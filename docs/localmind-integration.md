@@ -92,7 +92,7 @@ between sections; `Esc` returns to Session. Switching tabs preserves the current
 LocalMind section, selection, and reviewer identity. Help, Diff, Settings, and
 Report remain transient overlays; dismissing one returns to whichever product
 tab was beneath it. The command and tab are intentionally absent from the
-inline and pair hosts, and this does not replace LocalMind's standalone UI.
+pair host, and this does not replace LocalMind's standalone UI.
 
 The CLI is the integration boundary. It resolves the nearest LocalMind store,
 reads the engine through `localpilot-localmind`, maps the results into plain

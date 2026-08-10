@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The legacy inline chat host is retired.** `localpilot chat` now resolves only
+  to the full-screen terminal application; the `LOCALPILOT_CHAT_UI` selector, the
+  inline driver, and the `localpilot-tui` crate are removed (ADR-0154). The
+  slash catalog's phantom inline host is gone too. Full-screen and pair behaviour
+  is unchanged, and non-interactive/plain output is unaffected.
+
 - **LocalMind is now inspectable and reviewable inside full-screen chat.** The
   top bar now exposes real Session and LocalMind product tabs; `/localmind` and
   selecting the LocalMind tab both open its Docs, Graph, Memory, Review, Skills,

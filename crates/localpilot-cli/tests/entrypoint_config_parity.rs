@@ -32,7 +32,7 @@ const PARITY_KEYS: &[&str] = &[
 ];
 
 /// Whether `source` threads `key`, accepting either a bare `config.` prefix
-/// (the inline chat/session constructions) or the shared builder's
+/// (the direct chat/session constructions) or the shared builder's
 /// `self.config.` prefix (`server_cmd.rs`).
 fn wires(source: &str, key: &str) -> bool {
     source.contains(key) || source.contains(&key.replace("config.", "self.config."))

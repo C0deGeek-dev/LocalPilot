@@ -23,8 +23,15 @@ use localpilot_server::swarm::{AdoptedPair, SwarmHost};
 use localpilot_server::{swarm_id_for_dir, SessionHost, SessionRegistry, SwarmId, SwarmRegistry};
 use localpilot_store::Store;
 use localpilot_tools::{UserAnswer, UserPrompter, UserQuestion};
-use localpilot_tui::ApprovalRequest;
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+/// A pending tool-approval request, as surfaced to an interactive host.
+#[derive(Debug, Clone)]
+pub(crate) struct ApprovalRequest {
+    pub(crate) tool: String,
+    pub(crate) target: String,
+    pub(crate) risk_class: String,
+}
 
 /// A pending approval handed from the runtime to an interactive host.
 pub(crate) struct ApprovalCall {
@@ -719,7 +726,7 @@ pub(crate) fn initial_package_discovery_hint(config: &Config, cwd: &Path, truste
 /// Grant live workspace trust to an interactive runtime on trust acceptance, and
 /// refresh the package-discovery cue now that the project overlay is readable.
 ///
-/// The full-screen and inline accept branches share this helper. Pair does NOT
+/// The full-screen accept branch uses this helper. Pair does NOT
 /// route through it — it uses the separate all-or-error
 /// [`InteractivePairHost::grant_trust`] with a host-precomputed hint (same
 /// `set_trusted → config.trusted` policy, different call site because both peer

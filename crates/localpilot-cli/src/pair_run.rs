@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 
+use crate::interactive_session::ApprovalRequest;
 use localpilot_core::SessionId;
 use localpilot_harness::RuntimeEvent;
 use localpilot_server::swarm::{
@@ -13,7 +14,6 @@ use localpilot_server::swarm::{
     PairSetupError,
 };
 use localpilot_tools::{UserAnswer, UserQuestion};
-use localpilot_tui::ApprovalRequest;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 

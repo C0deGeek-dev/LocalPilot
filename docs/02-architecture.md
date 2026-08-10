@@ -255,15 +255,16 @@ the composer and dialogs are shared and explicitly target or identify a peer.
 `FrameLayout` remains the sole drawing and hit-test authority, so an off-screen
 peer has no stale pointer targets and resize does not move state between peers.
 
-`localpilot-tui` is the explicit legacy inline rollback while the remaining
-physical terminal matrix is completed. Full-screen chat is the interactive
-default (ADR-0129). The legacy crate owns:
+The inline chat host and its `localpilot-tui` crate have been retired
+(ADR-0154), superseding the inline main-screen-buffer rendering of
+ADR-0021/ADR-0039: `localpilot chat` resolves only to the full-screen
+application, which owns:
 
 - terminal layout
 - message rendering
 - keyboard input
 - approval dialogs
-- the inline question widget (`ask_user` and the intake guidance gate both drive it)
+- the question widget (`ask_user` and the intake guidance gate both drive it)
 - status lines
 - footer stats
 - optional thinking/reasoning panel
@@ -275,30 +276,21 @@ UI stack (chosen; see ADR-0006):
 - a hand-rolled multi-line composer (no third-party input widget), so cursor,
   wrapping, history, and paste behaviour are owned and testable
 
-That rollback renders inline in the terminal's main screen buffer (ADR-0021):
-finished transcript blocks are written once into native scrollback and a fixed-
-height bottom band holds the only redrawn surface (ADR-0039). The new host uses
-an alternate buffer, full-frame rendering, captured mouse input, and application-
-owned content selection (ADR-0107). The rollback and its selector are removed
-once the remaining terminal matrix is accepted **and** the approval types shared
-with the full-screen host have moved to a neutral home — that half of ADR-0129's
-extraction gate is still open. The slash-command half is complete: the shared
-slash-command surface has already moved to its neutral home
-(`localpilot-slash`, ADR-0144).
-
-`ratatui` is the committed TUI framework, not a suggestion. Alternatives are out
-of scope unless a future ADR supersedes ADR-0006.
+The host uses an alternate buffer, full-frame rendering, captured mouse input,
+and application-owned content selection (ADR-0107). `ratatui` is the committed
+TUI framework, not a suggestion. Alternatives are out of scope unless a future
+ADR supersedes ADR-0006.
 
 ### `localpilot-slash`
 
-The single source of truth for the slash-command surface across all three hosts
-(inline composer, full-screen picker, pair picker). Owns:
+The single source of truth for the slash-command surface across the full-screen
+picker and pair picker. Owns:
 
-- the parser (`parse_slash`/`parse_slash_for` and their helpers, plus
+- the parser (`parse_slash_for` and its helpers, plus
   `Mode`/`Profile`/`SlashAction` and the argument shapes) — lookup-first typed
-  dispatch, host-aware: the inline host keeps its frozen behaviour while the
-  full-screen and pair hosts additionally route the five shared takeover commands
-  (`help`/`theme`/`settings`/`diff`/`search`) to real actions. Full-screen alone
+  dispatch, host-aware: the full-screen and pair hosts route the five shared
+  takeover commands (`help`/`theme`/`settings`/`diff`/`search`) to real actions,
+  while the pair-only `/abort` stays external to every host. Full-screen alone
   adds the CLI-injected, engine-neutral `/localmind` workspace tab (ADR-0152); the
   presentation crates remain free of LocalMind dependencies. The full-screen
   host also runs `/compact`, the long-running `/ingest` runs, `/research`, and the
@@ -312,7 +304,7 @@ The single source of truth for the slash-command surface across all three hosts
   disclosure and the run, so what is disclosed is exactly what the run may reach. The
   completion boundary projects the full report into one redacted, 4-KiB finding/source
   index and asks `SessionRuntime` to append its topic/result exchange through the normal
-  transcript and event-log authority. Both interactive hosts render that same stored
+  transcript and event-log authority. The full-screen host renders that same stored
   result as assistant content; resume admits only this named synthetic origin and keeps
   other runtime repair messages hidden (ADR-0149). The
   resume commands enter `Mode::Harness` at dispatch and snapshot the live model,
@@ -324,14 +316,14 @@ The single source of truth for the slash-command surface across all three hosts
   per-host `Option<&str>` description
 - `specs_for(Host)`, which projects the table into any one host's catalog in
   global order, so no host keeps a private list (ADR-0144)
-- `SlashAction::runs_live(Host)`, the single active-turn policy: inline and
-  full-screen share profile, background, effort, and reasoning-visibility
-  controls; full-screen adds its safe takeovers; pair remains unchanged
+- `SlashAction::runs_live(Host)`, the single active-turn policy: the full-screen
+  host runs profile, background, effort, and reasoning-visibility controls plus
+  its safe takeovers live; pair remains unchanged
 
 Must remain:
 
 - dependency-free (no other workspace crate, no third-party crate) so both
-  `localpilot-tui` and `localpilot-cli` can depend on it without a cycle
+  `localpilot-cli` and `localpilot-terminal-ui` can depend on it without a cycle
 - free of rendering and I/O — it defines *what* commands exist and whether a
   host may run them live, not *how* a host services them
 

@@ -2,6 +2,38 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0154: The Inline Chat Host Is Retired
+
+Status: accepted. Completes the transition begun by ADR-0107 and made default by
+ADR-0129; supersedes the inline-rendering records ADR-0021 and ADR-0039 for the
+interactive chat host.
+
+The temporary inline rollback host is removed. `localpilot chat` (bare and every
+supported launch path) resolves unconditionally to the full-screen application in
+`localpilot-terminal-ui`; the `LOCALPILOT_CHAT_UI` selector and its `ChatUi` enum
+are gone, and no runtime or configuration path can select an inline host. The
+`localpilot-tui` crate is deleted from the workspace.
+
+The contracts the full-screen host consumed from `localpilot-tui` no longer need
+a two-host home. The slash-command surface already lived in the neutral
+`localpilot-slash` crate (ADR-0144), so `Host::Inline`, the inline `parse_slash`
+entry point, and the catalog's inline visibility column are removed with it — the
+catalog now generates only the full-screen and pair pickers, and
+`specs_for(Fullscreen)`/`specs_for(Pair)` are unchanged. The small
+`ApprovalRequest` DTO becomes a CLI-local type in `interactive_session`. LocalBox
+terminal consent collapses to explicit-command consent (ADR-0130): the retired
+approver-dialog path (`TerminalConsent::Prompt`) is gone, so an `Ask` decision
+proceeds on the explicit `/localbox` command and only a hard `Deny` blocks.
+
+Inline-only tests (the inline-viewport invariants, the event-loop and rendering
+tests, and the inline parse-semantics assertions) are removed; non-TTY/plain
+output and terminal-restoration coverage are preserved. Full-screen and pair
+behaviour is unchanged.
+
+The project owner authorized this retirement ahead of the deferred
+cross-terminal/real-screen-reader physical acceptance pass that ADR-0129 named;
+that gate is discharged by owner decision rather than a recorded pass.
+
 ## ADR-0153: LocalMind Terminal Review Writes Use The Host Permission Seam
 
 Status: Accepted. Extends ADR-0011 (review-gated memory), ADR-0010 (permission
@@ -1290,8 +1322,8 @@ policy. No new runtime dependencies
 
 ## ADR-0129: Full-Screen Chat Is The Interactive Default
 
-Status: accepted. Advances ADR-0107's transition without yet removing its
-temporary rollback host.
+Status: accepted; the temporary inline rollback host it retained has since been
+removed by ADR-0154, and the record below describes the state at the time.
 
 Bare interactive `localpilot chat` now launches the authoritative full-screen
 alternate-buffer host. `LOCALPILOT_CHAT_UI=fullscreen` remains an accepted
@@ -1331,7 +1363,8 @@ contract. Any broader exception requires another explicit owner decision.
 
 Status: accepted. Retains ADR-0006's Ratatui/Crossterm choice; supersedes
 ADR-0021 and ADR-0039 for the new interactive-chat host and narrows ADR-0064's
-LocalPilot reference. The old inline host remains a temporary rollback only.
+LocalPilot reference. The old inline host it kept as a temporary rollback was
+retired by ADR-0154.
 
 Interactive chat is rebuilt as an alternate-buffer, full-frame application. It
 captures mouse reporting and therefore owns timeline scrolling, scrollbar

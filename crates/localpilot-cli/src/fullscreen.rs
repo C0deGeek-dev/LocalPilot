@@ -32,6 +32,7 @@ use localpilot_sandbox::{
     Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionEngineHandle,
     PermissionRequest,
 };
+use localpilot_slash::{parse_slash_for, Host, SlashAction};
 use localpilot_store::SessionIndexEntry;
 use localpilot_terminal_ui::{
     render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
@@ -46,7 +47,6 @@ use localpilot_terminal_ui::{
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::{BackgroundProcesses, ToolOutputPresentation, UserAnswer, UserQuestion};
-use localpilot_tui::{parse_slash_for, Host, SlashAction};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -719,7 +719,7 @@ enum PumpedSlash {
     },
     /// Read and present the LocalBox-owned catalog without side effects.
     LocalBoxModels,
-    SelfImprove(localpilot_tui::SelfImproveAction),
+    SelfImprove(localpilot_slash::SelfImproveAction),
     Compact {
         force: bool,
     },
@@ -767,13 +767,13 @@ fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
         SlashAction::LocalBoxModels => SlashRoute::Pumped(PumpedSlash::LocalBoxModels),
         SlashAction::SelfImprove(action) => SlashRoute::Pumped(PumpedSlash::SelfImprove(action)),
         SlashAction::Compact { force } => SlashRoute::Pumped(PumpedSlash::Compact { force }),
-        SlashAction::Ingest(localpilot_tui::IngestAction::Run) => {
+        SlashAction::Ingest(localpilot_slash::IngestAction::Run) => {
             SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Run))
         }
-        SlashAction::Ingest(localpilot_tui::IngestAction::Refresh) => {
+        SlashAction::Ingest(localpilot_slash::IngestAction::Refresh) => {
             SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Refresh))
         }
-        SlashAction::Ingest(localpilot_tui::IngestAction::Resume) => {
+        SlashAction::Ingest(localpilot_slash::IngestAction::Resume) => {
             SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Resume))
         }
         // One-shot `/research <topic>` pumps; bare `/research` (mode entry, `None`)
@@ -1316,17 +1316,17 @@ fn format_count(value: u64) -> String {
 
 // Both full-screen pickers are generated from the one authoritative
 // `localpilot-slash` catalog table (per-host descriptions in global order), so
-// the inline, full-screen, and pair catalogs cannot drift.
+// the full-screen and pair catalogs cannot drift.
 fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
-    host_command_catalog(localpilot_tui::Host::Fullscreen)
+    host_command_catalog(localpilot_slash::Host::Fullscreen)
 }
 
 fn pair_command_catalog() -> Vec<CompletionCommand> {
-    host_command_catalog(localpilot_tui::Host::Pair)
+    host_command_catalog(localpilot_slash::Host::Pair)
 }
 
-fn host_command_catalog(host: localpilot_tui::Host) -> Vec<CompletionCommand> {
-    localpilot_tui::specs_for(host)
+fn host_command_catalog(host: localpilot_slash::Host) -> Vec<CompletionCommand> {
+    localpilot_slash::specs_for(host)
         .into_iter()
         .map(|(name, description)| CompletionCommand {
             name: name.to_string(),
@@ -3079,11 +3079,11 @@ fn prepare_prompt_operation(
 }
 
 /// Map the live operating mode to the kind a submitted prompt is pinned to.
-fn prompt_kind(mode: localpilot_tui::Mode) -> PromptKind {
+fn prompt_kind(mode: localpilot_slash::Mode) -> PromptKind {
     match mode {
-        localpilot_tui::Mode::Agent => PromptKind::Agent,
-        localpilot_tui::Mode::Harness => PromptKind::Harness,
-        localpilot_tui::Mode::Research => PromptKind::Research,
+        localpilot_slash::Mode::Agent => PromptKind::Agent,
+        localpilot_slash::Mode::Harness => PromptKind::Harness,
+        localpilot_slash::Mode::Research => PromptKind::Research,
     }
 }
 
@@ -3111,7 +3111,8 @@ async fn execute_fullscreen_slash(
             "image attachments were ignored for the slash command".to_string(),
         ));
     }
-    let Some(action) = parse_slash_for(localpilot_tui::Host::Fullscreen, &submitted.prompt) else {
+    let Some(action) = parse_slash_for(localpilot_slash::Host::Fullscreen, &submitted.prompt)
+    else {
         app.apply_runtime(RuntimeUpdate::Warning(
             "invalid slash command input".to_string(),
         ));
@@ -3365,12 +3366,12 @@ async fn execute_fullscreen_slash_action(
         // unreachable defensive guard, kept for exhaustiveness so a routing
         // regression surfaces as a notice rather than silently doing nothing.
         SlashAction::Ingest(action) => match action.tier() {
-            localpilot_tui::IngestTier::Fast => {
+            localpilot_slash::IngestTier::Fast => {
                 let (output, result) = crate::repl::ingest_slash_output(cwd, action);
                 let out = crate::repl::command_output_from_buffer(output, result);
                 present_command_report(app, command_report("ingest", out));
             }
-            localpilot_tui::IngestTier::LongRunning => {
+            localpilot_slash::IngestTier::LongRunning => {
                 app.apply_runtime(RuntimeUpdate::Notice(
                     "internal: long-running ingest reached the synchronous dispatch path"
                         .to_string(),
@@ -3389,7 +3390,7 @@ async fn execute_fullscreen_slash_action(
         // mode + all projections atomically, then post the exact egress-aware entry
         // notice (naming `/agent` as the exit).
         SlashAction::Research(None) => {
-            app.set_shared_mode(localpilot_tui::Mode::Research);
+            app.set_shared_mode(localpilot_slash::Mode::Research);
             app.apply_runtime(RuntimeUpdate::Notice(
                 crate::research::research_mode_notice(cwd),
             ));
@@ -3408,7 +3409,7 @@ async fn execute_fullscreen_slash_action(
         // item; the footer/settings render the mode, and a queued prompt captures
         // `PromptKind::Harness`, which drains through the ordinary turn path.
         SlashAction::SetMode(
-            mode @ (localpilot_tui::Mode::Agent | localpilot_tui::Mode::Harness),
+            mode @ (localpilot_slash::Mode::Agent | localpilot_slash::Mode::Harness),
         ) => {
             app.set_shared_mode(mode);
         }
@@ -3416,8 +3417,8 @@ async fn execute_fullscreen_slash_action(
         // `Research(None)`), but the exhaustive match must select Research TRUTHFULLY —
         // entering research mode WITH its egress disclosure, never a silent bypass of the
         // `Research(None)` contract.
-        SlashAction::SetMode(localpilot_tui::Mode::Research) => {
-            app.set_shared_mode(localpilot_tui::Mode::Research);
+        SlashAction::SetMode(localpilot_slash::Mode::Research) => {
+            app.set_shared_mode(localpilot_slash::Mode::Research);
             app.apply_runtime(RuntimeUpdate::Notice(
                 crate::research::research_mode_notice(cwd),
             ));
@@ -3967,7 +3968,7 @@ fn execute_pair_slash(
         );
         return PairHostAction::None;
     }
-    match parse_slash_for(localpilot_tui::Host::Pair, &submitted.prompt) {
+    match parse_slash_for(localpilot_slash::Host::Pair, &submitted.prompt) {
         Some(SlashAction::Exit { print_transcript }) => {
             app.request_exit(print_transcript);
             PairHostAction::Exit
@@ -4164,7 +4165,7 @@ async fn run_event_loop(
                             ));
                         }
                         let Some(action) =
-                            parse_slash_for(localpilot_tui::Host::Fullscreen, &submitted.prompt)
+                            parse_slash_for(localpilot_slash::Host::Fullscreen, &submitted.prompt)
                         else {
                             app.apply_runtime(RuntimeUpdate::Warning(
                                 "invalid slash command input".to_string(),
@@ -4737,7 +4738,7 @@ async fn drive_selfimprove(
     queue: &mut VecDeque<QueuedOperation>,
     approval_tx: &mpsc::UnboundedSender<ApprovalCall>,
     deferred_reload: &Cell<bool>,
-    action: localpilot_tui::SelfImproveAction,
+    action: localpilot_slash::SelfImproveAction,
 ) -> Result<bool> {
     let step = match crate::selfimprove_cmd::interactive_step(ctx.cwd, &action) {
         Ok(step) => step,
@@ -4914,7 +4915,6 @@ async fn drive_localbox(
             target.allow_untuned,
             profile,
             trusted,
-            crate::localbox::TerminalConsent::ExplicitCommand,
             &operation_cancel,
         )
         .await
@@ -5450,7 +5450,7 @@ fn resume_dispatch_snapshot(runtime: &SessionRuntime) -> ResumeDispatch {
 /// (Harness before Busy, mirroring the inline oracle). Harness then persists across the
 /// operation's completion/error/first-cancel. Used by `drive_harness_resume`.
 fn begin_harness_resume(app: &mut AppModel) {
-    app.set_shared_mode(localpilot_tui::Mode::Harness);
+    app.set_shared_mode(localpilot_slash::Mode::Harness);
     app.begin_work();
 }
 
@@ -8034,7 +8034,7 @@ mod tests {
                 workspace: "fixture-workspace".to_string(),
                 branch: Some("fixture-branch".to_string()),
                 workspace_dirty: Some(true),
-                mode: localpilot_tui::Mode::Agent,
+                mode: localpilot_slash::Mode::Agent,
                 profile: "default".to_string(),
                 session_id: "fixture-session".to_string(),
                 session_name: None,
@@ -8056,7 +8056,7 @@ mod tests {
                 workspace: workspace.to_string(),
                 branch: Some("fixture-branch".to_string()),
                 workspace_dirty: Some(true),
-                mode: localpilot_tui::Mode::Agent,
+                mode: localpilot_slash::Mode::Agent,
                 profile: "default".to_string(),
                 session_id: "session-a".to_string(),
                 session_name: Some("Alpha".to_string()),
@@ -11208,16 +11208,16 @@ mod tests {
         // and wildcard-free with NO deferred arm, so a `Synchronous` row is guaranteed a
         // real handler; this test does not re-assert each synchronous action's behaviour
         // and makes no claim about environment-dependent execution.
-        for (name, _desc) in localpilot_tui::specs_for(localpilot_tui::Host::Fullscreen) {
-            let spelling = localpilot_tui::lookup(name).expect("catalog row has a spelling");
+        for (name, _desc) in localpilot_slash::specs_for(localpilot_slash::Host::Fullscreen) {
+            let spelling = localpilot_slash::lookup(name).expect("catalog row has a spelling");
             let line = match (name, spelling.args) {
                 ("context", _) => "/context build a task".to_string(),
-                (_, localpilot_tui::ArgSpec::None | localpilot_tui::ArgSpec::Optional) => {
+                (_, localpilot_slash::ArgSpec::None | localpilot_slash::ArgSpec::Optional) => {
                     format!("/{name}")
                 }
-                (_, localpilot_tui::ArgSpec::Required) => format!("/{name} x"),
+                (_, localpilot_slash::ArgSpec::Required) => format!("/{name} x"),
             };
-            let action = parse_slash_for(localpilot_tui::Host::Fullscreen, &line)
+            let action = parse_slash_for(localpilot_slash::Host::Fullscreen, &line)
                 .unwrap_or_else(|| panic!("{line} did not parse on the full-screen host"));
             assert!(
                 !matches!(action, SlashAction::Unknown(_)),
@@ -13060,7 +13060,7 @@ mod tests {
             let (reply, answer) = oneshot::channel();
             sender
                 .send(ApprovalCall {
-                    request: localpilot_tui::ApprovalRequest {
+                    request: crate::interactive_session::ApprovalRequest {
                         tool: format!("tool-{number}"),
                         target: "fixture".to_string(),
                         risk_class: "test".to_string(),
@@ -14109,9 +14109,9 @@ mod tests {
         // later mode switch cannot reinterpret it while it sits in the queue. Covers
         // all three kinds (Agent and Harness both drain to a turn; Research reroutes).
         for (mode, expected) in [
-            (localpilot_tui::Mode::Agent, PromptKind::Agent),
-            (localpilot_tui::Mode::Harness, PromptKind::Harness),
-            (localpilot_tui::Mode::Research, PromptKind::Research),
+            (localpilot_slash::Mode::Agent, PromptKind::Agent),
+            (localpilot_slash::Mode::Harness, PromptKind::Harness),
+            (localpilot_slash::Mode::Research, PromptKind::Research),
         ] {
             let mut app = app();
             app.begin_work();
@@ -14137,7 +14137,7 @@ mod tests {
             ));
             // Switch the live mode AFTER the prompt is queued — the captured kind
             // must not change.
-            app.set_shared_mode(localpilot_tui::Mode::Agent);
+            app.set_shared_mode(localpilot_slash::Mode::Agent);
             assert_eq!(
                 queue.front().expect("one queued prompt").prompt().kind,
                 expected,
@@ -14271,7 +14271,7 @@ mod tests {
                 "{label}: the footer shows Harness mode once the resume completes (idle)"
             );
             // `/agent` exits back to Agent (the hidden real transition).
-            app.set_shared_mode(localpilot_tui::Mode::Agent);
+            app.set_shared_mode(localpilot_slash::Mode::Agent);
             assert_eq!(app.shared_mode(), "agent", "{label}: /agent exits Harness");
         };
         check("success", Ok(()), b"resumed 2 steps");
@@ -14727,7 +14727,7 @@ mod tests {
 
     #[test]
     fn route_fullscreen_slash_pumps_localbox_and_existing_long_operations() {
-        use localpilot_tui::IngestAction;
+        use localpilot_slash::IngestAction;
         assert!(matches!(
             route_fullscreen_slash(SlashAction::LocalBoxAdopt { serve: None }),
             SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt { serve: None, .. })
@@ -14748,10 +14748,10 @@ mod tests {
         ));
         assert!(matches!(
             route_fullscreen_slash(SlashAction::SelfImprove(
-                localpilot_tui::SelfImproveAction::Next
+                localpilot_slash::SelfImproveAction::Next
             )),
             SlashRoute::Pumped(PumpedSlash::SelfImprove(
-                localpilot_tui::SelfImproveAction::Next
+                localpilot_slash::SelfImproveAction::Next
             ))
         ));
         assert!(matches!(
@@ -14795,12 +14795,12 @@ mod tests {
             SlashRoute::Synchronous(SlashAction::Research(None))
         ));
         assert!(matches!(
-            route_fullscreen_slash(SlashAction::SetMode(localpilot_tui::Mode::Agent)),
-            SlashRoute::Synchronous(SlashAction::SetMode(localpilot_tui::Mode::Agent))
+            route_fullscreen_slash(SlashAction::SetMode(localpilot_slash::Mode::Agent)),
+            SlashRoute::Synchronous(SlashAction::SetMode(localpilot_slash::Mode::Agent))
         ));
         assert!(matches!(
-            route_fullscreen_slash(SlashAction::SetMode(localpilot_tui::Mode::Harness)),
-            SlashRoute::Synchronous(SlashAction::SetMode(localpilot_tui::Mode::Harness))
+            route_fullscreen_slash(SlashAction::SetMode(localpilot_slash::Mode::Harness)),
+            SlashRoute::Synchronous(SlashAction::SetMode(localpilot_slash::Mode::Harness))
         ));
         // The two resume commands pump; bare `/harness` is a synchronous real mode entry (above).
         assert!(matches!(
@@ -14901,7 +14901,7 @@ mod tests {
 
     #[test]
     fn route_fullscreen_slash_pumps_exactly_the_long_running_ingest_tier() {
-        use localpilot_tui::{IngestAction, IngestTier};
+        use localpilot_slash::{IngestAction, IngestTier};
         // Every IngestAction variant (the enum has no generated iterator — a NEW variant
         // MUST be added here). Locks that `route_fullscreen_slash` pumps EXACTLY the
         // `LongRunning` tier and routes the `Fast` tier synchronously, so a one-sided edit
@@ -14957,7 +14957,7 @@ mod tests {
         .await;
         assert_eq!(
             app.mode(),
-            localpilot_tui::Mode::Research,
+            localpilot_slash::Mode::Research,
             "bare /research enters Research mode"
         );
         assert!(
@@ -14981,7 +14981,7 @@ mod tests {
         .await;
         assert_eq!(
             app.mode(),
-            localpilot_tui::Mode::Agent,
+            localpilot_slash::Mode::Agent,
             "/agent exits Research mode"
         );
         // `/harness` is now a real SILENT typed mode entry — it transitions to Harness
@@ -14998,7 +14998,7 @@ mod tests {
         .await;
         assert_eq!(
             app.mode(),
-            localpilot_tui::Mode::Harness,
+            localpilot_slash::Mode::Harness,
             "/harness enters Harness mode"
         );
         assert!(
@@ -15043,7 +15043,7 @@ mod tests {
         .await;
         assert_eq!(
             app.mode(),
-            localpilot_tui::Mode::Agent,
+            localpilot_slash::Mode::Agent,
             "/agent exits Harness mode via the real route"
         );
         bundle.runtime.close();
@@ -15064,12 +15064,12 @@ mod tests {
             &mut bundle.runtime,
             &config,
             cwd,
-            SlashAction::SetMode(localpilot_tui::Mode::Research),
+            SlashAction::SetMode(localpilot_slash::Mode::Research),
         )
         .await;
         assert_eq!(
             app.mode(),
-            localpilot_tui::Mode::Research,
+            localpilot_slash::Mode::Research,
             "SetMode(Research) enters Research mode"
         );
         let disclosure = crate::research::research_mode_notice(cwd);
@@ -15210,7 +15210,7 @@ mod tests {
         let (reply, mut answer) = oneshot::channel();
         approvals
             .send(ApprovalCall {
-                request: localpilot_tui::ApprovalRequest {
+                request: crate::interactive_session::ApprovalRequest {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
@@ -15258,7 +15258,7 @@ mod tests {
         let (reply, mut answer) = oneshot::channel();
         approvals
             .send(ApprovalCall {
-                request: localpilot_tui::ApprovalRequest {
+                request: crate::interactive_session::ApprovalRequest {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
@@ -15364,7 +15364,7 @@ mod tests {
         let (reply, mut answer) = oneshot::channel();
         approvals
             .send(ApprovalCall {
-                request: localpilot_tui::ApprovalRequest {
+                request: crate::interactive_session::ApprovalRequest {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
@@ -15719,7 +15719,7 @@ mod tests {
         let (reply, mut answer) = oneshot::channel();
         approvals
             .send(ApprovalCall {
-                request: localpilot_tui::ApprovalRequest {
+                request: crate::interactive_session::ApprovalRequest {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
@@ -15763,7 +15763,7 @@ mod tests {
         let (reply, mut answer) = oneshot::channel();
         approvals
             .send(ApprovalCall {
-                request: localpilot_tui::ApprovalRequest {
+                request: crate::interactive_session::ApprovalRequest {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),

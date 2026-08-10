@@ -309,14 +309,13 @@ jobs:
       - run: cargo test --doc --workspace --manifest-path external/localmind/Cargo.toml
         timeout-minutes: 15
       # The interactive TUI (`chat`) is behind an opt-in feature; lint, build, and
-      # test it here so the terminal driver — including the inline scrollback-commit
-      # fidelity tests — is covered on every OS.
+      # test it here so the full-screen terminal host is covered on every OS.
       - run: cargo clippy -p localpilot --features tui,learning --all-targets -- -D warnings
         timeout-minutes: 15
       - run: cargo build -p localpilot --features tui,learning
         timeout-minutes: 15
-      # Run the binary's own unit tests under the TUI feature (the inline-driver
-      # scrollback-commit tests live here). Scoped to the bin: the integration tests
+      # Run the binary's own unit tests under the TUI feature (the full-screen
+      # host's tests live here). Scoped to the bin: the integration tests
       # under tests/ are not feature-dependent and already run in the workspace step.
       - run: cargo nextest run -p localpilot --features tui,learning --bin localpilot
         timeout-minutes: 15

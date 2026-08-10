@@ -1647,7 +1647,6 @@ dependencies = [
  "localpilot-taskgraph",
  "localpilot-terminal-ui",
  "localpilot-tools",
- "localpilot-tui",
  "parking_lot",
  "ratatui",
  "reqwest",
@@ -2089,15 +2088,6 @@ dependencies = [
  "thiserror 2.0.9",
  "tokio",
  "wiremock",
-]
-
-[[package]]
-name = "localpilot-tui"
-version = "2.8.1"
-dependencies = [
- "insta",
- "localpilot-slash",
- "ratatui",
 ]
 
 [[package]]

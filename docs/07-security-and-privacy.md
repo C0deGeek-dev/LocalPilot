@@ -524,8 +524,8 @@ structural, not a convention:
   replaced proposal is refused. `/selfimprove next` has no approval argument and
   cannot mint a token.
 - **Reload happens outside terminal modes.** A Built→Reloaded action requires a
-  separate confirmation, asks the interactive host to exit, restores raw/inline
-  or alternate-screen state, and only then calls the existing self-dev reload.
+  separate confirmation, asks the interactive host to exit, restores the
+  alternate-screen state, and only then calls the existing self-dev reload.
   A failed process swap rolls persisted state back to Built as before.
 
 ## Outward Draft Emission
@@ -580,8 +580,8 @@ construction:
   can override it (the consent grant is a no-op against config-off, enforced
   and tested).
 - **Loud disclosure on every web-active run, both surfaces.** The subcommand
-  and interactive `/research` — in both the inline composer and the full-screen
-  chat host — print the same egress disclosure before any request: the default-on
+  and interactive `/research` — in the full-screen chat host — print the same
+  egress disclosure before any request: the default-on
   posture and both off-switches, what is sent (only the redacted sub-question), the
   effective reach, blocked domains, and the audit-log path. The full-screen host
   shows and draws the disclosure before the research run is constructed or polled,

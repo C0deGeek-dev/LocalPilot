@@ -28,7 +28,6 @@ tui = [
     "dep:crossterm",
     "dep:parking_lot",
     "dep:ratatui",
-    "dep:localpilot-tui",
     "dep:localpilot-terminal-ui",
     "dep:localpilot-slash",
     "dep:ignore",
@@ -127,7 +126,6 @@ localpilot-store = { path = "../localpilot-store" }
 # (objective, mode, per-node model) and hands it to the swarm driver.
 localpilot-taskgraph = { path = "../localpilot-taskgraph" }
 localpilot-tools = { path = "../localpilot-tools" }
-localpilot-tui = { path = "../localpilot-tui", optional = true }
 localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }
 
 [dev-dependencies]

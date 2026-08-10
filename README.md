@@ -176,8 +176,9 @@ unchanged. Run `localpilot --help` for the complete command tree.
 - `/default`, `/relaxed`, `/bypass`, and `/unrestricted` switch the permission
   profile mid-turn, taking effect from the running turn's next tool call.
 
-The REPL uses the terminal's normal screen buffer, so native scrollback,
-selection, and copy/paste continue to work.
+The full-screen chat host runs in an alternate screen buffer and captures the
+mouse, so it owns timeline scrolling, text selection, and copy/paste within the
+application.
 
 ## Learns, with your approval
 

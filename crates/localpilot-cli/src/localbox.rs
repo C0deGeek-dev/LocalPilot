@@ -25,7 +25,7 @@ use localpilot_llm::discover_models;
 #[cfg(feature = "tui")]
 use localpilot_llm::ProviderRegistry;
 #[cfg(feature = "tui")]
-use localpilot_sandbox::{Approver, Profile};
+use localpilot_sandbox::Profile;
 use tokio_util::sync::CancellationToken;
 
 use serde::Deserialize;
@@ -634,15 +634,6 @@ where
     }
 }
 
-/// How a terminal host resolves an `Ask` decision. The legacy inline host keeps
-/// its standard approval dialog; the full-screen host preserves ADR-0130's
-/// explicit-command consent while still honoring hard `Deny` decisions.
-#[cfg(feature = "tui")]
-pub(crate) enum TerminalConsent<'a> {
-    Prompt(&'a dyn Approver),
-    ExplicitCommand,
-}
-
 /// A successful terminal adoption, including the freshly rebuilt provider
 /// registry needed to activate `local` in the current idle session.
 #[cfg(feature = "tui")]
@@ -670,7 +661,6 @@ pub(crate) async fn run_terminal_adopt(
     allow_untuned: bool,
     profile: Profile,
     trusted: bool,
-    consent: TerminalConsent<'_>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<TerminalAdoptOutcome> {
     let serve_entry = match serve {
@@ -699,7 +689,6 @@ pub(crate) async fn run_terminal_adopt(
         serve: canonical_serve,
         profile,
         trusted,
-        consent,
         cancel,
     };
     run_terminal_adopt_with(request, detect, |model, operation_cancel| async move {
@@ -720,7 +709,6 @@ struct TerminalAdoptRequest<'a> {
     serve: Option<&'a str>,
     profile: Profile,
     trusted: bool,
-    consent: TerminalConsent<'a>,
     cancel: &'a CancellationToken,
 }
 
@@ -759,7 +747,7 @@ where
             trusted: request.trusted,
             detail: format!("localbox serve {model}"),
         };
-        if !terminal_effect_allowed(&engine, &permission, &request.consent).await {
+        if !terminal_effect_allowed(&engine, &permission) {
             return Ok(TerminalAdoptOutcome::Declined("LocalBox launch"));
         }
         if matches!(
@@ -799,7 +787,7 @@ where
         trusted: request.trusted,
         detail: path.display().to_string(),
     };
-    if !terminal_effect_allowed(&engine, &permission, &request.consent).await {
+    if !terminal_effect_allowed(&engine, &permission) {
         return Ok(TerminalAdoptOutcome::Declined("LocalBox adoption"));
     }
     write_local_provider(&path, &endpoint, model.as_deref())?;
@@ -817,26 +805,20 @@ where
 }
 
 #[cfg(feature = "tui")]
-async fn terminal_effect_allowed(
+fn terminal_effect_allowed(
     engine: &localpilot_sandbox::PermissionEngine,
     request: &localpilot_sandbox::PermissionRequest,
-    consent: &TerminalConsent<'_>,
 ) -> bool {
-    match engine.decide(request) {
-        localpilot_sandbox::Decision::Allow => true,
-        localpilot_sandbox::Decision::Ask => match consent {
-            TerminalConsent::Prompt(approver) => approver.approve(request).await,
-            TerminalConsent::ExplicitCommand => true,
-        },
-        localpilot_sandbox::Decision::Deny => false,
-    }
+    // The explicit `/localbox` command is itself the consent for an `Ask`
+    // decision (ADR-0130); only a hard `Deny` blocks.
+    !matches!(engine.decide(request), localpilot_sandbox::Decision::Deny)
 }
 
 /// Merge a `[providers.local]` block for `endpoint`/`model` into the config file
 /// at `path` (creating it if absent), preserving other content. The **surface-
-/// agnostic write half of adopt**: the CLI (`run_adopt`) and the in-TUI `/localbox`
-/// adopt both reach here only after consent — CLI confirm or an in-session
-/// permission approval — so gating is the caller's responsibility, never this
+/// agnostic write half of adopt**: the CLI (`run_adopt`) and the full-screen
+/// `/localbox` adopt both reach here only after consent — a CLI confirm or the
+/// explicit in-session command — so gating is the caller's responsibility, never this
 /// function's. Reached only on approval, so a denied grant writes nothing.
 ///
 /// # Errors
@@ -1113,11 +1095,10 @@ command = \"npx\"
     }
 
     #[cfg(feature = "tui")]
-    #[tokio::test]
-    async fn terminal_consent_prompts_on_ask_while_explicit_command_is_consent() {
+    #[test]
+    fn an_explicit_terminal_command_consents_unless_a_hard_deny() {
         use localpilot_sandbox::{
             CommandClass, Effect, Interactivity, PermissionEngine, PermissionRequest, Profile,
-            ScriptedApprover,
         };
 
         let engine = PermissionEngine::new(Profile::Default, Vec::new());
@@ -1128,17 +1109,17 @@ command = \"npx\"
             trusted: true,
             detail: "localbox serve model.gguf".to_string(),
         };
-        let denied = ScriptedApprover::new(vec![false]);
-        assert!(
-            !terminal_effect_allowed(&engine, &request, &TerminalConsent::Prompt(&denied)).await
-        );
-        let approved = ScriptedApprover::new(vec![true]);
-        assert!(
-            terminal_effect_allowed(&engine, &request, &TerminalConsent::Prompt(&approved)).await
-        );
-        assert!(
-            terminal_effect_allowed(&engine, &request, &TerminalConsent::ExplicitCommand).await
-        );
+        // The explicit `/localbox` command is itself the consent, so an
+        // interactive `Ask` decision proceeds.
+        assert!(terminal_effect_allowed(&engine, &request));
+
+        // A hard `Deny` (here the same effect requested non-interactively) is
+        // still refused.
+        let denied = PermissionRequest {
+            interactivity: Interactivity::NonInteractive,
+            ..request
+        };
+        assert!(!terminal_effect_allowed(&engine, &denied));
     }
 
     #[cfg(feature = "tui")]
@@ -1152,7 +1133,6 @@ command = \"npx\"
                 serve: None,
                 profile: Profile::Unrestricted,
                 trusted: true,
-                consent: TerminalConsent::ExplicitCommand,
                 cancel: &cancel,
             },
             || {
@@ -1204,7 +1184,6 @@ command = \"npx\"
                 serve: Some("Bonsai 27B.gguf"),
                 profile: Profile::Unrestricted,
                 trusted: true,
-                consent: TerminalConsent::ExplicitCommand,
                 cancel: &cancel,
             },
             || {
@@ -1252,7 +1231,6 @@ command = \"npx\"
                 serve: Some("new-model"),
                 profile: Profile::Unrestricted,
                 trusted: true,
-                consent: TerminalConsent::ExplicitCommand,
                 cancel: &cancel,
             },
             || std::future::ready(states.borrow_mut().pop_front().unwrap()),
@@ -1280,7 +1258,6 @@ command = \"npx\"
                     serve: Some("model.gguf"),
                     profile: Profile::Unrestricted,
                     trusted: true,
-                    consent: TerminalConsent::ExplicitCommand,
                     cancel: &cancel,
                 },
                 || std::future::ready(LocalBoxState::InstalledNotRunning),
@@ -1304,41 +1281,8 @@ command = \"npx\"
 
     #[cfg(feature = "tui")]
     #[tokio::test]
-    async fn terminal_decline_absence_and_bad_config_never_overwrite() {
-        use localpilot_sandbox::ScriptedApprover;
-
+    async fn terminal_adopt_absence_and_bad_config_never_overwrite() {
         let cancel = CancellationToken::new();
-        let declined_dir = tempfile::tempdir().unwrap();
-        let declined_path = localpilot_config::project_config_path(declined_dir.path());
-        std::fs::write(&declined_path, "marker = true\n").unwrap();
-        let approver = ScriptedApprover::new(vec![false]);
-        let declined = run_terminal_adopt_with(
-            TerminalAdoptRequest {
-                cwd: declined_dir.path(),
-                serve: None,
-                profile: Profile::Default,
-                trusted: false,
-                consent: TerminalConsent::Prompt(&approver),
-                cancel: &cancel,
-            },
-            || {
-                std::future::ready(LocalBoxState::Running {
-                    endpoint: DEFAULT_PROXY_BASE_URL.to_string(),
-                    model: None,
-                })
-            },
-            |_model, _cancel| std::future::ready(Ok(ServeWait::Complete)),
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            declined,
-            TerminalAdoptOutcome::Declined("LocalBox adoption")
-        ));
-        assert_eq!(
-            std::fs::read_to_string(declined_path).unwrap(),
-            "marker = true\n"
-        );
 
         let absent_dir = tempfile::tempdir().unwrap();
         let absent = run_terminal_adopt_with(
@@ -1347,7 +1291,6 @@ command = \"npx\"
                 serve: Some("model.gguf"),
                 profile: Profile::Unrestricted,
                 trusted: true,
-                consent: TerminalConsent::ExplicitCommand,
                 cancel: &cancel,
             },
             || std::future::ready(LocalBoxState::NotInstalled),
@@ -1365,7 +1308,6 @@ command = \"npx\"
                 serve: None,
                 profile: Profile::Unrestricted,
                 trusted: true,
-                consent: TerminalConsent::ExplicitCommand,
                 cancel: &cancel,
             },
             || {

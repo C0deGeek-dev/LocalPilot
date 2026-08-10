@@ -8,7 +8,7 @@
 //!   stderr diagnostics. **Exception:** when the interactive `chat` TUI will own
 //!   the terminal, no terminal subscriber is installed at all — a mid-session
 //!   event (a provider error, a background-ingest warning) would print raw
-//!   ANSI/LF lines into the raw-mode inline viewport and corrupt it. The TUI
+//!   ANSI/LF lines into the raw-mode full-screen viewport and corrupt it. The TUI
 //!   already surfaces provider warnings/errors as transcript notices; anything
 //!   more detailed is the file mode's job.
 //! * File — `LOCALPILOT_LOG` set to a filter (e.g. `debug`): logs are written to

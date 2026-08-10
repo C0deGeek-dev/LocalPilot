@@ -266,22 +266,6 @@ pub fn research_mode_notice(root: &Path) -> String {
     }
 }
 
-/// Run a research pass for `topic` from the interactive surface. Web research
-/// follows the same config defaults as the subcommand (on unless
-/// `[research.web].enabled = false`), with the egress disclosure written into
-/// the transcript output. `stop`, when flipped true (Ctrl+C), ends the run at
-/// the next question boundary with a partial report instead of nothing.
-#[cfg(feature = "tui")]
-pub async fn run_interactive_research(
-    root: &Path,
-    topic: &str,
-    options: &ResearchOptions,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    out: &mut dyn Write,
-) -> anyhow::Result<ResearchCompletion> {
-    run_research_command_controlled(root, topic, options, None, Some(stop), out).await
-}
-
 /// A loaded research snapshot: the config that is the sole egress authority, the
 /// run options derived from it, and the exact disclosure text. Prepared once so the
 /// disclosure shown to the operator and the run that follows cannot disagree.

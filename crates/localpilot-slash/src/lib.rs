@@ -2,15 +2,14 @@
 //!
 //! One dependency-free source of command knowledge for every interactive host:
 //! the parsed action types, the parser, and one authoritative globally-ordered
-//! command+spelling catalog table that generates the inline, full-screen, and
-//! pair pickers. Both hosts re-export these types so command names, descriptions,
-//! order, and argument policy cannot drift between the rollback (inline) and the
-//! replacement (full-screen) UIs.
+//! command+spelling catalog table that generates the full-screen and pair
+//! pickers. Both hosts consume these types so command names, descriptions,
+//! order, and argument policy cannot drift between the full-screen and pair UIs.
 //!
 //! The command enum, the catalog table, and the identity list are generated from
 //! one [`slash_commands!`] invocation, so a new command identity cannot exist
-//! without a catalog row (and vice versa), and [`parse_slash`] dispatches on the
-//! typed [`SlashCommand`] of the looked-up spelling — never on a raw string.
+//! without a catalog row (and vice versa), and [`parse_slash_for`] dispatches on
+//! the typed [`SlashCommand`] of the looked-up spelling — never on a raw string.
 
 #![forbid(unsafe_code)]
 
@@ -258,7 +257,6 @@ pub enum StrayArgs {
 /// A picker host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
-    Inline,
     Fullscreen,
     Pair,
 }
@@ -273,7 +271,7 @@ impl SlashAction {
             Self::SetProfile(_) | Self::ToggleThinking | Self::SetEffort(_) | Self::Background(_)
         );
 
-        (shared && matches!(host, Host::Inline | Host::Fullscreen))
+        (shared && matches!(host, Host::Fullscreen))
             || matches!(
                 (host, self),
                 (
@@ -294,17 +292,17 @@ pub struct Spelling {
     pub args: ArgSpec,
     pub stray: StrayArgs,
     /// Typed metadata that a `compact` spelling forces compaction even within
-    /// budget. `parse_slash` reads this instead of re-matching the spelling
+    /// budget. `parse_slash_for` reads this instead of re-matching the spelling
     /// string, so the `compact_force`/`compact-force` distinction lives in the
     /// table, not in the parser.
     pub force: bool,
-    pub inline: Option<&'static str>,
     pub fullscreen: Option<&'static str>,
     pub pair: Option<&'static str>,
 }
 
 impl Spelling {
-    const fn both(
+    /// Full-screen and pair, sharing one description.
+    const fn fullscreen_and_pair(
         command: SlashCommand,
         name: &'static str,
         args: ArgSpec,
@@ -317,56 +315,12 @@ impl Spelling {
             args,
             stray,
             force: false,
-            inline: Some(desc),
-            fullscreen: Some(desc),
-            pair: None,
-        }
-    }
-
-    const fn both_pair(
-        command: SlashCommand,
-        name: &'static str,
-        args: ArgSpec,
-        stray: StrayArgs,
-        desc: &'static str,
-    ) -> Self {
-        Self {
-            command,
-            name,
-            args,
-            stray,
-            force: false,
-            inline: Some(desc),
             fullscreen: Some(desc),
             pair: Some(desc),
         }
     }
 
-    /// Inline + full-screen with DISTINCT per-host copy (no pair row). For a
-    /// command whose behaviour reads differently between hosts — e.g. `/think`
-    /// toggles an inline reasoning *panel* but hides *timeline items* in
-    /// full-screen — so the inline description cannot be reused verbatim.
-    const fn inline_and_fullscreen(
-        command: SlashCommand,
-        name: &'static str,
-        args: ArgSpec,
-        stray: StrayArgs,
-        inline_desc: &'static str,
-        fullscreen_desc: &'static str,
-    ) -> Self {
-        Self {
-            command,
-            name,
-            args,
-            stray,
-            force: false,
-            inline: Some(inline_desc),
-            fullscreen: Some(fullscreen_desc),
-            pair: None,
-        }
-    }
-
-    /// A full-screen/pair takeover: no shared inline route yet, its own per-host
+    /// A full-screen/pair takeover: its own per-host
     /// copy, and its true argument syntax for the host that services it.
     const fn takeover(
         command: SlashCommand,
@@ -382,13 +336,12 @@ impl Spelling {
             args,
             stray,
             force: false,
-            inline: None,
             fullscreen: Some(fullscreen),
             pair: Some(pair),
         }
     }
 
-    /// A takeover owned only by the full-screen host.
+    /// Full-screen only, no pair row.
     const fn fullscreen_only(
         command: SlashCommand,
         name: &'static str,
@@ -402,14 +355,13 @@ impl Spelling {
             args,
             stray,
             force: false,
-            inline: None,
             fullscreen: Some(desc),
             pair: None,
         }
     }
 
     /// The permanent pair-only command. Its argument syntax describes the pair
-    /// host that owns it; `parse_slash` never routes it.
+    /// host that owns it; `parse_slash_for` never routes it outside pair.
     const fn pair_only(
         command: SlashCommand,
         name: &'static str,
@@ -423,7 +375,6 @@ impl Spelling {
             args,
             stray,
             force: false,
-            inline: None,
             fullscreen: None,
             pair: Some(desc),
         }
@@ -441,27 +392,6 @@ impl Spelling {
             args,
             stray,
             force: false,
-            inline: None,
-            fullscreen: None,
-            pair: None,
-        }
-    }
-
-    /// An inline-visible `compact` spelling that forces compaction.
-    const fn inline_forcing(
-        command: SlashCommand,
-        name: &'static str,
-        args: ArgSpec,
-        stray: StrayArgs,
-        desc: &'static str,
-    ) -> Self {
-        Self {
-            command,
-            name,
-            args,
-            stray,
-            force: true,
-            inline: Some(desc),
             fullscreen: None,
             pair: None,
         }
@@ -480,7 +410,6 @@ impl Spelling {
             args,
             stray,
             force: true,
-            inline: None,
             fullscreen: None,
             pair: None,
         }
@@ -488,7 +417,6 @@ impl Spelling {
 
     const fn description_for(&self, host: Host) -> Option<&'static str> {
         match host {
-            Host::Inline => self.inline,
             Host::Fullscreen => self.fullscreen,
             Host::Pair => self.pair,
         }
@@ -537,97 +465,81 @@ macro_rules! slash_commands {
 
 slash_commands! {
     commands {
-        // Shared (inline + selectively full-screen) command identities.
+        // Interactive full-screen command identities.
         Agent, Harness, Default, Relaxed, Bypass, Unrestricted, Think, Effort,
         Model, Localbox, Selfimprove, New, Fork, Clone, Tree, Sessions, Session, Name,
         Continue, Clear, Compact, HarnessResume, WaitResume, Ingest, Knowledge,
         Context, Research, Agents, Skills, Bg, Exit,
-        // Shared full-screen/pair takeover identities. `parse_slash` (the inline rollback
-        // host) intentionally keeps them `Unknown` — a deliberate host gate, not a
-        // gap — while `parse_slash_for(Fullscreen|Pair)` routes them to real actions;
-        // their catalog scope stays full-screen/pair-only.
+        // Full-screen/pair takeover identities: `parse_slash_for(Fullscreen|Pair)`
+        // routes them to real actions; their catalog scope stays full-screen/pair-only.
         Help, Theme, Settings, Diff, Search,
-        // Full-screen-only takeover; inline and pair both keep it Unknown.
+        // Full-screen-only takeover; the pair host keeps it Unknown.
         LocalMind,
         // Permanent pair-only identity: `/abort` is owned by the pair event
-        // loop, never parsed by `parse_slash`, present only in the pair picker.
+        // loop, never parsed by `parse_slash_for`, present only in the pair picker.
         Abort,
     }
     spellings {
-        // --- shared: 35 inline-visible rows, in the frozen order -------------
-        Agent => both("agent", NoArg, Reject, "Switch to agent mode"),
-        Harness => both("harness", NoArg, Reject, "Switch to harness mode"),
+        // --- the shared full-screen rows, in the frozen order ----------------
+        Agent => fullscreen_only("agent", NoArg, Reject, "Switch to agent mode"),
+        Harness => fullscreen_only("harness", NoArg, Reject, "Switch to harness mode"),
         // The four permission profiles and `/effort` are switchable in the
-        // full-screen host too (they update the runtime engine + projection), so
-        // they carry a full-screen description as well as the inline one.
-        Default => both("default", NoArg, Reject, "Use the default permission profile"),
-        Relaxed => both("relaxed", NoArg, Reject, "Use the relaxed permission profile"),
-        Bypass => both("bypass", NoArg, Reject, "Use the bypass permission profile"),
-        Unrestricted => both(
+        // full-screen host (they update the runtime engine + projection).
+        Default => fullscreen_only("default", NoArg, Reject, "Use the default permission profile"),
+        Relaxed => fullscreen_only("relaxed", NoArg, Reject, "Use the relaxed permission profile"),
+        Bypass => fullscreen_only("bypass", NoArg, Reject, "Use the bypass permission profile"),
+        Unrestricted => fullscreen_only(
             "unrestricted",
             NoArg,
             Reject,
             "Approve everything, workspace boundary included — you take responsibility"
         ),
-        // `/think` toggles the inline reasoning panel, but in full-screen it hides
-        // reasoning timeline items — so the per-host copy differs (the inline copy
-        // stays byte-for-byte). Full-screen catalog gains this row (24→25).
-        Think => inline_and_fullscreen(
-            "think",
-            NoArg,
-            Reject,
-            "Toggle the reasoning panel",
-            "Show or hide reasoning in the timeline"
-        ),
-        Effort => both("effort", Required, Fall, "Set reasoning effort: minimal|low|medium|high"),
-        Model => both(
+        // `/think` shows or hides reasoning items in the full-screen timeline.
+        Think => fullscreen_only("think", NoArg, Reject, "Show or hide reasoning in the timeline"),
+        Effort => fullscreen_only("effort", Required, Fall, "Set reasoning effort: minimal|low|medium|high"),
+        Model => fullscreen_only(
             "model",
             Optional,
             Fall,
             "Switch provider/model, or list them (/model [provider [model]])"
         ),
-        Localbox => both(
+        Localbox => fullscreen_only(
             "localbox",
             Optional,
             Fall,
             "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)"
         ),
-        Selfimprove => both(
+        Selfimprove => fullscreen_only(
             "selfimprove",
             Optional,
             Fall,
             "Review, propose, approve, build, and reload (/selfimprove [status|start|next|approve|reset])"
         ),
-        New => both("new", NoArg, Fall, "Start a fresh session"),
-        Fork => both("fork", NoArg, Fall, "Branch the conversation into a new session"),
-        Clone => both("clone", NoArg, Fall, "Copy the conversation into a new session"),
-        Tree => both("tree", NoArg, Fall, "Show the session event tree"),
-        Sessions => both("sessions", NoArg, Fall, "List this workspace's sessions"),
-        Session => both("session", Required, Fall, "Resume a session by id"),
-        Name => both("name", Required, Fall, "Name this session (/name <text>)"),
-        Name => both("rename", Required, Fall, "Rename this session (/rename <text>)"),
-        Continue => both("continue", Optional, Fall, "Continue the previous session"),
-        Clear => both("clear", NoArg, Reject, "Clear the conversation view"),
-        Compact => both("compact", Optional, Fall, "Summarize and compact the context"),
-        Compact => inline_forcing(
-            "compact_force",
-            NoArg,
-            Reject,
-            "Compact now, even if within the budget"
-        ),
-        Continue => both("resume", Optional, Fall, "Continue a previous session"),
-        HarnessResume => both("harness-resume", NoArg, Reject, "Resume harness plan work"),
-        WaitResume => both("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
-        Ingest => both("ingest", Optional, Fall, "Manage workspace ingestion"),
-        Knowledge => both("knowledge", Required, Fall, "Query the knowledge base"),
-        Context => both("context", Required, Fall, "Build a context bundle"),
-        Research => both(
+        New => fullscreen_only("new", NoArg, Fall, "Start a fresh session"),
+        Fork => fullscreen_only("fork", NoArg, Fall, "Branch the conversation into a new session"),
+        Clone => fullscreen_only("clone", NoArg, Fall, "Copy the conversation into a new session"),
+        Tree => fullscreen_only("tree", NoArg, Fall, "Show the session event tree"),
+        Sessions => fullscreen_only("sessions", NoArg, Fall, "List this workspace's sessions"),
+        Session => fullscreen_only("session", Required, Fall, "Resume a session by id"),
+        Name => fullscreen_only("name", Required, Fall, "Name this session (/name <text>)"),
+        Name => fullscreen_only("rename", Required, Fall, "Rename this session (/rename <text>)"),
+        Continue => fullscreen_only("continue", Optional, Fall, "Continue the previous session"),
+        Clear => fullscreen_only("clear", NoArg, Reject, "Clear the conversation view"),
+        Compact => fullscreen_only("compact", Optional, Fall, "Summarize and compact the context"),
+        Compact => parse_forcing("compact_force", NoArg, Reject),
+        Continue => fullscreen_only("resume", Optional, Fall, "Continue a previous session"),
+        HarnessResume => fullscreen_only("harness-resume", NoArg, Reject, "Resume harness plan work"),
+        WaitResume => fullscreen_only("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
+        Ingest => fullscreen_only("ingest", Optional, Fall, "Manage workspace ingestion"),
+        Knowledge => fullscreen_only("knowledge", Required, Fall, "Query the knowledge base"),
+        Context => fullscreen_only("context", Required, Fall, "Build a context bundle"),
+        Research => fullscreen_only(
             "research",
             Optional,
             Fall,
             "Research a topic, local + web per config (/research [topic])"
         ),
-        Agents => both(
+        Agents => fullscreen_only(
             "agents",
             Optional,
             Fall,
@@ -635,20 +547,19 @@ slash_commands! {
         ),
         // `/skills` opens the skills surface with no subcommand (`Skills("")`),
         // so it is Optional, not Required.
-        Skills => both(
+        Skills => fullscreen_only(
             "skills",
             Optional,
             Fall,
             "Manage skills: repos, install, list (/skills <subcommand>)"
         ),
-        Bg => both("bg", Optional, Fall, "List background processes (/bg stop <id>|all)"),
-        Exit => both_pair("exit", Optional, Reject, "Exit LocalPilot (/exit [print])"),
+        Bg => fullscreen_only("bg", Optional, Fall, "List background processes (/bg stop <id>|all)"),
+        Exit => fullscreen_and_pair("exit", Optional, Reject, "Exit LocalPilot (/exit [print])"),
         // `/quit` accepts the same optional `print` argument as `/exit`.
-        Exit => both_pair("quit", Optional, Reject, "Exit LocalPilot"),
-        // --- full-screen/pair takeovers (per-host copy; not inline) -----------
-        // The inline host routes all five to `Unknown` — a host gate outside the
-        // builder, not a metadata quirk. For full-screen/pair they route to real
-        // actions. The `ArgSpec`/`StrayArgs` metadata stays host-independent and
+        Exit => fullscreen_and_pair("quit", Optional, Reject, "Exit LocalPilot"),
+        // --- full-screen/pair takeovers (per-host copy) ----------------------
+        // These five route to real actions in both hosts. The
+        // `ArgSpec`/`StrayArgs` metadata stays host-independent and
         // truthful: `help` is `NoArg`/`Reject` (a stray argument is `Invalid`
         // "this command does not take arguments", via the table-driven `no_arg`
         // path), while `theme`/`settings`/`diff`/`search` are `Optional` (any
@@ -785,22 +696,13 @@ impl SlashAction {
     }
 }
 
-/// Parse a slash command from an input line.
-///
-/// Lookup-first: the name is resolved to its [`Spelling`] once, then dispatched
-/// on the spelling's typed [`SlashCommand`] through one wildcard-free match. An
-/// unknown name is `Unknown`; the five takeovers and the pair-only `abort` have
-/// no shared route and resolve to `Unknown` exactly as before this table existed.
-#[must_use]
-pub fn parse_slash(line: &str) -> Option<SlashAction> {
-    parse_slash_for(Host::Inline, line)
-}
-
-/// Host-aware parse. Identical to [`parse_slash`] for `Host::Inline`; for
-/// `Host::Fullscreen`/`Host::Pair` the five takeover spellings resolve to their
-/// real actions ([`SlashAction::Help`]/`Theme`/`Settings`/`Diff`/`Search`)
-/// instead of `Unknown`. The pair-only `abort` stays `Unknown` for every host —
-/// the pair loop owns it as an exact-token route ahead of the parser.
+/// Host-aware parse. Lookup-first: the name is resolved to its [`Spelling`] once,
+/// then dispatched on the spelling's typed [`SlashCommand`] through one
+/// wildcard-free match. An unknown name is `Unknown`. The five takeover spellings
+/// resolve to their real actions ([`SlashAction::Help`]/`Theme`/`Settings`/`Diff`/
+/// `Search`) in both hosts; the full-screen-only `/localmind` stays `Unknown` in
+/// the pair host. The pair-only `abort` stays `Unknown` for every host — the pair
+/// loop owns it as an exact-token route ahead of the parser.
 #[must_use]
 pub fn parse_slash_for(host: Host, line: &str) -> Option<SlashAction> {
     let command = line.trim().strip_prefix('/')?.trim();
@@ -1067,19 +969,16 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
         // The pair-only `abort` has no shared parse route on any host — the pair
         // event loop owns it as an exact-token route ahead of the parser.
         C::Abort => SlashAction::Unknown(command.to_string()),
-        // The five full-screen/pair takeovers resolve to `Unknown` for the
-        // inline host (which never routes them) and to their real actions for
-        // the full-screen and pair hosts.
+        // The five full-screen/pair takeovers resolve to their real actions in
+        // both surviving hosts.
         // `help` is no-arg: the table-driven `no_arg`/`stray` path yields `Help`
         // for a bare form and the exact `Invalid` reason for a stray argument, so
         // the no-arg policy is not duplicated here.
-        C::Help => routed_takeover(host, command, || {
-            no_arg(spelling, name, args, command, SlashAction::Help)
-        }),
-        C::Theme => routed_takeover(host, command, || SlashAction::Theme(opt_arg(args))),
-        C::Settings => routed_takeover(host, command, || SlashAction::Settings(opt_arg(args))),
-        C::Diff => routed_takeover(host, command, || SlashAction::Diff(opt_arg(args))),
-        C::Search => routed_takeover(host, command, || SlashAction::Search(opt_arg(args))),
+        C::Help => no_arg(spelling, name, args, command, SlashAction::Help),
+        C::Theme => SlashAction::Theme(opt_arg(args)),
+        C::Settings => SlashAction::Settings(opt_arg(args)),
+        C::Diff => SlashAction::Diff(opt_arg(args)),
+        C::Search => SlashAction::Search(opt_arg(args)),
         C::LocalMind => routed_fullscreen(host, command, || {
             no_arg(spelling, name, args, command, SlashAction::LocalMind)
         }),
@@ -1091,16 +990,7 @@ fn opt_arg(args: &str) -> Option<String> {
     (!args.is_empty()).then(|| args.to_string())
 }
 
-/// Resolve a full-screen/pair takeover: `Unknown` for the inline rollback host
-/// (which never routes these), the built action for full-screen and pair.
-fn routed_takeover(host: Host, command: &str, build: impl FnOnce() -> SlashAction) -> SlashAction {
-    match host {
-        Host::Inline => SlashAction::Unknown(command.to_string()),
-        Host::Fullscreen | Host::Pair => build(),
-    }
-}
-
-/// Resolve a full-screen-only takeover; other hosts truthfully see it as
+/// Resolve a full-screen-only takeover; the pair host truthfully sees it as
 /// unavailable rather than inheriting the pair takeover scope.
 fn routed_fullscreen(
     host: Host,
@@ -1109,7 +999,7 @@ fn routed_fullscreen(
 ) -> SlashAction {
     match host {
         Host::Fullscreen => build(),
-        Host::Inline | Host::Pair => SlashAction::Unknown(command.to_string()),
+        Host::Pair => SlashAction::Unknown(command.to_string()),
     }
 }
 
@@ -1217,6 +1107,11 @@ mod tests {
     use super::*;
     use std::collections::{BTreeSet, HashSet};
 
+    /// Full-screen parse — the canonical single-host route these tests assert on.
+    fn parse(line: &str) -> Option<SlashAction> {
+        parse_slash_for(Host::Fullscreen, line)
+    }
+
     #[test]
     fn live_actions_are_host_aware() {
         let shared = [
@@ -1226,7 +1121,6 @@ mod tests {
             SlashAction::Background(BackgroundCommand::List),
         ];
         for action in shared {
-            assert!(action.runs_live(Host::Inline));
             assert!(action.runs_live(Host::Fullscreen));
             assert!(!action.runs_live(Host::Pair));
         }
@@ -1239,13 +1133,11 @@ mod tests {
             SlashAction::Theme(None),
             SlashAction::Search(None),
         ] {
-            assert!(!action.runs_live(Host::Inline));
             assert!(action.runs_live(Host::Fullscreen));
             assert!(!action.runs_live(Host::Pair));
         }
 
         for action in [SlashAction::Clear, SlashAction::Settings(None)] {
-            assert!(!action.runs_live(Host::Inline));
             assert!(!action.runs_live(Host::Fullscreen));
             assert!(!action.runs_live(Host::Pair));
         }
@@ -1283,7 +1175,6 @@ mod tests {
 
     #[test]
     fn catalogs_have_the_frozen_cardinalities() {
-        assert_eq!(specs_for(Host::Inline).len(), 35);
         // Full-screen grew 19→24 (profiles + `/effort`), 24→25 (`/think`), 25→31
         // (the six synchronous commands `tree`/`knowledge`/`context`/`agents`/
         // `skills`/`bg`), 31→33 (`compact` + `ingest` on the operation pump),
@@ -1373,85 +1264,14 @@ mod tests {
     }
 
     #[test]
-    fn inline_catalog_matches_the_frozen_golden() {
-        // The inline picker is the 35-row shared surface, byte-for-byte, in the
-        // frozen order. The takeovers never join it (inline stays 35).
-        let expected: &[(&str, &str)] = &[
-            ("agent", "Switch to agent mode"),
-            ("harness", "Switch to harness mode"),
-            ("default", "Use the default permission profile"),
-            ("relaxed", "Use the relaxed permission profile"),
-            ("bypass", "Use the bypass permission profile"),
-            (
-                "unrestricted",
-                "Approve everything, workspace boundary included — you take responsibility",
-            ),
-            ("think", "Toggle the reasoning panel"),
-            ("effort", "Set reasoning effort: minimal|low|medium|high"),
-            (
-                "model",
-                "Switch provider/model, or list them (/model [provider [model]])",
-            ),
-            (
-                "localbox",
-                "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)",
-            ),
-            (
-                "selfimprove",
-                "Review, propose, approve, build, and reload (/selfimprove [status|start|next|approve|reset])",
-            ),
-            ("new", "Start a fresh session"),
-            ("fork", "Branch the conversation into a new session"),
-            ("clone", "Copy the conversation into a new session"),
-            ("tree", "Show the session event tree"),
-            ("sessions", "List this workspace's sessions"),
-            ("session", "Resume a session by id"),
-            ("name", "Name this session (/name <text>)"),
-            ("rename", "Rename this session (/rename <text>)"),
-            ("continue", "Continue the previous session"),
-            ("clear", "Clear the conversation view"),
-            ("compact", "Summarize and compact the context"),
-            ("compact_force", "Compact now, even if within the budget"),
-            ("resume", "Continue a previous session"),
-            ("harness-resume", "Resume harness plan work"),
-            ("wait-resume", "Wait for quota, then resume"),
-            ("ingest", "Manage workspace ingestion"),
-            ("knowledge", "Query the knowledge base"),
-            ("context", "Build a context bundle"),
-            (
-                "research",
-                "Research a topic, local + web per config (/research [topic])",
-            ),
-            (
-                "agents",
-                "List or inspect subagent definitions (/agents [show <name>])",
-            ),
-            (
-                "skills",
-                "Manage skills: repos, install, list (/skills <subcommand>)",
-            ),
-            ("bg", "List background processes (/bg stop <id>|all)"),
-            ("exit", "Exit LocalPilot (/exit [print])"),
-            ("quit", "Exit LocalPilot"),
-        ];
-        let inline = specs_for(Host::Inline);
-        assert_eq!(inline.len(), expected.len());
-        for (got, want) in inline.iter().zip(expected.iter()) {
-            assert_eq!(*got, *want);
-        }
-    }
-
-    #[test]
-    fn full_screen_catalog_lists_no_inline_only_deferred_row() {
+    fn full_screen_catalog_hides_the_redundant_forcing_alias() {
         let full_screen: BTreeSet<_> = specs_for(Host::Fullscreen)
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        // An inline-only hidden spelling must not appear in the full-screen picker.
-        // `agent` and `harness` are now `both` (real full-screen mode entries), so the
-        // only remaining inline-only row is `compact_force` — a redundant forcing alias
-        // of `compact`, intentionally hidden (typeable via `/compact force`), never a
-        // duplicate picker row.
+        // A hidden forcing alias must not appear in the full-screen picker.
+        // `compact_force` is a redundant forcing alias of `compact`, intentionally
+        // hidden (typeable via `/compact force`), never a duplicate picker row.
         assert!(
             !full_screen.contains("compact_force"),
             "compact_force (a redundant forcing alias) leaked into the full-screen picker"
@@ -1510,24 +1330,14 @@ mod tests {
         ] {
             assert_eq!(args(name), Some(ArgSpec::None), "{name} is no-arg");
         }
-        // The inline host never routes the takeovers: both forms stay `Unknown`.
-        assert_eq!(
-            parse_slash("/search"),
-            Some(SlashAction::Unknown("search".to_string()))
-        );
-        assert_eq!(
-            parse_slash("/search foo"),
-            Some(SlashAction::Unknown("search foo".to_string()))
-        );
-
         // Representative parse forms exercising the corrected metadata.
         assert_eq!(
-            parse_slash("/skills"),
+            parse("/skills"),
             Some(SlashAction::Skills(String::new())),
             "/skills is Optional -> Skills(\"\")",
         );
         assert_eq!(
-            parse_slash("/quit print"),
+            parse("/quit print"),
             Some(SlashAction::Exit {
                 print_transcript: true
             }),
@@ -1545,7 +1355,7 @@ mod tests {
     fn abort_is_pair_only_and_never_parsed_or_bridged() {
         // `abort` is external for every host, including the pair host that owns
         // it as an exact-token route ahead of the parser.
-        for host in [Host::Inline, Host::Fullscreen, Host::Pair] {
+        for host in [Host::Fullscreen, Host::Pair] {
             assert_eq!(
                 parse_slash_for(host, "/abort"),
                 Some(SlashAction::Unknown("abort".to_string())),
@@ -1554,26 +1364,9 @@ mod tests {
         }
         let pair: BTreeSet<_> = specs_for(Host::Pair).into_iter().map(|(n, _)| n).collect();
         assert!(pair.contains("abort"));
-        assert!(!specs_for(Host::Inline).iter().any(|(n, _)| *n == "abort"));
         assert!(!specs_for(Host::Fullscreen)
             .iter()
             .any(|(n, _)| *n == "abort"));
-    }
-
-    #[test]
-    fn takeovers_are_unknown_for_the_inline_host() {
-        // The inline rollback host never routes the five takeovers: bare and
-        // with-argument forms both resolve to `Unknown`, never a semantic action.
-        for name in ["search", "help", "theme", "settings", "diff"] {
-            assert_eq!(
-                parse_slash(&format!("/{name}")),
-                Some(SlashAction::Unknown(name.to_string())),
-            );
-            assert_eq!(
-                parse_slash(&format!("/{name} x")),
-                Some(SlashAction::Unknown(format!("{name} x"))),
-            );
-        }
     }
 
     #[test]
@@ -1647,13 +1440,13 @@ mod tests {
                 reason: "this command does not take arguments".to_string(),
             })
         );
-        for host in [Host::Inline, Host::Pair] {
-            assert_eq!(
-                parse_slash_for(host, "/localmind"),
-                Some(SlashAction::Unknown("localmind".to_string()))
-            );
-            assert!(!specs_for(host).iter().any(|(name, _)| *name == "localmind"));
-        }
+        assert_eq!(
+            parse_slash_for(Host::Pair, "/localmind"),
+            Some(SlashAction::Unknown("localmind".to_string()))
+        );
+        assert!(!specs_for(Host::Pair)
+            .iter()
+            .any(|(name, _)| *name == "localmind"));
         assert!(specs_for(Host::Fullscreen)
             .iter()
             .any(|(name, _)| *name == "localmind"));
@@ -1795,7 +1588,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    parse_slash(&format!("/{name} stray")),
+                    parse(&format!("/{name} stray")),
                     Some(SlashAction::Invalid { .. })
                 ),
                 "/{name} stray should be Invalid",
@@ -1805,7 +1598,7 @@ mod tests {
         for name in ["new", "fork", "clone", "tree", "sessions"] {
             assert!(
                 matches!(
-                    parse_slash(&format!("/{name} stray")),
+                    parse(&format!("/{name} stray")),
                     Some(SlashAction::Unknown(_))
                 ),
                 "/{name} stray should be Unknown",
@@ -1816,69 +1609,66 @@ mod tests {
     #[test]
     fn alias_sensitive_forms_parse_exactly() {
         assert_eq!(
-            parse_slash("/compact"),
+            parse("/compact"),
             Some(SlashAction::Compact { force: false })
         );
         assert_eq!(
-            parse_slash("/compact force"),
+            parse("/compact force"),
             Some(SlashAction::Compact { force: true })
         );
         assert_eq!(
-            parse_slash("/compact_force"),
+            parse("/compact_force"),
             Some(SlashAction::Compact { force: true })
         );
         assert_eq!(
-            parse_slash("/compact-force"),
+            parse("/compact-force"),
             Some(SlashAction::Compact { force: true })
         );
         assert!(matches!(
-            parse_slash("/compact bogus"),
+            parse("/compact bogus"),
             Some(SlashAction::Invalid { .. })
         ));
         assert_eq!(
-            parse_slash("/exit"),
+            parse("/exit"),
             Some(SlashAction::Exit {
                 print_transcript: false
             })
         );
         assert_eq!(
-            parse_slash("/exit print"),
+            parse("/exit print"),
             Some(SlashAction::Exit {
                 print_transcript: true
             })
         );
         assert_eq!(
-            parse_slash("/quit"),
+            parse("/quit"),
             Some(SlashAction::Exit {
                 print_transcript: false
             })
         );
         assert_eq!(
-            parse_slash("/q print"),
+            parse("/q print"),
             Some(SlashAction::Exit {
                 print_transcript: true
             })
         );
         assert_eq!(
-            parse_slash("/name a"),
+            parse("/name a"),
             Some(SlashAction::NameSession("a".to_string())),
         );
         assert_eq!(
-            parse_slash("/rename a"),
+            parse("/rename a"),
             Some(SlashAction::NameSession("a".to_string())),
         );
+        assert_eq!(parse("/continue"), Some(SlashAction::ContinueSession(None)),);
         assert_eq!(
-            parse_slash("/continue"),
-            Some(SlashAction::ContinueSession(None)),
-        );
-        assert_eq!(
-            parse_slash("/resume x"),
+            parse("/resume x"),
             Some(SlashAction::ContinueSession(Some("x".to_string()))),
         );
-        assert_eq!(parse_slash("/think"), Some(SlashAction::ToggleThinking));
+        assert_eq!(parse("/think"), Some(SlashAction::ToggleThinking));
         // The hidden `/thinking` alias shares the action (no picker row) on every
         // host — `/think` is a shared command, not a host-gated takeover.
-        assert_eq!(parse_slash("/thinking"), Some(SlashAction::ToggleThinking));
+        assert_eq!(parse("/thinking"), Some(SlashAction::ToggleThinking));
         assert_eq!(
             parse_slash_for(Host::Fullscreen, "/thinking"),
             Some(SlashAction::ToggleThinking)
@@ -1887,40 +1677,37 @@ mod tests {
             parse_slash_for(Host::Fullscreen, "/think"),
             Some(SlashAction::ToggleThinking)
         );
-        assert_eq!(parse_slash("/wait-resume"), Some(SlashAction::WaitResume));
-        assert_eq!(parse_slash("/wait_resume"), Some(SlashAction::WaitResume));
+        assert_eq!(parse("/wait-resume"), Some(SlashAction::WaitResume));
+        assert_eq!(parse("/wait_resume"), Some(SlashAction::WaitResume));
     }
 
     #[test]
     fn localbox_teaches_models_and_direct_serve_while_retaining_adopt_compatibility() {
         assert_eq!(
-            parse_slash("/localbox"),
+            parse("/localbox"),
             Some(SlashAction::LocalBoxAdopt { serve: None })
         );
         assert_eq!(
-            parse_slash("/localbox adopt"),
+            parse("/localbox adopt"),
             Some(SlashAction::LocalBoxAdopt { serve: None })
         );
         assert_eq!(
-            parse_slash("/localbox adopt --serve Bonsai 27B.gguf"),
+            parse("/localbox adopt --serve Bonsai 27B.gguf"),
             Some(SlashAction::LocalBoxServe {
                 model: "Bonsai 27B.gguf".to_string(),
                 allow_untuned: false,
             })
         );
+        assert_eq!(parse("/localbox models"), Some(SlashAction::LocalBoxModels));
         assert_eq!(
-            parse_slash("/localbox models"),
-            Some(SlashAction::LocalBoxModels)
-        );
-        assert_eq!(
-            parse_slash("/localbox serve apex"),
+            parse("/localbox serve apex"),
             Some(SlashAction::LocalBoxServe {
                 model: "apex".to_string(),
                 allow_untuned: false,
             })
         );
         assert_eq!(
-            parse_slash("/localbox serve apex --allow-untuned"),
+            parse("/localbox serve apex --allow-untuned"),
             Some(SlashAction::LocalBoxServe {
                 model: "apex".to_string(),
                 allow_untuned: true,
@@ -1932,7 +1719,7 @@ mod tests {
             "/localbox adopt --server model",
         ] {
             assert!(matches!(
-                parse_slash(malformed),
+                parse(malformed),
                 Some(SlashAction::Invalid { .. })
             ));
         }
@@ -1941,45 +1728,45 @@ mod tests {
     #[test]
     fn selfimprove_preserves_explicit_rank_reviewer_and_gate_actions() {
         assert_eq!(
-            parse_slash("/selfimprove"),
+            parse("/selfimprove"),
             Some(SlashAction::SelfImprove(SelfImproveAction::Status))
         );
         assert_eq!(
-            parse_slash("/selfimprove status"),
+            parse("/selfimprove status"),
             Some(SlashAction::SelfImprove(SelfImproveAction::Status))
         );
         assert_eq!(
-            parse_slash("/selfimprove start"),
+            parse("/selfimprove start"),
             Some(SlashAction::SelfImprove(SelfImproveAction::Start {
                 finding: None
             }))
         );
         assert_eq!(
-            parse_slash("/selfimprove start 12"),
+            parse("/selfimprove start 12"),
             Some(SlashAction::SelfImprove(SelfImproveAction::Start {
                 finding: Some(12)
             }))
         );
         assert_eq!(
-            parse_slash("/selfimprove next"),
+            parse("/selfimprove next"),
             Some(SlashAction::SelfImprove(SelfImproveAction::Next))
         );
         assert_eq!(
-            parse_slash("/selfimprove approve David Smith"),
+            parse("/selfimprove approve David Smith"),
             Some(SlashAction::SelfImprove(SelfImproveAction::Approve {
                 reviewer: "David Smith".to_string()
             }))
         );
         assert_eq!(
-            parse_slash("/selfimprove reset"),
+            parse("/selfimprove reset"),
             Some(SlashAction::SelfImprove(SelfImproveAction::Reset))
         );
         assert!(matches!(
-            parse_slash("/selfimprove start 0"),
+            parse("/selfimprove start 0"),
             Some(SlashAction::Invalid { .. })
         ));
         assert!(matches!(
-            parse_slash("/selfimprove approve"),
+            parse("/selfimprove approve"),
             Some(SlashAction::Invalid { .. })
         ));
     }

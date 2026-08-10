@@ -1,7 +1,7 @@
-//! Host-shared ingest progress, preflight, and result helpers, so the inline and
-//! full-screen hosts drive the long-running ingest paths with identical decisions
-//! and copy. The generic operation pump never learns `IngestProgress`; it drains
-//! through a UI-agnostic closure that calls [`drain_ingest_progress_with`].
+//! Ingest progress, preflight, and result helpers for the full-screen host's
+//! long-running ingest paths. The generic operation pump never learns
+//! `IngestProgress`; it drains through a UI-agnostic closure that calls
+//! [`drain_ingest_progress_with`].
 
 use std::path::Path;
 
@@ -25,7 +25,7 @@ pub(crate) enum IngestPreflight {
 
 /// Resolve the config, run mode, and start notice for an ingest request. Runs
 /// before any Busy transition, so an `EarlyExit` never enters Busy or starts a
-/// walk. Shared verbatim with the inline host so the two cannot drift.
+/// walk. Kept host-neutral so the operation pump owns the decision.
 pub(crate) fn ingest_preflight(
     cwd: &Path,
     requested_mode: RunMode,
@@ -73,8 +73,8 @@ pub(crate) fn ingest_preflight(
 /// Drain queued ingestion progress, emitting one string per surfaced milestone.
 /// Milestone stages emit once; per-file `Parsing` ticks are throttled to quarter
 /// marks so a large walk does not flood the transcript. `total`/`bucket` carry the
-/// throttle state across calls. `emit` is the host's notice sink (inline
-/// `UiEvent::Notice`, full-screen `RuntimeUpdate::Notice`).
+/// throttle state across calls. `emit` is the host's notice sink
+/// (full-screen `RuntimeUpdate::Notice`).
 pub(crate) fn drain_ingest_progress_with(
     rx: &mut mpsc::UnboundedReceiver<IngestProgress>,
     total: &mut u64,
@@ -115,7 +115,7 @@ pub(crate) fn drain_ingest_progress_with(
 }
 
 /// Format the final ingest summary/error line from the joined walk result, shared
-/// so both hosts print identically.
+/// so every ingest caller prints it identically.
 pub(crate) fn ingest_result_notice(
     result: Result<Result<RunSummary, IngestError>, JoinError>,
 ) -> String {

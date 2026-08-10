@@ -253,7 +253,7 @@ It is reachable two ways: an interactive `/research <topic>` (runs once and
 returns to the prior mode) or a bare `/research` that enters a persistent
 research mode; and a headless `localpilot research <topic>` subcommand
 (`--no-report`, `--no-memory`). The interactive forms run in the full-screen
-(default) chat host as well as the inline composer; research is text-only, so a
+chat host; research is text-only, so a
 prompt submitted with image attachments while in research mode is declined with a
 notice and the draft and its attachments are preserved. When a provider and model are configured the
 model decomposes the topic; synthesis stays grounded in gathered evidence, so a
@@ -321,7 +321,7 @@ Interactive slash commands are REPL-scoped. Mode and permission switches
 (`/agent`, `/harness`, `/default`, `/relaxed`, `/bypass`, `/unrestricted`), the
 reasoning panel (`/think`), reasoning effort (`/effort <level>`), and session
 controls (`/new`, `/fork`, `/clone`, `/tree`, `/sessions`, `/session <id>`) act
-on the live session. During an inline or full-screen model turn, the shared
+on the live session. During a full-screen model turn, the shared
 host-aware live set is profile switches, `/bg`, `/effort`, and `/think`; the
 full-screen host additionally keeps `/help`, `/theme`, `/search`, and exit
 available (ADR-0147). Profile switches govern the next tool call because the
@@ -345,7 +345,7 @@ rather than entering provider input. The rest:
   report; a resume snapshots the live model, provider, permission profile, and
   workspace-trust at dispatch, so an in-session `/model` or profile switch is
   honoured. Bare `/agent` and `/harness` switch the session mode in the full-screen
-  host too — silent label flips at exact parity with the inline host (a plain prompt
+  host — silent label flips (a plain prompt
   in either mode runs an ordinary turn; the footer and settings show the mode).
 - `/ingest <action>` manages project-local folder ingestion (`run`, `refresh`,
   `resume`, `preview`, `status`, `review`, and so on). The walking actions

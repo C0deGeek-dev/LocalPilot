@@ -23,19 +23,14 @@ The configuration schema is SemVer-stable (LocalPilot has been ≥ 1.0.0 since
 
 ## Interactive chat host
 
-Interactive `localpilot chat` uses the full-screen terminal application by
-default:
+Interactive `localpilot chat` runs the full-screen terminal application:
 
 ```powershell
 localpilot chat
 ```
 
-`LOCALPILOT_CHAT_UI=fullscreen` is an accepted explicit spelling. Set
-`LOCALPILOT_CHAT_UI=inline` only to use the temporary legacy rollback while the
-remaining cross-terminal acceptance matrix is completed. Any other value is
-rejected with a configuration error. This environment-only recovery switch is
-not part of the stable TOML schema and does not affect non-interactive/plain
-output. The inline host and selector are removed after the gates in ADR-0129.
+The full-screen application is the only interactive host; there is no host
+selector, and it does not affect non-interactive/plain output.
 
 For the full-screen host, `LOCALPILOT_CHAT_THEME` accepts
 `default`, `dim`, `high-contrast`, or `colorblind`. An invalid value is shown as
@@ -114,8 +109,8 @@ The `bypass` and `unrestricted` profiles skip the prompt, so the CLI is the
 persistence route for a folder always worked in those profiles. See
 [07-security-and-privacy.md](07-security-and-privacy.md).
 
-The full-screen host uses the same resolved provider vision capability as the
-inline host. On a vision-capable model an image can be attached three ways, each
+The full-screen host resolves the provider's vision capability from config, else
+a best-effort probe. On a vision-capable model an image can be attached three ways, each
 as an atomic placeholder: Ctrl+V a copied bitmap; Ctrl+V a copied image file
 (read from the clipboard file list when no bitmap is present); or paste/drop an
 image-file path into the composer. Supported formats are PNG, JPEG, WebP, and
@@ -159,7 +154,7 @@ choice explicit. `/settings` opens a contained read-only view of the effective
 terminal, appearance, provider, and session values; launch-time controls remain
 environment settings. Slash invocations never enter prompt history or the
 provider prompt queue. A manually typed unsupported command produces an in-app
-notice instead of being sent to a model. During an active inline or full-screen
+notice instead of being sent to a model. During an active full-screen
 turn, profile commands, `/bg`, `/effort`, and `/think` execute live; profile
 changes apply from the next tool call, effort from the next provider request,
 and background commands use the session registry. Full-screen `/help`, `/theme`,

@@ -8,9 +8,9 @@ use clap::Args;
 use localpilot_config::{CliOverrides, Config, ConfigPaths};
 use localpilot_sandbox::Profile;
 use localpilot_server::swarm::PairBounds;
+use localpilot_slash::Mode;
 use localpilot_store::Store;
 use localpilot_terminal_ui::{Header, SessionHeader};
-use localpilot_tui::Mode;
 
 use crate::interactive_session::{
     InteractivePairHost, InteractivePeerSelection, InteractiveSessionSetup, PairPeer,

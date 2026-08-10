@@ -53,10 +53,10 @@ and `bypass` is never the default. Permission profiles (`default` / `relaxed` /
 
 ## Transcript scrolling in the REPL
 
-The REPL stays in your terminal's normal screen buffer and does not capture the
-mouse, so scroll the transcript exactly as you scroll any other terminal output
-(mouse wheel, scrollbar, or your terminal's scroll keys). Finished history is
-printed into native scrollback while the live input box and status line stay
+The full-screen chat host runs in an alternate screen buffer and owns timeline
+scrolling: use the mouse wheel, the scrollbar, PageUp/PageDown, or the arrow
+keys to move through history. Selection and copy are handled inside the
+application (the mouse is captured), and the composer and status line stay
 pinned at the bottom.
 
 ## Ingesting a folder looks stuck

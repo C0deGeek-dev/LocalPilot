@@ -11,45 +11,6 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
 }
 
 #[test]
-fn alt_enter_variants_insert_newline() {
-    for code in [KeyCode::Enter, KeyCode::Char('\r'), KeyCode::Char('\n')] {
-        let event = key(code, KeyModifiers::ALT);
-        assert!(key_input::is_newline(event, "hello"));
-        assert!(!key_input::is_submit(event, "hello"));
-    }
-}
-
-#[test]
-fn shift_enter_inserts_newline_when_reported() {
-    let event = key(KeyCode::Enter, KeyModifiers::SHIFT);
-    assert!(key_input::is_newline(event, "hello"));
-    assert!(!key_input::is_submit(event, "hello"));
-}
-
-#[test]
-fn plain_enter_submits_non_empty_input() {
-    for code in [KeyCode::Enter, KeyCode::Char('\r'), KeyCode::Char('\n')] {
-        let event = key(code, KeyModifiers::empty());
-        assert!(!key_input::is_newline(event, "hello"));
-        assert!(key_input::is_submit(event, "hello"));
-    }
-}
-
-#[test]
-fn plain_enter_submits_slash_commands() {
-    let event = key(KeyCode::Enter, KeyModifiers::empty());
-    assert!(!key_input::is_newline(event, "/ingest"));
-    assert!(key_input::is_submit(event, "/ingest"));
-}
-
-#[test]
-fn ctrl_j_inserts_newline() {
-    let event = key(KeyCode::Char('j'), KeyModifiers::CONTROL);
-    assert!(key_input::is_newline(event, "hello"));
-    assert!(!key_input::is_submit(event, "hello"));
-}
-
-#[test]
 fn ctrl_c_cancels() {
     assert!(key_input::is_cancel(key(
         KeyCode::Char('c'),
@@ -72,14 +33,6 @@ fn ctrl_v_requests_a_clipboard_image() {
         KeyCode::Char('v'),
         KeyModifiers::empty()
     )));
-}
-
-#[test]
-fn trailing_backslash_keeps_plain_enter_as_newline() {
-    let event = key(KeyCode::Enter, KeyModifiers::empty());
-    let input = "hello \\".to_string();
-    assert!(key_input::is_newline(event, &input));
-    assert!(!key_input::is_submit(event, &input));
 }
 
 #[test]
@@ -287,15 +240,7 @@ fn only_unmodified_chars_are_unbracketed_paste_candidates() {
         KeyCode::Char('a'),
         KeyModifiers::empty()
     )));
-    assert!(key_input::is_unbracketed_paste_newline_key(key(
-        KeyCode::Char('\n'),
-        KeyModifiers::empty()
-    )));
     assert!(key_input::may_be_unbracketed_paste_key(key(
-        KeyCode::Enter,
-        KeyModifiers::empty()
-    )));
-    assert!(key_input::is_unbracketed_paste_newline_key(key(
         KeyCode::Enter,
         KeyModifiers::empty()
     )));

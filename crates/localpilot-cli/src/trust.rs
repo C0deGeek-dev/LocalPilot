@@ -1,8 +1,8 @@
 //! Per-folder trust.
 //!
-//! The interactive hosts ask once, on first entry into a workspace folder,
-//! whether the folder is trusted. The inline rollback remembers an affirmative
-//! answer; the full-screen host also offers a session-only affirmative choice.
+//! The interactive host asks once, on first entry into a workspace folder,
+//! whether the folder is trusted. It remembers an affirmative answer and also
+//! offers a session-only affirmative choice.
 //! Persistent answers live in a small list under the user config directory so
 //! the prompt does not reappear for that folder.
 //! Trust is a convenience gate, not a security boundary — the permission engine
