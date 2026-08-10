@@ -18,6 +18,8 @@ use crate::{
 const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
 const MAX_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_SETTINGS_QUERY_BYTES: usize = 256;
+const MAX_REVIEWER_BYTES: usize = 128;
+const MAX_LOCALMIND_VIEW_ROWS: usize = 1_000;
 const DOUBLE_ESCAPE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -169,6 +171,7 @@ pub enum InputAction {
     DeleteToLineEnd,
     OpenExternalEditor,
     AcceptCompletion,
+    PreviousTakeoverSection,
     Submit,
 }
 
@@ -186,6 +189,189 @@ pub enum TakeoverKind {
     Settings,
     /// A bounded, scrollable, copyable command report (`/tree`, `/skills`, …).
     Report,
+    /// LocalMind's six internal sections in one full-screen surface.
+    LocalMind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalMindSection {
+    Docs,
+    Graph,
+    Memory,
+    Review,
+    Skills,
+    Audit,
+}
+
+impl LocalMindSection {
+    pub const ALL: [Self; 6] = [
+        Self::Docs,
+        Self::Graph,
+        Self::Memory,
+        Self::Review,
+        Self::Skills,
+        Self::Audit,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Docs => "Docs",
+            Self::Graph => "Graph",
+            Self::Memory => "Memory",
+            Self::Review => "Review",
+            Self::Skills => "Skills",
+            Self::Audit => "Audit",
+        }
+    }
+
+    const fn next(self) -> Self {
+        match self {
+            Self::Docs => Self::Graph,
+            Self::Graph => Self::Memory,
+            Self::Memory => Self::Review,
+            Self::Review => Self::Skills,
+            Self::Skills => Self::Audit,
+            Self::Audit => Self::Docs,
+        }
+    }
+
+    const fn previous(self) -> Self {
+        match self {
+            Self::Docs => Self::Audit,
+            Self::Graph => Self::Docs,
+            Self::Memory => Self::Graph,
+            Self::Review => Self::Memory,
+            Self::Skills => Self::Review,
+            Self::Audit => Self::Skills,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct LocalMindReviewRow {
+    pub id: String,
+    pub state: String,
+    pub session_id: String,
+    pub summary: String,
+    pub category: String,
+    pub confidence: String,
+    pub note: Option<String>,
+    pub replacement: Option<String>,
+    pub seen_count: i64,
+    pub evidence: Option<String>,
+    pub requires_edit: bool,
+    pub promoted: bool,
+}
+
+impl fmt::Debug for LocalMindReviewRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalMindReviewRow")
+            .field("id", &self.id)
+            .field("state", &self.state)
+            .field("requires_edit", &self.requires_edit)
+            .field("promoted", &self.promoted)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct LocalMindData {
+    pub docs: Vec<String>,
+    pub graph: Vec<String>,
+    pub memory: Vec<String>,
+    pub review: Vec<LocalMindReviewRow>,
+    pub skills: Vec<String>,
+    pub audit: Vec<String>,
+}
+
+impl LocalMindData {
+    fn sanitize(self) -> Self {
+        let lines = |items: Vec<String>| {
+            let omitted = items.len().saturating_sub(MAX_LOCALMIND_VIEW_ROWS);
+            let mut bounded: Vec<String> = items
+                .into_iter()
+                .take(MAX_LOCALMIND_VIEW_ROWS)
+                .map(|item| sanitize_text(&item))
+                .collect();
+            if omitted > 0 {
+                if bounded.len() == MAX_LOCALMIND_VIEW_ROWS {
+                    bounded.pop();
+                }
+                bounded.push(format!("… {omitted} more rows omitted"));
+            }
+            bounded
+        };
+        Self {
+            docs: lines(self.docs),
+            graph: lines(self.graph),
+            memory: lines(self.memory),
+            review: self
+                .review
+                .into_iter()
+                .take(MAX_LOCALMIND_VIEW_ROWS)
+                .map(|row| LocalMindReviewRow {
+                    id: sanitize_inline(&row.id),
+                    state: sanitize_inline(&row.state),
+                    session_id: sanitize_inline(&row.session_id),
+                    summary: sanitize_text(&row.summary),
+                    category: sanitize_inline(&row.category),
+                    confidence: sanitize_inline(&row.confidence),
+                    note: row.note.map(|value| sanitize_text(&value)),
+                    replacement: row.replacement.map(|value| sanitize_text(&value)),
+                    seen_count: row.seen_count,
+                    evidence: row.evidence.map(|value| sanitize_text(&value)),
+                    requires_edit: row.requires_edit,
+                    promoted: row.promoted,
+                })
+                .collect(),
+            skills: lines(self.skills),
+            audit: lines(self.audit),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalMindReviewAction {
+    Accept,
+    Reject,
+    Promote,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct LocalMindReviewIntent {
+    pub candidate_id: String,
+    pub reviewer: String,
+    pub action: LocalMindReviewAction,
+}
+
+impl fmt::Debug for LocalMindReviewIntent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalMindReviewIntent")
+            .field("candidate_id", &self.candidate_id)
+            .field("reviewer", &"<redacted>")
+            .field("action", &self.action)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct LocalMindState {
+    section: LocalMindSection,
+    data: LocalMindData,
+    reviewer: String,
+    editing_reviewer: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LocalMindView<'a> {
+    pub section: LocalMindSection,
+    pub lines: &'a [String],
+    pub review: &'a [LocalMindReviewRow],
+    pub reviewer: &'a str,
+    pub editing_reviewer: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +452,7 @@ struct TakeoverState {
     tree_visible: bool,
     report_title: String,
     report_lines: Vec<String>,
+    localmind: Option<LocalMindState>,
 }
 
 impl fmt::Debug for TakeoverState {
@@ -294,6 +481,20 @@ impl fmt::Debug for TakeoverState {
                     self.report_lines.iter().map(String::len).sum::<usize>()
                 ),
             )
+            .field(
+                "localmind",
+                &self.localmind.as_ref().map(|state| {
+                    (
+                        state.section,
+                        state.data.docs.len()
+                            + state.data.graph.len()
+                            + state.data.memory.len()
+                            + state.data.review.len()
+                            + state.data.skills.len()
+                            + state.data.audit.len(),
+                    )
+                }),
+            )
             .finish()
     }
 }
@@ -314,6 +515,7 @@ pub(crate) struct TakeoverView<'a> {
     pub tree_visible: bool,
     pub report_title: &'a str,
     pub report_lines: &'a [String],
+    pub localmind: Option<LocalMindView<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -661,6 +863,7 @@ pub enum AppCommand {
     Exit,
     NavigateTimeline(TimelineNavigation),
     NavigateTakeover(TakeoverNavigation),
+    LocalMindReview(LocalMindReviewIntent),
     ActivateSession(SessionSelection),
     OpenExternalEditor,
     RunShell(UserShellCommand),
@@ -1506,6 +1709,19 @@ impl AppModel {
                 if state.kind == TakeoverKind::Report {
                     return AppCommand::Copy(state.report_lines.join("\n"));
                 }
+                if let Some(localmind) = &state.localmind {
+                    let lines = match localmind.section {
+                        LocalMindSection::Docs => &localmind.data.docs,
+                        LocalMindSection::Graph => &localmind.data.graph,
+                        LocalMindSection::Memory => &localmind.data.memory,
+                        LocalMindSection::Review => &localmind.data.memory[..0],
+                        LocalMindSection::Skills => &localmind.data.skills,
+                        LocalMindSection::Audit => &localmind.data.audit,
+                    };
+                    if !lines.is_empty() {
+                        return AppCommand::Copy(lines.join("\n"));
+                    }
+                }
             }
             self.takeover = None;
             return AppCommand::None;
@@ -1724,6 +1940,7 @@ impl AppModel {
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
             | InputAction::OpenExternalEditor
+            | InputAction::PreviousTakeoverSection
             | InputAction::Submit => AppCommand::None,
         }
     }
@@ -2138,6 +2355,23 @@ impl AppModel {
             tree_visible: state.tree_visible,
             report_title: &state.report_title,
             report_lines: &state.report_lines,
+            localmind: state.localmind.as_ref().map(|localmind| {
+                let lines: &[String] = match localmind.section {
+                    LocalMindSection::Docs => &localmind.data.docs,
+                    LocalMindSection::Graph => &localmind.data.graph,
+                    LocalMindSection::Memory => &localmind.data.memory,
+                    LocalMindSection::Review => &[],
+                    LocalMindSection::Skills => &localmind.data.skills,
+                    LocalMindSection::Audit => &localmind.data.audit,
+                };
+                LocalMindView {
+                    section: localmind.section,
+                    lines,
+                    review: &localmind.data.review,
+                    reviewer: &localmind.reviewer,
+                    editing_reviewer: localmind.editing_reviewer,
+                }
+            }),
         })
     }
 
@@ -2226,6 +2460,7 @@ impl AppModel {
             tree_visible: true,
             report_title: String::new(),
             report_lines: Vec::new(),
+            localmind: None,
         });
     }
 
@@ -2262,7 +2497,168 @@ impl AppModel {
             tree_visible: true,
             report_title: title,
             report_lines,
+            localmind: None,
         });
+    }
+
+    /// Open LocalMind's six internal sections as one takeover. The host has
+    /// already bounded and mapped the engine data; this layer only sanitizes it.
+    pub fn open_localmind(&mut self, data: LocalMindData) {
+        self.exit_armed = false;
+        self.quick_help = false;
+        self.close_theme_picker(true);
+        self.input_overlay = None;
+        self.takeover = Some(TakeoverState {
+            kind: TakeoverKind::LocalMind,
+            scroll: 0,
+            file_scroll: 0,
+            selected: 0,
+            settings: Vec::new(),
+            settings_query: String::new(),
+            sessions: Vec::new(),
+            diff_files: Vec::new(),
+            diff_pane: DiffPane::Content,
+            selected_file: 0,
+            tree_visible: true,
+            report_title: String::new(),
+            report_lines: Vec::new(),
+            localmind: Some(LocalMindState {
+                section: LocalMindSection::Docs,
+                data: data.sanitize(),
+                reviewer: String::new(),
+                editing_reviewer: false,
+            }),
+        });
+    }
+
+    /// Refresh LocalMind data after a review mutation while preserving the
+    /// user's section, reviewer identity, and nearest valid selection.
+    pub fn refresh_localmind(&mut self, data: LocalMindData) {
+        let Some(state) = self
+            .takeover
+            .as_mut()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)
+        else {
+            self.open_localmind(data);
+            return;
+        };
+        let Some(localmind) = state.localmind.as_mut() else {
+            self.open_localmind(data);
+            return;
+        };
+        localmind.data = data.sanitize();
+        state.selected = state
+            .selected
+            .min(localmind.data.review.len().saturating_sub(1));
+        state.scroll = state.scroll.min(state.selected);
+    }
+
+    #[must_use]
+    pub fn localmind_section(&self) -> Option<LocalMindSection> {
+        self.takeover
+            .as_ref()
+            .and_then(|state| state.localmind.as_ref())
+            .map(|state| state.section)
+    }
+
+    #[must_use]
+    pub fn localmind_reviewer(&self) -> Option<&str> {
+        self.takeover
+            .as_ref()
+            .and_then(|state| state.localmind.as_ref())
+            .map(|state| state.reviewer.as_str())
+    }
+
+    fn cycle_localmind_section(&mut self, forward: bool) {
+        let Some(localmind) = self
+            .takeover
+            .as_mut()
+            .and_then(|state| state.localmind.as_mut())
+        else {
+            return;
+        };
+        localmind.section = if forward {
+            localmind.section.next()
+        } else {
+            localmind.section.previous()
+        };
+        localmind.editing_reviewer = false;
+        if let Some(state) = self.takeover.as_mut() {
+            state.scroll = 0;
+            state.selected = 0;
+        }
+    }
+
+    fn append_localmind_reviewer(&mut self, text: &str) {
+        let Some(localmind) = self
+            .takeover
+            .as_mut()
+            .and_then(|state| state.localmind.as_mut())
+            .filter(|state| state.editing_reviewer)
+        else {
+            return;
+        };
+        let text = sanitize_inline(text);
+        let remaining = MAX_REVIEWER_BYTES.saturating_sub(localmind.reviewer.len());
+        let end = previous_grapheme_boundary(&text, remaining);
+        localmind.reviewer.push_str(&text[..end]);
+    }
+
+    fn backspace_localmind_reviewer(&mut self) {
+        let Some(localmind) = self
+            .takeover
+            .as_mut()
+            .and_then(|state| state.localmind.as_mut())
+            .filter(|state| state.editing_reviewer)
+        else {
+            return;
+        };
+        if let Some((start, _)) = localmind.reviewer.grapheme_indices(true).next_back() {
+            localmind.reviewer.truncate(start);
+        }
+    }
+
+    fn localmind_review_is_active(&self) -> bool {
+        self.takeover
+            .as_ref()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)
+            .and_then(|state| state.localmind.as_ref())
+            .is_some_and(|localmind| localmind.section == LocalMindSection::Review)
+    }
+
+    fn localmind_review_intent(
+        &mut self,
+        action: LocalMindReviewAction,
+    ) -> Option<LocalMindReviewIntent> {
+        let state = self
+            .takeover
+            .as_mut()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)?;
+        let localmind = state.localmind.as_mut()?;
+        if localmind.section != LocalMindSection::Review {
+            return None;
+        }
+        if localmind.reviewer.trim().is_empty() {
+            localmind.editing_reviewer = true;
+            return None;
+        }
+        let row = localmind.data.review.get(state.selected)?;
+        let allowed = match action {
+            LocalMindReviewAction::Accept => {
+                row.state.eq_ignore_ascii_case("pending") && !row.requires_edit && !row.promoted
+            }
+            LocalMindReviewAction::Reject => row.state.eq_ignore_ascii_case("pending"),
+            LocalMindReviewAction::Promote => match row.state.to_ascii_lowercase().as_str() {
+                "accepted" => !row.requires_edit && !row.promoted,
+                "edited" => !row.promoted,
+                _ => false,
+            },
+        };
+        allowed.then(|| LocalMindReviewIntent {
+            candidate_id: row.id.clone(),
+            reviewer: localmind.reviewer.trim().to_string(),
+            action,
+        })
     }
 
     pub fn open_settings(&mut self, settings: impl IntoIterator<Item = SettingEntry>) {
@@ -2294,6 +2690,7 @@ impl AppModel {
             tree_visible: true,
             report_title: String::new(),
             report_lines: Vec::new(),
+            localmind: None,
         });
     }
 
@@ -2422,6 +2819,7 @@ impl AppModel {
             tree_visible: true,
             report_title: String::new(),
             report_lines: Vec::new(),
+            localmind: None,
         });
     }
 
@@ -2455,6 +2853,7 @@ impl AppModel {
             tree_visible: true,
             report_title: String::new(),
             report_lines: Vec::new(),
+            localmind: None,
         });
     }
 
@@ -2467,6 +2866,14 @@ impl AppModel {
                 state.selected = selected;
             }
             TakeoverKind::Sessions if selected < state.sessions.len() => state.selected = selected,
+            TakeoverKind::LocalMind
+                if state.localmind.as_ref().is_some_and(|localmind| {
+                    localmind.section == LocalMindSection::Review
+                        && selected < localmind.data.review.len()
+                }) =>
+            {
+                state.selected = selected;
+            }
             TakeoverKind::Diff
                 if state
                     .diff_files
@@ -2481,7 +2888,8 @@ impl AppModel {
             | TakeoverKind::Help
             | TakeoverKind::Sessions
             | TakeoverKind::Settings
-            | TakeoverKind::Report => {}
+            | TakeoverKind::Report
+            | TakeoverKind::LocalMind => {}
         }
     }
 
@@ -2501,9 +2909,20 @@ impl AppModel {
         let Some(state) = self.takeover.as_mut() else {
             return;
         };
-        if matches!(state.kind, TakeoverKind::Sessions | TakeoverKind::Settings) {
+        let localmind_review = state.kind == TakeoverKind::LocalMind
+            && state
+                .localmind
+                .as_ref()
+                .is_some_and(|localmind| localmind.section == LocalMindSection::Review);
+        if matches!(state.kind, TakeoverKind::Sessions | TakeoverKind::Settings) || localmind_review
+        {
             let total = if state.kind == TakeoverKind::Sessions {
                 state.sessions.len()
+            } else if localmind_review {
+                state
+                    .localmind
+                    .as_ref()
+                    .map_or(0, |localmind| localmind.data.review.len())
             } else {
                 filtered_setting_indices(state).len()
             };
@@ -2555,9 +2974,20 @@ impl AppModel {
         let Some(state) = self.takeover.as_mut() else {
             return;
         };
-        if matches!(state.kind, TakeoverKind::Sessions | TakeoverKind::Settings) {
+        let localmind_review = state.kind == TakeoverKind::LocalMind
+            && state
+                .localmind
+                .as_ref()
+                .is_some_and(|localmind| localmind.section == LocalMindSection::Review);
+        if matches!(state.kind, TakeoverKind::Sessions | TakeoverKind::Settings) || localmind_review
+        {
             let total = if state.kind == TakeoverKind::Sessions {
                 state.sessions.len()
+            } else if localmind_review {
+                state
+                    .localmind
+                    .as_ref()
+                    .map_or(0, |localmind| localmind.data.review.len())
             } else {
                 filtered_setting_indices(state).len()
             };
@@ -3477,6 +3907,7 @@ impl AppModel {
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
             | InputAction::OpenExternalEditor
+            | InputAction::PreviousTakeoverSection
             | InputAction::AcceptCompletion => {}
         }
         AppCommand::None
@@ -3485,10 +3916,23 @@ impl AppModel {
     fn handle_takeover_input(&mut self, action: InputAction) -> AppCommand {
         match action {
             InputAction::Escape => {
+                if let Some(localmind) = self
+                    .takeover
+                    .as_mut()
+                    .and_then(|state| state.localmind.as_mut())
+                    .filter(|state| state.editing_reviewer)
+                {
+                    localmind.editing_reviewer = false;
+                    return AppCommand::None;
+                }
                 if self.clear_settings_query() {
                     return AppCommand::None;
                 }
                 self.takeover = None;
+                AppCommand::None
+            }
+            InputAction::PreviousTakeoverSection => {
+                self.cycle_localmind_section(false);
                 AppCommand::None
             }
             InputAction::MoveUp => AppCommand::NavigateTakeover(TakeoverNavigation::LineUp),
@@ -3514,6 +3958,67 @@ impl AppModel {
                     }
                 }
                 AppCommand::None
+            }
+            InputAction::Insert(text)
+                if self
+                    .takeover
+                    .as_ref()
+                    .and_then(|state| state.localmind.as_ref())
+                    .is_some_and(|state| state.editing_reviewer) =>
+            {
+                self.append_localmind_reviewer(&text);
+                AppCommand::None
+            }
+            InputAction::Paste(text)
+                if self
+                    .takeover
+                    .as_ref()
+                    .and_then(|state| state.localmind.as_ref())
+                    .is_some_and(|state| state.editing_reviewer) =>
+            {
+                self.append_localmind_reviewer(&text);
+                AppCommand::None
+            }
+            InputAction::Backspace
+                if self
+                    .takeover
+                    .as_ref()
+                    .and_then(|state| state.localmind.as_ref())
+                    .is_some_and(|state| state.editing_reviewer) =>
+            {
+                self.backspace_localmind_reviewer();
+                AppCommand::None
+            }
+            InputAction::Insert(text)
+                if text.eq_ignore_ascii_case("i") && self.localmind_review_is_active() =>
+            {
+                if let Some(localmind) = self
+                    .takeover
+                    .as_mut()
+                    .and_then(|state| state.localmind.as_mut())
+                    .filter(|state| state.section == LocalMindSection::Review)
+                {
+                    localmind.editing_reviewer = true;
+                }
+                AppCommand::None
+            }
+            InputAction::Insert(text)
+                if text.eq_ignore_ascii_case("a") && self.localmind_review_is_active() =>
+            {
+                self.localmind_review_intent(LocalMindReviewAction::Accept)
+                    .map_or(AppCommand::None, AppCommand::LocalMindReview)
+            }
+            InputAction::Insert(text)
+                if text.eq_ignore_ascii_case("r") && self.localmind_review_is_active() =>
+            {
+                self.localmind_review_intent(LocalMindReviewAction::Reject)
+                    .map_or(AppCommand::None, AppCommand::LocalMindReview)
+            }
+            InputAction::Insert(text)
+                if text.eq_ignore_ascii_case("p") && self.localmind_review_is_active() =>
+            {
+                self.localmind_review_intent(LocalMindReviewAction::Promote)
+                    .map_or(AppCommand::None, AppCommand::LocalMindReview)
             }
             InputAction::Insert(text) if text.eq_ignore_ascii_case("t") => {
                 if let Some(state) = self.takeover.as_mut() {
@@ -3560,7 +4065,27 @@ impl AppModel {
                 self.edit_selected_setting(true);
                 AppCommand::None
             }
+            InputAction::AcceptCompletion
+                if self
+                    .takeover
+                    .as_ref()
+                    .is_some_and(|state| state.kind == TakeoverKind::LocalMind) =>
+            {
+                self.cycle_localmind_section(true);
+                AppCommand::None
+            }
             InputAction::Submit | InputAction::AcceptCompletion => {
+                if let Some(localmind) = self
+                    .takeover
+                    .as_mut()
+                    .and_then(|state| state.localmind.as_mut())
+                    .filter(|state| state.editing_reviewer)
+                {
+                    if !localmind.reviewer.trim().is_empty() {
+                        localmind.editing_reviewer = false;
+                    }
+                    return AppCommand::None;
+                }
                 if self
                     .takeover
                     .as_ref()
@@ -3635,7 +4160,8 @@ impl AppModel {
             | InputAction::DeleteWordLeft
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
-            | InputAction::OpenExternalEditor => {}
+            | InputAction::OpenExternalEditor
+            | InputAction::PreviousTakeoverSection => {}
         }
         AppCommand::None
     }
@@ -3732,7 +4258,8 @@ impl AppModel {
             | InputAction::DeleteWordLeft
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
-            | InputAction::OpenExternalEditor => {}
+            | InputAction::OpenExternalEditor
+            | InputAction::PreviousTakeoverSection => {}
         }
         AppCommand::None
     }
@@ -3778,6 +4305,7 @@ impl AppModel {
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
             | InputAction::OpenExternalEditor
+            | InputAction::PreviousTakeoverSection
             | InputAction::AcceptCompletion => {}
         }
         AppCommand::None
@@ -6026,6 +6554,20 @@ mod tests {
             },
         ]);
 
+        for hotkey in ["a", "i", "r", "p"] {
+            assert_eq!(
+                app.handle_input(InputAction::Insert(hotkey.to_string()), 80),
+                AppCommand::None
+            );
+        }
+        assert_eq!(
+            app.takeover().expect("settings").settings_query,
+            "airp",
+            "LocalMind review hotkeys must remain ordinary Settings filter text"
+        );
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(app.has_takeover());
+
         assert_eq!(
             app.handle_input(InputAction::Insert("PLANTED_COLOR_QUERY".into()), 80),
             AppCommand::None
@@ -7602,5 +8144,159 @@ mod tests {
 
         app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
         assert!(app.active_work_activity().is_none());
+    }
+
+    fn review_row(state: &str, requires_edit: bool, promoted: bool) -> LocalMindReviewRow {
+        LocalMindReviewRow {
+            id: "candidate-1".to_string(),
+            state: state.to_string(),
+            session_id: "session-1".to_string(),
+            summary: "Prefer bounded terminal views".to_string(),
+            category: "workflow".to_string(),
+            confidence: "92%".to_string(),
+            note: None,
+            replacement: None,
+            seen_count: 1,
+            evidence: Some("A large report stayed responsive.".to_string()),
+            requires_edit,
+            promoted,
+        }
+    }
+
+    fn localmind_data(review: Vec<LocalMindReviewRow>) -> LocalMindData {
+        LocalMindData {
+            docs: vec!["guide.md · 3 chunks".to_string()],
+            graph: vec!["12 files · 44 symbols".to_string()],
+            memory: vec!["memory-1 · workflow".to_string()],
+            review,
+            skills: vec!["pending · terminal-helper".to_string()],
+            audit: vec!["accepted · candidate-1".to_string()],
+        }
+    }
+
+    #[test]
+    fn localmind_cycles_six_sections_without_leaving_the_takeover() {
+        let mut app = model();
+        app.open_localmind(localmind_data(Vec::new()));
+        assert!(app.has_takeover());
+        assert_eq!(app.localmind_section(), Some(LocalMindSection::Docs));
+        for expected in [
+            LocalMindSection::Graph,
+            LocalMindSection::Memory,
+            LocalMindSection::Review,
+            LocalMindSection::Skills,
+            LocalMindSection::Audit,
+            LocalMindSection::Docs,
+        ] {
+            assert_eq!(
+                app.handle_input(InputAction::AcceptCompletion, 80),
+                AppCommand::None
+            );
+            assert_eq!(app.localmind_section(), Some(expected));
+            assert!(app.has_takeover());
+        }
+        assert_eq!(
+            app.handle_input(InputAction::PreviousTakeoverSection, 80),
+            AppCommand::None
+        );
+        assert_eq!(app.localmind_section(), Some(LocalMindSection::Audit));
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(!app.has_takeover());
+    }
+
+    #[test]
+    fn review_actions_require_identity_and_obey_candidate_state() {
+        let mut app = model();
+        app.open_localmind(localmind_data(vec![review_row("Pending", false, false)]));
+        for _ in 0..3 {
+            let _ = app.handle_input(InputAction::AcceptCompletion, 80);
+        }
+
+        assert_eq!(
+            app.handle_input(InputAction::Insert("a".to_string()), 80),
+            AppCommand::None,
+            "an unnamed reviewer cannot emit a write intent"
+        );
+        let _ = app.handle_input(InputAction::Insert("Ada".to_string()), 80);
+        let _ = app.handle_input(InputAction::Submit, 80);
+        let command = app.handle_input(InputAction::Insert("a".to_string()), 80);
+        assert_eq!(
+            command,
+            AppCommand::LocalMindReview(LocalMindReviewIntent {
+                candidate_id: "candidate-1".to_string(),
+                reviewer: "Ada".to_string(),
+                action: LocalMindReviewAction::Accept,
+            })
+        );
+
+        app.refresh_localmind(localmind_data(vec![review_row("Accepted", false, false)]));
+        assert_eq!(app.localmind_section(), Some(LocalMindSection::Review));
+        assert_eq!(app.localmind_reviewer(), Some("Ada"));
+        assert!(matches!(
+            app.handle_input(InputAction::Insert("p".to_string()), 80),
+            AppCommand::LocalMindReview(LocalMindReviewIntent {
+                action: LocalMindReviewAction::Promote,
+                ..
+            })
+        ));
+
+        app.refresh_localmind(localmind_data(vec![review_row("Pending", true, false)]));
+        assert_eq!(
+            app.handle_input(InputAction::Insert("a".to_string()), 80),
+            AppCommand::None,
+            "source excerpts requiring edit cannot be accepted as standalone lessons"
+        );
+
+        app.refresh_localmind(localmind_data(vec![review_row("Accepted", true, false)]));
+        assert_eq!(
+            app.handle_input(InputAction::Insert("p".to_string()), 80),
+            AppCommand::None,
+            "an accepted source excerpt still requires a standalone edit before promotion"
+        );
+        app.refresh_localmind(localmind_data(vec![review_row("Edited", true, false)]));
+        assert!(matches!(
+            app.handle_input(InputAction::Insert("p".to_string()), 80),
+            AppCommand::LocalMindReview(LocalMindReviewIntent {
+                action: LocalMindReviewAction::Promote,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reviewer_identity_cap_never_splits_a_grapheme() {
+        let mut app = model();
+        app.open_localmind(localmind_data(vec![review_row("Pending", false, false)]));
+        for _ in 0..3 {
+            let _ = app.handle_input(InputAction::AcceptCompletion, 80);
+        }
+        let _ = app.handle_input(InputAction::Insert("a".to_string()), 80);
+        let _ = app.handle_input(InputAction::Insert("x".repeat(127)), 80);
+        let _ = app.handle_input(InputAction::Insert("é".to_string()), 80);
+        assert_eq!(app.localmind_reviewer().expect("reviewer").len(), 127);
+
+        let _ = app.handle_input(InputAction::Backspace, 80);
+        let _ = app.handle_input(InputAction::Insert("é".to_string()), 80);
+        let reviewer = app.localmind_reviewer().expect("reviewer");
+        assert_eq!(reviewer.len(), MAX_REVIEWER_BYTES);
+        assert!(reviewer.ends_with('é'));
+    }
+
+    #[test]
+    fn localmind_defensively_caps_injected_rows() {
+        let mut app = model();
+        app.open_localmind(LocalMindData {
+            docs: (0..10_000).map(|index| format!("doc-{index}")).collect(),
+            ..LocalMindData::default()
+        });
+        let view = app
+            .takeover()
+            .and_then(|view| view.localmind)
+            .expect("localmind view");
+        assert_eq!(view.lines.len(), MAX_LOCALMIND_VIEW_ROWS);
+        assert!(view
+            .lines
+            .last()
+            .is_some_and(|line| line.contains("more rows omitted")));
     }
 }

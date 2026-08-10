@@ -10,6 +10,97 @@ use localmind_codegraph::{IngestBoundary, Reindexer};
 use localmind_store::{GraphStore, ProjectConfig};
 use std::path::{Path, PathBuf};
 
+/// File count for one detected language in the architecture overview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphLanguageSummary {
+    pub language: String,
+    pub files: usize,
+}
+
+/// File count for one package in the architecture overview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphPackageSummary {
+    pub path: String,
+    pub files: usize,
+}
+
+/// One entry point or call hotspot in the architecture overview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphSymbolSummary {
+    pub name: String,
+    pub kind: String,
+    pub inbound_calls: usize,
+    pub outbound_calls: usize,
+}
+
+/// Bounded, read-only orientation over an existing LocalMind graph.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ArchitectureSummary {
+    pub files: usize,
+    pub symbols: usize,
+    pub languages: Vec<GraphLanguageSummary>,
+    pub packages: Vec<GraphPackageSummary>,
+    pub entry_points: Vec<GraphSymbolSummary>,
+    pub hotspots: Vec<GraphSymbolSummary>,
+}
+
+fn architecture_summary(
+    overview: localmind_codegraph::ArchitectureOverview,
+) -> ArchitectureSummary {
+    let symbols = |items: Vec<localmind_codegraph::SymbolStat>| {
+        items
+            .into_iter()
+            .map(|item| GraphSymbolSummary {
+                name: item.qualified_name,
+                kind: item.kind,
+                inbound_calls: item.in_degree,
+                outbound_calls: item.out_degree,
+            })
+            .collect()
+    };
+    ArchitectureSummary {
+        files: overview.file_count,
+        symbols: overview.symbol_count,
+        languages: overview
+            .languages
+            .into_iter()
+            .map(|item| GraphLanguageSummary {
+                language: item.language,
+                files: item.file_count,
+            })
+            .collect(),
+        packages: overview
+            .top_packages
+            .into_iter()
+            .map(|item| GraphPackageSummary {
+                path: item.path,
+                files: item.file_count,
+            })
+            .collect(),
+        entry_points: symbols(overview.entry_points),
+        hotspots: symbols(overview.hotspots),
+    }
+}
+
+/// Compute a bounded architecture overview without creating a graph database.
+///
+/// # Errors
+/// Returns [`LearningError::Graph`] when an existing graph cannot be opened or
+/// read.
+pub fn codegraph_overview(project_root: &Path) -> Result<ArchitectureSummary, LearningError> {
+    if !crate::store_database_exists(project_root) {
+        return Ok(ArchitectureSummary::default());
+    }
+    let store = GraphStore::open_project(project_root)
+        .map_err(|error| LearningError::Graph(error.to_string()))?;
+    let overview = localmind_codegraph::compute_overview(
+        &store,
+        localmind_codegraph::OverviewOptions::default(),
+    )
+    .map_err(|error| LearningError::Graph(error.to_string()))?;
+    Ok(architecture_summary(overview))
+}
+
 /// Outcome of one bounded reindex pass.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CodeGraphSummary {
@@ -292,7 +383,9 @@ fn hunk_new_range(header: &str) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{codegraph_export, codegraph_inspect, codegraph_reindex, ExportFormat};
+    use super::{
+        codegraph_export, codegraph_inspect, codegraph_overview, codegraph_reindex, ExportFormat,
+    };
     use std::fs;
 
     #[test]
@@ -325,6 +418,42 @@ mod tests {
         )?;
         let third = codegraph_reindex(root, usize::MAX)?;
         assert_eq!(third.reindexed, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn overview_is_empty_and_does_not_create_a_store_for_a_bare_project(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path();
+
+        assert_eq!(codegraph_overview(root)?, Default::default());
+        assert!(!root.join(".localmind").exists());
+        assert!(!root.join(".localmind.toml").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn overview_maps_the_engine_architecture_summary() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path();
+        fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n")?;
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\npub fn caller() -> u8 { answer() }\n",
+        )?;
+        codegraph_reindex(root, usize::MAX)?;
+
+        let summary = codegraph_overview(root)?;
+        assert_eq!(summary.files, 1);
+        assert!(summary.symbols >= 2);
+        assert_eq!(summary.languages[0].language, "rust");
+        assert_eq!(summary.languages[0].files, 1);
+        assert!(summary
+            .hotspots
+            .iter()
+            .any(|symbol| symbol.name.ends_with("::answer")));
         Ok(())
     }
 

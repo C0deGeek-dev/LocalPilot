@@ -320,7 +320,8 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         | SlashAction::Theme(_)
         | SlashAction::Settings(_)
         | SlashAction::Diff(_)
-        | SlashAction::Search(_) => {}
+        | SlashAction::Search(_)
+        | SlashAction::LocalMind => {}
         SlashAction::Unknown(_) => {}
     }
 }

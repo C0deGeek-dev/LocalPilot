@@ -161,6 +161,8 @@ pub enum SlashAction {
     /// Search the session timeline, optionally seeding the query (`/search foo`).
     /// Routed for full-screen/pair only.
     Search(Option<String>),
+    /// Open the six-section LocalMind takeover. Full-screen only; no arguments.
+    LocalMind,
     Invalid {
         command: String,
         reason: String,
@@ -386,6 +388,26 @@ impl Spelling {
         }
     }
 
+    /// A takeover owned only by the full-screen host.
+    const fn fullscreen_only(
+        command: SlashCommand,
+        name: &'static str,
+        args: ArgSpec,
+        stray: StrayArgs,
+        desc: &'static str,
+    ) -> Self {
+        Self {
+            command,
+            name,
+            args,
+            stray,
+            force: false,
+            inline: None,
+            fullscreen: Some(desc),
+            pair: None,
+        }
+    }
+
     /// The permanent pair-only command. Its argument syntax describes the pair
     /// host that owns it; `parse_slash` never routes it.
     const fn pair_only(
@@ -520,11 +542,13 @@ slash_commands! {
         Model, Localbox, Selfimprove, New, Fork, Clone, Tree, Sessions, Session, Name,
         Continue, Clear, Compact, HarnessResume, WaitResume, Ingest, Knowledge,
         Context, Research, Agents, Skills, Bg, Exit,
-        // Full-screen/pair takeover identities. `parse_slash` (the inline rollback
+        // Shared full-screen/pair takeover identities. `parse_slash` (the inline rollback
         // host) intentionally keeps them `Unknown` — a deliberate host gate, not a
         // gap — while `parse_slash_for(Fullscreen|Pair)` routes them to real actions;
         // their catalog scope stays full-screen/pair-only.
         Help, Theme, Settings, Diff, Search,
+        // Full-screen-only takeover; inline and pair both keep it Unknown.
+        LocalMind,
         // Permanent pair-only identity: `/abort` is owned by the pair event
         // loop, never parsed by `parse_slash`, present only in the pair picker.
         Abort,
@@ -669,6 +693,12 @@ slash_commands! {
             "Review tracked workspace changes",
             "Review tracked workspace changes"
         ),
+        LocalMind => fullscreen_only(
+            "localmind",
+            NoArg,
+            Reject,
+            "Browse LocalMind docs, graph, memory, review, skills, and audit"
+        ),
         // --- permanent pair-only, pair-loop-owned: no-arg, rejects a stray ----
         Abort => pair_only("abort", NoArg, Reject, "Stop the collaboration and both peers"),
         // --- parse-only aliases (hidden; present for lookup + stray policy) ---
@@ -749,6 +779,7 @@ impl SlashAction {
             SlashAction::Settings(_) => C::Settings,
             SlashAction::Diff(_) => C::Diff,
             SlashAction::Search(_) => C::Search,
+            SlashAction::LocalMind => C::LocalMind,
             SlashAction::Invalid { .. } | SlashAction::Unknown(_) => return None,
         })
     }
@@ -1049,6 +1080,9 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
         C::Settings => routed_takeover(host, command, || SlashAction::Settings(opt_arg(args))),
         C::Diff => routed_takeover(host, command, || SlashAction::Diff(opt_arg(args))),
         C::Search => routed_takeover(host, command, || SlashAction::Search(opt_arg(args))),
+        C::LocalMind => routed_fullscreen(host, command, || {
+            no_arg(spelling, name, args, command, SlashAction::LocalMind)
+        }),
     }
 }
 
@@ -1063,6 +1097,19 @@ fn routed_takeover(host: Host, command: &str, build: impl FnOnce() -> SlashActio
     match host {
         Host::Inline => SlashAction::Unknown(command.to_string()),
         Host::Fullscreen | Host::Pair => build(),
+    }
+}
+
+/// Resolve a full-screen-only takeover; other hosts truthfully see it as
+/// unavailable rather than inheriting the pair takeover scope.
+fn routed_fullscreen(
+    host: Host,
+    command: &str,
+    build: impl FnOnce() -> SlashAction,
+) -> SlashAction {
+    match host {
+        Host::Fullscreen => build(),
+        Host::Inline | Host::Pair => SlashAction::Unknown(command.to_string()),
     }
 }
 
@@ -1231,7 +1278,7 @@ mod tests {
             from_table, from_enum,
             "SLASH_SPELLINGS identities must equal SlashCommand::ALL"
         );
-        assert_eq!(from_enum.len(), 37, "expected 37 command identities");
+        assert_eq!(from_enum.len(), 38, "expected 38 command identities");
     }
 
     #[test]
@@ -1244,7 +1291,8 @@ mod tests {
         // on the pump), then 36→38 (`agent` + `harness` mode entries). `compact_force`
         // (a redundant forcing alias of `compact`) and the `wait_resume`/`compact-force`
         // parse-only aliases stay hidden but remain typeable in full-screen.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 39);
+        // `/localmind` adds the one full-screen-only six-section takeover.
+        assert_eq!(specs_for(Host::Fullscreen).len(), 40);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 
@@ -1584,6 +1632,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn localmind_is_fullscreen_only_and_rejects_arguments() {
+        assert_eq!(
+            parse_slash_for(Host::Fullscreen, "/localmind"),
+            Some(SlashAction::LocalMind)
+        );
+        assert_eq!(
+            parse_slash_for(Host::Fullscreen, "/localmind extra"),
+            Some(SlashAction::Invalid {
+                command: "localmind".to_string(),
+                reason: "this command does not take arguments".to_string(),
+            })
+        );
+        for host in [Host::Inline, Host::Pair] {
+            assert_eq!(
+                parse_slash_for(host, "/localmind"),
+                Some(SlashAction::Unknown("localmind".to_string()))
+            );
+            assert!(!specs_for(host).iter().any(|(name, _)| *name == "localmind"));
+        }
+        assert!(specs_for(Host::Fullscreen)
+            .iter()
+            .any(|(name, _)| *name == "localmind"));
+        assert_eq!(SlashAction::LocalMind.command(), Some(C::LocalMind));
     }
 
     #[test]

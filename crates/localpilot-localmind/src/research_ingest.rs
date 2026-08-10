@@ -16,6 +16,21 @@ use crate::error::LearningError;
 
 pub use localmind_store::DocIngestSummary;
 
+/// One ingested documentation file, flattened for host presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocFileSummary {
+    pub path: String,
+    pub chunks: i64,
+}
+
+/// Read-only documentation-index orientation for a host UI.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DocIndexSummary {
+    pub chunks: i64,
+    pub vectors: i64,
+    pub files: Vec<DocFileSummary>,
+}
+
 /// Chunk and ingest every Markdown file under `docs_dir` into `project_root`'s
 /// LocalMind documentation index. Idempotent: unchanged report text is a no-op,
 /// edited text re-embeds in place. Returns what was touched.
@@ -39,6 +54,35 @@ pub fn doc_index_counts(project_root: &Path) -> Option<(i64, i64)> {
     let chunks = persistence.doc_chunk_count().ok()?;
     let vectors = persistence.doc_vector_count().ok()?;
     Some((chunks, vectors))
+}
+
+/// Browse the existing documentation index without creating a database.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] when an existing database cannot be read.
+pub fn doc_index_summary(project_root: &Path) -> Result<DocIndexSummary, LearningError> {
+    if !crate::store_database_exists(project_root) {
+        return Ok(DocIndexSummary::default());
+    }
+    let persistence = localmind_store::MemoryPersistence::open_project(project_root)
+        .map_err(|error| LearningError::Memory(error.to_string()))?;
+    let chunks = persistence
+        .doc_chunk_count()
+        .map_err(|error| LearningError::Memory(error.to_string()))?;
+    let vectors = persistence
+        .doc_vector_count()
+        .map_err(|error| LearningError::Memory(error.to_string()))?;
+    let files = persistence
+        .doc_files()
+        .map_err(|error| LearningError::Memory(error.to_string()))?
+        .into_iter()
+        .map(|(path, chunks)| DocFileSummary { path, chunks })
+        .collect();
+    Ok(DocIndexSummary {
+        chunks,
+        vectors,
+        files,
+    })
 }
 
 #[cfg(test)]
@@ -77,5 +121,16 @@ mod tests {
         assert_eq!(summary.files, 0);
         assert_eq!(summary.chunks, 0);
         assert_eq!(summary.total_in_index, 0);
+    }
+
+    #[test]
+    fn reading_docs_from_a_bare_project_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            doc_index_summary(dir.path()).unwrap(),
+            DocIndexSummary::default()
+        );
+        assert!(!dir.path().join(".localmind").exists());
+        assert!(!dir.path().join(crate::CONFIG_FILE).exists());
     }
 }

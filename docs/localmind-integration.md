@@ -83,6 +83,39 @@ it never rewrites the committed submodule gitlink.
 
 ## Current Surfaces
 
+### Full-screen LocalMind view
+
+Full-screen `localpilot chat` exposes `/localmind`, one contained takeover with
+six internal sections: **Docs, Graph, Memory, Review, Skills, and Audit**. `Tab`
+and `Shift+Tab` move between sections without leaving the takeover; `Esc` closes
+it. The command is intentionally absent from the inline and pair hosts, and it
+does not replace LocalMind's standalone UI.
+
+The CLI is the integration boundary. It resolves the nearest LocalMind store,
+reads the engine through `localpilot-localmind`, maps the results into plain
+terminal view data, and injects that data into the presentation crate. Docs
+shows indexed file/chunk/vector counts, Graph shows the architecture overview,
+Memory and Audit show their current stored records, and Skills shows the
+read-only LocalPilot proposal store at `.localpilot/skill-proposals.toml`.
+Opening the view with no resolved LocalMind project store presents empty
+guidance and creates no project `.localmind/`, `.localmind.toml`, or
+`.localpilot/` artifact. For an existing project store, Memory and Review use
+LocalMind's standard persistence opener; when global memory is configured, that
+opener may initialize its user-global store. Collections are bounded before
+presentation, and only the visible wrapped text window is materialized for each
+frame.
+
+Review is the only mutable section. Press `i` to enter a reviewer identity for
+the current session. Pending candidates may then be accepted with `a` or
+rejected with `r`; accepted standalone lessons or edited candidates may be
+promoted with `p` if they have not already been promoted. Candidates marked
+`edit required` cannot be accepted or promoted without an edit; use LocalMind's
+standalone review flow for Edit or Defer. Every terminal Review action is
+represented as an interactive in-workspace write and passes through
+LocalPilot's permission engine and production approval dialog before the
+existing LocalMind mutation API is
+called. A denial writes nothing.
+
 - `localpilot-localmind::closeout_session` imports an LocalPilot transcript into
   LocalMind, extracts candidate lessons, and enqueues them for review.
 - Close-out runs on **every** deliberate, opted-in session-end path — the
@@ -288,8 +321,10 @@ store answered.
   Use it when running from outside the project (`localpilot learning --workspace
   /path/to/project search "query"`). It is accepted on both `learning` and
   `memory`, ahead of the subcommand.
-- **A read never creates a store.** `learning search` and `memory search` are
-  read-only: when no store is found they report it and write nothing. Their stdout
+- **A read with no resolved project store creates none.** `learning search` and
+  `memory search` are read-only: when no project store is found they report it
+  and write nothing. Reads of an existing project honor the configured global-
+  memory policy and may initialize that user-global store. Their stdout
   stays script-stable — an empty `--json` result is still a valid empty array.
 - **Three empty outcomes are distinguished** on stderr so a bare `no matches` is
   never ambiguous: (a) *no store found* at or above the cwd; (b) a store exists but

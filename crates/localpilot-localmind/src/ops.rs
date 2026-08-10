@@ -11,6 +11,7 @@ use localmind_store::{
 };
 
 use crate::LearningError;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// A review-queue item, flattened for display.
@@ -33,6 +34,8 @@ pub struct ReviewSummary {
     /// The summary is a source excerpt a reviewer must edit into a standalone
     /// lesson before promotion.
     pub requires_edit: bool,
+    /// Whether this accepted/edited candidate already exists as durable memory.
+    pub promoted: bool,
 }
 
 /// A reviewer's verdict on a queue item.
@@ -107,7 +110,7 @@ pub struct AuditEntry {
     pub at: String,
 }
 
-fn summarize(item: &ReviewQueueItem) -> ReviewSummary {
+fn summarize(item: &ReviewQueueItem, promoted: &HashSet<String>) -> ReviewSummary {
     ReviewSummary {
         id: item.id.to_string(),
         state: format!("{:?}", item.state),
@@ -120,7 +123,17 @@ fn summarize(item: &ReviewQueueItem) -> ReviewSummary {
         seen_count: item.seen_count,
         evidence_text: item.candidate.evidence_text.clone(),
         requires_edit: item.candidate.requires_edit_before_promotion,
+        promoted: promoted.contains(item.candidate.id.as_str()),
     }
+}
+
+fn promoted_ids(persistence: &MemoryPersistence) -> Result<HashSet<String>, LearningError> {
+    Ok(persistence
+        .list_memory()
+        .map_err(memory_err)?
+        .into_iter()
+        .map(|record| record.memory_id.to_string())
+        .collect())
 }
 
 /// List every item in the project's review queue.
@@ -129,8 +142,13 @@ fn summarize(item: &ReviewQueueItem) -> ReviewSummary {
 /// Returns [`LearningError::Review`] if the queue cannot be opened or read.
 pub fn review_list(project_root: &Path) -> Result<Vec<ReviewSummary>, LearningError> {
     let queue = open_queue(project_root)?;
+    let persistence = open_memory(project_root)?;
+    let promoted = promoted_ids(&persistence)?;
     let items = queue.list().map_err(review_err)?;
-    Ok(items.iter().map(summarize).collect())
+    Ok(items
+        .iter()
+        .map(|item| summarize(item, &promoted))
+        .collect())
 }
 
 /// List the project's review queue **without** creating any project files. A
@@ -141,12 +159,17 @@ pub fn review_list(project_root: &Path) -> Result<Vec<ReviewSummary>, LearningEr
 /// # Errors
 /// Returns [`LearningError::Review`] if an existing queue cannot be read.
 pub fn review_list_readonly(project_root: &Path) -> Result<Vec<ReviewSummary>, LearningError> {
-    if !project_root.join(crate::CONFIG_FILE).exists() {
+    if !crate::store_database_exists(project_root) {
         return Ok(Vec::new());
     }
     let queue = ReviewQueue::open_project(project_root).map_err(review_err)?;
+    let persistence = MemoryPersistence::open_project(project_root).map_err(memory_err)?;
+    let promoted = promoted_ids(&persistence)?;
     let items = queue.list().map_err(review_err)?;
-    Ok(items.iter().map(summarize).collect())
+    Ok(items
+        .iter()
+        .map(|item| summarize(item, &promoted))
+        .collect())
 }
 
 /// Inspect a single review-queue item.
@@ -159,7 +182,9 @@ pub fn review_show(
 ) -> Result<Option<ReviewSummary>, LearningError> {
     let queue = open_queue(project_root)?;
     let item = queue.get(&ReviewItemId::new(item_id)).map_err(review_err)?;
-    Ok(item.as_ref().map(summarize))
+    let persistence = open_memory(project_root)?;
+    let promoted = promoted_ids(&persistence)?;
+    Ok(item.as_ref().map(|item| summarize(item, &promoted)))
 }
 
 /// Delete every pending review candidate, returning how many rows were removed.
@@ -530,6 +555,19 @@ pub fn memory_list(project_root: &Path) -> Result<Vec<MemorySummary>, LearningEr
     Ok(records.into_iter().map(memory_summary).collect())
 }
 
+/// List accepted memory without creating or initializing a project store.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] when an existing database cannot be read.
+pub fn memory_list_readonly(project_root: &Path) -> Result<Vec<MemorySummary>, LearningError> {
+    if !crate::store_database_exists(project_root) {
+        return Ok(Vec::new());
+    }
+    let persistence = MemoryPersistence::open_project(project_root).map_err(memory_err)?;
+    let records = persistence.list_memory().map_err(memory_err)?;
+    Ok(records.into_iter().map(memory_summary).collect())
+}
+
 /// Host-owned freshness thresholds for the operator CLI (a flat mirror of the
 /// engine's, so the CLI never names a LocalMind type). `None` fields fall back to
 /// the engine defaults.
@@ -847,6 +885,28 @@ pub fn audit(project_root: &Path) -> Result<Vec<AuditEntry>, LearningError> {
         .collect())
 }
 
+/// Read the memory audit log without creating or initializing a project store.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] when an existing database cannot be read.
+pub fn audit_readonly(project_root: &Path) -> Result<Vec<AuditEntry>, LearningError> {
+    if !crate::store_database_exists(project_root) {
+        return Ok(Vec::new());
+    }
+    let persistence = MemoryPersistence::open_project(project_root).map_err(memory_err)?;
+    let records = persistence.audit_records().map_err(memory_err)?;
+    Ok(records
+        .into_iter()
+        .map(|record| AuditEntry {
+            id: record.id,
+            kind: record.kind,
+            actor: record.actor,
+            subject: record.subject,
+            at: record.happened_at,
+        })
+        .collect())
+}
+
 /// A generated skill draft, flattened for display.
 #[derive(Debug, Clone)]
 pub struct SkillDraftInfo {
@@ -1135,6 +1195,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hits = context_hits(dir.path(), "anything", None).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn localmind_tab_reads_do_not_initialize_a_bare_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        assert!(review_list_readonly(root).unwrap().is_empty());
+        assert!(memory_list_readonly(root).unwrap().is_empty());
+        assert!(audit_readonly(root).unwrap().is_empty());
+        assert!(!root.join(".localmind").exists());
+        assert!(!root.join(crate::CONFIG_FILE).exists());
     }
 
     #[test]

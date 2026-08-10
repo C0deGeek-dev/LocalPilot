@@ -48,8 +48,9 @@ use std::path::Path;
 pub use active_skills_tool::ActiveSkills;
 pub use bundle::{bundle_export, bundle_import, BundleExportSummary, BundleImportSummary};
 pub use codegraph::{
-    codegraph_export, codegraph_impact, codegraph_inspect, codegraph_reindex, CodeGraphSummary,
-    ExportFormat, SymbolReport,
+    codegraph_export, codegraph_impact, codegraph_inspect, codegraph_overview, codegraph_reindex,
+    ArchitectureSummary, CodeGraphSummary, ExportFormat, GraphLanguageSummary, GraphPackageSummary,
+    GraphSymbolSummary, SymbolReport,
 };
 pub use context_hook::{register_context_hook, LocalMindContext};
 pub use defs::{enclosing, DefKind, Definition, DefinitionParser, ParseOutcome, MAX_PARSE_BYTES};
@@ -76,14 +77,14 @@ pub use layered::{expand_layer, fetch_layer, Expansion, FetchedBody};
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
 pub use memory_search_tool::MemorySearch;
 pub use ops::{
-    audit, cluster_by_similarity, context_for, flag_unhelpful_lesson, freshness_pass,
-    lessons_flagged_for_review, memory_delete, memory_disable_injection, memory_enable_injection,
-    memory_injection_enabled, memory_lifecycle, memory_list, promote, record_memory_usage,
-    revalidate, review_decide, review_list, review_purge, review_show, search, search_readonly,
-    skill_activate, skill_body, skill_show, skills_active, skills_generate, skills_list,
-    ActiveSkillInfo, AuditEntry, FreshnessFlagOut, FreshnessOutcome, FreshnessParams,
-    MemoryLifecycle, MemorySummary, RevalidationOutcome, ReviewSummary, ReviewVerdict, SearchHit,
-    SkillDraftInfo,
+    audit, audit_readonly, cluster_by_similarity, context_for, flag_unhelpful_lesson,
+    freshness_pass, lessons_flagged_for_review, memory_delete, memory_disable_injection,
+    memory_enable_injection, memory_injection_enabled, memory_lifecycle, memory_list,
+    memory_list_readonly, promote, record_memory_usage, revalidate, review_decide, review_list,
+    review_list_readonly, review_purge, review_show, search, search_readonly, skill_activate,
+    skill_body, skill_show, skills_active, skills_generate, skills_list, ActiveSkillInfo,
+    AuditEntry, FreshnessFlagOut, FreshnessOutcome, FreshnessParams, MemoryLifecycle,
+    MemorySummary, RevalidationOutcome, ReviewSummary, ReviewVerdict, SearchHit, SkillDraftInfo,
 };
 pub use pack::{PackEntry, PackSource};
 pub use primer::{accepted_primer, distill_primer_into_review};
@@ -92,7 +93,10 @@ pub use repair_signal::{
     enqueue_repair_signals, repair_lesson_candidate, repair_signals_from_events, RepairSignal,
 };
 pub use research_chat::ResearchChat;
-pub use research_ingest::{doc_index_counts, ingest_research_docs, DocIngestSummary};
+pub use research_ingest::{
+    doc_index_counts, doc_index_summary, ingest_research_docs, DocFileSummary, DocIndexSummary,
+    DocIngestSummary,
+};
 pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
 pub use review_list_tool::ReviewList;
 pub use rule_cue::{register_rule_cues, rule_cue_ids, RULE_CUE_TAG};
@@ -114,6 +118,17 @@ pub use error::LearningError;
 
 /// The project-local LocalMind config file name.
 const CONFIG_FILE: &str = ".localmind.toml";
+
+/// Whether the project's shared LocalMind database already exists. Read-only
+/// host surfaces check this before calling engine openers, which create and
+/// migrate the database by design.
+#[must_use]
+pub(crate) fn store_database_exists(project_root: &Path) -> bool {
+    project_root
+        .join(".localmind")
+        .join(localmind_store::REVIEW_DB_FILE_NAME)
+        .is_file()
+}
 
 /// The local-only learning header, always written.
 const LEARNING_CONFIG: &str = "[learning]\nenabled = true\nlocal_only = true\n";

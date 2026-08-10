@@ -382,6 +382,28 @@ and unrestricted additionally removes the workspace boundary for the file
 tools. Both should be used only in disposable or sandboxed environments, or
 where the user has deliberately accepted the risk.
 
+## LocalMind Terminal Review
+
+The full-screen `/localmind` Docs, Graph, Memory, Skills, and Audit sections are
+read-only. Store resolution happens before any engine opener is called; if no
+store exists, opening and navigating the view creates no project state. Skills
+reads LocalPilot's proposal store and offers no activation or mutation control.
+When a project store does exist, Memory and Review use LocalMind's standard
+persistence opener, which may initialize its configured user-global memory
+store; the no-creation guarantee is specifically for project state.
+
+Review Accept, Reject, and Promote are explicit user actions, but the underlying
+LocalMind APIs are direct writes. LocalPilot therefore treats each intent as an
+interactive, in-workspace overwrite effect and sends it through the active
+`PermissionEngine`. An `Ask` decision uses the same production `TuiApprover`
+channel as tool calls; `Deny` returns before a worker or LocalMind mutation is
+started. The reviewer identity must be entered deliberately, is held only in
+the open takeover, and is never inferred from provider or session metadata.
+Candidate state is re-read after a successful operation, while invalid or stale
+state fails in the LocalMind API. These controls do not make `bypass` or
+`unrestricted` safer: those explicitly selected profiles retain their documented
+auto-approval behavior.
+
 ## Pair Collaboration
 
 `localpilot pair` resolves one permission profile for the run and applies it to

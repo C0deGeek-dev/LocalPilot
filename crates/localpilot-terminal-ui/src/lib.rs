@@ -27,7 +27,8 @@ mod timeline;
 
 pub use app::{
     AppCommand, AppModel, ColorSupport, CompletionCommand, DialogState, DiffFile, DiffLine,
-    DiffLineKind, Focus, Header, ImageAttachBlock, InputAction, KeyboardSupport, PairStatus,
+    DiffLineKind, Focus, Header, ImageAttachBlock, InputAction, KeyboardSupport, LocalMindData,
+    LocalMindReviewAction, LocalMindReviewIntent, LocalMindReviewRow, LocalMindSection, PairStatus,
     PairStatusCandidate, PlanEntry, QuestionAction, QuestionOption, QuestionResponse,
     RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection, SettingEdit, SettingEntry,
     StopState, TabId, TakeoverKind, TakeoverNavigation, TerminalCapabilities, TimelineNavigation,

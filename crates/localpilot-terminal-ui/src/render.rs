@@ -8,7 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    sanitize_inline, CompletionKind, DiffPane, QuestionView, TakeoverView, TrustView,
+    sanitize_inline, CompletionKind, DiffPane, LocalMindSection, QuestionView, TakeoverView,
+    TrustView,
 };
 use crate::projection::{PeerPane, SessionProjection};
 use crate::{
@@ -712,6 +713,7 @@ fn render_takeover(
             }
             format!(" {clipped} ")
         }
+        TakeoverKind::LocalMind => " LocalMind ".to_string(),
     };
     frame.render_widget(
         Paragraph::new(title.as_str()).style(theme.ui(UiRole::TabActive)),
@@ -743,16 +745,43 @@ fn render_takeover(
         );
     }
 
+    if let Some(localmind) = takeover.localmind {
+        let mut x = area.x.saturating_add(2);
+        for section in LocalMindSection::ALL {
+            let label = format!(" {} ", section.label());
+            let width = u16::try_from(label.width()).unwrap_or(area.width);
+            if x.saturating_add(width) >= area.right().saturating_sub(1) {
+                break;
+            }
+            let role = if section == localmind.section {
+                UiRole::TabActive
+            } else {
+                UiRole::Muted
+            };
+            frame.render_widget(
+                Paragraph::new(label).style(theme.ui(role)),
+                Rect::new(x, area.y.saturating_add(1), width, 1),
+            );
+            x = x.saturating_add(width);
+        }
+    }
+
     let footer_height = match takeover.kind {
         TakeoverKind::Settings => 3,
         TakeoverKind::Sessions => 2,
         TakeoverKind::Diff | TakeoverKind::Help | TakeoverKind::Report => 1,
+        TakeoverKind::LocalMind => 3,
+    };
+    let content_offset = if takeover.kind == TakeoverKind::LocalMind {
+        3
+    } else {
+        2
     };
     let content = Rect::new(
         area.x.saturating_add(2),
-        area.y.saturating_add(2),
+        area.y.saturating_add(content_offset),
         area.width.saturating_sub(5),
-        area.height.saturating_sub(2 + footer_height),
+        area.height.saturating_sub(content_offset + footer_height),
     );
     let viewport_rows = usize::from(content.height);
     let (start, total_rows, scrollbar_rows, takeover_rows, takeover_file_rows) = match takeover.kind
@@ -785,27 +814,98 @@ fn render_takeover(
             // styled through the shared takeover line helper (same as Help). The
             // body is the content the user opened the takeover to read, so it is
             // Foreground (Muted is reserved for secondary chrome).
-            let source: Vec<(String, UiRole)> = takeover
-                .report_lines
-                .iter()
-                .map(|line| (line.clone(), UiRole::Foreground))
-                .collect();
-            let lines = text_takeover_lines(&source, content.width, theme);
-            let maximum = lines.len().saturating_sub(viewport_rows);
-            let start = takeover.scroll.min(maximum);
-            frame.render_widget(
-                Paragraph::new(
-                    lines
+            let (start, total, lines) = text_takeover_window(
+                takeover.report_lines,
+                takeover.scroll,
+                viewport_rows,
+                content.width,
+                theme,
+            );
+            frame.render_widget(Paragraph::new(lines), content);
+            (start, total, viewport_rows, Vec::new(), Vec::new())
+        }
+        TakeoverKind::LocalMind => match takeover.localmind {
+            Some(localmind) => {
+                if localmind.section == LocalMindSection::Review {
+                    let maximum = localmind.review.len().saturating_sub(viewport_rows);
+                    let start = takeover.scroll.min(maximum);
+                    let mut hits = Vec::new();
+                    for (offset, (index, row)) in localmind
+                        .review
                         .iter()
+                        .enumerate()
                         .skip(start)
                         .take(viewport_rows)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                ),
-                content,
-            );
-            (start, lines.len(), viewport_rows, Vec::new(), Vec::new())
-        }
+                        .enumerate()
+                    {
+                        let y = content
+                            .y
+                            .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
+                        let marker = if index == takeover.selected {
+                            "▶"
+                        } else {
+                            " "
+                        };
+                        let promoted = if row.promoted { " · promoted" } else { "" };
+                        let edit = if row.requires_edit {
+                            " · edit required"
+                        } else {
+                            ""
+                        };
+                        let text = truncate_end(
+                            &format!(
+                                "{marker} [{}] {} — {} · {}{}{}",
+                                row.state,
+                                row.summary,
+                                row.category,
+                                row.confidence,
+                                promoted,
+                                edit
+                            ),
+                            content.width,
+                        );
+                        let role = if index == takeover.selected {
+                            UiRole::Focus
+                        } else {
+                            UiRole::Foreground
+                        };
+                        frame.render_widget(
+                            Paragraph::new(text).style(theme.ui(role)),
+                            Rect::new(content.x, y, content.width, 1),
+                        );
+                        hits.push(TakeoverHit {
+                            index,
+                            area: Rect::new(content.x, y, content.width, 1),
+                        });
+                    }
+                    if localmind.review.is_empty() {
+                        frame.render_widget(
+                            Paragraph::new("No review candidates yet.")
+                                .style(theme.ui(UiRole::Muted)),
+                            content,
+                        );
+                    }
+                    (
+                        start,
+                        localmind.review.len(),
+                        viewport_rows,
+                        hits,
+                        Vec::new(),
+                    )
+                } else {
+                    let (start, total, lines) = text_takeover_window(
+                        localmind.lines,
+                        takeover.scroll,
+                        viewport_rows,
+                        content.width,
+                        theme,
+                    );
+                    frame.render_widget(Paragraph::new(lines), content);
+                    (start, total, viewport_rows, Vec::new(), Vec::new())
+                }
+            }
+            None => (0, 0, viewport_rows, Vec::new(), Vec::new()),
+        },
         TakeoverKind::Settings => {
             let section_rows = setting_indices
                 .iter()
@@ -1044,6 +1144,48 @@ fn render_takeover(
             ),
         );
     }
+    if let Some(localmind) = takeover.localmind {
+        let reviewer = if localmind.editing_reviewer {
+            format!(
+                "Reviewer: {}_ · Enter save · Esc cancel",
+                localmind.reviewer
+            )
+        } else if localmind.reviewer.is_empty() {
+            "Reviewer: not set · i set identity".to_string()
+        } else {
+            format!("Reviewer: {} · i edit", localmind.reviewer)
+        };
+        frame.render_widget(
+            Paragraph::new(truncate_end(&reviewer, area.width.saturating_sub(3)))
+                .style(theme.ui(UiRole::Muted)),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.bottom().saturating_sub(3),
+                area.width.saturating_sub(3),
+                1,
+            ),
+        );
+        let detail = localmind
+            .review
+            .get(takeover.selected)
+            .and_then(|row| {
+                row.evidence
+                    .as_deref()
+                    .or(row.replacement.as_deref())
+                    .or(row.note.as_deref())
+            })
+            .map_or_else(String::new, |text| format!("Evidence: {text}"));
+        frame.render_widget(
+            Paragraph::new(truncate_end(&detail, area.width.saturating_sub(3)))
+                .style(theme.ui(UiRole::Muted)),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.bottom().saturating_sub(2),
+                area.width.saturating_sub(3),
+                1,
+            ),
+        );
+    }
     let footer = match takeover.kind {
         TakeoverKind::Help => "↑/↓ scroll · Page Up/Page Down · Esc close".to_string(),
         TakeoverKind::Report => "↑/↓ scroll · Ctrl+C copy all · Esc close".to_string(),
@@ -1053,6 +1195,16 @@ fn render_takeover(
         TakeoverKind::Diff => {
             "↑/↓ navigate · ←/→ switch pane · t hide/show files · Esc close".to_string()
         }
+        TakeoverKind::LocalMind => takeover.localmind.map_or_else(String::new, |localmind| {
+            if localmind.editing_reviewer {
+                "Type reviewer identity · Enter save · Esc cancel".to_string()
+            } else if localmind.section == LocalMindSection::Review {
+                "Tab/Shift+Tab section · ↑/↓ select · a accept · r reject · p promote · Esc close"
+                    .to_string()
+            } else {
+                "Tab/Shift+Tab section · ↑/↓ scroll · Ctrl+C copy · Esc close".to_string()
+            }
+        }),
     };
     frame.render_widget(
         Paragraph::new(footer).style(theme.ui(UiRole::Muted)),
@@ -1548,6 +1700,41 @@ fn text_takeover_lines(
         }
     }
     lines
+}
+
+/// Wrap a bounded plain-text takeover body while allocating only the visible
+/// window. The first pass computes an exact wrapped-row count so a resize can
+/// clamp stale scroll positions; the second materializes at most one viewport.
+fn text_takeover_window(
+    source: &[String],
+    requested_start: usize,
+    viewport_rows: usize,
+    width: u16,
+    theme: ThemeResolver,
+) -> (usize, usize, Vec<Line<'static>>) {
+    let total = source
+        .iter()
+        .map(|text| crate::text::wrap_ranges(text, width).len())
+        .sum::<usize>();
+    let start = requested_start.min(total.saturating_sub(viewport_rows));
+    let end = start.saturating_add(viewport_rows);
+    let mut index = 0usize;
+    let mut visible = Vec::with_capacity(viewport_rows.min(total));
+    for text in source {
+        for range in crate::text::wrap_ranges(text, width) {
+            if index >= start && index < end {
+                visible.push(Line::styled(
+                    text[range.start_byte..range.end_byte].to_string(),
+                    theme.ui(UiRole::Foreground),
+                ));
+            }
+            index = index.saturating_add(1);
+            if index >= end && visible.len() == viewport_rows {
+                return (start, total, visible);
+            }
+        }
+    }
+    (start, total, visible)
 }
 
 fn draw_scrollbar(frame: &mut Frame<'_>, scrollbar: ScrollbarGeometry, app: &AppModel) {
@@ -6421,5 +6608,91 @@ mod tests {
         let footer = footer_state(&app);
         assert!(footer.contains("Compacting · 00:00"));
         assert!(footer.contains("Ctrl+C / Esc interrupt"));
+    }
+
+    #[test]
+    fn localmind_renders_sections_read_data_and_review_controls() {
+        let mut app = model();
+        app.open_localmind(crate::LocalMindData {
+            docs: vec!["guide.md · 3 chunks".to_string()],
+            graph: vec!["12 files · 44 symbols".to_string()],
+            memory: vec!["memory-1 · workflow".to_string()],
+            review: vec![crate::LocalMindReviewRow {
+                id: "candidate-1".to_string(),
+                state: "Pending".to_string(),
+                session_id: "session-1".to_string(),
+                summary: "Prefer bounded terminal views".to_string(),
+                category: "workflow".to_string(),
+                confidence: "92%".to_string(),
+                note: None,
+                replacement: None,
+                seen_count: 1,
+                evidence: Some("A large report stayed responsive.".to_string()),
+                requires_edit: false,
+                promoted: false,
+            }],
+            skills: vec!["pending · terminal-helper".to_string()],
+            audit: vec!["accepted · candidate-1".to_string()],
+        });
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("render docs");
+        let rendered = terminal.backend().to_string();
+        for label in ["Docs", "Graph", "Memory", "Review", "Skills", "Audit"] {
+            assert!(rendered.contains(label), "missing section label {label}");
+        }
+        assert!(rendered.contains("guide.md · 3 chunks"));
+        assert!(rendered.contains("Tab/Shift+Tab section"));
+
+        for _ in 0..3 {
+            let _ = app.handle_input(crate::InputAction::AcceptCompletion, 80);
+        }
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("render review");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("Prefer bounded terminal views"));
+        assert!(rendered.contains("Reviewer: not set"));
+        assert!(rendered.contains("a accept · r reject · p promote"));
+        assert!(rendered.contains("Evidence: A large report stayed responsive."));
+    }
+
+    #[test]
+    fn localmind_narrow_render_clips_without_panicking() {
+        let mut app = model();
+        app.open_localmind(crate::LocalMindData {
+            docs: vec!["a/very/long/documentation/path/guide.md · 123 chunks".to_string()],
+            ..crate::LocalMindData::default()
+        });
+        let backend = TestBackend::new(30, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("render narrow localmind");
+        assert!(terminal.backend().to_string().contains("LocalMind"));
+    }
+
+    #[test]
+    fn localmind_text_window_materializes_only_the_requested_viewport() {
+        let source = (0..10_000)
+            .map(|index| format!("doc-{index}"))
+            .collect::<Vec<_>>();
+        let app = model();
+
+        let (start, total, visible) = text_takeover_window(&source, usize::MAX, 7, 80, theme(&app));
+
+        assert_eq!(total, 10_000);
+        assert_eq!(start, 9_993);
+        assert_eq!(visible.len(), 7);
+        assert_eq!(visible[0].spans[0].content.as_ref(), "doc-9993");
+        assert_eq!(visible[6].spans[0].content.as_ref(), "doc-9999");
     }
 }

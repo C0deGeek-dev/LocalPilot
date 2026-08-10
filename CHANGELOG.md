@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **LocalMind is now inspectable and reviewable inside full-screen chat.** The
+  new `/localmind` takeover provides Docs, Graph, Memory, Review, Skills, and
+  Audit sections with `Tab`/`Shift+Tab` navigation and bounded viewport
+  rendering. Opening it without a project store is read-only and creates no
+  project state;
+  Skills reports LocalPilot proposals without changing them. Review requires an
+  explicit session-local reviewer identity, limits actions to valid candidate
+  states, and sends Accept, Reject, and Promote through the active permission
+  profile and approval dialog before LocalMind writes anything.
+
 - **The full self-improvement loop is available inside chat.** Both inline and
   full-screen hosts now expose `/selfimprove`, `status`, `start [finding-rank]`,
   `next`, `approve <reviewer>`, and `reset` through the existing persisted

@@ -2,6 +2,82 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0153: LocalMind Terminal Review Writes Use The Host Permission Seam
+
+Status: Accepted. Extends ADR-0011 (review-gated memory), ADR-0010 (permission
+invariants), and ADR-0129 (full-screen chat).
+
+Decision:
+
+- **Presentation emits intent, never writes.** The terminal model owns review
+  selection, valid-state controls, and a deliberately entered session-local
+  reviewer identity. It emits only typed Accept, Reject, or Promote intents and
+  has no LocalMind dependency. Edit and Defer remain in LocalMind's standalone
+  review surface.
+- **The CLI supplies the missing authorization boundary.** LocalMind's
+  `review_decide` and `promote` functions are direct mutations, so the
+  full-screen host represents every intent as an interactive in-workspace
+  overwrite effect and evaluates it with the live `PermissionEngine`. `Ask`
+  routes through the production `TuiApprover`; `Deny` returns before a blocking
+  worker or engine mutation starts. Explicit bypass/unrestricted profiles keep
+  their existing documented behavior.
+- **Mutations finish at one durable boundary.** After authorization, the CLI
+  calls the existing LocalMind API off the async driver, awaits completion in
+  the established full-screen operation pump, and reloads the six-section data
+  on success. UI state narrows obviously invalid actions, while LocalMind remains
+  authoritative for stale or concurrently changed candidate state.
+
+Boundary and compatibility: no LocalMind API, store schema, review mode, or
+permission profile changes. The reviewer is not derived from provider/session
+metadata and is not persisted by the takeover. Removing the three key actions
+restores a read-only view without affecting standalone review. Pinned by denied-
+write, interactive Ask allow/deny, approved mutation, reviewer/state, and refresh
+tests.
+
+Rejected: calling direct review APIs because the keypress is user-authored (it
+bypasses configured policy); granting the presentation crate engine access
+(breaks layering); inventing a second confirmation channel (approval drift); and
+defaulting reviewer identity (not a deliberate human claim).
+
+## ADR-0152: Full-Screen LocalMind Uses A CLI-Injected Neutral Takeover
+
+Status: Accepted. Extends ADR-0129 (full-screen chat), ADR-0144 (shared host
+surfaces), and ADR-0036 (LocalMind adapter boundary).
+
+Decision:
+
+- **One takeover owns six internal sections.** `/localmind` opens Docs, Graph,
+  Memory, Review, Skills, and Audit in the default full-screen host. Tab and
+  Shift+Tab cycle those sections, Escape dismisses the containing surface, and
+  the central `localpilot-slash` catalog is the only command spelling and
+  discovery source. Inline and pair hosts do not expose the command.
+- **The CLI joins engine and presentation.** `localpilot-localmind` exports
+  LocalPilot-owned read summaries for the documentation index, architecture
+  overview, memory, review queue, and audit. The CLI resolves the nearest store,
+  reads those APIs plus LocalPilot's skill-proposal store, and injects neutral
+  strings/rows. `localpilot-terminal-ui` and `localpilot-tui` remain free of
+  LocalMind and other engine dependencies.
+- **Read surfaces are inert and bounded.** A missing project store produces empty
+  guidance without creating project `.localmind/`, `.localmind.toml`, or
+  `.localpilot/` state. Existing-store memory/review reads retain LocalMind's
+  configured user-global store behavior.
+  Collections are capped and sanitized at the host/presentation boundaries;
+  read-only text rendering computes exact wrapping but allocates only the visible
+  viewport. Skills is advisory and read-only.
+
+Boundary and compatibility: no persistent root-tab model, store schema,
+LocalMind submodule, provider contract, or dependency change. The standalone
+LocalMind UI remains the richer management surface. Removing the single catalog
+row and dispatch makes the additive takeover unreachable. Pinned by catalog and
+host-routing tests, six-section input/render tests, 10,000-row bounding/window
+tests, absent-store tests, and dependency-tree checks.
+
+Rejected: six takeover kinds (duplicates lifecycle/input behavior); using the
+existing root tab metadata (it is not the takeover state machine); reading the
+engine from a presentation crate (layering regression); initializing a store to
+display an empty view (a read causing writes); and reproducing LocalMind's full
+standalone management UI (scope and ownership drift).
+
 ## ADR-0151: Chat Hosts Drive The Persisted Self-Improvement Loop
 
 Status: Accepted. Amends ADR-0034 (human-gated patch generation), ADR-0128

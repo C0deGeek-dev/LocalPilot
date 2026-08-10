@@ -297,9 +297,11 @@ The single source of truth for the slash-command surface across all three hosts
 - the parser (`parse_slash`/`parse_slash_for` and their helpers, plus
   `Mode`/`Profile`/`SlashAction` and the argument shapes) — lookup-first typed
   dispatch, host-aware: the inline host keeps its frozen behaviour while the
-  full-screen and pair hosts additionally route the five takeover commands
-  (`help`/`theme`/`settings`/`diff`/`search`) to real actions, and the full-screen
-  host runs `/compact`, the long-running `/ingest` runs, `/research`, and the
+  full-screen and pair hosts additionally route the five shared takeover commands
+  (`help`/`theme`/`settings`/`diff`/`search`) to real actions. Full-screen alone
+  adds the CLI-injected, engine-neutral `/localmind` takeover (ADR-0152); the
+  presentation crates remain free of LocalMind dependencies. The full-screen
+  host also runs `/compact`, the long-running `/ingest` runs, `/research`, and the
   `/harness-resume` / `/wait-resume` resume commands on its
   operation pump (a UI-agnostic progress lane surfaces ingest milestones without the
   operation and the pump both mutating the model). The full-screen host owns a typed

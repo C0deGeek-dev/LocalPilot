@@ -28,12 +28,16 @@ use localpilot_core::ContentBlock;
 use localpilot_harness::{
     ModelHealth, RuntimeEvent, SessionRuntime, SoftInterrupt, SteerQueue, StopReason,
 };
-use localpilot_sandbox::{PermissionEngine, PermissionEngineHandle};
+use localpilot_sandbox::{
+    Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionEngineHandle,
+    PermissionRequest,
+};
 use localpilot_store::SessionIndexEntry;
 use localpilot_terminal_ui::{
     render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
     DiffFile, DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, ItemKind,
-    KeyboardSupport, PairStatus, PairStatusCandidate, PeerPane, PlanEntry,
+    KeyboardSupport, LocalMindData, LocalMindReviewAction, LocalMindReviewIntent,
+    LocalMindReviewRow, PairStatus, PairStatusCandidate, PeerPane, PlanEntry,
     QuestionOption as UiQuestionOption, QuestionResponse, RecoveryState, ResultTone, RuntimeUpdate,
     SessionEntry, SessionHeader, SessionSelection, SettingEdit, SettingEntry, StopState,
     SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, Timeline, TimelineNavigation,
@@ -47,7 +51,9 @@ use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::interactive_session::{resolved_image_support, ApprovalCall, PairPeer, QuestionCall};
+use crate::interactive_session::{
+    resolved_image_support, ApprovalCall, PairPeer, QuestionCall, TuiApprover,
+};
 use crate::key_input::{
     is_cancel, is_clipboard_image_key, is_key_action, may_be_unbracketed_paste_key, PasteAction,
     PasteBurst,
@@ -1874,6 +1880,266 @@ fn present_command_report(app: &mut AppModel, report: CommandReport) {
     }
 }
 
+fn localmind_bounded(lines: Vec<String>) -> Vec<String> {
+    let logical = logical_lines(&lines);
+    truncate_report(&logical, MAX_REPORT_LINES, MAX_REPORT_BYTES)
+}
+
+fn localmind_docs_lines(
+    result: Result<localpilot_localmind::DocIndexSummary, localpilot_localmind::LearningError>,
+) -> Vec<String> {
+    match result {
+        Ok(summary) if summary.files.is_empty() => vec![
+            "No ingested documentation yet.".to_string(),
+            "Run `localpilot ingest` or enable research report ingestion to populate this view."
+                .to_string(),
+        ],
+        Ok(summary) => {
+            let mut lines = vec![format!(
+                "{} files · {} chunks · {} vectors",
+                summary.files.len(),
+                summary.chunks,
+                summary.vectors
+            )];
+            lines.extend(
+                summary
+                    .files
+                    .into_iter()
+                    .map(|file| format!("{} · {} chunks", file.path, file.chunks)),
+            );
+            localmind_bounded(lines)
+        }
+        Err(error) => vec![format!("Documentation index unavailable: {error}")],
+    }
+}
+
+fn localmind_graph_lines(
+    result: Result<localpilot_localmind::ArchitectureSummary, localpilot_localmind::LearningError>,
+) -> Vec<String> {
+    match result {
+        Ok(summary) if summary.files == 0 && summary.symbols == 0 => vec![
+            "No code graph has been indexed yet.".to_string(),
+            "Run `localpilot learning graph reindex` to populate this view.".to_string(),
+        ],
+        Ok(summary) => {
+            let mut lines = vec![format!(
+                "{} files · {} symbols",
+                summary.files, summary.symbols
+            )];
+            if !summary.languages.is_empty() {
+                lines.push("Languages".to_string());
+                lines.extend(
+                    summary
+                        .languages
+                        .into_iter()
+                        .map(|item| format!("  {} · {} files", item.language, item.files)),
+                );
+            }
+            if !summary.packages.is_empty() {
+                lines.push("Packages".to_string());
+                lines.extend(
+                    summary
+                        .packages
+                        .into_iter()
+                        .map(|item| format!("  {} · {} files", item.path, item.files)),
+                );
+            }
+            if !summary.hotspots.is_empty() {
+                lines.push("Call hotspots".to_string());
+                lines.extend(summary.hotspots.into_iter().map(|item| {
+                    format!(
+                        "  {} ({}) · {} inbound · {} outbound",
+                        item.name, item.kind, item.inbound_calls, item.outbound_calls
+                    )
+                }));
+            }
+            if !summary.entry_points.is_empty() {
+                lines.push("Entry points".to_string());
+                lines.extend(summary.entry_points.into_iter().map(|item| {
+                    format!(
+                        "  {} ({}) · {} outbound",
+                        item.name, item.kind, item.outbound_calls
+                    )
+                }));
+            }
+            localmind_bounded(lines)
+        }
+        Err(error) => vec![format!("Code graph unavailable: {error}")],
+    }
+}
+
+fn localmind_memory_lines(
+    result: Result<Vec<localpilot_localmind::MemorySummary>, localpilot_localmind::LearningError>,
+) -> Vec<String> {
+    match result {
+        Ok(memories) if memories.is_empty() => {
+            vec!["No accepted LocalMind memory yet.".to_string()]
+        }
+        Ok(memories) => localmind_bounded(
+            memories
+                .into_iter()
+                .map(|memory| {
+                    let mut flags = Vec::new();
+                    if memory.stale_candidate {
+                        flags.push("stale");
+                    }
+                    if memory.contradicted {
+                        flags.push("contradicted");
+                    }
+                    let flags = if flags.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", flags.join(", "))
+                    };
+                    let used = memory
+                        .last_used_at
+                        .map_or_else(|| "never used".to_string(), |at| format!("used {at}"));
+                    format!(
+                        "{} · {} · {} · {} · {} hits · {used}{flags}\n  {}\n  {}",
+                        memory.id,
+                        memory.category,
+                        memory.scope,
+                        memory.status,
+                        memory.hit_count,
+                        memory.path,
+                        memory.body
+                    )
+                })
+                .collect(),
+        ),
+        Err(error) => vec![format!("Memory unavailable: {error}")],
+    }
+}
+
+fn localmind_review_rows(
+    result: Result<Vec<localpilot_localmind::ReviewSummary>, localpilot_localmind::LearningError>,
+) -> Vec<LocalMindReviewRow> {
+    match result {
+        Ok(rows) => rows
+            .into_iter()
+            .take(MAX_REPORT_LINES)
+            .map(|row| LocalMindReviewRow {
+                id: row.id,
+                state: row.state,
+                session_id: row.session_id,
+                summary: row.summary,
+                category: row.category,
+                confidence: format!("{:.0}%", row.confidence * 100.0),
+                note: row.note,
+                replacement: row.replacement,
+                seen_count: row.seen_count,
+                evidence: row.evidence_text,
+                requires_edit: row.requires_edit,
+                promoted: row.promoted,
+            })
+            .collect(),
+        Err(error) => vec![LocalMindReviewRow {
+            id: String::new(),
+            state: "Unavailable".to_string(),
+            session_id: String::new(),
+            summary: format!("Review queue unavailable: {error}"),
+            category: "error".to_string(),
+            confidence: String::new(),
+            note: None,
+            replacement: None,
+            seen_count: 0,
+            evidence: None,
+            requires_edit: true,
+            promoted: false,
+        }],
+    }
+}
+
+fn proposal_state_label(state: localpilot_skills::ProposalState) -> &'static str {
+    match state {
+        localpilot_skills::ProposalState::Pending => "pending",
+        localpilot_skills::ProposalState::Deferred => "deferred",
+        localpilot_skills::ProposalState::Rejected => "rejected",
+        localpilot_skills::ProposalState::Acted => "acted",
+    }
+}
+
+fn localmind_skills_lines(cwd: &Path) -> Vec<String> {
+    let path = cwd.join(".localpilot").join("skill-proposals.toml");
+    match localpilot_skills::ProposalStore::load(&path) {
+        Ok(store) if store.proposals().is_empty() => vec![
+            "No skill-discovery proposals yet.".to_string(),
+            format!("Read-only source: {}", path.display()),
+        ],
+        Ok(store) => localmind_bounded(
+            store
+                .proposals()
+                .iter()
+                .map(|proposal| {
+                    let skill = proposal
+                        .recommended_skill
+                        .as_deref()
+                        .unwrap_or("repository recommendation");
+                    format!(
+                        "{} · {} · {} · {:.0}%\n  {}\n  {}",
+                        proposal_state_label(proposal.state),
+                        skill,
+                        proposal.scope,
+                        proposal.confidence * 100.0,
+                        proposal.repo_url,
+                        proposal.reason
+                    )
+                })
+                .collect(),
+        ),
+        Err(error) => vec![format!("Skill proposals unavailable: {error}")],
+    }
+}
+
+fn localmind_audit_lines(
+    result: Result<Vec<localpilot_localmind::AuditEntry>, localpilot_localmind::LearningError>,
+) -> Vec<String> {
+    match result {
+        Ok(entries) if entries.is_empty() => vec!["No LocalMind audit entries yet.".to_string()],
+        Ok(entries) => localmind_bounded(
+            entries
+                .into_iter()
+                .map(|entry| {
+                    format!(
+                        "{} · {} · {} · {} · {}",
+                        entry.at, entry.kind, entry.actor, entry.subject, entry.id
+                    )
+                })
+                .collect(),
+        ),
+        Err(error) => vec![format!("Audit log unavailable: {error}")],
+    }
+}
+
+fn load_localmind_data(cwd: &Path) -> LocalMindData {
+    load_localmind_data_at(cwd, localpilot_localmind::resolve_store_root(cwd))
+}
+
+fn load_localmind_data_at(
+    cwd: &Path,
+    store_root: localpilot_localmind::StoreRoot,
+) -> LocalMindData {
+    let skills = localmind_skills_lines(cwd);
+    let localpilot_localmind::StoreRoot::Found(root) = store_root else {
+        return LocalMindData {
+            docs: vec!["No LocalMind store found for this workspace.".to_string()],
+            graph: vec!["No LocalMind store found for this workspace.".to_string()],
+            memory: vec!["No LocalMind store found for this workspace.".to_string()],
+            review: Vec::new(),
+            skills,
+            audit: vec!["No LocalMind store found for this workspace.".to_string()],
+        };
+    };
+    LocalMindData {
+        docs: localmind_docs_lines(localpilot_localmind::doc_index_summary(&root)),
+        graph: localmind_graph_lines(localpilot_localmind::codegraph_overview(&root)),
+        memory: localmind_memory_lines(localpilot_localmind::memory_list_readonly(&root)),
+        review: localmind_review_rows(localpilot_localmind::review_list_readonly(&root)),
+        skills,
+        audit: localmind_audit_lines(localpilot_localmind::audit_readonly(&root)),
+    }
+}
+
 /// Convert the shared UI-neutral [`crate::repl::CommandOutput`] into a full-screen
 /// `CommandReport`: the output lines plus the exact failure text appended as a
 /// final line, with `failed` set from the error. The presenter then bounds it.
@@ -2998,6 +3264,7 @@ async fn execute_fullscreen_slash_action(
         | SlashAction::Search(_)) => {
             open_fullscreen_takeover(app, config, cwd, action, runtime.reasoning_effort());
         }
+        SlashAction::LocalMind => app.open_localmind(load_localmind_data(cwd)),
         // Toggle reasoning visibility in the timeline (a pure display toggle).
         SlashAction::ToggleThinking => {
             let visible = app.toggle_reasoning();
@@ -3457,6 +3724,13 @@ fn handle_pair_terminal_event(
                 }
                 AppCommand::ActivateSession(_) => {
                     apply_pair_notice(app, "Sessions cannot be changed during a collaboration.");
+                    PairHostAction::None
+                }
+                AppCommand::LocalMindReview(_) => {
+                    apply_pair_notice(
+                        app,
+                        "LocalMind review actions are available only in full-screen chat.",
+                    );
                     PairHostAction::None
                 }
                 AppCommand::None => PairHostAction::None,
@@ -3980,6 +4254,29 @@ async fn run_event_loop(
                             break;
                         }
                     }
+                    AppCommand::LocalMindReview(intent) => {
+                        if drive_localmind_review(
+                            terminal,
+                            app,
+                            runtime,
+                            SlashContext {
+                                approval_rx: &mut *approval_rx,
+                                question_rx: &mut *question_rx,
+                                cwd,
+                                history,
+                                mouse_state: &mut mouse_state,
+                                paste_burst: &mut paste_burst,
+                                workspace_index: &mut *workspace_index,
+                            },
+                            approval_tx,
+                            intent,
+                            &mut queue,
+                        )
+                        .await?
+                        {
+                            break;
+                        }
+                    }
                     AppCommand::NavigateTakeover(navigation) => {
                         apply_takeover_navigation(app, navigation, &hit_map);
                     }
@@ -4212,6 +4509,156 @@ enum LocalBoxPumpResult {
 struct LocalBoxTarget {
     serve: Option<String>,
     allow_untuned: bool,
+}
+
+enum LocalMindReviewOutcome {
+    Updated(String),
+    Denied,
+    Failed(String),
+}
+
+fn localmind_review_request(trusted: bool, intent: &LocalMindReviewIntent) -> PermissionRequest {
+    PermissionRequest {
+        tool: "localmind_review".to_string(),
+        effect: Effect::WritePath {
+            inside_workspace: true,
+            overwrite: true,
+            secret_like: false,
+        },
+        interactivity: Interactivity::Interactive,
+        trusted,
+        detail: format!(
+            "{} LocalMind review candidate {}",
+            match intent.action {
+                LocalMindReviewAction::Accept => "accept",
+                LocalMindReviewAction::Reject => "reject",
+                LocalMindReviewAction::Promote => "promote",
+            },
+            intent.candidate_id
+        ),
+    }
+}
+
+async fn localmind_review_allowed(
+    permissions: &PermissionEngineHandle,
+    approver: &dyn Approver,
+    request: &PermissionRequest,
+) -> bool {
+    match permissions.snapshot().decide(request) {
+        Decision::Allow => true,
+        Decision::Deny => false,
+        Decision::Ask => approver.approve(request).await,
+    }
+}
+
+fn mutate_localmind_review(
+    root: &Path,
+    intent: &LocalMindReviewIntent,
+) -> Result<String, localpilot_localmind::LearningError> {
+    match intent.action {
+        LocalMindReviewAction::Accept => localpilot_localmind::review_decide(
+            root,
+            &intent.candidate_id,
+            localpilot_localmind::ReviewVerdict::Accept,
+            &intent.reviewer,
+            None,
+        ),
+        LocalMindReviewAction::Reject => localpilot_localmind::review_decide(
+            root,
+            &intent.candidate_id,
+            localpilot_localmind::ReviewVerdict::Reject,
+            &intent.reviewer,
+            None,
+        ),
+        LocalMindReviewAction::Promote => localpilot_localmind::promote(root, &intent.candidate_id),
+    }
+}
+
+async fn perform_localmind_review(
+    permissions: PermissionEngineHandle,
+    approver: &dyn Approver,
+    request: PermissionRequest,
+    root: PathBuf,
+    intent: LocalMindReviewIntent,
+) -> LocalMindReviewOutcome {
+    if !localmind_review_allowed(&permissions, approver, &request).await {
+        return LocalMindReviewOutcome::Denied;
+    }
+    match tokio::task::spawn_blocking(move || mutate_localmind_review(&root, &intent)).await {
+        Ok(Ok(result)) => LocalMindReviewOutcome::Updated(result),
+        Ok(Err(error)) => LocalMindReviewOutcome::Failed(error.to_string()),
+        Err(error) => LocalMindReviewOutcome::Failed(format!(
+            "LocalMind review worker did not complete: {error}"
+        )),
+    }
+}
+
+async fn drive_localmind_review(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: SlashContext<'_>,
+    approval_tx: &mpsc::UnboundedSender<ApprovalCall>,
+    intent: LocalMindReviewIntent,
+    queue: &mut VecDeque<QueuedOperation>,
+) -> Result<bool> {
+    let root = match localpilot_localmind::resolve_store_root(ctx.cwd) {
+        localpilot_localmind::StoreRoot::Found(root) => root,
+        localpilot_localmind::StoreRoot::NotFound(_) => {
+            app.apply_runtime(RuntimeUpdate::Warning(
+                "LocalMind review is unavailable because this workspace has no store.".to_string(),
+            ));
+            return Ok(false);
+        }
+    };
+    let permissions = runtime.permission_engine_handle();
+    let request = localmind_review_request(runtime.trusted(), &intent);
+    let approver = TuiApprover::new(approval_tx.clone());
+    let refresh_root = ctx.cwd.to_path_buf();
+    let operation = perform_localmind_review(permissions, &approver, request, root, intent.clone());
+    let cancel = CancellationToken::new();
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    app.begin_work();
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    drive_fullscreen_operation(
+        app,
+        ctx,
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::UninterruptibleCommand,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        move |app: &mut AppModel, outcome| {
+            match outcome {
+                LocalMindReviewOutcome::Updated(result) => {
+                    app.refresh_localmind(load_localmind_data(&refresh_root));
+                    app.apply_runtime(RuntimeUpdate::Notice(format!(
+                        "LocalMind review updated: {result}"
+                    )));
+                }
+                LocalMindReviewOutcome::Denied => app.apply_runtime(RuntimeUpdate::Warning(
+                    "LocalMind review action denied; no changes were made.".to_string(),
+                )),
+                LocalMindReviewOutcome::Failed(error) => app.apply_runtime(RuntimeUpdate::Warning(
+                    format!("LocalMind review failed: {error}"),
+                )),
+            }
+            app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        },
+    )
+    .await
 }
 
 async fn drive_localbox_models(
@@ -6044,6 +6491,13 @@ fn handle_turn_event_impl(
                     ));
                     false
                 }
+                AppCommand::LocalMindReview(_) => {
+                    app.apply_runtime(RuntimeUpdate::Notice(
+                        "LocalMind review actions are available when the current operation is idle."
+                            .to_string(),
+                    ));
+                    false
+                }
                 AppCommand::None | AppCommand::OpenExternalEditor => false,
             }
         }
@@ -7181,6 +7635,7 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
         KeyCode::Enter if alt || shift => Some(InputAction::Insert("\n".to_string())),
         KeyCode::Enter => Some(InputAction::Submit),
         KeyCode::Tab => Some(InputAction::AcceptCompletion),
+        KeyCode::BackTab => Some(InputAction::PreviousTakeoverSection),
         KeyCode::Esc => Some(InputAction::Escape),
         KeyCode::Backspace => Some(InputAction::Backspace),
         KeyCode::Delete => Some(InputAction::Delete),
@@ -10601,6 +11056,11 @@ mod tests {
                 KeyModifiers::NONE,
                 InputAction::AcceptCompletion,
             ),
+            (
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT,
+                InputAction::PreviousTakeoverSection,
+            ),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(map_key(press(code, modifiers)), Some(expected));
@@ -10609,9 +11069,9 @@ mod tests {
 
     #[test]
     fn fullscreen_catalog_matches_the_shared_spec_table() {
-        // The full-screen picker is generated from the shared table: 39 rows in global
+        // The full-screen picker is generated from the shared table: 40 rows in global
         // order (the `agent`/`harness` mode entries, the four permission profiles +
-        // effort, the pumped + synchronous command tiers, and the 5 takeovers),
+        // effort, the pumped + synchronous command tiers, and the 6 takeovers),
         // byte-for-byte, and never a hidden inline-only forcing alias.
         let full_screen: Vec<(String, String)> = fullscreen_command_catalog()
             .into_iter()
@@ -10678,8 +11138,12 @@ mod tests {
             ("theme", "Preview terminal color modes"),
             ("settings", "Inspect terminal chat settings"),
             ("diff", "Review tracked workspace changes"),
+            (
+                "localmind",
+                "Browse LocalMind docs, graph, memory, review, skills, and audit",
+            ),
         ];
-        assert_eq!(full_screen.len(), 39);
+        assert_eq!(full_screen.len(), 40);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
@@ -16039,5 +16503,169 @@ mod tests {
             held.active_timeline().viewport,
             ViewportAnchor::Held(anchor)
         );
+    }
+
+    #[test]
+    fn localmind_loader_on_a_bare_workspace_is_empty_and_non_creating() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let data = load_localmind_data_at(
+            dir.path(),
+            localpilot_localmind::StoreRoot::NotFound(dir.path().to_path_buf()),
+        );
+        assert!(data.docs[0].contains("No LocalMind store"));
+        assert!(data.graph[0].contains("No LocalMind store"));
+        assert!(data.memory[0].contains("No LocalMind store"));
+        assert!(data.review.is_empty());
+        assert!(data.skills[0].contains("No skill-discovery proposals"));
+        assert!(data.audit[0].contains("No LocalMind store"));
+        assert!(!dir.path().join(".localmind").exists());
+        assert!(!dir.path().join(".localmind.toml").exists());
+        assert!(!dir.path().join(".localpilot").exists());
+    }
+
+    #[tokio::test]
+    async fn localmind_slash_opens_the_six_section_takeover() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        localpilot_localmind::initialize(dir.path()).expect("empty LocalMind store");
+        let (config, mut bundle) = single_session(dir.path()).await;
+        let mut app = app();
+
+        let exited = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            dir.path(),
+            slash_input("/localmind"),
+        )
+        .await;
+
+        assert!(!exited);
+        assert!(app.has_takeover());
+        let screen = rendered_screen(&app);
+        for section in ["Docs", "Graph", "Memory", "Review", "Skills", "Audit"] {
+            assert!(screen.contains(section), "missing {section}:\n{screen}");
+        }
+        bundle.runtime.close();
+    }
+
+    #[test]
+    fn localmind_skills_reads_the_localpilot_proposal_store() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let state = dir.path().join(".localpilot");
+        std::fs::create_dir_all(&state).expect("proposal directory");
+        std::fs::write(
+            state.join("skill-proposals.toml"),
+            r#"[[proposal]]
+repo_url = "https://example.test/skills"
+commit = "abc123"
+catalog_root = "."
+available_skills = ["terminal-helper"]
+recommended_skill = "terminal-helper"
+confidence = 0.91
+reason = "Matches terminal work"
+query = "terminal"
+scope = "project"
+state = "pending"
+provenance = "fixture"
+first_seen = "2026-08-10"
+last_seen = "2026-08-10"
+"#,
+        )
+        .expect("proposal fixture");
+
+        let lines = localmind_skills_lines(dir.path());
+        let rendered = lines.join("\n");
+        assert!(rendered.contains("pending · terminal-helper · project · 91%"));
+        assert!(rendered.contains("https://example.test/skills"));
+        assert!(rendered.contains("Matches terminal work"));
+    }
+
+    #[tokio::test]
+    async fn denied_localmind_review_performs_no_write() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let intent = LocalMindReviewIntent {
+            candidate_id: "candidate-1".to_string(),
+            reviewer: "Ada".to_string(),
+            action: LocalMindReviewAction::Accept,
+        };
+        let request = localmind_review_request(false, &intent);
+        let permissions =
+            PermissionEngineHandle::new(PermissionEngine::new(Profile::Default, Vec::new()));
+        let approver = localpilot_sandbox::ScriptedApprover::new(vec![false]);
+        let outcome = perform_localmind_review(
+            permissions,
+            &approver,
+            request,
+            dir.path().to_path_buf(),
+            intent,
+        )
+        .await;
+        assert!(matches!(outcome, LocalMindReviewOutcome::Denied));
+        assert!(!dir.path().join(".localmind").exists());
+        assert!(!dir.path().join(".localmind.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn review_permission_uses_the_interactive_approver_when_asked() {
+        let intent = LocalMindReviewIntent {
+            candidate_id: "candidate-1".to_string(),
+            reviewer: "Ada".to_string(),
+            action: LocalMindReviewAction::Reject,
+        };
+        let request = localmind_review_request(false, &intent);
+        assert!(matches!(
+            request.effect,
+            Effect::WritePath {
+                inside_workspace: true,
+                overwrite: true,
+                secret_like: false
+            }
+        ));
+        assert_eq!(request.interactivity, Interactivity::Interactive);
+        let permissions =
+            PermissionEngineHandle::new(PermissionEngine::new(Profile::Default, Vec::new()));
+        let deny = localpilot_sandbox::ScriptedApprover::new(vec![false]);
+        assert!(!localmind_review_allowed(&permissions, &deny, &request).await);
+        let allow = localpilot_sandbox::ScriptedApprover::new(vec![true]);
+        assert!(localmind_review_allowed(&permissions, &allow, &request).await);
+    }
+
+    #[tokio::test]
+    async fn approved_review_action_mutates_through_the_localmind_api() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        localpilot_localmind::write_retrospective_lesson(
+            dir.path(),
+            &localpilot_localmind::RetrospectiveLesson::new(
+                "Keep terminal data bounded before presenting it.",
+            ),
+        )
+        .expect("enqueue candidate");
+        let candidate = localpilot_localmind::review_list(dir.path())
+            .expect("review list")
+            .into_iter()
+            .next()
+            .expect("review candidate");
+        let intent = LocalMindReviewIntent {
+            candidate_id: candidate.id,
+            reviewer: "Ada".to_string(),
+            action: LocalMindReviewAction::Accept,
+        };
+        let request = localmind_review_request(false, &intent);
+        let permissions =
+            PermissionEngineHandle::new(PermissionEngine::new(Profile::Default, Vec::new()));
+        let approver = localpilot_sandbox::ScriptedApprover::new(vec![true]);
+
+        let outcome = perform_localmind_review(
+            permissions,
+            &approver,
+            request,
+            dir.path().to_path_buf(),
+            intent,
+        )
+        .await;
+
+        assert!(matches!(outcome, LocalMindReviewOutcome::Updated(_)));
+        let updated = localpilot_localmind::review_list(dir.path()).expect("updated review list");
+        assert_eq!(updated[0].state, "Accepted");
     }
 }

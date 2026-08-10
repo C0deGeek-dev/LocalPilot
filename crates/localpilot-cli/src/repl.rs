@@ -1080,7 +1080,8 @@ async fn run_slash(
         | SlashAction::Theme(_)
         | SlashAction::Settings(_)
         | SlashAction::Diff(_)
-        | SlashAction::Search(_) => {}
+        | SlashAction::Search(_)
+        | SlashAction::LocalMind => {}
         SlashAction::Unknown(command) => {
             state.apply(UiEvent::Notice(format!(
                 "unknown slash command: /{command}"
