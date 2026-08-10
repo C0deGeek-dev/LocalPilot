@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **LocalBox models and direct serving are first-class chat commands.**
+  `/localbox models` reads LocalBox's versioned catalog contract and lists the
+  exact launch name first, accepted aliases, model/quant identity, required
+  engine, tuned/default profile state, and the active model when detectable.
+  `/localbox serve <model>` now means exactly start that model, wait for
+  readiness, adopt its provider config, and switch the current session; the old
+  `/localbox adopt --serve <model>` spelling remains a compatibility alias.
+  LocalPilot preflights LocalBox's own run-profile result before launching. If
+  tuned settings are unavailable it shows the actionable warning and starts
+  nothing until the user explicitly retries with `--allow-untuned`; only that
+  approved retry passes LocalBox's one-shot fallback flag. Older LocalBox builds
+  degrade with update guidance rather than parsing prose or launching blindly.
+
 - **Interactive research now becomes part of the conversation.** A completed or
   cleanly interrupted `/research` run adds one assistant-style, redacted result
   to the active session, so the next turn and a resumed session can refer to its

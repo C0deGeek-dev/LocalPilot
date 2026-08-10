@@ -949,7 +949,33 @@ async fn run_slash(
             run_model_command(state, runtime, host.cwd, provider, model).await;
         }
         SlashAction::LocalBoxAdopt { serve } => {
-            run_localbox_adopt(terminal, state, prompts, host, runtime, serve).await?;
+            run_localbox_adopt(terminal, state, prompts, host, runtime, serve, false).await?;
+        }
+        SlashAction::LocalBoxServe {
+            model,
+            allow_untuned,
+        } => {
+            run_localbox_adopt(
+                terminal,
+                state,
+                prompts,
+                host,
+                runtime,
+                Some(model),
+                allow_untuned,
+            )
+            .await?;
+        }
+        SlashAction::LocalBoxModels => {
+            state.busy = true;
+            let result = crate::localbox::run_models().await;
+            state.busy = false;
+            match result {
+                Ok(models) => state.apply(UiEvent::Notice(models)),
+                Err(error) => state.apply(UiEvent::Notice(format!(
+                    "LocalBox model listing failed: {error}"
+                ))),
+            }
         }
         // The walk-and-chunk actions can run for many seconds; drive them through
         // a spinner/progress loader so the UI never just freezes. The rest are
@@ -1990,6 +2016,7 @@ async fn run_localbox_adopt(
     host: &CommandHost<'_>,
     runtime: &mut SessionRuntime,
     serve: Option<String>,
+    allow_untuned: bool,
 ) -> anyhow::Result<()> {
     let profile = sandbox_profile(state.profile);
     let trusted = runtime.trusted();
@@ -2006,6 +2033,7 @@ async fn run_localbox_adopt(
         crate::localbox::run_terminal_adopt(
             &cwd,
             serve.as_deref(),
+            allow_untuned,
             profile,
             trusted,
             crate::localbox::TerminalConsent::Prompt(&approver),

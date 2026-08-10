@@ -2,6 +2,55 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0150: LocalBox Owns Catalog And Run-Profile Resolution
+
+Status: Accepted. Amends ADR-0130 (LocalBox adoption) and ADR-0144 (shared
+long-running command hosting). Closes LocalHub#66, LocalHub#67, and LocalHub#68.
+
+Decision:
+
+- **LocalBox owns launch identity and settings.** A schema-versioned
+  `localbox models --json` contract exposes canonical launch keys, aliases,
+  model/quant identity, required mode, and typed tuned/default profile state.
+  LocalPilot consumes that contract defensively; it does not duplicate a model
+  list or parse LocalBox prose. The same LocalBox resolver accepts every
+  advertised alias and supplies one run-profile outcome to direct, guided, and
+  externally requested launches.
+- **Serving is the user action; adoption is its completion.**
+  `/localbox serve <model>` resolves the catalog identity, starts that exact
+  model when it is not already active, waits on the documented endpoint, writes
+  the local provider through the existing permission gate, rebuilds the live
+  registry, and switches the idle session. `/localbox adopt` still adopts an
+  already-running server. `/localbox adopt --serve <model>` parses to the new
+  serve action as a compatibility alias, while help teaches the direct verb.
+- **Fallback cannot hide behind null child stdio.** LocalPilot preflights the
+  typed run-profile state before starting LocalBox. A missing, invalid,
+  unsupported, or incompatible profile produces LocalBox's actionable warning
+  and no launch. The user may configure tuning or explicitly retry once with
+  `--allow-untuned`; only then does LocalPilot pass that flag to the child.
+  LocalBox itself prompts default-no on an interactive direct launch and refuses
+  non-interactive fallback without the same explicit flag. `--no-auto-best`
+  remains LocalBox's deliberate defaults policy; `--auto-best` is retained as a
+  strict compatibility spelling.
+- **Catalog listing stays bounded and inert.** `/localbox models` uses fixed
+  argv, a 1 MiB wire ceiling, schema validation, control-character stripping,
+  per-field limits, and the existing bounded full-screen report presenter. It
+  does not start a model or write project config. Version skew fails with update
+  guidance and the older `localbox info` escape hatch.
+
+Boundary and compatibility: the provider TOML shape, readiness endpoint,
+permission effects, cancellation ownership, and transcript remain unchanged.
+The catalog schema is additive within version 1; an incompatible schema fails
+closed. Reverting the two new slash actions and LocalBox contract restores the
+old adoption-only surface. Pinned by parser/route parity, schema and sanitizing
+tests, tuned/default profile resolution tests, different-running-model serve
+tests, permission/adoption regressions, and both host suites.
+
+Rejected: a LocalPilot-owned catalog (drifts); using `/v1/models` as available
+models (it only reports what is serving); parsing `localbox info` prose
+(unversioned); surfacing child stderr (suppressed in terminal hosts); and
+silently falling back to raw defaults (the original OOM-prone bug).
+
 ## ADR-0149: Interactive Research Is A Bounded Durable Conversation Exchange
 
 Status: Accepted. Amends ADR-0060 (research outputs), ADR-0129 (full-screen

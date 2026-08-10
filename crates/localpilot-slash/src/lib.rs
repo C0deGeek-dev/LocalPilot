@@ -104,6 +104,14 @@ pub enum SlashAction {
     LocalBoxAdopt {
         serve: Option<String>,
     },
+    /// List the LocalBox-owned launch catalog and run-profile state.
+    LocalBoxModels,
+    /// Start a named LocalBox model, then adopt and switch this session.
+    LocalBoxServe {
+        model: String,
+        /// Explicit one-shot approval to use defaults when no tuned profile exists.
+        allow_untuned: bool,
+    },
     Ingest(IngestAction),
     Knowledge(String),
     /// Research a topic. `Some(topic)` runs a one-shot research pass; `None`
@@ -540,7 +548,7 @@ slash_commands! {
             "localbox",
             Optional,
             Fall,
-            "Launch or adopt LocalBox (/localbox adopt [--serve <model>])"
+            "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)"
         ),
         New => both("new", NoArg, Fall, "Start a fresh session"),
         Fork => both("fork", NoArg, Fall, "Branch the conversation into a new session"),
@@ -690,6 +698,7 @@ impl SlashAction {
             SlashAction::SetEffort(_) => C::Effort,
             SlashAction::Model { .. } => C::Model,
             SlashAction::LocalBoxAdopt { .. } => C::Localbox,
+            SlashAction::LocalBoxModels | SlashAction::LocalBoxServe { .. } => C::Localbox,
             SlashAction::NewSession => C::New,
             SlashAction::Fork => C::Fork,
             SlashAction::CloneSession => C::Clone,
@@ -820,23 +829,56 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
             }
         }
         C::Localbox => {
-            let parsed = if args.is_empty() || args == "adopt" {
-                Some(None)
+            fn serve_target(value: &str) -> Option<(String, bool)> {
+                let value = value.trim();
+                let (model, allow_untuned) = value
+                    .strip_suffix(" --allow-untuned")
+                    .map_or((value, false), |model| (model.trim(), true));
+                (!model.is_empty()).then(|| (model.to_string(), allow_untuned))
+            }
+
+            if args.is_empty() || args == "adopt" {
+                SlashAction::LocalBoxAdopt { serve: None }
+            } else if args == "models" {
+                SlashAction::LocalBoxModels
+            } else if let Some(rest) = args
+                .strip_prefix("serve")
+                .filter(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+            {
+                serve_target(rest).map_or_else(
+                    || SlashAction::Invalid {
+                        command: name.to_string(),
+                        reason: "usage: /localbox models | serve <model> [--allow-untuned] | adopt"
+                            .to_string(),
+                    },
+                    |(model, allow_untuned)| SlashAction::LocalBoxServe {
+                        model,
+                        allow_untuned,
+                    },
+                )
+            } else if let Some(rest) = args
+                .strip_prefix("adopt")
+                .map(str::trim_start)
+                .and_then(|rest| rest.strip_prefix("--serve"))
+                .filter(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+            {
+                serve_target(rest).map_or_else(
+                    || SlashAction::Invalid {
+                        command: name.to_string(),
+                        reason: "usage: /localbox models | serve <model> [--allow-untuned] | adopt"
+                            .to_string(),
+                    },
+                    |(model, allow_untuned)| SlashAction::LocalBoxServe {
+                        model,
+                        allow_untuned,
+                    },
+                )
             } else {
-                args.strip_prefix("adopt")
-                    .map(str::trim_start)
-                    .and_then(|rest| rest.strip_prefix("--serve"))
-                    .filter(|model| model.chars().next().is_some_and(char::is_whitespace))
-                    .map(str::trim)
-                    .filter(|model| !model.is_empty())
-                    .map(|model| Some(model.to_string()))
-            };
-            match parsed {
-                Some(serve) => SlashAction::LocalBoxAdopt { serve },
-                None => SlashAction::Invalid {
+                SlashAction::Invalid {
                     command: name.to_string(),
-                    reason: "usage: /localbox adopt [--serve <model>]".to_string(),
-                },
+                    reason: "usage: /localbox models | serve <model> [--allow-untuned] | adopt"
+                        .to_string(),
+                }
             }
         }
         C::New => no_arg(spelling, name, args, command, SlashAction::NewSession),
@@ -1235,7 +1277,7 @@ mod tests {
             ),
             (
                 "localbox",
-                "Launch or adopt LocalBox (/localbox adopt [--serve <model>])",
+                "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)",
             ),
             ("new", "Start a fresh session"),
             ("fork", "Branch the conversation into a new session"),
@@ -1703,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    fn localbox_accepts_adopt_and_a_literal_serve_model_only() {
+    fn localbox_teaches_models_and_direct_serve_while_retaining_adopt_compatibility() {
         assert_eq!(
             parse_slash("/localbox"),
             Some(SlashAction::LocalBoxAdopt { serve: None })
@@ -1714,8 +1756,27 @@ mod tests {
         );
         assert_eq!(
             parse_slash("/localbox adopt --serve Bonsai 27B.gguf"),
-            Some(SlashAction::LocalBoxAdopt {
-                serve: Some("Bonsai 27B.gguf".to_string()),
+            Some(SlashAction::LocalBoxServe {
+                model: "Bonsai 27B.gguf".to_string(),
+                allow_untuned: false,
+            })
+        );
+        assert_eq!(
+            parse_slash("/localbox models"),
+            Some(SlashAction::LocalBoxModels)
+        );
+        assert_eq!(
+            parse_slash("/localbox serve apex"),
+            Some(SlashAction::LocalBoxServe {
+                model: "apex".to_string(),
+                allow_untuned: false,
+            })
+        );
+        assert_eq!(
+            parse_slash("/localbox serve apex --allow-untuned"),
+            Some(SlashAction::LocalBoxServe {
+                model: "apex".to_string(),
+                allow_untuned: true,
             })
         );
         for malformed in [

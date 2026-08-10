@@ -58,7 +58,7 @@ block.
   localbox serve <model>        # start a local server (run in LocalBox)
   localpilot localbox adopt     # write [providers.local] pointing at it
 
-  # …or start the server and adopt in one step (see `localbox info` for models):
+  # …or start the server and adopt in one step (compatibility spelling):
   localpilot localbox adopt --serve <model>
   ```
 
@@ -68,14 +68,26 @@ block.
   key env) into `.localpilot.toml` and sets it as the default provider. The
   merge **upserts only `[providers.local]`** — any other providers,
   `[mcp.servers.*]` tables, and comments already in the file are preserved.
-- **Inside a running chat session**, use `/localbox adopt` to adopt a server
-  that is already running, or `/localbox adopt --serve <model>` to start one
-  when necessary. LocalPilot launches the model through LocalBox, adopts the
-  resulting provider, rebuilds the provider registry, and switches the current
-  idle conversation to the local model immediately; the transcript is kept.
-  If a server is already running, `--serve` adopts that server instead of
-  starting another one. Starting LocalBox and writing workspace config remain
-  permission-gated effects.
+- **Inside a running chat session**, `/localbox models` lists LocalBox's actual
+  launch catalog—not merely the model currently answering `/v1/models`. Each
+  row starts with the exact copy-pasteable model key and includes aliases,
+  model/quant identity, required engine, tuned/default run-profile state, and
+  the active model when it can be detected.
+- Use `/localbox serve <model>` to start that exact catalog model, wait for
+  readiness, adopt the resulting provider, rebuild the registry, and switch the
+  current idle conversation immediately without losing the transcript. A
+  different running model is replaced; an already-running matching model is
+  reused. `/localbox adopt` remains the command for adopting whatever is
+  already serving, and `/localbox adopt --serve <model>` remains a compatibility
+  alias for the direct serve flow. Starting LocalBox and writing workspace
+  config remain separately permission-gated effects.
+- LocalPilot reads LocalBox's versioned catalog/profile contract before a serve.
+  When no compatible tuned profile exists, it displays LocalBox's warning and
+  starts nothing. Configure with LocalBench, or make the deliberate one-shot
+  choice by retrying `/localbox serve <model> --allow-untuned`; only that retry
+  forwards LocalBox's fallback flag. If the installed LocalBox predates the
+  catalog contract, LocalPilot asks you to update it and points to
+  `localbox info` for the older read-only view.
 
   Pressing `Ctrl-C` while LocalPilot waits for startup cancels only LocalPilot's
   wait. LocalBox owns the server process, so startup may continue in the

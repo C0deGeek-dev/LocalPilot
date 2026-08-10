@@ -8,12 +8,11 @@
 //! detection returns [`LocalBoxState::NotInstalled`] after only a cheap `PATH`
 //! scan, so unrelated provider flows are unchanged.
 //!
-//! LocalBox exposes no machine-readable status — `localbox status` prints a
-//! prose health line on its default ports, carrying no endpoint that could be
-//! discovered from it. So the authoritative "is it serving, and where" signal
-//! is a read-only probe of LocalBox's documented default proxy endpoint via the
-//! existing [`localpilot_llm::discover_models`] — not a parse of that prose,
-//! which would couple LocalPilot to a cross-repo wording that can drift.
+//! LocalBox's versioned `models --json` contract is authoritative for models
+//! available to launch and their run-profile state. Live readiness/current
+//! identity still comes from a read-only probe of LocalBox's documented default
+//! proxy endpoint via [`localpilot_llm::discover_models`]; `localbox status`
+//! remains human prose and is never parsed.
 
 #[cfg(feature = "tui")]
 use std::path::Path;
@@ -29,12 +28,205 @@ use localpilot_llm::ProviderRegistry;
 use localpilot_sandbox::{Approver, Profile};
 use tokio_util::sync::CancellationToken;
 
+use serde::Deserialize;
+
 /// LocalBox's documented default no-think proxy endpoint. LocalBox launch and
 /// `status` default to proxy `:11435` and backend `:8080` (`--proxy-port` /
 /// `--server-port` override them); the proxy serves the OpenAI-compatible `/v1`
 /// surface probed here. Mirrored from LocalBox's public defaults — never
 /// imported from it.
 const DEFAULT_PROXY_BASE_URL: &str = "http://127.0.0.1:11435/v1";
+const MODELS_CATALOG_SCHEMA: u32 = 1;
+const MAX_CATALOG_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Deserialize)]
+struct LocalBoxModelsCatalog {
+    schema: u32,
+    models: Vec<LocalBoxModelEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LocalBoxModelEntry {
+    name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    display_name: Option<String>,
+    repository: String,
+    default_quant: Option<String>,
+    required_mode: Option<String>,
+    run_profile: LocalBoxRunProfile,
+    #[serde(default)]
+    active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LocalBoxRunProfile {
+    source: String,
+    source_path: String,
+    reason: Option<String>,
+    warning: Option<String>,
+    quant: Option<String>,
+    context: Option<String>,
+    mode: Option<String>,
+}
+
+fn safe_catalog_field(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(max_chars)
+        .collect()
+}
+
+async fn read_models_catalog() -> anyhow::Result<LocalBoxModelsCatalog> {
+    let program = localbox_on_path()
+        .ok_or_else(|| anyhow::anyhow!("LocalBox is not installed (no `localbox` on PATH)"))?;
+    let output = tokio::process::Command::new(program)
+        .args(["models", "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| anyhow::anyhow!("could not run `localbox models --json`: {error}"))?;
+    if output.stdout.len() > MAX_CATALOG_BYTES || output.stderr.len() > MAX_CATALOG_BYTES {
+        anyhow::bail!("LocalBox model catalog exceeded the 1 MiB safety limit");
+    }
+    if !output.status.success() {
+        let detail = safe_catalog_field(&String::from_utf8_lossy(&output.stderr), 500);
+        anyhow::bail!(
+            "this LocalBox does not provide the model-catalog contract; update LocalBox and retry (you can inspect the older install with `localbox info`){suffix}",
+            suffix = if detail.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", detail.trim())
+            }
+        );
+    }
+    parse_models_catalog(&output.stdout)
+}
+
+fn parse_models_catalog(bytes: &[u8]) -> anyhow::Result<LocalBoxModelsCatalog> {
+    let catalog: LocalBoxModelsCatalog = serde_json::from_slice(bytes)
+        .map_err(|error| anyhow::anyhow!("LocalBox returned an invalid model catalog: {error}"))?;
+    if catalog.schema != MODELS_CATALOG_SCHEMA {
+        anyhow::bail!(
+            "LocalBox model-catalog schema {} is not supported (expected {}); update LocalPilot and LocalBox together",
+            catalog.schema,
+            MODELS_CATALOG_SCHEMA
+        );
+    }
+    Ok(catalog)
+}
+
+fn catalog_entry<'a>(
+    catalog: &'a LocalBoxModelsCatalog,
+    name: &str,
+) -> Option<&'a LocalBoxModelEntry> {
+    catalog
+        .models
+        .iter()
+        .find(|model| model.name == name || model.aliases.iter().any(|alias| alias == name))
+}
+
+/// Read and render the LocalBox-owned launch catalog. No server is started and
+/// no project file is written.
+pub(crate) async fn run_models() -> anyhow::Result<String> {
+    let catalog = read_models_catalog().await?;
+    let active_model = match detect().await {
+        LocalBoxState::Running { model, .. } => model,
+        LocalBoxState::NotInstalled | LocalBoxState::InstalledNotRunning => None,
+    };
+    Ok(render_models_catalog(&catalog, active_model.as_deref()))
+}
+
+fn render_models_catalog(catalog: &LocalBoxModelsCatalog, active_model: Option<&str>) -> String {
+    let mut out = String::from("LocalBox models\n");
+    for model in &catalog.models {
+        let name = safe_catalog_field(&model.name, 100);
+        let aliases = model
+            .aliases
+            .iter()
+            .map(|alias| safe_catalog_field(alias, 100))
+            .collect::<Vec<_>>();
+        let alias_text = if aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" (aliases: {})", aliases.join(", "))
+        };
+        let display = safe_catalog_field(
+            model.display_name.as_deref().unwrap_or(&model.repository),
+            160,
+        );
+        let repository = safe_catalog_field(&model.repository, 160);
+        let catalog_quant = safe_catalog_field(
+            model.default_quant.as_deref().unwrap_or("catalog default"),
+            100,
+        );
+        let profile = if model.run_profile.source == "tuned" {
+            format!(
+                "tuned {} / {} / {}",
+                safe_catalog_field(
+                    model
+                        .run_profile
+                        .quant
+                        .as_deref()
+                        .unwrap_or("default quant"),
+                    80
+                ),
+                safe_catalog_field(
+                    model
+                        .run_profile
+                        .context
+                        .as_deref()
+                        .unwrap_or("default context"),
+                    80
+                ),
+                safe_catalog_field(
+                    model.run_profile.mode.as_deref().unwrap_or("default mode"),
+                    80
+                )
+            )
+        } else {
+            format!(
+                "defaults ({})",
+                safe_catalog_field(
+                    model.run_profile.reason.as_deref().unwrap_or("not tuned"),
+                    80
+                )
+            )
+        };
+        let active = active_model.is_some_and(|active| {
+            active == model.name || model.aliases.iter().any(|alias| alias == active)
+        }) || model.active == Some(true);
+        let mode = model
+            .required_mode
+            .as_deref()
+            .map(|mode| format!(" · mode {}", safe_catalog_field(mode, 40)))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "{name}{alias_text}{} — {display} · {repository} · quant {catalog_quant}{mode} · {profile}\n",
+            if active { " [active]" } else { "" }
+        ));
+    }
+    out.push_str("\nStart and switch: /localbox serve <name>\n");
+    if out.len() > 64 * 1024 {
+        out.truncate(64 * 1024);
+        out.push_str("\n… model catalog truncated …\n");
+    }
+    out
+}
+
+async fn preflight_serve(name: &str) -> anyhow::Result<LocalBoxModelEntry> {
+    let catalog = read_models_catalog().await?;
+    catalog_entry(&catalog, name).cloned().ok_or_else(|| {
+        let known = catalog
+            .models
+            .iter()
+            .map(|model| model.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::anyhow!("unknown LocalBox model '{name}'. Available names: {known}")
+    })
+}
 
 /// Where a detected LocalBox stands. Read-only; no runtime path can panic.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +410,33 @@ pub(crate) async fn run_adopt(
     } else {
         Interactivity::NonInteractive
     };
+    let serve_entry = match serve.as_deref() {
+        Some(model) => Some(preflight_serve(model).await?),
+        None => None,
+    };
+    let allow_untuned = if let Some(entry) = serve_entry
+        .as_ref()
+        .filter(|entry| entry.run_profile.source != "tuned")
+    {
+        let warning = entry.run_profile.warning.clone().unwrap_or_else(|| {
+            format!(
+                "Warning: no usable tuned profile for '{}' at {}; continuing uses LocalBox defaults.",
+                entry.name, entry.run_profile.source_path
+            )
+        });
+        eprintln!("{warning}");
+        if assume_yes {
+            true
+        } else if stdin_is_tty {
+            crate::models_cmd::confirm("continue once with LocalBox defaults?")?
+        } else {
+            anyhow::bail!(
+                "an untuned launch needs an explicit choice — configure LocalBench or re-run interactively"
+            )
+        }
+    } else {
+        false
+    };
     // One consent step for every gated side effect (start the server, write config).
     let consent = |request: &PermissionRequest, question: &str| -> anyhow::Result<bool> {
         if assume_yes {
@@ -235,36 +454,47 @@ pub(crate) async fn run_adopt(
         })
     };
 
-    // Resolve a running server, starting one first when asked and none is up.
+    // A direct serve target is authoritative: reuse only the same serving
+    // identity; a different running model is replaced, then adopted.
     let mut state = detect().await;
-    if !matches!(state, LocalBoxState::Running { .. }) {
-        match (&state, serve.as_deref()) {
-            (LocalBoxState::NotInstalled, _) => {
+    let target_is_running = serve_entry.as_ref().is_some_and(|entry| {
+        matches!(
+            &state,
+            LocalBoxState::Running { model: Some(active), .. }
+                if active == &entry.name || entry.aliases.iter().any(|alias| alias == active)
+        )
+    });
+    if let Some(entry) = serve_entry.as_ref().filter(|_| !target_is_running) {
+        if matches!(state, LocalBoxState::NotInstalled) {
+            anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)");
+        }
+        let model = &entry.name;
+        // Starting a server loads a model and binds a port — a real side
+        // effect, gated like any other.
+        let permission = PermissionRequest {
+            tool: "localbox serve".to_string(),
+            effect: Effect::RunCommand(CommandClass::ExternalWrite),
+            interactivity,
+            trusted: true,
+            detail: format!("localbox serve {model}"),
+        };
+        if !consent(
+            &permission,
+            &format!("start LocalBox serving {model} (loads a model, can take minutes)?"),
+        )? {
+            anyhow::bail!("declined — LocalBox not started");
+        }
+        let _ = start_localbox_serve(model, allow_untuned, ServeStdio::Inherit, None).await?;
+        state = detect().await;
+    } else if serve_entry.is_none() && !matches!(state, LocalBoxState::Running { .. }) {
+        match state {
+            LocalBoxState::NotInstalled => {
                 anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
             }
-            (LocalBoxState::InstalledNotRunning, None) => anyhow::bail!(
-                "no running LocalBox server found — pass --serve <model> to start one, or run `localbox serve <model>` first (see `localbox info`)"
+            LocalBoxState::InstalledNotRunning => anyhow::bail!(
+                "no running LocalBox server found — run `/localbox serve <model>` or `localbox serve <model>` first"
             ),
-            (LocalBoxState::InstalledNotRunning, Some(model)) => {
-                // Starting a server loads a model and binds a port — a real side
-                // effect, gated like any other.
-                let permission = PermissionRequest {
-                    tool: "localbox serve".to_string(),
-                    effect: Effect::RunCommand(CommandClass::ExternalWrite),
-                    interactivity,
-                    trusted: true,
-                    detail: format!("localbox serve {model}"),
-                };
-                if !consent(
-                    &permission,
-                    &format!("start LocalBox serving {model} (loads a model, can take minutes)?"),
-                )? {
-                    anyhow::bail!("declined — LocalBox not started");
-                }
-                let _ = start_localbox_serve(model, ServeStdio::Inherit, None).await?;
-                state = detect().await;
-            }
-            (LocalBoxState::Running { .. }, _) => {}
+            LocalBoxState::Running { .. } => {}
         }
     }
 
@@ -327,13 +557,16 @@ enum ServeWait {
 /// remains the sole owner of the detached model server and its teardown.
 async fn start_localbox_serve(
     model: &str,
+    allow_untuned: bool,
     stdio: ServeStdio,
     cancel: Option<&CancellationToken>,
 ) -> anyhow::Result<ServeWait> {
     let program = localbox_on_path()
         .ok_or_else(|| anyhow::anyhow!("LocalBox is not installed (no `localbox` on PATH)"))?;
     let mut command = tokio::process::Command::new(program);
-    command.arg("serve").arg(model).kill_on_drop(false);
+    command
+        .args(localbox_serve_args(model, allow_untuned))
+        .kill_on_drop(false);
     match stdio {
         ServeStdio::Inherit => {
             println!("starting LocalBox serving {model} (loading a model can take a few minutes)…");
@@ -365,6 +598,14 @@ async fn start_localbox_serve(
         anyhow::bail!("`localbox serve {model}` exited with {status}");
     }
     Ok(ServeWait::Complete)
+}
+
+fn localbox_serve_args(model: &str, allow_untuned: bool) -> Vec<String> {
+    let mut args = vec!["serve".to_string(), model.to_string()];
+    if allow_untuned {
+        args.push("--allow-untuned".to_string());
+    }
+    args
 }
 
 async fn wait_or_cancel<F, T>(wait: F, cancel: Option<&CancellationToken>) -> Option<T>
@@ -415,21 +656,49 @@ pub(crate) enum TerminalAdoptOutcome {
 pub(crate) async fn run_terminal_adopt(
     cwd: &Path,
     serve: Option<&str>,
+    allow_untuned: bool,
     profile: Profile,
     trusted: bool,
     consent: TerminalConsent<'_>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<TerminalAdoptOutcome> {
+    let serve_entry = match serve {
+        Some(model) => Some(preflight_serve(model).await?),
+        None => None,
+    };
+    if let Some(entry) = serve_entry
+        .as_ref()
+        .filter(|entry| entry.run_profile.source != "tuned")
+        .filter(|_| !allow_untuned)
+    {
+        let warning = entry.run_profile.warning.clone().unwrap_or_else(|| {
+            format!(
+                "Warning: no usable tuned profile for '{}' at {}; continuing uses LocalBox defaults.",
+                entry.name, entry.run_profile.source_path
+            )
+        });
+        anyhow::bail!(
+            "{warning}\nNo model was started. Configure tuned settings, or explicitly continue once with `/localbox serve {} --allow-untuned`.",
+            entry.name
+        );
+    }
+    let canonical_serve = serve_entry.as_ref().map(|entry| entry.name.as_str());
     let request = TerminalAdoptRequest {
         cwd,
-        serve,
+        serve: canonical_serve,
         profile,
         trusted,
         consent,
         cancel,
     };
     run_terminal_adopt_with(request, detect, |model, operation_cancel| async move {
-        start_localbox_serve(&model, ServeStdio::Null, Some(&operation_cancel)).await
+        start_localbox_serve(
+            &model,
+            allow_untuned,
+            ServeStdio::Null,
+            Some(&operation_cancel),
+        )
+        .await
     })
     .await
 }
@@ -462,34 +731,42 @@ where
 
     let engine = PermissionEngine::new(request.profile, Vec::new());
     let mut state = detect_state().await;
-    if !matches!(state, LocalBoxState::Running { .. }) {
-        match (&state, request.serve) {
-            (LocalBoxState::NotInstalled, _) => {
+    let target_is_running = request.serve.is_some_and(|target| {
+        matches!(
+            &state,
+            LocalBoxState::Running { model: Some(active), .. } if active == target
+        )
+    });
+    if let Some(model) = request.serve.filter(|_| !target_is_running) {
+        if matches!(state, LocalBoxState::NotInstalled) {
+            anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)");
+        }
+        let permission = PermissionRequest {
+            tool: "localbox serve".to_string(),
+            effect: Effect::RunCommand(CommandClass::ExternalWrite),
+            interactivity: Interactivity::Interactive,
+            trusted: request.trusted,
+            detail: format!("localbox serve {model}"),
+        };
+        if !terminal_effect_allowed(&engine, &permission, &request.consent).await {
+            return Ok(TerminalAdoptOutcome::Declined("LocalBox launch"));
+        }
+        if matches!(
+            start_serve(model.to_string(), request.cancel.clone()).await?,
+            ServeWait::Cancelled
+        ) {
+            return Ok(TerminalAdoptOutcome::Cancelled);
+        }
+        state = detect_state().await;
+    } else if request.serve.is_none() && !matches!(state, LocalBoxState::Running { .. }) {
+        match state {
+            LocalBoxState::NotInstalled => {
                 anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
             }
-            (LocalBoxState::InstalledNotRunning, None) => anyhow::bail!(
-                "no running LocalBox server found — use `/localbox adopt --serve <model>` or run `localbox serve <model>` first"
+            LocalBoxState::InstalledNotRunning => anyhow::bail!(
+                "no running LocalBox server found — use `/localbox serve <model>` or run `localbox serve <model>` first"
             ),
-            (LocalBoxState::InstalledNotRunning, Some(model)) => {
-                let permission = PermissionRequest {
-                    tool: "localbox serve".to_string(),
-                    effect: Effect::RunCommand(CommandClass::ExternalWrite),
-                    interactivity: Interactivity::Interactive,
-                    trusted: request.trusted,
-                    detail: format!("localbox serve {model}"),
-                };
-                if !terminal_effect_allowed(&engine, &permission, &request.consent).await {
-                    return Ok(TerminalAdoptOutcome::Declined("LocalBox launch"));
-                }
-                if matches!(
-                    start_serve(model.to_string(), request.cancel.clone()).await?,
-                    ServeWait::Cancelled
-                ) {
-                    return Ok(TerminalAdoptOutcome::Cancelled);
-                }
-                state = detect_state().await;
-            }
-            (LocalBoxState::Running { .. }, _) => {}
+            LocalBoxState::Running { .. } => {}
         }
     }
 
@@ -637,6 +914,53 @@ command = \"npx\"
     #[test]
     fn adopt_merge_rejects_a_malformed_existing_file() {
         assert!(merge_local_provider("not [ valid", "http://x/v1", None).is_err());
+    }
+
+    #[test]
+    fn schema_one_catalog_resolves_aliases_and_renders_key_first() {
+        let catalog = parse_models_catalog(
+            br#"{
+                "schema":1,
+                "models":[{
+                    "name":"q36apex",
+                    "aliases":["apex"],
+                    "display_name":"Qwen APEX",
+                    "repository":"owner/apex",
+                    "default_quant":"iq4",
+                    "required_mode":"native",
+                    "run_profile":{
+                        "source":"tuned",
+                        "source_path":"C:/profiles/best-q36apex.json",
+                        "quant":"iq3",
+                        "context":"64k",
+                        "mode":"native"
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(catalog_entry(&catalog, "apex").unwrap().name, "q36apex");
+        let rendered = render_models_catalog(&catalog, Some("q36apex"));
+        assert!(rendered.contains(
+            "q36apex (aliases: apex) [active] — Qwen APEX · owner/apex · quant iq4 · mode native · tuned iq3 / 64k / native"
+        ));
+        assert!(rendered.ends_with("/localbox serve <name>\n"));
+    }
+
+    #[test]
+    fn catalog_contract_rejects_unknown_schema_and_sanitizes_fields() {
+        let err = parse_models_catalog(br#"{"schema":2,"models":[]}"#).unwrap_err();
+        assert!(err.to_string().contains("schema 2"));
+        assert_eq!(safe_catalog_field("ok\u{1b}[31m\nnext", 20), "ok[31mnext");
+    }
+
+    #[test]
+    fn untuned_child_flag_is_forwarded_only_for_the_explicit_retry() {
+        assert_eq!(localbox_serve_args("apex", false), ["serve", "apex"]);
+        assert_eq!(
+            localbox_serve_args("apex", true),
+            ["serve", "apex", "--allow-untuned"]
+        );
     }
 
     #[test]
@@ -890,6 +1214,47 @@ command = \"npx\"
 
         assert!(matches!(outcome, TerminalAdoptOutcome::Adopted(_)));
         assert_eq!(started.into_inner(), vec!["Bonsai 27B.gguf"]);
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test]
+    async fn direct_serve_replaces_a_different_running_model_before_adoption() {
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        let states = RefCell::new(VecDeque::from([
+            LocalBoxState::Running {
+                endpoint: DEFAULT_PROXY_BASE_URL.to_string(),
+                model: Some("old-model".to_string()),
+            },
+            LocalBoxState::Running {
+                endpoint: DEFAULT_PROXY_BASE_URL.to_string(),
+                model: Some("new-model".to_string()),
+            },
+        ]));
+        let started = RefCell::new(Vec::new());
+        let outcome = run_terminal_adopt_with(
+            TerminalAdoptRequest {
+                cwd: dir.path(),
+                serve: Some("new-model"),
+                profile: Profile::Unrestricted,
+                trusted: true,
+                consent: TerminalConsent::ExplicitCommand,
+                cancel: &cancel,
+            },
+            || std::future::ready(states.borrow_mut().pop_front().unwrap()),
+            |model, _cancel| {
+                started.borrow_mut().push(model);
+                std::future::ready(Ok(ServeWait::Complete))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, TerminalAdoptOutcome::Adopted(_)));
+        assert_eq!(started.into_inner(), vec!["new-model"]);
     }
 
     #[cfg(feature = "tui")]

@@ -704,7 +704,10 @@ enum PumpedSlash {
     /// Adopt a running server, or launch `serve` first when supplied.
     LocalBoxAdopt {
         serve: Option<String>,
+        allow_untuned: bool,
     },
+    /// Read and present the LocalBox-owned catalog without side effects.
+    LocalBoxModels,
     Compact {
         force: bool,
     },
@@ -738,9 +741,18 @@ enum SerialOperation {
 /// synchronously. Consumes the action, so there is no reparse or clone.
 fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
     match action {
-        SlashAction::LocalBoxAdopt { serve } => {
-            SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt { serve })
-        }
+        SlashAction::LocalBoxAdopt { serve } => SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt {
+            serve,
+            allow_untuned: false,
+        }),
+        SlashAction::LocalBoxServe {
+            model,
+            allow_untuned,
+        } => SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt {
+            serve: Some(model),
+            allow_untuned,
+        }),
+        SlashAction::LocalBoxModels => SlashRoute::Pumped(PumpedSlash::LocalBoxModels),
         SlashAction::Compact { force } => SlashRoute::Pumped(PumpedSlash::Compact { force }),
         SlashAction::Ingest(localpilot_tui::IngestAction::Run) => {
             SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Run))
@@ -2965,7 +2977,9 @@ async fn execute_fullscreen_slash_action(
         }
         // Routed to the operation pump before synchronous dispatch. Keeping an
         // explicit defensive arm makes a future routing regression visible.
-        SlashAction::LocalBoxAdopt { .. } => app.apply_runtime(RuntimeUpdate::Warning(
+        SlashAction::LocalBoxAdopt { .. }
+        | SlashAction::LocalBoxModels
+        | SlashAction::LocalBoxServe { .. } => app.apply_runtime(RuntimeUpdate::Warning(
             "/localbox could not enter the operation pump".to_string(),
         )),
         action @ (SlashAction::Help
@@ -4095,9 +4109,25 @@ async fn drive_slash_command(
     authority: &mut PumpedAuthority<'_>,
 ) -> Result<bool> {
     match command {
-        PumpedSlash::LocalBoxAdopt { serve } => {
-            drive_localbox(terminal, app, runtime, authority.config, ctx, serve, queue).await
+        PumpedSlash::LocalBoxAdopt {
+            serve,
+            allow_untuned,
+        } => {
+            drive_localbox(
+                terminal,
+                app,
+                runtime,
+                authority.config,
+                ctx,
+                LocalBoxTarget {
+                    serve,
+                    allow_untuned,
+                },
+                queue,
+            )
+            .await
         }
+        PumpedSlash::LocalBoxModels => drive_localbox_models(terminal, app, ctx, queue).await,
         PumpedSlash::Compact { force } => {
             drive_compact(terminal, app, runtime, ctx, force, queue).await
         }
@@ -4148,7 +4178,63 @@ enum LocalBoxPumpResult {
     },
     Declined(&'static str),
     Cancelled,
+    Models(String),
+    ModelsFailed(String),
     Failed(String),
+}
+
+struct LocalBoxTarget {
+    serve: Option<String>,
+    allow_untuned: bool,
+}
+
+async fn drive_localbox_models(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+) -> Result<bool> {
+    let cancel = CancellationToken::new();
+    app.begin_work();
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    let operation = async {
+        match crate::localbox::run_models().await {
+            Ok(output) => LocalBoxPumpResult::Models(output),
+            Err(error) => LocalBoxPumpResult::ModelsFailed(error.to_string()),
+        }
+    };
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: String::new(),
+        vision_capable: false,
+    };
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        apply_localbox_pump_result,
+    )
+    .await
 }
 
 /// Run `/localbox` on the responsive command pump. Child stdio is isolated by
@@ -4161,7 +4247,7 @@ async fn drive_localbox(
     runtime: &mut SessionRuntime,
     config: &mut localpilot_config::Config,
     ctx: &mut SlashContext<'_>,
-    serve: Option<String>,
+    target: LocalBoxTarget,
     queue: &mut VecDeque<QueuedOperation>,
 ) -> Result<bool> {
     let cancel = CancellationToken::new();
@@ -4183,7 +4269,8 @@ async fn drive_localbox(
     let operation = async move {
         match crate::localbox::run_terminal_adopt(
             &cwd,
-            serve.as_deref(),
+            target.serve.as_deref(),
+            target.allow_untuned,
             profile,
             trusted,
             crate::localbox::TerminalConsent::ExplicitCommand,
@@ -4271,6 +4358,19 @@ fn apply_localbox_pump_result(app: &mut AppModel, result: LocalBoxPumpResult) {
             "stopped waiting for LocalBox; startup may continue in the background — run `/localbox adopt` when it is ready"
                 .to_string(),
         )),
+        LocalBoxPumpResult::Models(output) => present_command_report(
+            app,
+            CommandReport {
+                title: "localbox models".to_string(),
+                lines: output.lines().map(str::to_string).collect(),
+                failed: false,
+            },
+        ),
+        LocalBoxPumpResult::ModelsFailed(error) => {
+            app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "LocalBox model listing failed: {error}"
+            )))
+        }
         LocalBoxPumpResult::Failed(error) => app.apply_runtime(RuntimeUpdate::Warning(format!(
             "LocalBox launch/adopt failed: {error}"
         ))),
@@ -10304,7 +10404,7 @@ mod tests {
             ),
             (
                 "localbox",
-                "Launch or adopt LocalBox (/localbox adopt [--serve <model>])",
+                "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)",
             ),
             ("new", "Start a fresh session"),
             ("fork", "Branch the conversation into a new session"),
@@ -13828,14 +13928,31 @@ mod tests {
         use localpilot_tui::IngestAction;
         assert!(matches!(
             route_fullscreen_slash(SlashAction::LocalBoxAdopt { serve: None }),
-            SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt { serve: None })
+            SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt { serve: None, .. })
         ));
         assert!(matches!(
             route_fullscreen_slash(SlashAction::LocalBoxAdopt {
                 serve: Some("model.gguf".to_string()),
             }),
-            SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt { serve: Some(model) })
+            SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt {
+                serve: Some(model),
+                ..
+            })
                 if model == "model.gguf"
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::LocalBoxModels),
+            SlashRoute::Pumped(PumpedSlash::LocalBoxModels)
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::LocalBoxServe {
+                model: "apex".to_string(),
+                allow_untuned: true,
+            }),
+            SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt {
+                serve: Some(model),
+                allow_untuned: true,
+            }) if model == "apex"
         ));
         assert!(matches!(
             route_fullscreen_slash(SlashAction::Compact { force: false }),

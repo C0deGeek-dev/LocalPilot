@@ -301,7 +301,9 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         SlashAction::Model { .. } => state.apply(UiEvent::Notice(
             "/model is handled by the interactive host".to_string(),
         )),
-        SlashAction::LocalBoxAdopt { .. } => state.apply(UiEvent::Notice(
+        SlashAction::LocalBoxAdopt { .. }
+        | SlashAction::LocalBoxModels
+        | SlashAction::LocalBoxServe { .. } => state.apply(UiEvent::Notice(
             "/localbox is handled by the interactive host".to_string(),
         )),
         SlashAction::Exit { .. } => state.should_quit = true,
@@ -724,14 +726,27 @@ mod tests {
         );
         assert_eq!(
             parse_slash("/localbox adopt --serve bonsai.gguf"),
-            Some(SlashAction::LocalBoxAdopt {
-                serve: Some("bonsai.gguf".to_string()),
+            Some(SlashAction::LocalBoxServe {
+                model: "bonsai.gguf".to_string(),
+                allow_untuned: false,
             })
         );
         assert_eq!(
             parse_slash("/localbox adopt --serve Bonsai 27B.gguf"),
-            Some(SlashAction::LocalBoxAdopt {
-                serve: Some("Bonsai 27B.gguf".to_string()),
+            Some(SlashAction::LocalBoxServe {
+                model: "Bonsai 27B.gguf".to_string(),
+                allow_untuned: false,
+            })
+        );
+        assert_eq!(
+            parse_slash("/localbox models"),
+            Some(SlashAction::LocalBoxModels)
+        );
+        assert_eq!(
+            parse_slash("/localbox serve apex --allow-untuned"),
+            Some(SlashAction::LocalBoxServe {
+                model: "apex".to_string(),
+                allow_untuned: true,
             })
         );
         assert!(matches!(
