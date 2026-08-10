@@ -178,7 +178,10 @@ unchanged. Run `localpilot --help` for the complete command tree.
 
 The full-screen chat host runs in an alternate screen buffer and captures the
 mouse, so it owns timeline scrolling, text selection, and copy/paste within the
-application.
+application. Tool work stays compact but inspectable: its visible action names
+the target, completed work includes up to three indented result rows, and
+clicking the tool's status glyph expands or collapses the complete bounded
+result. Timeline search also reveals a match inside collapsed tool output.
 
 ## Learns, with your approval
 

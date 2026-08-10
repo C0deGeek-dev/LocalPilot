@@ -775,13 +775,204 @@ fn tool_output_body(output: &str) -> &str {
         .trim()
 }
 
-fn tool_output_line_count(output: &str) -> usize {
-    let body = tool_output_body(output);
-    if body.is_empty() {
-        0
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolHeadlineState {
+    Running,
+    Success,
+    Error,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ToolVerbs {
+    running: &'static str,
+    success: &'static str,
+    error: &'static str,
+    cancelled: &'static str,
+}
+
+fn builtin_tool_verbs(name: &str) -> Option<ToolVerbs> {
+    let verbs = match name {
+        "read_file" | "read_tool_output" => ToolVerbs {
+            running: "Reading",
+            success: "Read",
+            error: "Read failed",
+            cancelled: "Read cancelled",
+        },
+        "write_file" | "append_file" => ToolVerbs {
+            running: "Writing",
+            success: "Wrote",
+            error: "Write failed",
+            cancelled: "Write cancelled",
+        },
+        "edit_file" | "multi_edit" | "replace_in_file" | "apply_patch" => ToolVerbs {
+            running: "Editing",
+            success: "Edited",
+            error: "Edit failed",
+            cancelled: "Edit cancelled",
+        },
+        "list_files" => ToolVerbs {
+            running: "Listing",
+            success: "Listed",
+            error: "List failed",
+            cancelled: "List cancelled",
+        },
+        "find_files" => ToolVerbs {
+            running: "Finding files",
+            success: "Found files",
+            error: "File search failed",
+            cancelled: "File search cancelled",
+        },
+        "search_text" => ToolVerbs {
+            running: "Searching",
+            success: "Searched",
+            error: "Search failed",
+            cancelled: "Search cancelled",
+        },
+        "fetch" => ToolVerbs {
+            running: "Fetching",
+            success: "Fetched",
+            error: "Fetch failed",
+            cancelled: "Fetch cancelled",
+        },
+        "run_shell" => ToolVerbs {
+            running: "Running",
+            success: "Ran",
+            error: "Command failed",
+            cancelled: "Command cancelled",
+        },
+        _ => return None,
+    };
+    Some(verbs)
+}
+
+fn tool_action_headline(name: &str, detail: &str, state: ToolHeadlineState) -> String {
+    let name = sanitize_inline(name);
+    let name = if name.is_empty() { "tool" } else { &name };
+    let detail = sanitize_inline(detail);
+    let Some(verbs) = builtin_tool_verbs(name) else {
+        let state = match state {
+            ToolHeadlineState::Running => "running",
+            ToolHeadlineState::Success => "completed",
+            ToolHeadlineState::Error => "failed",
+            ToolHeadlineState::Cancelled => "cancelled",
+        };
+        return if detail.is_empty() {
+            format!("{name} {state}")
+        } else {
+            format!("{name} {state}: {detail}")
+        };
+    };
+    let verb = match state {
+        ToolHeadlineState::Running => verbs.running,
+        ToolHeadlineState::Success => verbs.success,
+        ToolHeadlineState::Error => verbs.error,
+        ToolHeadlineState::Cancelled => verbs.cancelled,
+    };
+    if detail.is_empty() {
+        verb.to_string()
+    } else if matches!(
+        state,
+        ToolHeadlineState::Error | ToolHeadlineState::Cancelled
+    ) {
+        format!("{verb}: {detail}")
     } else {
-        body.lines().count()
+        format!("{verb} {detail}")
     }
+}
+
+fn unified_diff_summary(body: &str) -> Option<(usize, usize)> {
+    let mut old_header = false;
+    let mut new_header = false;
+    let mut in_hunk = false;
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    for line in body.lines() {
+        if line.starts_with("diff --git ") {
+            old_header = false;
+            new_header = false;
+            in_hunk = false;
+        } else if line.starts_with("--- ") {
+            old_header = true;
+            new_header = false;
+            in_hunk = false;
+        } else if old_header && line.starts_with("+++ ") {
+            new_header = true;
+        } else if old_header && new_header && line.starts_with("@@") {
+            in_hunk = true;
+        } else if in_hunk && line.starts_with('+') {
+            additions = additions.saturating_add(1);
+        } else if in_hunk && line.starts_with('-') {
+            deletions = deletions.saturating_add(1);
+        }
+    }
+    (old_header && new_header && in_hunk).then_some((additions, deletions))
+}
+
+fn finished_tool_headline(
+    name: &str,
+    detail: &str,
+    state: ToolHeadlineState,
+    output_line_count: usize,
+    diff_summary: Option<(usize, usize)>,
+    duration_ms: u64,
+) -> String {
+    let line_unit = if output_line_count == 1 {
+        "line"
+    } else {
+        "lines"
+    };
+    let mut headline = tool_action_headline(name, detail, state);
+    if let Some((additions, deletions)) = diff_summary {
+        headline.push_str(&format!(" · +{additions}/-{deletions}"));
+    }
+    headline.push_str(&format!(
+        " · {output_line_count} {line_unit} · {}",
+        format_tool_duration(duration_ms)
+    ));
+    headline
+}
+
+fn tool_activity_styles(text: &str, headline_role: SemanticRole) -> Vec<StyledRange> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let headline_end = text.find('\n').unwrap_or(text.len());
+    let mut styles = vec![StyledRange {
+        start_byte: 0,
+        end_byte: headline_end,
+        style: TextStyle::new(headline_role).bold(),
+    }];
+    if headline_end == text.len() {
+        return styles;
+    }
+
+    let body_start = headline_end.saturating_add(1);
+    styles.push(StyledRange {
+        start_byte: headline_end,
+        end_byte: body_start,
+        style: TextStyle::new(SemanticRole::Muted),
+    });
+    let body = &text[body_start..];
+    let is_unified_diff = unified_diff_summary(body).is_some();
+    let mut cursor = body_start;
+    for line in body.split_inclusive('\n') {
+        let content = line.trim_end_matches('\n').trim_end_matches('\r');
+        let role = if is_unified_diff && content.starts_with('+') && !content.starts_with("+++") {
+            SemanticRole::Success
+        } else if is_unified_diff && content.starts_with('-') && !content.starts_with("---") {
+            SemanticRole::Error
+        } else {
+            SemanticRole::Muted
+        };
+        styles.push(StyledRange {
+            start_byte: cursor,
+            end_byte: cursor + line.len(),
+            style: TextStyle::new(role),
+        });
+        cursor += line.len();
+    }
+    styles
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2056,15 +2247,11 @@ impl AppModel {
                 projection.active_reasoning = None;
                 let detail = bounded_inline_text(&detail, MAX_TOOL_DETAIL_BYTES);
                 let question = name == "ask_user";
-                let mut text = if question {
+                let text = if question {
                     format!("Asking user {detail}")
                 } else {
-                    sanitize_inline(&name)
+                    tool_action_headline(&name, &detail, ToolHeadlineState::Running)
                 };
-                if !question && !detail.is_empty() {
-                    text.push('\n');
-                    text.push_str(&detail);
-                }
                 let kind = if question {
                     ItemKind::Question
                 } else {
@@ -2074,6 +2261,7 @@ impl AppModel {
                     let _ = projection
                         .timeline
                         .set_activity(item, Some(ActivityState::Running));
+                    Self::style_activity_on(projection, item, ActivityState::Running);
                     projection.active_tools.insert(
                         id,
                         ActiveTool {
@@ -2125,30 +2313,30 @@ impl AppModel {
                     }
                     return;
                 }
-                let state = if cancelled {
-                    "cancelled"
+                let headline_state = if cancelled {
+                    ToolHeadlineState::Cancelled
                 } else if is_error {
-                    "failed"
+                    ToolHeadlineState::Error
                 } else {
-                    "completed"
+                    ToolHeadlineState::Success
                 };
-                let output_line_count = tool_output_line_count(&output);
-                let output_line_unit = if output_line_count == 1 {
-                    "line"
+                let output_body = tool_output_body(&output);
+                let output_line_count = if output_body.is_empty() {
+                    0
                 } else {
-                    "lines"
+                    output_body.lines().count()
                 };
-                let mut text = format!(
-                    "{} {state} · {output_line_count} {output_line_unit} · {}",
-                    sanitize_inline(&name),
-                    format_tool_duration(duration_ms)
-                );
-                let output = bounded_view_text(&output, MAX_TOOL_OUTPUT_BYTES);
+                let diff_summary = unified_diff_summary(output_body);
+                let output = bounded_view_text(output_body, MAX_TOOL_OUTPUT_BYTES);
                 if let Some(active) = projection.active_tools.remove(&id) {
-                    if !active.detail.is_empty() {
-                        text.push('\n');
-                        text.push_str(&active.detail);
-                    }
+                    let mut text = finished_tool_headline(
+                        &name,
+                        &active.detail,
+                        headline_state,
+                        output_line_count,
+                        diff_summary,
+                        duration_ms,
+                    );
                     if !output.is_empty() {
                         text.push('\n');
                         text.push_str(&output);
@@ -2165,22 +2353,31 @@ impl AppModel {
                         .timeline
                         .set_activity(active.item_id, Some(activity));
                     Self::style_activity_on(projection, active.item_id, activity);
-                } else if let Some(item) = Self::push_runtime_item_to(projection, ItemKind::Tool, {
+                } else {
+                    let mut text = finished_tool_headline(
+                        &name,
+                        "",
+                        headline_state,
+                        output_line_count,
+                        diff_summary,
+                        duration_ms,
+                    );
                     if !output.is_empty() {
                         text.push('\n');
                         text.push_str(&output);
                     }
-                    text
-                }) {
-                    let activity = if cancelled {
-                        ActivityState::Cancelled
-                    } else if is_error {
-                        ActivityState::Error
-                    } else {
-                        ActivityState::Success
-                    };
-                    let _ = projection.timeline.set_activity(item, Some(activity));
-                    Self::style_activity_on(projection, item, activity);
+                    if let Some(item) = Self::push_runtime_item_to(projection, ItemKind::Tool, text)
+                    {
+                        let activity = if cancelled {
+                            ActivityState::Cancelled
+                        } else if is_error {
+                            ActivityState::Error
+                        } else {
+                            ActivityState::Success
+                        };
+                        let _ = projection.timeline.set_activity(item, Some(activity));
+                        Self::style_activity_on(projection, item, activity);
+                    }
                 }
             }
             RuntimeUpdate::Usage {
@@ -4499,7 +4696,7 @@ impl AppModel {
             state.selected = selected;
         }
         if let Some(point) = point {
-            let _ = projection.timeline.hold_at(point);
+            Self::reveal_timeline_search_point(projection, point);
         }
     }
 
@@ -4522,6 +4719,17 @@ impl AppModel {
             state.selected = Some(next);
             state.matches[next]
         };
+        Self::reveal_timeline_search_point(projection, point);
+    }
+
+    fn reveal_timeline_search_point(projection: &mut SessionProjection, point: ContentPoint) {
+        let collapsed_tool = projection
+            .timeline
+            .item(point.item_id)
+            .is_some_and(|item| item.kind == ItemKind::Tool && !item.expanded);
+        if collapsed_tool {
+            let _ = projection.timeline.set_expanded(point.item_id, true);
+        }
         let _ = projection.timeline.hold_at(point);
     }
 
@@ -4821,14 +5029,18 @@ impl AppModel {
     }
 
     fn style_activity_on(projection: &mut SessionProjection, id: ItemId, activity: ActivityState) {
-        let Some(end_byte) = projection.timeline.item(id).map(|item| item.text.len()) else {
+        let Some((kind, text)) = projection
+            .timeline
+            .item(id)
+            .map(|item| (item.kind, item.text.clone()))
+        else {
             return;
         };
-        let role = match (projection.timeline.item(id).map(|item| item.kind), activity) {
-            (Some(ItemKind::Question), ActivityState::Running | ActivityState::Success) => {
+        let role = match (kind, activity) {
+            (ItemKind::Question, ActivityState::Running | ActivityState::Success) => {
                 SemanticRole::Tool
             }
-            (Some(ItemKind::Question), ActivityState::Error | ActivityState::Cancelled) => {
+            (ItemKind::Question, ActivityState::Error | ActivityState::Cancelled) => {
                 SemanticRole::Muted
             }
             (_, ActivityState::Running) => SemanticRole::Tool,
@@ -4836,14 +5048,18 @@ impl AppModel {
             (_, ActivityState::Error) => SemanticRole::Error,
             (_, ActivityState::Cancelled) => SemanticRole::Muted,
         };
-        let styles = (end_byte > 0)
-            .then_some(StyledRange {
-                start_byte: 0,
-                end_byte,
-                style: TextStyle::new(role),
-            })
-            .into_iter()
-            .collect();
+        let styles = if kind == ItemKind::Tool {
+            tool_activity_styles(&text, role)
+        } else {
+            (!text.is_empty())
+                .then_some(StyledRange {
+                    start_byte: 0,
+                    end_byte: text.len(),
+                    style: TextStyle::new(role),
+                })
+                .into_iter()
+                .collect()
+        };
         let _ = projection.timeline.set_styles(id, styles);
     }
 
@@ -7723,7 +7939,7 @@ mod tests {
             vec![
                 "active",
                 "first response",
-                "inspect",
+                "inspect running",
                 "queued a",
                 "answer a",
                 "queued b"
@@ -7778,7 +7994,7 @@ mod tests {
                 (ItemKind::User, "active"),
                 (ItemKind::Assistant, "assistant A"),
                 (ItemKind::Reasoning, "reasoning A"),
-                (ItemKind::Tool, "inspect"),
+                (ItemKind::Tool, "inspect running"),
                 (ItemKind::Assistant, "assistant B"),
                 (ItemKind::Reasoning, "reasoning B"),
                 (ItemKind::User, "queued"),
@@ -8022,10 +8238,19 @@ mod tests {
         assert!(!tool.expanded);
         assert_eq!(
             app.active_timeline().rows(80)[2].text,
-            "inspect completed · 2 lines · 1.2 s"
+            "inspect completed: src/main.rs · 2 lines · 1.2 s"
         );
         assert!(tool.text.contains("src/main.rs"));
         assert!(tool.text.contains("detail one\ndetail two"));
+        assert!(!tool.text.contains("tool: inspect"));
+        assert!(tool
+            .styles
+            .iter()
+            .any(|span| { span.style.role == SemanticRole::Success && span.style.bold }));
+        assert!(tool
+            .styles
+            .iter()
+            .any(|span| span.style.role == SemanticRole::Muted));
     }
 
     #[test]
@@ -8049,7 +8274,7 @@ mod tests {
         assert_eq!(tool.activity, Some(ActivityState::Cancelled));
         assert_eq!(
             app.active_timeline().rows(80)[0].text,
-            "run_shell cancelled · 1 line · 750 ms"
+            "Command cancelled: cargo test · 1 line · 750 ms"
         );
     }
 
@@ -8084,14 +8309,133 @@ mod tests {
                 output: output.to_string(),
                 duration_ms: 10,
             });
-            assert_eq!(
-                app.active_timeline()
-                    .rows(80)
-                    .last()
-                    .map(|row| row.text.as_str()),
-                Some(expected)
-            );
+            let tool = app.active_timeline().items().last().expect("tool item");
+            assert_eq!(tool.text.lines().next(), Some(expected));
+            assert!(!tool.text.contains("tool: inspect"));
+            assert!(!tool.text.contains("status:"));
         }
+    }
+
+    #[test]
+    fn tool_headlines_name_known_targets_and_keep_unknown_tools_neutral() {
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "read".to_string(),
+            name: "read_file".to_string(),
+            detail: "src/lib.rs\nignored".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "remote".to_string(),
+            name: "mcp__docs_lookup".to_string(),
+            detail: "widget API".to_string(),
+        });
+
+        assert_eq!(
+            app.active_timeline().items()[0].text,
+            "Reading src/lib.rs ignored"
+        );
+        assert_eq!(
+            app.active_timeline().items()[1].text,
+            "mcp__docs_lookup running: widget API"
+        );
+        assert!(app.active_timeline().items().iter().all(|item| {
+            item.styles
+                .iter()
+                .any(|span| span.style.role == SemanticRole::Tool && span.style.bold)
+        }));
+    }
+
+    #[test]
+    fn recognizable_unified_diffs_gain_truthful_deltas_and_line_styles() {
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "edit".to_string(),
+            name: "edit_file".to_string(),
+            detail: "src/lib.rs".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "edit".to_string(),
+            name: "edit_file".to_string(),
+            is_error: false,
+            cancelled: false,
+            output: concat!(
+                "tool: edit_file\nstatus: success\noutput:\n",
+                "--- a/src/lib.rs\n",
+                "+++ b/src/lib.rs\n",
+                "@@ -1,2 +1,3 @@\n",
+                "-old\n",
+                "+new\n",
+                "+more\n",
+                " context"
+            )
+            .to_string(),
+            duration_ms: 20,
+        });
+
+        let tool = &app.active_timeline().items()[0];
+        assert_eq!(
+            tool.text.lines().next(),
+            Some("Edited src/lib.rs · +2/-1 · 7 lines · 20 ms")
+        );
+        assert!(!tool.text.contains("tool: edit_file"));
+        assert!(tool
+            .styles
+            .iter()
+            .any(|span| span.style.role == SemanticRole::Success));
+        assert!(tool
+            .styles
+            .iter()
+            .any(|span| span.style.role == SemanticRole::Error));
+
+        let mut prose = model();
+        prose.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "plain".to_string(),
+            name: "edit_file".to_string(),
+            is_error: false,
+            cancelled: false,
+            output: "+ added in prose\n- removed in prose".to_string(),
+            duration_ms: 20,
+        });
+        let plain = &prose.active_timeline().items()[0];
+        assert_eq!(plain.text.lines().next(), Some("Edited · 2 lines · 20 ms"));
+        assert_eq!(
+            plain
+                .styles
+                .iter()
+                .filter(|span| matches!(
+                    span.style.role,
+                    SemanticRole::Success | SemanticRole::Error
+                ))
+                .count(),
+            1,
+            "only the successful headline is semantic; prose signs are muted"
+        );
+    }
+
+    #[test]
+    fn searching_retained_tool_output_expands_a_hidden_match() {
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "long".to_string(),
+            name: "inspect".to_string(),
+            is_error: false,
+            cancelled: false,
+            output: "one\ntwo\nthree\nfour\nneedle after preview".to_string(),
+            duration_ms: 25,
+        });
+        let id = app.active_timeline().items()[0].id;
+        assert!(!app.active_timeline().item(id).expect("tool").expanded);
+        assert_eq!(app.active_timeline().rows(80).len(), 4);
+
+        app.open_timeline_search("needle after preview".to_string());
+
+        assert_eq!(app.timeline_search().map(|search| search.total), Some(1));
+        assert!(app.active_timeline().item(id).expect("tool").expanded);
+        assert!(app
+            .active_timeline()
+            .rows(80)
+            .iter()
+            .any(|row| row.text == "needle after preview"));
     }
 
     #[test]
@@ -8254,6 +8598,24 @@ mod tests {
         assert!(bounded.starts_with("HEAD界"));
         assert!(bounded.ends_with("TAIL界"));
         assert!(bounded.contains("middle omitted from terminal view"));
+
+        let lines = MAX_TOOL_OUTPUT_BYTES / 2 + 100;
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "large".to_string(),
+            name: "inspect".to_string(),
+            is_error: false,
+            cancelled: false,
+            output: "x\n".repeat(lines),
+            duration_ms: 1,
+        });
+        let tool = &app.active_timeline().items()[0];
+        assert!(tool
+            .text
+            .lines()
+            .next()
+            .is_some_and(|headline| headline.contains(&format!("{lines} lines"))));
+        assert!(tool.text.contains("middle omitted from terminal view"));
     }
 
     #[test]

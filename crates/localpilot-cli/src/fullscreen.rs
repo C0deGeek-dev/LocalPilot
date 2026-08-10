@@ -1277,11 +1277,11 @@ fn visible_transcript(app: &AppModel) -> String {
                 ItemKind::Result => "Result",
             };
             let visible = if item.kind == ItemKind::Tool && !item.expanded {
-                item.text.lines().next().unwrap_or_default()
+                item.text.lines().take(4).collect::<Vec<_>>().join("\n")
             } else {
-                &item.text
+                item.text.clone()
             };
-            let visible = sanitize_text(visible);
+            let visible = sanitize_text(&visible);
             (!visible.trim().is_empty()).then(|| format!("{label}\n{visible}"))
         })
         .collect::<Vec<_>>()
@@ -9322,6 +9322,28 @@ mod tests {
     }
 
     #[test]
+    fn print_transcript_keeps_the_compact_tool_preview_until_expanded() {
+        let mut app = app();
+        let tool = app
+            .active_timeline_mut()
+            .push(
+                ItemKind::Tool,
+                "Ran check · 5 lines\none\ntwo\nthree\nfour\nfive",
+            )
+            .expect("tool");
+
+        let compact = visible_transcript(&app);
+        assert!(compact.contains("Ran check · 5 lines\none\ntwo\nthree"));
+        assert!(!compact.contains("four"));
+        assert!(!compact.contains("five"));
+
+        assert!(app.active_timeline_mut().set_expanded(tool, true));
+        let expanded = visible_transcript(&app);
+        assert!(expanded.contains("four"));
+        assert!(expanded.contains("five"));
+    }
+
+    #[test]
     fn presenter_routes_by_both_logical_lines_and_bytes() {
         let report = |lines: Vec<String>| CommandReport {
             title: "t".to_string(),
@@ -11528,7 +11550,13 @@ mod tests {
             name: "read_file".to_string(),
             is_error: false,
             cancelled: false,
-            output: "COLLAPSED_OUTPUT_SECRET".to_string(),
+            output: concat!(
+                "COLLAPSED_OUTPUT_VISIBLE_1\n",
+                "COLLAPSED_OUTPUT_VISIBLE_2\n",
+                "COLLAPSED_OUTPUT_VISIBLE_3\n",
+                "COLLAPSED_OUTPUT_HIDDEN_4"
+            )
+            .to_string(),
             duration_ms: 20,
         });
         app.apply_runtime(RuntimeUpdate::Usage {
@@ -11544,8 +11572,10 @@ mod tests {
         assert!(output.contains("Tokens: 1,234 input · 56 output"));
         assert!(output.contains("Resume: localpilot chat --resume fixture-session"));
         assert!(!output.contains("HIDDEN_REASONING_SECRET"));
-        assert!(!output.contains("COLLAPSED_DETAIL_SECRET"));
-        assert!(!output.contains("COLLAPSED_OUTPUT_SECRET"));
+        assert!(output.contains("COLLAPSED_DETAIL_SECRET"));
+        assert!(output.contains("COLLAPSED_OUTPUT_VISIBLE_1"));
+        assert!(output.contains("COLLAPSED_OUTPUT_VISIBLE_3"));
+        assert!(!output.contains("COLLAPSED_OUTPUT_HIDDEN_4"));
         assert!(!output.contains('\x1b'));
 
         let summary = exit_presentation(&app, directory.path(), Duration::ZERO, false);

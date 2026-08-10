@@ -56,7 +56,11 @@ not need a real console:
   values, contained quick/full help, help wheel/thumb navigation, cancelable
   whole-UI theme preview and mouse selection, contained settings and bounded
   two-pane tracked-diff review, role-labeled screen-reader frames and dialogs,
-  bounded compact/expanded tool details with elapsed time, local refusal during
+  bounded four-row/expanded tool details with target-aware lifecycle headlines,
+  envelope-free muted output, elapsed time, Unicode wrapping, connector geometry,
+  visible-only collapsed copy/exit projection, full-result search reveal, and
+  conservative unified-diff styling across default/no-color/colorblind modes,
+  local refusal during
   active work, host-aware live profile/background/effort controls, Ctrl+Q slash
   routing without prompt enqueue, truthful no-handle refusal, and the full
   `ask_user` lifecycle: bounded typed schema, pending/

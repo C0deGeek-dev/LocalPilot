@@ -545,7 +545,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
         [
             "Page Up/Down scroll timeline",
             "Wheel        scroll timeline",
-            "Drag         select text",
+            "Drag / icon  select / expand",
             "Ctrl+F       search messages",
             "Esc          stop and steer",
             "Esc Esc      clear draft",
@@ -1680,7 +1680,7 @@ fn help_lines(
         ),
         (
             if mouse_capture {
-                "  Drag        Select timeline text or move the scrollbar".to_string()
+                "  Drag / icon Select text; click a tool status to expand it".to_string()
             } else {
                 "  Mouse       Disabled for this launch".to_string()
             },
@@ -2003,12 +2003,16 @@ fn render_timeline(
             timeline_line(row, app, area.width)
                 .render(Rect::new(area.x, y, area.width, 1), frame.buffer_mut());
             if matches!(row.part, VisualRowPart::Content { .. }) {
-                let first = matches!(row.part, VisualRowPart::Content { first: true, .. });
+                let (first, last) = match row.part {
+                    VisualRowPart::Content { first, last } => (first, last),
+                    VisualRowPart::FrameTop | VisualRowPart::FrameBottom => (false, false),
+                };
                 let content_column = role_prefix(
                     row.kind,
                     row.activity,
                     row.tone,
                     first,
+                    last,
                     theme(app),
                     app.capabilities.screen_reader,
                 )
@@ -2226,6 +2230,7 @@ fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
         row.activity,
         row.tone,
         first,
+        last,
         theme,
         app.capabilities.screen_reader,
     );
@@ -2319,6 +2324,7 @@ fn role_prefix(
     activity: Option<ActivityState>,
     tone: Option<crate::ResultTone>,
     first: bool,
+    last: bool,
     theme: ThemeResolver,
     screen_reader: bool,
 ) -> Vec<Span<'static>> {
@@ -2430,8 +2436,14 @@ fn role_prefix(
                 Some(ActivityState::Cancelled) => ("■ ", UiRole::Muted),
             };
             vec![Span::styled(
-                if first { glyph } else { "  " },
-                theme.ui(role),
+                if first {
+                    glyph
+                } else if last {
+                    "└ "
+                } else {
+                    "│ "
+                },
+                theme.ui(if first { role } else { UiRole::Muted }),
             )]
         }
         ItemKind::Question => {
@@ -3881,6 +3893,20 @@ mod tests {
                     duration_ms: 250,
                 },
             ));
+            // This pair/resize golden deliberately keeps a fixed one-row Tool
+            // sentinel. Compact result previews have focused wide/narrow and
+            // accessibility coverage below; including them here would make an
+            // unrelated peer-geometry fixture depend on result-row budgeting.
+            let timeline = app.timeline_for_mut(peer).expect("named peer timeline");
+            let tool = timeline
+                .items()
+                .iter()
+                .rfind(|item| item.kind == ItemKind::Tool)
+                .map(|item| item.id)
+                .expect("snapshot tool");
+            assert!(
+                timeline.replace_text(tool, format!("{marker}_TOOL completed · 2 lines · 250 ms"))
+            );
         }
         assert!(app.apply_runtime_for(
             peer,
@@ -5793,6 +5819,53 @@ mod tests {
         assert!(rendered.contains("2. Trust and remember"));
         assert!(rendered.contains("3. No - exit"));
         assert!(!rendered.contains('›'));
+    }
+
+    #[test]
+    fn compact_tool_results_render_bounded_connectors_at_supported_widths() {
+        let mut app = model();
+        app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+            id: "shell".into(),
+            name: "run_shell".into(),
+            detail: "x".into(),
+        });
+        app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+            id: "shell".into(),
+            name: "run_shell".into(),
+            is_error: false,
+            cancelled: false,
+            output: "one\ntwo\nthree\nfour\nfive".into(),
+            duration_ms: 5,
+        });
+
+        for (width, height) in [(120, 30), (80, 24), (40, 20)] {
+            let (buffer, hits) = render_test_frame(&app, width, height);
+            let timeline = single_hits(&hits);
+            let text = rect_text(&buffer, timeline.timeline);
+            assert!(text.contains("✓ Ran x · 5 lines · 5 ms"));
+            assert!(text.contains("│ one"));
+            assert!(text.contains("│ two"));
+            assert!(text.contains("└ three"));
+            assert!(!text.contains("four"));
+            assert!(!text.contains("five"));
+        }
+
+        app.theme = Theme::Colorblind;
+        app.capabilities.color = ColorSupport::NoColor;
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(
+            text.contains("✓ Ran x"),
+            "status remains non-color-readable"
+        );
+
+        app.capabilities.screen_reader = true;
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("Tool completed: Ran x · 5 lines · 5 ms"));
+        assert!(text.contains("one"));
+        assert!(!text.contains("│ one"));
+        assert!(!text.contains("└ three"));
     }
 
     #[test]

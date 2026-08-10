@@ -379,6 +379,19 @@ Other editor wraps and grows to the available height, then scrolls with a visibl
 position indicator while keeping the caret on-screen. Home/End makes both ends
 reviewable before Enter confirms, including after a terminal resize.
 
+Tool lifecycle events update one stable timeline item. A running built-in tool
+uses an original target-aware action headline; an unknown or MCP tool keeps its
+sanitized name and neutral lifecycle wording. Completion adds truthful result-
+body line count and elapsed time, strips registry envelope metadata from the
+presentation, and shows at most four wrapped visual rows total: the headline
+plus up to three indented result rows, with no padding. Clicking the status glyph
+expands or collapses the complete bounded terminal result. Timeline search
+continues across that retained result and expands a hidden match, while copying
+a collapsed selection and the exit transcript include only the compact visible
+projection. Status remains identifiable by glyph or screen-reader text without
+color; ordinary child output is subordinate, and `+`/`-` emphasis or delta
+counts appear only for recognizable unified diffs.
+
 ### Harness CLI
 
 Scriptable commands:

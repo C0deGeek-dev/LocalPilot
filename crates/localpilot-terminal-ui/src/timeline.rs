@@ -8,6 +8,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::sanitize_text;
 use crate::text::{wrap_ranges, TextRow};
 
+const COLLAPSED_TOOL_VISUAL_ROWS: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ItemId(u64);
 
@@ -639,7 +641,7 @@ impl Timeline {
             if self.is_reasoning_hidden(item) {
                 continue;
             }
-            let visible_len = displayed_text(item).len();
+            let visible_len = self.displayed_end_byte(item);
             let from = if index == start_index {
                 start_byte.min(visible_len)
             } else {
@@ -711,13 +713,21 @@ impl Timeline {
 
     fn row_ranges(&self, item: &TimelineItem, width: u16) -> Arc<[TextRow]> {
         let width = width.max(1);
-        let display_text = displayed_text(item);
+        let display_text = if item.kind == ItemKind::Tool && !item.expanded {
+            item.text.as_str()
+        } else {
+            displayed_text(item)
+        };
         if let Some(cached) = self.wrap_cache.borrow().get(&item.id) {
             if cached.width == width && cached.text_len == display_text.len() {
                 return Arc::clone(&cached.ranges);
             }
         }
-        let ranges: Arc<[TextRow]> = wrap_ranges(display_text, width).into();
+        let mut ranges = wrap_ranges(display_text, width);
+        if item.kind == ItemKind::Tool && !item.expanded {
+            ranges.truncate(COLLAPSED_TOOL_VISUAL_ROWS);
+        }
+        let ranges: Arc<[TextRow]> = ranges.into();
         self.wrap_cache.borrow_mut().insert(
             item.id,
             CachedWrap {
@@ -727,6 +737,18 @@ impl Timeline {
             },
         );
         ranges
+    }
+
+    fn displayed_end_byte(&self, item: &TimelineItem) -> usize {
+        if item.kind != ItemKind::Tool || item.expanded {
+            return displayed_text(item).len();
+        }
+        self.wrap_cache
+            .borrow()
+            .get(&item.id)
+            .filter(|cached| cached.text_len == item.text.len())
+            .and_then(|cached| cached.ranges.last())
+            .map_or_else(|| displayed_text(item).len(), |row| row.end_byte)
     }
 
     fn total_rows(&self, width: u16) -> usize {
@@ -1417,8 +1439,9 @@ mod tests {
             .expect("tool id");
         assert!(timeline.set_activity(tool, Some(ActivityState::Success)));
         let collapsed = timeline.rows(40);
-        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed.len(), 3);
         assert_eq!(collapsed[0].text, "read_file completed");
+        assert_eq!(collapsed[2].text, "line two");
         assert_eq!(collapsed[0].activity, Some(ActivityState::Success));
         timeline.start_selection(ContentPoint {
             item_id: tool,
@@ -1430,7 +1453,7 @@ mod tests {
         });
         assert_eq!(
             timeline.selected_text().as_deref(),
-            Some("read_file completed")
+            Some("read_file completed\nline one\nline two")
         );
 
         assert!(timeline.set_expanded(tool, true));
@@ -1442,6 +1465,86 @@ mod tests {
         assert!(!timeline.item(tool).expect("tool").expanded);
         assert!(timeline.toggle_expandable(tool));
         assert!(timeline.item(tool).expect("tool").expanded);
+    }
+
+    #[test]
+    fn collapsed_tool_preview_is_four_wrapped_rows_and_copy_stays_visible() {
+        let mut timeline = Timeline::new();
+        let tool = timeline
+            .push(
+                ItemKind::Tool,
+                "Checked target · 5 lines\none\ntwo\nthree\nfour\nfive",
+            )
+            .expect("tool id");
+        assert!(timeline.set_activity(tool, Some(ActivityState::Success)));
+
+        let collapsed = timeline.rows(40);
+        assert_eq!(collapsed.len(), 4);
+        assert_eq!(
+            collapsed
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Checked target · 5 lines", "one", "two", "three"]
+        );
+        timeline.start_selection(ContentPoint {
+            item_id: tool,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: tool,
+            byte: timeline.item(tool).expect("tool").text.len(),
+        });
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some("Checked target · 5 lines\none\ntwo\nthree")
+        );
+
+        assert!(timeline.set_expanded(tool, true));
+        assert_eq!(timeline.rows(40).len(), 6);
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some("Checked target · 5 lines\none\ntwo\nthree\nfour\nfive")
+        );
+    }
+
+    #[test]
+    fn collapsed_tool_budget_is_cell_aware_at_narrow_widths_without_padding() {
+        let mut timeline = Timeline::new();
+        let short = timeline
+            .push(ItemKind::Tool, "Read café\n済")
+            .expect("short tool");
+        assert_eq!(timeline.rows(40).len(), 2, "short output is never padded");
+
+        let long = timeline
+            .push(
+                ItemKind::Tool,
+                "Reading wide graphemes 😀😀😀😀\nαβγδεζηθ\ntail",
+            )
+            .expect("long tool");
+        let rows = timeline.rows(8);
+        let long_rows = rows
+            .iter()
+            .filter(|row| row.item_id == long)
+            .collect::<Vec<_>>();
+        assert_eq!(long_rows.len(), COLLAPSED_TOOL_VISUAL_ROWS);
+        assert!(long_rows.iter().all(|row| {
+            timeline
+                .item(long)
+                .expect("long tool")
+                .text
+                .is_char_boundary(row.start_byte)
+                && timeline
+                    .item(long)
+                    .expect("long tool")
+                    .text
+                    .is_char_boundary(row.end_byte)
+        }));
+        assert_eq!(timeline.items().len(), 2);
+        assert_eq!(
+            timeline.item(short).expect("short tool").text,
+            "Read café\n済"
+        );
     }
 
     #[test]

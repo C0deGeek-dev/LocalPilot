@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Tool activity is compact without being opaque.** Full-screen chat now shows
+  a descriptive, target-aware action while a tool runs, then keeps up to three
+  indented result rows under the outcome, line count, and elapsed time. The
+  complete bounded result remains searchable and expands in place from the
+  status glyph; ordinary output is subdued, while trustworthy unified-diff
+  additions and deletions retain semantic emphasis. Screen-reader labels,
+  no-color status cues, stable selection, and bounded exit transcript output
+  remain intact.
+
 - **The legacy inline chat host is retired.** `localpilot chat` now resolves only
   to the full-screen terminal application; the `LOCALPILOT_CHAT_UI` selector, the
   inline driver, and the `localpilot-tui` crate are removed (ADR-0154). The

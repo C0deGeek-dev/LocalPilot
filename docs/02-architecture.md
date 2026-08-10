@@ -205,6 +205,17 @@ chat model. It owns:
 - one responsive frame layout/hit map and one semantic theme resolver across
   default, dim, high-contrast, colorblind, and no-color rendering
 
+Tool activity uses the same retained-text/visible-projection split as the rest
+of the timeline. `AppModel` converts provider-neutral lifecycle events into an
+original sanitized headline plus the bounded envelope-free result; runtime and
+store payloads do not change. `Timeline::row_ranges` remains the sole cell-aware
+geometry authority and truncates a collapsed Tool item to four wrapped visual
+rows without changing its stable item ID or byte-coordinate space. Expansion
+uses the complete retained rows, and search expands before anchoring a match
+that was outside the compact projection. The renderer only supplies semantic
+headline/body/diff styles and first/intermediate/last prefixes; it does not
+reparse provider events or create a second tool-card model.
+
 The default resolver owns the application canvas, raised prompt/composer
 surface, prompt text, muted text, focus edge, scrollbar, and tab roles. Prompt
 and composer bands are filled surfaces assembled from terminal cells; they are
