@@ -8,9 +8,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    sanitize_inline, CompletionKind, DiffPane, LocalMindSection, QuestionView, TakeoverView,
-    TrustView,
+    sanitize_inline, ActiveBody, CompletionKind, DiffPane, LocalMindSection, QuestionView,
+    TakeoverView, TrustView,
 };
+use crate::layout::tab_height;
 use crate::projection::{PeerPane, SessionProjection};
 use crate::{
     ActivityState, AppModel, ColorSupport, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt,
@@ -355,8 +356,31 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         Block::default().style(theme(app).ui(UiRole::Background)),
         area,
     );
-    if let Some(takeover) = app.takeover() {
-        return render_takeover(frame, area, app, takeover);
+    match app.active_body() {
+        ActiveBody::Takeover => {
+            if let Some(takeover) = app.takeover() {
+                return render_takeover(frame, area, app, takeover);
+            }
+        }
+        ActiveBody::LocalMind => {
+            if let Some(localmind) = app.localmind_tab() {
+                let tabs_height =
+                    tab_height(area.width, app.capabilities.screen_reader).min(area.height);
+                let tabs_area = Rect::new(area.x, area.y, area.width, tabs_height);
+                let body = Rect::new(
+                    area.x,
+                    area.y.saturating_add(tabs_height),
+                    area.width,
+                    area.height.saturating_sub(tabs_height),
+                );
+                let tabs = render_tabs(frame, tabs_area, app);
+                let mut hit_map = render_takeover(frame, body, app, localmind);
+                hit_map.tabs = tabs;
+                hit_map.theme_rows = render_theme_picker(frame, area, app);
+                return hit_map;
+            }
+        }
+        ActiveBody::Session => {}
     }
     // FrameLayout insets the composer twice: once for the outer surface and
     // once for its content. Use that exact width for the height request so the
@@ -690,11 +714,11 @@ fn render_takeover(
     }
 
     let theme = theme(app);
-    let title: String = match takeover.kind {
-        TakeoverKind::Help => " Help ".to_string(),
-        TakeoverKind::Sessions => " Sessions ".to_string(),
-        TakeoverKind::Settings => " Settings ".to_string(),
-        TakeoverKind::Diff => " Diff ".to_string(),
+    let title: Option<String> = match takeover.kind {
+        TakeoverKind::Help => Some(" Help ".to_string()),
+        TakeoverKind::Sessions => Some(" Sessions ".to_string()),
+        TakeoverKind::Settings => Some(" Settings ".to_string()),
+        TakeoverKind::Diff => Some(" Diff ".to_string()),
         // Clip the bounded report title to the title bar width so a long title
         // cannot overflow at narrow widths.
         TakeoverKind::Report => {
@@ -711,19 +735,22 @@ fn render_takeover(
                 used += width;
                 clipped.push(ch);
             }
-            format!(" {clipped} ")
+            Some(format!(" {clipped} "))
         }
-        TakeoverKind::LocalMind => " LocalMind ".to_string(),
+        // The persistent product-tab strip already supplies this title.
+        TakeoverKind::LocalMind => None,
     };
-    frame.render_widget(
-        Paragraph::new(title.as_str()).style(theme.ui(UiRole::TabActive)),
-        Rect::new(
-            area.x.saturating_add(1),
-            area.y,
-            u16::try_from(title.width()).unwrap_or(area.width),
-            1,
-        ),
-    );
+    if let Some(title) = title {
+        frame.render_widget(
+            Paragraph::new(title.as_str()).style(theme.ui(UiRole::TabActive)),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                u16::try_from(title.width()).unwrap_or(area.width),
+                1,
+            ),
+        );
+    }
 
     let setting_indices = settings_indices(takeover);
     if takeover.kind == TakeoverKind::Settings {
@@ -760,7 +787,7 @@ fn render_takeover(
             };
             frame.render_widget(
                 Paragraph::new(label).style(theme.ui(role)),
-                Rect::new(x, area.y.saturating_add(1), width, 1),
+                Rect::new(x, area.y, width, 1),
             );
             x = x.saturating_add(width);
         }
@@ -772,11 +799,7 @@ fn render_takeover(
         TakeoverKind::Diff | TakeoverKind::Help | TakeoverKind::Report => 1,
         TakeoverKind::LocalMind => 3,
     };
-    let content_offset = if takeover.kind == TakeoverKind::LocalMind {
-        3
-    } else {
-        2
-    };
+    let content_offset = 2;
     let content = Rect::new(
         area.x.saturating_add(2),
         area.y.saturating_add(content_offset),
@@ -3888,7 +3911,9 @@ mod tests {
         let timelines = hit_map.timelines.as_ref().expect("visible timeline");
         assert!(timelines.for_peer(PeerPane::A).is_none());
         assert!(timelines.for_peer(PeerPane::B).is_none());
-        assert_eq!(hit_map.tabs.len(), 1);
+        assert_eq!(hit_map.tabs.len(), 2);
+        assert_eq!(hit_map.tabs[0].tab, TabId::Session);
+        assert_eq!(hit_map.tabs[1].tab, TabId::LocalMind);
         assert!(timeline.timeline.height > 0);
         assert!(hit_map.composer.height > 0);
         assert_eq!(
@@ -6636,12 +6661,20 @@ mod tests {
         });
         let backend = TestBackend::new(90, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut hit_map = None;
         terminal
             .draw(|frame| {
-                let _ = render(frame, &app);
+                hit_map = Some(render(frame, &app));
             })
             .expect("render docs");
         let rendered = terminal.backend().to_string();
+        let hit_map = hit_map.expect("localmind hit map");
+        assert_eq!(app.active_tab, TabId::LocalMind);
+        assert_eq!(hit_map.tabs.len(), 2);
+        assert_eq!(hit_map.tabs[0].tab, TabId::Session);
+        assert_eq!(hit_map.tabs[1].tab, TabId::LocalMind);
+        assert!(buffer_line(terminal.backend().buffer(), 0).contains("Session"));
+        assert!(buffer_line(terminal.backend().buffer(), 0).contains("LocalMind"));
         for label in ["Docs", "Graph", "Memory", "Review", "Skills", "Audit"] {
             assert!(rendered.contains(label), "missing section label {label}");
         }

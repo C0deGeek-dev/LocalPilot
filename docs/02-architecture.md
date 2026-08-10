@@ -299,7 +299,7 @@ The single source of truth for the slash-command surface across all three hosts
   dispatch, host-aware: the inline host keeps its frozen behaviour while the
   full-screen and pair hosts additionally route the five shared takeover commands
   (`help`/`theme`/`settings`/`diff`/`search`) to real actions. Full-screen alone
-  adds the CLI-injected, engine-neutral `/localmind` takeover (ADR-0152); the
+  adds the CLI-injected, engine-neutral `/localmind` workspace tab (ADR-0152); the
   presentation crates remain free of LocalMind dependencies. The full-screen
   host also runs `/compact`, the long-running `/ingest` runs, `/research`, and the
   `/harness-resume` / `/wait-resume` resume commands on its

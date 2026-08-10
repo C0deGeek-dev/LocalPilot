@@ -29,7 +29,7 @@ Decision:
 
 Boundary and compatibility: no LocalMind API, store schema, review mode, or
 permission profile changes. The reviewer is not derived from provider/session
-metadata and is not persisted by the takeover. Removing the three key actions
+metadata and is not persisted by the tab. Removing the three key actions
 restores a read-only view without affecting standalone review. Pinned by denied-
 write, interactive Ask allow/deny, approved mutation, reviewer/state, and refresh
 tests.
@@ -39,18 +39,21 @@ bypasses configured policy); granting the presentation crate engine access
 (breaks layering); inventing a second confirmation channel (approval drift); and
 defaulting reviewer identity (not a deliberate human claim).
 
-## ADR-0152: Full-Screen LocalMind Uses A CLI-Injected Neutral Takeover
+## ADR-0152: Full-Screen LocalMind Uses A CLI-Injected Neutral Workspace Tab
 
 Status: Accepted. Extends ADR-0129 (full-screen chat), ADR-0144 (shared host
 surfaces), and ADR-0036 (LocalMind adapter boundary).
 
 Decision:
 
-- **One takeover owns six internal sections.** `/localmind` opens Docs, Graph,
-  Memory, Review, Skills, and Audit in the default full-screen host. Tab and
-  Shift+Tab cycle those sections, Escape dismisses the containing surface, and
-  the central `localpilot-slash` catalog is the only command spelling and
-  discovery source. Inline and pair hosts do not expose the command.
+- **One product tab owns six internal sections.** The ordinary full-screen top
+  bar exposes Session and LocalMind; selecting LocalMind or entering
+  `/localmind` opens Docs, Graph, Memory, Review, Skills, and Audit. Tab and
+  Shift+Tab cycle those sections, while Escape returns to Session. LocalMind
+  state is separate from transient Help/Diff/Settings/Report takeovers, so tab
+  switches preserve section, selection, and reviewer state and an overlay
+  dismisses back to the tab beneath it. Inline and pair hosts do not expose the
+  command or tab.
 - **The CLI joins engine and presentation.** `localpilot-localmind` exports
   LocalPilot-owned read summaries for the documentation index, architecture
   overview, memory, review queue, and audit. The CLI resolves the nearest store,
@@ -65,18 +68,22 @@ Decision:
   read-only text rendering computes exact wrapping but allocates only the visible
   viewport. Skills is advisory and read-only.
 
-Boundary and compatibility: no persistent root-tab model, store schema,
-LocalMind submodule, provider contract, or dependency change. The standalone
-LocalMind UI remains the richer management surface. Removing the single catalog
-row and dispatch makes the additive takeover unreachable. Pinned by catalog and
-host-routing tests, six-section input/render tests, 10,000-row bounding/window
-tests, absent-store tests, and dependency-tree checks.
+Boundary and compatibility: the root-tab model gains one presentation-owned,
+session-local state slot; there is no store schema, LocalMind submodule,
+provider contract, or dependency change. The standalone LocalMind UI remains
+the richer management surface. Removing the tab plus the single catalog row and
+dispatch makes the additive workspace unreachable. Pinned by catalog and
+host-routing tests, tab/overlay precedence and persistence tests, six-section
+input/render tests, 10,000-row bounding/window tests, absent-store tests, and
+dependency-tree checks.
 
-Rejected: six takeover kinds (duplicates lifecycle/input behavior); using the
-existing root tab metadata (it is not the takeover state machine); reading the
-engine from a presentation crate (layering regression); initializing a store to
-display an empty view (a read causing writes); and reproducing LocalMind's full
-standalone management UI (scope and ownership drift).
+Rejected: six root tabs (duplicates section lifecycle/input behavior); storing
+LocalMind in the transient takeover slot (hidden state would capture Session
+input or be clobbered by the next overlay); a decorative tab that still requires
+the slash command; reading the engine from a presentation crate (layering
+regression); initializing a store to display an empty view (a read causing
+writes); and reproducing LocalMind's full standalone management UI (scope and
+ownership drift).
 
 ## ADR-0151: Chat Hosts Drive The Persisted Self-Improvement Loop
 

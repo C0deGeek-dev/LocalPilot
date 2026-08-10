@@ -10,6 +10,14 @@ const NARROW_WIDTH: u16 = 60;
 const MINIMUM_TIMELINE_HEIGHT: u16 = 3;
 const CONTENT_LEFT_INSET: u16 = 2;
 const CHROME_RIGHT_INSET: u16 = 2;
+
+pub(crate) const fn tab_height(width: u16, screen_reader: bool) -> u16 {
+    if screen_reader && width < NARROW_WIDTH {
+        2
+    } else {
+        1
+    }
+}
 const TIMELINE_SCROLLBAR_GAP: u16 = 1;
 
 /// Geometry for one visible session timeline.
@@ -153,7 +161,7 @@ fn calculate_rows(
 
     let narrow = area.width < NARROW_WIDTH;
     let stacked = narrow && area.height >= 14;
-    let tabs_height: u16 = if screen_reader && narrow { 2 } else { 1 };
+    let tabs_height = tab_height(area.width, screen_reader);
     let status_height = if stacked { 2 } else { 1 };
     let footer_height = if stacked { 2 } else { 1 };
     let fixed_without_editor = tabs_height

@@ -40,8 +40,9 @@ use localpilot_terminal_ui::{
     LocalMindReviewRow, PairStatus, PairStatusCandidate, PeerPane, PlanEntry,
     QuestionOption as UiQuestionOption, QuestionResponse, RecoveryState, ResultTone, RuntimeUpdate,
     SessionEntry, SessionHeader, SessionSelection, SettingEdit, SettingEntry, StopState,
-    SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, Timeline, TimelineNavigation,
-    TimelinePaneHits, UsageTotals, UserShellCommand, UserShellOutput, VisualRowPart,
+    SubmittedInput, TabId, TakeoverNavigation, TerminalCapabilities, Theme, Timeline,
+    TimelineNavigation, TimelinePaneHits, UsageTotals, UserShellCommand, UserShellOutput,
+    VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::{BackgroundProcesses, ToolOutputPresentation, UserAnswer, UserQuestion};
@@ -885,6 +886,7 @@ impl WorkspaceFileIndex {
 enum RoutedEvent {
     Unhandled,
     Handled,
+    OpenLocalMind,
     Copy(String),
     PasteClipboard,
 }
@@ -3264,7 +3266,15 @@ async fn execute_fullscreen_slash_action(
         | SlashAction::Search(_)) => {
             open_fullscreen_takeover(app, config, cwd, action, runtime.reasoning_effort());
         }
-        SlashAction::LocalMind => app.open_localmind(load_localmind_data(cwd)),
+        SlashAction::LocalMind => {
+            let data = load_localmind_data(cwd);
+            if app.localmind_section().is_some() {
+                app.refresh_localmind(data);
+                let _ = app.activate_tab(TabId::LocalMind);
+            } else {
+                app.open_localmind(data);
+            }
+        }
         // Toggle reasoning visibility in the timeline (a pure display toggle).
         SlashAction::ToggleThinking => {
             let visible = app.toggle_reasoning();
@@ -3659,6 +3669,10 @@ fn handle_pair_terminal_event(
 
     match route_pointer_or_navigation(app, &event, hit_map, mouse_state) {
         RoutedEvent::Handled => return PairHostAction::None,
+        RoutedEvent::OpenLocalMind => {
+            app.open_localmind(load_localmind_data(cwd));
+            return PairHostAction::None;
+        }
         RoutedEvent::Copy(text) => {
             copy_to_clipboard(app, text);
             return PairHostAction::None;
@@ -4114,6 +4128,10 @@ async fn run_event_loop(
         }
         match route_pointer_or_navigation(app, &next, &hit_map, &mut mouse_state) {
             RoutedEvent::Handled => continue,
+            RoutedEvent::OpenLocalMind => {
+                app.open_localmind(load_localmind_data(cwd));
+                continue;
+            }
             RoutedEvent::Copy(text) => {
                 copy_to_clipboard(app, text);
                 continue;
@@ -5886,6 +5904,10 @@ fn handle_operation_terminal_event(
     } else {
         match route_pointer_or_navigation(app, &next, hit_map, mouse_state) {
             RoutedEvent::Handled => false,
+            RoutedEvent::OpenLocalMind => {
+                app.open_localmind(load_localmind_data(cwd));
+                false
+            }
             RoutedEvent::Copy(text) => {
                 copy_to_clipboard(app, text);
                 false
@@ -6895,6 +6917,19 @@ fn handle_mouse_event(
             app.disarm_exit();
             mouse_state.reset_gesture();
 
+            if let Some(tab) = hit_map
+                .tabs
+                .iter()
+                .find(|tab| rect_contains(tab.area, mouse.column, mouse.row))
+            {
+                if tab.tab == TabId::LocalMind && app.localmind_section().is_none() {
+                    return RoutedEvent::OpenLocalMind;
+                }
+                let _ = app.activate_tab(tab.tab);
+                app.active_timeline_mut().clear_selection();
+                return RoutedEvent::Handled;
+            }
+
             let clicked_timeline = (!hit_map.takeover)
                 .then(|| pointer_timeline_hits(hit_map, mouse.column, mouse.row))
                 .flatten();
@@ -6969,16 +7004,6 @@ fn handle_mouse_event(
                 {
                     app.select_takeover_row(hit.index);
                 }
-                return RoutedEvent::Handled;
-            }
-
-            if let Some(tab) = hit_map
-                .tabs
-                .iter()
-                .find(|tab| rect_contains(tab.area, mouse.column, mouse.row))
-            {
-                app.active_tab = tab.tab;
-                app.active_timeline_mut().clear_selection();
                 return RoutedEvent::Handled;
             }
 
@@ -11314,6 +11339,83 @@ mod tests {
             panic!("Enter should activate the focused row");
         };
         assert_eq!(selection.as_str(), selected);
+    }
+
+    #[test]
+    fn localmind_tab_click_lazy_loads_once_and_switches_back_to_preserved_state() {
+        let mut app = app();
+        let hit_map = draw_hit_map(&app, 80, 20);
+        let localmind = hit_map
+            .tabs
+            .iter()
+            .find(|hit| hit.tab == TabId::LocalMind)
+            .copied()
+            .expect("LocalMind tab");
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    localmind.area.x,
+                    localmind.area.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::OpenLocalMind
+        );
+        app.open_localmind(LocalMindData::default());
+        assert_eq!(app.active_tab, TabId::LocalMind);
+        assert!(app.localmind_section().is_some());
+        assert!(!app.has_takeover());
+
+        let localmind_hit_map = draw_hit_map(&app, 80, 20);
+        let session = localmind_hit_map
+            .tabs
+            .iter()
+            .find(|hit| hit.tab == TabId::Session)
+            .copied()
+            .expect("Session tab");
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    session.area.x,
+                    session.area.y,
+                )),
+                &localmind_hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.active_tab, TabId::Session);
+
+        let session_hit_map = draw_hit_map(&app, 80, 20);
+        let localmind = session_hit_map
+            .tabs
+            .iter()
+            .find(|hit| hit.tab == TabId::LocalMind)
+            .copied()
+            .expect("LocalMind tab after returning to Session");
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    localmind.area.x,
+                    localmind.area.y,
+                )),
+                &session_hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled,
+            "preserved tab state must avoid a second load"
+        );
+        assert_eq!(app.active_tab, TabId::LocalMind);
+        assert!(app.localmind_section().is_some());
     }
 
     #[test]
@@ -16524,7 +16626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn localmind_slash_opens_the_six_section_takeover() {
+    async fn localmind_slash_activates_the_six_section_tab() {
         let dir = tempfile::tempdir().expect("temporary workspace");
         localpilot_localmind::initialize(dir.path()).expect("empty LocalMind store");
         let (config, mut bundle) = single_session(dir.path()).await;
@@ -16540,11 +16642,35 @@ mod tests {
         .await;
 
         assert!(!exited);
-        assert!(app.has_takeover());
+        assert_eq!(app.active_tab, TabId::LocalMind);
+        assert!(!app.has_takeover());
+        assert!(app.localmind_section().is_some());
         let screen = rendered_screen(&app);
         for section in ["Docs", "Graph", "Memory", "Review", "Skills", "Audit"] {
             assert!(screen.contains(section), "missing {section}:\n{screen}");
         }
+
+        let _ = app.handle_input(InputAction::AcceptCompletion, 80);
+        assert_eq!(
+            app.localmind_section(),
+            Some(localpilot_terminal_ui::LocalMindSection::Graph)
+        );
+        assert!(app.activate_tab(TabId::Session));
+        let exited = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            dir.path(),
+            slash_input("/localmind"),
+        )
+        .await;
+        assert!(!exited);
+        assert_eq!(app.active_tab, TabId::LocalMind);
+        assert_eq!(
+            app.localmind_section(),
+            Some(localpilot_terminal_ui::LocalMindSection::Graph),
+            "reopening through the command should refresh without resetting tab state"
+        );
         bundle.runtime.close();
     }
 

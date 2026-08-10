@@ -7,10 +7,12 @@ is SemVer-stable; the configuration schema stability policy is in
 ## Unreleased
 
 - **LocalMind is now inspectable and reviewable inside full-screen chat.** The
-  new `/localmind` takeover provides Docs, Graph, Memory, Review, Skills, and
-  Audit sections with `Tab`/`Shift+Tab` navigation and bounded viewport
-  rendering. Opening it without a project store is read-only and creates no
-  project state;
+  top bar now exposes real Session and LocalMind product tabs; `/localmind` and
+  selecting the LocalMind tab both open its Docs, Graph, Memory, Review, Skills,
+  and Audit sections with `Tab`/`Shift+Tab` navigation and bounded viewport
+  rendering. Switching tabs preserves LocalMind section, selection, and reviewer
+  state, while transient overlays return to the tab beneath them. Opening it
+  without a project store is read-only and creates no project state;
   Skills reports LocalPilot proposals without changing them. Review requires an
   explicit session-local reviewer identity, limits actions to valid candidate
   states, and sends Accept, Reject, and Promote through the active permission

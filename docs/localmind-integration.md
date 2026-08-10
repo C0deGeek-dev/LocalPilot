@@ -85,11 +85,14 @@ it never rewrites the committed submodule gitlink.
 
 ### Full-screen LocalMind view
 
-Full-screen `localpilot chat` exposes `/localmind`, one contained takeover with
-six internal sections: **Docs, Graph, Memory, Review, Skills, and Audit**. `Tab`
-and `Shift+Tab` move between sections without leaving the takeover; `Esc` closes
-it. The command is intentionally absent from the inline and pair hosts, and it
-does not replace LocalMind's standalone UI.
+Full-screen `localpilot chat` exposes **Session** and **LocalMind** in its top
+bar. Selecting LocalMind or entering `/localmind` opens six internal sections:
+**Docs, Graph, Memory, Review, Skills, and Audit**. `Tab` and `Shift+Tab` move
+between sections; `Esc` returns to Session. Switching tabs preserves the current
+LocalMind section, selection, and reviewer identity. Help, Diff, Settings, and
+Report remain transient overlays; dismissing one returns to whichever product
+tab was beneath it. The command and tab are intentionally absent from the
+inline and pair hosts, and this does not replace LocalMind's standalone UI.
 
 The CLI is the integration boundary. It resolves the nearest LocalMind store,
 reads the engine through `localpilot-localmind`, maps the results into plain
