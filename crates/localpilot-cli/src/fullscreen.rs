@@ -1,5 +1,6 @@
 //! Crossterm host for the backend-neutral full-screen chat model.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::future::Future;
@@ -101,6 +102,9 @@ pub(crate) struct HostContext<'a> {
     /// paths observe the newly added provider without restarting the host.
     pub(crate) config: &'a mut localpilot_config::Config,
     pub(crate) trust_required: bool,
+    /// Confirmed reload handoff, consumed by `repl::run_chat` only after this host
+    /// has restored the alternate screen and raw terminal modes.
+    pub(crate) deferred_selfimprove_reload: &'a Cell<bool>,
 }
 
 pub(crate) struct PairHostContext<'a> {
@@ -708,6 +712,7 @@ enum PumpedSlash {
     },
     /// Read and present the LocalBox-owned catalog without side effects.
     LocalBoxModels,
+    SelfImprove(localpilot_tui::SelfImproveAction),
     Compact {
         force: bool,
     },
@@ -753,6 +758,7 @@ fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
             allow_untuned,
         }),
         SlashAction::LocalBoxModels => SlashRoute::Pumped(PumpedSlash::LocalBoxModels),
+        SlashAction::SelfImprove(action) => SlashRoute::Pumped(PumpedSlash::SelfImprove(action)),
         SlashAction::Compact { force } => SlashRoute::Pumped(PumpedSlash::Compact { force }),
         SlashAction::Ingest(localpilot_tui::IngestAction::Run) => {
             SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Run))
@@ -2982,6 +2988,9 @@ async fn execute_fullscreen_slash_action(
         | SlashAction::LocalBoxServe { .. } => app.apply_runtime(RuntimeUpdate::Warning(
             "/localbox could not enter the operation pump".to_string(),
         )),
+        SlashAction::SelfImprove(_) => app.apply_runtime(RuntimeUpdate::Warning(
+            "/selfimprove could not enter the operation pump".to_string(),
+        )),
         action @ (SlashAction::Help
         | SlashAction::Theme(_)
         | SlashAction::Settings(_)
@@ -3756,6 +3765,7 @@ async fn run_event_loop(
         history,
         ingest,
         config,
+        deferred_selfimprove_reload,
         // The launch gate uses this in the startup screen; inside the loop the live
         // authority is `runtime.trusted()` (built from the same launch snapshot),
         // updated on accept — so no separate loop-local trust shadow is kept.
@@ -3889,6 +3899,7 @@ async fn run_event_loop(
                                     PumpedAuthority {
                                         config,
                                         approval_tx,
+                                        deferred_selfimprove_reload,
                                     },
                                 )
                                 .await?
@@ -3931,6 +3942,7 @@ async fn run_event_loop(
                             PumpedAuthority {
                                 config,
                                 approval_tx,
+                                deferred_selfimprove_reload,
                             },
                         )
                         .await?
@@ -3960,6 +3972,7 @@ async fn run_event_loop(
                             PumpedAuthority {
                                 config,
                                 approval_tx,
+                                deferred_selfimprove_reload,
                             },
                         )
                         .await?
@@ -4128,6 +4141,19 @@ async fn drive_slash_command(
             .await
         }
         PumpedSlash::LocalBoxModels => drive_localbox_models(terminal, app, ctx, queue).await,
+        PumpedSlash::SelfImprove(action) => {
+            drive_selfimprove(
+                terminal,
+                app,
+                runtime,
+                ctx,
+                queue,
+                authority.approval_tx,
+                authority.deferred_selfimprove_reload,
+                action,
+            )
+            .await
+        }
         PumpedSlash::Compact { force } => {
             drive_compact(terminal, app, runtime, ctx, force, queue).await
         }
@@ -4235,6 +4261,156 @@ async fn drive_localbox_models(
         apply_localbox_pump_result,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_selfimprove(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    approval_tx: &mpsc::UnboundedSender<ApprovalCall>,
+    deferred_reload: &Cell<bool>,
+    action: localpilot_tui::SelfImproveAction,
+) -> Result<bool> {
+    let step = match crate::selfimprove_cmd::interactive_step(ctx.cwd, &action) {
+        Ok(step) => step,
+        Err(error) => {
+            app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "self-improvement preflight failed: {error}"
+            )));
+            return Ok(false);
+        }
+    };
+
+    // The exact persisted proposal is visible before the confirmation dialog can
+    // yield a positive answer and reach the shared approval-token seam.
+    let confirmed_proposal_id = if step == crate::selfimprove_cmd::InteractiveStep::Approve {
+        let mut proposal = Vec::new();
+        let result = crate::selfimprove_cmd::render_pending_proposal(ctx.cwd, &mut proposal);
+        let failed = result.is_err();
+        let proposal_id = result.as_ref().ok().cloned();
+        present_command_report(
+            app,
+            command_report(
+                "selfimprove proposal",
+                crate::repl::bounded_command_output_from_buffer(proposal, result.map(|_| ())),
+            ),
+        );
+        draw_synchronized(terminal, app)?;
+        if failed {
+            return Ok(false);
+        }
+        proposal_id
+    } else {
+        None
+    };
+
+    let cancel = CancellationToken::new();
+    let operation_cancel = cancel.clone();
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    let model = runtime.active_model().to_string();
+    let provider = runtime.active_provider_id().to_string();
+    let root = ctx.cwd.to_path_buf();
+    let tx = approval_tx.clone();
+    app.begin_work_with_label(match step {
+        crate::selfimprove_cmd::InteractiveStep::Build => "Building self-improvement",
+        crate::selfimprove_cmd::InteractiveStep::Propose => "Preparing self-improvement",
+        _ => "Advancing self-improvement",
+    });
+    let operation = crate::repl::execute_selfimprove_pump(crate::repl::SelfImprovePumpRequest {
+        cwd: root,
+        action,
+        model,
+        provider,
+        step,
+        confirmed_proposal_id,
+        approval_tx: tx,
+        cancel: operation_cancel,
+    });
+    let completed_reload = Cell::new(false);
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    let pump_exit = drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        if step == crate::selfimprove_cmd::InteractiveStep::Build {
+            OperationKind::UninterruptibleCommand
+        } else {
+            OperationKind::Command
+        },
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        |app, result| {
+            match result {
+                Ok(crate::repl::SelfImprovePumpResult::Finished {
+                    outcome,
+                    output,
+                    result,
+                }) => {
+                    present_command_report(
+                        app,
+                        command_report(
+                            "selfimprove",
+                            crate::repl::bounded_command_output_from_buffer(output, result),
+                        ),
+                    );
+                    completed_reload
+                        .set(outcome == crate::selfimprove_cmd::InteractiveOutcome::DeferredReload);
+                }
+                Ok(crate::repl::SelfImprovePumpResult::Declined(action)) => {
+                    app.apply_runtime(RuntimeUpdate::Notice(format!(
+                        "self-improvement {action} declined — persisted state is unchanged"
+                    )));
+                }
+                Ok(crate::repl::SelfImprovePumpResult::Cancelled(output)) => {
+                    present_command_report(
+                        app,
+                        command_report(
+                            "selfimprove",
+                            crate::repl::bounded_command_output_from_buffer(output, Ok(())),
+                        ),
+                    );
+                    app.apply_runtime(RuntimeUpdate::Notice(
+                        "self-improvement action cancelled before a stage transition".to_string(),
+                    ));
+                }
+                Err(error) => app.apply_runtime(RuntimeUpdate::Warning(format!(
+                    "self-improvement operation failed: {error}"
+                ))),
+            }
+            app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        },
+    )
+    .await?;
+    if completed_reload.get() {
+        deferred_reload.set(true);
+        discard_queued_operations(queue);
+        return Ok(true);
+    }
+    Ok(pump_exit)
 }
 
 /// Run `/localbox` on the responsive command pump. Child stdio is isolated by
@@ -4759,6 +4935,7 @@ struct ResumeAuthority<'a> {
 struct PumpedAuthority<'a> {
     config: &'a mut localpilot_config::Config,
     approval_tx: &'a mpsc::UnboundedSender<ApprovalCall>,
+    deferred_selfimprove_reload: &'a Cell<bool>,
 }
 
 /// Which resume the pump runs — a typed kind (not a bare `wait` bool) so the two
@@ -5066,6 +5243,9 @@ enum OperationKind {
     Shell,
     /// A pumped slash command (`/compact`, long-running `/ingest`).
     Command,
+    /// A command whose synchronous worker cannot be abandoned safely. Input stays
+    /// responsive, but even a forced exit waits for its durable stage boundary.
+    UninterruptibleCommand,
 }
 
 impl OperationKind {
@@ -5073,7 +5253,7 @@ impl OperationKind {
         match self {
             Self::Turn => "poll full-screen turn input",
             Self::Shell => "poll full-screen shell input",
-            Self::Command => "poll full-screen command input",
+            Self::Command | Self::UninterruptibleCommand => "poll full-screen command input",
         }
     }
 
@@ -5081,7 +5261,7 @@ impl OperationKind {
         match self {
             Self::Turn => "read full-screen turn input",
             Self::Shell => "read full-screen shell input",
-            Self::Command => "read full-screen command input",
+            Self::Command | Self::UninterruptibleCommand => "read full-screen command input",
         }
     }
 
@@ -5089,8 +5269,12 @@ impl OperationKind {
         match self {
             Self::Turn => "poll after active full-screen paste key",
             Self::Shell => "poll after active shell paste key",
-            Self::Command => "poll after active command paste key",
+            Self::Command | Self::UninterruptibleCommand => "poll after active command paste key",
         }
+    }
+
+    const fn waits_for_durable_boundary(self) -> bool {
+        matches!(self, Self::UninterruptibleCommand)
     }
 }
 
@@ -5356,6 +5540,7 @@ where
     progress.drain(app);
     let mut hit_map = (io.draw)(app)?;
     let mut render_needed = false;
+    let mut durable_wait_notified = false;
     let outcome = async {
         loop {
             tokio::select! {
@@ -5400,7 +5585,19 @@ where
                             }
                             OperationInputOutcome::Exit => {
                                 cancel.cancel();
-                                return Ok(true);
+                                if kind.waits_for_durable_boundary() {
+                                    if !durable_wait_notified {
+                                        app.apply_runtime(RuntimeUpdate::Warning(
+                                            "the self-improvement build cannot be abandoned mid-stage; waiting for its durable result"
+                                                .to_string(),
+                                        ));
+                                        durable_wait_notified = true;
+                                    }
+                                    app.clear_cancellation_request();
+                                    render_needed = true;
+                                } else {
+                                    return Ok(true);
+                                }
                             }
                         }
                     }
@@ -5456,7 +5653,19 @@ where
                             }
                             OperationInputOutcome::Exit => {
                                 cancel.cancel();
-                                return Ok(true);
+                                if kind.waits_for_durable_boundary() {
+                                    if !durable_wait_notified {
+                                        app.apply_runtime(RuntimeUpdate::Warning(
+                                            "the self-improvement build cannot be abandoned mid-stage; waiting for its durable result"
+                                                .to_string(),
+                                        ));
+                                        durable_wait_notified = true;
+                                    }
+                                    app.clear_cancellation_request();
+                                    render_needed = true;
+                                } else {
+                                    return Ok(true);
+                                }
                             }
                         }
                     }
@@ -5467,6 +5676,17 @@ where
                     }
                 }
                 _ = frame_tick.tick() => {
+                    if kind.waits_for_durable_boundary()
+                        && cancel.is_cancelled()
+                        && !durable_wait_notified
+                    {
+                        app.apply_runtime(RuntimeUpdate::Warning(
+                            "the self-improvement build cannot be interrupted mid-stage; waiting for its durable result"
+                                .to_string(),
+                        ));
+                        app.clear_cancellation_request();
+                        durable_wait_notified = true;
+                    }
                     workspace_index.refresh(app);
                     progress.drain(app);
                     if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
@@ -5514,7 +5734,18 @@ where
                             }
                             OperationInputOutcome::Exit => {
                                 cancel.cancel();
-                                return Ok(true);
+                                if kind.waits_for_durable_boundary() {
+                                    if !durable_wait_notified {
+                                        app.apply_runtime(RuntimeUpdate::Warning(
+                                            "the self-improvement build cannot be abandoned mid-stage; waiting for its durable result"
+                                                .to_string(),
+                                        ));
+                                        durable_wait_notified = true;
+                                    }
+                                    app.clear_cancellation_request();
+                                } else {
+                                    return Ok(true);
+                                }
                             }
                         }
                     }
@@ -10378,7 +10609,7 @@ mod tests {
 
     #[test]
     fn fullscreen_catalog_matches_the_shared_spec_table() {
-        // The full-screen picker is generated from the shared table: 38 rows in global
+        // The full-screen picker is generated from the shared table: 39 rows in global
         // order (the `agent`/`harness` mode entries, the four permission profiles +
         // effort, the pumped + synchronous command tiers, and the 5 takeovers),
         // byte-for-byte, and never a hidden inline-only forcing alias.
@@ -10405,6 +10636,10 @@ mod tests {
             (
                 "localbox",
                 "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)",
+            ),
+            (
+                "selfimprove",
+                "Review, propose, approve, build, and reload (/selfimprove [status|start|next|approve|reset])",
             ),
             ("new", "Start a fresh session"),
             ("fork", "Branch the conversation into a new session"),
@@ -10444,7 +10679,7 @@ mod tests {
             ("settings", "Inspect terminal chat settings"),
             ("diff", "Review tracked workspace changes"),
         ];
-        assert_eq!(full_screen.len(), 38);
+        assert_eq!(full_screen.len(), 39);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
@@ -13943,6 +14178,14 @@ mod tests {
         assert!(matches!(
             route_fullscreen_slash(SlashAction::LocalBoxModels),
             SlashRoute::Pumped(PumpedSlash::LocalBoxModels)
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::SelfImprove(
+                localpilot_tui::SelfImproveAction::Next
+            )),
+            SlashRoute::Pumped(PumpedSlash::SelfImprove(
+                localpilot_tui::SelfImproveAction::Next
+            ))
         ));
         assert!(matches!(
             route_fullscreen_slash(SlashAction::LocalBoxServe {

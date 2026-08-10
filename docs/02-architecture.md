@@ -535,10 +535,14 @@ mutation with a human-merge gate (`patchgen`) versus a compiled-binary lifecycle
 with a build gauntlet and rollback breaker (`selfdev`). Merging them would couple
 two unrelated concerns and blur the human gate (ADR-0138).
 
-Must not own: minting the `ApprovalToken` (only the human `--approve` path
+Must not own: minting the `ApprovalToken` (only an explicit human approval path
 does), and any autonomous build→reload path — the unattended loop stays deferred
-(ADR-0128). It is surfaced by `localpilot selfimprove status` / `next`, which
-advance one explicit step and hard-stop at the gate.
+(ADR-0128). It is surfaced by `localpilot selfimprove status` / `next` and by the
+two interactive hosts through `/selfimprove`. Both surfaces call the same
+orchestrator and persisted state. Chat lists multiple findings before requiring
+an explicit rank, displays the persisted proposal before a reviewer-bound
+approval confirmation, advances build/reload one requested step at a time, and
+performs a confirmed reload only after restoring terminal modes (ADR-0151).
 
 ### `localpilot-verify`
 

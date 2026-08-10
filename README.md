@@ -168,6 +168,10 @@ unchanged. Run `localpilot --help` for the complete command tree.
 - `/model` changes provider or model without losing the conversation.
 - `/localbox adopt --serve <model>` can start LocalBox, adopt its provider, and
   switch the current idle conversation to the local model.
+- `/selfimprove` shows the persisted self-improvement stage. Use
+  `/selfimprove start [finding-rank]` to review/select and propose,
+  `/selfimprove approve <reviewer>` for the explicit human gate, and
+  `/selfimprove next` for each subsequent build/reload step.
 - `/name` names the session so it can be resumed by name.
 - `/default`, `/relaxed`, `/bypass`, and `/unrestricted` switch the permission
   profile mid-turn, taking effect from the running turn's next tool call.

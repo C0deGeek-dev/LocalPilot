@@ -495,6 +495,16 @@ structural, not a convention:
   only land strictly inside the worktree.
 - **Scope-bound.** A proposal may touch only the files the finding named; both
   the declared edits and the produced diff are checked against that set.
+- **Interactive approval is informed and identity-bound.** `/selfimprove
+  approve <reviewer>` first reopens and displays the persisted proposal id and
+  bounded diff, then requires a positive terminal confirmation naming that id
+  and reviewer. The state and id are rechecked after the dialog; a stale or
+  replaced proposal is refused. `/selfimprove next` has no approval argument and
+  cannot mint a token.
+- **Reload happens outside terminal modes.** A Built→Reloaded action requires a
+  separate confirmation, asks the interactive host to exit, restores raw/inline
+  or alternate-screen state, and only then calls the existing self-dev reload.
+  A failed process swap rolls persisted state back to Built as before.
 
 ## Outward Draft Emission
 

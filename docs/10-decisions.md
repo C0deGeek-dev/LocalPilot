@@ -2,6 +2,60 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0151: Chat Hosts Drive The Persisted Self-Improvement Loop
+
+Status: Accepted. Amends ADR-0034 (human-gated patch generation), ADR-0128
+(deferred self-improvement), ADR-0138 (thin loop orchestrator), ADR-0129
+(full-screen chat), and ADR-0144 (shared long-running command hosting). Closes
+LocalHub#69.
+
+Decision:
+
+- **One loop and one approval seam.** `/selfimprove` in both interactive hosts
+  delegates to the existing `localpilot-selfimprove` orchestrator and its
+  `.localpilot/selfimprove/state.json`; chat owns no shadow stage machine.
+  `/selfimprove next` can propose, report the Proposed gate, build an Approved
+  tree, or request reload, but it has no approval argument. Only
+  `/selfimprove approve <reviewer>` may reach the existing
+  `ApprovalToken::approve(id, reviewer) -> Orchestrator::approve` seam.
+- **Selection and approval are explicit and informed.** Start runs the read-only
+  review. One finding may be selected automatically; multiple findings are
+  rendered with stable one-based ranks and create no proposal until the user
+  submits `/selfimprove start <rank>`. Approval reopens and displays the exact
+  persisted id, summary, and bounded patch before a terminal confirmation that
+  repeats the id and human reviewer. The host rechecks both stage and id after
+  the dialog; concurrent/stale state fails closed.
+- **Long work uses the established host pumps.** Review and build blocking work
+  is moved off the async driver. Proposal generation is cancellable before its
+  atomic `propose` transition. The underlying self-dev build has no safe
+  cancellation seam, so a cancellation request remains visible but the host
+  awaits its durable success/failure boundary instead of detaching a worker.
+  Findings, diffs, and logs have byte/line ceilings and use each host's normal
+  report projection.
+- **Reload is deferred past terminal restoration.** Built→Reloaded requires its
+  own confirmation because it exits the live chat and replaces the process. The
+  pumped action returns a typed deferred-reload result and exits the host. Inline
+  raw modes and full-screen alternate-screen modes are restored first; only the
+  caller then invokes the existing `Orchestrator::reload`. That orchestrator
+  remains responsible for marking Reloaded before swap and rolling back to Built
+  if relaunch fails.
+
+Boundary and compatibility: CLI `selfimprove status`/`next`/`reset`, loop-state
+schema, proposal format, provider APIs, and self-dev lifecycle are unchanged.
+The slash catalog gains one shared row (35 inline / 39 full-screen / 8 pair),
+and pair collaboration deliberately keeps the action unavailable. Reverting the
+typed slash action, two host adapters, and post-restore handoff restores the CLI-
+only surface without migrating state. Pinned by grammar/catalog tests,
+stage-policy and no-next-approval tests, bounded-output tests, full-screen pump
+routing, existing CLI gate tests, and terminal-restoration witnesses.
+
+Rejected: a chat-local state machine (drift and split persistence); permitting
+`next --approve` (autonomous paths could grow approval authority); silently
+choosing among multiple findings (uninformed scope); defaulting reviewer identity
+(not a deliberate human claim); abandoning a blocking build worker (unknown
+partial lifecycle); and calling reload from raw/alternate-screen mode (corrupted
+terminal or an invisible successor).
+
 ## ADR-0150: LocalBox Owns Catalog And Run-Profile Resolution
 
 Status: Accepted. Amends ADR-0130 (LocalBox adoption) and ADR-0144 (shared

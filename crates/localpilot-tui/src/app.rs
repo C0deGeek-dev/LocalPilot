@@ -306,6 +306,9 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         | SlashAction::LocalBoxServe { .. } => state.apply(UiEvent::Notice(
             "/localbox is handled by the interactive host".to_string(),
         )),
+        SlashAction::SelfImprove(_) => state.apply(UiEvent::Notice(
+            "/selfimprove is handled by the interactive host".to_string(),
+        )),
         SlashAction::Exit { .. } => state.should_quit = true,
         SlashAction::Invalid { command, reason } => {
             state.apply(UiEvent::Notice(format!("invalid /{command}: {reason}")));

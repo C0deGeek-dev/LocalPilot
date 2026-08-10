@@ -7,6 +7,7 @@
 //! logic remain unit-tested in `localpilot-tui`; the authoritative full-screen
 //! application lives in `localpilot-terminal-ui`.
 
+use std::cell::Cell;
 use std::future::Future;
 use std::io::{self, Stdout};
 use std::sync::Arc;
@@ -23,7 +24,8 @@ use localpilot_config::{CliOverrides, ConfigPaths};
 use localpilot_core::{ContentBlock, TokenUsage};
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, SwitchError};
 use localpilot_sandbox::{
-    Approver, Interactivity, PermissionEngine, PermissionEngineHandle, Profile,
+    Approver, CommandClass, Effect, Interactivity, PermissionEngine, PermissionEngineHandle,
+    PermissionRequest, Profile,
 };
 use localpilot_store::Store;
 use localpilot_tools::{BackgroundProcesses, UserAnswer, UserQuestion};
@@ -192,6 +194,9 @@ struct CommandHost<'a> {
     /// Loaded config, used to re-resolve the active provider's vision capability
     /// when the user pastes an image (config wins, else a best-effort probe).
     config: &'a localpilot_config::Config,
+    /// Set only by a confirmed Built → Reloaded chat action. The event loop exits,
+    /// terminal modes are restored, and `run_chat` consumes it afterwards.
+    deferred_selfimprove_reload: &'a Cell<bool>,
 }
 
 /// Launch the interactive REPL.
@@ -358,6 +363,7 @@ pub async fn run_chat(
     };
     timer.mark("update check");
     let history = localpilot_store::PromptHistory::new(config.history.persistence.is_enabled());
+    let deferred_selfimprove_reload = Cell::new(false);
     // The full-screen model loads its bounded prompt history only after drawing
     // a first frame and has no consumer yet for the inline host's eager
     // `@`-mention file list or knowledge-index startup. Enter before those
@@ -396,11 +402,16 @@ pub async fn run_chat(
                 ingest: &config.ingest,
                 config: &mut fullscreen_config,
                 trust_required,
+                deferred_selfimprove_reload: &deferred_selfimprove_reload,
             },
         )
         .await;
         crate::context_inject::close_out(&cwd, runtime.session_id());
-        return result.map(|exit| ChatOutcome {
+        let exit = result?;
+        if deferred_selfimprove_reload.get() {
+            crate::selfimprove_cmd::reload_after_chat(&cwd, &mut io::stdout())?;
+        }
+        return Ok(ChatOutcome {
             succeeded: !exit.trust_denied,
             presentation: exit.presentation,
         });
@@ -479,6 +490,7 @@ pub async fn run_chat(
                     provider_id,
                     history: &history,
                     config,
+                    deferred_selfimprove_reload: &deferred_selfimprove_reload,
                 },
             )
             .await
@@ -494,6 +506,9 @@ pub async fn run_chat(
     // user actually worked in.
     crate::context_inject::close_out(&cwd, runtime.session_id());
     result?;
+    if deferred_selfimprove_reload.get() {
+        crate::selfimprove_cmd::reload_after_chat(&cwd, &mut io::stdout())?;
+    }
     Ok(ChatOutcome::success())
 }
 
@@ -977,6 +992,9 @@ async fn run_slash(
                 ))),
             }
         }
+        SlashAction::SelfImprove(action) => {
+            run_selfimprove(terminal, state, prompts, host, runtime, action).await?;
+        }
         // The walk-and-chunk actions can run for many seconds; drive them through
         // a spinner/progress loader so the UI never just freezes. The rest are
         // cheap state reads/writes and stay synchronous.
@@ -1445,6 +1463,50 @@ pub(crate) fn command_output_from_buffer(
         .collect();
     let error = result.err().map(|error| format!("command failed: {error}"));
     CommandOutput { lines, error }
+}
+
+const MAX_INTERACTIVE_COMMAND_LINES: usize = 1_000;
+const MAX_INTERACTIVE_COMMAND_BYTES: usize = 128 * 1024;
+const INTERACTIVE_TRUNCATION_MARKER: &str = "[output truncated for interactive display]";
+
+/// The bounded form used by chat workflows that can emit patches or build logs.
+/// The CLI subcommands keep their streaming output; only interactive projection is
+/// capped so neither host can flood its timeline or retain unbounded text.
+pub(crate) fn bounded_command_output_from_buffer(
+    output: Vec<u8>,
+    result: anyhow::Result<()>,
+) -> CommandOutput {
+    let normalized = command_output_from_buffer(output, result);
+    let mut lines = Vec::new();
+    let mut bytes = 0_usize;
+    let mut truncated = false;
+    for line in normalized.lines {
+        let added = line.len().saturating_add(1);
+        if lines.len() == MAX_INTERACTIVE_COMMAND_LINES
+            || bytes.saturating_add(added) > MAX_INTERACTIVE_COMMAND_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        bytes = bytes.saturating_add(added);
+        lines.push(line);
+    }
+    if truncated {
+        let marker_bytes = INTERACTIVE_TRUNCATION_MARKER.len().saturating_add(1);
+        while lines.len() >= MAX_INTERACTIVE_COMMAND_LINES
+            || bytes.saturating_add(marker_bytes) > MAX_INTERACTIVE_COMMAND_BYTES
+        {
+            let Some(removed) = lines.pop() else {
+                break;
+            };
+            bytes = bytes.saturating_sub(removed.len().saturating_add(1));
+        }
+        lines.push(INTERACTIVE_TRUNCATION_MARKER.to_string());
+    }
+    CommandOutput {
+        lines,
+        error: normalized.error,
+    }
 }
 
 /// The background-command producer as a [`CommandOutput`] (it never fails).
@@ -2069,6 +2131,232 @@ async fn run_localbox_adopt(
             "stopped waiting for LocalBox; startup may continue in the background — run `/localbox adopt` when it is ready"
                 .to_string(),
         )),
+    }
+    Ok(())
+}
+
+pub(crate) enum SelfImprovePumpResult {
+    Finished {
+        outcome: crate::selfimprove_cmd::InteractiveOutcome,
+        output: Vec<u8>,
+        result: anyhow::Result<()>,
+    },
+    Declined(&'static str),
+    Cancelled(Vec<u8>),
+}
+
+pub(crate) fn selfimprove_confirmation(
+    step: crate::selfimprove_cmd::InteractiveStep,
+    action: &localpilot_tui::SelfImproveAction,
+    proposal_id: Option<&str>,
+) -> Option<(String, String)> {
+    match step {
+        crate::selfimprove_cmd::InteractiveStep::Approve => {
+            let localpilot_tui::SelfImproveAction::Approve { reviewer } = action else {
+                return None;
+            };
+            Some((
+                "selfimprove approve".to_string(),
+                format!(
+                    "approve displayed proposal `{}` as human reviewer `{reviewer}` and promote it onto the current branch",
+                    proposal_id.unwrap_or("(unknown)")
+                ),
+            ))
+        }
+        crate::selfimprove_cmd::InteractiveStep::Reload => Some((
+            "selfimprove reload".to_string(),
+            "exit this chat and replace the running LocalPilot with the rebuilt binary".to_string(),
+        )),
+        _ => None,
+    }
+}
+
+pub(crate) struct SelfImprovePumpRequest {
+    pub(crate) cwd: std::path::PathBuf,
+    pub(crate) action: localpilot_tui::SelfImproveAction,
+    pub(crate) model: String,
+    pub(crate) provider: String,
+    pub(crate) step: crate::selfimprove_cmd::InteractiveStep,
+    pub(crate) confirmed_proposal_id: Option<String>,
+    pub(crate) approval_tx: mpsc::UnboundedSender<ApprovalCall>,
+    pub(crate) cancel: CancellationToken,
+}
+
+pub(crate) async fn execute_selfimprove_pump(
+    request: SelfImprovePumpRequest,
+) -> anyhow::Result<SelfImprovePumpResult> {
+    let SelfImprovePumpRequest {
+        cwd,
+        action,
+        model,
+        provider,
+        step,
+        confirmed_proposal_id,
+        approval_tx,
+        cancel,
+    } = request;
+    if let Some((tool, detail)) =
+        selfimprove_confirmation(step, &action, confirmed_proposal_id.as_deref())
+    {
+        let approver = TuiApprover::new(approval_tx);
+        let request = PermissionRequest {
+            tool,
+            effect: Effect::RunCommand(CommandClass::Destructive),
+            interactivity: Interactivity::Interactive,
+            trusted: true,
+            detail,
+        };
+        if !approver.approve(&request).await {
+            return Ok(SelfImprovePumpResult::Declined(
+                if step == crate::selfimprove_cmd::InteractiveStep::Reload {
+                    "reload"
+                } else {
+                    "approval"
+                },
+            ));
+        }
+    }
+
+    let mut output = Vec::new();
+    let result = if step == crate::selfimprove_cmd::InteractiveStep::Build {
+        crate::selfimprove_cmd::run_interactive(
+            &cwd,
+            &action,
+            step,
+            confirmed_proposal_id.as_deref(),
+            &model,
+            &provider,
+            &mut output,
+        )
+        .await
+    } else {
+        let selected = {
+            let run = crate::selfimprove_cmd::run_interactive(
+                &cwd,
+                &action,
+                step,
+                confirmed_proposal_id.as_deref(),
+                &model,
+                &provider,
+                &mut output,
+            );
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => Some(result),
+                () = cancel.cancelled() => None,
+            }
+        };
+        match selected {
+            Some(result) => result,
+            None => return Ok(SelfImprovePumpResult::Cancelled(output)),
+        }
+    };
+    match result {
+        Ok(outcome) => Ok(SelfImprovePumpResult::Finished {
+            outcome,
+            output,
+            result: Ok(()),
+        }),
+        Err(error) => Ok(SelfImprovePumpResult::Finished {
+            outcome: crate::selfimprove_cmd::InteractiveOutcome::Complete,
+            output,
+            result: Err(error),
+        }),
+    }
+}
+
+/// Drive the persisted self-improvement loop without freezing inline chat. The
+/// proposal future is cancellable before its atomic persist; the synchronous
+/// build runs on a blocking worker and the pump keeps awaiting its durable result.
+async fn run_selfimprove(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+    prompts: &mut UserChannels,
+    host: &CommandHost<'_>,
+    runtime: &SessionRuntime,
+    action: localpilot_tui::SelfImproveAction,
+) -> anyhow::Result<()> {
+    let step = match crate::selfimprove_cmd::interactive_step(host.cwd, &action) {
+        Ok(step) => step,
+        Err(error) => {
+            apply_command_output_result(state, command_output_from_buffer(Vec::new(), Err(error)));
+            return Ok(());
+        }
+    };
+
+    // Approval is informed: display the exact persisted id + bounded patch before
+    // asking the confirmation whose positive answer permits token minting.
+    let confirmed_proposal_id = if step == crate::selfimprove_cmd::InteractiveStep::Approve {
+        let mut proposal = Vec::new();
+        let result = crate::selfimprove_cmd::render_pending_proposal(host.cwd, &mut proposal);
+        let failed = result.is_err();
+        let proposal_id = result.as_ref().ok().cloned();
+        let result = result.map(|_| ());
+        apply_command_output_result(state, bounded_command_output_from_buffer(proposal, result));
+        draw_ui(terminal, state)?;
+        if failed {
+            return Ok(());
+        }
+        proposal_id
+    } else {
+        None
+    };
+
+    let tx = host.approval_tx.clone();
+    let cwd = host.cwd.to_path_buf();
+    let model = runtime.active_model().to_string();
+    let provider = runtime.active_provider_id().to_string();
+    let cancel = CancellationToken::new();
+    let operation_cancel = cancel.clone();
+    let (_events, mut rx) = broadcast::channel::<RuntimeEvent>(4);
+    state.busy = true;
+    let operation = execute_selfimprove_pump(SelfImprovePumpRequest {
+        cwd,
+        action,
+        model,
+        provider,
+        step,
+        confirmed_proposal_id,
+        approval_tx: tx,
+        cancel: operation_cancel,
+    });
+
+    let result = drive_runtime_operation(
+        terminal,
+        state,
+        prompts,
+        &mut rx,
+        &cancel,
+        std::time::Instant::now(),
+        None,
+        None,
+        None,
+        None,
+        operation,
+    )
+    .await?;
+    state.busy = false;
+    match result {
+        SelfImprovePumpResult::Finished {
+            outcome,
+            output,
+            result,
+        } => {
+            apply_command_output_result(state, bounded_command_output_from_buffer(output, result));
+            if outcome == crate::selfimprove_cmd::InteractiveOutcome::DeferredReload {
+                host.deferred_selfimprove_reload.set(true);
+                state.should_quit = true;
+            }
+        }
+        SelfImprovePumpResult::Declined(action) => state.apply(UiEvent::Notice(format!(
+            "self-improvement {action} declined — persisted state is unchanged"
+        ))),
+        SelfImprovePumpResult::Cancelled(output) => {
+            apply_command_output_result(state, bounded_command_output_from_buffer(output, Ok(())));
+            state.apply(UiEvent::Notice(
+                "self-improvement action cancelled before a stage transition".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -3377,6 +3665,53 @@ mod tests {
         let ok = command_output_from_buffer(b"only line\n".to_vec(), Ok(()));
         assert_eq!(ok.lines, vec!["only line".to_string()]);
         assert_eq!(ok.error, None);
+    }
+
+    #[test]
+    fn bounded_command_output_caps_lines_and_bytes_with_one_marker() {
+        use std::fmt::Write as _;
+
+        let mut many = String::new();
+        for index in 0..MAX_INTERACTIVE_COMMAND_LINES + 50 {
+            writeln!(&mut many, "line-{index}").unwrap();
+        }
+        let output = bounded_command_output_from_buffer(many.into_bytes(), Ok(()));
+        assert_eq!(output.lines.len(), MAX_INTERACTIVE_COMMAND_LINES);
+        assert_eq!(
+            output.lines.last().map(String::as_str),
+            Some(INTERACTIVE_TRUNCATION_MARKER)
+        );
+
+        let huge = vec![b'x'; MAX_INTERACTIVE_COMMAND_BYTES + 1];
+        let output = bounded_command_output_from_buffer(huge, Ok(()));
+        let displayed = output.lines.iter().map(String::len).sum::<usize>() + output.lines.len();
+        assert!(displayed <= MAX_INTERACTIVE_COMMAND_BYTES);
+        assert_eq!(
+            output.lines.last().map(String::as_str),
+            Some(INTERACTIVE_TRUNCATION_MARKER)
+        );
+    }
+
+    #[test]
+    fn selfimprove_approval_confirmation_names_the_exact_patch_and_reviewer() {
+        let action = localpilot_tui::SelfImproveAction::Approve {
+            reviewer: "David Smith".to_string(),
+        };
+        let (tool, detail) = selfimprove_confirmation(
+            crate::selfimprove_cmd::InteractiveStep::Approve,
+            &action,
+            Some("selfimprove/finding-7"),
+        )
+        .expect("approval confirmation");
+        assert_eq!(tool, "selfimprove approve");
+        assert!(detail.contains("`selfimprove/finding-7`"));
+        assert!(detail.contains("`David Smith`"));
+        assert!(selfimprove_confirmation(
+            crate::selfimprove_cmd::InteractiveStep::Gate,
+            &localpilot_tui::SelfImproveAction::Next,
+            None,
+        )
+        .is_none());
     }
 
     #[test]

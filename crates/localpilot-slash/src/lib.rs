@@ -46,6 +46,22 @@ pub enum Profile {
     Unrestricted,
 }
 
+/// One explicit action in the persisted self-improvement loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelfImproveAction {
+    /// Show the current persisted stage (bare `/selfimprove` is equivalent).
+    Status,
+    /// Review and propose one finding. `finding` is a 1-based rank; when omitted,
+    /// a single finding is selected automatically and multiple findings are listed.
+    Start { finding: Option<usize> },
+    /// Advance exactly one non-approval stage, stopping at the human gate.
+    Next,
+    /// Cross the human gate for the named reviewer.
+    Approve { reviewer: String },
+    /// Clear the persisted loop state.
+    Reset,
+}
+
 impl Profile {
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -112,6 +128,8 @@ pub enum SlashAction {
         /// Explicit one-shot approval to use defaults when no tuned profile exists.
         allow_untuned: bool,
     },
+    /// Inspect or advance the persisted, human-gated self-improvement loop.
+    SelfImprove(SelfImproveAction),
     Ingest(IngestAction),
     Knowledge(String),
     /// Research a topic. `Some(topic)` runs a one-shot research pass; `None`
@@ -499,7 +517,7 @@ slash_commands! {
     commands {
         // Shared (inline + selectively full-screen) command identities.
         Agent, Harness, Default, Relaxed, Bypass, Unrestricted, Think, Effort,
-        Model, Localbox, New, Fork, Clone, Tree, Sessions, Session, Name,
+        Model, Localbox, Selfimprove, New, Fork, Clone, Tree, Sessions, Session, Name,
         Continue, Clear, Compact, HarnessResume, WaitResume, Ingest, Knowledge,
         Context, Research, Agents, Skills, Bg, Exit,
         // Full-screen/pair takeover identities. `parse_slash` (the inline rollback
@@ -512,7 +530,7 @@ slash_commands! {
         Abort,
     }
     spellings {
-        // --- shared: 34 inline-visible rows, in the frozen order -------------
+        // --- shared: 35 inline-visible rows, in the frozen order -------------
         Agent => both("agent", NoArg, Reject, "Switch to agent mode"),
         Harness => both("harness", NoArg, Reject, "Switch to harness mode"),
         // The four permission profiles and `/effort` are switchable in the
@@ -549,6 +567,12 @@ slash_commands! {
             Optional,
             Fall,
             "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)"
+        ),
+        Selfimprove => both(
+            "selfimprove",
+            Optional,
+            Fall,
+            "Review, propose, approve, build, and reload (/selfimprove [status|start|next|approve|reset])"
         ),
         New => both("new", NoArg, Fall, "Start a fresh session"),
         Fork => both("fork", NoArg, Fall, "Branch the conversation into a new session"),
@@ -699,6 +723,7 @@ impl SlashAction {
             SlashAction::Model { .. } => C::Model,
             SlashAction::LocalBoxAdopt { .. } => C::Localbox,
             SlashAction::LocalBoxModels | SlashAction::LocalBoxServe { .. } => C::Localbox,
+            SlashAction::SelfImprove(_) => C::Selfimprove,
             SlashAction::NewSession => C::New,
             SlashAction::Fork => C::Fork,
             SlashAction::CloneSession => C::Clone,
@@ -755,6 +780,49 @@ pub fn parse_slash_for(host: Host, line: &str) -> Option<SlashAction> {
         return Some(SlashAction::Unknown(command.to_string()));
     };
     Some(dispatch(spelling, host, name, args, command))
+}
+
+fn parse_selfimprove(name: &str, args: &str) -> SlashAction {
+    const USAGE: &str =
+        "usage: /selfimprove [status | start [finding-rank] | next | approve <reviewer> | reset]";
+
+    match args {
+        "" | "status" => SlashAction::SelfImprove(SelfImproveAction::Status),
+        "start" => SlashAction::SelfImprove(SelfImproveAction::Start { finding: None }),
+        "next" => SlashAction::SelfImprove(SelfImproveAction::Next),
+        "reset" => SlashAction::SelfImprove(SelfImproveAction::Reset),
+        _ => {
+            if let Some(rank) = args.strip_prefix("start ").map(str::trim) {
+                return match rank.parse::<usize>() {
+                    Ok(finding) if finding > 0 => {
+                        SlashAction::SelfImprove(SelfImproveAction::Start {
+                            finding: Some(finding),
+                        })
+                    }
+                    _ => SlashAction::Invalid {
+                        command: name.to_string(),
+                        reason: "finding rank must be a positive integer".to_string(),
+                    },
+                };
+            }
+            if let Some(reviewer) = args.strip_prefix("approve ").map(str::trim) {
+                return if reviewer.is_empty() {
+                    SlashAction::Invalid {
+                        command: name.to_string(),
+                        reason: "approval requires the human reviewer's name".to_string(),
+                    }
+                } else {
+                    SlashAction::SelfImprove(SelfImproveAction::Approve {
+                        reviewer: reviewer.to_string(),
+                    })
+                };
+            }
+            SlashAction::Invalid {
+                command: name.to_string(),
+                reason: USAGE.to_string(),
+            }
+        }
+    }
 }
 
 /// Dispatch a resolved spelling to its action. One arm per [`SlashCommand`]
@@ -881,6 +949,7 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
                 }
             }
         }
+        C::Selfimprove => parse_selfimprove(name, args),
         C::New => no_arg(spelling, name, args, command, SlashAction::NewSession),
         C::Fork => no_arg(spelling, name, args, command, SlashAction::Fork),
         C::Clone => no_arg(spelling, name, args, command, SlashAction::CloneSession),
@@ -1162,12 +1231,12 @@ mod tests {
             from_table, from_enum,
             "SLASH_SPELLINGS identities must equal SlashCommand::ALL"
         );
-        assert_eq!(from_enum.len(), 36, "expected 36 command identities");
+        assert_eq!(from_enum.len(), 37, "expected 37 command identities");
     }
 
     #[test]
     fn catalogs_have_the_frozen_cardinalities() {
-        assert_eq!(specs_for(Host::Inline).len(), 34);
+        assert_eq!(specs_for(Host::Inline).len(), 35);
         // Full-screen grew 19→24 (profiles + `/effort`), 24→25 (`/think`), 25→31
         // (the six synchronous commands `tree`/`knowledge`/`context`/`agents`/
         // `skills`/`bg`), 31→33 (`compact` + `ingest` on the operation pump),
@@ -1175,7 +1244,7 @@ mod tests {
         // on the pump), then 36→38 (`agent` + `harness` mode entries). `compact_force`
         // (a redundant forcing alias of `compact`) and the `wait_resume`/`compact-force`
         // parse-only aliases stay hidden but remain typeable in full-screen.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 38);
+        assert_eq!(specs_for(Host::Fullscreen).len(), 39);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 
@@ -1257,8 +1326,8 @@ mod tests {
 
     #[test]
     fn inline_catalog_matches_the_frozen_golden() {
-        // The inline picker is the 34-row shared surface, byte-for-byte, in the
-        // frozen order. The takeovers never join it (inline stays 34).
+        // The inline picker is the 35-row shared surface, byte-for-byte, in the
+        // frozen order. The takeovers never join it (inline stays 35).
         let expected: &[(&str, &str)] = &[
             ("agent", "Switch to agent mode"),
             ("harness", "Switch to harness mode"),
@@ -1278,6 +1347,10 @@ mod tests {
             (
                 "localbox",
                 "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)",
+            ),
+            (
+                "selfimprove",
+                "Review, propose, approve, build, and reload (/selfimprove [status|start|next|approve|reset])",
             ),
             ("new", "Start a fresh session"),
             ("fork", "Branch the conversation into a new session"),
@@ -1789,5 +1862,51 @@ mod tests {
                 Some(SlashAction::Invalid { .. })
             ));
         }
+    }
+
+    #[test]
+    fn selfimprove_preserves_explicit_rank_reviewer_and_gate_actions() {
+        assert_eq!(
+            parse_slash("/selfimprove"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Status))
+        );
+        assert_eq!(
+            parse_slash("/selfimprove status"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Status))
+        );
+        assert_eq!(
+            parse_slash("/selfimprove start"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Start {
+                finding: None
+            }))
+        );
+        assert_eq!(
+            parse_slash("/selfimprove start 12"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Start {
+                finding: Some(12)
+            }))
+        );
+        assert_eq!(
+            parse_slash("/selfimprove next"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Next))
+        );
+        assert_eq!(
+            parse_slash("/selfimprove approve David Smith"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Approve {
+                reviewer: "David Smith".to_string()
+            }))
+        );
+        assert_eq!(
+            parse_slash("/selfimprove reset"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Reset))
+        );
+        assert!(matches!(
+            parse_slash("/selfimprove start 0"),
+            Some(SlashAction::Invalid { .. })
+        ));
+        assert!(matches!(
+            parse_slash("/selfimprove approve"),
+            Some(SlashAction::Invalid { .. })
+        ));
     }
 }

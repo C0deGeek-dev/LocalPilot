@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The full self-improvement loop is available inside chat.** Both inline and
+  full-screen hosts now expose `/selfimprove`, `status`, `start [finding-rank]`,
+  `next`, `approve <reviewer>`, and `reset` through the existing persisted
+  orchestrator. Multiple findings are shown as a bounded numbered report and
+  require an explicit selection; proposals and build output are bounded in the
+  UI. `next` stops at Proposed, while approval displays the exact persisted diff
+  and requires a reviewer-bound confirmation before the sole `ApprovalToken`
+  path can promote. Build remains responsive and reaches a durable boundary;
+  confirmed reload exits and restores the terminal before invoking the existing
+  self-dev process swap.
+
 - **LocalBox models and direct serving are first-class chat commands.**
   `/localbox models` reads LocalBox's versioned catalog contract and lists the
   exact launch name first, accepted aliases, model/quant identity, required

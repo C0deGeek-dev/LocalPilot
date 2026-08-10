@@ -1604,7 +1604,7 @@ mod tests {
         let picker = s.slash_picker.as_ref().expect("picker open");
         let names: Vec<&str> = picker.items.iter().map(|i| i.name.as_str()).collect();
         // Preserves the table order and only keeps the "se" prefix.
-        assert_eq!(names, ["sessions", "session"]);
+        assert_eq!(names, ["selfimprove", "sessions", "session"]);
         assert!(picker.items.iter().all(|i| !i.description.is_empty()));
     }
 
@@ -1631,6 +1631,7 @@ mod tests {
         s.input = "/se".to_string();
         s.input_cursor = s.input.len();
         s.open_slash_picker("/se".to_string());
+        s.slash_picker_next(); // selfimprove -> sessions
         s.slash_picker_next(); // sessions -> session
         s.slash_picker_select();
         assert!(s.slash_picker.is_none());

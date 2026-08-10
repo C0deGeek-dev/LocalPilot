@@ -19,7 +19,8 @@ pub use app::{handle_input, run, AppInput, Key};
 // crate; re-exported here so existing `localpilot_tui::…` call sites are unchanged.
 pub use localpilot_slash::{
     lookup, parse_slash, parse_slash_for, specs_for, ArgSpec, BackgroundCommand, Host,
-    IngestAction, IngestTier, Mode, Profile, SlashAction, SlashCommand, Spelling, StrayArgs,
+    IngestAction, IngestTier, Mode, Profile, SelfImproveAction, SlashAction, SlashCommand,
+    Spelling, StrayArgs,
 };
 pub use render::{
     banner_text, blocking_prompt_height, history_block_text, live_region_height, render,
