@@ -17,6 +17,12 @@ is SemVer-stable; the configuration schema stability policy is in
   confirmed reload exits and restores the terminal before invoking the existing
   self-dev process swap.
 
+- **Injected credential stores no longer touch the host OS keychain.** Stores
+  constructed with an explicit fallback path are now fail-closed and file-only,
+  so all-feature tests and dependency-injected callers cannot read, overwrite,
+  or delete the process user's ambient provider and MCP credentials. The
+  production user store remains the sole keychain opt-in.
+
 - **LocalBox models and direct serving are first-class chat commands.**
   `/localbox models` reads LocalBox's versioned catalog contract and lists the
   exact launch name first, accepted aliases, model/quant identity, required

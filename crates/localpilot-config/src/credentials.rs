@@ -83,10 +83,16 @@ pub enum CredentialError {
 
 /// A handle to the credential store: the OS keychain (best-effort) over a
 /// restrictive-mode file fallback.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CredentialStore {
     /// The fallback file location, or `None` when no user dir is resolvable.
     file_path: Option<PathBuf>,
+    /// Whether this handle may consult the process user's OS keychain.
+    ///
+    /// Explicit-file stores are dependency-injected fixtures and must remain
+    /// isolated from host state, even when the `keychain` feature is enabled.
+    #[cfg(feature = "keychain")]
+    use_keychain: bool,
 }
 
 impl CredentialStore {
@@ -95,14 +101,22 @@ impl CredentialStore {
     pub fn user() -> Self {
         Self {
             file_path: crate::load::credential_store_path(),
+            #[cfg(feature = "keychain")]
+            use_keychain: true,
         }
     }
 
-    /// A store over an explicit fallback-file path (tests and callers that resolve
-    /// their own location). `None` disables the file tier.
+    /// A file-only store over an explicit path (tests and dependency-injected
+    /// callers). `None` disables the file tier. This constructor never consults
+    /// the process user's OS keychain, so an isolated caller cannot read or
+    /// mutate ambient credentials when the `keychain` feature is enabled.
     #[must_use]
     pub fn with_file(path: Option<PathBuf>) -> Self {
-        Self { file_path: path }
+        Self {
+            file_path: path,
+            #[cfg(feature = "keychain")]
+            use_keychain: false,
+        }
     }
 
     /// The stored secret for `provider_id`, or `None` for a clean miss. The OS
@@ -119,8 +133,10 @@ impl CredentialStore {
     pub fn lookup(&self, provider_id: &str) -> Option<(Secret, CredentialSource)> {
         #[cfg(feature = "keychain")]
         {
-            if let Some(secret) = keychain_get(provider_id) {
-                return Some((secret, CredentialSource::Keychain));
+            if self.use_keychain {
+                if let Some(secret) = keychain_get(provider_id) {
+                    return Some((secret, CredentialSource::Keychain));
+                }
             }
         }
         self.file_get(provider_id)
@@ -148,11 +164,13 @@ impl CredentialStore {
     ) -> Result<CredentialSource, CredentialError> {
         #[cfg(feature = "keychain")]
         {
-            // A keychain failure (absent/locked) is not fatal: fall through to the
-            // file. The error is deliberately not logged — it cannot carry a key,
-            // but keeping secrets out of every log path is the simplest guarantee.
-            if keychain_set(provider_id, secret).is_ok() {
-                return Ok(CredentialSource::Keychain);
+            if self.use_keychain {
+                // A keychain failure (absent/locked) is not fatal: fall through to
+                // the file. The error is deliberately not logged — it cannot carry
+                // a key, but keeping secrets out of every log path is simplest.
+                if keychain_set(provider_id, secret).is_ok() {
+                    return Ok(CredentialSource::Keychain);
+                }
             }
         }
         self.file_set(provider_id, secret)?;
@@ -168,7 +186,7 @@ impl CredentialStore {
         let mut removed = false;
         #[cfg(feature = "keychain")]
         {
-            if keychain_delete(provider_id) {
+            if self.use_keychain && keychain_delete(provider_id) {
                 removed = true;
             }
         }
@@ -193,8 +211,10 @@ impl CredentialStore {
     pub fn generic_lookup(&self, name: &str) -> Option<(Secret, CredentialSource)> {
         #[cfg(feature = "keychain")]
         {
-            if let Some(secret) = keychain_get_scoped(GENERIC_SERVICE, name) {
-                return Some((secret, CredentialSource::Keychain));
+            if self.use_keychain {
+                if let Some(secret) = keychain_get_scoped(GENERIC_SERVICE, name) {
+                    return Some((secret, CredentialSource::Keychain));
+                }
             }
         }
         let store = self.read_store()?;
@@ -217,7 +237,7 @@ impl CredentialStore {
     ) -> Result<CredentialSource, CredentialError> {
         #[cfg(feature = "keychain")]
         {
-            if keychain_set_scoped(GENERIC_SERVICE, name, secret).is_ok() {
+            if self.use_keychain && keychain_set_scoped(GENERIC_SERVICE, name, secret).is_ok() {
                 // Record the name so `generic_list` can see a keychain-backed
                 // credential, and drop any stale file-tier copy of the same name
                 // so the two tiers cannot disagree.
@@ -248,7 +268,7 @@ impl CredentialStore {
         let mut removed = false;
         #[cfg(feature = "keychain")]
         {
-            if keychain_delete_scoped(GENERIC_SERVICE, name) {
+            if self.use_keychain && keychain_delete_scoped(GENERIC_SERVICE, name) {
                 removed = true;
             }
         }
@@ -452,10 +472,10 @@ fn keychain_delete_scoped(service: &str, id: &str) -> bool {
 mod tests {
     use super::*;
 
-    // The file-tier tests drive `file_*` directly so they are deterministic
-    // regardless of whether the `keychain` feature is built: the public
-    // `get`/`set`/`delete` consult the real OS keychain first (covered by the
-    // ignored keychain test), which is shared host state unfit for assertions.
+    // Explicit-file fixtures are deterministically file-only regardless of
+    // whether the `keychain` feature is built. The ignored integration test at
+    // the end is the only test in this module allowed to touch host keychain
+    // state.
     fn store_at(dir: &tempfile::TempDir) -> CredentialStore {
         CredentialStore::with_file(Some(dir.path().join("credentials.json")))
     }
@@ -471,6 +491,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_at(&dir);
         assert!(store.file_get("anthropic").is_none());
+    }
+
+    #[test]
+    fn explicit_file_stores_are_isolated_from_each_other_and_the_host() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first = store_at(&first_dir);
+        let second = store_at(&second_dir);
+
+        assert_eq!(
+            first
+                .set("isolated-provider", &Secret::new("provider-secret"))
+                .unwrap(),
+            CredentialSource::File
+        );
+        assert_eq!(
+            first
+                .generic_set("isolated-generic", &Secret::new("generic-secret"))
+                .unwrap(),
+            CredentialSource::File
+        );
+        assert_eq!(
+            first.source("isolated-provider"),
+            Some(CredentialSource::File)
+        );
+        assert_eq!(
+            first
+                .generic_lookup("isolated-generic")
+                .map(|(_, source)| source),
+            Some(CredentialSource::File)
+        );
+
+        // A second injected store cannot observe either value through ambient
+        // keychain state, even in an all-features build on a desktop host.
+        assert!(second.get("isolated-provider").is_none());
+        assert!(second.generic_get("isolated-generic").is_none());
+
+        let persisted = std::fs::read_to_string(first_dir.path().join("credentials.json"))
+            .expect("the isolated store writes its explicit file");
+        assert!(persisted.contains("provider-secret"));
+        assert!(persisted.contains("generic-secret"));
+
+        assert!(first.delete("isolated-provider").unwrap());
+        assert!(first.generic_delete("isolated-generic").unwrap());
+        assert!(first.get("isolated-provider").is_none());
+        assert!(first.generic_get("isolated-generic").is_none());
     }
 
     #[test]
