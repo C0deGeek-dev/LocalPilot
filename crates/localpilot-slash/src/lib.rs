@@ -161,7 +161,7 @@ pub enum SlashAction {
     /// Search the session timeline, optionally seeding the query (`/search foo`).
     /// Routed for full-screen/pair only.
     Search(Option<String>),
-    /// Open the six-section LocalMind takeover. Full-screen only; no arguments.
+    /// Activate the six-section LocalMind workspace tab. Full-screen only; no arguments.
     LocalMind,
     Invalid {
         command: String,
@@ -1291,7 +1291,7 @@ mod tests {
         // on the pump), then 36→38 (`agent` + `harness` mode entries). `compact_force`
         // (a redundant forcing alias of `compact`) and the `wait_resume`/`compact-force`
         // parse-only aliases stay hidden but remain typeable in full-screen.
-        // `/localmind` adds the one full-screen-only six-section takeover.
+        // `/localmind` adds the one full-screen-only six-section workspace tab.
         assert_eq!(specs_for(Host::Fullscreen).len(), 40);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }

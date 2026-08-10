@@ -7660,7 +7660,7 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
         KeyCode::Enter if alt || shift => Some(InputAction::Insert("\n".to_string())),
         KeyCode::Enter => Some(InputAction::Submit),
         KeyCode::Tab => Some(InputAction::AcceptCompletion),
-        KeyCode::BackTab => Some(InputAction::PreviousTakeoverSection),
+        KeyCode::BackTab => Some(InputAction::PreviousLocalMindSection),
         KeyCode::Esc => Some(InputAction::Escape),
         KeyCode::Backspace => Some(InputAction::Backspace),
         KeyCode::Delete => Some(InputAction::Delete),
@@ -11084,7 +11084,7 @@ mod tests {
             (
                 KeyCode::BackTab,
                 KeyModifiers::SHIFT,
-                InputAction::PreviousTakeoverSection,
+                InputAction::PreviousLocalMindSection,
             ),
         ];
         for (code, modifiers, expected) in cases {
@@ -11096,7 +11096,8 @@ mod tests {
     fn fullscreen_catalog_matches_the_shared_spec_table() {
         // The full-screen picker is generated from the shared table: 40 rows in global
         // order (the `agent`/`harness` mode entries, the four permission profiles +
-        // effort, the pumped + synchronous command tiers, and the 6 takeovers),
+        // effort, the pumped + synchronous command tiers, five takeovers, and the
+        // LocalMind workspace tab),
         // byte-for-byte, and never a hidden inline-only forcing alias.
         let full_screen: Vec<(String, String)> = fullscreen_command_catalog()
             .into_iter()

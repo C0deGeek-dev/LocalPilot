@@ -182,7 +182,7 @@ pub enum InputAction {
     DeleteToLineEnd,
     OpenExternalEditor,
     AcceptCompletion,
-    PreviousTakeoverSection,
+    PreviousLocalMindSection,
     Submit,
 }
 
@@ -2004,7 +2004,7 @@ impl AppModel {
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
             | InputAction::OpenExternalEditor
-            | InputAction::PreviousTakeoverSection
+            | InputAction::PreviousLocalMindSection
             | InputAction::Submit => AppCommand::None,
         }
     }
@@ -2645,8 +2645,9 @@ impl AppModel {
             .map(|state| state.section)
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn localmind_reviewer(&self) -> Option<&str> {
+    fn localmind_reviewer(&self) -> Option<&str> {
         self.localmind_tab
             .as_ref()
             .and_then(|state| state.localmind.as_ref())
@@ -3996,7 +3997,7 @@ impl AppModel {
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
             | InputAction::OpenExternalEditor
-            | InputAction::PreviousTakeoverSection
+            | InputAction::PreviousLocalMindSection
             | InputAction::AcceptCompletion => {}
         }
         AppCommand::None
@@ -4011,7 +4012,7 @@ impl AppModel {
                 self.takeover = None;
                 AppCommand::None
             }
-            InputAction::PreviousTakeoverSection => AppCommand::None,
+            InputAction::PreviousLocalMindSection => AppCommand::None,
             InputAction::MoveUp => AppCommand::NavigateTakeover(TakeoverNavigation::LineUp),
             InputAction::MoveDown => AppCommand::NavigateTakeover(TakeoverNavigation::LineDown),
             InputAction::NavigateTimeline(TimelineNavigation::PageUp) => {
@@ -4142,7 +4143,7 @@ impl AppModel {
                 }
                 AppCommand::None
             }
-            InputAction::PreviousTakeoverSection => {
+            InputAction::PreviousLocalMindSection => {
                 self.cycle_localmind_section(false);
                 AppCommand::None
             }
@@ -4288,7 +4289,7 @@ impl AppModel {
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
             | InputAction::OpenExternalEditor
-            | InputAction::PreviousTakeoverSection => {}
+            | InputAction::PreviousLocalMindSection => {}
         }
         AppCommand::None
     }
@@ -4386,7 +4387,7 @@ impl AppModel {
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
             | InputAction::OpenExternalEditor
-            | InputAction::PreviousTakeoverSection => {}
+            | InputAction::PreviousLocalMindSection => {}
         }
         AppCommand::None
     }
@@ -4432,7 +4433,7 @@ impl AppModel {
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
             | InputAction::OpenExternalEditor
-            | InputAction::PreviousTakeoverSection
+            | InputAction::PreviousLocalMindSection
             | InputAction::AcceptCompletion => {}
         }
         AppCommand::None
@@ -8327,7 +8328,7 @@ mod tests {
             assert_eq!(app.active_body(), ActiveBody::LocalMind);
         }
         assert_eq!(
-            app.handle_input(InputAction::PreviousTakeoverSection, 80),
+            app.handle_input(InputAction::PreviousLocalMindSection, 80),
             AppCommand::None
         );
         assert_eq!(app.localmind_section(), Some(LocalMindSection::Audit));
