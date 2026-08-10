@@ -58,7 +58,7 @@ not need a real console:
   two-pane tracked-diff review, role-labeled screen-reader frames and dialogs,
   bounded four-row/expanded tool details with target-aware lifecycle headlines,
   envelope-free muted output, elapsed time, Unicode wrapping, connector geometry,
-  visible-only collapsed copy/exit projection, full-result search reveal, and
+  visible-only collapsed copy, bounded exit preview, full-result search reveal, and
   conservative unified-diff styling across default/no-color/colorblind modes,
   local refusal during
   active work, host-aware live profile/background/effort controls, Ctrl+Q slash

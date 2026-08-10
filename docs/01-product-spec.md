@@ -387,10 +387,11 @@ presentation, and shows at most four wrapped visual rows total: the headline
 plus up to three indented result rows, with no padding. Clicking the status glyph
 expands or collapses the complete bounded terminal result. Timeline search
 continues across that retained result and expands a hidden match, while copying
-a collapsed selection and the exit transcript include only the compact visible
-projection. Status remains identifiable by glyph or screen-reader text without
-color; ordinary child output is subordinate, and `+`/`-` emphasis or delta
-counts appear only for recognizable unified diffs.
+a collapsed selection includes only displayed wrapped rows. The width-independent
+exit transcript keeps a bounded compact preview of the headline plus three
+logical result lines. Status remains identifiable by glyph or screen-reader text
+without color; ordinary child output is subordinate, and `+`/`-` emphasis or
+delta counts appear only for recognizable unified diffs.
 
 ### Harness CLI
 

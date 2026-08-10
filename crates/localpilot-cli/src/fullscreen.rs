@@ -11543,7 +11543,7 @@ mod tests {
         app.apply_runtime(RuntimeUpdate::ToolStarted {
             id: "tool-1".to_string(),
             name: "read_file".to_string(),
-            detail: "COLLAPSED_DETAIL_SECRET".to_string(),
+            detail: "VISIBLE_TOOL_TARGET".to_string(),
         });
         app.apply_runtime(RuntimeUpdate::ToolFinished {
             id: "tool-1".to_string(),
@@ -11572,7 +11572,7 @@ mod tests {
         assert!(output.contains("Tokens: 1,234 input · 56 output"));
         assert!(output.contains("Resume: localpilot chat --resume fixture-session"));
         assert!(!output.contains("HIDDEN_REASONING_SECRET"));
-        assert!(output.contains("COLLAPSED_DETAIL_SECRET"));
+        assert!(output.contains("VISIBLE_TOOL_TARGET"));
         assert!(output.contains("COLLAPSED_OUTPUT_VISIBLE_1"));
         assert!(output.contains("COLLAPSED_OUTPUT_VISIBLE_3"));
         assert!(!output.contains("COLLAPSED_OUTPUT_HIDDEN_4"));
