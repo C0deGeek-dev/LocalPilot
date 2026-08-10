@@ -33,8 +33,8 @@ is SemVer-stable; the configuration schema stability policy is in
   states, and sends Accept, Reject, and Promote through the active permission
   profile and approval dialog before LocalMind writes anything.
 
-- **The full self-improvement loop is available inside chat.** Both inline and
-  full-screen hosts now expose `/selfimprove`, `status`, `start [finding-rank]`,
+- **The full self-improvement loop is available inside chat.** Full-screen chat
+  exposes `/selfimprove`, `status`, `start [finding-rank]`,
   `next`, `approve <reviewer>`, and `reset` through the existing persisted
   orchestrator. Multiple findings are shown as a bounded numbered report and
   require an explicit selection; proposals and build output are bounded in the
@@ -85,9 +85,9 @@ is SemVer-stable; the configuration schema stability policy is in
   inference and the TUI share a machine. Working chrome animates and shows
   monotonic elapsed time; manual compaction is labelled `Compacting` without
   inventing internal phases or percentages.
-- **Live slash controls now agree across inline and full-screen turns.** One
-  host-aware policy keeps permission profiles, `/bg`, `/effort`, and `/think`
-  live in both hosts (with the existing safe full-screen takeovers). Profiles
+- **Live slash controls remain available during full-screen turns.** The shared
+  command policy keeps permission profiles, `/bg`, `/effort`, and `/think`
+  live while work runs. Profiles
   apply from the next tool call and effort from the next provider request, even
   within the same turn. Ctrl+Q slash submissions use the same dispatcher as
   Enter, unsupported active-turn commands name the live choices, and operations

@@ -64,7 +64,7 @@ For Google Cloud projects that require ADC instead of an API key, configure a
 
 ## Control a chat while the model is working
 
-Inline and full-screen chat keep these commands live during a model turn:
+Full-screen chat keeps these commands live during a model turn:
 
 - `/default`, `/relaxed`, `/bypass`, or `/unrestricted` changes permissions for
   the next tool call.
@@ -89,6 +89,14 @@ operation is active. `/compact` uses the high-level label `Compacting`; the time
 is elapsed operation time, not an estimated completion percentage. Typing and
 Enter are serviced independently from the animation refresh, including when a
 local LocalBox server is consuming the same machine.
+
+## Inspect tool activity without losing the conversation
+
+Tool work stays compact in the timeline: the action names its target and a
+completed tool shows up to three indented result rows beneath its outcome. Click
+the tool's status glyph to expand or collapse the complete bounded result.
+Timeline search includes collapsed result text and expands a tool automatically
+when the selected match would otherwise be hidden.
 
 When LocalPilot asks a multiple-choice question, select **Other** and press Enter
 to type a custom answer. Long answers wrap and expand the dialog; after the
