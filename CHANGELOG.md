@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v3.0.0 - 2026-08-11
+
+Coordinated LocalX release.
+
 - **Tool activity is compact without being opaque.** Full-screen chat now shows
   a descriptive, target-aware action while a tool runs, then keeps up to three
   indented result rows under the outcome, line count, and elapsed time. The
