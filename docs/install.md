@@ -15,15 +15,18 @@ curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/instal
 irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
 ```
 
-No Rust toolchain needed. The script downloads the prebuilt `localpilot` for your
+No Rust toolchain needed. The script downloads the prebuilt **`localx`** for your
 platform, **checks it against the published SHA-256 before unpacking it**, and
-then uses it to install the rest of the stack.
+then runs `localx install` to lay down the rest of the stack and the llama.cpp
+engine.
 
 ### What it installs
 
-Four tools, all at the same version: **`localpilot`** (the agent harness),
+**`localx`** — the stack's umbrella command — plus the four release-train tools
+it installs, all at the same version: **`localpilot`** (the agent harness),
 **`localmind`** (the learning and memory engine), **`localbox`** (the local-model
-launcher), and **`localbench`** (the benchmark runner).
+launcher), and **`localbench`** (the benchmark runner); and the llama.cpp
+**engine** (managed by localbox).
 
 They are cut as a set — one version, one tag — and only tested together, so the
 installer treats them as a set. A stack assembled from different releases is a
@@ -145,6 +148,24 @@ resumes under any provider, and it is redacted on write. Resume it with
 `--force` to import again under a new name).
 
 ### Staying up to date
+
+The umbrella command updates or provisions everything in one go:
+
+```sh
+localx update                # update the whole stack + engine to the newest release
+localx update --prerelease   # build each app from its latest main (developer channel)
+localx install               # provision the stack + engine (idempotent)
+localx install localbox      # just one tool; `localx install engine` for the engine
+localx status                # installed version of every tool and the engine
+localx localbox serve …      # run any stack tool: localx <tool> [args…]
+```
+
+`--prerelease` builds each app from its repository's latest `main` commit instead
+of the newest published release — the way to test work that is pushed but not yet
+cut. It needs a Rust toolchain and covers the app tools only; the engine always
+uses its released binaries.
+
+Per-tool commands stay available for finer control:
 
 ```sh
 localpilot update            # fetch, verify, and install the newest release

@@ -6,7 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
-## v3.0.0 - 2026-08-11
+- **`localx`, one command for the whole stack.** A new umbrella binary installs
+  and updates the entire stack in one step: `localx update` refreshes every
+  release-train tool (localpilot, localmind, localbox, localbench) *and* the
+  llama.cpp engine; `localx install [all|<tool>|engine]` provisions them;
+  `localx status` reports what is installed; and `localx <tool> …` runs any stack
+  tool. `localx update --prerelease` (or `localx install --prerelease`) builds
+  each app from its repository's latest `main` instead of the newest release —
+  the developer channel for testing pushed-but-uncut work (needs a Rust
+  toolchain; app tools only). `localx` self-updates as part of the stack. The
+  one-command installer now bootstraps `localx` and lets it install the rest;
+  `localpilot update --all` still works and shares the same install core.
 
 Coordinated LocalX release.
 
