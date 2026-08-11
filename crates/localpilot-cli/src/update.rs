@@ -1,13 +1,18 @@
 //! Self-update: check the project repository for a newer release tag and, on the
-//! user's confirmation, reinstall from source with the same feature set.
+//! user's confirmation, install it. The stack-install machinery (the release
+//! train, the per-tool install loop, source builds, PATH activation) lives in
+//! `localpilot-stack` so both this command and the `localx` umbrella share one
+//! copy; what stays here is localpilot's own version cache (list/pin/rollback)
+//! and the once-a-day update notice.
 
 use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use localpilot_dist::{Cache, Version};
+use localpilot_stack::{Channel, Running, Selection};
 use localpilot_store::Store;
 
-const REPO_URL: &str = "https://github.com/C0deGeek-dev/LocalPilot.git";
 const TAGS_API: &str = "https://api.github.com/repos/C0deGeek-dev/LocalPilot/tags";
 const CACHE_KEY: &str = "update-check.json";
 const CHECK_INTERVAL_SECS: u64 = 86_400;
@@ -18,8 +23,6 @@ const CHECK_INTERVAL_SECS: u64 = 86_400;
 pub fn current_version() -> &'static str {
     env!("LOCALPILOT_VERSION")
 }
-
-use localpilot_dist::Version;
 
 /// Query the repository for the newest tag. Returns the tag name when it is
 /// strictly newer than the running version, else `None`.
@@ -123,7 +126,7 @@ fn now_unix() -> u64 {
 }
 
 /// Run the `update` command: check, report, and (unless `check_only`) prompt and
-/// reinstall from source.
+/// install — a single tool by default, or the whole stack with `--all`.
 ///
 /// # Errors
 /// Returns an error only if writing output or running the installer fails; a
@@ -135,17 +138,36 @@ pub async fn run(
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let current = current_version();
+    let running = Version::parse(current);
+
     if all {
         // `--all` means "make the stack match this binary". It deliberately does
         // not ask about a newer release: the user picked a version by installing
         // it, and the bootstrap installer runs this with stdin bound to a pipe,
-        // where a confirmation prompt reads EOF and cancels.
-        let Some(tag) = stack_tag(out).await? else {
-            return Ok(());
+        // where a confirmation prompt reads EOF and cancels. A from-source build
+        // has no published tag of its own, so its running version resolves to the
+        // base release tag (the describe suffix is dropped); an unparseable
+        // version falls back to the newest published release.
+        let channel = if from_source {
+            Channel::Prerelease
+        } else {
+            Channel::Release
         };
-        writeln!(out, "installing the stack at {tag} ...")?;
-        return install_stack(&tag, out).await;
+        let tag = running.as_ref().map(localpilot_stack::tag_for_version);
+        let marker = running.as_ref().map(|v| Running {
+            tool: "localpilot",
+            version: v.clone(),
+        });
+        return localpilot_stack::install(
+            &Selection::All,
+            tag.as_deref(),
+            channel,
+            marker.as_ref(),
+            out,
+        )
+        .await;
     }
+
     match newer_release().await {
         Ok(Some(tag)) => {
             writeln!(out, "update available: {tag}  (current: {current})")?;
@@ -157,15 +179,32 @@ pub async fn run(
                 writeln!(out, "cancelled")?;
                 return Ok(());
             }
-            // Prefer the published binary: it needs no toolchain and takes
-            // seconds. Compiling stays available, and is the automatic fallback
-            // when a platform has no published archive.
-            let installed = !from_source && install_binary(&tag, out).await?;
-            if !installed {
-                if !from_source {
-                    writeln!(out, "falling back to building from source")?;
-                }
-                reinstall(&tag, out)?;
+            let Some(localpilot) = localpilot_stack::tool("localpilot") else {
+                writeln!(
+                    out,
+                    "internal error: localpilot is not in the release train"
+                )?;
+                return Ok(());
+            };
+            let marker = running.as_ref().map(|v| Running {
+                tool: "localpilot",
+                version: v.clone(),
+            });
+            if from_source {
+                // Prefer the published binary: it needs no toolchain and takes
+                // seconds. Compiling stays available on request, and is the
+                // automatic fallback when a platform has no published archive.
+                localpilot_stack::source_install(localpilot, out)?;
+            } else if !localpilot_stack::install_release(
+                localpilot,
+                &tag,
+                marker.as_ref().map(|m| &m.version),
+                out,
+            )
+            .await?
+            {
+                writeln!(out, "falling back to building from source")?;
+                localpilot_stack::source_install(localpilot, out)?;
             }
         }
         Ok(None) => {
@@ -174,144 +213,6 @@ pub async fn run(
         Err(error) => writeln!(out, "update check failed: {error}")?,
     }
     Ok(())
-}
-
-/// The tag to install the stack from.
-///
-/// A release build names its own version. A build from source is stamped with a
-/// commit description, which is not a tag anyone published — asking for it would
-/// produce a 404 per tool. Those fall back to the newest published release, which
-/// is what "install the stack" means from a working tree.
-async fn stack_tag(out: &mut dyn Write) -> anyhow::Result<Option<String>> {
-    if let Some(version) = localpilot_dist::Version::parse(current_version()) {
-        return Ok(Some(format!("v{}", version.to_dir_name())));
-    }
-    match latest_release().await {
-        Ok(Some((_, tag))) => {
-            writeln!(
-                out,
-                "this build ({}) is not a release; using the newest published release",
-                current_version()
-            )?;
-            Ok(Some(tag))
-        }
-        Ok(None) => {
-            writeln!(out, "no published release to install the stack from")?;
-            Ok(None)
-        }
-        Err(error) => {
-            writeln!(out, "could not reach the release list: {error}")?;
-            Ok(None)
-        }
-    }
-}
-
-/// Install the release train at `tag`.
-///
-/// The train cuts every tool to one version, so a stack assembled from different
-/// tags is a configuration nobody tested. A tool that fails to install is
-/// reported and skipped rather than aborting the others — a partial stack the
-/// user can see beats an install that stops halfway without saying where.
-async fn install_stack(tag: &str, out: &mut dyn Write) -> anyhow::Result<()> {
-    let mut failed = Vec::new();
-    for (tool, repo) in TRAIN {
-        if !install_tool(tool, repo, tag, out).await? {
-            failed.push(*tool);
-        }
-    }
-    if failed.is_empty() {
-        writeln!(out, "\nthe stack is installed at {tag}")?;
-    } else if failed.len() == TRAIN.len() {
-        // "installed, except: <everything>" reads as partial success. Nothing
-        // landed, so say that, and do not point at a PATH entry holding nothing.
-        writeln!(
-            out,
-            "\nnothing was installed: no tool published a usable {tag} build for this platform."
-        )?;
-        writeln!(
-            out,
-            "check `localpilot update --check`, or install from source."
-        )?;
-        return Ok(());
-    } else {
-        writeln!(
-            out,
-            "\ninstalled at {tag}, except: {}. Re-run `localpilot update --all` to retry.",
-            failed.join(", ")
-        )?;
-    }
-    path_notice(out)
-}
-
-/// Tell the user how to reach the executables, when the directory holding them is
-/// not already on `PATH`.
-fn path_notice(out: &mut dyn Write) -> anyhow::Result<()> {
-    let Some(bin) = shared_bin_dir() else {
-        return Ok(());
-    };
-    let on_path = std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry == bin));
-    if on_path {
-        return Ok(());
-    }
-    writeln!(out, "\nadd this directory to PATH to use them:")?;
-    writeln!(out, "    {}", bin.display())?;
-    if cfg!(windows) {
-        writeln!(
-            out,
-            "    setx PATH \"$env:PATH;{}\"   (PowerShell, new terminals only)",
-            bin.display()
-        )?;
-    } else {
-        writeln!(
-            out,
-            "    export PATH=\"{}:$PATH\"   (add to your shell profile)",
-            bin.display()
-        )?;
-    }
-    Ok(())
-}
-
-/// Reinstall from source at `tag` via `cargo install --git`, matching the running
-/// binary's feature set, and the MSVC toolchain on Windows when the TUI is built.
-fn reinstall(tag: &str, out: &mut dyn Write) -> anyhow::Result<()> {
-    let mut command = std::process::Command::new("cargo");
-    // The interactive TUI is unstable on the windows-gnu toolchain.
-    if cfg!(all(windows, feature = "tui")) {
-        command.arg("+stable-x86_64-pc-windows-msvc");
-    }
-    command.args(reinstall_args(tag));
-
-    writeln!(out, "reinstalling from source at {tag} ...")?;
-    let status = command
-        .status()
-        .map_err(|e| anyhow::anyhow!("could not run cargo: {e}"))?;
-    if status.success() {
-        writeln!(out, "updated to {tag}")?;
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("cargo install failed"))
-    }
-}
-
-/// Build the source-reinstall arguments separately from process execution so
-/// the workspace package selection cannot regress unnoticed.
-fn reinstall_args(tag: &str) -> Vec<String> {
-    let mut args = vec![
-        "install".to_string(),
-        "--git".to_string(),
-        REPO_URL.to_string(),
-        "localpilot".to_string(),
-        "--tag".to_string(),
-        tag.to_string(),
-        "--locked".to_string(),
-        "--force".to_string(),
-    ];
-    if cfg!(feature = "tui") {
-        args.push("--features".to_string());
-        args.push("tui".to_string());
-    }
-    args
 }
 
 fn confirm(prompt: &str) -> anyhow::Result<bool> {
@@ -325,230 +226,27 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
 
 // --- version cache ----------------------------------------------------------
 
-/// Base URL of a release's downloadable assets.
-fn release_assets_url(repo_url: &str, tag: &str) -> String {
-    // `REPO_URL` carries the `.git` suffix cargo wants; the releases path does
-    // not, and GitHub is stricter about it on some routes than others.
-    let repo = repo_url.trim_end_matches(".git");
-    format!("{repo}/releases/download/{tag}")
+/// The install cache for localpilot, when the platform reports a data directory.
+fn cache() -> Option<Cache> {
+    Cache::default_root("localpilot").map(Cache::new)
 }
 
-/// The `owner/name` a repository URL points at, for the attestation hint.
-fn repo_slug(repo_url: &str) -> &str {
-    repo_url
-        .trim_end_matches(".git")
-        .rsplit_once("github.com/")
-        .map_or("C0deGeek-dev/LocalPilot", |(_, slug)| slug)
-}
-
-/// The install cache for this tool, when the platform reports a data directory.
-fn cache() -> Option<localpilot_dist::Cache> {
-    tool_cache("localpilot")
-}
-
-/// The install cache for any train tool.
-fn tool_cache(tool: &str) -> Option<localpilot_dist::Cache> {
-    localpilot_dist::Cache::default_root(tool).map(localpilot_dist::Cache::new)
-}
-
-/// The tools one release train cuts together.
-///
-/// They share a version and a tag by construction, so installing them as a set is
-/// the only way to avoid a skew none of them can detect on its own — a mismatched
-/// store schema between an installed CLI and the engine it talks to fails
-/// silently, not loudly.
-const TRAIN: &[(&str, &str)] = &[
-    ("localpilot", "https://github.com/C0deGeek-dev/LocalPilot"),
-    ("localmind", "https://github.com/C0deGeek-dev/LocalMind"),
-    ("localbox", "https://github.com/C0deGeek-dev/LocalBox"),
-    ("localbench", "https://github.com/C0deGeek-dev/LocalBench"),
-];
-
-/// The one directory every train tool's executable is published into, so a user
-/// adds a single entry to `PATH` rather than one per tool.
-#[must_use]
-pub fn shared_bin_dir() -> Option<std::path::PathBuf> {
-    localpilot_dist::Cache::default_root("localx").map(|root| localpilot_dist::bin_dir(&root))
-}
-
-/// Point `<bin>/<tool>` at whatever the resolver now chooses, so a version switch
-/// is visible to the shell rather than only to `version list`.
-///
-/// Only this tool has a running build in this process. The resolver's
-/// strictly-newer rule exists to stop a stale cache downgrading a from-source
-/// build — a protection that is meaningful for `localpilot` and meaningless for
-/// the companions, where the pin (or the newest install) is the whole answer.
-fn activate(
-    cache: &localpilot_dist::Cache,
-    tool: &str,
-    out: &mut dyn Write,
-) -> anyhow::Result<Option<std::path::PathBuf>> {
-    let Some(bin) = shared_bin_dir() else {
-        return Ok(None);
+/// Refresh the `PATH`-visible localpilot executable after a change to what should
+/// run, and say where it landed. A pin that only `version list` can see is not a
+/// pin.
+fn report_active(cache: &Cache, out: &mut dyn Write) -> anyhow::Result<()> {
+    let Some(running) = Version::parse(current_version()) else {
+        return Ok(());
     };
-    let placed = if tool == "localpilot" {
-        let Some(running) = localpilot_dist::Version::parse(current_version()) else {
-            return Ok(None);
-        };
-        localpilot_dist::activate(cache, &bin, tool, &running)
-    } else {
-        let chosen = cache
-            .pin()
-            .and_then(|pinned| cache.get(&pinned))
-            .or_else(|| cache.newest());
-        match chosen {
-            Some(cached) => localpilot_dist::place(&bin, tool, &cached.executable()).map(Some),
-            None => Ok(None),
-        }
+    let Some(bin) = localpilot_stack::shared_bin_dir() else {
+        return Ok(());
     };
-    match placed {
-        Ok(path) => Ok(path),
-        Err(error) => {
-            // The payload is installed and resolvable; only the PATH-visible copy
-            // failed. Say which half worked so the fix is obvious.
-            writeln!(
-                out,
-                "installed, but could not update {tool} on PATH: {error}"
-            )?;
-            Ok(None)
-        }
-    }
-}
-
-/// Install a released binary into the version cache, verifying it first.
-///
-/// This is the path that does **not** need a Rust toolchain. The from-source
-/// reinstall stays available for a target with no published archive and for
-/// anyone who prefers it.
-///
-/// # Errors
-/// Returns an error only if output cannot be written; a failed install is
-/// reported and leaves the previously installed version untouched.
-pub async fn install_binary(tag: &str, out: &mut dyn Write) -> anyhow::Result<bool> {
-    install_tool("localpilot", REPO_URL, tag, out).await
-}
-
-/// Install one train tool's published archive at `tag`, verifying it first and
-/// then making it the version on `PATH`.
-///
-/// # Errors
-/// Returns an error only if output cannot be written; a failed install is
-/// reported and leaves the previously installed version untouched.
-pub async fn install_tool(
-    tool: &str,
-    repo_url: &str,
-    tag: &str,
-    out: &mut dyn Write,
-) -> anyhow::Result<bool> {
-    let Some(cache) = tool_cache(tool) else {
-        writeln!(
-            out,
-            "no per-user data directory on this platform; use --from-source"
-        )?;
-        return Ok(false);
-    };
-    let target = localpilot_dist::current_target();
-    if target.is_empty() {
-        writeln!(
-            out,
-            "this platform has no published build; use --from-source to compile it"
-        )?;
-        return Ok(false);
-    }
-
-    let base = release_assets_url(repo_url, tag);
-    writeln!(out, "{tool}: fetching {tag} manifest…")?;
-    let manifest_bytes = match localpilot_dist::download(&format!("{base}/manifest.json")).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            writeln!(
-                out,
-                "could not fetch the {tag} manifest ({error}); use --from-source"
-            )?;
-            return Ok(false);
-        }
-    };
-    let manifest = match String::from_utf8(manifest_bytes)
-        .map_err(|e| e.to_string())
-        .and_then(|text| localpilot_dist::ReleaseManifest::parse(&text).map_err(|e| e.to_string()))
-    {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            writeln!(
-                out,
-                "manifest for {tag} is unusable ({error}); use --from-source"
-            )?;
-            return Ok(false);
-        }
-    };
-
-    writeln!(out, "{tool}: downloading and verifying {target}…")?;
-    match localpilot_dist::install_release(&cache, &manifest, target, tool, &base).await {
-        Ok(dir) => {
-            writeln!(out, "{tool}: installed {tag} to {}", dir.display())?;
-            // Name the property that was actually checked. The digest proves the
-            // bytes are intact; origin comes from the release's build attestation,
-            // which this updater does not verify in-process — so point at the
-            // command that does, rather than implying it was already done.
-            writeln!(
-                out,
-                "verified against the checksum published with the release (integrity)"
-            )?;
-            writeln!(
-                out,
-                "to confirm it was built by this repository: \
-                 gh attestation verify <archive> --repo {}",
-                repo_slug(repo_url)
-            )?;
-            if let Some(path) = activate(&cache, tool, out)? {
-                writeln!(out, "{tool}: on PATH at {}", path.display())?;
-            }
-            let swept = cache.sweep(KEEP_VERSIONS, &protected(&cache, tool));
-            if !swept.is_empty() {
-                let names: Vec<String> = swept
-                    .iter()
-                    .map(localpilot_dist::Version::to_dir_name)
-                    .collect();
-                writeln!(out, "removed older cached version(s): {}", names.join(", "))?;
-            }
-            Ok(true)
-        }
-        Err(error) => {
-            writeln!(out, "install failed: {error}")?;
-            writeln!(out, "the previously installed version is untouched")?;
-            Ok(false)
-        }
-    }
-}
-
-/// Refresh the `PATH`-visible executable after a change to what should run, and
-/// say where it landed. A pin that only `version list` can see is not a pin.
-fn report_active(cache: &localpilot_dist::Cache, out: &mut dyn Write) -> anyhow::Result<()> {
-    if let Some(path) = activate(cache, "localpilot", out)? {
-        writeln!(out, "active binary: {}", path.display())?;
+    match localpilot_dist::activate(cache, &bin, "localpilot", &running) {
+        Ok(Some(path)) => writeln!(out, "active binary: {}", path.display())?,
+        Ok(None) => {}
+        Err(error) => writeln!(out, "could not update localpilot on PATH: {error}")?,
     }
     Ok(())
-}
-
-/// How many cached versions to keep, beyond the running and pinned ones. Two is
-/// enough to roll back once without keeping every release ever installed.
-const KEEP_VERSIONS: usize = 2;
-
-/// Versions the sweep must never remove.
-///
-/// The running version is only ours to protect for our own cache; another tool's
-/// running version is not something this process can know.
-fn protected(cache: &localpilot_dist::Cache, tool: &str) -> Vec<localpilot_dist::Version> {
-    let mut protected = Vec::new();
-    if tool == "localpilot" {
-        if let Some(running) = localpilot_dist::Version::parse(current_version()) {
-            protected.push(running);
-        }
-    }
-    if let Some(pinned) = cache.pin() {
-        protected.push(pinned);
-    }
-    protected
 }
 
 /// List installed versions and say which one would run, and why.
@@ -560,7 +258,7 @@ pub fn list_versions(out: &mut dyn Write) -> anyhow::Result<()> {
         writeln!(out, "no per-user data directory on this platform")?;
         return Ok(());
     };
-    let running = localpilot_dist::Version::parse(current_version());
+    let running = Version::parse(current_version());
     let installed = cache.installed();
     if installed.is_empty() {
         writeln!(out, "no installed versions (running {})", current_version())?;
@@ -603,12 +301,12 @@ pub fn set_pin(version: Option<&str>, out: &mut dyn Write) -> anyhow::Result<()>
             report_active(&cache, out)?;
         }
         Some(text) => {
-            let Some(version) = localpilot_dist::Version::parse(text) else {
+            let Some(version) = Version::parse(text) else {
                 writeln!(out, "{text:?} is not a version like 2.5.0")?;
                 return Ok(());
             };
             if cache.get(&version).is_none()
-                && localpilot_dist::Version::parse(current_version()).as_ref() != Some(&version)
+                && Version::parse(current_version()).as_ref() != Some(&version)
             {
                 writeln!(
                     out,
@@ -634,7 +332,7 @@ pub fn rollback(out: &mut dyn Write) -> anyhow::Result<()> {
         writeln!(out, "no per-user data directory on this platform")?;
         return Ok(());
     };
-    let running = localpilot_dist::Version::parse(current_version());
+    let running = Version::parse(current_version());
     let installed = cache.installed();
     // The newest version strictly older than what would run now.
     let previous = installed.iter().find(|cached| {
@@ -674,26 +372,7 @@ pub fn rollback(out: &mut dyn Write) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{reinstall_args, Version, REPO_URL};
-
-    #[test]
-    fn source_reinstall_selects_the_localpilot_package() {
-        let args = reinstall_args("v9.8.7");
-
-        assert_eq!(
-            &args[..8],
-            [
-                "install",
-                "--git",
-                REPO_URL,
-                "localpilot",
-                "--tag",
-                "v9.8.7",
-                "--locked",
-                "--force",
-            ]
-        );
-    }
+    use super::Version;
 
     #[test]
     fn alpha_ordering_and_describe_suffix() {

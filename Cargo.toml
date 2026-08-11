@@ -17,6 +17,7 @@ members = [
     "crates/localpilot-skills",
     "crates/localpilot-agents",
     "crates/localpilot-dist",
+    "crates/localpilot-stack",
     "crates/localpilot-recovery",
     "crates/localpilot-rpc",
     "crates/localpilot-server",

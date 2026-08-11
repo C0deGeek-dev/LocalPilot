@@ -98,6 +98,7 @@ localpilot-harness = { path = "../localpilot-harness" }
 localpilot-llm = { path = "../localpilot-llm" }
 localpilot-agents = { path = "../localpilot-agents" }
 localpilot-dist = { path = "../localpilot-dist" }
+localpilot-stack = { path = "../localpilot-stack" }
 localpilot-localmind = { path = "../localpilot-localmind" }
 localpilot-mcp = { path = "../localpilot-mcp" }
 localpilot-patchgen = { path = "../localpilot-patchgen" }

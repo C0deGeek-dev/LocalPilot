@@ -1643,6 +1643,7 @@ dependencies = [
  "localpilot-server",
  "localpilot-skills",
  "localpilot-slash",
+ "localpilot-stack",
  "localpilot-store",
  "localpilot-taskgraph",
  "localpilot-terminal-ui",
@@ -2036,6 +2037,18 @@ dependencies = [
 [[package]]
 name = "localpilot-slash"
 version = "3.0.0"
+
+[[package]]
+name = "localpilot-stack"
+version = "3.0.0"
+dependencies = [
+ "anyhow",
+ "localpilot-dist",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "localpilot-store"
