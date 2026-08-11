@@ -192,6 +192,10 @@ application. Tool work stays compact but inspectable: its visible action names
 the target, completed work includes up to three indented result rows, and
 clicking the tool's status glyph expands or collapses the complete bounded
 result. Timeline search also reveals a match inside collapsed tool output.
+For tool-heavy sessions, `[terminal] group_successful_tools = true` optionally
+collapses runs of three or more successful tools into one expandable summary;
+the default remains off, and search, copy disclosure, persistence, and export
+stay grounded in the original tool rows.
 
 ## Learns, with your approval
 

@@ -141,7 +141,7 @@ fn default_config_loads() -> TestResult {
 }
 
 #[test]
-fn timeline_density_defaults_to_compact_and_round_trips() -> TestResult {
+fn terminal_preferences_keep_compatible_defaults_and_round_trip() -> TestResult {
     isolated(|jail| {
         let empty = write(jail, "empty.toml", "")?;
         let paths = ConfigPaths {
@@ -150,11 +150,12 @@ fn timeline_density_defaults_to_compact_and_round_trips() -> TestResult {
         };
         let defaulted = load(&paths, &CliOverrides::default())?;
         assert_eq!(defaulted.terminal.density, TimelineDensity::Compact);
+        assert!(!defaulted.terminal.group_successful_tools);
 
         let project = write(
             jail,
             "project.toml",
-            "[terminal]\ndensity = \"comfortable\"\n",
+            "[terminal]\ndensity = \"comfortable\"\ngroup_successful_tools = true\n",
         )?;
         let paths = ConfigPaths {
             user: None,
@@ -162,6 +163,7 @@ fn timeline_density_defaults_to_compact_and_round_trips() -> TestResult {
         };
         let comfortable = load(&paths, &CliOverrides::default())?;
         assert_eq!(comfortable.terminal.density, TimelineDensity::Comfortable);
+        assert!(comfortable.terminal.group_successful_tools);
         let encoded = serde_json::to_value(&comfortable)?;
         let decoded = serde_json::from_value(encoded)?;
         assert_eq!(comfortable, decoded);

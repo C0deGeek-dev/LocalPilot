@@ -66,6 +66,10 @@ not need a real console:
   fixed two-head/six-tail failure previews, state-change cache invalidation,
   omission-aware source-byte hits and visible-only copy markers, and narrow
   Unicode/no-color/screen-reader tail cues,
+  opt-in three-success grouping boundaries, reversible collapsed/expanded
+  geometry, group focus and prefix-click parity, collapsed-member anchors,
+  search reveal, nonselectable synthetic summaries, counted cross-group copy,
+  no-color/screen-reader disclosure, config propagation, and raw-item export,
   Unicode wrapping, connector geometry, visible-only collapsed copy, bounded exit
   preview, full-result search reveal, and
   conservative unified-diff styling across default/no-color/colorblind modes,

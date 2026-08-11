@@ -412,6 +412,13 @@ delta counts appear only for recognizable unified diffs. Timeline density is a
 session presentation policy: `compact` is the compatibility default and keeps
 adjacent tool rows tight, while `comfortable` inserts one optional row between
 them. Both keep the required separator before assistant or reasoning prose.
+Successful-run grouping is a separate, default-off presentation policy. When
+enabled, three or more consecutive successful tools collapse to one expandable
+summary with count, known aggregate duration, retained-detail visibility, and
+terminal-truncation disclosure. Expanding reveals the original rows. Search and
+export stay grounded in those originals, while copying across a collapsed run
+inserts a counted omission marker. Any non-tool, running, failed, or cancelled
+item ends a group.
 
 ### Harness CLI
 

@@ -2250,6 +2250,9 @@ fn tool_line_layout(
     if row.kind != ItemKind::Tool {
         return ToolLineLayout::default();
     }
+    if row.tool_group.is_some() {
+        return ToolLineLayout::default();
+    }
     let mut layout = ToolLineLayout::default();
     let natural_width = UnicodeWidthStr::width(row.text.as_str());
     let capacity = usize::from(width).saturating_sub(prefix_width);
@@ -2435,6 +2438,18 @@ fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Ve
     let tone = row.tone;
     let disclosure = row.disclosure;
     if screen_reader {
+        if let Some(group) = row.tool_group {
+            return vec![Span::styled(
+                if row.focused {
+                    "Group focused: "
+                } else if group.expanded {
+                    "Group expanded: "
+                } else {
+                    "Group collapsed: "
+                },
+                theme.ui(UiRole::Success),
+            )];
+        }
         if kind == ItemKind::Tool && row.omitted_before_visual_rows > 0 {
             return vec![Span::styled(
                 "Earlier output hidden: ",
@@ -2557,6 +2572,30 @@ fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Ve
             theme.ui(UiRole::Muted),
         )],
         ItemKind::Tool => {
+            if let Some(group) = row.tool_group {
+                let marker = if row.focused {
+                    if group.expanded {
+                        "▼ "
+                    } else {
+                        "▶ "
+                    }
+                } else if group.expanded {
+                    "▾ "
+                } else {
+                    "▸ "
+                };
+                return vec![
+                    Span::styled("✓", theme.ui(UiRole::Success)),
+                    Span::styled(
+                        marker,
+                        theme.ui(if row.focused {
+                            UiRole::Focus
+                        } else {
+                            UiRole::Success
+                        }),
+                    ),
+                ];
+            }
             let (glyph, role) = match activity {
                 Some(ActivityState::Running) | None => ("◉", UiRole::Code),
                 Some(ActivityState::Success) => ("✓", UiRole::Success),
@@ -6085,6 +6124,103 @@ mod tests {
         let (buffer, hits) = render_test_frame(&app, 80, 24);
         let text = rect_text(&buffer, single_hits(&hits).timeline);
         assert!(text.contains("✓▼ Ran x"));
+    }
+
+    #[test]
+    fn successful_tool_groups_are_opt_in_reversible_and_accessible() {
+        let mut app = model();
+        for (id, detail, duration_ms) in [
+            ("group-one", "one.rs", 10),
+            ("group-two", "two.rs", 20),
+            ("group-three", "three.rs", 30),
+        ] {
+            app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+                id: id.into(),
+                name: "read_file".into(),
+                detail: detail.into(),
+            });
+            app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+                id: id.into(),
+                name: "read_file".into(),
+                is_error: false,
+                cancelled: false,
+                output: format!("retained detail for {detail}"),
+                duration_ms,
+            });
+        }
+
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(
+            text.contains("Read one.rs"),
+            "the default remains ungrouped"
+        );
+        assert!(!text.contains("3 tools completed"));
+
+        app.set_group_successful_tools(true);
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let timeline = single_hits(&hits);
+        let text = rect_text(&buffer, timeline.timeline);
+        assert!(text.contains("✓▸ 3 tools completed · 60 ms · retained details hidden"));
+        assert!(!text.contains("Read one.rs"));
+        assert_eq!(
+            timeline
+                .rows
+                .iter()
+                .filter(|hit| hit.row.tool_group.is_some())
+                .count(),
+            1
+        );
+
+        app.capabilities.color = ColorSupport::NoColor;
+        app.capabilities.screen_reader = true;
+        let (buffer, hits) = render_test_frame(&app, 40, 20);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("Group collapsed: 3 tools completed"));
+        app.capabilities.screen_reader = false;
+
+        assert!(app.handle_tool_action(
+            crate::ToolAction::Next,
+            timeline.wrap_width,
+            timeline.timeline.height,
+        ));
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let timeline = single_hits(&hits);
+        let text = rect_text(&buffer, timeline.timeline);
+        assert!(text.contains("✓▶ 3 tools completed"));
+        assert!(matches!(
+            app.active_timeline().focused_target(),
+            Some(crate::TimelineFocusTarget::SuccessGroup(_))
+        ));
+        assert_eq!(app.active_timeline().focused_tool(), None);
+
+        assert!(app.handle_tool_action(
+            crate::ToolAction::Toggle,
+            timeline.wrap_width,
+            timeline.timeline.height,
+        ));
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let timeline = single_hits(&hits);
+        let text = rect_text(&buffer, timeline.timeline);
+        assert!(text.contains("✓▼ 3 tools completed · 60 ms · retained details shown"));
+        assert!(text.contains("Read one.rs"));
+        assert!(text.contains("Read three.rs"));
+
+        app.capabilities.screen_reader = true;
+        let (buffer, hits) = render_test_frame(&app, 120, 30);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("Group focused: 3 tools completed"));
+        assert!(text.contains("retained details shown"));
+
+        let timeline = single_hits(&hits);
+        assert!(app.handle_tool_action(
+            crate::ToolAction::Release,
+            timeline.wrap_width,
+            timeline.timeline.height,
+        ));
+        let (buffer, hits) = render_test_frame(&app, 120, 30);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("Group expanded: 3 tools completed"));
     }
 
     #[test]

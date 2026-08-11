@@ -97,6 +97,9 @@ completed tool shows up to three indented result rows beneath its outcome. Click
 the tool's status glyph to expand or collapse the complete bounded result.
 Timeline search includes collapsed result text and expands a tool automatically
 when the selected match would otherwise be hidden.
+Set `[terminal] group_successful_tools = true` to summarize runs of three or
+more successful tools; expand the summary to inspect the original rows. This is
+off by default and never replaces stored or exported tool activity.
 
 When LocalPilot asks a multiple-choice question, select **Other** and press Enter
 to type a custom answer. Long answers wrap and expand the dialog; after the

@@ -13,7 +13,8 @@ use crate::projection::{
 };
 use crate::{
     sanitize_text, ActivityState, ContentPoint, Editor, ItemId, ItemKind, PeerPane, ResultTone,
-    SemanticRole, SessionHeader, StyledRange, TextStyle, Theme, Timeline, ToolPresentation,
+    SemanticRole, SessionHeader, StyledRange, TextStyle, Theme, Timeline, TimelineFocusTarget,
+    ToolPresentation,
 };
 
 const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
@@ -194,7 +195,7 @@ pub enum ToolAction {
     Previous,
     Next,
     Toggle,
-    Activate(ItemId),
+    Activate(TimelineFocusTarget),
     Release,
 }
 
@@ -546,6 +547,7 @@ pub(crate) struct TakeoverView<'a> {
 pub enum SettingEdit {
     CopyOnSelect,
     TimelineDensity,
+    SuccessfulToolGrouping,
     Theme,
 }
 
@@ -1478,6 +1480,8 @@ pub struct AppModel {
     default_theme: Theme,
     timeline_density: TimelineDensity,
     default_timeline_density: TimelineDensity,
+    group_successful_tools: bool,
+    default_group_successful_tools: bool,
     pub dialog: Option<DialogState>,
     dialog_peer: Option<PeerPane>,
     takeover: Option<TakeoverState>,
@@ -1597,6 +1601,8 @@ impl AppModel {
             default_theme: Theme::Default,
             timeline_density: TimelineDensity::Compact,
             default_timeline_density: TimelineDensity::Compact,
+            group_successful_tools: false,
+            default_group_successful_tools: false,
             dialog: None,
             dialog_peer: None,
             takeover: None,
@@ -2396,6 +2402,7 @@ impl AppModel {
                             source_bytes: output_bytes,
                             retained_lines,
                             retained_bytes,
+                            duration_ms: Some(duration_ms),
                             terminal_truncated,
                             metadata_start,
                             metadata_end,
@@ -2436,6 +2443,7 @@ impl AppModel {
                                 source_bytes: output_bytes,
                                 retained_lines,
                                 retained_bytes,
+                                duration_ms: Some(duration_ms),
                                 terminal_truncated,
                                 metadata_start,
                                 metadata_end,
@@ -3136,6 +3144,14 @@ impl AppModel {
                 };
                 self.set_timeline_density(density);
             }
+            Some(SettingEdit::SuccessfulToolGrouping) => {
+                let enabled = if reset {
+                    self.default_group_successful_tools
+                } else {
+                    !self.group_successful_tools
+                };
+                self.set_group_successful_tools(enabled);
+            }
             Some(SettingEdit::Theme) if reset => {
                 self.theme = self.default_theme;
                 self.sync_setting_values();
@@ -3428,6 +3444,7 @@ impl AppModel {
         // host-level reasoning visibility so hiding survives a clear/new session.
         self.reapply_reasoning_visibility();
         self.set_timeline_density(self.timeline_density);
+        self.set_group_successful_tools(self.group_successful_tools);
     }
 
     #[must_use]
@@ -4158,6 +4175,24 @@ impl AppModel {
         self.sync_setting_values();
     }
 
+    pub fn set_group_successful_tools(&mut self, enabled: bool) {
+        self.group_successful_tools = enabled;
+        for projection in self.projections.iter_mut() {
+            projection.timeline.set_group_successful_tools(enabled);
+        }
+        self.sync_setting_values();
+    }
+
+    #[must_use]
+    pub const fn group_successful_tools(&self) -> bool {
+        self.group_successful_tools
+    }
+
+    #[must_use]
+    pub fn group_successful_tools_is_default(&self) -> bool {
+        self.group_successful_tools == self.default_group_successful_tools
+    }
+
     #[must_use]
     pub const fn timeline_density(&self) -> TimelineDensity {
         self.timeline_density
@@ -4207,8 +4242,10 @@ impl AppModel {
                         .active_timeline_mut()
                         .toggle_focused_tool(width, height)
             }
-            ToolAction::Activate(id) => {
-                let focused = self.active_timeline_mut().focus_tool(id, width, height);
+            ToolAction::Activate(target) => {
+                let focused = self
+                    .active_timeline_mut()
+                    .focus_target(target, width, height);
                 if focused {
                     let _ = self
                         .active_timeline_mut()
@@ -4236,6 +4273,7 @@ impl AppModel {
         self.default_copy_on_select = self.copy_on_select;
         self.default_theme = self.theme;
         self.default_timeline_density = self.timeline_density;
+        self.default_group_successful_tools = self.group_successful_tools;
         self.sync_setting_values();
     }
 
@@ -4266,6 +4304,16 @@ impl AppModel {
                 Some(SettingEdit::TimelineDensity) => {
                     setting.value = self.timeline_density.display_name().to_string();
                     setting.is_default = self.timeline_density == self.default_timeline_density;
+                }
+                Some(SettingEdit::SuccessfulToolGrouping) => {
+                    setting.value = if self.group_successful_tools {
+                        "On"
+                    } else {
+                        "Off"
+                    }
+                    .to_string();
+                    setting.is_default =
+                        self.group_successful_tools == self.default_group_successful_tools;
                 }
                 Some(SettingEdit::Theme) => {
                     setting.value = self.theme.display_name().to_string();
@@ -4891,6 +4939,9 @@ impl AppModel {
     }
 
     fn reveal_timeline_search_point(projection: &mut SessionProjection, point: ContentPoint) {
+        let _ = projection
+            .timeline
+            .expand_success_group_containing(point.item_id);
         let collapsed_tool = projection
             .timeline
             .item(point.item_id)
@@ -8607,6 +8658,45 @@ mod tests {
     }
 
     #[test]
+    fn search_reveals_the_original_item_inside_a_collapsed_success_group() {
+        let mut app = model();
+        app.set_group_successful_tools(true);
+        for (id, output) in [
+            ("first", "ordinary detail"),
+            ("second", "grouped NEEDLE detail"),
+            ("third", "ordinary detail"),
+        ] {
+            app.apply_runtime(RuntimeUpdate::ToolFinished {
+                id: id.to_string(),
+                name: "inspect".to_string(),
+                is_error: false,
+                cancelled: false,
+                output: output.to_string(),
+                duration_ms: 5,
+            });
+        }
+        let collapsed = app.active_timeline().rows(80);
+        assert_eq!(
+            collapsed
+                .iter()
+                .filter(|row| row.tool_group.is_some())
+                .count(),
+            1
+        );
+        assert!(!collapsed.iter().any(|row| row.text.contains("NEEDLE")));
+
+        app.open_timeline_search("NEEDLE".to_string());
+
+        assert_eq!(app.timeline_search().map(|search| search.total), Some(1));
+        let revealed = app.active_timeline().rows(80);
+        assert!(revealed.iter().any(|row| {
+            row.tool_group
+                .is_some_and(|group| group.expanded && group.tool_count == 3)
+        }));
+        assert!(revealed.iter().any(|row| row.text.contains("NEEDLE")));
+    }
+
+    #[test]
     fn question_dialog_owns_choices_other_text_and_cancellation() {
         let mut app = model();
         app.request_question(
@@ -8888,6 +8978,38 @@ mod tests {
         app.edit_selected_setting(true);
         assert_eq!(app.timeline_density(), TimelineDensity::Compact);
         assert!(app.timeline_density_is_default());
+    }
+
+    #[test]
+    fn successful_tool_grouping_setting_is_opt_in_and_survives_a_clear() {
+        let mut app = model();
+        app.capture_setting_defaults();
+        app.open_settings(vec![SettingEntry {
+            section: "Appearance".to_string(),
+            name: "Group successful tools".to_string(),
+            value: "Off".to_string(),
+            description: "grouping".to_string(),
+            edit: Some(SettingEdit::SuccessfulToolGrouping),
+            is_default: true,
+        }]);
+        app.edit_selected_setting(false);
+        assert!(app.group_successful_tools());
+        assert!(app.active_timeline().group_successful_tools());
+        app.clear_conversation();
+        assert!(app.group_successful_tools());
+        assert!(app.active_timeline().group_successful_tools());
+
+        app.open_settings(vec![SettingEntry {
+            section: "Appearance".to_string(),
+            name: "Group successful tools".to_string(),
+            value: "On".to_string(),
+            description: "grouping".to_string(),
+            edit: Some(SettingEdit::SuccessfulToolGrouping),
+            is_default: false,
+        }]);
+        app.edit_selected_setting(true);
+        assert!(!app.group_successful_tools());
+        assert!(app.group_successful_tools_is_default());
     }
 
     #[test]

@@ -42,8 +42,8 @@ use localpilot_terminal_ui::{
     QuestionOption as UiQuestionOption, QuestionResponse, RecoveryState, ResultTone, RuntimeUpdate,
     SessionEntry, SessionHeader, SessionSelection, SettingEdit, SettingEntry, StopState,
     SubmittedInput, TabId, TakeoverNavigation, TerminalCapabilities, Theme, Timeline,
-    TimelineNavigation, TimelinePaneHits, ToolAction, UsageTotals, UserShellCommand,
-    UserShellOutput, VisualRowPart,
+    TimelineFocusTarget, TimelineNavigation, TimelinePaneHits, ToolAction, UsageTotals,
+    UserShellCommand, UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::{BackgroundProcesses, ToolOutputPresentation, UserAnswer, UserQuestion};
@@ -2531,6 +2531,15 @@ fn fullscreen_settings(app: &AppModel, config: &localpilot_config::Config) -> Ve
         },
         SettingEntry {
             section: "Appearance".to_string(),
+            name: "Group successful tools".to_string(),
+            value: enabled(app.group_successful_tools()).to_string(),
+            description: "Enter toggles this session; set [terminal] group_successful_tools = true to summarize runs of three or more successful tools. Off preserves individual rows."
+                .to_string(),
+            edit: Some(SettingEdit::SuccessfulToolGrouping),
+            is_default: app.group_successful_tools_is_default(),
+        },
+        SettingEntry {
+            section: "Appearance".to_string(),
             name: "Color mode".to_string(),
             value: app.theme.display_name().to_string(),
             description: format!(
@@ -2628,6 +2637,7 @@ fn image_content_blocks(images: Vec<localpilot_terminal_ui::ImageAttachment>) ->
 
 fn apply_host_preferences(app: &mut AppModel, config: &localpilot_config::Config) {
     app.set_timeline_density(config.terminal.density);
+    app.set_group_successful_tools(config.terminal.group_successful_tools);
     apply_theme_preference(app, std::env::var_os(CHAT_THEME_ENV));
     if let Some(value) = std::env::var_os(CHAT_COPY_ON_SELECT_ENV) {
         match value.into_string() {
@@ -7062,7 +7072,11 @@ fn handle_mouse_event(
                         && matches!(hit.row.part, VisualRowPart::Content { first: true, .. })
                 }) {
                     if app.handle_tool_action(
-                        ToolAction::Activate(hit.row.item_id),
+                        ToolAction::Activate(if hit.row.tool_group.is_some() {
+                            TimelineFocusTarget::SuccessGroup(hit.row.item_id)
+                        } else {
+                            TimelineFocusTarget::Tool(hit.row.item_id)
+                        }),
                         timeline.wrap_width,
                         timeline.timeline.height,
                     ) {
@@ -7278,7 +7292,7 @@ fn selection_points(
     let hit = timeline_hits_for_peer(hit_map, peer)?
         .rows
         .iter()
-        .find(|hit| hit.y == row)?;
+        .find(|hit| hit.y == row && hit.row.tool_group.is_none())?;
     Some((
         hit.point_for_column(column, false),
         hit.point_for_column(column, true),
@@ -7295,6 +7309,7 @@ fn selection_points_nearest(
         let hit = timeline_hits_for_peer(hit_map, peer)?
             .rows
             .iter()
+            .filter(|hit| hit.row.tool_group.is_none())
             .min_by_key(|hit| hit.y.abs_diff(row))?;
         Some((
             hit.point_for_column(column, false),
@@ -9386,6 +9401,49 @@ mod tests {
     }
 
     #[test]
+    fn successful_tool_grouping_never_replaces_exported_originals() {
+        let mut app = app();
+        app.set_group_successful_tools(true);
+        for (id, target) in [
+            ("export-one", "one.rs"),
+            ("export-two", "two.rs"),
+            ("export-three", "three.rs"),
+        ] {
+            app.apply_runtime(RuntimeUpdate::ToolStarted {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+                detail: target.to_string(),
+            });
+            app.apply_runtime(RuntimeUpdate::ToolFinished {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+                is_error: false,
+                cancelled: false,
+                output: format!("contents of {target}"),
+                duration_ms: 5,
+            });
+        }
+
+        assert_eq!(
+            app.active_timeline()
+                .rows(80)
+                .iter()
+                .filter(|row| row.tool_group.is_some())
+                .count(),
+            1,
+            "the interactive projection is grouped"
+        );
+        let transcript = visible_transcript(&app);
+        for target in ["one.rs", "two.rs", "three.rs"] {
+            assert!(
+                transcript.contains(target),
+                "the raw {target} tool remains in the export"
+            );
+        }
+        assert!(!transcript.contains("tools completed"));
+    }
+
+    #[test]
     fn presenter_routes_by_both_logical_lines_and_bytes() {
         let report = |lines: Vec<String>| CommandReport {
             title: "t".to_string(),
@@ -10384,6 +10442,7 @@ mod tests {
             "Prompt history",
             "Compact paste",
             "Timeline density",
+            "Group successful tools",
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }
@@ -10395,15 +10454,17 @@ mod tests {
             [
                 SettingEdit::CopyOnSelect,
                 SettingEdit::TimelineDensity,
+                SettingEdit::SuccessfulToolGrouping,
                 SettingEdit::Theme,
             ]
         );
     }
 
     #[test]
-    fn configured_timeline_density_reaches_the_production_app_and_settings() {
+    fn configured_timeline_preferences_reach_the_production_app_and_settings() {
         let mut config = localpilot_config::Config::default();
         config.terminal.density = localpilot_config::TimelineDensity::Comfortable;
+        config.terminal.group_successful_tools = true;
         let mut app = app();
         apply_host_preferences(&mut app, &config);
         assert_eq!(
@@ -10420,6 +10481,14 @@ mod tests {
             .expect("timeline density setting");
         assert_eq!(density.value, "Comfortable");
         assert!(density.description.contains("[terminal]"));
+        assert!(app.group_successful_tools());
+        assert!(app.active_timeline().group_successful_tools());
+        let grouping = fullscreen_settings(&app, &config)
+            .into_iter()
+            .find(|setting| setting.edit == Some(SettingEdit::SuccessfulToolGrouping))
+            .expect("successful-tool grouping setting");
+        assert_eq!(grouping.value, "On");
+        assert!(grouping.description.contains("group_successful_tools"));
     }
 
     #[test]
@@ -12255,6 +12324,84 @@ mod tests {
         );
         assert_eq!(app.focus, localpilot_terminal_ui::Focus::Composer);
         assert_eq!(app.active_timeline().focused_tool(), None);
+    }
+
+    #[test]
+    fn successful_tool_group_uses_the_same_pointer_and_keyboard_action_seam() {
+        let mut app = app();
+        app.set_group_successful_tools(true);
+        for number in 1..=3 {
+            let id = format!("group-{number}");
+            app.apply_runtime(RuntimeUpdate::ToolStarted {
+                id: id.clone(),
+                name: "inspect".to_string(),
+                detail: format!("target-{number}"),
+            });
+            app.apply_runtime(RuntimeUpdate::ToolFinished {
+                id,
+                name: "inspect".to_string(),
+                is_error: false,
+                cancelled: false,
+                output: format!("detail-{number}"),
+                duration_ms: 10,
+            });
+        }
+
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let timeline = single_hits(&hit_map);
+        let group_hit = timeline
+            .rows
+            .iter()
+            .find(|hit| hit.row.tool_group.is_some())
+            .expect("successful-tool group row");
+        let group_head = group_hit.row.item_id;
+        assert_eq!(
+            selection_points(&hit_map, None, group_hit.content_x, group_hit.y),
+            None,
+            "the synthetic summary is not selectable source text"
+        );
+        let mut mouse_state = MouseState::default();
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    timeline.timeline.x,
+                    group_hit.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(
+            app.active_timeline().focused_target(),
+            Some(TimelineFocusTarget::SuccessGroup(group_head))
+        );
+        assert!(app
+            .active_timeline()
+            .rows(80)
+            .iter()
+            .find_map(|row| row.tool_group)
+            .is_some_and(|group| group.expanded));
+        assert!(app.active_timeline().selection.is_none());
+
+        let expanded_hits = draw_hit_map(&app, 80, 24);
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+                &expanded_hits,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(app
+            .active_timeline()
+            .rows(80)
+            .iter()
+            .find_map(|row| row.tool_group)
+            .is_some_and(|group| !group.expanded));
     }
 
     #[test]

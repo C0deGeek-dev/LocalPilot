@@ -49,8 +49,9 @@ pub use sanitize::sanitize_text;
 pub use theme::{Theme, ThemeParseError, ThemeResolver, UiRole};
 pub use timeline::{
     ActivityState, ContentPoint, ItemId, ItemKind, PinnedPrompt, ResultTone, Selection,
-    SemanticRole, StyledRange, TextStyle, Timeline, TimelineItem, TimelineView, ToolDisclosure,
-    ToolPresentation, ViewportAnchor, VisualRow, VisualRowPart, VisualSpan,
+    SemanticRole, StyledRange, TextStyle, Timeline, TimelineFocusTarget, TimelineItem,
+    TimelineView, ToolDisclosure, ToolGroupPresentation, ToolPresentation, ViewportAnchor,
+    VisualRow, VisualRowPart, VisualSpan,
 };
 
 /// The product name shown by the full-screen UI.

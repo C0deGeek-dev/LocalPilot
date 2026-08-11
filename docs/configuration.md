@@ -368,10 +368,12 @@ current compact layout.
 | Key | Type | Default | Description |
 |---|---|---:|---|
 | `density` | `compact` \| `comfortable` | `compact` | `compact` keeps adjacent tool activity tight; `comfortable` inserts one optional spacer between adjacent tool rows. Both retain the required separator before assistant or reasoning text. `/settings` can change the value for the current session without rewriting the config file. |
+| `group_successful_tools` | bool | `false` | When true, three or more consecutive successful tools collapse into one expandable presentation row. Any other timeline item or tool outcome ends the run. The original tools remain searchable, exportable, and retained; `/settings` can toggle grouping for the current session. |
 
 ```toml
 [terminal]
 density = "comfortable"
+group_successful_tools = true
 ```
 
 ### `[provider]`

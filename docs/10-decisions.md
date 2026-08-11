@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0156: Successful Tool Runs Group Only As An Opt-In Timeline Projection
+
+Status: accepted
+
+The full-screen timeline may summarize a run of three or more consecutive
+successful tool items behind one expandable row, but only when
+`[terminal] group_successful_tools = true` (or the equivalent session toggle in
+`/settings`). The compatibility default is `false`. Any non-tool item, running,
+failed, or cancelled tool ends a run.
+
+Grouping is presentation-only. Provider-neutral runtime events, retained
+`TimelineItem`s, session storage, and exit/export transcripts keep every
+original tool. A collapsed summary reports the tool count, aggregate duration
+only when every duration is known, whether retained details are hidden, and
+whether any member hit the independent terminal retention bound. Expanding the
+summary reveals the original tool rows, which retain their own disclosure
+controls.
+
+The summary is a typed focus target but not selectable source text. F7/F8,
+Enter, Escape, and prefix clicks use the same `ToolAction` authority as an
+ordinary tool. Search expands the containing group before revealing an original
+match; an anchor inside a collapsed member resolves to the group headline; and
+a selection spanning a collapsed run inserts a counted
+`… N successful tools grouped …` marker instead of silently dropping or joining
+hidden source. Turning grouping off restores the original projection without a
+transcript migration.
+
+Reason:
+
+- repeated successful tools are useful progress evidence but can dominate the
+  conversation's visual hierarchy
+- keeping the feature opt-in preserves the already-approved compact default
+  while making the denser view available for tool-heavy workflows
+- projection-only grouping avoids a second transcript model and keeps search,
+  export, persistence, and provider contracts grounded in retained originals
+- typed focus, explicit omission copy, and non-color/screen-reader cues make the
+  space-saving interaction inspectable rather than opaque
+
 ## ADR-0155: `localx`, One Umbrella Command For The Whole Stack
 
 Status: Accepted. Extends the binary-distribution decisions (D011 stack-as-a-set,

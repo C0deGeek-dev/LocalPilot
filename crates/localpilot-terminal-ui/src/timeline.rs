@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -13,6 +13,7 @@ use crate::text::{wrap_ranges, TextRow};
 const COLLAPSED_TOOL_VISUAL_ROWS: usize = 4;
 const FAILED_TOOL_VISUAL_ROWS: usize = 8;
 const FAILED_TOOL_HEAD_ROWS: usize = 2;
+const SUCCESS_GROUP_MIN_TOOLS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ItemId(u64);
@@ -63,6 +64,8 @@ pub struct ToolPresentation {
     pub source_bytes: usize,
     pub retained_lines: usize,
     pub retained_bytes: usize,
+    /// Completed runtime duration when the host supplied one.
+    pub duration_ms: Option<u64>,
     pub terminal_truncated: bool,
     /// Byte boundary between the action headline and its metadata suffix.
     pub metadata_start: usize,
@@ -82,6 +85,34 @@ pub struct ToolDisclosure {
     /// retained wrapped rows between the compact head and tail are hidden.
     pub tail_start_visual_row: Option<usize>,
     pub terminal_truncated: bool,
+}
+
+/// Projection-only summary of one consecutive successful tool run. Original
+/// timeline items remain authoritative and reappear when the group expands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolGroupPresentation {
+    pub tool_count: usize,
+    pub duration_ms: Option<u64>,
+    pub has_retained_details: bool,
+    pub terminal_truncated: bool,
+    pub expanded: bool,
+}
+
+/// One keyboard/pointer focus authority for original tools and projected
+/// successful-run summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineFocusTarget {
+    Tool(ItemId),
+    SuccessGroup(ItemId),
+}
+
+impl TimelineFocusTarget {
+    #[must_use]
+    pub const fn item_id(self) -> ItemId {
+        match self {
+            Self::Tool(id) | Self::SuccessGroup(id) => id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +246,7 @@ pub struct VisualRow {
     pub tone: Option<ResultTone>,
     pub tool: Option<ToolPresentation>,
     pub disclosure: Option<ToolDisclosure>,
+    pub tool_group: Option<ToolGroupPresentation>,
     /// Retained wrapped rows skipped immediately before this projected row.
     /// This is projection metadata, never synthetic source text.
     pub omitted_before_visual_rows: usize,
@@ -287,6 +319,14 @@ struct ItemLayout {
     start: usize,
     end: usize,
     leading_spacer: bool,
+    kind: ItemLayoutKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ItemLayoutKind {
+    Item,
+    SuccessGroupHead(ToolGroupPresentation),
+    CollapsedSuccessGroupMember { head: ItemId },
 }
 
 #[derive(Debug, Clone)]
@@ -294,6 +334,13 @@ struct CachedLayout {
     width: u16,
     entries: Arc<[ItemLayout]>,
     total_rows: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SuccessGroup {
+    head_index: usize,
+    end_index: usize,
+    presentation: ToolGroupPresentation,
 }
 
 #[derive(Debug, Clone)]
@@ -311,7 +358,9 @@ pub struct Timeline {
     /// are retained (streaming continues; the print path drops them separately).
     reasoning_visible: bool,
     density: TimelineDensity,
-    focused_tool: Option<ItemId>,
+    group_successful_tools: bool,
+    expanded_success_groups: HashSet<ItemId>,
+    focused_target: Option<TimelineFocusTarget>,
 }
 
 impl Default for Timeline {
@@ -334,7 +383,9 @@ impl Timeline {
             new_content: Cell::new(false),
             reasoning_visible: true,
             density: TimelineDensity::Compact,
-            focused_tool: None,
+            group_successful_tools: false,
+            expanded_success_groups: HashSet::new(),
+            focused_target: None,
         }
     }
 
@@ -362,12 +413,33 @@ impl Timeline {
     }
 
     #[must_use]
-    pub const fn focused_tool(&self) -> Option<ItemId> {
-        self.focused_tool
+    pub const fn group_successful_tools(&self) -> bool {
+        self.group_successful_tools
+    }
+
+    pub fn set_group_successful_tools(&mut self, enabled: bool) {
+        if self.group_successful_tools != enabled {
+            self.group_successful_tools = enabled;
+            self.focused_target = None;
+            self.invalidate_layout();
+        }
+    }
+
+    #[must_use]
+    pub const fn focused_target(&self) -> Option<TimelineFocusTarget> {
+        self.focused_target
+    }
+
+    #[must_use]
+    pub fn focused_tool(&self) -> Option<ItemId> {
+        match self.focused_target {
+            Some(TimelineFocusTarget::Tool(id)) => Some(id),
+            Some(TimelineFocusTarget::SuccessGroup(_)) | None => None,
+        }
     }
 
     pub fn clear_tool_focus(&mut self) {
-        self.focused_tool = None;
+        self.focused_target = None;
     }
 
     /// Set reasoning visibility. Invalidates the layout cache so scroll geometry
@@ -413,6 +485,70 @@ impl Timeline {
         self.item_positions
             .get(&id)
             .and_then(|index| self.items.get(*index))
+    }
+
+    fn success_groups(&self) -> Vec<SuccessGroup> {
+        if !self.group_successful_tools {
+            return Vec::new();
+        }
+        let mut groups = Vec::new();
+        let mut index = 0usize;
+        while index < self.items.len() {
+            if !is_groupable_success(&self.items[index]) {
+                index += 1;
+                continue;
+            }
+            let head_index = index;
+            while index < self.items.len() && is_groupable_success(&self.items[index]) {
+                index += 1;
+            }
+            let end_index = index;
+            let tool_count = end_index.saturating_sub(head_index);
+            if tool_count < SUCCESS_GROUP_MIN_TOOLS {
+                continue;
+            }
+            let members = &self.items[head_index..end_index];
+            let duration_ms = members.iter().try_fold(0u64, |total, item| {
+                item.tool?
+                    .duration_ms
+                    .map(|duration| total.saturating_add(duration))
+            });
+            let head = self.items[head_index].id;
+            groups.push(SuccessGroup {
+                head_index,
+                end_index,
+                presentation: ToolGroupPresentation {
+                    tool_count,
+                    duration_ms,
+                    has_retained_details: members.iter().any(|item| item.text.contains('\n')),
+                    terminal_truncated: members
+                        .iter()
+                        .any(|item| item.tool.is_some_and(|tool| tool.terminal_truncated)),
+                    expanded: self.expanded_success_groups.contains(&head),
+                },
+            });
+        }
+        groups
+    }
+
+    fn success_group_containing(&self, id: ItemId) -> Option<SuccessGroup> {
+        let index = self.item_positions.get(&id).copied()?;
+        self.success_groups()
+            .into_iter()
+            .find(|group| group.head_index <= index && index < group.end_index)
+    }
+
+    /// Reveal original tools inside the containing successful run before a
+    /// search/anchor operation targets their source bytes.
+    pub fn expand_success_group_containing(&mut self, id: ItemId) -> bool {
+        let Some(group) = self.success_group_containing(id) else {
+            return false;
+        };
+        let head = self.items[group.head_index].id;
+        if self.expanded_success_groups.insert(head) {
+            self.invalidate_layout();
+        }
+        true
     }
 
     pub fn push(&mut self, kind: ItemKind, text: impl Into<String>) -> Option<ItemId> {
@@ -591,53 +727,135 @@ impl Timeline {
         true
     }
 
-    /// Focus one tool by stable item identity, scroll its headline into view,
-    /// and leave wrapping/search/copy grounded in the original item.
-    pub fn focus_tool(&mut self, id: ItemId, width: u16, height: u16) -> bool {
-        let Some(item) = self.item(id) else {
+    /// Focus one original tool or one projected successful-run summary.
+    pub fn focus_target(&mut self, target: TimelineFocusTarget, width: u16, height: u16) -> bool {
+        let id = target.item_id();
+        let Some(index) = self.item_positions.get(&id).copied() else {
+            return false;
+        };
+        let Some(item) = self.items.get(index) else {
             return false;
         };
         if item.kind != ItemKind::Tool {
             return false;
         }
-        self.focused_tool = Some(id);
-        self.reveal_tool_headline(id, width, height);
+        match target {
+            TimelineFocusTarget::Tool(_) => {
+                if self
+                    .success_group_containing(id)
+                    .is_some_and(|group| !group.presentation.expanded)
+                {
+                    return false;
+                }
+            }
+            TimelineFocusTarget::SuccessGroup(_) => {
+                if !self
+                    .success_group_containing(id)
+                    .is_some_and(|group| group.head_index == index)
+                {
+                    return false;
+                }
+            }
+        }
+        self.focused_target = Some(target);
+        self.reveal_focus_target(target, width, height);
         true
+    }
+
+    /// Compatibility helper for callers that explicitly target an original tool.
+    pub fn focus_tool(&mut self, id: ItemId, width: u16, height: u16) -> bool {
+        self.focus_target(TimelineFocusTarget::Tool(id), width, height)
     }
 
     /// Move the stable tool cursor in timeline reading order. The first move
     /// starts at the nearest edge and subsequent moves clamp at either end.
     pub fn move_tool_focus(&mut self, forward: bool, width: u16, height: u16) -> bool {
-        let tools = self
-            .items
-            .iter()
-            .filter(|item| item.kind == ItemKind::Tool)
-            .map(|item| item.id)
-            .collect::<Vec<_>>();
-        if tools.is_empty() {
-            self.focused_tool = None;
+        let targets = self.focus_targets();
+        if targets.is_empty() {
+            self.focused_target = None;
             return false;
         }
         let current = self
-            .focused_tool
-            .and_then(|focused| tools.iter().position(|id| *id == focused));
+            .focused_target
+            .and_then(|focused| targets.iter().position(|target| *target == focused));
         let next = match (current, forward) {
-            (Some(index), true) => index.saturating_add(1).min(tools.len().saturating_sub(1)),
+            (Some(index), true) => index.saturating_add(1).min(targets.len().saturating_sub(1)),
             (Some(index), false) => index.saturating_sub(1),
             (None, true) => 0,
-            (None, false) => tools.len().saturating_sub(1),
+            (None, false) => targets.len().saturating_sub(1),
         };
-        self.focus_tool(tools[next], width, height)
+        self.focus_target(targets[next], width, height)
     }
 
     /// Toggle the focused tool while preserving the pre-toggle viewport start.
     /// The only movement permitted is deterministic clamping when the shorter
     /// post-toggle timeline no longer has that start row.
     pub fn toggle_focused_tool(&mut self, width: u16, height: u16) -> bool {
-        let Some(id) = self.focused_tool else {
+        let Some(target) = self.focused_target else {
             return false;
         };
-        self.toggle_tool_preserving_view(id, width, height)
+        match target {
+            TimelineFocusTarget::Tool(id) => self.toggle_tool_preserving_view(id, width, height),
+            TimelineFocusTarget::SuccessGroup(id) => {
+                self.toggle_success_group_preserving_view(id, width, height)
+            }
+        }
+    }
+
+    fn focus_targets(&self) -> Vec<TimelineFocusTarget> {
+        let groups = self.success_groups();
+        let mut targets = Vec::new();
+        let mut index = 0usize;
+        for group in groups {
+            while index < group.head_index {
+                if self.items[index].kind == ItemKind::Tool {
+                    targets.push(TimelineFocusTarget::Tool(self.items[index].id));
+                }
+                index += 1;
+            }
+            let head = self.items[group.head_index].id;
+            targets.push(TimelineFocusTarget::SuccessGroup(head));
+            if group.presentation.expanded {
+                targets.extend(
+                    self.items[group.head_index..group.end_index]
+                        .iter()
+                        .map(|item| TimelineFocusTarget::Tool(item.id)),
+                );
+            }
+            index = group.end_index;
+        }
+        while index < self.items.len() {
+            if self.items[index].kind == ItemKind::Tool {
+                targets.push(TimelineFocusTarget::Tool(self.items[index].id));
+            }
+            index += 1;
+        }
+        targets
+    }
+
+    fn toggle_success_group_preserving_view(
+        &mut self,
+        head: ItemId,
+        width: u16,
+        height: u16,
+    ) -> bool {
+        let Some(group) = self.success_group_containing(head) else {
+            return false;
+        };
+        if self.items[group.head_index].id != head {
+            return false;
+        }
+        let before = self.view(width, height);
+        if group.presentation.expanded {
+            self.expanded_success_groups.remove(&head);
+        } else {
+            self.expanded_success_groups.insert(head);
+        }
+        self.invalidate_layout();
+        let after = self.view(width, height);
+        let max_start = self.total_rows(width).saturating_sub(after.viewport_rows);
+        self.set_viewport_start(before.start.min(max_start), width, max_start);
+        true
     }
 
     fn toggle_tool_preserving_view(&mut self, id: ItemId, width: u16, height: u16) -> bool {
@@ -651,7 +869,8 @@ impl Timeline {
         true
     }
 
-    fn reveal_tool_headline(&mut self, id: ItemId, width: u16, height: u16) {
+    fn reveal_focus_target(&mut self, target: TimelineFocusTarget, width: u16, height: u16) {
+        let id = target.item_id();
         let Some(index) = self.item_positions.get(&id).copied() else {
             return;
         };
@@ -659,9 +878,17 @@ impl Timeline {
         let Some(entry) = layout.entries.get(index) else {
             return;
         };
+        let group_header_rows = usize::from(matches!(
+            (target, entry.kind),
+            (
+                TimelineFocusTarget::Tool(_),
+                ItemLayoutKind::SuccessGroupHead(ToolGroupPresentation { expanded: true, .. })
+            )
+        ));
         let headline = entry
             .start
-            .saturating_add(usize::from(entry.leading_spacer));
+            .saturating_add(usize::from(entry.leading_spacer))
+            .saturating_add(group_header_rows);
         let view = self.view(width, height);
         let end = view.start.saturating_add(view.viewport_rows);
         let start = if headline < view.start {
@@ -803,11 +1030,37 @@ impl Timeline {
         }
         let mut output = String::new();
         let mut selected_any = false;
+        let mut collapsed_group_by_index = HashMap::new();
+        for group in self
+            .success_groups()
+            .into_iter()
+            .filter(|group| !group.presentation.expanded)
+        {
+            for index in group.head_index..group.end_index {
+                collapsed_group_by_index.insert(index, group);
+            }
+        }
+        let mut emitted_collapsed_groups = HashSet::new();
         for (index, item) in self.items[start_index..=end_index].iter().enumerate() {
             let index = start_index + index;
             // A hidden reasoning item has no visible row, so a selection spanning
             // it must not splice its text into the copy.
             if self.is_reasoning_hidden(item) {
+                continue;
+            }
+            if let Some(group) = collapsed_group_by_index.get(&index).copied() {
+                let head = self.items[group.head_index].id;
+                if emitted_collapsed_groups.insert(head) {
+                    let selected_tools = end_index
+                        .saturating_add(1)
+                        .min(group.end_index)
+                        .saturating_sub(start_index.max(group.head_index));
+                    if selected_any {
+                        output.push('\n');
+                    }
+                    output.push_str(&format!("… {} successful tools grouped …", selected_tools));
+                    selected_any = true;
+                }
                 continue;
             }
             let from = if index == start_index {
@@ -1041,6 +1294,17 @@ impl Timeline {
         if self.is_reasoning_hidden(item) {
             return entry.start.min(layout.total_rows.saturating_sub(1));
         }
+        if let ItemLayoutKind::CollapsedSuccessGroupMember { head } = entry.kind {
+            return self
+                .item_positions
+                .get(&head)
+                .and_then(|head_index| layout.entries.get(*head_index))
+                .map_or(entry.start, |head_entry| {
+                    head_entry
+                        .start
+                        .saturating_add(usize::from(head_entry.leading_spacer))
+                });
+        }
         let ranges = self.row_ranges(item, item_content_width(item, width));
         let within = ranges
             .iter()
@@ -1051,9 +1315,14 @@ impl Timeline {
                     .position(|row| row.start_byte < anchor.byte && anchor.byte <= row.end_byte)
             })
             .unwrap_or_else(|| ranges.len().saturating_sub(1));
+        let group_header_rows = usize::from(matches!(
+            entry.kind,
+            ItemLayoutKind::SuccessGroupHead(ToolGroupPresentation { expanded: true, .. })
+        ));
         entry
             .start
             .saturating_add(usize::from(entry.leading_spacer))
+            .saturating_add(group_header_rows)
             .saturating_add(frame_prefix_rows(item.kind))
             .saturating_add(within)
     }
@@ -1072,6 +1341,18 @@ impl Timeline {
             });
         }
         let local = local.saturating_sub(spacer);
+        if let ItemLayoutKind::SuccessGroupHead(group) = entry.kind {
+            if local == 0 || !group.expanded {
+                return Some(ContentPoint {
+                    item_id: item.id,
+                    byte: 0,
+                });
+            }
+        }
+        let local = local.saturating_sub(usize::from(matches!(
+            entry.kind,
+            ItemLayoutKind::SuccessGroupHead(ToolGroupPresentation { expanded: true, .. })
+        )));
         let prefix = frame_prefix_rows(item.kind);
         if local < prefix {
             return Some(ContentPoint {
@@ -1102,23 +1383,46 @@ impl Timeline {
         let first_index = layout.entries.partition_point(|entry| entry.end <= start);
         for (index, entry) in layout.entries.iter().enumerate().skip(first_index) {
             let item = &self.items[index];
-            let ranges = self.row_ranges(item, item_content_width(item, width));
-            let disclosure = self.tool_disclosure(item);
             if entry.start >= end {
                 break;
             }
+            if matches!(
+                entry.kind,
+                ItemLayoutKind::CollapsedSuccessGroupMember { .. }
+            ) {
+                continue;
+            }
+            let ranges = self.row_ranges(item, item_content_width(item, width));
+            let disclosure = self.tool_disclosure(item);
             let item_rows = entry.end.saturating_sub(entry.start);
             let first = start.saturating_sub(entry.start);
             let last = end.saturating_sub(entry.start).min(item_rows);
-            output.extend(project_item_rows(
-                item,
-                &ranges,
-                first,
-                last,
-                entry.leading_spacer,
-                disclosure,
-                self.focused_tool == Some(item.id),
-            ));
+            match entry.kind {
+                ItemLayoutKind::Item => output.extend(project_item_rows(
+                    item,
+                    &ranges,
+                    first,
+                    last,
+                    entry.leading_spacer,
+                    disclosure,
+                    self.focused_target == Some(TimelineFocusTarget::Tool(item.id)),
+                )),
+                ItemLayoutKind::SuccessGroupHead(group) => {
+                    output.extend(project_success_group_rows(
+                        item,
+                        &ranges,
+                        first,
+                        last,
+                        entry.leading_spacer,
+                        disclosure,
+                        SuccessGroupProjection {
+                            group,
+                            focused_target: self.focused_target,
+                        },
+                    ));
+                }
+                ItemLayoutKind::CollapsedSuccessGroupMember { .. } => {}
+            }
         }
         output
     }
@@ -1181,41 +1485,69 @@ impl Timeline {
         }
         let mut start = 0usize;
         let mut previous_visible_kind = None;
-        let entries: Arc<[ItemLayout]> = self
-            .items
+        let groups = self.success_groups();
+        let group_heads = groups
             .iter()
-            .map(|item| {
-                // A hidden reasoning item stays in the entries vector (index
-                // identity with `self.items`) but is zero-height, so it occupies
-                // no rows and later entries keep the same start offsets.
-                let hidden = self.is_reasoning_hidden(item);
-                // Keep narration into the next tool dense; only resumed LLM
-                // narration after a tool gets the requested breathing room.
-                let required_spacer = previous_visible_kind == Some(ItemKind::Tool)
-                    && matches!(item.kind, ItemKind::Assistant | ItemKind::Reasoning);
-                let density_spacer = self.density.includes_optional_spacers()
-                    && previous_visible_kind == Some(ItemKind::Tool)
-                    && item.kind == ItemKind::Tool;
-                let leading_spacer = !hidden && (required_spacer || density_spacer);
-                let height = if hidden {
-                    0
-                } else {
-                    let ranges = self.row_ranges(item, item_content_width(item, width));
-                    let height = item_visual_row_count(item, &ranges, leading_spacer);
-                    previous_visible_kind = Some(item.kind);
-                    height
-                };
-                let end = start.saturating_add(height);
-                let entry = ItemLayout {
+            .map(|group| (group.head_index, *group))
+            .collect::<HashMap<_, _>>();
+        let mut collapsed_members = HashMap::new();
+        for group in groups.iter().filter(|group| !group.presentation.expanded) {
+            let head = self.items[group.head_index].id;
+            for index in group.head_index + 1..group.end_index {
+                collapsed_members.insert(index, head);
+            }
+        }
+        let mut entry_values = Vec::with_capacity(self.items.len());
+        for (index, item) in self.items.iter().enumerate() {
+            if let Some(head) = collapsed_members.get(&index).copied() {
+                entry_values.push(ItemLayout {
                     start,
-                    end,
-                    leading_spacer,
+                    end: start,
+                    leading_spacer: false,
+                    kind: ItemLayoutKind::CollapsedSuccessGroupMember { head },
+                });
+                continue;
+            }
+            // A hidden reasoning item stays in the entries vector (index
+            // identity with `self.items`) but is zero-height.
+            let hidden = self.is_reasoning_hidden(item);
+            let required_spacer = previous_visible_kind == Some(ItemKind::Tool)
+                && matches!(item.kind, ItemKind::Assistant | ItemKind::Reasoning);
+            let density_spacer = self.density.includes_optional_spacers()
+                && previous_visible_kind == Some(ItemKind::Tool)
+                && item.kind == ItemKind::Tool;
+            let leading_spacer = !hidden && (required_spacer || density_spacer);
+            let (height, kind) = if hidden {
+                (0, ItemLayoutKind::Item)
+            } else if let Some(group) = group_heads.get(&index).copied() {
+                let original_rows = if group.presentation.expanded {
+                    self.row_ranges(item, item_content_width(item, width)).len()
+                } else {
+                    0
                 };
-                start = end;
-                entry
-            })
-            .collect::<Vec<_>>()
-            .into();
+                previous_visible_kind = Some(ItemKind::Tool);
+                (
+                    usize::from(leading_spacer)
+                        .saturating_add(1)
+                        .saturating_add(original_rows),
+                    ItemLayoutKind::SuccessGroupHead(group.presentation),
+                )
+            } else {
+                let ranges = self.row_ranges(item, item_content_width(item, width));
+                let height = item_visual_row_count(item, &ranges, leading_spacer);
+                previous_visible_kind = Some(item.kind);
+                (height, ItemLayoutKind::Item)
+            };
+            let end = start.saturating_add(height);
+            entry_values.push(ItemLayout {
+                start,
+                end,
+                leading_spacer,
+                kind,
+            });
+            start = end;
+        }
+        let entries: Arc<[ItemLayout]> = entry_values.into();
         let cached = CachedLayout {
             width,
             entries,
@@ -1232,6 +1564,10 @@ impl Timeline {
 
 fn frame_prefix_rows(kind: ItemKind) -> usize {
     usize::from(kind == ItemKind::User)
+}
+
+fn is_groupable_success(item: &TimelineItem) -> bool {
+    item.kind == ItemKind::Tool && item.activity == Some(ActivityState::Success)
 }
 
 fn displayed_text(item: &TimelineItem) -> &str {
@@ -1319,6 +1655,106 @@ fn project_item_rows(
     output
 }
 
+#[derive(Clone, Copy)]
+struct SuccessGroupProjection {
+    group: ToolGroupPresentation,
+    focused_target: Option<TimelineFocusTarget>,
+}
+
+fn project_success_group_rows(
+    item: &TimelineItem,
+    ranges: &[TextRow],
+    start: usize,
+    end: usize,
+    leading_spacer: bool,
+    disclosure: Option<ToolDisclosure>,
+    projection: SuccessGroupProjection,
+) -> Vec<VisualRow> {
+    let mut output = Vec::with_capacity(end.saturating_sub(start));
+    let spacer = usize::from(leading_spacer);
+    for index in start..end {
+        if leading_spacer && index == 0 {
+            output.push(frame_row(item, VisualRowPart::Spacer, false));
+            continue;
+        }
+        let local = index.saturating_sub(spacer);
+        if local == 0 {
+            output.push(success_group_row(
+                item,
+                projection.group,
+                projection.focused_target == Some(TimelineFocusTarget::SuccessGroup(item.id)),
+            ));
+            continue;
+        }
+        if !projection.group.expanded {
+            continue;
+        }
+        let content_index = local.saturating_sub(1);
+        if let Some(range) = ranges.get(content_index) {
+            let omitted_before_visual_rows = disclosure
+                .filter(|value| {
+                    !value.expanded && value.tail_start_visual_row == Some(content_index)
+                })
+                .map_or(0, |value| value.hidden_visual_rows);
+            output.push(visual_row(
+                item,
+                *range,
+                VisualRowPart::Content {
+                    first: content_index == 0,
+                    last: content_index + 1 == ranges.len(),
+                },
+                disclosure,
+                omitted_before_visual_rows,
+                projection.focused_target == Some(TimelineFocusTarget::Tool(item.id)),
+            ));
+        }
+    }
+    output
+}
+
+fn success_group_row(
+    item: &TimelineItem,
+    group: ToolGroupPresentation,
+    focused: bool,
+) -> VisualRow {
+    let mut text = format!("{} tools completed", group.tool_count);
+    if let Some(duration_ms) = group.duration_ms {
+        text.push_str(&format!(" · {duration_ms} ms"));
+    }
+    if group.has_retained_details {
+        text.push_str(if group.expanded {
+            " · retained details shown"
+        } else {
+            " · retained details hidden"
+        });
+    }
+    if group.terminal_truncated {
+        text.push_str(" · terminal view truncated");
+    }
+    VisualRow {
+        item_id: item.id,
+        kind: ItemKind::Tool,
+        start_byte: 0,
+        end_byte: 0,
+        text,
+        spans: Vec::new(),
+        part: VisualRowPart::Content {
+            first: true,
+            last: true,
+        },
+        content_column: 3,
+        trailing: None,
+        pending: false,
+        activity: Some(ActivityState::Success),
+        tone: None,
+        tool: None,
+        disclosure: None,
+        tool_group: Some(group),
+        omitted_before_visual_rows: 0,
+        focused,
+    }
+}
+
 fn frame_row(item: &TimelineItem, part: VisualRowPart, focused: bool) -> VisualRow {
     let byte = if part == VisualRowPart::FrameBottom {
         item.text.len()
@@ -1340,6 +1776,7 @@ fn frame_row(item: &TimelineItem, part: VisualRowPart, focused: bool) -> VisualR
         tone: item.tone,
         tool: item.tool,
         disclosure: None,
+        tool_group: None,
         omitted_before_visual_rows: 0,
         focused,
     }
@@ -1438,6 +1875,7 @@ fn visual_row(
         tone: item.tone,
         tool: item.tool,
         disclosure,
+        tool_group: None,
         omitted_before_visual_rows,
         focused,
     }
@@ -1446,6 +1884,37 @@ fn visual_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn push_successful_tool(
+        timeline: &mut Timeline,
+        name: &str,
+        body: &str,
+        duration_ms: Option<u64>,
+    ) -> ItemId {
+        let mut text = format!("{name} completed");
+        let metadata_start = name.len();
+        let metadata_end = text.len();
+        if !body.is_empty() {
+            text.push('\n');
+            text.push_str(body);
+        }
+        let id = timeline.push(ItemKind::Tool, &text).expect("tool");
+        assert!(timeline.set_tool_presentation(
+            id,
+            ToolPresentation {
+                source_lines: body.lines().count(),
+                source_bytes: body.len(),
+                retained_lines: body.lines().count(),
+                retained_bytes: body.len(),
+                duration_ms,
+                terminal_truncated: false,
+                metadata_start,
+                metadata_end,
+            },
+        ));
+        assert!(timeline.set_activity(id, Some(ActivityState::Success)));
+        id
+    }
 
     #[test]
     fn held_content_anchor_survives_stream_and_reflow() {
@@ -1909,6 +2378,7 @@ mod tests {
                 source_bytes: text.len(),
                 retained_lines: 10,
                 retained_bytes: text.len(),
+                duration_ms: Some(5),
                 terminal_truncated: false,
                 metadata_start,
                 metadata_end,
@@ -1999,6 +2469,7 @@ mod tests {
                 source_bytes: text.len(),
                 retained_lines: 8,
                 retained_bytes: text.len(),
+                duration_ms: None,
                 terminal_truncated: false,
                 metadata_start: "inspect".len(),
                 metadata_end: "inspect running".len(),
@@ -2046,6 +2517,7 @@ mod tests {
                 source_bytes: 4_096,
                 retained_lines: 7,
                 retained_bytes: text.len(),
+                duration_ms: Some(5),
                 terminal_truncated: true,
                 metadata_start,
                 metadata_end,
@@ -2067,6 +2539,145 @@ mod tests {
         assert!(disclosure.expandable);
         assert_eq!(expanded.len(), 8);
         assert_eq!(timeline.items().len(), 1);
+    }
+
+    #[test]
+    fn successful_tool_grouping_is_opt_in_thresholded_and_reversible() {
+        let mut timeline = Timeline::new();
+        let first = push_successful_tool(&mut timeline, "first", "detail one", Some(10));
+        let second = push_successful_tool(&mut timeline, "second", "detail two", Some(20));
+        let third = push_successful_tool(&mut timeline, "third", "detail three", Some(30));
+
+        assert!(!timeline.group_successful_tools());
+        assert_eq!(
+            timeline
+                .rows(80)
+                .iter()
+                .filter(|row| row.kind == ItemKind::Tool)
+                .count(),
+            6,
+            "the compatibility default keeps all three original headlines and bodies"
+        );
+
+        timeline.set_group_successful_tools(true);
+        let collapsed = timeline.rows(80);
+        assert_eq!(collapsed.len(), 1);
+        let summary = collapsed[0].tool_group.expect("group summary");
+        assert_eq!(summary.tool_count, 3);
+        assert_eq!(summary.duration_ms, Some(60));
+        assert!(summary.has_retained_details);
+        assert!(!summary.expanded);
+        assert_eq!(timeline.items().len(), 3, "original items remain retained");
+
+        assert!(timeline.move_tool_focus(true, 80, 12));
+        assert_eq!(
+            timeline.focused_target(),
+            Some(TimelineFocusTarget::SuccessGroup(first))
+        );
+        let before = timeline.view(80, 12);
+        let before_row = before
+            .rows
+            .iter()
+            .position(|row| row.tool_group.is_some())
+            .expect("collapsed group row");
+        assert!(timeline.toggle_focused_tool(80, 12));
+        let expanded = timeline.view(80, 12);
+        let expanded_row = expanded
+            .rows
+            .iter()
+            .position(|row| row.tool_group.is_some())
+            .expect("expanded group row");
+        assert_eq!(
+            before_row, expanded_row,
+            "the summary headline stays anchored"
+        );
+        assert!(expanded.rows[expanded_row]
+            .tool_group
+            .is_some_and(|group| group.expanded));
+        assert!(expanded
+            .rows
+            .iter()
+            .any(|row| row.item_id == first && row.tool_group.is_none()));
+        assert!(expanded.rows.iter().any(|row| row.item_id == second));
+        assert!(expanded.rows.iter().any(|row| row.item_id == third));
+
+        assert!(timeline.move_tool_focus(true, 80, 12));
+        assert_eq!(
+            timeline.focused_target(),
+            Some(TimelineFocusTarget::Tool(first))
+        );
+        assert!(timeline.focus_target(TimelineFocusTarget::SuccessGroup(first), 80, 12));
+        assert!(timeline.toggle_focused_tool(80, 12));
+        assert_eq!(timeline.rows(80).len(), 1);
+    }
+
+    #[test]
+    fn grouping_boundaries_and_collapsed_copy_remain_truthful() {
+        let mut timeline = Timeline::new();
+        timeline.set_group_successful_tools(true);
+        let before = timeline
+            .push(ItemKind::Assistant, "before group")
+            .expect("before");
+        let first = push_successful_tool(&mut timeline, "one", "detail", Some(1));
+        let second = push_successful_tool(&mut timeline, "two", "", Some(2));
+        let third = push_successful_tool(&mut timeline, "three", "", None);
+        let after = timeline
+            .push(ItemKind::Assistant, "after group")
+            .expect("after");
+        let _ = push_successful_tool(&mut timeline, "only one", "", Some(4));
+        let failed = timeline
+            .push(ItemKind::Tool, "failed")
+            .expect("failed boundary");
+        assert!(timeline.set_activity(failed, Some(ActivityState::Error)));
+        let _ = push_successful_tool(&mut timeline, "only two", "", Some(5));
+
+        let rows = timeline.rows(80);
+        let groups = rows
+            .iter()
+            .filter_map(|row| row.tool_group)
+            .collect::<Vec<_>>();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].tool_count, 3);
+        assert_eq!(groups[0].duration_ms, None, "unknown duration stays honest");
+        assert!(rows.iter().any(|row| row.item_id == failed));
+
+        timeline.start_selection(ContentPoint {
+            item_id: before,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: after,
+            byte: timeline.item(after).expect("after item").text.len(),
+        });
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some("before group\n… 3 successful tools grouped …\nafter group")
+        );
+
+        timeline.start_selection(ContentPoint {
+            item_id: second,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: after,
+            byte: timeline.item(after).expect("after item").text.len(),
+        });
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some("… 2 successful tools grouped …\nafter group"),
+            "a selection retained before collapse never loses hidden members silently"
+        );
+
+        assert!(timeline.hold_at(ContentPoint {
+            item_id: third,
+            byte: 0,
+        }));
+        let group_row = timeline
+            .rows(80)
+            .iter()
+            .position(|row| row.item_id == first && row.tool_group.is_some())
+            .expect("group row");
+        assert_eq!(timeline.current_start(80), group_row);
     }
 
     #[test]

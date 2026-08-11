@@ -239,6 +239,19 @@ Tool-to-Tool geometry, `comfortable` owns only the optional spacer between
 adjacent tools, and the separate Tool-to-Assistant/Reasoning spacer is an
 invariant rather than a density preference.
 
+Optional successful-run grouping is another projection over the same raw item
+vector, never a storage transform. `Timeline` detects runs of at least three
+consecutive successful `Tool` items and gives the head entry a typed synthetic
+summary row; collapsed members retain index identity but contribute zero visual
+height. A `TimelineFocusTarget` distinguishes original tools from group
+summaries, so both travel through the existing geometry-aware `ToolAction`
+seam. Expanded groups project the summary followed by each original tool.
+Collapsed-member anchors resolve to the summary, search expands the containing
+group before resolving original bytes, selection treats the summary as
+non-source and inserts a counted group marker when it crosses hidden members,
+and the exit transcript continues to walk raw items. The config default is off,
+so no migration or provider/store change exists.
+
 The default resolver owns the application canvas, raised prompt/composer
 surface, prompt text, muted text, focus edge, scrollbar, and tab roles. Prompt
 and composer bands are filled surfaces assembled from terminal cells; they are

@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Successful tool runs can collapse without changing the transcript.** The
+  opt-in `[terminal] group_successful_tools = true` preference summarizes three
+  or more consecutive successful tools behind one expandable row with count,
+  known aggregate duration, retained-detail, and terminal-truncation disclosure.
+  F7/F8, Enter, Escape, prefix clicks, search, anchors, no-color, and
+  screen-reader modes use the same interaction model as individual tools.
+  Copying across a collapsed group inserts a counted omission marker, while
+  persistence and exit/export output keep every original tool. The default is
+  off.
+
 - **Failed tools surface the useful diagnostic tail without flooding chat.** A
   collapsed failure keeps two leading command/context rows plus the six newest
   retained wrapped rows. An ellipsis gutter, screen-reader sentence, and

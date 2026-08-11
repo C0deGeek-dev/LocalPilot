@@ -70,6 +70,9 @@ pub struct TerminalConfig {
     /// Timeline whitespace policy. Compact is the compatibility default;
     /// comfortable adds only optional density-owned rows.
     pub density: TimelineDensity,
+    /// Collapse eligible runs of three or more successful tools into one
+    /// reversible timeline summary. Opt-in preserves the shipped default view.
+    pub group_successful_tools: bool,
 }
 
 /// Whitespace policy for the full-screen conversation timeline.
