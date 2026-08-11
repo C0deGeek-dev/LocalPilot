@@ -68,11 +68,15 @@ remain unchanged, while non-TTY output continues to use LocalPilot's separate
 plain path. Terminal chrome is static; there is no animated spinner or motion
 effect to disable.
 
-Tool calls appear as one compact running/completed/failed/cancelled row. Clicking the
-status prefix expands the permission-safe target detail and captured output;
-finished rows include elapsed time. Terminal-only output is bounded to 256 KiB
-with an explicit middle-omission marker, while the provider transcript and
-retained tool-output path keep their existing independent limits. A tool row
+Tool calls appear as one compact running/completed/failed/cancelled row. An
+expandable row shows a chevron and its current hidden-row count; clicking the
+status prefix expands the complete retained target detail and captured output.
+Finished rows include elapsed time and align their metadata at wide widths when
+that cannot force a wrap. Terminal-only output is bounded to 256 KiB with both
+an explicit middle-omission marker and a `terminal view truncated` headline
+label, while collapsed rows use the separate temporary hidden-row cue. The
+provider transcript and retained tool-output path keep their existing independent
+limits. A tool row
 stays interleaved with the assistant text and reasoning that surround it: text
 streamed after a tool call opens its own row below that tool, in the order the
 model produced it, rather than merging into the assistant paragraph that came

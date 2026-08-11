@@ -384,13 +384,19 @@ uses an original target-aware action headline; an unknown or MCP tool keeps its
 sanitized name and neutral lifecycle wording. Completion adds truthful result-
 body line count and elapsed time, strips registry envelope metadata from the
 presentation, and shows at most four wrapped visual rows total: the headline
-plus up to three indented result rows, with no padding. Clicking the status glyph
-expands or collapses the complete bounded terminal result. Timeline search
+plus up to three indented result rows, with no padding. An expandable row shows
+a chevron and its width-specific hidden-row count; an independently bounded
+terminal view says `terminal view truncated`, so collapsed retained content is
+never confused with discarded terminal bytes. Wide rows right-align completion
+metadata only when the entire headline still fits, then fall back to ordinary
+flow on narrower terminals. Clicking the status prefix expands or collapses the
+complete retained terminal result. Timeline search
 continues across that retained result and expands a hidden match, while copying
 a collapsed selection includes only displayed wrapped rows. The width-independent
 exit transcript keeps a bounded compact preview of the headline plus three
 logical result lines. Status remains identifiable by glyph or screen-reader text
-without color; ordinary child output is subordinate, and `+`/`-` emphasis or
+without color; screen-reader rows announce the number of hidden rows, ordinary
+child output is subordinate, and `+`/`-` emphasis or
 delta counts appear only for recognizable unified diffs.
 
 ### Harness CLI

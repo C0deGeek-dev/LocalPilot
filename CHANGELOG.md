@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Tool results disclose what is hidden.** Expandable full-screen tool rows now
+  show a chevron and the number of collapsed visual rows, distinguish that
+  temporary omission from a permanently bounded terminal view, and align
+  completion metadata when a wide terminal can do so without wrapping. Narrow,
+  no-color, colorblind, screen-reader, search, selection, and copy behavior keep
+  the same retained timeline authority.
+
 ## v3.1.0 - 2026-08-11
 
 Coordinated LocalX release.

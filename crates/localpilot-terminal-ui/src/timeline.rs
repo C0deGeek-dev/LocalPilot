@@ -50,6 +50,33 @@ pub enum ActivityState {
     Cancelled,
 }
 
+/// Source-versus-retained facts for one terminal tool result. The source is the
+/// sanitized body delivered to the terminal event; the retained body is what
+/// remains in the authoritative timeline after its independent view bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolPresentation {
+    pub source_lines: usize,
+    pub source_bytes: usize,
+    pub retained_lines: usize,
+    pub retained_bytes: usize,
+    pub terminal_truncated: bool,
+    /// Byte boundary between the action headline and its metadata suffix.
+    pub metadata_start: usize,
+    /// Byte boundary at the end of the complete headline. Alignment is only
+    /// safe when this boundary remains on the first projected visual row.
+    pub metadata_end: usize,
+}
+
+/// Width-specific disclosure state derived from the authoritative wrap ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolDisclosure {
+    pub expanded: bool,
+    pub expandable: bool,
+    /// Visual rows hidden by the compact projection at this width.
+    pub hidden_visual_rows: usize,
+    pub terminal_truncated: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticRole {
     User,
@@ -137,6 +164,7 @@ pub struct TimelineItem {
     pub activity: Option<ActivityState>,
     pub tone: Option<ResultTone>,
     pub expanded: bool,
+    pub tool: Option<ToolPresentation>,
 }
 
 impl TimelineItem {
@@ -152,6 +180,7 @@ impl TimelineItem {
             activity: None,
             tone: None,
             expanded: !matches!(kind, ItemKind::Reasoning | ItemKind::Tool),
+            tool: None,
         }
     }
 }
@@ -177,6 +206,8 @@ pub struct VisualRow {
     pub pending: bool,
     pub activity: Option<ActivityState>,
     pub tone: Option<ResultTone>,
+    pub tool: Option<ToolPresentation>,
+    pub disclosure: Option<ToolDisclosure>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +267,7 @@ struct CachedWrap {
     width: u16,
     text_len: usize,
     ranges: Arc<[TextRow]>,
+    full_row_count: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -476,6 +508,18 @@ impl Timeline {
             return false;
         };
         self.items[index].activity = activity;
+        true
+    }
+
+    pub fn set_tool_presentation(&mut self, id: ItemId, presentation: ToolPresentation) -> bool {
+        let Some(index) = self.item_positions.get(&id).copied() else {
+            return false;
+        };
+        if self.items[index].kind != ItemKind::Tool {
+            return false;
+        }
+        self.items[index].tool = Some(presentation);
+        self.invalidate_layout();
         true
     }
 
@@ -720,6 +764,7 @@ impl Timeline {
             }
         }
         let mut ranges = wrap_ranges(display_text, width);
+        let full_row_count = ranges.len();
         if item.kind == ItemKind::Tool && !item.expanded {
             ranges.truncate(COLLAPSED_TOOL_VISUAL_ROWS);
         }
@@ -730,9 +775,25 @@ impl Timeline {
                 width,
                 text_len: display_text.len(),
                 ranges: Arc::clone(&ranges),
+                full_row_count,
             },
         );
         ranges
+    }
+
+    fn tool_disclosure(&self, item: &TimelineItem) -> Option<ToolDisclosure> {
+        let presentation = item.tool?;
+        let cached = self.wrap_cache.borrow();
+        let cached = cached.get(&item.id)?;
+        let hidden_visual_rows = cached
+            .full_row_count
+            .saturating_sub(COLLAPSED_TOOL_VISUAL_ROWS);
+        Some(ToolDisclosure {
+            expanded: item.expanded,
+            expandable: hidden_visual_rows > 0,
+            hidden_visual_rows,
+            terminal_truncated: presentation.terminal_truncated,
+        })
     }
 
     fn displayed_end_byte(&self, item: &TimelineItem) -> usize {
@@ -851,6 +912,7 @@ impl Timeline {
         for (index, entry) in layout.entries.iter().enumerate().skip(first_index) {
             let item = &self.items[index];
             let ranges = self.row_ranges(item, item_content_width(item, width));
+            let disclosure = self.tool_disclosure(item);
             if entry.start >= end {
                 break;
             }
@@ -863,6 +925,7 @@ impl Timeline {
                 first,
                 last,
                 entry.leading_spacer,
+                disclosure,
             ));
         }
         output
@@ -996,9 +1059,9 @@ fn item_content_width(item: &TimelineItem, width: u16) -> u16 {
                 .saturating_add(if item.pending { 10 } else { 0 })
                 .saturating_add(1),
         ),
+        ItemKind::Tool => 3,
         ItemKind::Assistant
         | ItemKind::Reasoning
-        | ItemKind::Tool
         | ItemKind::Question
         | ItemKind::Shell
         | ItemKind::Notice
@@ -1020,6 +1083,7 @@ fn project_item_rows(
     start: usize,
     end: usize,
     leading_spacer: bool,
+    disclosure: Option<ToolDisclosure>,
 ) -> Vec<VisualRow> {
     let mut output = Vec::with_capacity(end.saturating_sub(start));
     let prefix = frame_prefix_rows(item.kind);
@@ -1043,6 +1107,7 @@ fn project_item_rows(
                     first: content_index == 0,
                     last: content_index + 1 == ranges.len(),
                 },
+                disclosure,
             ));
         } else if item.kind == ItemKind::User {
             output.push(frame_row(item, VisualRowPart::FrameBottom));
@@ -1070,6 +1135,8 @@ fn frame_row(item: &TimelineItem, part: VisualRowPart) -> VisualRow {
         pending: item.pending,
         activity: item.activity,
         tone: item.tone,
+        tool: item.tool,
+        disclosure: None,
     }
 }
 
@@ -1119,7 +1186,12 @@ fn normalized_styles(item: &TimelineItem, mut styles: Vec<StyledRange>) -> Vec<S
     output
 }
 
-fn visual_row(item: &TimelineItem, range: TextRow, part: VisualRowPart) -> VisualRow {
+fn visual_row(
+    item: &TimelineItem,
+    range: TextRow,
+    part: VisualRowPart,
+    disclosure: Option<ToolDisclosure>,
+) -> VisualRow {
     let spans = item
         .styles
         .iter()
@@ -1143,9 +1215,9 @@ fn visual_row(item: &TimelineItem, range: TextRow, part: VisualRowPart) -> Visua
         part,
         content_column: match item.kind {
             ItemKind::User => 3,
+            ItemKind::Tool => 3,
             ItemKind::Assistant
             | ItemKind::Reasoning
-            | ItemKind::Tool
             | ItemKind::Question
             | ItemKind::Shell
             | ItemKind::Notice
@@ -1157,6 +1229,8 @@ fn visual_row(item: &TimelineItem, range: TextRow, part: VisualRowPart) -> Visua
         pending: item.pending,
         activity: item.activity,
         tone: item.tone,
+        tool: item.tool,
+        disclosure,
     }
 }
 
@@ -1599,6 +1673,43 @@ mod tests {
             timeline.selected_text().as_deref(),
             Some("Checked target · 5 lines\none\ntwo\nthree\nfour\nfive")
         );
+    }
+
+    #[test]
+    fn tool_disclosure_distinguishes_hidden_rows_from_terminal_truncation() {
+        let mut timeline = Timeline::new();
+        let text = "Checked target · 7 lines · 5 ms\none\ntwo\nthree\nfour\nfive\nsix\nseven";
+        let tool = timeline.push(ItemKind::Tool, text).expect("tool id");
+        let metadata_start = "Checked target".len();
+        let metadata_end = text.find('\n').expect("headline boundary");
+        assert!(timeline.set_tool_presentation(
+            tool,
+            ToolPresentation {
+                source_lines: 9,
+                source_bytes: 4_096,
+                retained_lines: 7,
+                retained_bytes: text.len(),
+                terminal_truncated: true,
+                metadata_start,
+                metadata_end,
+            },
+        ));
+
+        let collapsed = timeline.rows(80);
+        let disclosure = collapsed[0].disclosure.expect("tool disclosure");
+        assert!(!disclosure.expanded);
+        assert!(disclosure.expandable);
+        assert_eq!(disclosure.hidden_visual_rows, 4);
+        assert!(disclosure.terminal_truncated);
+        assert_eq!(collapsed[0].tool.expect("presentation").source_lines, 9);
+
+        assert!(timeline.set_expanded(tool, true));
+        let expanded = timeline.rows(80);
+        let disclosure = expanded[0].disclosure.expect("expanded disclosure");
+        assert!(disclosure.expanded);
+        assert!(disclosure.expandable);
+        assert_eq!(expanded.len(), 8);
+        assert_eq!(timeline.items().len(), 1);
     }
 
     #[test]

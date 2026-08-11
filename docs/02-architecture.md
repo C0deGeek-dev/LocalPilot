@@ -208,12 +208,17 @@ chat model. It owns:
 Tool activity uses the same retained-text/visible-projection split as the rest
 of the timeline. `AppModel` converts provider-neutral lifecycle events into an
 original sanitized headline plus the bounded envelope-free result; runtime and
-store payloads do not change. `Timeline::row_ranges` remains the sole cell-aware
+store payloads do not change. Typed tool presentation metadata records source
+and retained line/byte counts, terminal bounding, and headline metadata byte
+boundaries beside that retention decision. `Timeline::row_ranges` remains the sole cell-aware
 geometry authority and truncates a collapsed Tool item to four wrapped visual
 rows without changing its stable item ID or byte-coordinate space. Expansion
 uses the complete retained rows, and search expands before anchoring a match
-that was outside the compact projection. The renderer only supplies semantic
-headline/body/diff styles and first/intermediate/last prefixes; it does not
+that was outside the compact projection. Disclosure derives its hidden-row count
+from those same width-indexed ranges. The renderer only supplies semantic
+headline/body/diff styles, first/intermediate/last prefixes, and a synthetic
+wide-only metadata gap whose hit mapping resolves back to the original byte
+boundary; it does not
 reparse provider events or create a second tool-card model.
 
 The default resolver owns the application canvas, raised prompt/composer

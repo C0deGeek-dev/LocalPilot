@@ -23,6 +23,11 @@ use crate::{
 const BANNER_ROWS: u16 = 7;
 /// Width of the widest screen-reader timeline role label (`Shell completed: `).
 const SCREEN_READER_PREFIX_EXTRA: u16 = 17;
+/// Preferred row-cell column for the first metadata separator, including the
+/// status/disclosure prefix. It is near enough to keep short actions connected
+/// while leaving result facts scannable; rows that cannot fit the complete
+/// block stay in natural flow.
+const TOOL_METADATA_COLUMN: usize = 31;
 const TRUST_OPTIONS: [&str; 3] = ["Session only", "Trust and remember", "No - exit"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,16 +199,19 @@ pub struct TimelineRowHit {
     pub y: u16,
     pub content_x: u16,
     pub row: VisualRow,
+    metadata_column: u16,
+    metadata_gap: u16,
 }
 
 impl TimelineRowHit {
     #[must_use]
     pub fn point_for_column(&self, column: u16, trailing: bool) -> crate::ContentPoint {
-        crate::Timeline::point_for_column(
-            &self.row,
-            column.saturating_sub(self.content_x),
-            trailing,
-        )
+        let mut content_column = column.saturating_sub(self.content_x);
+        if self.metadata_gap > 0 && content_column >= self.metadata_column {
+            let inside_or_after = content_column.saturating_sub(self.metadata_column);
+            content_column = content_column.saturating_sub(inside_or_after.min(self.metadata_gap));
+        }
+        crate::Timeline::point_for_column(&self.row, content_column, trailing)
     }
 }
 
@@ -2003,30 +2011,24 @@ fn render_timeline(
             timeline_line(row, app, area.width)
                 .render(Rect::new(area.x, y, area.width, 1), frame.buffer_mut());
             if matches!(row.part, VisualRowPart::Content { .. }) {
-                let (first, last) = match row.part {
-                    VisualRowPart::Content { first, last } => (first, last),
-                    VisualRowPart::Spacer
-                    | VisualRowPart::FrameTop
-                    | VisualRowPart::FrameBottom => (false, false),
-                };
-                let content_column = role_prefix(
-                    row.kind,
-                    row.activity,
-                    row.tone,
-                    first,
-                    last,
-                    theme(app),
+                let content_column = role_prefix(row, theme(app), app.capabilities.screen_reader)
+                    .iter()
+                    .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum::<usize>();
+                let tool_layout = tool_line_layout(
+                    row,
+                    area.width,
+                    content_column,
                     app.capabilities.screen_reader,
-                )
-                .iter()
-                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                .sum::<usize>();
+                );
                 row_hits.push(TimelineRowHit {
                     y,
                     content_x: area
                         .x
                         .saturating_add(u16::try_from(content_column).unwrap_or(u16::MAX)),
                     row: row.clone(),
+                    metadata_column: u16::try_from(tool_layout.metadata_column).unwrap_or(u16::MAX),
+                    metadata_gap: u16::try_from(tool_layout.metadata_gap).unwrap_or(u16::MAX),
                 });
             }
         }
@@ -2209,6 +2211,76 @@ fn render_pinned_prompt(frame: &mut Frame<'_>, area: Rect, pin: &PinnedPrompt, a
     );
 }
 
+#[derive(Debug, Default)]
+struct ToolLineLayout {
+    metadata_byte: Option<usize>,
+    metadata_column: usize,
+    metadata_gap: usize,
+    suffix: String,
+}
+
+fn tool_line_layout(
+    row: &VisualRow,
+    width: u16,
+    prefix_width: usize,
+    screen_reader: bool,
+) -> ToolLineLayout {
+    let VisualRowPart::Content { first: true, .. } = row.part else {
+        return ToolLineLayout::default();
+    };
+    if row.kind != ItemKind::Tool {
+        return ToolLineLayout::default();
+    }
+    let mut layout = ToolLineLayout::default();
+    let natural_width = UnicodeWidthStr::width(row.text.as_str());
+    let capacity = usize::from(width).saturating_sub(prefix_width);
+    if let Some(disclosure) = row.disclosure.filter(|value| value.expandable) {
+        let suffix = if screen_reader {
+            if disclosure.expanded {
+                " · expanded".to_string()
+            } else {
+                format!(" · {} more rows", disclosure.hidden_visual_rows)
+            }
+        } else if disclosure.expanded {
+            String::new()
+        } else {
+            format!(" · +{} rows", disclosure.hidden_visual_rows)
+        };
+        if natural_width.saturating_add(UnicodeWidthStr::width(suffix.as_str())) <= capacity {
+            layout.suffix = suffix;
+        }
+    }
+    let Some(tool) = row.tool else {
+        return layout;
+    };
+    let Some(relative) = tool.metadata_start.checked_sub(row.start_byte) else {
+        return layout;
+    };
+    if screen_reader
+        || tool.metadata_end > row.end_byte
+        || relative > row.text.len()
+        || !row.text.is_char_boundary(relative)
+    {
+        return layout;
+    }
+    let action_width = UnicodeWidthStr::width(&row.text[..relative]);
+    let metadata_width = natural_width.saturating_sub(action_width);
+    let suffix_width = UnicodeWidthStr::width(layout.suffix.as_str());
+    let content_metadata_column = TOOL_METADATA_COLUMN.saturating_sub(prefix_width);
+    if action_width.saturating_add(2) > content_metadata_column
+        || content_metadata_column
+            .saturating_add(metadata_width)
+            .saturating_add(suffix_width)
+            > capacity
+    {
+        return layout;
+    }
+    layout.metadata_byte = Some(tool.metadata_start);
+    layout.metadata_column = action_width;
+    layout.metadata_gap = content_metadata_column.saturating_sub(action_width);
+    layout
+}
+
 fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
     let theme = theme(app);
     if row.part == VisualRowPart::FrameTop {
@@ -2224,22 +2296,16 @@ fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
         return framed_rule(width, false, theme.ui(UiRole::SurfaceEdge));
     }
 
-    let VisualRowPart::Content { first, last } = row.part else {
+    let VisualRowPart::Content { last, .. } = row.part else {
         return Line::default();
     };
-    let mut spans = role_prefix(
-        row.kind,
-        row.activity,
-        row.tone,
-        first,
-        last,
-        theme,
-        app.capabilities.screen_reader,
-    );
+    let mut spans = role_prefix(row, theme, app.capabilities.screen_reader);
     let prefix_width = spans
         .iter()
         .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
         .sum::<usize>();
+    let tool_layout = tool_line_layout(row, width, prefix_width, app.capabilities.screen_reader);
+    let mut metadata_gap_inserted = false;
     let mut content_width = 0usize;
     let mut rendered_content = false;
     for visual_span in &row.spans {
@@ -2248,6 +2314,11 @@ fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
         for (offset, grapheme) in row.text[relative_start..relative_end].grapheme_indices(true) {
             let start = visual_span.start_byte + offset;
             let end = start + grapheme.len();
+            if !metadata_gap_inserted && tool_layout.metadata_byte == Some(start) {
+                spans.push(Span::raw(" ".repeat(tool_layout.metadata_gap)));
+                content_width = content_width.saturating_add(tool_layout.metadata_gap);
+                metadata_gap_inserted = true;
+            }
             let selected =
                 app.active_timeline()
                     .selection_contains_grapheme(row.item_id, start, end);
@@ -2268,6 +2339,9 @@ fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
         let fallback = TextStyle::new(row.kind.into());
         content_width = UnicodeWidthStr::width(row.text.as_str());
         spans.push(Span::styled(row.text.clone(), theme.text(fallback)));
+    }
+    if !tool_layout.suffix.is_empty() {
+        spans.push(Span::styled(tool_layout.suffix, theme.ui(UiRole::Muted)));
     }
     if row.kind == ItemKind::User {
         let trailing = row.trailing.as_deref().unwrap_or("");
@@ -2321,15 +2395,14 @@ const fn result_role(tone: Option<crate::ResultTone>) -> UiRole {
     }
 }
 
-fn role_prefix(
-    kind: ItemKind,
-    activity: Option<ActivityState>,
-    tone: Option<crate::ResultTone>,
-    first: bool,
-    last: bool,
-    theme: ThemeResolver,
-    screen_reader: bool,
-) -> Vec<Span<'static>> {
+fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Vec<Span<'static>> {
+    let VisualRowPart::Content { first, last } = row.part else {
+        return Vec::new();
+    };
+    let kind = row.kind;
+    let activity = row.activity;
+    let tone = row.tone;
+    let disclosure = row.disclosure;
     if screen_reader {
         let (label, role) = match kind {
             ItemKind::User | ItemKind::Assistant => ("  ", UiRole::Foreground),
@@ -2432,18 +2505,26 @@ fn role_prefix(
         )],
         ItemKind::Tool => {
             let (glyph, role) = match activity {
-                Some(ActivityState::Running) | None => ("◉ ", UiRole::Code),
-                Some(ActivityState::Success) => ("✓ ", UiRole::Success),
-                Some(ActivityState::Error) => ("× ", UiRole::Error),
-                Some(ActivityState::Cancelled) => ("■ ", UiRole::Muted),
+                Some(ActivityState::Running) | None => ("◉", UiRole::Code),
+                Some(ActivityState::Success) => ("✓", UiRole::Success),
+                Some(ActivityState::Error) => ("×", UiRole::Error),
+                Some(ActivityState::Cancelled) => ("■", UiRole::Muted),
             };
+            let disclosure = disclosure.filter(|value| value.expandable);
             vec![Span::styled(
                 if first {
-                    glyph
+                    disclosure.map_or_else(
+                        || format!("{glyph} "),
+                        |value| format!("{glyph}{} ", if value.expanded { "▾" } else { "▸" }),
+                    )
+                } else if disclosure.is_some() && last {
+                    " └ ".to_string()
+                } else if disclosure.is_some() {
+                    " │ ".to_string()
                 } else if last {
-                    "└ "
+                    "└ ".to_string()
                 } else {
-                    "│ "
+                    "│ ".to_string()
                 },
                 theme.ui(if first { role } else { UiRole::Muted }),
             )]
@@ -5857,7 +5938,9 @@ mod tests {
             let (buffer, hits) = render_test_frame(&app, width, height);
             let timeline = single_hits(&hits);
             let text = rect_text(&buffer, timeline.timeline);
-            assert!(text.contains("✓ Ran x · 5 lines · 5 ms"));
+            assert!(text.contains("✓▸ Ran x"));
+            assert!(text.contains("· 5 lines · 5 ms"));
+            assert!(text.contains("· +2 rows"));
             assert!(text.contains("│ one"));
             assert!(text.contains("│ two"));
             assert!(text.contains("└ three"));
@@ -5870,7 +5953,7 @@ mod tests {
         let (buffer, hits) = render_test_frame(&app, 80, 24);
         let text = rect_text(&buffer, single_hits(&hits).timeline);
         assert!(
-            text.contains("✓ Ran x"),
+            text.contains("✓▸ Ran x"),
             "status remains non-color-readable"
         );
 
@@ -5878,9 +5961,145 @@ mod tests {
         let (buffer, hits) = render_test_frame(&app, 80, 24);
         let text = rect_text(&buffer, single_hits(&hits).timeline);
         assert!(text.contains("Tool completed: Ran x · 5 lines · 5 ms"));
+        assert!(text.contains("2 more rows"));
         assert!(text.contains("one"));
         assert!(!text.contains("│ one"));
         assert!(!text.contains("└ three"));
+    }
+
+    #[test]
+    fn wide_tool_metadata_aligns_without_changing_source_byte_hits() {
+        let mut app = model();
+        for (id, name, detail, output, duration_ms) in [
+            ("short", "read_file", "a.rs", "", 5),
+            (
+                "long",
+                "read_file",
+                "a/longer/path.rs",
+                "one\ntwo\nthree\nfour\nfive",
+                55,
+            ),
+        ] {
+            app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+                id: id.into(),
+                name: name.into(),
+                detail: detail.into(),
+            });
+            app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+                id: id.into(),
+                name: name.into(),
+                is_error: false,
+                cancelled: false,
+                output: output.into(),
+                duration_ms,
+            });
+        }
+
+        let (buffer, hits) = render_test_frame(&app, 120, 30);
+        let timeline = single_hits(&hits);
+        let tool_hits = timeline
+            .rows
+            .iter()
+            .filter(|hit| {
+                hit.row.kind == ItemKind::Tool
+                    && matches!(hit.row.part, VisualRowPart::Content { first: true, .. })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_hits.len(), 2);
+        assert!(tool_hits.iter().all(|hit| hit.metadata_gap >= 2));
+        let metadata_x = tool_hits
+            .iter()
+            .map(|hit| hit.content_x + hit.metadata_column + hit.metadata_gap)
+            .collect::<Vec<_>>();
+        assert_eq!(metadata_x[0], metadata_x[1]);
+
+        for hit in tool_hits {
+            let metadata_start = hit.row.tool.expect("tool presentation").metadata_start;
+            let gap_start = hit.content_x + hit.metadata_column;
+            assert_eq!(hit.point_for_column(gap_start, false).byte, metadata_start);
+            assert_eq!(
+                hit.point_for_column(gap_start + hit.metadata_gap, false)
+                    .byte,
+                metadata_start
+            );
+        }
+        let text = rect_text(&buffer, timeline.timeline);
+        assert!(text.contains("✓ Read a.rs"));
+        assert!(text.contains("✓▸ Read a/longer/path.rs"));
+
+        let (buffer, hits) = render_test_frame(&app, 40, 20);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("Read a.rs"));
+        assert!(text.contains("5 lines"));
+        assert!(text.contains("55 ms"));
+    }
+
+    #[test]
+    fn disclosure_gutter_is_resize_stable_across_the_expandable_threshold() {
+        let mut app = model();
+        app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+            id: "resize".into(),
+            name: "run_shell".into(),
+            detail: "x".into(),
+        });
+        app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+            id: "resize".into(),
+            name: "run_shell".into(),
+            is_error: false,
+            cancelled: false,
+            output: "word ".repeat(30),
+            duration_ms: 5,
+        });
+
+        let (_, wide_hits) = render_test_frame(&app, 120, 30);
+        let wide = single_hits(&wide_hits);
+        let wide_headline = wide
+            .rows
+            .iter()
+            .find(|hit| hit.row.kind == ItemKind::Tool)
+            .expect("wide tool headline");
+        let wide_id = wide_headline.row.item_id;
+        let wide_end = wide_headline.row.end_byte;
+        assert_eq!(wide_headline.content_x, wide.timeline.x + 2);
+        assert!(
+            !wide_headline
+                .row
+                .disclosure
+                .expect("wide disclosure")
+                .expandable
+        );
+
+        let (_, narrow_hits) = render_test_frame(&app, 40, 20);
+        let narrow = single_hits(&narrow_hits);
+        let narrow_headline = narrow
+            .rows
+            .iter()
+            .find(|hit| hit.row.item_id == wide_id)
+            .expect("narrow tool headline");
+        assert_eq!(narrow_headline.content_x, narrow.timeline.x + 3);
+        assert!(
+            narrow_headline
+                .row
+                .disclosure
+                .expect("narrow disclosure")
+                .expandable
+        );
+
+        let (_, wide_again_hits) = render_test_frame(&app, 120, 30);
+        let wide_again = single_hits(&wide_again_hits);
+        let wide_again_headline = wide_again
+            .rows
+            .iter()
+            .find(|hit| hit.row.item_id == wide_id)
+            .expect("wide tool headline after resize");
+        assert_eq!(wide_again_headline.content_x, wide_again.timeline.x + 2);
+        assert_eq!(wide_again_headline.row.end_byte, wide_end);
+        assert_eq!(
+            wide_again_headline
+                .point_for_column(wide_again_headline.content_x, false)
+                .byte,
+            0
+        );
     }
 
     #[test]

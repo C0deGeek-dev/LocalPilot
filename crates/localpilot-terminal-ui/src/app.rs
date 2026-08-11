@@ -12,7 +12,7 @@ use crate::projection::{
 };
 use crate::{
     sanitize_text, ActivityState, ContentPoint, Editor, ItemId, ItemKind, PeerPane, ResultTone,
-    SemanticRole, SessionHeader, StyledRange, TextStyle, Theme, Timeline,
+    SemanticRole, SessionHeader, StyledRange, TextStyle, Theme, Timeline, ToolPresentation,
 };
 
 const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
@@ -916,13 +916,15 @@ fn finished_tool_headline(
     output_line_count: usize,
     diff_summary: Option<(usize, usize)>,
     duration_ms: u64,
-) -> String {
+    terminal_truncated: bool,
+) -> (String, usize) {
     let line_unit = if output_line_count == 1 {
         "line"
     } else {
         "lines"
     };
     let mut headline = tool_action_headline(name, detail, state);
+    let metadata_start = headline.len();
     if let Some((additions, deletions)) = diff_summary {
         headline.push_str(&format!(" · +{additions}/-{deletions}"));
     }
@@ -930,7 +932,10 @@ fn finished_tool_headline(
         " · {output_line_count} {line_unit} · {}",
         format_tool_duration(duration_ms)
     ));
-    headline
+    if terminal_truncated {
+        headline.push_str(" · terminal view truncated");
+    }
+    (headline, metadata_start)
 }
 
 fn tool_activity_styles(text: &str, headline_role: SemanticRole) -> Vec<StyledRange> {
@@ -2320,28 +2325,50 @@ impl AppModel {
                 } else {
                     ToolHeadlineState::Success
                 };
-                let output_body = tool_output_body(&output);
+                let output_body = sanitize_text(tool_output_body(&output));
                 let output_line_count = if output_body.is_empty() {
                     0
                 } else {
                     output_body.lines().count()
                 };
-                let diff_summary = unified_diff_summary(output_body);
-                let output = bounded_view_text(output_body, MAX_TOOL_OUTPUT_BYTES);
+                let output_bytes = output_body.len();
+                let diff_summary = unified_diff_summary(&output_body);
+                let terminal_truncated = output_bytes > MAX_TOOL_OUTPUT_BYTES;
+                let output = bounded_view_text(&output_body, MAX_TOOL_OUTPUT_BYTES);
+                let retained_lines = if output.is_empty() {
+                    0
+                } else {
+                    output.lines().count()
+                };
+                let retained_bytes = output.len();
                 if let Some(active) = projection.active_tools.remove(&id) {
-                    let mut text = finished_tool_headline(
+                    let (mut text, metadata_start) = finished_tool_headline(
                         &name,
                         &active.detail,
                         headline_state,
                         output_line_count,
                         diff_summary,
                         duration_ms,
+                        terminal_truncated,
                     );
+                    let metadata_end = text.len();
                     if !output.is_empty() {
                         text.push('\n');
                         text.push_str(&output);
                     }
                     let _ = projection.timeline.replace_text(active.item_id, text);
+                    let _ = projection.timeline.set_tool_presentation(
+                        active.item_id,
+                        ToolPresentation {
+                            source_lines: output_line_count,
+                            source_bytes: output_bytes,
+                            retained_lines,
+                            retained_bytes,
+                            terminal_truncated,
+                            metadata_start,
+                            metadata_end,
+                        },
+                    );
                     let activity = if cancelled {
                         ActivityState::Cancelled
                     } else if is_error {
@@ -2354,20 +2381,34 @@ impl AppModel {
                         .set_activity(active.item_id, Some(activity));
                     Self::style_activity_on(projection, active.item_id, activity);
                 } else {
-                    let mut text = finished_tool_headline(
+                    let (mut text, metadata_start) = finished_tool_headline(
                         &name,
                         "",
                         headline_state,
                         output_line_count,
                         diff_summary,
                         duration_ms,
+                        terminal_truncated,
                     );
+                    let metadata_end = text.len();
                     if !output.is_empty() {
                         text.push('\n');
                         text.push_str(&output);
                     }
                     if let Some(item) = Self::push_runtime_item_to(projection, ItemKind::Tool, text)
                     {
+                        let _ = projection.timeline.set_tool_presentation(
+                            item,
+                            ToolPresentation {
+                                source_lines: output_line_count,
+                                source_bytes: output_bytes,
+                                retained_lines,
+                                retained_bytes,
+                                terminal_truncated,
+                                metadata_start,
+                                metadata_end,
+                            },
+                        );
                         let activity = if cancelled {
                             ActivityState::Cancelled
                         } else if is_error {
@@ -8615,7 +8656,22 @@ mod tests {
             .lines()
             .next()
             .is_some_and(|headline| headline.contains(&format!("{lines} lines"))));
+        assert!(tool.text.contains("terminal view truncated"));
         assert!(tool.text.contains("middle omitted from terminal view"));
+        let presentation = tool.tool.expect("bounded tool presentation");
+        assert_eq!(presentation.source_lines, lines);
+        assert_eq!(
+            presentation.source_bytes,
+            lines.saturating_mul(2).saturating_sub(1)
+        );
+        assert!(presentation.retained_lines < presentation.source_lines);
+        assert_eq!(
+            presentation.retained_bytes,
+            tool.text[presentation.metadata_end + 1..].len()
+        );
+        assert!(presentation.retained_bytes <= MAX_TOOL_OUTPUT_BYTES);
+        assert!(presentation.terminal_truncated);
+        assert!(presentation.metadata_start < presentation.metadata_end);
     }
 
     #[test]
