@@ -9,9 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  # Build one archive per target. `fail-fast: false` is deliberate: when a
-  # release build breaks we want to see *every* target that broke in one run,
-  # not just the first. Nothing is published from here — see `publish`.
+  # Build one archive per target for each published binary. `fail-fast: false`
+  # is deliberate: when a release build breaks we want to see *every* target that
+  # broke in one run, not just the first. Nothing is published from here — see
+  # `publish`.
   archives:
     name: archive (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -63,34 +64,47 @@ jobs:
           echo "CARGO_TARGET_${triple_env}_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
           echo "CC_${{ matrix.target }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
       - run: cargo build --release --locked --target ${{ matrix.target }} -p localpilot --features tui,learning
-      # Stage the binary alongside the license files so every archive ships them.
+      # The umbrella `localx` binary ships from this repo's release too, as a
+      # second archive with its own manifest. It links no TUI, so it needs no
+      # extra features and builds the same way on every target.
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p localx
+      # Stage each binary alongside the license files so every archive ships them.
       - name: stage (unix)
         if: runner.os != 'Windows'
         run: |
-          mkdir -p dist/localpilot
-          cp target/${{ matrix.target }}/release/localpilot dist/localpilot/
-          cp LICENSE-MIT README.md CHANGELOG.md dist/localpilot/
-          tar -C dist -czf localpilot-${{ matrix.target }}.tar.gz localpilot
+          for tool in localpilot localx; do
+            mkdir -p "dist/$tool"
+            cp "target/${{ matrix.target }}/release/$tool" "dist/$tool/"
+            cp LICENSE-MIT README.md CHANGELOG.md "dist/$tool/"
+            tar -C dist -czf "$tool-${{ matrix.target }}.tar.gz" "$tool"
+          done
       - name: stage (windows)
         if: runner.os == 'Windows'
         run: |
-          New-Item -ItemType Directory -Force dist/localpilot | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/localpilot.exe dist/localpilot/
-          Copy-Item LICENSE-MIT, README.md, CHANGELOG.md dist/localpilot/
-          tar -C dist -czf localpilot-${{ matrix.target }}.tar.gz localpilot
+          foreach ($tool in 'localpilot', 'localx') {
+            New-Item -ItemType Directory -Force "dist/$tool" | Out-Null
+            Copy-Item "target/${{ matrix.target }}/release/$tool.exe" "dist/$tool/"
+            Copy-Item LICENSE-MIT, README.md, CHANGELOG.md "dist/$tool/"
+            tar -C dist -czf "$tool-${{ matrix.target }}.tar.gz" "$tool"
+          }
       # Digest computed where the bytes are produced, so it covers exactly what
       # was archived. It proves a download was not corrupted or truncated; it
       # does not prove origin — only signing does that, and this repo does not
       # sign. Say so wherever it is surfaced.
       - name: checksum
         shell: bash
-        run: sha256sum localpilot-${{ matrix.target }}.${{ matrix.ext }} > localpilot-${{ matrix.target }}.${{ matrix.ext }}.sha256
+        run: |
+          for tool in localpilot localx; do
+            sha256sum "$tool-${{ matrix.target }}.${{ matrix.ext }}" > "$tool-${{ matrix.target }}.${{ matrix.ext }}.sha256"
+          done
       - uses: actions/upload-artifact@v7
         with:
-          name: localpilot-${{ matrix.target }}
+          name: release-${{ matrix.target }}
           path: |
             localpilot-${{ matrix.target }}.${{ matrix.ext }}
             localpilot-${{ matrix.target }}.${{ matrix.ext }}.sha256
+            localx-${{ matrix.target }}.${{ matrix.ext }}
+            localx-${{ matrix.target }}.${{ matrix.ext }}.sha256
 
   # Publish once, and only when **every** target built. `needs` is the
   # completeness gate: each matrix job used to publish its own archive, so one
@@ -114,50 +128,59 @@ jobs:
         with:
           path: staged
           merge-multiple: true
-      - name: verify every target is present
+      - name: verify every target is present for every binary
         shell: bash
         run: |
           set -euo pipefail
           expected="x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc"
           missing=""
-          for target in $expected; do
-            if ! ls staged/localpilot-"$target".* >/dev/null 2>&1; then
-              missing="$missing $target"
-            fi
+          for tool in localpilot localx; do
+            for target in $expected; do
+              if ! ls staged/"$tool"-"$target".* >/dev/null 2>&1; then
+                missing="$missing $tool/$target"
+              fi
+            done
           done
           if [ -n "$missing" ]; then
             echo "refusing to publish a partial release; missing:$missing" >&2
             exit 1
           fi
-      # A machine-readable index of the release: what exists, for which target,
-      # and the digest to check it against. An updater reads this instead of
-      # guessing archive names from a naming convention.
-      - name: build manifest
+      # A machine-readable index of the release per binary: what exists, for
+      # which target, and the digest to check it against. An updater reads this
+      # instead of guessing archive names from a naming convention. localpilot
+      # keeps the historic `manifest.json`; the second binary gets a per-tool name
+      # so both can live in one release.
+      - name: build manifests
         shell: bash
         run: |
           set -euo pipefail
           cd staged
           version="${GITHUB_REF_NAME#v}"
-          {
-            printf '{\n  "manifest_version": 1,\n  "tool": "localpilot",\n  "version": "%s",\n  "artifacts": [\n' "$version"
-            first=1
-            for archive in localpilot-*.tar.gz; do
-              [ -e "$archive" ] || continue
-              target="${archive#localpilot-}"
-              target="${target%.tar.gz}"
-              digest=$(cut -d' ' -f1 < "$archive.sha256")
-              size=$(wc -c < "$archive" | tr -d ' ')
-              [ $first -eq 1 ] || printf ',\n'
-              first=0
-              printf '    { "target": "%s", "file": "%s", "size": %s, "sha256": "%s" }' \
-                "$target" "$archive" "$size" "$digest"
-            done
-            printf '\n  ]\n}\n'
-          } > manifest.json
-          cat manifest.json
+          build_manifest() {
+            tool="$1"; out="$2"
+            {
+              printf '{\n  "manifest_version": 1,\n  "tool": "%s",\n  "version": "%s",\n  "artifacts": [\n' "$tool" "$version"
+              first=1
+              for archive in "$tool"-*.tar.gz; do
+                [ -e "$archive" ] || continue
+                target="${archive#"$tool"-}"
+                target="${target%.tar.gz}"
+                digest=$(cut -d' ' -f1 < "$archive.sha256")
+                size=$(wc -c < "$archive" | tr -d ' ')
+                [ $first -eq 1 ] || printf ',\n'
+                first=0
+                printf '    { "target": "%s", "file": "%s", "size": %s, "sha256": "%s" }' \
+                  "$target" "$archive" "$size" "$digest"
+              done
+              printf '\n  ]\n}\n'
+            } > "$out"
+            cat "$out"
+          }
+          build_manifest localpilot manifest.json
+          build_manifest localx manifest-localx.json
       - name: aggregate checksums
         shell: bash
-        run: cd staged && cat localpilot-*.sha256 > SHA256SUMS && cat SHA256SUMS
+        run: cd staged && cat localpilot-*.sha256 localx-*.sha256 > SHA256SUMS && cat SHA256SUMS
       # Build provenance, signed keylessly through Sigstore. Because LocalPilot
       # is a public repository, GitHub uses Sigstore's public-good instance and
       # records the attestation in the public Rekor transparency log. This is
@@ -176,7 +199,9 @@ jobs:
       - name: attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: staged/localpilot-*.tar.gz
+          subject-path: |
+            staged/localpilot-*.tar.gz
+            staged/localx-*.tar.gz
 
       - name: extract release notes
         shell: bash
@@ -189,5 +214,7 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: |
             staged/localpilot-*.tar.gz
+            staged/localx-*.tar.gz
             staged/SHA256SUMS
             staged/manifest.json
+            staged/manifest-localx.json
