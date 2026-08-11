@@ -61,15 +61,27 @@ if ($mode -eq 'binary') {
         "https://github.com/$repo/releases/latest/download"
     }
 
-    $archive = "localpilot-$target.tar.gz"
+    # Bootstrap the umbrella binary (it installs the whole stack + engine); fall
+    # back to localpilot for releases cut before localx existed.
+    $tool = 'localx'
+    $postcmd = @('install', 'all')
+    $archive = "localx-$target.tar.gz"
     $work = Join-Path ([System.IO.Path]::GetTempPath()) ("localx-" + [System.Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $work | Out-Null
     try {
-        Write-Host "downloading $archive ..."
         # Progress rendering makes Invoke-WebRequest dramatically slower.
         $previousProgress = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri "$base/$archive" -OutFile (Join-Path $work $archive)
+        Write-Host "downloading $archive ..."
+        try {
+            Invoke-WebRequest -Uri "$base/$archive" -OutFile (Join-Path $work $archive)
+        } catch {
+            Write-Host "note: this release has no localx binary; bootstrapping localpilot instead."
+            $tool = 'localpilot'
+            $postcmd = @('update', '--all')
+            $archive = "localpilot-$target.tar.gz"
+            Invoke-WebRequest -Uri "$base/$archive" -OutFile (Join-Path $work $archive)
+        }
         Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile (Join-Path $work 'SHA256SUMS')
         $ProgressPreference = $previousProgress
 
@@ -88,28 +100,25 @@ if ($mode -eq 'binary') {
         }
 
         tar -xzf (Join-Path $work $archive) -C $work
-        $binary = Get-ChildItem -Path $work -Filter 'localpilot.exe' -Recurse -File | Select-Object -First 1
-        if (-not $binary) { Write-Error "the archive contained no localpilot.exe." }
+        $binary = Get-ChildItem -Path $work -Filter "$tool.exe" -Recurse -File | Select-Object -First 1
+        if (-not $binary) { Write-Error "the archive contained no $tool.exe." }
 
         # From here the binary owns the install layout. Duplicating the cache and
         # marker rules in PowerShell would be a second implementation to keep in step.
         $bin = Join-Path $env:LOCALAPPDATA 'localx\bin'
         New-Item -ItemType Directory -Path $bin -Force | Out-Null
-        Copy-Item $binary.FullName (Join-Path $bin 'localpilot.exe') -Force
+        Copy-Item $binary.FullName (Join-Path $bin "$tool.exe") -Force
 
         Write-Host ""
         Write-Host "installing the stack ..."
-        # `update --all` arrived in 2.6.0. Installing an older release is
-        # legitimate (-Version), and it must not look like the whole install
-        # failed: localpilot is on disk and working either way. It also owns the
-        # PATH advice, so the fallback below is the only place this script gives
+        # The bootstrapped binary owns the install of everything else (and the
+        # PATH advice), so the fallback below is the only place this script gives
         # its own.
-        & (Join-Path $bin 'localpilot.exe') update --all
+        & (Join-Path $bin "$tool.exe") @postcmd
         if ($LASTEXITCODE -ne 0) {
             Write-Host ""
-            Write-Host "note: this release cannot install the rest of the stack itself."
-            Write-Host "      localpilot is installed; for localmind, localbox, and localbench"
-            Write-Host "      install 2.6.0 or later, then run: localpilot update --all"
+            Write-Host "note: the stack install did not complete."
+            Write-Host "      $tool is on disk at $bin\$tool.exe; run it directly to retry."
             if (($env:PATH -split ';') -notcontains $bin) {
                 Write-Host ""
                 Write-Host "add this directory to PATH:"
@@ -118,8 +127,13 @@ if ($mode -eq 'binary') {
         }
 
         Write-Host ""
-        Write-Host "verify with:"
-        Write-Host "    $bin\localpilot.exe doctor"
+        if ($tool -eq 'localx') {
+            Write-Host "verify with:"
+            Write-Host "    $bin\localx.exe status"
+        } else {
+            Write-Host "verify with:"
+            Write-Host "    $bin\localpilot.exe doctor"
+        }
         Write-Host "authenticity of the downloaded archives (needs the GitHub CLI):"
         Write-Host "    gh attestation verify $archive --repo $repo"
     } finally {
@@ -194,6 +208,21 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "cargo install failed (exit $LASTEXITCODE). See the build error above. If it is a missing C compiler (SQLite/rusqlite for LocalMind), install the Visual Studio Build Tools 'Desktop development with C++' workload."
 }
 
+# Build the umbrella from the same checkout, so `localx` matches the localpilot
+# you just built. It links no TUI, so it needs no features.
+Write-Host "building and installing localx ..."
+$localxArgs = @()
+if ($Toolchain) { $localxArgs += "+$Toolchain" }
+$localxArgs += @('install', '--path', (Join-Path $root 'crates/localx'), '--locked', '--force')
+if ($Target) { $localxArgs += @('--target', $Target) }
+cargo @localxArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "cargo install localx failed (exit $LASTEXITCODE). See the build error above."
+}
+
 Write-Host ""
-Write-Host "installed 'localpilot'. verify with:"
+Write-Host "installed 'localpilot' and 'localx' from source. verify with:"
 Write-Host "    localpilot doctor"
+Write-Host "install the rest of the stack (localmind, localbox, localbench) and the engine:"
+Write-Host "    localx install                 # released binaries"
+Write-Host "    localx install --prerelease    # or build each from its latest main"

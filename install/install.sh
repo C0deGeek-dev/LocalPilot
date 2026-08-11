@@ -83,12 +83,25 @@ if [ "$mode" = binary ]; then
         base="https://github.com/$REPO/releases/latest/download"
     fi
 
-    archive="localpilot-$target.tar.gz"
     work="$(mktemp -d)"
     trap 'rm -rf "$work"' EXIT INT TERM
 
+    # Bootstrap the umbrella binary: it installs the whole stack (localpilot,
+    # localmind, localbox, localbench) and the engine, so the stack-install logic
+    # lives in one place instead of being duplicated here. Releases cut before
+    # localx existed have no such archive; fall back to bootstrapping localpilot,
+    # which knows how to install the rest with `update --all`.
+    tool=localx
+    postcmd="install all"
+    archive="localx-$target.tar.gz"
     echo "downloading $archive ..."
-    curl -fsSL -o "$work/$archive" "$base/$archive"
+    if ! curl -fsSL -o "$work/$archive" "$base/$archive"; then
+        echo "note: this release has no localx binary; bootstrapping localpilot instead."
+        tool=localpilot
+        postcmd="update --all"
+        archive="localpilot-$target.tar.gz"
+        curl -fsSL -o "$work/$archive" "$base/$archive"
+    fi
     curl -fsSL -o "$work/SHA256SUMS" "$base/SHA256SUMS"
 
     # Verify before anything is unpacked, let alone executed.
@@ -114,27 +127,24 @@ if [ "$mode" = binary ]; then
     fi
 
     tar -xzf "$work/$archive" -C "$work"
-    binary="$(find "$work" -name localpilot -type f -print -quit)"
-    [ -n "$binary" ] || { echo "error: the archive contained no localpilot binary." >&2; exit 1; }
+    binary="$(find "$work" -name "$tool" -type f -print -quit)"
+    [ -n "$binary" ] || { echo "error: the archive contained no $tool binary." >&2; exit 1; }
     chmod +x "$binary"
 
     # From here the binary owns the install layout. Duplicating the cache and
     # marker rules in shell would be a second implementation to keep in step.
     bin="${XDG_DATA_HOME:-$HOME/.local/share}/localx/bin"
     mkdir -p "$bin"
-    cp "$binary" "$bin/localpilot"
+    cp "$binary" "$bin/$tool"
 
     echo
     echo "installing the stack ..."
-    # `update --all` arrived in 2.6.0. Installing an older release is legitimate
-    # (--version), and it must not look like the whole install failed: localpilot
-    # is on disk and working either way. It also owns the PATH advice, so the
-    # fallback below is the only place this script gives its own.
-    if ! "$bin/localpilot" update --all; then
+    # The bootstrapped binary owns the install of everything else (and the PATH
+    # advice), so the fallback below is the only place this script gives its own.
+    if ! "$bin/$tool" $postcmd; then
         echo
-        echo "note: this release cannot install the rest of the stack itself."
-        echo "      localpilot is installed; for localmind, localbox, and localbench"
-        echo "      install 2.6.0 or later, then run: localpilot update --all"
+        echo "note: the stack install did not complete."
+        echo "      $tool is on disk at $bin/$tool; run it directly to retry."
         case ":$PATH:" in
             *":$bin:"*) ;;
             *) echo
@@ -144,8 +154,13 @@ if [ "$mode" = binary ]; then
     fi
 
     echo
-    echo "verify with:"
-    echo "    $bin/localpilot doctor"
+    if [ "$tool" = localx ]; then
+        echo "verify with:"
+        echo "    $bin/localx status"
+    else
+        echo "verify with:"
+        echo "    $bin/localpilot doctor"
+    fi
     echo "authenticity of the downloaded archives (needs the GitHub CLI):"
     echo "    gh attestation verify $archive --repo $REPO"
     exit 0
@@ -196,6 +211,14 @@ else
     cargo install --path "$root/crates/localpilot-cli" --locked
 fi
 
+# Build the umbrella from the same checkout, so `localx` matches the localpilot
+# you just built. It pulls in no TUI, so it needs no features.
+echo "building and installing localx ..."
+cargo install --path "$root/crates/localx" --locked
+
 echo
-echo "installed 'localpilot'. verify with:"
+echo "installed 'localpilot' and 'localx' from source. verify with:"
 echo "    localpilot doctor"
+echo "install the rest of the stack (localmind, localbox, localbench) and the engine:"
+echo "    localx install        # released binaries"
+echo "    localx install --prerelease   # or build each from its latest main"
