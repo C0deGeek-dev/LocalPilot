@@ -65,10 +65,19 @@ curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/instal
 irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
 ```
 
-No toolchain needed. This downloads the prebuilt binary for your platform, checks
-it against the published SHA-256 before unpacking, and installs the whole stack —
-`localpilot`, `localmind`, `localbox`, and `localbench` — at one version. The
-installer prints the directory to add to `PATH`.
+No toolchain needed. This downloads the prebuilt **`localx`** for your platform,
+checks it against the published SHA-256 before unpacking, and lets it install the
+whole stack — `localpilot`, `localmind`, `localbox`, `localbench` — and the
+llama.cpp engine, at one version. The installer prints the directory to add to
+`PATH`.
+
+`localx` is the stack's front door afterwards:
+
+```sh
+localx update              # update every tool + the engine to the newest release
+localx update --prerelease # or build each app from its latest main (dev channel)
+localx status              # what is installed
+```
 
 Prefer to read the script first, or build from a checkout? See
 [docs/install.md](docs/install.md).

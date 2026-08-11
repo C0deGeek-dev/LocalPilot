@@ -2,6 +2,45 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0155: `localx`, One Umbrella Command For The Whole Stack
+
+Status: Accepted. Extends the binary-distribution decisions (D011 stack-as-a-set,
+D012 shared PATH `bin/`) and the release-train model.
+
+A single `localx` binary provisions and refreshes the entire LocalX stack, so a
+user no longer has to know that the stack-installer lives under `localpilot`.
+
+- **One install core, two verbs.** The release train, the per-tool install loop,
+  the source-build path, and PATH activation move out of the `localpilot update`
+  command into a new `localpilot-stack` crate (depending only on
+  `localpilot-dist` + `anyhow`, keeping dist's on-disk-contract charter intact).
+  Both `localpilot update --all` and `localx` route through it, so there is
+  exactly one copy of the loop. `localx install` and `localx update` share one
+  `install(selection, tag, channel, …)` entry; the verbs differ in intent
+  (provision at a tag vs. refresh to the newest), not in mechanism.
+- **`localx` ships as a second binary from the LocalPilot release.** The train
+  gains a fifth member whose repository is LocalPilot but whose release manifest
+  is a per-tool `manifest-localx.json`, published alongside the historic
+  `manifest.json`. This lets two binaries ship from one repo release without
+  breaking the one-manifest-one-executable assumption the other four rely on.
+  `localx` self-updates as a train member; the bootstrap installer shrinks to
+  "fetch `localx`, run `localx install`".
+- **A prerelease (developer) channel.** `localx install`/`update --prerelease`
+  builds each app from its repository's latest `main` commit
+  (`cargo install --git … --branch main`) instead of the newest published
+  release — the way to test pushed-but-uncut work. It needs a Rust toolchain,
+  installs to cargo's bin directory (as a from-source build always has), and
+  covers the app tools only; the llama.cpp engine always uses its released
+  binaries. This is deliberately distinct from GitHub's *tagged* alpha/beta/rc
+  pre-releases, which remain part of the release channel's newest-tag resolution.
+- **The engine is delegated, not re-implemented.** `localx` refreshes the
+  llama.cpp engine by invoking the installed `localbox update`, which is
+  non-interactive by construction (plan/effect split), so no LocalBox change was
+  needed. Model and engine ownership stay in LocalBox.
+- A precise engine tag/variant in `localx status` is deferred: it would need an
+  offline stamp seam in localbox that would make `localbox --version` fragile for
+  a status nicety. The engine *refresh* — the value — works today.
+
 ## ADR-0154: The Inline Chat Host Is Retired
 
 Status: accepted. Completes the transition begun by ADR-0107 and made default by
