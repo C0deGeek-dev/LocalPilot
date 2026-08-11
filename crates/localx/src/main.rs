@@ -210,15 +210,17 @@ fn tool_version(tool: &str) -> String {
     }
 }
 
-/// The engine's state, via `localbox`. LocalBox owns the llama.cpp version; here
-/// we only confirm the delegate is reachable.
+/// The engine's state. LocalBox owns the llama.cpp binaries and their version;
+/// here we only confirm the delegate is reachable, then point at the command
+/// that refreshes them. A precise engine tag would need an offline stamp seam in
+/// localbox, which is not worth making `localbox --version` fragile for.
 fn engine_version() -> String {
     let path = tool_path("localbox");
     match std::process::Command::new(&path).arg("--version").output() {
         Ok(output) if output.status.success() => {
-            "managed by localbox (run `localx install engine`)".to_string()
+            "llama.cpp managed by localbox (refresh: `localx install engine`)".to_string()
         }
-        _ => "localbox not installed".to_string(),
+        _ => "not installed (needs localbox)".to_string(),
     }
 }
 
