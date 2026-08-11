@@ -2116,6 +2116,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "localx"
+version = "3.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "localpilot-dist",
+ "localpilot-stack",
+ "tokio",
+]
+
+[[package]]
 name = "localx-eval-core"
 version = "0.1.0"
 source = "git+https://github.com/C0deGeek-dev/localx-llama.git?rev=c4f91f180168a0d7a62e9de2ec4c9acf358f5430#c4f91f180168a0d7a62e9de2ec4c9acf358f5430"
