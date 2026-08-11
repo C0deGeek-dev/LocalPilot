@@ -252,7 +252,6 @@ pub struct VisualRow {
     pub spans: Vec<VisualSpan>,
     pub assistant_presentation: Option<AssistantPresentation>,
     pub part: VisualRowPart,
-    pub content_column: u16,
     pub trailing: Option<String>,
     pub pending: bool,
     pub activity: Option<ActivityState>,
@@ -1774,7 +1773,6 @@ fn success_group_row(
             first: true,
             last: true,
         },
-        content_column: 3,
         trailing: None,
         pending: false,
         activity: Some(ActivityState::Success),
@@ -1802,7 +1800,6 @@ fn frame_row(item: &TimelineItem, part: VisualRowPart, focused: bool) -> VisualR
         spans: Vec::new(),
         assistant_presentation: item.assistant_presentation,
         part,
-        content_column: 0,
         trailing: None,
         pending: item.pending,
         activity: item.activity,
@@ -1891,16 +1888,6 @@ fn visual_row(
         spans,
         assistant_presentation: item.assistant_presentation,
         part,
-        content_column: match item.kind {
-            ItemKind::User => 3,
-            ItemKind::Tool => 3,
-            ItemKind::Assistant
-            | ItemKind::Reasoning
-            | ItemKind::Question
-            | ItemKind::Shell
-            | ItemKind::Notice
-            | ItemKind::Result => 2,
-        },
         trailing: matches!(part, VisualRowPart::Content { first: true, .. })
             .then(|| item.trailing.clone())
             .flatten(),
