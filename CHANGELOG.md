@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Failed tools surface the useful diagnostic tail without flooding chat.** A
+  collapsed failure keeps two leading command/context rows plus the six newest
+  retained wrapped rows. An ellipsis gutter, screen-reader sentence, and
+  width-specific disclosure count identify the skipped middle; a selection
+  crossing that jump copies an explicit omission marker rather than silently
+  joining noncontiguous output. Expansion restores the complete retained item.
+  Running, successful, and cancelled previews keep their four-row ceiling.
+
 - **Tool rows now have one keyboard-and-pointer focus model.** F7/F8 move a
   stable focus through tool activity, Enter expands or collapses the focused
   row, Escape returns to the composer, and clicking the disclosure prefix uses

@@ -211,14 +211,19 @@ original sanitized headline plus the bounded envelope-free result; runtime and
 store payloads do not change. Typed tool presentation metadata records source
 and retained line/byte counts, terminal bounding, and headline metadata byte
 boundaries beside that retention decision. `Timeline::row_ranges` remains the sole cell-aware
-geometry authority and truncates a collapsed Tool item to four wrapped visual
-rows without changing its stable item ID or byte-coordinate space. Expansion
+geometry authority. Running, successful, and cancelled collapsed tools project
+the first four wrapped visual rows. Failed tools project the first two and last
+six retained wrapped rows, with the skipped count and tail boundary carried as
+projection metadata over the original stable item ID and byte-coordinate
+space. Visible-only copy walks those source segments and inserts an omission
+marker only when a selection crosses their discontinuity. Expansion
 uses the complete retained rows, and search expands before anchoring a match
 that was outside the compact projection. Disclosure derives its hidden-row count
 from those same width-indexed ranges. The renderer only supplies semantic
 headline/body/diff styles, first/intermediate/last prefixes, and a synthetic
 wide-only metadata gap whose hit mapping resolves back to the original byte
-boundary; it does not
+boundary. The tail ellipsis is likewise a prefix over the mapped source row,
+not synthetic timeline text; it does not
 reparse provider events or create a second tool-card model.
 
 Tool focus is one optional stable `ItemId` owned by `Timeline`, projected onto

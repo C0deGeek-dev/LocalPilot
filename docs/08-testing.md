@@ -63,6 +63,9 @@ not need a real console:
   anchoring across expansion, deterministic bottom clamping, focus cues across
   color/no-color/screen-reader modes, ordinary-input focus release, and compact
   versus comfortable density without weakening the narration separator,
+  fixed two-head/six-tail failure previews, state-change cache invalidation,
+  omission-aware source-byte hits and visible-only copy markers, and narrow
+  Unicode/no-color/screen-reader tail cues,
   Unicode wrapping, connector geometry, visible-only collapsed copy, bounded exit
   preview, full-result search reveal, and
   conservative unified-diff styling across default/no-color/colorblind modes,

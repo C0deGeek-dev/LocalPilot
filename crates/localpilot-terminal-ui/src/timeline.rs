@@ -11,6 +11,8 @@ use crate::sanitize_text;
 use crate::text::{wrap_ranges, TextRow};
 
 const COLLAPSED_TOOL_VISUAL_ROWS: usize = 4;
+const FAILED_TOOL_VISUAL_ROWS: usize = 8;
+const FAILED_TOOL_HEAD_ROWS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ItemId(u64);
@@ -76,6 +78,9 @@ pub struct ToolDisclosure {
     pub expandable: bool,
     /// Visual rows hidden by the compact projection at this width.
     pub hidden_visual_rows: usize,
+    /// Index of the first tail row in the collapsed projection. When present,
+    /// retained wrapped rows between the compact head and tail are hidden.
+    pub tail_start_visual_row: Option<usize>,
     pub terminal_truncated: bool,
 }
 
@@ -210,6 +215,9 @@ pub struct VisualRow {
     pub tone: Option<ResultTone>,
     pub tool: Option<ToolPresentation>,
     pub disclosure: Option<ToolDisclosure>,
+    /// Retained wrapped rows skipped immediately before this projected row.
+    /// This is projection metadata, never synthetic source text.
+    pub omitted_before_visual_rows: usize,
     pub focused: bool,
 }
 
@@ -271,6 +279,7 @@ struct CachedWrap {
     text_len: usize,
     ranges: Arc<[TextRow]>,
     full_row_count: usize,
+    tail_start_visual_row: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -535,7 +544,12 @@ impl Timeline {
         let Some(index) = self.item_positions.get(&id).copied() else {
             return false;
         };
+        if self.items[index].activity == activity {
+            return true;
+        }
         self.items[index].activity = activity;
+        self.wrap_cache.borrow_mut().remove(&id);
+        self.invalidate_layout();
         true
     }
 
@@ -547,6 +561,7 @@ impl Timeline {
             return false;
         }
         self.items[index].tool = Some(presentation);
+        self.wrap_cache.borrow_mut().remove(&id);
         self.invalidate_layout();
         true
     }
@@ -795,25 +810,44 @@ impl Timeline {
             if self.is_reasoning_hidden(item) {
                 continue;
             }
-            let visible_len = self.displayed_end_byte(item);
             let from = if index == start_index {
-                start_byte.min(visible_len)
+                start_byte.min(item.text.len())
             } else {
                 0
             };
             let to = if index == end_index {
-                end_byte.min(visible_len)
+                end_byte.min(item.text.len())
             } else {
-                visible_len
+                item.text.len()
             };
             if from > to || !item.text.is_char_boundary(from) || !item.text.is_char_boundary(to) {
                 continue;
             }
-            if selected_any {
-                output.push('\n');
+            let (segments, omitted_rows) = self.displayed_segments(item);
+            let mut selected_in_item = false;
+            for (segment_start, segment_end) in segments {
+                let segment_from = from.max(segment_start);
+                let segment_to = to.min(segment_end);
+                if segment_from >= segment_to
+                    || !item.text.is_char_boundary(segment_from)
+                    || !item.text.is_char_boundary(segment_to)
+                {
+                    continue;
+                }
+                if selected_any {
+                    if selected_in_item && omitted_rows > 0 {
+                        let row_word = if omitted_rows == 1 { "row" } else { "rows" };
+                        output.push_str(&format!(
+                            "\n… {omitted_rows} earlier wrapped {row_word} hidden …\n"
+                        ));
+                    } else {
+                        output.push('\n');
+                    }
+                }
+                output.push_str(&item.text[segment_from..segment_to]);
+                selected_any = true;
+                selected_in_item = true;
             }
-            output.push_str(&item.text[from..to]);
-            selected_any = true;
         }
         selected_any.then_some(output)
     }
@@ -879,8 +913,24 @@ impl Timeline {
         }
         let mut ranges = wrap_ranges(display_text, width);
         let full_row_count = ranges.len();
+        let mut tail_start_visual_row = None;
         if item.kind == ItemKind::Tool && !item.expanded {
-            ranges.truncate(COLLAPSED_TOOL_VISUAL_ROWS);
+            if item.activity == Some(ActivityState::Error)
+                && full_row_count > FAILED_TOOL_VISUAL_ROWS
+            {
+                let tail_rows = FAILED_TOOL_VISUAL_ROWS.saturating_sub(FAILED_TOOL_HEAD_ROWS);
+                let tail_start = full_row_count.saturating_sub(tail_rows);
+                let tail = ranges[tail_start..].to_vec();
+                ranges.truncate(FAILED_TOOL_HEAD_ROWS);
+                tail_start_visual_row = Some(ranges.len());
+                ranges.extend(tail);
+            } else {
+                ranges.truncate(if item.activity == Some(ActivityState::Error) {
+                    FAILED_TOOL_VISUAL_ROWS
+                } else {
+                    COLLAPSED_TOOL_VISUAL_ROWS
+                });
+            }
         }
         let ranges: Arc<[TextRow]> = ranges.into();
         self.wrap_cache.borrow_mut().insert(
@@ -890,6 +940,7 @@ impl Timeline {
                 text_len: display_text.len(),
                 ranges: Arc::clone(&ranges),
                 full_row_count,
+                tail_start_visual_row,
             },
         );
         ranges
@@ -899,27 +950,53 @@ impl Timeline {
         let presentation = item.tool?;
         let cached = self.wrap_cache.borrow();
         let cached = cached.get(&item.id)?;
-        let hidden_visual_rows = cached
-            .full_row_count
-            .saturating_sub(COLLAPSED_TOOL_VISUAL_ROWS);
+        let failed = item.activity == Some(ActivityState::Error);
+        let collapsed_budget = if failed {
+            FAILED_TOOL_VISUAL_ROWS
+        } else {
+            COLLAPSED_TOOL_VISUAL_ROWS
+        };
+        let hidden_visual_rows = cached.full_row_count.saturating_sub(collapsed_budget);
         Some(ToolDisclosure {
             expanded: item.expanded,
             expandable: hidden_visual_rows > 0,
             hidden_visual_rows,
+            tail_start_visual_row: (failed && hidden_visual_rows > 0)
+                .then_some(FAILED_TOOL_HEAD_ROWS),
             terminal_truncated: presentation.terminal_truncated,
         })
     }
 
-    fn displayed_end_byte(&self, item: &TimelineItem) -> usize {
+    fn displayed_segments(&self, item: &TimelineItem) -> (Vec<(usize, usize)>, usize) {
         if item.kind != ItemKind::Tool || item.expanded {
-            return displayed_text(item).len();
+            return (vec![(0, displayed_text(item).len())], 0);
         }
-        self.wrap_cache
-            .borrow()
+        let cached = self.wrap_cache.borrow();
+        let Some(cached) = cached
             .get(&item.id)
             .filter(|cached| cached.text_len == item.text.len())
-            .and_then(|cached| cached.ranges.last())
-            .map_or_else(|| displayed_text(item).len(), |row| row.end_byte)
+        else {
+            return (vec![(0, displayed_text(item).len())], 0);
+        };
+        let Some(last) = cached.ranges.last() else {
+            return (Vec::new(), 0);
+        };
+        let Some(tail_start) = cached.tail_start_visual_row else {
+            return (vec![(0, last.end_byte)], 0);
+        };
+        let Some(head) = tail_start
+            .checked_sub(1)
+            .and_then(|index| cached.ranges.get(index))
+        else {
+            return (vec![(0, last.end_byte)], 0);
+        };
+        let Some(tail) = cached.ranges.get(tail_start) else {
+            return (vec![(0, last.end_byte)], 0);
+        };
+        (
+            vec![(0, head.end_byte), (tail.start_byte, last.end_byte)],
+            cached.full_row_count.saturating_sub(cached.ranges.len()),
+        )
     }
 
     fn total_rows(&self, width: u16) -> usize {
@@ -1219,6 +1296,11 @@ fn project_item_rows(
         }
         let content_index = item_index.saturating_sub(prefix);
         if let Some(range) = ranges.get(content_index) {
+            let omitted_before_visual_rows = disclosure
+                .filter(|value| {
+                    !value.expanded && value.tail_start_visual_row == Some(content_index)
+                })
+                .map_or(0, |value| value.hidden_visual_rows);
             output.push(visual_row(
                 item,
                 *range,
@@ -1227,6 +1309,7 @@ fn project_item_rows(
                     last: content_index + 1 == ranges.len(),
                 },
                 disclosure,
+                omitted_before_visual_rows,
                 focused,
             ));
         } else if item.kind == ItemKind::User {
@@ -1257,6 +1340,7 @@ fn frame_row(item: &TimelineItem, part: VisualRowPart, focused: bool) -> VisualR
         tone: item.tone,
         tool: item.tool,
         disclosure: None,
+        omitted_before_visual_rows: 0,
         focused,
     }
 }
@@ -1312,6 +1396,7 @@ fn visual_row(
     range: TextRow,
     part: VisualRowPart,
     disclosure: Option<ToolDisclosure>,
+    omitted_before_visual_rows: usize,
     focused: bool,
 ) -> VisualRow {
     let spans = item
@@ -1353,6 +1438,7 @@ fn visual_row(
         tone: item.tone,
         tool: item.tool,
         disclosure,
+        omitted_before_visual_rows,
         focused,
     }
 }
@@ -1807,6 +1893,143 @@ mod tests {
             timeline.selected_text().as_deref(),
             Some("Checked target · 5 lines\none\ntwo\nthree\nfour\nfive")
         );
+    }
+
+    #[test]
+    fn failed_tool_preview_keeps_two_head_rows_and_six_tail_rows() {
+        let mut timeline = Timeline::new();
+        let text = "Failed inspect · 10 lines\ncontext\nhidden two\nhidden three\nhidden four\ntail one\ntail two\ntail three\ntail four\ntail five\n終端 error 🧪";
+        let tool = timeline.push(ItemKind::Tool, text).expect("tool id");
+        let metadata_start = "Failed inspect".len();
+        let metadata_end = text.find('\n').expect("headline boundary");
+        assert!(timeline.set_tool_presentation(
+            tool,
+            ToolPresentation {
+                source_lines: 10,
+                source_bytes: text.len(),
+                retained_lines: 10,
+                retained_bytes: text.len(),
+                terminal_truncated: false,
+                metadata_start,
+                metadata_end,
+            },
+        ));
+        assert!(timeline.set_activity(tool, Some(ActivityState::Error)));
+
+        let collapsed = timeline.rows(80);
+        assert_eq!(collapsed.len(), FAILED_TOOL_VISUAL_ROWS);
+        assert_eq!(collapsed[0].text, "Failed inspect · 10 lines");
+        assert_eq!(collapsed[1].text, "context");
+        assert_eq!(collapsed[2].text, "tail one");
+        assert_eq!(
+            collapsed.last().map(|row| row.text.as_str()),
+            Some("終端 error 🧪")
+        );
+        assert_eq!(collapsed[2].omitted_before_visual_rows, 3);
+        assert!(collapsed
+            .iter()
+            .enumerate()
+            .all(|(index, row)| index == 2 || row.omitted_before_visual_rows == 0));
+        let disclosure = collapsed[0].disclosure.expect("failure disclosure");
+        assert_eq!(disclosure.hidden_visual_rows, 3);
+        assert_eq!(
+            disclosure.tail_start_visual_row,
+            Some(FAILED_TOOL_HEAD_ROWS)
+        );
+
+        let tail_start = text.find("tail one").expect("tail source byte");
+        assert_eq!(
+            Timeline::point_for_column(&collapsed[2], 0, false).byte,
+            tail_start
+        );
+        timeline.start_selection(ContentPoint {
+            item_id: tool,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: tool,
+            byte: text.len(),
+        });
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some(
+                "Failed inspect · 10 lines\ncontext\n… 3 earlier wrapped rows hidden …\ntail one\ntail two\ntail three\ntail four\ntail five\n終端 error 🧪"
+            )
+        );
+
+        timeline.start_selection(ContentPoint {
+            item_id: tool,
+            byte: tail_start,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: tool,
+            byte: text.len(),
+        });
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some("tail one\ntail two\ntail three\ntail four\ntail five\n終端 error 🧪")
+        );
+
+        assert!(timeline.set_expanded(tool, true));
+        let expanded = timeline.rows(80);
+        assert_eq!(expanded.len(), 11);
+        assert!(expanded
+            .iter()
+            .all(|row| row.omitted_before_visual_rows == 0));
+        timeline.start_selection(ContentPoint {
+            item_id: tool,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: tool,
+            byte: text.len(),
+        });
+        assert_eq!(timeline.selected_text().as_deref(), Some(text));
+    }
+
+    #[test]
+    fn activity_changes_invalidate_the_collapsed_preview_budget() {
+        let mut timeline = Timeline::new();
+        let text = "inspect running\none\ntwo\nthree\nfour\nfive\nsix\nseven\neight";
+        let tool = timeline.push(ItemKind::Tool, text).expect("tool");
+        assert!(timeline.set_tool_presentation(
+            tool,
+            ToolPresentation {
+                source_lines: 8,
+                source_bytes: text.len(),
+                retained_lines: 8,
+                retained_bytes: text.len(),
+                terminal_truncated: false,
+                metadata_start: "inspect".len(),
+                metadata_end: "inspect running".len(),
+            },
+        ));
+        assert!(timeline.set_activity(tool, Some(ActivityState::Running)));
+        assert_eq!(timeline.rows(40).len(), COLLAPSED_TOOL_VISUAL_ROWS);
+
+        assert!(timeline.set_activity(tool, Some(ActivityState::Error)));
+        let failed = timeline.rows(40);
+        assert_eq!(failed.len(), FAILED_TOOL_VISUAL_ROWS);
+        assert_eq!(failed[2].omitted_before_visual_rows, 1);
+        assert!(failed.last().is_some_and(|row| row.text == "eight"));
+        timeline.start_selection(ContentPoint {
+            item_id: tool,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: tool,
+            byte: text.len(),
+        });
+        assert!(timeline
+            .selected_text()
+            .is_some_and(|copy| copy.contains("… 1 earlier wrapped row hidden …")));
+
+        assert!(timeline.set_activity(tool, Some(ActivityState::Cancelled)));
+        let cancelled = timeline.rows(40);
+        assert_eq!(cancelled.len(), COLLAPSED_TOOL_VISUAL_ROWS);
+        assert!(cancelled
+            .iter()
+            .all(|row| row.omitted_before_visual_rows == 0));
     }
 
     #[test]

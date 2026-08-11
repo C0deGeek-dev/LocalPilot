@@ -2230,6 +2230,14 @@ struct ToolLineLayout {
     suffix: String,
 }
 
+const fn row_word(count: usize) -> &'static str {
+    if count == 1 {
+        "row"
+    } else {
+        "rows"
+    }
+}
+
 fn tool_line_layout(
     row: &VisualRow,
     width: u16,
@@ -2249,11 +2257,23 @@ fn tool_line_layout(
         let suffix = if screen_reader {
             if disclosure.expanded {
                 " · expanded".to_string()
+            } else if disclosure.tail_start_visual_row.is_some() {
+                format!(
+                    " · tail preview, {} earlier {} hidden",
+                    disclosure.hidden_visual_rows,
+                    row_word(disclosure.hidden_visual_rows)
+                )
             } else {
                 format!(" · {} more rows", disclosure.hidden_visual_rows)
             }
         } else if disclosure.expanded {
             String::new()
+        } else if disclosure.tail_start_visual_row.is_some() {
+            format!(
+                " · tail · +{} earlier {}",
+                disclosure.hidden_visual_rows,
+                row_word(disclosure.hidden_visual_rows)
+            )
         } else {
             format!(" · +{} rows", disclosure.hidden_visual_rows)
         };
@@ -2415,6 +2435,12 @@ fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Ve
     let tone = row.tone;
     let disclosure = row.disclosure;
     if screen_reader {
+        if kind == ItemKind::Tool && row.omitted_before_visual_rows > 0 {
+            return vec![Span::styled(
+                "Earlier output hidden: ",
+                theme.ui(UiRole::Muted),
+            )];
+        }
         let (label, role) = match kind {
             ItemKind::User | ItemKind::Assistant => ("  ", UiRole::Foreground),
             ItemKind::Reasoning => (
@@ -2551,6 +2577,8 @@ fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Ve
                         theme.ui(if row.focused { UiRole::Focus } else { role }),
                     ),
                 ]
+            } else if row.omitted_before_visual_rows > 0 {
+                vec![Span::styled(" … ", theme.ui(UiRole::Muted))]
             } else {
                 let wide_gutter = disclosure.is_some() || row.focused;
                 vec![Span::styled(
@@ -6057,6 +6085,48 @@ mod tests {
         let (buffer, hits) = render_test_frame(&app, 80, 24);
         let text = rect_text(&buffer, single_hits(&hits).timeline);
         assert!(text.contains("✓▼ Ran x"));
+    }
+
+    #[test]
+    fn failed_tool_preview_keeps_a_narrow_and_accessible_omission_cue() {
+        let mut app = model();
+        app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+            id: "failed-tail".into(),
+            name: "run_shell".into(),
+            detail: "x".into(),
+        });
+        app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+            id: "failed-tail".into(),
+            name: "run_shell".into(),
+            is_error: true,
+            cancelled: false,
+            output: "context\nhidden two\nhidden three\nhidden four\ntail one\ntail two\ntail three\ntail four\ntail five\n終端 error 🧪".into(),
+            duration_ms: 5,
+        });
+
+        for (width, height) in [(120, 30), (40, 20)] {
+            app.theme = Theme::Colorblind;
+            app.capabilities.color = ColorSupport::NoColor;
+            let (buffer, hits) = render_test_frame(&app, width, height);
+            let text = rect_text(&buffer, single_hits(&hits).timeline);
+            assert!(text.contains('×'), "failure keeps its non-color status cue");
+            assert!(text.contains(" … tail one"), "tail boundary stays visible");
+            if width == 120 {
+                assert!(text.contains("tail · +3 earlier rows"));
+            }
+            assert!(
+                text.contains('終') && text.contains("error"),
+                "the diagnostic tail is retained at width {width}: {text}"
+            );
+            assert!(!text.contains("hidden two"));
+        }
+
+        app.capabilities.screen_reader = true;
+        let (buffer, hits) = render_test_frame(&app, 120, 30);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("tail preview, 3 earlier rows hidden"));
+        assert!(text.contains("Earlier output hidden: tail one"));
+        assert!(text.contains('終') && text.contains("error"));
     }
 
     #[test]

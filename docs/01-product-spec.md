@@ -383,9 +383,14 @@ Tool lifecycle events update one stable timeline item. A running built-in tool
 uses an original target-aware action headline; an unknown or MCP tool keeps its
 sanitized name and neutral lifecycle wording. Completion adds truthful result-
 body line count and elapsed time, strips registry envelope metadata from the
-presentation, and shows at most four wrapped visual rows total: the headline
-plus up to three indented result rows, with no padding. An expandable row shows
-a chevron and its width-specific hidden-row count; an independently bounded
+presentation, and keeps running, successful, and cancelled tools to at most
+four wrapped visual rows total: the headline plus up to three indented result
+rows, with no padding. A failed tool instead uses a fixed eight-row diagnostic
+preview: its first two wrapped rows plus its six newest retained rows. A gutter
+ellipsis and screen-reader label mark the head-to-tail discontinuity, and a
+selection crossing it copies an explicit omission marker rather than making the
+visible pieces look contiguous. An expandable row shows a chevron and its
+width-specific hidden-row count; an independently bounded
 terminal view says `terminal view truncated`, so collapsed retained content is
 never confused with discarded terminal bytes. Wide rows right-align completion
 metadata only when the entire headline still fits, then fall back to ordinary

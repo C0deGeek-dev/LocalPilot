@@ -79,6 +79,11 @@ Finished rows include elapsed time and align their metadata at wide widths when
 that cannot force a wrap. Terminal-only output is bounded to 256 KiB with both
 an explicit middle-omission marker and a `terminal view truncated` headline
 label, while collapsed rows use the separate temporary hidden-row cue. The
+ordinary running, successful, and cancelled preview is at most four wrapped
+rows. A failed tool uses a fixed eight-row preview—two leading rows and the six
+newest retained rows—so the diagnostic tail is visible without unbounded
+expansion. Its ellipsis gutter and screen-reader label identify earlier hidden
+rows; copying across the jump inserts an omission marker. The
 provider transcript and retained tool-output path keep their existing independent
 limits. A tool row
 stays interleaved with the assistant text and reasoning that surround it: text
