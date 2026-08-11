@@ -252,6 +252,16 @@ non-source and inserts a counted group marker when it crosses hidden members,
 and the exit transcript continues to walk raw items. The config default is off,
 so no migration or provider/store change exists.
 
+Assistant progress hierarchy is metadata over an ordinary `Assistant` item.
+Every streamed assistant segment starts as `AssistantPresentation::Answer`; a
+subsequent `ToolStarted` update is the only proof point that changes the open
+segment to `Progress` before its pointer is retired under ADR-0141. Both states
+keep the same item kind, text, styles, stable ID, byte coordinates, wrap width,
+and transcript/export label. The renderer alone maps Answer to the filled accent
+dot and Progress to a muted hollow dot plus an explicit screen-reader label.
+Consequently the retroactive cue change cannot move an anchor, selection, or
+row, and the last assistant segment remains Answer when the turn stops.
+
 The default resolver owns the application canvas, raised prompt/composer
 surface, prompt text, muted text, focus edge, scrollbar, and tab roles. Prompt
 and composer bands are filled surfaces assembled from terminal cells; they are

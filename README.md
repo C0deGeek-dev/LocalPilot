@@ -196,6 +196,10 @@ For tool-heavy sessions, `[terminal] group_successful_tools = true` optionally
 collapses runs of three or more successful tools into one expandable summary;
 the default remains off, and search, copy disclosure, persistence, and export
 stay grounded in the original tool rows.
+Assistant status prose is quieter too: if a later tool call proves a segment was
+intermediate, its filled answer dot becomes a hollow progress dot in place; the
+final answer keeps the filled dot, and screen readers announce progress
+explicitly.
 
 ## Learns, with your approval
 

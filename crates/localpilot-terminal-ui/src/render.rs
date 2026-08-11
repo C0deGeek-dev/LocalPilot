@@ -14,9 +14,9 @@ use crate::app::{
 use crate::layout::tab_height;
 use crate::projection::{PeerPane, SessionProjection};
 use crate::{
-    ActivityState, AppModel, ColorSupport, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt,
-    TabId, TakeoverKind, TextStyle, Theme, ThemeResolver, TimelineLayout, TimelinePaneLayout,
-    UiRole, VisualRow, VisualRowPart, APP_NAME, MINIMUM_HEIGHT, MINIMUM_WIDTH,
+    ActivityState, AppModel, AssistantPresentation, ColorSupport, DialogState, Focus, FrameLayout,
+    ItemKind, PinnedPrompt, TabId, TakeoverKind, TextStyle, Theme, ThemeResolver, TimelineLayout,
+    TimelinePaneLayout, UiRole, VisualRow, VisualRowPart, APP_NAME, MINIMUM_HEIGHT, MINIMUM_WIDTH,
 };
 
 /// Six banner lines plus one deliberate blank line before the first prompt.
@@ -2457,7 +2457,21 @@ fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Ve
             )];
         }
         let (label, role) = match kind {
-            ItemKind::User | ItemKind::Assistant => ("  ", UiRole::Foreground),
+            ItemKind::User => ("  ", UiRole::Foreground),
+            ItemKind::Assistant => {
+                if row.assistant_presentation == Some(AssistantPresentation::Progress) {
+                    (
+                        if first {
+                            "Progress update: "
+                        } else {
+                            "                 "
+                        },
+                        UiRole::Muted,
+                    )
+                } else {
+                    ("  ", UiRole::Foreground)
+                }
+            }
             ItemKind::Reasoning => (
                 if first { "Reasoning: " } else { "           " },
                 UiRole::Muted,
@@ -2564,8 +2578,22 @@ fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Ve
             ),
         ],
         ItemKind::Assistant => vec![Span::styled(
-            if first { "● " } else { "  " },
-            theme.ui(UiRole::Accent),
+            if first {
+                if row.assistant_presentation == Some(AssistantPresentation::Progress) {
+                    "○ "
+                } else {
+                    "● "
+                }
+            } else {
+                "  "
+            },
+            theme.ui(
+                if row.assistant_presentation == Some(AssistantPresentation::Progress) {
+                    UiRole::Muted
+                } else {
+                    UiRole::Accent
+                },
+            ),
         )],
         ItemKind::Reasoning => vec![Span::styled(
             if first { "◌ " } else { "  " },
@@ -5864,6 +5892,76 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("● assistant prose"));
         assert!(rendered.contains("◌ reasoning prose"));
+    }
+
+    #[test]
+    fn tool_proven_progress_is_quieter_than_the_final_answer_in_every_accessibility_mode() {
+        let mut app = model();
+        app.apply_runtime(crate::RuntimeUpdate::Text(
+            "I will inspect the relevant files".into(),
+        ));
+        for (id, target) in [
+            ("progress-one", "one.rs"),
+            ("progress-two", "two.rs"),
+            ("progress-three", "three.rs"),
+        ] {
+            app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+                id: id.into(),
+                name: "read_file".into(),
+                detail: target.into(),
+            });
+            app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+                id: id.into(),
+                name: "read_file".into(),
+                is_error: false,
+                cancelled: false,
+                output: format!("contents of {target}"),
+                duration_ms: 5,
+            });
+        }
+        app.apply_runtime(crate::RuntimeUpdate::Text(
+            "The final answer is ready".into(),
+        ));
+        app.apply_runtime(crate::RuntimeUpdate::Stopped(crate::StopState::Done));
+        app.set_group_successful_tools(true);
+        app.theme = Theme::HighContrast;
+        app.capabilities.color = ColorSupport::NoColor;
+
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let timeline = single_hits(&hits);
+        let text = rect_text(&buffer, timeline.timeline);
+        assert!(text.contains("○ I will inspect the relevant files"));
+        assert!(text.contains("✓▸ 3 tools completed · 15 ms"));
+        assert!(text.contains("● The final answer is ready"));
+        assert!(!text.contains("○ The final answer is ready"));
+        let progress = timeline
+            .rows
+            .iter()
+            .find(|hit| hit.row.text.contains("I will inspect"))
+            .expect("progress row");
+        let final_answer = timeline
+            .rows
+            .iter()
+            .find(|hit| hit.row.text.contains("The final answer"))
+            .expect("final answer row");
+        assert_eq!(progress.row.kind, ItemKind::Assistant);
+        assert_eq!(final_answer.row.kind, ItemKind::Assistant);
+        assert_eq!(
+            progress.row.assistant_presentation,
+            Some(AssistantPresentation::Progress)
+        );
+        assert_eq!(
+            final_answer.row.assistant_presentation,
+            Some(AssistantPresentation::Answer)
+        );
+
+        app.capabilities.screen_reader = true;
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("Progress update: I will inspect the relevant files"));
+        assert!(text.contains("Group collapsed: 3 tools completed"));
+        assert!(text.contains("The final answer is ready"));
+        assert!(!text.contains("Progress update: The final answer is ready"));
     }
 
     #[test]

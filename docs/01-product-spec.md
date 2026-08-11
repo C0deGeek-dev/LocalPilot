@@ -420,6 +420,13 @@ export stay grounded in those originals, while copying across a collapsed run
 inserts a counted omission marker. Any non-tool, running, failed, or cancelled
 item ends a group.
 
+Assistant prose uses a filled `●` answer cue by default. Only a later observed
+tool start can prove that the currently open assistant segment was intermediate;
+at that boundary, the same stable text and byte coordinates switch in place to
+a quieter hollow `○` progress cue and the screen-reader label
+`Progress update:`. Assistant prose after the final tool remains the filled
+answer. A turn that ends without a tool is never guessed to be progress.
+
 ### Harness CLI
 
 Scriptable commands:

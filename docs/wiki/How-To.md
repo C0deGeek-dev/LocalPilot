@@ -100,6 +100,10 @@ when the selected match would otherwise be hidden.
 Set `[terminal] group_successful_tools = true` to summarize runs of three or
 more successful tools; expand the summary to inspect the original rows. This is
 off by default and never replaces stored or exported tool activity.
+Assistant prose that leads into a tool call changes to a hollow `○` progress cue
+once that tool starts. The final answer keeps the filled `●` cue; screen readers
+hear `Progress update:`. The text itself remains searchable, selectable, and
+unchanged in exported transcripts.
 
 When LocalPilot asks a multiple-choice question, select **Other** and press Enter
 to type a custom answer. Long answers wrap and expand the dialog; after the

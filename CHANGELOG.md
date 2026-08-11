@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Intermediate progress no longer competes with the final answer.** Assistant
+  prose keeps the filled `●` answer cue unless a later tool start proves that
+  exact stable segment was intermediate; then it switches in place to a quieter
+  hollow `○` progress cue. The final post-tool answer remains filled. Screen
+  readers announce `Progress update:`, while no-color, search, copy, export,
+  wrapping, and viewport anchors retain their existing source text and geometry.
+
 - **Successful tool runs can collapse without changing the transcript.** The
   opt-in `[terminal] group_successful_tools = true` preference summarizes three
   or more consecutive successful tools behind one expandable row with count,

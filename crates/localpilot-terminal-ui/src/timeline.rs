@@ -37,6 +37,15 @@ pub enum ItemKind {
     Result,
 }
 
+/// Provider-neutral presentation stage for assistant prose. A segment begins as
+/// an answer and becomes progress only when a later tool start proves it was
+/// intermediate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantPresentation {
+    Answer,
+    Progress,
+}
+
 /// The honesty of a retained collaboration result, driving its distinct prefix and
 /// colour. Success is only a genuine convergence; a bounded or aborted run is
 /// incomplete; a failed run is an error.
@@ -197,6 +206,7 @@ pub struct TimelineItem {
     pub kind: ItemKind,
     pub text: String,
     pub styles: Vec<StyledRange>,
+    pub assistant_presentation: Option<AssistantPresentation>,
     pub trailing: Option<String>,
     pub pending: bool,
     pub activity: Option<ActivityState>,
@@ -213,6 +223,8 @@ impl TimelineItem {
             kind,
             text,
             styles,
+            assistant_presentation: (kind == ItemKind::Assistant)
+                .then_some(AssistantPresentation::Answer),
             trailing: None,
             pending: false,
             activity: None,
@@ -238,6 +250,7 @@ pub struct VisualRow {
     pub end_byte: usize,
     pub text: String,
     pub spans: Vec<VisualSpan>,
+    pub assistant_presentation: Option<AssistantPresentation>,
     pub part: VisualRowPart,
     pub content_column: u16,
     pub trailing: Option<String>,
@@ -686,6 +699,24 @@ impl Timeline {
         self.items[index].activity = activity;
         self.wrap_cache.borrow_mut().remove(&id);
         self.invalidate_layout();
+        true
+    }
+
+    /// Reclassify assistant presentation without changing kind, text, bytes, or
+    /// geometry. Non-assistant items reject the update.
+    pub fn set_assistant_presentation(
+        &mut self,
+        id: ItemId,
+        presentation: AssistantPresentation,
+    ) -> bool {
+        let Some(index) = self.item_positions.get(&id).copied() else {
+            return false;
+        };
+        let item = &mut self.items[index];
+        if item.kind != ItemKind::Assistant {
+            return false;
+        }
+        item.assistant_presentation = Some(presentation);
         true
     }
 
@@ -1738,6 +1769,7 @@ fn success_group_row(
         end_byte: 0,
         text,
         spans: Vec::new(),
+        assistant_presentation: None,
         part: VisualRowPart::Content {
             first: true,
             last: true,
@@ -1768,6 +1800,7 @@ fn frame_row(item: &TimelineItem, part: VisualRowPart, focused: bool) -> VisualR
         end_byte: byte,
         text: String::new(),
         spans: Vec::new(),
+        assistant_presentation: item.assistant_presentation,
         part,
         content_column: 0,
         trailing: None,
@@ -1856,6 +1889,7 @@ fn visual_row(
         end_byte: range.end_byte,
         text: item.text[range.start_byte..range.end_byte].to_string(),
         spans,
+        assistant_presentation: item.assistant_presentation,
         part,
         content_column: match item.kind {
             ItemKind::User => 3,
@@ -2539,6 +2573,72 @@ mod tests {
         assert!(disclosure.expandable);
         assert_eq!(expanded.len(), 8);
         assert_eq!(timeline.items().len(), 1);
+    }
+
+    #[test]
+    fn assistant_presentation_changes_without_moving_text_or_geometry() {
+        let mut timeline = Timeline::new();
+        let assistant = timeline
+            .push(ItemKind::Assistant, "I will inspect the target")
+            .expect("assistant");
+        let tool = timeline
+            .push(ItemKind::Tool, "inspect running")
+            .expect("tool");
+        timeline.start_selection(ContentPoint {
+            item_id: assistant,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: assistant,
+            byte: "I will inspect the target".len(),
+        });
+        assert!(timeline.hold_at(ContentPoint {
+            item_id: assistant,
+            byte: 0,
+        }));
+
+        let before = timeline.rows(16);
+        let before_geometry = before
+            .iter()
+            .map(|row| {
+                (
+                    row.item_id,
+                    row.start_byte,
+                    row.end_byte,
+                    row.text.clone(),
+                    row.part,
+                )
+            })
+            .collect::<Vec<_>>();
+        let before_start = timeline.current_start(16);
+        let before_copy = timeline.selected_text();
+        assert!(before
+            .iter()
+            .filter(|row| row.item_id == assistant)
+            .all(|row| { row.assistant_presentation == Some(AssistantPresentation::Answer) }));
+
+        assert!(timeline.set_assistant_presentation(assistant, AssistantPresentation::Progress));
+        assert!(!timeline.set_assistant_presentation(tool, AssistantPresentation::Progress));
+        let after = timeline.rows(16);
+        let after_geometry = after
+            .iter()
+            .map(|row| {
+                (
+                    row.item_id,
+                    row.start_byte,
+                    row.end_byte,
+                    row.text.clone(),
+                    row.part,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after_geometry, before_geometry);
+        assert_eq!(timeline.current_start(16), before_start);
+        assert_eq!(timeline.selected_text(), before_copy);
+        assert!(after
+            .iter()
+            .filter(|row| row.item_id == assistant)
+            .all(|row| { row.assistant_presentation == Some(AssistantPresentation::Progress) }));
     }
 
     #[test]

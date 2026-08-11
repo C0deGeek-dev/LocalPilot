@@ -9444,6 +9444,35 @@ mod tests {
     }
 
     #[test]
+    fn progress_presentation_does_not_rewrite_the_exported_assistant_transcript() {
+        let mut app = app();
+        app.apply_runtime(RuntimeUpdate::Text(
+            "I will inspect before answering".to_string(),
+        ));
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "export-progress".to_string(),
+            name: "inspect".to_string(),
+            detail: "target".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "export-progress".to_string(),
+            name: "inspect".to_string(),
+            is_error: false,
+            cancelled: false,
+            output: "observed output".to_string(),
+            duration_ms: 5,
+        });
+        app.apply_runtime(RuntimeUpdate::Text("Here is the final answer".to_string()));
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+
+        let transcript = visible_transcript(&app);
+        assert!(transcript.contains("LocalPilot\nI will inspect before answering"));
+        assert!(transcript.contains("LocalPilot\nHere is the final answer"));
+        assert!(!transcript.contains("Progress update:"));
+        assert!(!transcript.contains('○'));
+    }
+
+    #[test]
     fn presenter_routes_by_both_logical_lines_and_bytes() {
         let report = |lines: Vec<String>| CommandReport {
             title: "t".to_string(),

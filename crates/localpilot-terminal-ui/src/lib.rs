@@ -48,8 +48,8 @@ pub use render::{
 pub use sanitize::sanitize_text;
 pub use theme::{Theme, ThemeParseError, ThemeResolver, UiRole};
 pub use timeline::{
-    ActivityState, ContentPoint, ItemId, ItemKind, PinnedPrompt, ResultTone, Selection,
-    SemanticRole, StyledRange, TextStyle, Timeline, TimelineFocusTarget, TimelineItem,
+    ActivityState, AssistantPresentation, ContentPoint, ItemId, ItemKind, PinnedPrompt, ResultTone,
+    Selection, SemanticRole, StyledRange, TextStyle, Timeline, TimelineFocusTarget, TimelineItem,
     TimelineView, ToolDisclosure, ToolGroupPresentation, ToolPresentation, ViewportAnchor,
     VisualRow, VisualRowPart, VisualSpan,
 };

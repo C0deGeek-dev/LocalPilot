@@ -70,6 +70,10 @@ not need a real console:
   geometry, group focus and prefix-click parity, collapsed-member anchors,
   search reveal, nonselectable synthetic summaries, counted cross-group copy,
   no-color/screen-reader disclosure, config propagation, and raw-item export,
+  tool-proven assistant-progress reclassification across success, failure,
+  cancellation, question, and reasoning boundaries; stable geometry/selection/
+  search/export; grouped-tool integration; hollow-versus-filled no-color cues;
+  explicit screen-reader progress labels; and final/no-tool answer invariants,
   Unicode wrapping, connector geometry, visible-only collapsed copy, bounded exit
   preview, full-result search reveal, and
   conservative unified-diff styling across default/no-color/colorblind modes,

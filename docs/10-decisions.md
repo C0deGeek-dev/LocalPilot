@@ -1042,6 +1042,16 @@ post-tool segments still land ahead of prompts queued during the turn. Bounding
 the number of tool rows (run-collapsing) and keyboard expansion of a collapsed
 row are separate concerns, deliberately out of scope here.
 
+2026-08-11 presentation amendment: the same tool-start boundary is also the only
+proof that the open assistant segment was intermediate. Before retiring its
+pointer, the full-screen model changes provider-neutral presentation metadata
+from Answer to Progress on that same stable item. Text, kind, bytes, styles,
+search, copy, persistence, and export do not change. The renderer uses a hollow
+muted `○` and `Progress update:` screen-reader label for Progress, while the
+default/final Answer keeps its filled `●`; a turn that stops without a later
+tool start is never reclassified. This refines presentation only and does not
+alter ADR-0141's segmentation or provider contract.
+
 ## ADR-0140: Context Hygiene Is A Read-Only, Opt-In Section Of `doctor`
 
 Status: accepted. Extends ADR-0050 (the `doctor` report and its `--format`

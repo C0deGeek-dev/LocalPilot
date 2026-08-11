@@ -12,9 +12,9 @@ use crate::projection::{
     ActiveTool, ProjectionSet, SessionProjection, TimelineSearchState, WorkActivity,
 };
 use crate::{
-    sanitize_text, ActivityState, ContentPoint, Editor, ItemId, ItemKind, PeerPane, ResultTone,
-    SemanticRole, SessionHeader, StyledRange, TextStyle, Theme, Timeline, TimelineFocusTarget,
-    ToolPresentation,
+    sanitize_text, ActivityState, AssistantPresentation, ContentPoint, Editor, ItemId, ItemKind,
+    PeerPane, ResultTone, SemanticRole, SessionHeader, StyledRange, TextStyle, Theme, Timeline,
+    TimelineFocusTarget, ToolPresentation,
 };
 
 const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
@@ -2279,6 +2279,11 @@ impl AppModel {
                 }
             }
             RuntimeUpdate::ToolStarted { id, name, detail } => {
+                if let Some(assistant) = projection.active_assistant {
+                    let _ = projection
+                        .timeline
+                        .set_assistant_presentation(assistant, AssistantPresentation::Progress);
+                }
                 // A tool row is a boundary in the stream. Finalize the styling of
                 // the open assistant/reasoning segments (each inter-tool segment
                 // is complete once the tool starts), then retire them so text and
@@ -8191,6 +8196,12 @@ mod tests {
             name: "inspect".to_string(),
             detail: String::new(),
         });
+        assert_eq!(
+            app.active_timeline()
+                .item(assistant_a)
+                .and_then(|item| item.assistant_presentation),
+            Some(AssistantPresentation::Progress)
+        );
         // The tool boundary retires both open segments.
         assert!(app.active_projection().active_assistant.is_none());
         assert!(app.active_projection().active_reasoning.is_none());
@@ -8229,6 +8240,149 @@ mod tests {
             .collect();
         assert_eq!(ids.first(), Some(&active));
         assert_eq!(ids.last(), Some(&queued));
+    }
+
+    #[test]
+    fn only_tool_proven_assistant_segments_become_progress() {
+        let mut app = model();
+        app.begin_work();
+        let cases = [
+            ("success", "read_file", false, false),
+            ("failure", "run_shell", true, false),
+            ("cancelled", "inspect", false, true),
+            ("question", "ask_user", false, false),
+        ];
+        let mut progress_items = Vec::new();
+
+        for (label, tool_name, is_error, cancelled) in cases {
+            let text = format!("{label} progress SEARCHABLE");
+            app.apply_runtime(RuntimeUpdate::Text(text.clone()));
+            let assistant = app
+                .active_projection()
+                .active_assistant
+                .expect("open assistant segment");
+            assert_eq!(
+                app.active_timeline()
+                    .item(assistant)
+                    .and_then(|item| item.assistant_presentation),
+                Some(AssistantPresentation::Answer),
+                "a segment is not guessed to be progress while it streams"
+            );
+            if label == "success" {
+                app.apply_runtime(RuntimeUpdate::Reasoning(
+                    "reasoning does not break the proof boundary".to_string(),
+                ));
+            }
+            app.apply_runtime(RuntimeUpdate::ToolStarted {
+                id: label.to_string(),
+                name: tool_name.to_string(),
+                detail: label.to_string(),
+            });
+            assert_eq!(
+                app.active_timeline()
+                    .item(assistant)
+                    .and_then(|item| item.assistant_presentation),
+                Some(AssistantPresentation::Progress),
+                "the later tool start proves the preceding segment was intermediate"
+            );
+            assert_eq!(
+                app.active_timeline()
+                    .item(assistant)
+                    .map(|item| item.text.as_str()),
+                Some(text.as_str()),
+                "presentation changes without rewriting source text"
+            );
+            app.apply_runtime(RuntimeUpdate::ToolFinished {
+                id: label.to_string(),
+                name: tool_name.to_string(),
+                is_error,
+                cancelled,
+                output: format!("{label} output"),
+                duration_ms: 5,
+            });
+            progress_items.push(assistant);
+        }
+
+        app.apply_runtime(RuntimeUpdate::Text("terminal FINAL SEARCHABLE".to_string()));
+        let final_answer = app
+            .active_projection()
+            .active_assistant
+            .expect("final assistant segment");
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        assert_eq!(
+            app.active_timeline()
+                .item(final_answer)
+                .and_then(|item| item.assistant_presentation),
+            Some(AssistantPresentation::Answer),
+            "the last assistant segment stays the final answer"
+        );
+        assert!(progress_items
+            .iter()
+            .all(|id| app.active_timeline().item(*id).is_some_and(|item| {
+                item.assistant_presentation == Some(AssistantPresentation::Progress)
+            })));
+
+        app.set_group_successful_tools(true);
+        assert!(
+            app.active_timeline()
+                .rows(80)
+                .iter()
+                .all(|row| row.tool_group.is_none()),
+            "assistant progress remains a conversational boundary between tools"
+        );
+        for density in [TimelineDensity::Compact, TimelineDensity::Comfortable] {
+            app.set_timeline_density(density);
+            let rows = app.active_timeline().rows(80);
+            for progress in progress_items.iter().skip(1) {
+                let headline = rows
+                    .iter()
+                    .position(|row| {
+                        row.item_id == *progress
+                            && matches!(row.part, crate::VisualRowPart::Content { first: true, .. })
+                    })
+                    .expect("post-tool progress headline");
+                assert!(headline > 0);
+                assert_eq!(rows[headline - 1].part, crate::VisualRowPart::Spacer);
+                assert_eq!(rows[headline - 1].item_id, *progress);
+            }
+        }
+
+        app.open_timeline_search("SEARCHABLE".to_string());
+        assert_eq!(app.timeline_search().map(|view| view.total), Some(5));
+        let selected = progress_items[1];
+        let selected_len = app
+            .active_timeline()
+            .item(selected)
+            .expect("progress item")
+            .text
+            .len();
+        app.active_timeline_mut().start_selection(ContentPoint {
+            item_id: selected,
+            byte: 0,
+        });
+        app.active_timeline_mut().extend_selection(ContentPoint {
+            item_id: selected,
+            byte: selected_len,
+        });
+        assert_eq!(
+            app.active_timeline().selected_text().as_deref(),
+            Some("failure progress SEARCHABLE")
+        );
+
+        let mut no_tool = model();
+        no_tool.apply_runtime(RuntimeUpdate::Text("ordinary answer".to_string()));
+        let answer = no_tool
+            .active_projection()
+            .active_assistant
+            .expect("ordinary answer");
+        no_tool.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        assert_eq!(
+            no_tool
+                .active_timeline()
+                .item(answer)
+                .and_then(|item| item.assistant_presentation),
+            Some(AssistantPresentation::Answer)
+        );
     }
 
     #[test]
