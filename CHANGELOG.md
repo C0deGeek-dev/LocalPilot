@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v3.1.0 - 2026-08-11
+
+Coordinated LocalX release.
+
 - **`localx`, one command for the whole stack.** A new umbrella binary installs
   and updates the entire stack in one step: `localx update` refreshes every
   release-train tool (localpilot, localmind, localbox, localbench) *and* the
