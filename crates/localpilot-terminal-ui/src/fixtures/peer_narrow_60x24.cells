@@ -9,6 +9,7 @@
 ␠␠▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀␠█␠
 ␠␠◌␠BETA_REASONING_04␠checking␠context␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠█␠
 ␠␠✓␠BETA_TOOL␠completed␠·␠2␠lines␠·␠250␠ms␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠│␠
+␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠│␠
 ␠␠●␠BETA_ANSWER_04␠completed␠the␠requested␠review␠␠␠␠␠␠␠␠␠│␠
 ␠␠▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄␠│␠
 ␠␠␠❯␠BETA_PROMPT_05␠inspect␠the␠requested␠module␠␠␠␠␠␠␠␠␠␠│␠
@@ -16,7 +17,6 @@
 ␠␠◌␠BETA_REASONING_05␠checking␠context␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠│␠
 ␠␠●␠BETA_ANSWER_05␠completed␠the␠requested␠review␠␠␠␠␠␠␠␠␠│␠
 ␠␠▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄␠│␠
-␠␠␠❯␠BETA_PROMPT_06␠inspect␠the␠requested␠module␠␠␠␠␠␠␠␠␠␠│␠
 ␠␠snapshot-workspace␠[snapshot-branch]␠␠␠␠␠␠␠␠␠␠␠␠0␠tokens␠␠
 ␠▄▄␠Steer␠Peer␠B␠▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄␠
 ␠▏␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠␠

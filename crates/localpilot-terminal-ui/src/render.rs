@@ -2005,7 +2005,9 @@ fn render_timeline(
             if matches!(row.part, VisualRowPart::Content { .. }) {
                 let (first, last) = match row.part {
                     VisualRowPart::Content { first, last } => (first, last),
-                    VisualRowPart::FrameTop | VisualRowPart::FrameBottom => (false, false),
+                    VisualRowPart::Spacer
+                    | VisualRowPart::FrameTop
+                    | VisualRowPart::FrameBottom => (false, false),
                 };
                 let content_column = role_prefix(
                     row.kind,
@@ -3845,6 +3847,17 @@ mod tests {
         snapshot
     }
 
+    fn assert_cell_snapshot(actual: &str, expected: &str, fixture: &str) {
+        assert!(actual.ends_with('\n'), "{fixture} actual snapshot newline");
+        assert!(expected.ends_with('\n'), "{fixture} fixture newline");
+        let actual = actual.lines().collect::<Vec<_>>();
+        let expected = expected.lines().collect::<Vec<_>>();
+        assert_eq!(actual.len(), expected.len(), "{fixture} row count");
+        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(actual, expected, "{fixture} row {}", index + 1);
+        }
+    }
+
     fn render_test_frame(app: &AppModel, width: u16, height: u16) -> (Buffer, HitMap) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         let mut hit_map = None;
@@ -4191,13 +4204,15 @@ mod tests {
 
         let wide_snapshot = character_cell_snapshot(&wide_buffer);
         let narrow_snapshot = character_cell_snapshot(&narrow_buffer);
-        assert_eq!(
-            wide_snapshot,
-            include_str!("fixtures/peer_wide_120x30.cells")
+        assert_cell_snapshot(
+            &wide_snapshot,
+            include_str!("fixtures/peer_wide_120x30.cells"),
+            "peer_wide_120x30.cells",
         );
-        assert_eq!(
-            narrow_snapshot,
-            include_str!("fixtures/peer_narrow_60x24.cells")
+        assert_cell_snapshot(
+            &narrow_snapshot,
+            include_str!("fixtures/peer_narrow_60x24.cells"),
+            "peer_narrow_60x24.cells",
         );
 
         // --- Augmented resize round trip -------------------------------------
@@ -5866,6 +5881,49 @@ mod tests {
         assert!(text.contains("one"));
         assert!(!text.contains("│ one"));
         assert!(!text.contains("└ three"));
+    }
+
+    #[test]
+    fn tool_to_narration_boundary_renders_one_empty_non_interactive_row() {
+        let mut app = model();
+        app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+            id: "manifest".into(),
+            name: "read_file".into(),
+            detail: "manifest.json".into(),
+        });
+        app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+            id: "manifest".into(),
+            name: "read_file".into(),
+            is_error: false,
+            cancelled: false,
+            output: String::new(),
+            duration_ms: 5,
+        });
+        app.apply_runtime(crate::RuntimeUpdate::Text(
+            "I found the relevant entry".into(),
+        ));
+
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let timeline = single_hits(&hits);
+        let tool_y = timeline
+            .rows
+            .iter()
+            .filter(|hit| hit.row.kind == ItemKind::Tool)
+            .map(|hit| hit.y)
+            .max()
+            .expect("tool row");
+        let assistant_y = timeline
+            .rows
+            .iter()
+            .filter(|hit| hit.row.kind == ItemKind::Assistant)
+            .map(|hit| hit.y)
+            .min()
+            .expect("assistant row");
+        let spacer_y = tool_y.saturating_add(1);
+
+        assert_eq!(assistant_y, tool_y.saturating_add(2));
+        assert!(buffer_line(&buffer, spacer_y).trim().is_empty());
+        assert!(timeline.rows.iter().all(|hit| hit.y != spacer_y));
     }
 
     #[test]

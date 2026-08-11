@@ -181,6 +181,7 @@ pub struct VisualRow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisualRowPart {
+    Spacer,
     FrameTop,
     Content { first: bool, last: bool },
     FrameBottom,
@@ -241,6 +242,7 @@ struct CachedWrap {
 struct ItemLayout {
     start: usize,
     end: usize,
+    leading_spacer: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -504,14 +506,8 @@ impl Timeline {
 
     #[must_use]
     pub fn rows(&self, width: u16) -> Vec<VisualRow> {
-        self.items
-            .iter()
-            .filter(|item| !self.is_reasoning_hidden(item))
-            .flat_map(|item| {
-                let ranges = self.row_ranges(item, item_content_width(item, width));
-                project_item_rows(item, &ranges, 0, item_visual_row_count(item, &ranges))
-            })
-            .collect()
+        let end = self.total_rows(width);
+        self.project_rows(width, 0, end)
     }
 
     #[must_use]
@@ -805,6 +801,7 @@ impl Timeline {
             .unwrap_or_else(|| ranges.len().saturating_sub(1));
         entry
             .start
+            .saturating_add(usize::from(entry.leading_spacer))
             .saturating_add(frame_prefix_rows(item.kind))
             .saturating_add(within)
     }
@@ -815,6 +812,14 @@ impl Timeline {
         let entry = layout.entries.get(index)?;
         let item = self.items.get(index)?;
         let local = target.saturating_sub(entry.start);
+        let spacer = usize::from(entry.leading_spacer);
+        if local < spacer {
+            return Some(ContentPoint {
+                item_id: item.id,
+                byte: 0,
+            });
+        }
+        let local = local.saturating_sub(spacer);
         let prefix = frame_prefix_rows(item.kind);
         if local < prefix {
             return Some(ContentPoint {
@@ -852,7 +857,13 @@ impl Timeline {
             let item_rows = entry.end.saturating_sub(entry.start);
             let first = start.saturating_sub(entry.start);
             let last = end.saturating_sub(entry.start).min(item_rows);
-            output.extend(project_item_rows(item, &ranges, first, last));
+            output.extend(project_item_rows(
+                item,
+                &ranges,
+                first,
+                last,
+                entry.leading_spacer,
+            ));
         }
         output
     }
@@ -914,6 +925,7 @@ impl Timeline {
             return cached.clone();
         }
         let mut start = 0usize;
+        let mut previous_visible_kind = None;
         let entries: Arc<[ItemLayout]> = self
             .items
             .iter()
@@ -921,14 +933,26 @@ impl Timeline {
                 // A hidden reasoning item stays in the entries vector (index
                 // identity with `self.items`) but is zero-height, so it occupies
                 // no rows and later entries keep the same start offsets.
-                let height = if self.is_reasoning_hidden(item) {
+                let hidden = self.is_reasoning_hidden(item);
+                // Keep narration into the next tool dense; only resumed LLM
+                // narration after a tool gets the requested breathing room.
+                let leading_spacer = !hidden
+                    && previous_visible_kind == Some(ItemKind::Tool)
+                    && matches!(item.kind, ItemKind::Assistant | ItemKind::Reasoning);
+                let height = if hidden {
                     0
                 } else {
                     let ranges = self.row_ranges(item, item_content_width(item, width));
-                    item_visual_row_count(item, &ranges)
+                    let height = item_visual_row_count(item, &ranges, leading_spacer);
+                    previous_visible_kind = Some(item.kind);
+                    height
                 };
                 let end = start.saturating_add(height);
-                let entry = ItemLayout { start, end };
+                let entry = ItemLayout {
+                    start,
+                    end,
+                    leading_spacer,
+                };
                 start = end;
                 entry
             })
@@ -983,9 +1007,10 @@ fn item_content_width(item: &TimelineItem, width: u16) -> u16 {
     width.saturating_sub(decoration).max(1)
 }
 
-fn item_visual_row_count(item: &TimelineItem, ranges: &[TextRow]) -> usize {
+fn item_visual_row_count(item: &TimelineItem, ranges: &[TextRow], leading_spacer: bool) -> usize {
     ranges
         .len()
+        .saturating_add(usize::from(leading_spacer))
         .saturating_add(if item.kind == ItemKind::User { 2 } else { 0 })
 }
 
@@ -994,15 +1019,22 @@ fn project_item_rows(
     ranges: &[TextRow],
     start: usize,
     end: usize,
+    leading_spacer: bool,
 ) -> Vec<VisualRow> {
     let mut output = Vec::with_capacity(end.saturating_sub(start));
     let prefix = frame_prefix_rows(item.kind);
+    let spacer = usize::from(leading_spacer);
     for index in start..end {
-        if item.kind == ItemKind::User && index == 0 {
+        if leading_spacer && index == 0 {
+            output.push(frame_row(item, VisualRowPart::Spacer));
+            continue;
+        }
+        let item_index = index.saturating_sub(spacer);
+        if item.kind == ItemKind::User && item_index == 0 {
             output.push(frame_row(item, VisualRowPart::FrameTop));
             continue;
         }
-        let content_index = index.saturating_sub(prefix);
+        let content_index = item_index.saturating_sub(prefix);
         if let Some(range) = ranges.get(content_index) {
             output.push(visual_row(
                 item,
@@ -1020,10 +1052,10 @@ fn project_item_rows(
 }
 
 fn frame_row(item: &TimelineItem, part: VisualRowPart) -> VisualRow {
-    let byte = if part == VisualRowPart::FrameTop {
-        0
-    } else {
+    let byte = if part == VisualRowPart::FrameBottom {
         item.text.len()
+    } else {
+        0
     };
     VisualRow {
         item_id: item.id,
@@ -1429,6 +1461,67 @@ mod tests {
             view.rows.last().map(|row| row.text.as_str()),
             Some("line 39")
         );
+    }
+
+    #[test]
+    fn tool_to_narration_spacer_is_visual_only_and_skips_consecutive_tools() {
+        let mut timeline = Timeline::new();
+        let opening = timeline
+            .push(ItemKind::Assistant, "I will inspect the files")
+            .expect("opening narration");
+        let first_tool = timeline
+            .push(ItemKind::Tool, "Read manifest")
+            .expect("tool");
+        let second_tool = timeline.push(ItemKind::Tool, "Read log").expect("tool");
+        let narration = timeline
+            .push(ItemKind::Assistant, "I found the issue")
+            .expect("narration");
+
+        let rows = timeline.rows(40);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].item_id, opening);
+        assert_eq!(rows[1].item_id, first_tool);
+        assert_eq!(rows[2].item_id, second_tool);
+        assert_eq!(rows[3].part, VisualRowPart::Spacer);
+        assert_eq!(rows[4].item_id, narration);
+        assert_eq!(timeline.view(40, 10).total_rows, rows.len());
+
+        timeline.start_selection(ContentPoint {
+            item_id: first_tool,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: narration,
+            byte: "I found the issue".len(),
+        });
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some("Read manifest\nRead log\nI found the issue")
+        );
+    }
+
+    #[test]
+    fn hidden_reasoning_keeps_one_tool_to_narration_spacer() {
+        let mut timeline = Timeline::new();
+        let _ = timeline.push(ItemKind::Tool, "Read manifest");
+        let reasoning = timeline
+            .push(ItemKind::Reasoning, "Checking the result")
+            .expect("reasoning");
+        let assistant = timeline
+            .push(ItemKind::Assistant, "The result is valid")
+            .expect("assistant");
+
+        let visible = timeline.rows(40);
+        assert_eq!(visible.len(), 4);
+        assert_eq!(visible[1].part, VisualRowPart::Spacer);
+        assert_eq!(visible[2].item_id, reasoning);
+        assert_eq!(visible[3].item_id, assistant);
+
+        timeline.set_reasoning_visible(false);
+        let hidden = timeline.rows(40);
+        assert_eq!(hidden.len(), 3);
+        assert_eq!(hidden[1].part, VisualRowPart::Spacer);
+        assert_eq!(hidden[2].item_id, assistant);
     }
 
     #[test]
