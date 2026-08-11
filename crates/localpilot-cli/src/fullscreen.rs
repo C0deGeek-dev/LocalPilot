@@ -15433,49 +15433,42 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn turn_loop_redraws_on_resize() {
-        async fn draws_for(events: Vec<Event>) -> usize {
-            let mut app = app();
-            let history = localpilot_store::PromptHistory::with_store(None);
-            let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
-            let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
-            let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
-            let steer = SteerQueue::default();
-            let cancel = CancellationToken::new();
-            let mut queue = VecDeque::new();
-            let mut mouse_state = MouseState::default();
-            let mut paste_burst = PasteBurst::default();
-            let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
-            let draws = cell(0);
-            let mut io = characterization_io(queued(events), cell(0), draws.clone(), None);
-            drive_turn_loop(
-                &mut app,
-                &mut io,
-                &mut approval_rx,
-                &mut question_rx,
-                &mut rx,
-                &steer,
-                &cancel,
-                &image_capability(false),
-                &mut queue,
-                &history,
-                std::path::Path::new("."),
-                &mut mouse_state,
-                &mut paste_burst,
-                &mut workspace_index,
-                complete_after(20),
-                |_app: &mut AppModel, _reason: ()| {},
-            )
-            .await
-            .expect("turn loop completes");
-            draws.get()
-        }
-        let baseline = draws_for(vec![]).await;
-        let with_resize = draws_for(vec![Event::Resize(100, 30)]).await;
-        assert!(
-            with_resize > baseline,
-            "a resize forces an extra redraw ({with_resize} > {baseline})"
+    #[test]
+    fn operation_resize_requests_geometry_redraw() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let cancel = CancellationToken::new();
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let mut pending = None;
+        let mut pending_questions = None;
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut queue = VecDeque::new();
+        let mut pending_steer_items = VecDeque::new();
+
+        let outcome = handle_operation_terminal_event(
+            &mut app,
+            Event::Resize(100, 30),
+            false,
+            &mut pending,
+            &mut pending_questions,
+            &cancel,
+            &hit_map,
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &image_capability(false),
+            None,
+            None,
+            &mut pending_steer_items,
+        );
+
+        assert_eq!(
+            outcome,
+            OperationInputOutcome::Geometry,
+            "a resize requests the pump's synchronous redraw path"
         );
     }
 
