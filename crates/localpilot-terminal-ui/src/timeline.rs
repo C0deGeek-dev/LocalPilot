@@ -5,6 +5,8 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use localpilot_config::TimelineDensity;
+
 use crate::sanitize_text;
 use crate::text::{wrap_ranges, TextRow};
 
@@ -208,6 +210,7 @@ pub struct VisualRow {
     pub tone: Option<ResultTone>,
     pub tool: Option<ToolPresentation>,
     pub disclosure: Option<ToolDisclosure>,
+    pub focused: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +301,8 @@ pub struct Timeline {
     /// geometry, search, selection, and new-content notification — the raw items
     /// are retained (streaming continues; the print path drops them separately).
     reasoning_visible: bool,
+    density: TimelineDensity,
+    focused_tool: Option<ItemId>,
 }
 
 impl Default for Timeline {
@@ -319,6 +324,8 @@ impl Timeline {
             selection: None,
             new_content: Cell::new(false),
             reasoning_visible: true,
+            density: TimelineDensity::Compact,
+            focused_tool: None,
         }
     }
 
@@ -331,6 +338,27 @@ impl Timeline {
     #[must_use]
     pub const fn reasoning_visible(&self) -> bool {
         self.reasoning_visible
+    }
+
+    #[must_use]
+    pub const fn density(&self) -> TimelineDensity {
+        self.density
+    }
+
+    pub fn set_density(&mut self, density: TimelineDensity) {
+        if self.density != density {
+            self.density = density;
+            self.invalidate_layout();
+        }
+    }
+
+    #[must_use]
+    pub const fn focused_tool(&self) -> Option<ItemId> {
+        self.focused_tool
+    }
+
+    pub fn clear_tool_focus(&mut self) {
+        self.focused_tool = None;
     }
 
     /// Set reasoning visibility. Invalidates the layout cache so scroll geometry
@@ -546,6 +574,92 @@ impl Timeline {
         self.wrap_cache.borrow_mut().remove(&id);
         self.invalidate_layout();
         true
+    }
+
+    /// Focus one tool by stable item identity, scroll its headline into view,
+    /// and leave wrapping/search/copy grounded in the original item.
+    pub fn focus_tool(&mut self, id: ItemId, width: u16, height: u16) -> bool {
+        let Some(item) = self.item(id) else {
+            return false;
+        };
+        if item.kind != ItemKind::Tool {
+            return false;
+        }
+        self.focused_tool = Some(id);
+        self.reveal_tool_headline(id, width, height);
+        true
+    }
+
+    /// Move the stable tool cursor in timeline reading order. The first move
+    /// starts at the nearest edge and subsequent moves clamp at either end.
+    pub fn move_tool_focus(&mut self, forward: bool, width: u16, height: u16) -> bool {
+        let tools = self
+            .items
+            .iter()
+            .filter(|item| item.kind == ItemKind::Tool)
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        if tools.is_empty() {
+            self.focused_tool = None;
+            return false;
+        }
+        let current = self
+            .focused_tool
+            .and_then(|focused| tools.iter().position(|id| *id == focused));
+        let next = match (current, forward) {
+            (Some(index), true) => index.saturating_add(1).min(tools.len().saturating_sub(1)),
+            (Some(index), false) => index.saturating_sub(1),
+            (None, true) => 0,
+            (None, false) => tools.len().saturating_sub(1),
+        };
+        self.focus_tool(tools[next], width, height)
+    }
+
+    /// Toggle the focused tool while preserving the pre-toggle viewport start.
+    /// The only movement permitted is deterministic clamping when the shorter
+    /// post-toggle timeline no longer has that start row.
+    pub fn toggle_focused_tool(&mut self, width: u16, height: u16) -> bool {
+        let Some(id) = self.focused_tool else {
+            return false;
+        };
+        self.toggle_tool_preserving_view(id, width, height)
+    }
+
+    fn toggle_tool_preserving_view(&mut self, id: ItemId, width: u16, height: u16) -> bool {
+        let before = self.view(width, height);
+        if !self.toggle_expandable(id) {
+            return false;
+        }
+        let after = self.view(width, height);
+        let max_start = self.total_rows(width).saturating_sub(after.viewport_rows);
+        self.set_viewport_start(before.start.min(max_start), width, max_start);
+        true
+    }
+
+    fn reveal_tool_headline(&mut self, id: ItemId, width: u16, height: u16) {
+        let Some(index) = self.item_positions.get(&id).copied() else {
+            return;
+        };
+        let layout = self.layout_index(width);
+        let Some(entry) = layout.entries.get(index) else {
+            return;
+        };
+        let headline = entry
+            .start
+            .saturating_add(usize::from(entry.leading_spacer));
+        let view = self.view(width, height);
+        let end = view.start.saturating_add(view.viewport_rows);
+        let start = if headline < view.start {
+            headline
+        } else if headline >= end {
+            headline
+                .saturating_add(1)
+                .saturating_sub(view.viewport_rows)
+        } else {
+            return;
+        };
+        let max_start = layout.total_rows.saturating_sub(view.viewport_rows);
+        self.set_viewport_start(start.min(max_start), width, max_start);
     }
 
     #[must_use]
@@ -926,6 +1040,7 @@ impl Timeline {
                 last,
                 entry.leading_spacer,
                 disclosure,
+                self.focused_tool == Some(item.id),
             ));
         }
         output
@@ -999,9 +1114,12 @@ impl Timeline {
                 let hidden = self.is_reasoning_hidden(item);
                 // Keep narration into the next tool dense; only resumed LLM
                 // narration after a tool gets the requested breathing room.
-                let leading_spacer = !hidden
-                    && previous_visible_kind == Some(ItemKind::Tool)
+                let required_spacer = previous_visible_kind == Some(ItemKind::Tool)
                     && matches!(item.kind, ItemKind::Assistant | ItemKind::Reasoning);
+                let density_spacer = self.density.includes_optional_spacers()
+                    && previous_visible_kind == Some(ItemKind::Tool)
+                    && item.kind == ItemKind::Tool;
+                let leading_spacer = !hidden && (required_spacer || density_spacer);
                 let height = if hidden {
                     0
                 } else {
@@ -1084,18 +1202,19 @@ fn project_item_rows(
     end: usize,
     leading_spacer: bool,
     disclosure: Option<ToolDisclosure>,
+    focused: bool,
 ) -> Vec<VisualRow> {
     let mut output = Vec::with_capacity(end.saturating_sub(start));
     let prefix = frame_prefix_rows(item.kind);
     let spacer = usize::from(leading_spacer);
     for index in start..end {
         if leading_spacer && index == 0 {
-            output.push(frame_row(item, VisualRowPart::Spacer));
+            output.push(frame_row(item, VisualRowPart::Spacer, focused));
             continue;
         }
         let item_index = index.saturating_sub(spacer);
         if item.kind == ItemKind::User && item_index == 0 {
-            output.push(frame_row(item, VisualRowPart::FrameTop));
+            output.push(frame_row(item, VisualRowPart::FrameTop, focused));
             continue;
         }
         let content_index = item_index.saturating_sub(prefix);
@@ -1108,15 +1227,16 @@ fn project_item_rows(
                     last: content_index + 1 == ranges.len(),
                 },
                 disclosure,
+                focused,
             ));
         } else if item.kind == ItemKind::User {
-            output.push(frame_row(item, VisualRowPart::FrameBottom));
+            output.push(frame_row(item, VisualRowPart::FrameBottom, focused));
         }
     }
     output
 }
 
-fn frame_row(item: &TimelineItem, part: VisualRowPart) -> VisualRow {
+fn frame_row(item: &TimelineItem, part: VisualRowPart, focused: bool) -> VisualRow {
     let byte = if part == VisualRowPart::FrameBottom {
         item.text.len()
     } else {
@@ -1137,6 +1257,7 @@ fn frame_row(item: &TimelineItem, part: VisualRowPart) -> VisualRow {
         tone: item.tone,
         tool: item.tool,
         disclosure: None,
+        focused,
     }
 }
 
@@ -1191,6 +1312,7 @@ fn visual_row(
     range: TextRow,
     part: VisualRowPart,
     disclosure: Option<ToolDisclosure>,
+    focused: bool,
 ) -> VisualRow {
     let spans = item
         .styles
@@ -1231,6 +1353,7 @@ fn visual_row(
         tone: item.tone,
         tool: item.tool,
         disclosure,
+        focused,
     }
 }
 
@@ -1538,7 +1661,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_to_narration_spacer_is_visual_only_and_skips_consecutive_tools() {
+    fn density_changes_only_optional_tool_run_spacing() {
         let mut timeline = Timeline::new();
         let opening = timeline
             .push(ItemKind::Assistant, "I will inspect the files")
@@ -1551,14 +1674,25 @@ mod tests {
             .push(ItemKind::Assistant, "I found the issue")
             .expect("narration");
 
-        let rows = timeline.rows(40);
-        assert_eq!(rows.len(), 5);
-        assert_eq!(rows[0].item_id, opening);
-        assert_eq!(rows[1].item_id, first_tool);
-        assert_eq!(rows[2].item_id, second_tool);
-        assert_eq!(rows[3].part, VisualRowPart::Spacer);
-        assert_eq!(rows[4].item_id, narration);
-        assert_eq!(timeline.view(40, 10).total_rows, rows.len());
+        timeline.set_density(TimelineDensity::Comfortable);
+        let comfortable = timeline.rows(40);
+        assert_eq!(comfortable.len(), 6);
+        assert_eq!(comfortable[0].item_id, opening);
+        assert_eq!(comfortable[1].item_id, first_tool);
+        assert_eq!(comfortable[2].part, VisualRowPart::Spacer);
+        assert_eq!(comfortable[3].item_id, second_tool);
+        assert_eq!(comfortable[4].part, VisualRowPart::Spacer);
+        assert_eq!(comfortable[5].item_id, narration);
+
+        timeline.set_density(TimelineDensity::Compact);
+        let compact = timeline.rows(40);
+        assert_eq!(compact.len(), 5);
+        assert_eq!(compact[0].item_id, opening);
+        assert_eq!(compact[1].item_id, first_tool);
+        assert_eq!(compact[2].item_id, second_tool);
+        assert_eq!(compact[3].part, VisualRowPart::Spacer);
+        assert_eq!(compact[4].item_id, narration);
+        assert_eq!(timeline.view(40, 10).total_rows, compact.len());
 
         timeline.start_selection(ContentPoint {
             item_id: first_tool,
@@ -1710,6 +1844,143 @@ mod tests {
         assert!(disclosure.expandable);
         assert_eq!(expanded.len(), 8);
         assert_eq!(timeline.items().len(), 1);
+    }
+
+    #[test]
+    fn tool_focus_follows_reading_order_and_projects_on_the_same_rows() {
+        let mut timeline = Timeline::new();
+        let first = timeline
+            .push(ItemKind::Tool, "first\none\ntwo\nthree\nfour")
+            .expect("first tool");
+        let _ = timeline.push(ItemKind::Assistant, "between");
+        let second = timeline
+            .push(ItemKind::Tool, "second\none\ntwo\nthree\nfour")
+            .expect("second tool");
+
+        assert!(timeline.move_tool_focus(true, 40, 8));
+        assert_eq!(timeline.focused_tool(), Some(first));
+        assert!(timeline
+            .rows(40)
+            .iter()
+            .filter(|row| row.item_id == first)
+            .all(|row| row.focused));
+
+        assert!(timeline.move_tool_focus(true, 40, 8));
+        assert_eq!(timeline.focused_tool(), Some(second));
+        assert!(timeline.move_tool_focus(true, 40, 8));
+        assert_eq!(timeline.focused_tool(), Some(second), "clamps at the end");
+        assert!(timeline.move_tool_focus(false, 40, 8));
+        assert_eq!(timeline.focused_tool(), Some(first));
+        timeline.clear_tool_focus();
+        assert!(timeline.rows(40).iter().all(|row| !row.focused));
+    }
+
+    #[test]
+    fn focused_tool_headline_keeps_its_screen_row_across_expansion() {
+        let mut timeline = Timeline::new();
+        for number in 0..8 {
+            let _ = timeline.push(ItemKind::Assistant, format!("before {number}"));
+        }
+        let tool = timeline
+            .push(
+                ItemKind::Tool,
+                "tool completed\none\ntwo\nthree\nfour\nfive\nsix\nseven",
+            )
+            .expect("tool");
+        for number in 0..12 {
+            let _ = timeline.push(ItemKind::Assistant, format!("after {number}"));
+        }
+        let headline = timeline
+            .rows(40)
+            .iter()
+            .position(|row| {
+                row.item_id == tool
+                    && matches!(row.part, VisualRowPart::Content { first: true, .. })
+            })
+            .expect("headline row");
+        timeline.scroll_to_row(headline.saturating_sub(2), 40, 8);
+        assert!(timeline.focus_tool(tool, 40, 8));
+        let before = timeline.view(40, 8);
+        let before_row = before
+            .rows
+            .iter()
+            .position(|row| {
+                row.item_id == tool
+                    && matches!(row.part, VisualRowPart::Content { first: true, .. })
+            })
+            .expect("visible focused tool");
+
+        assert!(timeline.toggle_focused_tool(40, 8));
+        let expanded = timeline.view(40, 8);
+        assert_eq!(
+            expanded
+                .rows
+                .iter()
+                .position(|row| {
+                    row.item_id == tool
+                        && matches!(row.part, VisualRowPart::Content { first: true, .. })
+                })
+                .expect("expanded headline"),
+            before_row
+        );
+        assert!(timeline.toggle_focused_tool(40, 8));
+        let collapsed = timeline.view(40, 8);
+        assert_eq!(
+            collapsed
+                .rows
+                .iter()
+                .position(|row| {
+                    row.item_id == tool
+                        && matches!(row.part, VisualRowPart::Content { first: true, .. })
+                })
+                .expect("collapsed headline"),
+            before_row
+        );
+    }
+
+    #[test]
+    fn collapsing_a_last_tool_uses_one_deterministic_bottom_clamp() {
+        let mut timeline = Timeline::new();
+        for number in 0..10 {
+            let _ = timeline.push(ItemKind::Assistant, format!("before {number}"));
+        }
+        let tool = timeline
+            .push(
+                ItemKind::Tool,
+                "tool completed\none\ntwo\nthree\nfour\nfive\nsix\nseven",
+            )
+            .expect("tool");
+        assert!(timeline.set_expanded(tool, true));
+        assert!(timeline.focus_tool(tool, 40, 6));
+        let expanded = timeline.view(40, 6);
+        assert_eq!(
+            expanded
+                .rows
+                .iter()
+                .position(|row| {
+                    row.item_id == tool
+                        && matches!(row.part, VisualRowPart::Content { first: true, .. })
+                })
+                .expect("expanded headline"),
+            0
+        );
+
+        assert!(timeline.toggle_focused_tool(40, 6));
+        let collapsed = timeline.view(40, 6);
+        let headline_row = collapsed
+            .rows
+            .iter()
+            .position(|row| {
+                row.item_id == tool
+                    && matches!(row.part, VisualRowPart::Content { first: true, .. })
+            })
+            .expect("clamped headline");
+        assert_eq!(headline_row, 2);
+        assert_eq!(
+            collapsed.start,
+            collapsed.total_rows - collapsed.viewport_rows
+        );
+        assert_eq!(timeline.viewport, ViewportAnchor::FollowBottom);
     }
 
     #[test]

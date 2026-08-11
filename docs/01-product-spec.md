@@ -389,15 +389,24 @@ a chevron and its width-specific hidden-row count; an independently bounded
 terminal view says `terminal view truncated`, so collapsed retained content is
 never confused with discarded terminal bytes. Wide rows right-align completion
 metadata only when the entire headline still fits, then fall back to ordinary
-flow on narrower terminals. Clicking the status prefix expands or collapses the
-complete retained terminal result. Timeline search
+flow on narrower terminals. F7/F8 move an explicit focus through tool rows in
+timeline order, Enter expands or collapses the focused row, and Escape returns
+to the composer; ordinary typing also returns to the composer and is never
+trapped. A focused disclosure has a shape cue in every color mode and an
+explicit screen-reader label. Clicking the status prefix uses the same
+focus-and-toggle authority. Expansion keeps the tool headline on the same
+screen row, except for one deterministic clamp when the shorter post-collapse
+timeline cannot retain that viewport start. Timeline search
 continues across that retained result and expands a hidden match, while copying
 a collapsed selection includes only displayed wrapped rows. The width-independent
 exit transcript keeps a bounded compact preview of the headline plus three
 logical result lines. Status remains identifiable by glyph or screen-reader text
 without color; screen-reader rows announce the number of hidden rows, ordinary
 child output is subordinate, and `+`/`-` emphasis or
-delta counts appear only for recognizable unified diffs.
+delta counts appear only for recognizable unified diffs. Timeline density is a
+session presentation policy: `compact` is the compatibility default and keeps
+adjacent tool rows tight, while `comfortable` inserts one optional row between
+them. Both keep the required separator before assistant or reasoning prose.
 
 ### Harness CLI
 

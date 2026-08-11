@@ -59,6 +59,10 @@ not need a real console:
   bounded four-row/expanded tool details with target-aware lifecycle headlines,
   envelope-free muted output, elapsed time, source-versus-retained bounds,
   width-specific disclosure counts, wide metadata alignment with stable byte hits,
+  F7/F8 reading-order focus, Enter/Escape and prefix-click parity, headline-row
+  anchoring across expansion, deterministic bottom clamping, focus cues across
+  color/no-color/screen-reader modes, ordinary-input focus release, and compact
+  versus comfortable density without weakening the narration separator,
   Unicode wrapping, connector geometry, visible-only collapsed copy, bounded exit
   preview, full-result search reveal, and
   conservative unified-diff styling across default/no-color/colorblind modes,

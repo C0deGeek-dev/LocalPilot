@@ -3,6 +3,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
+use localpilot_config::TimelineDensity;
 use localpilot_slash::Mode;
 
 use crate::editor::{EditorSnapshot, EditorToken, SubmittedInput};
@@ -160,6 +161,7 @@ pub enum InputAction {
     StashOrPop,
     CyclePeer,
     NavigateTimeline(TimelineNavigation),
+    Tool(ToolAction),
     Insert(String),
     Paste(String),
     Backspace,
@@ -184,6 +186,16 @@ pub enum InputAction {
     AcceptCompletion,
     PreviousLocalMindSection,
     Submit,
+}
+
+/// Geometry-aware tool-row action shared by keyboard and pointer adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAction {
+    Previous,
+    Next,
+    Toggle,
+    Activate(ItemId),
+    Release,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,6 +545,7 @@ pub(crate) struct TakeoverView<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingEdit {
     CopyOnSelect,
+    TimelineDensity,
     Theme,
 }
 
@@ -1463,6 +1476,8 @@ pub struct AppModel {
     copy_on_select: bool,
     default_copy_on_select: bool,
     default_theme: Theme,
+    timeline_density: TimelineDensity,
+    default_timeline_density: TimelineDensity,
     pub dialog: Option<DialogState>,
     dialog_peer: Option<PeerPane>,
     takeover: Option<TakeoverState>,
@@ -1580,6 +1595,8 @@ impl AppModel {
             copy_on_select: false,
             default_copy_on_select: false,
             default_theme: Theme::Default,
+            timeline_density: TimelineDensity::Compact,
+            default_timeline_density: TimelineDensity::Compact,
             dialog: None,
             dialog_peer: None,
             takeover: None,
@@ -1912,6 +1929,20 @@ impl AppModel {
         editor_width: u16,
         now: Instant,
     ) -> AppCommand {
+        if self.focus == Focus::Timeline && self.tool_navigation_available() {
+            match &action {
+                InputAction::Tool(_) | InputAction::Submit => return AppCommand::None,
+                InputAction::Escape => {
+                    let _ = self.handle_tool_action(ToolAction::Release, 1, 1);
+                    return AppCommand::None;
+                }
+                InputAction::NavigateTimeline(_) => {}
+                _ => {
+                    self.active_timeline_mut().clear_tool_focus();
+                    self.focus = Focus::Composer;
+                }
+            }
+        }
         if !matches!(action, InputAction::Escape) {
             self.escape_armed_at = None;
         }
@@ -2039,6 +2070,7 @@ impl AppModel {
                 AppCommand::None
             }
             InputAction::NavigateTimeline(navigation) => AppCommand::NavigateTimeline(navigation),
+            InputAction::Tool(_) => AppCommand::None,
             InputAction::Insert(text) if self.focus == Focus::Composer => {
                 if text == "?"
                     && self.editor.text().is_empty()
@@ -3096,6 +3128,14 @@ impl AppModel {
                 };
                 self.sync_setting_values();
             }
+            Some(SettingEdit::TimelineDensity) => {
+                let density = if reset {
+                    self.default_timeline_density
+                } else {
+                    self.timeline_density.toggled()
+                };
+                self.set_timeline_density(density);
+            }
             Some(SettingEdit::Theme) if reset => {
                 self.theme = self.default_theme;
                 self.sync_setting_values();
@@ -3387,6 +3427,7 @@ impl AppModel {
         // The reset installed a fresh (default-visible) timeline; reapply the
         // host-level reasoning visibility so hiding survives a clear/new session.
         self.reapply_reasoning_visibility();
+        self.set_timeline_density(self.timeline_density);
     }
 
     #[must_use]
@@ -4109,6 +4150,81 @@ impl AppModel {
         self.sync_setting_values();
     }
 
+    pub fn set_timeline_density(&mut self, density: TimelineDensity) {
+        self.timeline_density = density;
+        for projection in self.projections.iter_mut() {
+            projection.timeline.set_density(density);
+        }
+        self.sync_setting_values();
+    }
+
+    #[must_use]
+    pub const fn timeline_density(&self) -> TimelineDensity {
+        self.timeline_density
+    }
+
+    #[must_use]
+    pub fn timeline_density_is_default(&self) -> bool {
+        self.timeline_density == self.default_timeline_density
+    }
+
+    /// Whether the ordinary session timeline currently owns enough focus to
+    /// accept explicit tool-row navigation. Transient surfaces keep precedence.
+    #[must_use]
+    pub fn tool_navigation_available(&self) -> bool {
+        self.dialog.is_none()
+            && self.theme_picker.is_none()
+            && self.takeover.is_none()
+            && matches!(self.active_body(), ActiveBody::Session)
+            && !self.has_input_overlay()
+            && !self.quick_help
+            && !self.editor.is_shell_mode()
+    }
+
+    /// Apply one geometry-aware tool action through the active timeline. The
+    /// host supplies its rendered wrap width and viewport height, so keyboard
+    /// and pointer activation share focus and anchor behavior.
+    pub fn handle_tool_action(&mut self, action: ToolAction, width: u16, height: u16) -> bool {
+        if matches!(action, ToolAction::Release) {
+            self.active_timeline_mut().clear_tool_focus();
+            self.focus = Focus::Composer;
+            return true;
+        }
+        if !self.tool_navigation_available() {
+            return false;
+        }
+        let handled = match action {
+            ToolAction::Previous => self
+                .active_timeline_mut()
+                .move_tool_focus(false, width, height),
+            ToolAction::Next => self
+                .active_timeline_mut()
+                .move_tool_focus(true, width, height),
+            ToolAction::Toggle => {
+                let timeline_focused = self.focus == Focus::Timeline;
+                timeline_focused
+                    && self
+                        .active_timeline_mut()
+                        .toggle_focused_tool(width, height)
+            }
+            ToolAction::Activate(id) => {
+                let focused = self.active_timeline_mut().focus_tool(id, width, height);
+                if focused {
+                    let _ = self
+                        .active_timeline_mut()
+                        .toggle_focused_tool(width, height);
+                    self.active_timeline_mut().clear_selection();
+                }
+                focused
+            }
+            ToolAction::Release => true,
+        };
+        if handled {
+            self.focus = Focus::Timeline;
+        }
+        handled
+    }
+
     #[must_use]
     pub const fn copy_on_select(&self) -> bool {
         self.copy_on_select
@@ -4119,6 +4235,7 @@ impl AppModel {
     pub fn capture_setting_defaults(&mut self) {
         self.default_copy_on_select = self.copy_on_select;
         self.default_theme = self.theme;
+        self.default_timeline_density = self.timeline_density;
         self.sync_setting_values();
     }
 
@@ -4145,6 +4262,10 @@ impl AppModel {
                 Some(SettingEdit::CopyOnSelect) => {
                     setting.value = if self.copy_on_select { "On" } else { "Off" }.to_string();
                     setting.is_default = self.copy_on_select == self.default_copy_on_select;
+                }
+                Some(SettingEdit::TimelineDensity) => {
+                    setting.value = self.timeline_density.display_name().to_string();
+                    setting.is_default = self.timeline_density == self.default_timeline_density;
                 }
                 Some(SettingEdit::Theme) => {
                     setting.value = self.theme.display_name().to_string();
@@ -4218,6 +4339,7 @@ impl AppModel {
             InputAction::CancelOrExit
             | InputAction::StashOrPop
             | InputAction::CyclePeer
+            | InputAction::Tool(_)
             | InputAction::NavigateTimeline(_)
             | InputAction::Delete
             | InputAction::MoveLeft
@@ -4346,6 +4468,7 @@ impl AppModel {
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
             | InputAction::CyclePeer
+            | InputAction::Tool(_)
             | InputAction::Insert(_)
             | InputAction::Paste(_)
             | InputAction::Backspace
@@ -4475,6 +4598,7 @@ impl AppModel {
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
             | InputAction::CyclePeer
+            | InputAction::Tool(_)
             | InputAction::Insert(_)
             | InputAction::Paste(_)
             | InputAction::Backspace
@@ -4507,6 +4631,7 @@ impl AppModel {
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
             | InputAction::CyclePeer
+            | InputAction::Tool(_)
             | InputAction::NavigateTimeline(_)
             | InputAction::Insert(_)
             | InputAction::Paste(_)
@@ -4614,6 +4739,7 @@ impl AppModel {
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
             | InputAction::CyclePeer
+            | InputAction::Tool(_)
             | InputAction::NavigateTimeline(_)
             | InputAction::MoveVisualStart
             | InputAction::MoveVisualEnd
@@ -4654,6 +4780,7 @@ impl AppModel {
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
             | InputAction::CyclePeer
+            | InputAction::Tool(_)
             | InputAction::NavigateTimeline(_)
             | InputAction::Delete
             | InputAction::MoveLeft
@@ -8672,6 +8799,95 @@ mod tests {
         assert!(presentation.retained_bytes <= MAX_TOOL_OUTPUT_BYTES);
         assert!(presentation.terminal_truncated);
         assert!(presentation.metadata_start < presentation.metadata_end);
+    }
+
+    #[test]
+    fn explicit_tool_focus_never_traps_ordinary_composer_input() {
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "focus".to_string(),
+            name: "inspect".to_string(),
+            detail: String::new(),
+        });
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "focus".to_string(),
+            name: "inspect".to_string(),
+            is_error: false,
+            cancelled: false,
+            output: "one\ntwo\nthree\nfour\nfive".to_string(),
+            duration_ms: 1,
+        });
+        assert!(app.handle_tool_action(ToolAction::Next, 77, 12));
+        assert_eq!(app.focus, Focus::Timeline);
+
+        assert_eq!(
+            app.handle_input(InputAction::Insert("x".to_string()), 80),
+            AppCommand::None
+        );
+        assert_eq!(app.focus, Focus::Composer);
+        assert_eq!(app.active_timeline().focused_tool(), None);
+        assert_eq!(app.editor.text(), "x");
+
+        app.quick_help = true;
+        assert!(!app.handle_tool_action(ToolAction::Next, 77, 12));
+        assert_eq!(app.focus, Focus::Composer);
+    }
+
+    #[test]
+    fn a_takeover_keeps_escape_precedence_over_hidden_tool_focus() {
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "focus-before-report".to_string(),
+            name: "inspect".to_string(),
+            detail: String::new(),
+        });
+        assert!(app.handle_tool_action(ToolAction::Next, 77, 12));
+        assert_eq!(app.focus, Focus::Timeline);
+
+        app.open_report("tree".to_string(), vec!["one result".to_string()]);
+        assert!(app.has_takeover());
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(
+            !app.has_takeover(),
+            "one Escape dismisses the visible report"
+        );
+    }
+
+    #[test]
+    fn density_setting_cycles_session_policy_and_survives_a_clear() {
+        let mut app = model();
+        app.capture_setting_defaults();
+        app.open_settings(vec![SettingEntry {
+            section: "Appearance".to_string(),
+            name: "Timeline density".to_string(),
+            value: "Compact".to_string(),
+            description: "density".to_string(),
+            edit: Some(SettingEdit::TimelineDensity),
+            is_default: true,
+        }]);
+        app.edit_selected_setting(false);
+        assert_eq!(app.timeline_density(), TimelineDensity::Comfortable);
+        assert_eq!(
+            app.active_timeline().density(),
+            TimelineDensity::Comfortable
+        );
+        app.clear_conversation();
+        assert_eq!(
+            app.active_timeline().density(),
+            TimelineDensity::Comfortable
+        );
+
+        app.open_settings(vec![SettingEntry {
+            section: "Appearance".to_string(),
+            name: "Timeline density".to_string(),
+            value: "Comfortable".to_string(),
+            description: "density".to_string(),
+            edit: Some(SettingEdit::TimelineDensity),
+            is_default: false,
+        }]);
+        app.edit_selected_setting(true);
+        assert_eq!(app.timeline_density(), TimelineDensity::Compact);
+        assert!(app.timeline_density_is_default());
     }
 
     #[test]

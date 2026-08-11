@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Tool rows now have one keyboard-and-pointer focus model.** F7/F8 move a
+  stable focus through tool activity, Enter expands or collapses the focused
+  row, Escape returns to the composer, and clicking the disclosure prefix uses
+  the same geometry and viewport-anchor path. Expansion keeps the headline on
+  its screen row except for one deterministic bottom clamp. The new
+  `[terminal] density` preference defaults to `compact`, preserving the current
+  layout; `comfortable` adds breathing room only between adjacent tool rows,
+  while the separator before assistant or reasoning text remains in both.
+
 - **Tool results disclose what is hidden.** Expandable full-screen tool rows now
   show a chevron and the number of collapsed visual rows, distinguish that
   temporary omission from a permanently bounded terminal view, and align

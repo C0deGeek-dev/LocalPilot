@@ -42,8 +42,8 @@ use localpilot_terminal_ui::{
     QuestionOption as UiQuestionOption, QuestionResponse, RecoveryState, ResultTone, RuntimeUpdate,
     SessionEntry, SessionHeader, SessionSelection, SettingEdit, SettingEntry, StopState,
     SubmittedInput, TabId, TakeoverNavigation, TerminalCapabilities, Theme, Timeline,
-    TimelineNavigation, TimelinePaneHits, UsageTotals, UserShellCommand, UserShellOutput,
-    VisualRowPart,
+    TimelineNavigation, TimelinePaneHits, ToolAction, UsageTotals, UserShellCommand,
+    UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::{BackgroundProcesses, ToolOutputPresentation, UserAnswer, UserQuestion};
@@ -939,7 +939,7 @@ pub(crate) async fn run(
         "model",
         fullscreen_model_values(&*context.config, context.runtime.active_provider_id()),
     );
-    apply_host_preferences(&mut app);
+    apply_host_preferences(&mut app, context.config);
     for item in startup_items {
         apply_startup_item(&mut app, item);
     }
@@ -1032,7 +1032,7 @@ pub(crate) async fn run_pair(
 
     let mut app = AppModel::new_pair(primary, secondary, capabilities);
     app.set_command_catalog(pair_command_catalog());
-    apply_host_preferences(&mut app);
+    apply_host_preferences(&mut app, context.config);
     apply_pair_status(&mut app, &prepared.status());
     if context.trust_required {
         app.require_workspace_trust(context.cwd.display().to_string());
@@ -2522,6 +2522,15 @@ fn fullscreen_settings(app: &AppModel, config: &localpilot_config::Config) -> Ve
         },
         SettingEntry {
             section: "Appearance".to_string(),
+            name: "Timeline density".to_string(),
+            value: app.timeline_density().display_name().to_string(),
+            description: "Enter cycles this session; set [terminal] density = \"comfortable\" or \"compact\" for future sessions. The tool-to-reply separator remains in both modes."
+                .to_string(),
+            edit: Some(SettingEdit::TimelineDensity),
+            is_default: app.timeline_density_is_default(),
+        },
+        SettingEntry {
+            section: "Appearance".to_string(),
             name: "Color mode".to_string(),
             value: app.theme.display_name().to_string(),
             description: format!(
@@ -2617,7 +2626,8 @@ fn image_content_blocks(images: Vec<localpilot_terminal_ui::ImageAttachment>) ->
         .collect()
 }
 
-fn apply_host_preferences(app: &mut AppModel) {
+fn apply_host_preferences(app: &mut AppModel, config: &localpilot_config::Config) {
+    app.set_timeline_density(config.terminal.density);
     apply_theme_preference(app, std::env::var_os(CHAT_THEME_ENV));
     if let Some(value) = std::env::var_os(CHAT_COPY_ON_SELECT_ENV) {
         match value.into_string() {
@@ -6761,13 +6771,42 @@ fn route_pointer_or_navigation(
             RoutedEvent::Handled
         }
         Event::Key(key) if is_key_action(*key) => {
-            let Some(InputAction::NavigateTimeline(navigation)) = map_key(*key) else {
+            let Some(action) = map_key(*key) else {
                 return RoutedEvent::Unhandled;
             };
-            let command = app.handle_input(
-                InputAction::NavigateTimeline(navigation),
-                hit_map.editor_width,
-            );
+            let tool_action = match &action {
+                InputAction::Tool(action) => Some(*action),
+                InputAction::Submit
+                    if app.focus == localpilot_terminal_ui::Focus::Timeline
+                        && app.tool_navigation_available() =>
+                {
+                    Some(ToolAction::Toggle)
+                }
+                InputAction::Escape
+                    if app.focus == localpilot_terminal_ui::Focus::Timeline
+                        && app.tool_navigation_available() =>
+                {
+                    Some(ToolAction::Release)
+                }
+                _ => None,
+            };
+            if let Some(action) = tool_action {
+                if !matches!(action, ToolAction::Release) && !app.tool_navigation_available() {
+                    return RoutedEvent::Unhandled;
+                }
+                if let Some(timeline) = active_timeline_hits(app, hit_map) {
+                    let _ = app.handle_tool_action(
+                        action,
+                        timeline.wrap_width,
+                        timeline.timeline.height,
+                    );
+                }
+                return RoutedEvent::Handled;
+            }
+            if !matches!(action, InputAction::NavigateTimeline(_)) {
+                return RoutedEvent::Unhandled;
+            }
+            let command = app.handle_input(action, hit_map.editor_width);
             match command {
                 AppCommand::NavigateTimeline(navigation) => {
                     apply_timeline_navigation(app, navigation, hit_map)
@@ -7022,11 +7061,12 @@ fn handle_mouse_event(
                         && mouse.column < hit.content_x
                         && matches!(hit.row.part, VisualRowPart::Content { first: true, .. })
                 }) {
-                    if let Some(target) = timeline_for_peer_mut(app, timeline.peer) {
-                        if target.toggle_expandable(hit.row.item_id) {
-                            target.clear_selection();
-                            return RoutedEvent::Handled;
-                        }
+                    if app.handle_tool_action(
+                        ToolAction::Activate(hit.row.item_id),
+                        timeline.wrap_width,
+                        timeline.timeline.height,
+                    ) {
+                        return RoutedEvent::Handled;
                     }
                 }
             }
@@ -7633,6 +7673,8 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::F(6) if !ctrl && !alt && !shift => Some(InputAction::CyclePeer),
+        KeyCode::F(7) if !ctrl && !alt && !shift => Some(InputAction::Tool(ToolAction::Previous)),
+        KeyCode::F(8) if !ctrl && !alt && !shift => Some(InputAction::Tool(ToolAction::Next)),
         KeyCode::PageUp => Some(InputAction::NavigateTimeline(TimelineNavigation::PageUp)),
         KeyCode::PageDown => Some(InputAction::NavigateTimeline(TimelineNavigation::PageDown)),
         KeyCode::Home if ctrl && !alt => Some(InputAction::MoveTextStart),
@@ -10341,6 +10383,7 @@ mod tests {
             "Updates",
             "Prompt history",
             "Compact paste",
+            "Timeline density",
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }
@@ -10349,8 +10392,34 @@ mod tests {
                 .iter()
                 .filter_map(|setting| setting.edit)
                 .collect::<Vec<_>>(),
-            [SettingEdit::CopyOnSelect, SettingEdit::Theme]
+            [
+                SettingEdit::CopyOnSelect,
+                SettingEdit::TimelineDensity,
+                SettingEdit::Theme,
+            ]
         );
+    }
+
+    #[test]
+    fn configured_timeline_density_reaches_the_production_app_and_settings() {
+        let mut config = localpilot_config::Config::default();
+        config.terminal.density = localpilot_config::TimelineDensity::Comfortable;
+        let mut app = app();
+        apply_host_preferences(&mut app, &config);
+        assert_eq!(
+            app.timeline_density(),
+            localpilot_config::TimelineDensity::Comfortable
+        );
+        assert_eq!(
+            app.active_timeline().density(),
+            localpilot_config::TimelineDensity::Comfortable
+        );
+        let density = fullscreen_settings(&app, &config)
+            .into_iter()
+            .find(|setting| setting.edit == Some(SettingEdit::TimelineDensity))
+            .expect("timeline density setting");
+        assert_eq!(density.value, "Comfortable");
+        assert!(density.description.contains("[terminal]"));
     }
 
     #[test]
@@ -11107,6 +11176,16 @@ mod tests {
                 KeyCode::BackTab,
                 KeyModifiers::SHIFT,
                 InputAction::PreviousLocalMindSection,
+            ),
+            (
+                KeyCode::F(7),
+                KeyModifiers::NONE,
+                InputAction::Tool(ToolAction::Previous),
+            ),
+            (
+                KeyCode::F(8),
+                KeyModifiers::NONE,
+                InputAction::Tool(ToolAction::Next),
             ),
         ];
         for (code, modifiers, expected) in cases {
@@ -12109,6 +12188,73 @@ mod tests {
                 .expanded
         );
         assert!(app.active_timeline().selection.is_none());
+        assert_eq!(app.focus, localpilot_terminal_ui::Focus::Timeline);
+        assert_eq!(app.active_timeline().focused_tool(), Some(tool));
+    }
+
+    #[test]
+    fn keyboard_tool_focus_toggles_through_the_same_geometry_seam() {
+        let mut app = app();
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "tool-keyboard".to_string(),
+            name: "inspect".to_string(),
+            detail: String::new(),
+        });
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "tool-keyboard".to_string(),
+            name: "inspect".to_string(),
+            is_error: false,
+            cancelled: false,
+            output: "one\ntwo\nthree\nfour\nfive".to_string(),
+            duration_ms: 25,
+        });
+        let tool = app
+            .active_timeline()
+            .items()
+            .iter()
+            .find(|item| item.kind == ItemKind::Tool)
+            .expect("tool")
+            .id;
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Key(press(KeyCode::F(8), KeyModifiers::NONE)),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.focus, localpilot_terminal_ui::Focus::Timeline);
+        assert_eq!(app.active_timeline().focused_tool(), Some(tool));
+        assert!(!app.active_timeline().item(tool).expect("tool").expanded);
+
+        let focused_hits = draw_hit_map(&app, 80, 24);
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+                &focused_hits,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(app.active_timeline().item(tool).expect("tool").expanded);
+
+        let expanded_hits = draw_hit_map(&app, 80, 24);
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Key(press(KeyCode::Esc, KeyModifiers::NONE)),
+                &expanded_hits,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.focus, localpilot_terminal_ui::Focus::Composer);
+        assert_eq!(app.active_timeline().focused_tool(), None);
     }
 
     #[test]
@@ -15470,6 +15616,50 @@ mod tests {
             OperationInputOutcome::Geometry,
             "a resize requests the pump's synchronous redraw path"
         );
+    }
+
+    #[test]
+    fn operation_escape_dismisses_a_takeover_over_hidden_tool_focus() {
+        let mut app = app();
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "focus-before-operation-report".to_string(),
+            name: "inspect".to_string(),
+            detail: String::new(),
+        });
+        assert!(app.handle_tool_action(ToolAction::Next, 77, 12));
+        assert_eq!(app.focus, localpilot_terminal_ui::Focus::Timeline);
+        app.open_report("tree".to_string(), vec!["one result".to_string()]);
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let cancel = CancellationToken::new();
+        let mut pending = None;
+        let mut pending_questions = None;
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut queue = VecDeque::new();
+        let mut pending_steer_items = VecDeque::new();
+
+        let outcome = handle_operation_terminal_event(
+            &mut app,
+            Event::Key(press(KeyCode::Esc, KeyModifiers::NONE)),
+            false,
+            &mut pending,
+            &mut pending_questions,
+            &cancel,
+            &hit_map,
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &image_capability(false),
+            None,
+            None,
+            &mut pending_steer_items,
+        );
+
+        assert_eq!(outcome, OperationInputOutcome::Handled);
+        assert!(!app.has_takeover(), "one live Esc dismisses the report");
     }
 
     #[tokio::test]

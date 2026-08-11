@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+localpilot-config = { path = "../localpilot-config" }
 localpilot-slash = { path = "../localpilot-slash" }
 ratatui = { workspace = true, default-features = false }
 unicode-segmentation.workspace = true

@@ -547,35 +547,38 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
         "Ctrl+R      search history",
         "Ctrl+G      external editor",
         "Ctrl+S      stash / restore draft",
+        "F7 / F8     previous / next tool",
         image_left,
     ];
     let right = if app.capabilities.mouse_capture {
         [
             "Page Up/Down scroll timeline",
             "Wheel        scroll timeline",
-            "Drag / icon  select / expand",
-            "Ctrl+F       search messages",
-            "Esc          stop and steer",
-            "Esc Esc      clear draft",
             image_right,
+            "Drag / icon  select / expand",
+            "Enter        expand focused tool",
+            "Ctrl+F       search messages",
+            "Esc          return / stop and steer",
+            "Esc Esc      clear draft",
         ]
     } else {
         [
             "Page Up/Down scroll timeline",
             "Mouse        disabled",
+            image_right,
+            "Enter        expand focused tool",
             "Ctrl+C       copy / clear / cancel / exit",
             "Ctrl+F       search messages",
-            "Esc          stop and steer",
+            "Esc          return / stop and steer",
             "Esc Esc      clear draft",
-            image_right,
         ]
     };
     let wide = area.width >= 70;
     let pair_rows = u16::from(app.is_pair());
     let requested = if wide {
-        8_u16.saturating_add(pair_rows)
+        9_u16.saturating_add(pair_rows)
     } else {
-        15_u16.saturating_add(pair_rows)
+        17_u16.saturating_add(pair_rows)
     };
     let height = requested.min(area.height);
     let help = Rect::new(
@@ -616,7 +619,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
             );
         }
         if app.is_pair() {
-            let y = help.y.saturating_add(8);
+            let y = help.y.saturating_add(9);
             if y < help.bottom() {
                 frame.render_widget(
                     Paragraph::new("F6          switch peer").style(theme.ui(UiRole::Foreground)),
@@ -1695,6 +1698,14 @@ fn help_lines(
             UiRole::Foreground,
         ),
         (
+            "  F7 / F8     Focus the previous / next tool in reading order".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Enter       Expand or collapse the focused tool".to_string(),
+            UiRole::Foreground,
+        ),
+        (
             "  Esc         Close the focused view; during work, stop and steer".to_string(),
             UiRole::Foreground,
         ),
@@ -2412,24 +2423,36 @@ fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Ve
             ),
             ItemKind::Tool => match activity {
                 Some(ActivityState::Success) => (
-                    if first {
+                    if first && row.focused {
+                        "Tool focused: "
+                    } else if first {
                         "Tool completed: "
+                    } else if row.focused {
+                        "              "
                     } else {
                         "                "
                     },
                     UiRole::Success,
                 ),
                 Some(ActivityState::Error) => (
-                    if first {
+                    if first && row.focused {
+                        "Tool focused: "
+                    } else if first {
                         "Tool failed: "
+                    } else if row.focused {
+                        "              "
                     } else {
                         "             "
                     },
                     UiRole::Error,
                 ),
                 Some(ActivityState::Cancelled) => (
-                    if first {
+                    if first && row.focused {
+                        "Tool focused: "
+                    } else if first {
                         "Tool cancelled: "
+                    } else if row.focused {
+                        "              "
                     } else {
                         "                "
                     },
@@ -2437,7 +2460,11 @@ fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Ve
                 ),
                 Some(ActivityState::Running) | None => (
                     if first {
-                        "Tool running: "
+                        if row.focused {
+                            "Tool focused: "
+                        } else {
+                            "Tool running: "
+                        }
                     } else {
                         "              "
                     },
@@ -2511,23 +2538,34 @@ fn role_prefix(row: &VisualRow, theme: ThemeResolver, screen_reader: bool) -> Ve
                 Some(ActivityState::Cancelled) => ("■", UiRole::Muted),
             };
             let disclosure = disclosure.filter(|value| value.expandable);
-            vec![Span::styled(
-                if first {
-                    disclosure.map_or_else(
-                        || format!("{glyph} "),
-                        |value| format!("{glyph}{} ", if value.expanded { "▾" } else { "▸" }),
-                    )
-                } else if disclosure.is_some() && last {
-                    " └ ".to_string()
-                } else if disclosure.is_some() {
-                    " │ ".to_string()
-                } else if last {
-                    "└ ".to_string()
+            if first {
+                let marker = if row.focused {
+                    disclosure.map_or("› ", |value| if value.expanded { "▼ " } else { "▶ " })
                 } else {
-                    "│ ".to_string()
-                },
-                theme.ui(if first { role } else { UiRole::Muted }),
-            )]
+                    disclosure.map_or(" ", |value| if value.expanded { "▾ " } else { "▸ " })
+                };
+                vec![
+                    Span::styled(glyph, theme.ui(role)),
+                    Span::styled(
+                        marker,
+                        theme.ui(if row.focused { UiRole::Focus } else { role }),
+                    ),
+                ]
+            } else {
+                let wide_gutter = disclosure.is_some() || row.focused;
+                vec![Span::styled(
+                    if wide_gutter && last {
+                        " └ "
+                    } else if wide_gutter {
+                        " │ "
+                    } else if last {
+                        "└ "
+                    } else {
+                        "│ "
+                    },
+                    theme.ui(UiRole::Muted),
+                )]
+            }
         }
         ItemKind::Question => {
             let (glyph, role) = match activity {
@@ -5965,6 +6003,60 @@ mod tests {
         assert!(text.contains("one"));
         assert!(!text.contains("│ one"));
         assert!(!text.contains("└ three"));
+    }
+
+    #[test]
+    fn focused_tool_has_shape_and_screen_reader_cues_in_every_color_mode() {
+        let mut app = model();
+        app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+            id: "focused".into(),
+            name: "run_shell".into(),
+            detail: "x".into(),
+        });
+        app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+            id: "focused".into(),
+            name: "run_shell".into(),
+            is_error: false,
+            cancelled: false,
+            output: "one\ntwo\nthree\nfour\nfive".into(),
+            duration_ms: 5,
+        });
+        let (_, initial_hits) = render_test_frame(&app, 80, 24);
+        let initial = single_hits(&initial_hits);
+        assert!(app.handle_tool_action(
+            crate::ToolAction::Next,
+            initial.wrap_width,
+            initial.timeline.height,
+        ));
+
+        for (theme, color) in [
+            (Theme::Default, ColorSupport::Color),
+            (Theme::Colorblind, ColorSupport::Color),
+            (Theme::HighContrast, ColorSupport::NoColor),
+        ] {
+            app.theme = theme;
+            app.capabilities.color = color;
+            let (buffer, hits) = render_test_frame(&app, 80, 24);
+            let text = rect_text(&buffer, single_hits(&hits).timeline);
+            assert!(text.contains("✓▶ Ran x"));
+        }
+
+        app.capabilities.screen_reader = true;
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("Tool focused: Ran x"));
+
+        app.capabilities.screen_reader = false;
+        let (_, focused_hits) = render_test_frame(&app, 80, 24);
+        let focused = single_hits(&focused_hits);
+        assert!(app.handle_tool_action(
+            crate::ToolAction::Toggle,
+            focused.wrap_width,
+            focused.timeline.height,
+        ));
+        let (buffer, hits) = render_test_frame(&app, 80, 24);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("✓▼ Ran x"));
     }
 
     #[test]

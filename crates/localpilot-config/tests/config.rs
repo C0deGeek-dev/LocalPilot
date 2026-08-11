@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use localpilot_config::{
-    load, AutoFix, Cadence, CliOverrides, ConfigPaths, LookupPolicy, McpEnvEntry,
+    load, AutoFix, Cadence, CliOverrides, ConfigPaths, LookupPolicy, McpEnvEntry, TimelineDensity,
 };
 use proptest::prelude::*;
 
@@ -136,6 +136,35 @@ fn default_config_loads() -> TestResult {
         assert!(cfg.context.project_analysis);
         assert_eq!(cfg.docs.lookup_policy, LookupPolicy::Evidence);
         assert_eq!(cfg.quota.max_wait_minutes, 360);
+        Ok(())
+    })
+}
+
+#[test]
+fn timeline_density_defaults_to_compact_and_round_trips() -> TestResult {
+    isolated(|jail| {
+        let empty = write(jail, "empty.toml", "")?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(empty),
+        };
+        let defaulted = load(&paths, &CliOverrides::default())?;
+        assert_eq!(defaulted.terminal.density, TimelineDensity::Compact);
+
+        let project = write(
+            jail,
+            "project.toml",
+            "[terminal]\ndensity = \"comfortable\"\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let comfortable = load(&paths, &CliOverrides::default())?;
+        assert_eq!(comfortable.terminal.density, TimelineDensity::Comfortable);
+        let encoded = serde_json::to_value(&comfortable)?;
+        let decoded = serde_json::from_value(encoded)?;
+        assert_eq!(comfortable, decoded);
         Ok(())
     })
 }

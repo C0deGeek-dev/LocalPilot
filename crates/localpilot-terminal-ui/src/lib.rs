@@ -32,13 +32,14 @@ pub use app::{
     PairStatusCandidate, PlanEntry, QuestionAction, QuestionOption, QuestionResponse,
     RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection, SettingEdit, SettingEntry,
     StopState, TabId, TakeoverKind, TakeoverNavigation, TerminalCapabilities, TimelineNavigation,
-    TrustAction, UsageTotals, UserShellCommand, UserShellOutput, WorkState,
+    ToolAction, TrustAction, UsageTotals, UserShellCommand, UserShellOutput, WorkState,
 };
 pub use editor::{Editor, EditorRow, ImageAttachment, PasteUnit, SubmittedInput};
 pub use layout::{
     FrameLayout, PairTimelineLayout, TimelineLayout, TimelinePaneLayout, MINIMUM_HEIGHT,
     MINIMUM_WIDTH, PAIR_MINIMUM_HEIGHT, PAIR_WIDE_MINIMUM_WIDTH,
 };
+pub use localpilot_config::TimelineDensity;
 pub use projection::{PeerPane, SessionHeader};
 pub use render::{
     render, CompletionHit, HitMap, QuestionHit, ScrollbarGeometry, TabHit, TakeoverHit, ThemeHit,

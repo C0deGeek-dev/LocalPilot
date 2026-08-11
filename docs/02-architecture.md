@@ -221,6 +221,19 @@ wide-only metadata gap whose hit mapping resolves back to the original byte
 boundary; it does not
 reparse provider events or create a second tool-card model.
 
+Tool focus is one optional stable `ItemId` owned by `Timeline`, projected onto
+every visual row of that item and rendered with shape plus semantic focus cues.
+The Crossterm host maps F7/F8, Enter, Escape, and prefix clicks into typed
+`ToolAction`s, but `AppModel` is the single geometry-aware activation seam.
+Focus movement reveals a headline in content coordinates; toggling snapshots
+the viewport start and restores it after reflow, clamped once against the new
+bottom. Any ordinary composer action releases tool focus before normal input
+routing. `TimelineDensity` is defined by `localpilot-config` and reused by the
+terminal model, settings projection, and host. `compact` reproduces the shipped
+Tool-to-Tool geometry, `comfortable` owns only the optional spacer between
+adjacent tools, and the separate Tool-to-Assistant/Reasoning spacer is an
+invariant rather than a density preference.
+
 The default resolver owns the application canvas, raised prompt/composer
 surface, prompt text, muted text, focus edge, scrollbar, and tab roles. Prompt
 and composer bands are filled surfaces assembled from terminal cells; they are

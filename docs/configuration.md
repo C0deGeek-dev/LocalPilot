@@ -70,7 +70,11 @@ effect to disable.
 
 Tool calls appear as one compact running/completed/failed/cancelled row. An
 expandable row shows a chevron and its current hidden-row count; clicking the
-status prefix expands the complete retained target detail and captured output.
+status prefix focuses it and expands the complete retained target detail and
+captured output. F7/F8 move focus through tool rows, Enter toggles the focused
+row, and Escape returns to the composer; ordinary typing also releases tool
+focus before editing. Expansion preserves the headline's screen row except for
+a deterministic clamp at the bottom of the timeline.
 Finished rows include elapsed time and align their metadata at wide widths when
 that cannot force a wrap. Terminal-only output is bounded to 256 KiB with both
 an explicit middle-omission marker and a `terminal view truncated` headline
@@ -166,6 +170,12 @@ and background commands use the session registry. Full-screen `/help`, `/theme`,
 dispatcher. Other commands, including `/clear`, are refused with a notice naming
 the live choices. Runtime operations without live session handles refuse
 profile/background/effort changes explicitly.
+
+The timeline's session density can also be changed from `/settings`. The
+persisted launch default is configured under `[terminal]`; `compact` preserves
+the current tight Tool-to-Tool layout, while `comfortable` inserts an optional
+blank row only between adjacent tool rows. The separator between a tool and
+following assistant or reasoning text is always present in either mode.
 
 `/diff` opens a contained two-pane review of tracked Git changes against `HEAD`
 (or the current index/worktree when no `HEAD` exists). Arrow keys navigate the
@@ -344,6 +354,20 @@ array, and all diagnostics (the format hint, the store-resolution and empty-stat
 lines) go to stderr.
 
 ## Reference
+
+### `[terminal]`
+
+Full-screen timeline presentation preferences. An absent block preserves the
+current compact layout.
+
+| Key | Type | Default | Description |
+|---|---|---:|---|
+| `density` | `compact` \| `comfortable` | `compact` | `compact` keeps adjacent tool activity tight; `comfortable` inserts one optional spacer between adjacent tool rows. Both retain the required separator before assistant or reasoning text. `/settings` can change the value for the current session without rewriting the config file. |
+
+```toml
+[terminal]
+density = "comfortable"
+```
 
 ### `[provider]`
 

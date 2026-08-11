@@ -34,6 +34,7 @@ pub struct Config {
     pub self_improvement: SelfImprovementConfig,
     pub research: ResearchConfig,
     pub discovery: DiscoveryConfig,
+    pub terminal: TerminalConfig,
 }
 
 impl Default for Config {
@@ -57,7 +58,59 @@ impl Default for Config {
             self_improvement: SelfImprovementConfig::default(),
             research: ResearchConfig::default(),
             discovery: DiscoveryConfig::default(),
+            terminal: TerminalConfig::default(),
         }
+    }
+}
+
+/// Full-screen terminal presentation preferences.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Timeline whitespace policy. Compact is the compatibility default;
+    /// comfortable adds only optional density-owned rows.
+    pub density: TimelineDensity,
+}
+
+/// Whitespace policy for the full-screen conversation timeline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineDensity {
+    /// Preserve optional breathing room between dense activity rows.
+    Comfortable,
+    /// Preserve the shipped compact layout while retaining semantic separators.
+    #[default]
+    Compact,
+}
+
+impl TimelineDensity {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Comfortable => "comfortable",
+            Self::Compact => "compact",
+        }
+    }
+
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Comfortable => "Comfortable",
+            Self::Compact => "Compact",
+        }
+    }
+
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Comfortable => Self::Compact,
+            Self::Compact => Self::Comfortable,
+        }
+    }
+
+    #[must_use]
+    pub const fn includes_optional_spacers(self) -> bool {
+        matches!(self, Self::Comfortable)
     }
 }
 
