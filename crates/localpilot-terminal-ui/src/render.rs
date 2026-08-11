@@ -2267,7 +2267,11 @@ fn tool_line_layout(
                     row_word(disclosure.hidden_visual_rows)
                 )
             } else {
-                format!(" · {} more rows", disclosure.hidden_visual_rows)
+                format!(
+                    " · {} more {}",
+                    disclosure.hidden_visual_rows,
+                    row_word(disclosure.hidden_visual_rows)
+                )
             }
         } else if disclosure.expanded {
             String::new()
@@ -2278,7 +2282,11 @@ fn tool_line_layout(
                 row_word(disclosure.hidden_visual_rows)
             )
         } else {
-            format!(" · +{} rows", disclosure.hidden_visual_rows)
+            format!(
+                " · +{} {}",
+                disclosure.hidden_visual_rows,
+                row_word(disclosure.hidden_visual_rows)
+            )
         };
         if natural_width.saturating_add(UnicodeWidthStr::width(suffix.as_str())) <= capacity {
             layout.suffix = suffix;
@@ -6168,6 +6176,31 @@ mod tests {
         assert!(text.contains("one"));
         assert!(!text.contains("│ one"));
         assert!(!text.contains("└ three"));
+
+        let mut singular = model();
+        singular.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+            id: "singular".into(),
+            name: "run_shell".into(),
+            detail: "x".into(),
+        });
+        singular.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+            id: "singular".into(),
+            name: "run_shell".into(),
+            is_error: false,
+            cancelled: false,
+            output: "one\ntwo\nthree\nfour".into(),
+            duration_ms: 5,
+        });
+        let (buffer, hits) = render_test_frame(&singular, 120, 30);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("· +1 row"));
+        assert!(!text.contains("+1 rows"));
+
+        singular.capabilities.screen_reader = true;
+        let (buffer, hits) = render_test_frame(&singular, 120, 30);
+        let text = rect_text(&buffer, single_hits(&hits).timeline);
+        assert!(text.contains("1 more row"));
+        assert!(!text.contains("1 more rows"));
     }
 
     #[test]
