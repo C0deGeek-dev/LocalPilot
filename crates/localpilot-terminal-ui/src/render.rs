@@ -3017,7 +3017,17 @@ fn render_dialog(
             });
     }
     let width = frame_area.width.saturating_sub(4).min(72);
-    let height = frame_area.height.saturating_sub(2).min(7);
+    let incognito_creation = matches!(
+        dialog,
+        DialogState::Approval {
+            incognito_creation: true,
+            ..
+        }
+    );
+    let height = frame_area
+        .height
+        .saturating_sub(2)
+        .min(if incognito_creation { 9 } else { 7 });
     if width < 20 || height < 5 {
         return DialogHits::default();
     }
@@ -3042,28 +3052,42 @@ fn render_dialog(
             tool,
             target,
             risk_class,
-        } => vec![
-            Line::from(vec![
-                Span::styled("● ", theme.ui(UiRole::Warning)),
-                Span::styled(
-                    dialog_heading(app, "Permission required"),
-                    theme.ui(UiRole::Prompt),
+            incognito_creation,
+        } => {
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled("● ", theme.ui(UiRole::Warning)),
+                    Span::styled(
+                        dialog_heading(app, "Permission required"),
+                        theme.ui(UiRole::Prompt),
+                    ),
+                ]),
+                Line::styled(
+                    format!("{tool} · {risk_class}"),
+                    theme.ui(UiRole::Foreground),
                 ),
-            ]),
-            Line::styled(
-                format!("{tool} · {risk_class}"),
-                theme.ui(UiRole::Foreground),
-            ),
-            Line::styled(target.clone(), theme.ui(UiRole::Muted)),
-            Line::styled(
+                Line::styled(target.clone(), theme.ui(UiRole::Muted)),
+            ];
+            if *incognito_creation {
+                lines.push(Line::styled(
+                    "Incognito: created files persist after this session.",
+                    theme.ui(UiRole::Warning),
+                ));
+                lines.push(Line::styled(
+                    "Shell writes outside the workspace cannot be enumerated.",
+                    theme.ui(UiRole::Muted),
+                ));
+            }
+            lines.push(Line::styled(
                 if app.dialog_peer().is_some() {
                     "Ctrl+C abort · Y allow once · N or Esc deny"
                 } else {
                     "Y allow once · N deny"
                 },
                 theme.ui(UiRole::Muted),
-            ),
-        ],
+            ));
+            lines
+        }
         DialogState::Question(_) => Vec::new(),
     };
     frame.render_widget(
@@ -3311,7 +3335,17 @@ fn render_screen_reader_dialog(
         });
     }
     let width = frame_area.width.saturating_sub(4).min(72);
-    let height = frame_area.height.saturating_sub(2).min(7);
+    let incognito_creation = matches!(
+        dialog,
+        DialogState::Approval {
+            incognito_creation: true,
+            ..
+        }
+    );
+    let height = frame_area
+        .height
+        .saturating_sub(2)
+        .min(if incognito_creation { 9 } else { 7 });
     if width < 20 || height < 5 {
         return Vec::new();
     }
@@ -3328,26 +3362,40 @@ fn render_screen_reader_dialog(
             tool,
             target,
             risk_class,
-        } => vec![
-            Line::styled(
-                dialog_heading(app, "Permission required"),
-                theme.ui(UiRole::Prompt),
-            ),
-            Line::styled(
-                format!("{tool} · {risk_class}"),
-                theme.ui(UiRole::Foreground),
-            ),
-            Line::styled(truncate_end(target, area.width), theme.ui(UiRole::Muted)),
-            Line::styled("Y allow once", theme.ui(UiRole::Foreground)),
-            Line::styled(
+            incognito_creation,
+        } => {
+            let mut lines = vec![
+                Line::styled(
+                    dialog_heading(app, "Permission required"),
+                    theme.ui(UiRole::Prompt),
+                ),
+                Line::styled(
+                    format!("{tool} · {risk_class}"),
+                    theme.ui(UiRole::Foreground),
+                ),
+                Line::styled(truncate_end(target, area.width), theme.ui(UiRole::Muted)),
+            ];
+            if *incognito_creation {
+                lines.push(Line::styled(
+                    "Incognito: created files persist after this session.",
+                    theme.ui(UiRole::Warning),
+                ));
+                lines.push(Line::styled(
+                    "Shell writes outside the workspace cannot be enumerated.",
+                    theme.ui(UiRole::Muted),
+                ));
+            }
+            lines.push(Line::styled("Y allow once", theme.ui(UiRole::Foreground)));
+            lines.push(Line::styled(
                 if app.dialog_peer().is_some() {
                     "N or Esc deny · Ctrl+C abort"
                 } else {
                     "N or Esc deny"
                 },
                 theme.ui(UiRole::Muted),
-            ),
-        ],
+            ));
+            lines
+        }
         DialogState::Question(_) => Vec::new(),
     };
     frame.render_widget(Clear, area);
@@ -3661,6 +3709,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
             app.shared_profile(),
             app.active_model()
         )
+    };
+    let context = if app.incognito() {
+        format!("incognito · {context}")
+    } else {
+        context
     };
     let context = if app.has_stashed_draft() {
         format!("stashed · {context}")
@@ -5335,6 +5388,46 @@ mod tests {
     }
 
     #[test]
+    fn incognito_file_creation_approval_states_the_durability_boundary() {
+        for screen_reader in [false, true] {
+            let mut app = model();
+            app.capabilities.screen_reader = screen_reader;
+            app.request_approval_with_incognito_creation(
+                "write_file",
+                "notes.md",
+                "workspace write",
+                true,
+            );
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let _ = render(frame, &app);
+                })
+                .expect("draw incognito approval");
+            let rendered = terminal.backend().to_string();
+            assert!(
+                rendered.contains("Incognito: created files persist after this session."),
+                "screen_reader={screen_reader}: {rendered}"
+            );
+            assert!(
+                rendered.contains("Shell writes outside the workspace cannot be enumerated."),
+                "screen_reader={screen_reader}: {rendered}"
+            );
+
+            app.clear_dialog();
+            app.request_approval("write_file", "notes.md", "workspace write");
+            terminal
+                .draw(|frame| {
+                    let _ = render(frame, &app);
+                })
+                .expect("draw ordinary approval");
+            let rendered = terminal.backend().to_string();
+            assert!(!rendered.contains("created files persist"));
+            assert!(!rendered.contains("cannot be enumerated"));
+        }
+    }
+
+    #[test]
     fn trust_dialog_keeps_all_choices_at_the_minimum_supported_frame() {
         for screen_reader in [false, true] {
             let mut app = model();
@@ -6899,6 +6992,35 @@ mod tests {
         let footer = buffer_line(terminal.backend().buffer(), layout.footer.bottom() - 1);
         assert!(footer.contains("agent · BYPASS → model"));
         assert!(!footer.contains("relaxed"));
+
+        // Incognito is a separate live projection, so a profile change cannot
+        // erase it and busy-mode footer compaction cannot hide it.
+        app.set_incognito(true);
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw incognito");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let footer = buffer_line(terminal.backend().buffer(), layout.footer.bottom() - 1);
+        assert!(footer.contains("incognito · agent · BYPASS → model"));
+
+        app.begin_work();
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw busy incognito");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let footer = buffer_line(terminal.backend().buffer(), layout.footer.bottom() - 1);
+        assert!(footer.contains("incognito · model"));
+
+        app.set_incognito(false);
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw incognito off");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let footer = buffer_line(terminal.backend().buffer(), layout.footer.bottom() - 1);
+        assert!(!footer.contains("incognito"));
     }
 
     #[test]

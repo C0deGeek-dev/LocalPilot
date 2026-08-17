@@ -779,6 +779,7 @@ fn handle_incognito_toggle(
             runtime.incognito_ledger(),
         );
         runtime.exit_incognito();
+        app.set_incognito(false);
         // Restore normal prompt history now that the session persists again.
         history.set_muted(false);
         reset_session_view(app, runtime);
@@ -794,6 +795,7 @@ fn handle_incognito_toggle(
             return;
         }
         runtime.enter_incognito();
+        app.set_incognito(true);
         // Stop persisting/recalling prompts for the incognito session.
         history.set_muted(true);
         *incognito_entry.borrow_mut() = Some(crate::incognito::WorkspaceSnapshot::take(cwd));
@@ -1005,6 +1007,7 @@ pub(crate) async fn run(
     let mut terminal = Terminal::new(backend).context("initialize full-screen terminal")?;
     terminal.clear().context("clear full-screen terminal")?;
     let mut app = AppModel::new(header, capabilities);
+    app.set_incognito(context.runtime.is_incognito());
     app.set_command_catalog(fullscreen_command_catalog());
     app.set_command_values(
         "model",
@@ -6369,10 +6372,12 @@ where
                     if let Some(text) = paste_burst.flush_pending() {
                         let _ = app.handle_input(InputAction::Paste(text), 1);
                     }
-                    app.request_approval(
+                    let incognito_creation = app.incognito() && call.request.may_create_files;
+                    app.request_approval_with_incognito_creation(
                         call.request.tool,
                         call.request.target,
                         call.request.risk_class,
+                        incognito_creation,
                     );
                     pending = Some(call.reply);
                     render_needed = true;
@@ -13542,6 +13547,7 @@ mod tests {
                         tool: format!("tool-{number}"),
                         target: "fixture".to_string(),
                         risk_class: "test".to_string(),
+                        may_create_files: false,
                     },
                     reply,
                 })
@@ -15696,6 +15702,7 @@ mod tests {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
+                    may_create_files: false,
                 },
                 reply,
             })
@@ -15744,6 +15751,7 @@ mod tests {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
+                    may_create_files: false,
                 },
                 reply,
             })
@@ -15850,6 +15858,7 @@ mod tests {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
+                    may_create_files: false,
                 },
                 reply,
             })
@@ -16242,6 +16251,7 @@ mod tests {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
+                    may_create_files: false,
                 },
                 reply,
             })
@@ -16286,6 +16296,7 @@ mod tests {
                     tool: "tool".to_string(),
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
+                    may_create_files: false,
                 },
                 reply,
             })
@@ -17343,6 +17354,7 @@ last_seen = "2026-08-10"
             false,
         );
         assert!(bundle.runtime.is_incognito(), "/incognito entered");
+        assert!(app.incognito(), "live UI projection entered incognito");
         assert!(bundle.runtime.store().is_ephemeral());
         assert!(
             incognito_entry.borrow().is_some(),
@@ -17366,6 +17378,7 @@ last_seen = "2026-08-10"
             true,
         );
         assert!(!bundle.runtime.is_incognito(), "/incognito off left");
+        assert!(!app.incognito(), "live UI projection left incognito");
         assert!(!bundle.runtime.store().is_ephemeral());
         assert!(incognito_entry.borrow().is_none(), "entry snapshot cleared");
         bundle.runtime.close();

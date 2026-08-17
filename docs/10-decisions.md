@@ -27,12 +27,15 @@ Decision:
   An incognito *floor* on the permission engine turns an `Allow` into an
   interactive `Ask` (and a headless run into a `Deny`) for any effect that can
   leave a new file behind — a `write_file` to a path that does not exist, or a
-  write-capable shell command. Overwrites, reads, and network calls keep the
+  write-capable shell command (including a network-class command). Overwrites,
+  reads, read-only shell commands, and pure in-process network effects keep the
   profile's own answer; the floor only ever tightens, and it is a session
   property that survives a mid-session profile swap, so `/bypass` cannot lift it.
-  The acknowledgement states that the file will outlive the session, and that a
-  shell command's writes *outside* the workspace cannot be enumerated, so consent
-  is informed at the moment it is given.
+  The UI keeps a dedicated incognito indicator visible across launch, idle,
+  profile changes, and active work. Every applicable acknowledgement states that
+  created files will outlive the session, and that a shell command's writes
+  *outside* the workspace cannot be enumerated, so consent is informed at the
+  moment it is given.
 - **Persistent slash commands are refused, by an exhaustive classification.**
   Every `SlashAction` is classified `ReadOnly`, `MemoryOnly` (touches only the
   ephemeral store), or `Persistent(what)` in a wildcard-free match, so a new
@@ -45,8 +48,10 @@ Decision:
   workspace (a full filesystem snapshot diffed at the end, with no ignore
   filtering, so a `target/` write counts; `.git/` internals are collapsed to a
   count), files a tool wrote outside the workspace (exact, from the tool's own
-  touch report), and the approved shell/background commands verbatim — with the
-  stated limit that files those created outside the workspace are not tracked.
+  touch report), and shell/background command attempts presented to the
+  permission gate verbatim — including denied, cancelled, failed, and timed-out
+  attempts — with the stated limit that files those created outside the
+  workspace are not tracked.
 
 Boundary and compatibility: off by default; an ordinary session is byte-for-byte
 unchanged (the disk backend, full persistence, no floor). No config, provider,

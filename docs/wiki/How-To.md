@@ -158,7 +158,10 @@ While incognito:
 
 - **Every file the session creates needs your approval** — a `write_file` to a
   new path, or a shell command that can write. A headless run (no one to ask)
-  denies instead. The floor holds even under `--permission bypass`.
+  denies instead. The floor holds even under `--permission bypass`. The footer
+  and empty composer keep the incognito state visible, and each applicable
+  approval reminds you that created files persist and that shell writes outside
+  the workspace cannot be enumerated.
 - **Commands that would write something durable are refused** — research
   reports, `/ingest`, knowledge-index builds, `/localbox adopt`/`serve`, the
   self-improvement loop, skill installs, and LocalMind review decisions — with a
@@ -166,8 +169,10 @@ While incognito:
 - **When it ends** (`/incognito off`, or you quit) it reports every file it
   created: files under the workspace (found by a full snapshot, so build output
   under `target/` counts too), files a tool wrote outside the workspace, and the
-  shell commands that ran. One boundary to know: a shell command's writes
-  *outside* the workspace cannot be listed, so only the command is shown.
+  shell/background command attempts presented for permission, including denied,
+  cancelled, failed, and timed-out attempts. One boundary to know: a shell
+  command's writes *outside* the workspace cannot be listed, so only the command
+  attempt is shown.
 
 A prior, persisted session is never touched by starting incognito — `/incognito`
 begins a fresh session and leaves the old one on disk exactly as it was.

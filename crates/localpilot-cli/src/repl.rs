@@ -249,13 +249,7 @@ pub async fn run_chat_with(
             branch: git.as_ref().map(|status| status.branch.clone()),
             workspace_dirty: git.as_ref().and_then(|status| status.dirty),
             mode: Mode::Agent,
-            // A launch-time incognito badge rides the profile label so the header
-            // always shows the session is non-persistent.
-            profile: if incognito {
-                format!("{} · incognito", ui_profile(profile).label())
-            } else {
-                ui_profile(profile).label().to_string()
-            },
+            profile: ui_profile(profile).label().to_string(),
             session_id: runtime.session_id().to_string(),
             session_name: resumed_session_name,
         },

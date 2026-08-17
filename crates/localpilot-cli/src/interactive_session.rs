@@ -31,6 +31,10 @@ pub(crate) struct ApprovalRequest {
     pub(crate) tool: String,
     pub(crate) target: String,
     pub(crate) risk_class: String,
+    /// Whether the effect can create a durable file. The full-screen host pairs
+    /// this typed signal with its live incognito state to show the acknowledgement
+    /// copy only for approvals raised by the incognito creation floor.
+    pub(crate) may_create_files: bool,
 }
 
 /// A pending approval handed from the runtime to an interactive host.
@@ -870,6 +874,7 @@ fn describe(request: &PermissionRequest) -> ApprovalRequest {
         tool: request.tool.to_string(),
         target,
         risk_class: risk_class.to_string(),
+        may_create_files: request.effect.may_create_files(),
     }
 }
 
@@ -1678,6 +1683,7 @@ mod tests {
                     tool: "pair-channel-probe".to_string(),
                     target: "A".to_string(),
                     risk_class: "test".to_string(),
+                    may_create_files: false,
                 },
                 reply,
             })
@@ -2098,6 +2104,7 @@ mod tests {
             answer = &mut approval => panic!("approval completed before host answer: {answer}"),
         };
         assert_eq!(call.request.tool, "run_shell");
+        assert!(call.request.may_create_files);
         call.reply.send(true).expect("answer approval");
         assert!(approval.await);
 

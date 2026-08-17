@@ -1222,6 +1222,9 @@ pub enum DialogState {
         tool: String,
         target: String,
         risk_class: String,
+        /// This approval was raised by the incognito file-creation floor. The
+        /// renderer shows the durable-side-effect warning at the decision point.
+        incognito_creation: bool,
     },
     Question(QuestionDialog),
 }
@@ -1465,6 +1468,9 @@ pub struct AppModel {
     header: SharedHeader,
     projections: ProjectionSet,
     pair_status: Option<PairStatus>,
+    /// Live host-projected incognito state. Kept separate from the permission
+    /// profile label so a profile switch cannot erase the privacy indicator.
+    incognito: bool,
     pub capabilities: TerminalCapabilities,
     pub theme: Theme,
     pub tabs: Vec<TabId>,
@@ -1586,6 +1592,7 @@ impl AppModel {
             header,
             projections,
             pair_status: None,
+            incognito: false,
             capabilities,
             theme: Theme::Default,
             tabs,
@@ -1721,10 +1728,26 @@ impl AppModel {
     /// renderer never parses a mode string. Shown only when the editor is empty.
     #[must_use]
     pub const fn composer_hint(&self) -> Option<&'static str> {
+        if self.incognito {
+            return Some("Incognito — nothing from this session is saved");
+        }
         match self.header.mode {
             Mode::Research => Some("Research a topic — local + web per config"),
             Mode::Agent | Mode::Harness => None,
         }
+    }
+
+    /// Whether the active single-session host is incognito.
+    #[must_use]
+    pub const fn incognito(&self) -> bool {
+        self.incognito
+    }
+
+    /// Project the runtime's live incognito state into persistent UI chrome.
+    /// This is deliberately independent of the profile label: `/bypass` changes
+    /// the profile but must not hide that the incognito floor is still active.
+    pub fn set_incognito(&mut self, incognito: bool) {
+        self.incognito = incognito;
     }
 
     #[must_use]
@@ -3851,8 +3874,20 @@ impl AppModel {
         target: impl Into<String>,
         risk_class: impl Into<String>,
     ) {
+        self.request_approval_with_incognito_creation(tool, target, risk_class, false);
+    }
+
+    /// Open an approval dialog, marking it as an incognito file-creation
+    /// acknowledgement when the host says the permission floor caused the ask.
+    pub fn request_approval_with_incognito_creation(
+        &mut self,
+        tool: impl Into<String>,
+        target: impl Into<String>,
+        risk_class: impl Into<String>,
+        incognito_creation: bool,
+    ) {
         let peer = self.active_pair_pane();
-        self.install_approval(peer, tool, target, risk_class);
+        self.install_approval(peer, tool, target, risk_class, incognito_creation);
     }
 
     /// Opens an approval attributed to one named peer and makes that peer the
@@ -3872,7 +3907,7 @@ impl AppModel {
         if self.active_pair_pane() != Some(peer) && !self.select_pair_pane(peer) {
             return false;
         }
-        self.install_approval(Some(peer), tool, target, risk_class);
+        self.install_approval(Some(peer), tool, target, risk_class, false);
         true
     }
 
@@ -3882,6 +3917,7 @@ impl AppModel {
         tool: impl Into<String>,
         target: impl Into<String>,
         risk_class: impl Into<String>,
+        incognito_creation: bool,
     ) {
         self.claim_dialog_focus();
         self.dialog_peer = peer;
@@ -3889,6 +3925,7 @@ impl AppModel {
             tool: sanitize_inline(&tool.into()),
             target: sanitize_inline(&target.into()),
             risk_class: sanitize_inline(&risk_class.into()),
+            incognito_creation,
         });
     }
 
@@ -8486,8 +8523,29 @@ mod tests {
                 tool: "tool".to_string(),
                 target: "target".to_string(),
                 risk_class: "write".to_string(),
+                incognito_creation: false,
             })
         );
+    }
+
+    #[test]
+    fn incognito_projection_survives_profile_changes_and_controls_the_composer_hint() {
+        let mut app = model();
+        assert!(!app.incognito());
+        assert_eq!(app.composer_hint(), None);
+
+        app.set_incognito(true);
+        app.set_shared_profile("BYPASS");
+        assert!(app.incognito());
+        assert_eq!(app.shared_profile(), "BYPASS");
+        assert_eq!(
+            app.composer_hint(),
+            Some("Incognito — nothing from this session is saved")
+        );
+
+        app.set_incognito(false);
+        assert!(!app.incognito());
+        assert_eq!(app.composer_hint(), None);
     }
 
     #[test]

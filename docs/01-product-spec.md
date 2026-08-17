@@ -247,9 +247,11 @@ persists nothing of its own — the session store is in-memory, prompt history i
 off, and no closeout, knowledge index, or code-graph reindex runs — and every
 file it creates is gated behind an explicit acknowledgement (a headless run
 denies), a floor that no permission profile lifts. Slash commands that would
-write something durable are refused. When the session ends it reports every file
-it created, and states the one boundary it cannot observe: a shell command's
-writes outside the workspace.
+write something durable are refused. The full-screen UI keeps an incognito
+indicator visible across profile changes and repeats the durability boundary in
+each file-creation approval. When the session ends it reports every file it
+created, and states the one boundary it cannot observe: a shell command's writes
+outside the workspace.
 
 ### Research (local-first; web opt-in)
 

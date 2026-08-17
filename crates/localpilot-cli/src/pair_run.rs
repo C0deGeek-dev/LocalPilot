@@ -1459,6 +1459,7 @@ mod tests {
                     tool: tool.to_string(),
                     target: format!("{tool}-target"),
                     risk_class: format!("{tool}-risk"),
+                    may_create_files: false,
                 },
                 reply,
             },
