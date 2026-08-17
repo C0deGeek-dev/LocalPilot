@@ -267,7 +267,10 @@ fn a_long_first_line_keeps_its_enter_as_paste_content() {
     for c in line.chars() {
         // Roughly one frame between keys.
         at += Duration::from_millis(1);
-        assert_eq!(burst.observe(plain(c), true, at), key_input::PasteAction::Absorbed);
+        assert_eq!(
+            burst.observe(plain(c), true, at),
+            key_input::PasteAction::Absorbed
+        );
     }
     assert!(at.duration_since(now) > Duration::from_millis(50));
 
@@ -278,7 +281,10 @@ fn a_long_first_line_keeps_its_enter_as_paste_content() {
         "Enter with more paste queued behind it is a newline, not the submit key"
     );
     at += Duration::from_millis(1);
-    assert_eq!(burst.observe(plain('n'), true, at), key_input::PasteAction::Absorbed);
+    assert_eq!(
+        burst.observe(plain('n'), true, at),
+        key_input::PasteAction::Absorbed
+    );
     at += Duration::from_millis(1);
     assert_eq!(
         burst.observe(plain('!'), false, at),

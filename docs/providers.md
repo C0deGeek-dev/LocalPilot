@@ -177,6 +177,13 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."   # Windows PowerShell
 The credential is sent as the `x-api-key` header with the documented
 `anthropic-version`; it is wrapped so it never appears in logs or transcripts.
 
+`max_tokens` is one budget for the whole reply — prose *and* tool-call
+arguments. A model that narrates at length and then emits a large `write_file`
+can run out mid-call at any cap; LocalPilot discards the truncated call (never
+half-applies it), names the tool and size in the warning, and retries a file
+write once in smaller pieces before stopping. Raising `max_tokens` postpones
+that failure; asking for less preamble or chunked writes removes it.
+
 If `base_url` is omitted, Anthropic providers use
 `ANTHROPIC_BASE_URL` before falling back to the official API URL. If the config
 does not set `model`, `ANTHROPIC_MODEL` can provide the default model for

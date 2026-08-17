@@ -506,11 +506,25 @@ type EventQueue = VecDeque<Result<ModelEvent, ProviderError>>;
 /// and assembled into a single [`ModelEvent::ToolCall`] at `content_block_stop`.
 /// Raw bytes are buffered and only complete lines are decoded, so a multi-byte
 /// UTF-8 character split across network chunks is never corrupted.
+///
+/// A tool block whose accumulated arguments do not parse is *not* judged at
+/// `content_block_stop`: `stop_reason` arrives one event later, on
+/// `message_delta`, and it decides the fate. When the provider stopped at
+/// `max_tokens` the arguments were cut off by the output cap — the partial
+/// call is discarded (never repaired, never emitted) and the
+/// [`ModelEvent::OutputLimit`] names the tool; any other ending reports the
+/// complete-but-invalid payload as [`ProviderError::MalformedToolArguments`]
+/// with the tool name and byte count so the harness can steer a chunked
+/// retry.
 #[derive(Default)]
 struct SseDecoder {
     buf: Vec<u8>,
     thinking: InlineThinkingFilter,
     tools: BTreeMap<u64, ToolAccum>,
+    /// Tool blocks that closed with unparseable arguments, in block order,
+    /// waiting for the stop reason to decide whether they were truncated by
+    /// the output cap or genuinely malformed.
+    unparsed_tools: Vec<UnparsedTool>,
     open_blocks: BTreeSet<u64>,
     closed_blocks: usize,
     saw_content_delta: bool,
@@ -520,6 +534,9 @@ struct SseDecoder {
     done: bool,
     warned_stop_reason: bool,
     saw_stop_reason: bool,
+    /// `stop_reason: max_tokens` was seen: later unparseable tool blocks are
+    /// output-cap truncations, not malformed calls.
+    output_limited: bool,
 }
 
 #[derive(Default)]
@@ -527,6 +544,13 @@ struct ToolAccum {
     id: String,
     name: String,
     input: String,
+}
+
+/// A closed tool block whose arguments did not parse as JSON.
+struct UnparsedTool {
+    name: String,
+    bytes: usize,
+    reason: String,
 }
 
 /// Drives the SSE decoder over arbitrary bytes for the fuzz harness: the
@@ -570,6 +594,9 @@ impl SseDecoder {
             }
         }
         self.flush_thinking(out);
+        // No stop reason ever arrived: an unparseable tool payload cannot be
+        // blamed on the output cap, so it is reported as malformed.
+        self.report_malformed_tools(out);
         if !self.done {
             if self.saw_stop_reason && self.open_blocks.is_empty() && self.content_complete() {
                 self.emit_done(out);
@@ -665,10 +692,18 @@ impl SseDecoder {
                 }
                 if let Some(reason) = event["delta"]["stop_reason"].as_str() {
                     self.saw_stop_reason = true;
+                    if reason == "max_tokens" {
+                        self.output_limited = true;
+                    } else {
+                        // Any other ending means the model finished the call on
+                        // its own terms: an unparseable payload is malformed.
+                        self.report_malformed_tools(out);
+                    }
                     self.warn_for_stop_reason(reason, out);
                 }
             }
             Some("message_stop") => {
+                self.report_malformed_tools(out);
                 if self.open_blocks.is_empty() && self.content_complete() {
                     self.emit_done(out);
                 } else {
@@ -739,7 +774,17 @@ impl SseDecoder {
             match serde_json::from_str::<Value>(&accum.input) {
                 Ok(value) => value,
                 Err(e) => {
-                    out.push_back(Err(ProviderError::StreamDecode(format!("tool input: {e}"))));
+                    // Do not judge yet: whether this is a cap truncation or a
+                    // malformed call is known only once the stop reason
+                    // arrives. Never repair the JSON — a truncated file write
+                    // that "succeeds" is worse than one that fails.
+                    if !self.output_limited {
+                        self.unparsed_tools.push(UnparsedTool {
+                            name: accum.name,
+                            bytes: accum.input.len(),
+                            reason: e.to_string(),
+                        });
+                    }
                     return;
                 }
             }
@@ -752,6 +797,36 @@ impl SseDecoder {
         }));
     }
 
+    /// Report every parked unparseable tool block as a malformed call. A no-op
+    /// once the output cap has been blamed: those blocks were discarded.
+    fn report_malformed_tools(&mut self, out: &mut EventQueue) {
+        if self.output_limited {
+            self.unparsed_tools.clear();
+            return;
+        }
+        for tool in std::mem::take(&mut self.unparsed_tools) {
+            out.push_back(Err(ProviderError::MalformedToolArguments {
+                tool: tool.name,
+                bytes: tool.bytes,
+                reason: tool.reason,
+            }));
+        }
+    }
+
+    /// "`write_file` arguments (41806 bytes)" for one truncated block, or a
+    /// comma-joined list for several; `None` when no tool block was cut off.
+    fn unparsed_tool_summary(&self) -> Option<String> {
+        if self.unparsed_tools.is_empty() {
+            return None;
+        }
+        let parts: Vec<String> = self
+            .unparsed_tools
+            .iter()
+            .map(|tool| format!("`{}` arguments ({} bytes)", tool.name, tool.bytes))
+            .collect();
+        Some(parts.join(", "))
+    }
+
     fn warn_for_stop_reason(&mut self, reason: &str, out: &mut EventQueue) {
         if self.warned_stop_reason {
             return;
@@ -760,8 +835,30 @@ impl SseDecoder {
             "end_turn" | "tool_use" => None,
             "max_tokens" => {
                 self.warned_stop_reason = true;
+                let summary = self.unparsed_tool_summary();
+                let truncated_tools: Vec<String> = std::mem::take(&mut self.unparsed_tools)
+                    .into_iter()
+                    .map(|tool| tool.name)
+                    .collect();
+                let message = match summary {
+                    Some(summary) => {
+                        let (subject, verb) = if truncated_tools.len() == 1 {
+                            ("the partial tool call", "was")
+                        } else {
+                            ("the partial tool calls", "were")
+                        };
+                        format!(
+                            "provider stopped at max_tokens while streaming {summary}; {subject} {verb} \
+                             discarded — the output cap is shared with any prose before the call, so write the \
+                             file in smaller pieces (write_file, then append_file), skip a long preamble, or \
+                             raise provider max_tokens"
+                        )
+                    }
+                    None => "provider stopped at max_tokens; output may be truncated".to_string(),
+                };
                 out.push_back(Ok(ModelEvent::OutputLimit {
-                    message: "provider stopped at max_tokens; output may be truncated".to_string(),
+                    message,
+                    truncated_tools,
                 }));
                 return;
             }
@@ -953,9 +1050,132 @@ mod tests {
         ]);
         assert!(events.iter().any(|e| matches!(
             e,
-            Ok(ModelEvent::OutputLimit { message })
+            Ok(ModelEvent::OutputLimit { message, .. })
                 if message.contains("max_tokens")
         )));
+    }
+
+    #[test]
+    fn max_tokens_truncated_tool_input_is_discarded_and_named() {
+        // The model ran out of output budget partway through a write_file
+        // payload: content_block_stop closes the block with unparseable JSON,
+        // then message_delta carries the diagnosis. Mirrors the OpenAI
+        // decoder's length-finish handling: no decode error, no malformed-
+        // arguments error, no half-applied tool call — one OutputLimit that
+        // names the tool and the size.
+        let events = collect_sse(&[
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Rewriting the module.\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"write_file\",\"input\":{}}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.rs\\\",\\\"content\\\":\\\"fn main() {\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":16384}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ]);
+        let limit = events.iter().find_map(|e| match e {
+            Ok(ModelEvent::OutputLimit {
+                message,
+                truncated_tools,
+            }) => Some((message.clone(), truncated_tools.clone())),
+            _ => None,
+        });
+        let (message, truncated_tools) = limit.expect("an output-limit event was emitted");
+        assert!(message.contains("max_tokens"), "{message}");
+        assert!(message.contains("`write_file`"), "{message}");
+        assert!(message.contains("bytes"), "{message}");
+        assert!(message.contains("smaller pieces"), "{message}");
+        assert!(message.contains("tool call was discarded"), "{message}");
+        assert!(
+            !message.contains("  "),
+            "no in-source padding leaks: {message}"
+        );
+        assert!(
+            !message.contains("column"),
+            "no bare serde offset: {message}"
+        );
+        assert_eq!(truncated_tools, vec!["write_file".to_string()]);
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, Err(ProviderError::StreamDecode(_)))));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, Err(ProviderError::MalformedToolArguments { .. }))));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, Ok(ModelEvent::ToolCall { .. }))));
+        assert!(matches!(events.last(), Some(Ok(ModelEvent::Done))));
+    }
+
+    #[test]
+    fn complete_but_invalid_tool_input_is_malformed_with_tool_name() {
+        // The model finished on its own terms (stop_reason tool_use) but the
+        // payload is not JSON: a typed MalformedToolArguments carrying the tool
+        // and byte count, so the harness can steer a chunked retry — never a
+        // generic decode error.
+        let events = collect_sse(&[
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"write_file\",\"input\":{}}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{ not json\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ]);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Err(ProviderError::MalformedToolArguments { tool, bytes, .. })
+                if tool == "write_file" && *bytes > 0
+        )));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, Err(ProviderError::StreamDecode(_)))));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, Ok(ModelEvent::ToolCall { .. }))));
+    }
+
+    #[test]
+    fn unparseable_tool_input_without_a_stop_reason_is_malformed() {
+        // A server that never sends stop_reason cannot blame the output cap:
+        // the payload is reported as malformed at message_stop.
+        let events = collect_sse(&[
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"edit_file\",\"input\":{}}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ]);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Err(ProviderError::MalformedToolArguments { tool, .. }) if tool == "edit_file"
+        )));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, Err(ProviderError::StreamDecode(_)))));
+    }
+
+    #[test]
+    fn multiple_tool_blocks_still_flush_in_index_order() {
+        let events = collect_sse(&[
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"list_files\",\"input\":{}}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ]);
+        let names: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(ModelEvent::ToolCall { name, .. }) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["read_file".to_string(), "list_files".to_string()]
+        );
+        assert!(matches!(events.last(), Some(Ok(ModelEvent::Done))));
     }
 
     #[test]

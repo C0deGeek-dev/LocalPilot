@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A tool call cut off by the provider's output cap is reported as what it is
+  and retried in pieces.** On the Anthropic wire protocol (including local
+  servers that speak it) a `write_file` payload truncated at `max_tokens`
+  surfaced as `stream decode error: tool input: EOF while parsing a string at
+  line 1 column 41806`, and the chunked-write recovery built for oversized
+  writes could never fire on that adapter. The decoder now waits for the stop
+  reason before judging an unparseable tool block: a `max_tokens` truncation is
+  discarded (never half-applied) and named on the output-limit warning with its
+  byte count; a complete-but-invalid payload surfaces as the typed
+  malformed-arguments error that steers the model to write in smaller pieces.
+  Both decoders report every truncated call, and when one is a file write the
+  turn retries once with the chunked-write instruction instead of stopping —
+  without moving the recovery ladder. The stop message now says the output cap
+  is shared by prose and tool arguments (ADR-0158).
+
 - **A long multi-line paste on Windows stays one prompt.** The legacy
   key-record paste fallback judged the first Enter of a run by how fast the
   terminal loop had *processed* the preceding characters, so any first line

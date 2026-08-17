@@ -44,6 +44,17 @@ localpilot models
 Provider setup detail:
 [providers.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/providers.md).
 
+## "provider stopped at max_tokens while streaming `write_file` arguments"
+
+The model ran out of output budget partway through a tool call. `max_tokens`
+covers the whole reply — any explanation the model writes first *and* the tool
+arguments — so a long preamble followed by a large file write can hit the cap
+even at 16384. LocalPilot discards the truncated call (it is never half-applied)
+and retries a file write once in smaller pieces; if the cap is hit again the
+turn stops with the same warning. Ask for a shorter answer or a chunked write,
+or raise the provider's `max_tokens`
+([providers.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/providers.md)).
+
 ## A tool action was blocked
 
 That's the permission engine doing its job — risky actions need explicit approval

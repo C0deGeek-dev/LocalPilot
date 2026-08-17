@@ -33,7 +33,15 @@ pub enum ModelEvent {
     ProviderWarning { message: String },
     /// The provider stopped because the configured output limit was reached.
     /// Any streamed text before this event may be incomplete.
-    OutputLimit { message: String },
+    /// `truncated_tools` names every tool call whose arguments were cut off by
+    /// the cap and discarded (never emitted as a [`ModelEvent::ToolCall`]), in
+    /// stream order — so the harness can steer an oversized file write into
+    /// smaller calls instead of only reporting the limit.
+    OutputLimit {
+        message: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        truncated_tools: Vec<String>,
+    },
     /// The stream completed normally.
     Done,
 }

@@ -811,6 +811,7 @@ async fn output_limit_stop_discards_partial_reply() {
         Ok(ModelEvent::TextDelta("partial answer".to_string())),
         Ok(ModelEvent::OutputLimit {
             message: "provider stopped at max_tokens; output may be truncated".to_string(),
+            truncated_tools: Vec::new(),
         }),
         Ok(ModelEvent::Done),
     ]);
@@ -831,6 +832,149 @@ async fn output_limit_stop_discards_partial_reply() {
         !transcript.contains("partial answer"),
         "output-limit text must not be persisted as a final assistant reply"
     );
+}
+
+#[tokio::test]
+async fn an_output_limited_file_write_is_retried_in_pieces_once() {
+    // Turn 1: the provider's output cap cuts a write_file call off and the
+    // decoder discards it, naming the tool. That is an output-budget fault, not
+    // a bad turn: the harness steers a chunked retry instead of stopping, and
+    // the recovery ladder is untouched. Turns 2-3: the model writes in pieces.
+    let provider = Arc::new(
+        FakeProvider::new()
+            .script(vec![
+                Ok(ModelEvent::TextDelta("Rewriting the report.".to_string())),
+                Ok(ModelEvent::OutputLimit {
+                    message: "provider stopped at max_tokens while streaming `write_file` arguments (41806 bytes)".to_string(),
+                    truncated_tools: vec!["read_file".to_string(), "write_file".to_string()],
+                }),
+                Ok(ModelEvent::Done),
+            ])
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "doc.md", "content": "# Part 1
+" }),
+            )
+            .tool_call(
+                "c2",
+                "append_file",
+                json!({ "path": "doc.md", "content": "# Part 2
+" }),
+            )
+            .text("done"),
+    );
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[],
+        SessionConfig::default(),
+        Profile::Bypass,
+    );
+    let mut rx = h.events.subscribe();
+
+    let reason = h
+        .runtime
+        .run_turn("write the report", &h.events, &h.cancel)
+        .await;
+
+    assert_eq!(reason, StopReason::Done);
+    assert_eq!(provider.requests().len(), 4);
+    assert_eq!(
+        std::fs::read_to_string(h._dir.path().join("doc.md")).unwrap(),
+        "# Part 1
+# Part 2
+"
+    );
+    let events = drain(&mut rx);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::Recovery { .. })),
+        "an output-budget fault must not move the recovery ladder"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Warning(message) if message.contains("smaller pieces")
+    )));
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let synthetic_text: String = transcript
+        .iter()
+        .filter(|m| m.is_synthetic())
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            localpilot_core::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        synthetic_text.contains("append_file") && synthetic_text.contains("smaller pieces"),
+        "expected the chunked-write prompt, got: {synthetic_text}"
+    );
+    let persisted = serde_json::to_string(&transcript).expect("transcript serializes");
+    assert!(
+        !persisted.contains("Rewriting the report."),
+        "the cut-off partial reply must not be persisted"
+    );
+}
+
+#[tokio::test]
+async fn a_second_output_limit_in_the_same_turn_stops_honestly() {
+    let provider = Arc::new(
+        FakeProvider::new()
+            .script(vec![
+                Ok(ModelEvent::OutputLimit {
+                    message: "cap".to_string(),
+                    truncated_tools: vec!["write_file".to_string()],
+                }),
+                Ok(ModelEvent::Done),
+            ])
+            .script(vec![
+                Ok(ModelEvent::OutputLimit {
+                    message: "cap".to_string(),
+                    truncated_tools: vec!["write_file".to_string()],
+                }),
+                Ok(ModelEvent::Done),
+            ]),
+    );
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[],
+        SessionConfig::default(),
+        Profile::Bypass,
+    );
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
+
+    assert_eq!(reason, StopReason::ProviderError);
+    assert_eq!(provider.requests().len(), 2, "exactly one chunked retry");
+    assert!(drain(&mut rx).iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Warning(message)
+            if message.contains("discarding partial response") && message.contains("shared by prose")
+    )));
+}
+
+#[tokio::test]
+async fn an_output_limit_without_a_file_write_stops_immediately() {
+    let provider = Arc::new(FakeProvider::new().script(vec![
+        Ok(ModelEvent::OutputLimit {
+            message: "cap".to_string(),
+            truncated_tools: vec!["read_file".to_string()],
+        }),
+        Ok(ModelEvent::Done),
+    ]));
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[],
+        SessionConfig::default(),
+        Profile::Bypass,
+    );
+
+    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
+
+    assert_eq!(reason, StopReason::ProviderError);
+    assert_eq!(provider.requests().len(), 1);
 }
 
 #[tokio::test]

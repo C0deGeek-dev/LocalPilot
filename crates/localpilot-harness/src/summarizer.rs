@@ -753,15 +753,19 @@ mod tests {
             FakeProvider::new()
                 .script(vec![Ok(ModelEvent::OutputLimit {
                     message: "limit".to_string(),
+                    truncated_tools: Vec::new(),
                 })])
                 .script(vec![Ok(ModelEvent::OutputLimit {
                     message: "limit".to_string(),
+                    truncated_tools: Vec::new(),
                 })])
                 .script(vec![Ok(ModelEvent::OutputLimit {
                     message: "limit".to_string(),
+                    truncated_tools: Vec::new(),
                 })])
                 .script(vec![Ok(ModelEvent::OutputLimit {
                     message: "limit".to_string(),
+                    truncated_tools: Vec::new(),
                 })]),
         );
         let summarizer = ProviderSummarizer::new(provider, "m");

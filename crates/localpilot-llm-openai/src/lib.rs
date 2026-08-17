@@ -780,6 +780,10 @@ struct SseDecoder {
     warned_finish_reasons: BTreeSet<String>,
     saw_finish_reason: bool,
     output_limited: bool,
+    /// Tool calls whose arguments were discarded on a `length` finish, in
+    /// accumulator order, reported on the `OutputLimit` event so the harness
+    /// can steer an oversized file write into smaller calls.
+    truncated_tools: Vec<String>,
     done: bool,
 }
 
@@ -816,7 +820,7 @@ impl SseDecoder {
         if !self.output_limited {
             self.flush_tools(out);
         } else {
-            self.discard_tools();
+            let _ = self.discard_tools();
         }
         if !self.done {
             if self.saw_finish_reason {
@@ -913,7 +917,8 @@ impl SseDecoder {
                 self.saw_finish_reason = true;
                 if reason == "length" {
                     self.output_limited = true;
-                    self.discard_tools();
+                    let discarded = self.discard_tools();
+                    self.truncated_tools.extend(discarded);
                 }
                 if reason == "tool_calls" {
                     self.flush_tools(out);
@@ -995,9 +1000,16 @@ impl SseDecoder {
         }
     }
 
-    fn discard_tools(&mut self) {
-        self.tools.clear();
+    /// Drop every pending tool accumulator (their arguments were cut off by
+    /// the output cap and must never be half-applied), returning the names of
+    /// the calls that had one.
+    fn discard_tools(&mut self) -> Vec<String> {
+        let names = std::mem::take(&mut self.tools)
+            .into_values()
+            .filter_map(|acc| acc.name)
+            .collect();
         self.last_keyless = None;
+        names
     }
 
     fn warn_for_finish_reason(&mut self, reason: &str, out: &mut EventQueue) {
@@ -1010,17 +1022,38 @@ impl SseDecoder {
                 "provider returned a legacy function_call finish reason; no tool call was decoded"
                     .to_string(),
             ),
-            "length" => Some(
+            "length" => Some(if self.truncated_tools.is_empty() {
                 "provider stopped because the token limit was reached; output may be truncated"
-                    .to_string(),
-            ),
+                    .to_string()
+            } else {
+                let names: Vec<String> = self
+                    .truncated_tools
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect();
+                let (subject, verb) = if names.len() == 1 {
+                    ("the partial tool call", "was")
+                } else {
+                    ("the partial tool calls", "were")
+                };
+                format!(
+                    "provider stopped because the token limit was reached while streaming {} arguments; \
+                     {subject} {verb} discarded — the output cap is shared with any prose before the \
+                     call, so write the file in smaller pieces (write_file, then append_file), skip a \
+                     long preamble, or raise provider max_tokens",
+                    names.join(", ")
+                )
+            }),
             "content_filter" => Some("provider filtered part or all of the response".to_string()),
             other if other.trim().is_empty() => None,
             other => Some(format!("provider finished with reason `{other}`")),
         };
         if let Some(message) = message {
             if reason == "length" {
-                out.push_back(Ok(ModelEvent::OutputLimit { message }));
+                out.push_back(Ok(ModelEvent::OutputLimit {
+                    message,
+                    truncated_tools: std::mem::take(&mut self.truncated_tools),
+                }));
                 return;
             }
             out.push_back(Ok(ModelEvent::ProviderWarning { message }));
@@ -1173,7 +1206,7 @@ mod tests {
         ]);
         assert!(events.iter().any(|e| matches!(
             e,
-            Ok(ModelEvent::OutputLimit { message })
+            Ok(ModelEvent::OutputLimit { message, .. })
                 if message.contains("token limit")
         )));
     }
@@ -1188,7 +1221,7 @@ mod tests {
 
         assert!(events.iter().any(|event| matches!(
             event,
-            Ok(ModelEvent::OutputLimit { message }) if message.contains("token limit")
+            Ok(ModelEvent::OutputLimit { message, .. }) if message.contains("token limit")
         )));
         // The partial arguments are discarded on a length finish, so neither a
         // decode error nor a malformed-arguments error is emitted.
@@ -1202,6 +1235,46 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, Ok(ModelEvent::ToolCall { .. }))));
+    }
+
+    #[test]
+    fn length_finish_names_every_discarded_tool_call() {
+        // Parallel tool calls: a read_file and a write_file both pending when
+        // the cap hits. Every discarded name rides the OutputLimit event so
+        // the harness can tell that a file write was among them.
+        let events = collect_sse(&[
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}},{\"index\":1,\"id\":\"call_2\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"b.rs\\\",\\\"content\\\":\\\"fn main() {\"}}]}}]}
+",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}
+",
+            "data: [DONE]
+",
+        ]);
+        let limit = events.iter().find_map(|event| match event {
+            Ok(ModelEvent::OutputLimit {
+                message,
+                truncated_tools,
+            }) => Some((message.clone(), truncated_tools.clone())),
+            _ => None,
+        });
+        let (message, truncated_tools) = limit.expect("an output-limit event was emitted");
+        assert_eq!(
+            truncated_tools,
+            vec!["read_file".to_string(), "write_file".to_string()]
+        );
+        assert!(message.contains("`write_file`"), "{message}");
+        assert!(message.contains("smaller pieces"), "{message}");
+        assert!(message.contains("tool calls were discarded"), "{message}");
+        assert!(
+            !message.contains("  "),
+            "no in-source padding leaks: {message}"
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ok(ModelEvent::ToolCall { .. }))));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Err(ProviderError::MalformedToolArguments { .. }))));
     }
 
     #[test]

@@ -2,6 +2,57 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0158: A Tool Call Cut Off By The Output Cap Is An Output-Budget Fault — Discarded, Named, Steered Once
+
+Status: Accepted. Extends ADR-0038 (an oversized malformed write is recovered by
+chunking) and ADR-0069 (oversized writes are prevented at the prompt and the
+tool). Closes LocalHub#74.
+
+Context: on the Anthropic wire protocol — which any local server can speak
+(`kind = "anthropic"` with a LAN `base_url`) — a tool call whose
+`input_json_delta` fragments stop partway through a string because the model
+ran out of output budget surfaced as `stream decode error: tool input: EOF while
+parsing a string at line 1 column 41806`. Nothing had failed to decode: the
+buffer was exactly what the model sent. The decoder judged the block at
+`content_block_stop`, one event before `message_delta` carries
+`stop_reason: max_tokens`, reported a generic `StreamDecode`, and the harness
+broke out of the stream before the diagnosis arrived. The typed
+`MalformedToolArguments` (and with it the ADR-0038 chunked-write rung) was
+unreachable on this adapter, while the OpenAI decoder already handled the same
+condition correctly.
+
+Decision:
+
+- **Well-formed tool blocks still flush at `content_block_stop`**; only the
+  *failure* decision waits for the stop reason. An unparseable accumulation is
+  parked in block order. `stop_reason: max_tokens` discards it — never
+  repaired, never emitted as a `ToolCall` (a truncated file write that
+  "succeeds" is worse than one that fails) — and the `OutputLimit` names the
+  tool and its byte count. Any other ending, `message_stop`, or end of stream
+  reports it as `MalformedToolArguments { tool, bytes, reason }`.
+- **`ModelEvent::OutputLimit` carries `truncated_tools: Vec<String>`** — every
+  call the cap cut off, from both decoders (the OpenAI adapter's `length`
+  finish discards its whole pending set, which may hold parallel calls). A
+  singular field could name the wrong call and hide the write.
+- **The harness steers once, and never degrades.** An output-budget fault is
+  not the model losing coherence, so it never feeds the bad-output ladder.
+  When a truncated call is a file-write tool, the turn appends the
+  chunked-write instruction (the ADR-0038 prompt) as a synthetic user message
+  and retries once per turn; a second cap hit in the same turn, or a
+  truncation with no file write among the calls, stops the turn honestly. The
+  stop message says the cap is shared by prose and tool arguments — the
+  observed failure had `max_tokens = 16384` and still ran out because the
+  model narrated at length before opening the call — so it recommends a
+  shorter answer, chunked writes, or a raised cap in that order.
+- **No user-visible text carries a bare `serde_json` column offset** for this
+  condition.
+
+Boundary and compatibility: `truncated_tools` is serde-defaulted and skipped
+when empty, so persisted or RPC-carried events remain readable. Pinned by the
+Anthropic decoder tests for cap truncation, complete-but-invalid payloads,
+missing stop reason, and multi-block index order; the OpenAI parallel-call
+`length` test; and the harness steer-once / second-limit / no-write tests.
+
 ## ADR-0157: Unbracketed Paste Is Classified By Queue Evidence, Not Processing Time
 
 Status: Accepted. Amends ADR-0148 (the legacy key-record paste classifier).

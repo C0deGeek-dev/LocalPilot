@@ -2639,6 +2639,9 @@ impl SessionRuntime {
         // estimate believed it fit. The first overflow forces a tighter
         // compaction and one retry; a second overflow this turn is terminal.
         let mut overflow_retried = false;
+        // A file write cut off by the provider's output cap is steered into a
+        // chunked retry once per turn; a second cap hit is reported honestly.
+        let mut chunked_write_steered = false;
         // A mid-stream truncation (the server dropped the response before it
         // completed) is a transient infrastructure fault, retried up to
         // `max_stream_retries` across turn iterations before giving up honestly.
@@ -2763,6 +2766,9 @@ impl SessionRuntime {
             // chunked retry rather than a blind re-prompt.
             let mut failed_tool: Option<String> = None;
             let mut output_limited = false;
+            // Tool calls the provider discarded because the output cap cut
+            // their arguments off — a write among them can be retried in pieces.
+            let mut truncated_tools: Vec<String> = Vec::new();
             let mut overflow = false;
             // The server dropped the stream before completing the response. Unlike
             // a malformed turn, this is retried transiently, not fed to the
@@ -2849,8 +2855,12 @@ impl SessionRuntime {
                         Some(Ok(ModelEvent::ProviderWarning { message })) => {
                             let _ = events.send(RuntimeEvent::Warning(message));
                         }
-                        Some(Ok(ModelEvent::OutputLimit { message })) => {
+                        Some(Ok(ModelEvent::OutputLimit {
+                            message,
+                            truncated_tools: cut,
+                        })) => {
                             output_limited = true;
+                            truncated_tools.extend(cut);
                             let _ = events.send(RuntimeEvent::Warning(message));
                         }
                         Some(Ok(ModelEvent::Done)) => break,
@@ -2961,7 +2971,25 @@ impl SessionRuntime {
             }
 
             if output_limited {
-                let message = "discarding partial response because the provider hit the output token limit; increase provider max_tokens or ask for a shorter answer".to_string();
+                // An output-budget fault is not the model losing coherence, so
+                // it never feeds the bad-output ladder. But when the call the
+                // cap cut off was a file write, a chunked retry genuinely fixes
+                // it: steer once per turn, then report honestly.
+                if truncated_tools.iter().any(|tool| is_file_write_tool(tool))
+                    && !chunked_write_steered
+                {
+                    chunked_write_steered = true;
+                    let _ = events.send(RuntimeEvent::Warning(
+                        "the file write was cut off by the provider's output cap; retrying it in smaller pieces"
+                            .to_string(),
+                    ));
+                    self.append(
+                        Message::text(Role::User, CHUNKED_WRITE_REPAIR_PROMPT)
+                            .into_synthetic("chunked write after output limit"),
+                    );
+                    continue;
+                }
+                let message = "discarding partial response because the provider hit the output token limit; the cap is shared by prose and tool arguments, so ask for a shorter answer, write large files in smaller pieces (write_file, then append_file), or raise provider max_tokens".to_string();
                 let _ = events.send(RuntimeEvent::Warning(message.clone()));
                 return self.stop_with_detail(events, StopReason::ProviderError, Some(message));
             }
