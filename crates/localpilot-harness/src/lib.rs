@@ -18,6 +18,7 @@ mod evidence;
 mod guidance;
 mod handoff;
 mod hooks;
+mod incognito;
 mod judge;
 mod launch_targets;
 mod lessons;
@@ -53,6 +54,7 @@ pub use handoff::{
     ResumeEnv, ResumeFinding, ResumeReport, HANDOFF_SCHEMA,
 };
 pub use hooks::{ContextContribution, ContextHook, HookEvent, HookFabric, SessionObserver};
+pub use incognito::IncognitoLedger;
 pub use judge::{judge_ranking_selftest_live, judge_score_live};
 pub use lessons::{Lesson, Lessons};
 pub use paths_in_play::PathsInPlay;

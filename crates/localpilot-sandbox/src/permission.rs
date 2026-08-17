@@ -86,6 +86,34 @@ impl Effect {
         )
     }
 
+    /// Whether this effect can leave something on disk that outlives the
+    /// session — the effects an incognito session must never perform silently.
+    /// A *new* file is one; a command class that may write is one (a command
+    /// carries no path, so any write-capable class counts); overwriting an
+    /// existing file, reading, and network are not: they change or expose what
+    /// already exists rather than leaving a new artefact behind.
+    #[must_use]
+    pub fn may_create_files(&self) -> bool {
+        match self {
+            Effect::WritePath {
+                overwrite: false, ..
+            } => true,
+            Effect::WritePath {
+                overwrite: true, ..
+            }
+            | Effect::ReadPath { .. }
+            | Effect::Network => false,
+            Effect::RunCommand(class) => matches!(
+                class,
+                CommandClass::ProjectWrite
+                    | CommandClass::ExternalWrite
+                    | CommandClass::Destructive
+                    | CommandClass::Privileged
+                    | CommandClass::Unknown
+            ),
+        }
+    }
+
     /// A short human-readable class for an approval prompt, shared by every
     /// asking surface. Honest about why the ask exists: an in-workspace
     /// read/write can still ask (the untrusted floor turns its allow into an
@@ -137,13 +165,41 @@ pub struct PermissionRequest {
 pub struct PermissionEngine {
     profile: Profile,
     allowlist: Vec<String>,
+    /// The incognito floor: every effect that may leave a new file behind asks
+    /// (interactive) or is denied (headless), whatever the profile says. It is
+    /// a session property, not a profile, so a mid-session profile swap must
+    /// carry it — see [`PermissionEngine::with_profile`].
+    incognito: bool,
 }
 
 impl PermissionEngine {
     /// An engine with a profile and (for `relaxed`) an allowlist of tool names.
     #[must_use]
     pub fn new(profile: Profile, allowlist: Vec<String>) -> Self {
-        Self { profile, allowlist }
+        Self {
+            profile,
+            allowlist,
+            incognito: false,
+        }
+    }
+
+    /// The same engine with the incognito floor switched on or off.
+    #[must_use]
+    pub fn with_incognito(mut self, incognito: bool) -> Self {
+        self.incognito = incognito;
+        self
+    }
+
+    /// A new engine over a different profile and allowlist that keeps every
+    /// session-level floor (incognito) of this one — the shape a live profile
+    /// swap must use, so `/bypass` cannot lift the incognito floor.
+    #[must_use]
+    pub fn with_profile(&self, profile: Profile, allowlist: Vec<String>) -> Self {
+        Self {
+            profile,
+            allowlist,
+            incognito: self.incognito,
+        }
     }
 
     /// The active profile.
@@ -152,9 +208,25 @@ impl PermissionEngine {
         self.profile
     }
 
+    /// Whether the incognito floor is on.
+    #[must_use]
+    pub fn incognito(&self) -> bool {
+        self.incognito
+    }
+
     /// Decide whether an effect may proceed.
     #[must_use]
     pub fn decide(&self, request: &PermissionRequest) -> Decision {
+        let decision = self.profile_decision(request);
+        if self.incognito && request.effect.may_create_files() {
+            incognito_floor(decision, request.interactivity)
+        } else {
+            decision
+        }
+    }
+
+    /// The profile's own answer, before any session-level floor.
+    fn profile_decision(&self, request: &PermissionRequest) -> Decision {
         match self.profile {
             Profile::Unrestricted => Decision::Allow,
             Profile::Bypass => {
@@ -271,6 +343,17 @@ fn ask_or_deny(interactivity: Interactivity) -> Decision {
     match interactivity {
         Interactivity::Interactive => Decision::Ask,
         Interactivity::NonInteractive => Decision::Deny,
+    }
+}
+
+/// The incognito floor: an effect that may leave a new file behind never runs
+/// silently. `Allow` becomes an interactive `Ask` — the user acknowledges that
+/// the file will outlive the session — and a headless run cannot acknowledge, so
+/// it is denied. `Ask` and `Deny` are unchanged: the floor only ever tightens.
+fn incognito_floor(decision: Decision, interactivity: Interactivity) -> Decision {
+    match decision {
+        Decision::Allow => ask_or_deny(interactivity),
+        other => other,
     }
 }
 
@@ -450,6 +533,112 @@ mod tests {
 
     fn engine(profile: Profile) -> PermissionEngine {
         PermissionEngine::new(profile, Vec::new())
+    }
+
+    #[test]
+    fn the_incognito_floor_asks_for_every_new_file_under_every_profile() {
+        let create = Effect::WritePath {
+            inside_workspace: true,
+            overwrite: false,
+            secret_like: false,
+        };
+        let overwrite = Effect::WritePath {
+            inside_workspace: true,
+            overwrite: true,
+            secret_like: false,
+        };
+        let read = Effect::ReadPath {
+            inside_workspace: true,
+            secret_like: false,
+        };
+        for profile in [
+            Profile::Default,
+            Profile::Relaxed,
+            Profile::Bypass,
+            Profile::Unrestricted,
+        ] {
+            let e = engine(profile).with_incognito(true);
+            assert!(e.incognito());
+            assert_eq!(
+                e.decide(&req(create, Interactivity::Interactive, true)),
+                Decision::Ask,
+                "{profile:?}: a new file must be acknowledged"
+            );
+            assert_eq!(
+                e.decide(&req(create, Interactivity::NonInteractive, true)),
+                Decision::Deny,
+                "{profile:?}: headless cannot acknowledge"
+            );
+            // Overwrites and reads keep the profile's own answer.
+            assert_eq!(
+                e.decide(&req(overwrite, Interactivity::Interactive, true)),
+                engine(profile).decide(&req(overwrite, Interactivity::Interactive, true))
+            );
+            assert_eq!(
+                e.decide(&req(read, Interactivity::Interactive, true)),
+                engine(profile).decide(&req(read, Interactivity::Interactive, true))
+            );
+        }
+        // Without the floor, bypass allows the same creation silently.
+        assert_eq!(
+            engine(Profile::Bypass).decide(&req(create, Interactivity::Interactive, true)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn the_incognito_floor_covers_write_capable_commands_only() {
+        let e = engine(Profile::Bypass).with_incognito(true);
+        for class in [
+            CommandClass::ProjectWrite,
+            CommandClass::ExternalWrite,
+            CommandClass::Destructive,
+            CommandClass::Privileged,
+            CommandClass::Unknown,
+        ] {
+            assert!(Effect::RunCommand(class).may_create_files(), "{class:?}");
+            assert_eq!(
+                e.decide(&req(
+                    Effect::RunCommand(class),
+                    Interactivity::Interactive,
+                    true
+                )),
+                Decision::Ask,
+                "{class:?}"
+            );
+        }
+        for class in [CommandClass::ReadOnly, CommandClass::Network] {
+            assert!(!Effect::RunCommand(class).may_create_files(), "{class:?}");
+            assert_eq!(
+                e.decide(&req(
+                    Effect::RunCommand(class),
+                    Interactivity::Interactive,
+                    true
+                )),
+                Decision::Allow,
+                "{class:?}: bypass still allows a command that cannot write"
+            );
+        }
+        assert!(!Effect::Network.may_create_files());
+    }
+
+    #[test]
+    fn a_profile_swap_keeps_the_incognito_floor() {
+        let e = engine(Profile::Default).with_incognito(true);
+        let swapped = e.with_profile(Profile::Unrestricted, Vec::new());
+        assert_eq!(swapped.profile(), Profile::Unrestricted);
+        assert!(swapped.incognito());
+        let create = Effect::WritePath {
+            inside_workspace: true,
+            overwrite: false,
+            secret_like: false,
+        };
+        assert_eq!(
+            swapped.decide(&req(create, Interactivity::Interactive, true)),
+            Decision::Ask
+        );
+        // A plain rebuild would have dropped it — the swap shape matters.
+        assert!(!PermissionEngine::new(Profile::Unrestricted, Vec::new()).incognito());
     }
 
     #[test]

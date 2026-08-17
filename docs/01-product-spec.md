@@ -239,6 +239,18 @@ loop cannot mint: a human `promote`s a patch onto the branch, or `emit-draft
 **off by default** (`[self_improvement]`) and the agent can propose but never
 publish.
 
+### Incognito (persist nothing; gate every file)
+
+Independent of the operating mode, a session can run **incognito**
+(`localpilot chat --incognito`, or `/incognito` mid-session; ADR-0160). It
+persists nothing of its own — the session store is in-memory, prompt history is
+off, and no closeout, knowledge index, or code-graph reindex runs — and every
+file it creates is gated behind an explicit acknowledgement (a headless run
+denies), a floor that no permission profile lifts. Slash commands that would
+write something durable are refused. When the session ends it reports every file
+it created, and states the one boundary it cannot observe: a shell command's
+writes outside the workspace.
+
 ### Research (local-first; web opt-in)
 
 Independent of the operating mode, LocalPilot can **research** a topic

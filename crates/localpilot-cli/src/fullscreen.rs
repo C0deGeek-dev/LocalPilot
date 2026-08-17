@@ -1,6 +1,6 @@
 //! Crossterm host for the backend-neutral full-screen chat model.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::future::Future;
@@ -29,8 +29,7 @@ use localpilot_harness::{
     ModelHealth, RuntimeEvent, SessionRuntime, SoftInterrupt, SteerQueue, StopReason,
 };
 use localpilot_sandbox::{
-    Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionEngineHandle,
-    PermissionRequest,
+    Approver, Decision, Effect, Interactivity, PermissionEngineHandle, PermissionRequest,
 };
 use localpilot_slash::{parse_slash_for, Host, SlashAction};
 use localpilot_store::SessionIndexEntry;
@@ -112,6 +111,10 @@ pub(crate) struct HostContext<'a> {
     /// Confirmed reload handoff, consumed by `repl::run_chat` only after this host
     /// has restored the alternate screen and raw terminal modes.
     pub(crate) deferred_selfimprove_reload: &'a Cell<bool>,
+    /// The workspace snapshot taken when the current incognito session began, so
+    /// `/incognito off` (and session exit) can report the files it created.
+    /// `Some` iff a session is currently incognito. Owned by `repl::run_chat`.
+    pub(crate) incognito_entry: &'a RefCell<Option<crate::incognito::WorkspaceSnapshot>>,
 }
 
 pub(crate) struct PairHostContext<'a> {
@@ -748,6 +751,69 @@ enum SerialOperation {
     PumpedSlash(PumpedSlash),
 }
 
+/// Enter or leave incognito mid-session. Entering swaps the runtime to a
+/// non-persistent store and turns on the file-creation floor; leaving prints a
+/// report of everything the incognito session created and returns to a normal
+/// persisted session. Both start a fresh session, exactly like `/new`.
+fn handle_incognito_toggle(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    cwd: &Path,
+    incognito_entry: &RefCell<Option<crate::incognito::WorkspaceSnapshot>>,
+    off: bool,
+) {
+    if off {
+        if !runtime.is_incognito() {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "not in incognito — nothing to end.".to_string(),
+            ));
+            return;
+        }
+        // Report what the incognito session created before dropping its record.
+        let before = incognito_entry.borrow_mut().take().unwrap_or_default();
+        let after = crate::incognito::WorkspaceSnapshot::take(cwd);
+        let report = crate::incognito::IncognitoReport::assemble(
+            &before,
+            &after,
+            runtime.incognito_ledger(),
+        );
+        runtime.exit_incognito();
+        reset_session_view(app, runtime);
+        app.apply_runtime(RuntimeUpdate::Notice(report.render(cwd)));
+        app.apply_runtime(RuntimeUpdate::Notice(
+            "incognito off — this session is saved again.".to_string(),
+        ));
+    } else {
+        if runtime.is_incognito() {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "already incognito — nothing is being saved.".to_string(),
+            ));
+            return;
+        }
+        runtime.enter_incognito();
+        *incognito_entry.borrow_mut() = Some(crate::incognito::WorkspaceSnapshot::take(cwd));
+        reset_session_view(app, runtime);
+        app.apply_runtime(RuntimeUpdate::Notice(
+            "incognito on — nothing is saved to session memory or LocalMind. \
+             Every new file needs your approval; files a shell command creates \
+             outside the workspace cannot be tracked. Run `/incognito off` to end \
+             and see what was created."
+                .to_string(),
+        ));
+    }
+}
+
+/// Reset the timeline/session view after an in-place session change (new
+/// session, or an incognito enter/leave), mirroring the `/new` handler.
+fn reset_session_view(app: &mut AppModel, runtime: &SessionRuntime) {
+    app.clear_stashed_draft();
+    app.clear_conversation();
+    app.set_active_session_id(runtime.session_id().to_string());
+    app.set_active_session_name(None);
+    let (used, limit) = runtime.context_usage();
+    app.apply_runtime(RuntimeUpdate::ContextUsage { used, limit });
+}
+
 /// Route a parsed full-screen slash action: `/localbox`, `/compact[ force]`, and
 /// the long-running ingest/research/resume actions pump; everything else runs
 /// synchronously. Consumes the action, so there is no reparse or clone.
@@ -950,7 +1016,9 @@ pub(crate) async fn run(
     // history store. Workspace scans stay out of this startup seam entirely.
     let _ = draw_synchronized(&mut terminal, &app)?;
     let mut workspace_index = WorkspaceFileIndex::start(context.cwd.to_path_buf());
-    if !context.trust_required {
+    // Incognito builds no project-knowledge index: it must write nothing to the
+    // LocalMind store.
+    if !context.trust_required && !context.runtime.is_incognito() {
         crate::repl::start_session_knowledge_index(context.cwd, context.ingest);
     }
     let history_entries = context.history.load();
@@ -3138,7 +3206,8 @@ async fn execute_fullscreen_slash(
         ));
         return false;
     };
-    execute_fullscreen_slash_action(app, runtime, config, cwd, action).await
+    let incognito_entry = RefCell::new(None);
+    execute_fullscreen_slash_action(app, runtime, config, cwd, &incognito_entry, action).await
 }
 
 /// Execute an already-parsed synchronous full-screen slash action. Pumped actions
@@ -3150,9 +3219,13 @@ async fn execute_fullscreen_slash_action(
     runtime: &mut SessionRuntime,
     config: &localpilot_config::Config,
     cwd: &Path,
+    incognito_entry: &RefCell<Option<crate::incognito::WorkspaceSnapshot>>,
     action: SlashAction,
 ) -> bool {
     match action {
+        SlashAction::Incognito { off } => {
+            handle_incognito_toggle(app, runtime, cwd, incognito_entry, off);
+        }
         SlashAction::Model {
             provider: Some(provider),
             model,
@@ -4075,6 +4148,7 @@ async fn run_event_loop(
         ingest,
         config,
         deferred_selfimprove_reload,
+        incognito_entry,
         // The launch gate uses this in the startup screen; inside the loop the live
         // authority is `runtime.trusted()` (built from the same launch snapshot),
         // updated on accept — so no separate loop-local trust shadow is kept.
@@ -4120,12 +4194,16 @@ async fn run_event_loop(
                     // persisted (memory-only), so a later process still prompts.
                     crate::interactive_session::grant_live_trust(runtime, config, cwd);
                     accept_workspace_trust(app, cwd, false, crate::trust::remember);
-                    crate::repl::start_session_knowledge_index(cwd, ingest);
+                    if !runtime.is_incognito() {
+                        crate::repl::start_session_knowledge_index(cwd, ingest);
+                    }
                 }
                 TrustEventOutcome::Remember => {
                     crate::interactive_session::grant_live_trust(runtime, config, cwd);
                     accept_workspace_trust(app, cwd, true, crate::trust::remember);
-                    crate::repl::start_session_knowledge_index(cwd, ingest);
+                    if !runtime.is_incognito() {
+                        crate::repl::start_session_knowledge_index(cwd, ingest);
+                    }
                 }
                 TrustEventOutcome::Exit => break,
                 TrustEventOutcome::Deny => return Ok(LoopExit::TrustDenied),
@@ -4192,6 +4270,14 @@ async fn run_event_loop(
                             ));
                             continue;
                         };
+                        // Incognito refuses any command that would write something
+                        // durable, naming what it would have written.
+                        if runtime.is_incognito() {
+                            if let Some(message) = crate::incognito::incognito_refusal(&action) {
+                                app.apply_runtime(RuntimeUpdate::Warning(message));
+                                continue;
+                            }
+                        }
                         match route_fullscreen_slash(action) {
                             SlashRoute::Pumped(command) => {
                                 if drive_operation_chain(
@@ -4222,7 +4308,12 @@ async fn run_event_loop(
                             }
                             SlashRoute::Synchronous(action) => {
                                 if execute_fullscreen_slash_action(
-                                    app, runtime, config, cwd, action,
+                                    app,
+                                    runtime,
+                                    config,
+                                    cwd,
+                                    incognito_entry,
+                                    action,
                                 )
                                 .await
                                 {
@@ -4641,6 +4732,16 @@ async fn drive_localmind_review(
     intent: LocalMindReviewIntent,
     queue: &mut VecDeque<QueuedOperation>,
 ) -> Result<bool> {
+    // A LocalMind review decision writes to the persistent knowledge store — the
+    // one thing an incognito session must never do. Refuse it plainly.
+    if runtime.is_incognito() {
+        app.apply_runtime(RuntimeUpdate::Warning(
+            "not available in incognito — a LocalMind review decision would write to the \
+             persistent knowledge store."
+                .to_string(),
+        ));
+        return Ok(false);
+    }
     let root = match localpilot_localmind::resolve_store_root(ctx.cwd) {
         localpilot_localmind::StoreRoot::Found(root) => root,
         localpilot_localmind::StoreRoot::NotFound(_) => {
@@ -6621,10 +6722,14 @@ fn run_active_fullscreen_slash(
         SlashAction::SetProfile(profile) => {
             match live {
                 Some(live) => {
-                    live.permissions.set(PermissionEngine::new(
-                        crate::repl::sandbox_profile(profile),
-                        Vec::new(),
-                    ));
+                    // Rebuild through the current engine so a session-level floor
+                    // (incognito) survives a mid-session profile swap — `/bypass`
+                    // must not lift it.
+                    live.permissions.set(
+                        live.permissions
+                            .snapshot()
+                            .with_profile(crate::repl::sandbox_profile(profile), Vec::new()),
+                    );
                     app.set_shared_profile(profile.label());
                     app.apply_runtime(RuntimeUpdate::Notice(format!(
                         "permission profile: {} (in force from the next tool call)",
@@ -11293,7 +11398,7 @@ mod tests {
 
     #[test]
     fn fullscreen_catalog_matches_the_shared_spec_table() {
-        // The full-screen picker is generated from the shared table: 40 rows in global
+        // The full-screen picker is generated from the shared table: 41 rows in global
         // order (the `agent`/`harness` mode entries, the four permission profiles +
         // effort, the pumped + synchronous command tiers, five takeovers, and the
         // LocalMind workspace tab),
@@ -11367,8 +11472,12 @@ mod tests {
                 "localmind",
                 "Browse LocalMind docs, graph, memory, review, skills, and audit",
             ),
+            (
+                "incognito",
+                "Incognito: save nothing; new files need approval (`/incognito off` to end)",
+            ),
         ];
-        assert_eq!(full_screen.len(), 40);
+        assert_eq!(full_screen.len(), 41);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
@@ -12853,7 +12962,7 @@ mod tests {
         let history = localpilot_store::PromptHistory::with_store(None);
         let mut queue = VecDeque::new();
         let live = LiveControls {
-            permissions: PermissionEngineHandle::new(PermissionEngine::new(
+            permissions: PermissionEngineHandle::new(localpilot_sandbox::PermissionEngine::new(
                 localpilot_sandbox::Profile::Default,
                 Vec::new(),
             )),
@@ -15411,11 +15520,13 @@ mod tests {
         let (config, mut bundle) = single_session(dir.path()).await;
         let cwd = dir.path();
         let mut app = app();
+        let incognito_entry = RefCell::new(None);
         let _ = execute_fullscreen_slash_action(
             &mut app,
             &mut bundle.runtime,
             &config,
             cwd,
+            &incognito_entry,
             SlashAction::SetMode(localpilot_slash::Mode::Research),
         )
         .await;
@@ -17105,8 +17216,10 @@ last_seen = "2026-08-10"
             action: LocalMindReviewAction::Accept,
         };
         let request = localmind_review_request(false, &intent);
-        let permissions =
-            PermissionEngineHandle::new(PermissionEngine::new(Profile::Default, Vec::new()));
+        let permissions = PermissionEngineHandle::new(localpilot_sandbox::PermissionEngine::new(
+            Profile::Default,
+            Vec::new(),
+        ));
         let approver = localpilot_sandbox::ScriptedApprover::new(vec![false]);
         let outcome = perform_localmind_review(
             permissions,
@@ -17138,8 +17251,10 @@ last_seen = "2026-08-10"
             }
         ));
         assert_eq!(request.interactivity, Interactivity::Interactive);
-        let permissions =
-            PermissionEngineHandle::new(PermissionEngine::new(Profile::Default, Vec::new()));
+        let permissions = PermissionEngineHandle::new(localpilot_sandbox::PermissionEngine::new(
+            Profile::Default,
+            Vec::new(),
+        ));
         let deny = localpilot_sandbox::ScriptedApprover::new(vec![false]);
         assert!(!localmind_review_allowed(&permissions, &deny, &request).await);
         let allow = localpilot_sandbox::ScriptedApprover::new(vec![true]);
@@ -17167,8 +17282,10 @@ last_seen = "2026-08-10"
             action: LocalMindReviewAction::Accept,
         };
         let request = localmind_review_request(false, &intent);
-        let permissions =
-            PermissionEngineHandle::new(PermissionEngine::new(Profile::Default, Vec::new()));
+        let permissions = PermissionEngineHandle::new(localpilot_sandbox::PermissionEngine::new(
+            Profile::Default,
+            Vec::new(),
+        ));
         let approver = localpilot_sandbox::ScriptedApprover::new(vec![true]);
 
         let outcome = perform_localmind_review(
@@ -17183,5 +17300,40 @@ last_seen = "2026-08-10"
         assert!(matches!(outcome, LocalMindReviewOutcome::Updated(_)));
         let updated = localpilot_localmind::review_list(dir.path()).expect("updated review list");
         assert_eq!(updated[0].state, "Accepted");
+    }
+
+    #[tokio::test]
+    async fn incognito_toggle_enters_and_leaves_a_non_persistent_session() {
+        // `/incognito` swaps the live runtime to a non-persistent session; a
+        // persistent slash command is then refused; `/incognito off` returns to
+        // a persisted session. The report render never panics on an empty run.
+        let dir = tempfile::tempdir().unwrap();
+        let (_config, mut bundle) = single_session(dir.path()).await;
+        let cwd = dir.path();
+        let mut app = app();
+        let incognito_entry = RefCell::new(None);
+
+        assert!(!bundle.runtime.is_incognito());
+        handle_incognito_toggle(&mut app, &mut bundle.runtime, cwd, &incognito_entry, false);
+        assert!(bundle.runtime.is_incognito(), "/incognito entered");
+        assert!(bundle.runtime.store().is_ephemeral());
+        assert!(
+            incognito_entry.borrow().is_some(),
+            "entry snapshot captured"
+        );
+
+        // A persistent command is refused while incognito.
+        assert!(crate::incognito::incognito_refusal(&SlashAction::Ingest(
+            localpilot_slash::IngestAction::Run
+        ))
+        .is_some());
+        // A read/toggle is not.
+        assert!(crate::incognito::incognito_refusal(&SlashAction::Tree).is_none());
+
+        handle_incognito_toggle(&mut app, &mut bundle.runtime, cwd, &incognito_entry, true);
+        assert!(!bundle.runtime.is_incognito(), "/incognito off left");
+        assert!(!bundle.runtime.store().is_ephemeral());
+        assert!(incognito_entry.borrow().is_none(), "entry snapshot cleared");
+        bundle.runtime.close();
     }
 }

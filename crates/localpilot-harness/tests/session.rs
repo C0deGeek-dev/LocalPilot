@@ -2162,3 +2162,55 @@ async fn a_stuck_tool_is_named_in_the_handoff() {
         .to_json_line()
         .contains("\"stuck_tools\":[\"read_file\"]"));
 }
+
+#[tokio::test]
+async fn entering_incognito_swaps_to_an_ephemeral_store_and_arms_the_file_floor() {
+    use localpilot_sandbox::{Decision, Effect};
+
+    let mut h = build(FakeProvider::new(), &[], SessionConfig::default());
+    let before_session = h.runtime.session_id();
+    assert!(!h.runtime.is_incognito());
+
+    assert!(h.runtime.enter_incognito());
+    assert!(h.runtime.is_incognito());
+    assert!(h.runtime.store().is_ephemeral(), "store is in-memory now");
+    assert_ne!(h.runtime.session_id(), before_session, "a fresh session");
+
+    // The incognito floor turns a new-file write into an acknowledgement even
+    // though the base profile (Default, trusted) would allow it.
+    let create = Effect::WritePath {
+        inside_workspace: true,
+        overwrite: false,
+        secret_like: false,
+    };
+    let request = PermissionRequest {
+        tool: "write_file".to_string(),
+        effect: create,
+        interactivity: Interactivity::Interactive,
+        trusted: true,
+        detail: String::new(),
+    };
+    assert_eq!(
+        h.runtime
+            .permission_engine_handle()
+            .snapshot()
+            .decide(&request),
+        Decision::Ask,
+        "a new file must be acknowledged under incognito"
+    );
+
+    // Re-entering is a no-op; leaving returns to a persisted store.
+    assert!(!h.runtime.enter_incognito());
+    assert!(h.runtime.exit_incognito());
+    assert!(!h.runtime.is_incognito());
+    assert!(!h.runtime.store().is_ephemeral(), "store is on disk again");
+    assert_eq!(
+        h.runtime
+            .permission_engine_handle()
+            .snapshot()
+            .decide(&request),
+        Decision::Allow,
+        "the floor is lifted after leaving incognito"
+    );
+    assert!(!h.runtime.exit_incognito());
+}

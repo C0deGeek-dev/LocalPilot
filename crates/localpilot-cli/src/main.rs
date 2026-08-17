@@ -19,6 +19,8 @@ mod fullscreen;
 mod handoff_cmd;
 mod harness_cmd;
 mod import_cmd;
+#[cfg(feature = "tui")]
+mod incognito;
 mod ingest_cmd;
 #[cfg(feature = "tui")]
 mod ingest_progress;
@@ -425,6 +427,11 @@ enum Command {
         /// Open the session with this id or name (see `session list`).
         #[arg(long)]
         resume: Option<String>,
+        /// Incognito: persist nothing (no transcript, session index, prompt
+        /// history, or LocalMind learning), and require an acknowledgement for
+        /// every file the session creates. Cannot resume a persisted session.
+        #[arg(long, conflicts_with_all = ["resume", "continue_latest"])]
+        incognito: bool,
     },
     /// Run an opt-in two-agent collaboration in the full-screen terminal.
     #[cfg(feature = "tui")]
@@ -2160,11 +2167,18 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             bypass,
             continue_latest,
             resume,
+            incognito,
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
-            let outcome =
-                repl::run_chat(model.as_deref(), provider.as_deref(), profile, resume).await?;
+            let outcome = repl::run_chat_with(
+                model.as_deref(),
+                provider.as_deref(),
+                profile,
+                resume,
+                incognito,
+            )
+            .await?;
             exit_code = finish_chat(outcome)?;
         }
         #[cfg(feature = "tui")]

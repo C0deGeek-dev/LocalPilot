@@ -162,6 +162,12 @@ pub enum SlashAction {
     Search(Option<String>),
     /// Activate the six-section LocalMind workspace tab. Full-screen only; no arguments.
     LocalMind,
+    /// Toggle incognito mode: `/incognito` starts a non-persistent session (a
+    /// fresh session that saves nothing and gates every file it creates);
+    /// `/incognito off` ends it and reports what was created. Full-screen only.
+    Incognito {
+        off: bool,
+    },
     Invalid {
         command: String,
         reason: String,
@@ -259,6 +265,120 @@ pub enum StrayArgs {
 pub enum Host {
     Fullscreen,
     Pair,
+}
+
+/// Whether a slash action leaves anything on disk — the axis an incognito
+/// session gates on. Kept exhaustive (wildcard-free) so a new [`SlashAction`]
+/// must be classified before it compiles, and a persistent action can never be
+/// added that an incognito session then silently runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Persistence {
+    /// Reads or shows state; writes nothing.
+    ReadOnly,
+    /// Touches only the session store, which is in-memory under incognito, so it
+    /// leaves nothing on disk there.
+    MemoryOnly,
+    /// Writes to disk, or starts a durable service, that outlives the session.
+    /// The string names what would be written, for an incognito refusal message.
+    Persistent(&'static str),
+}
+
+impl Persistence {
+    /// What this persistent action would write, or `None` when it writes
+    /// nothing durable.
+    #[must_use]
+    pub fn persistent_target(self) -> Option<&'static str> {
+        match self {
+            Persistence::Persistent(what) => Some(what),
+            Persistence::ReadOnly | Persistence::MemoryOnly => None,
+        }
+    }
+}
+
+/// Whether a raw `/skills` argument names a writing subcommand. `/skills` bare
+/// (or `list`/`show`/`research` read paths) inspects only; `install`, `add`,
+/// `remove`, `delete`, `update`, `repo`, and `sync` change what is on disk.
+#[must_use]
+fn skills_arg_writes(arg: &str) -> Option<&'static str> {
+    match arg.split_whitespace().next().unwrap_or("") {
+        "install" | "add" | "update" | "sync" => Some("install or update a skill on disk"),
+        "remove" | "delete" | "uninstall" => Some("remove an installed skill from disk"),
+        "repo" | "source" | "sources" => Some("add or change a skill source repository on disk"),
+        _ => None,
+    }
+}
+
+impl SlashAction {
+    /// Classify what this action would persist, so an incognito session can
+    /// refuse every [`Persistence::Persistent`] one. Exhaustive by construction.
+    #[must_use]
+    pub fn persistence(&self) -> Persistence {
+        match self {
+            // Pure view/control: nothing written.
+            Self::SetMode(_)
+            | Self::SetProfile(_)
+            | Self::ToggleThinking
+            | Self::Clear
+            | Self::Compact { .. }
+            | Self::SetEffort(_)
+            | Self::Tree
+            | Self::Sessions
+            | Self::HarnessResume
+            | Self::WaitResume
+            | Self::Knowledge(_)
+            | Self::Agents(_)
+            | Self::Background(_)
+            | Self::LocalBoxModels
+            | Self::Exit { .. }
+            | Self::Help
+            | Self::Theme(_)
+            | Self::Settings(_)
+            | Self::Diff(_)
+            | Self::Search(_)
+            | Self::LocalMind
+            | Self::Incognito { .. }
+            | Self::Model { .. }
+            | Self::Invalid { .. }
+            | Self::Unknown(_) => Persistence::ReadOnly,
+
+            // Touch the session store only — in-memory under incognito, so these
+            // leave nothing on disk there.
+            Self::NewSession
+            | Self::Fork
+            | Self::CloneSession
+            | Self::LoadSession(_)
+            | Self::ContinueSession(_)
+            | Self::NameSession(_) => Persistence::MemoryOnly,
+
+            // Write to disk (or start a durable service) that outlives the run.
+            Self::Research(_) => Persistence::Persistent("save a research report to disk"),
+            Self::Ingest(_) => {
+                Persistence::Persistent("ingest content into the persistent knowledge store")
+            }
+            Self::ContextBuild(_) => {
+                Persistence::Persistent("build a persistent knowledge index on disk")
+            }
+            Self::LocalBoxAdopt { .. } => {
+                Persistence::Persistent("write a LocalBox server into `.localpilot.toml`")
+            }
+            Self::LocalBoxServe { .. } => Persistence::Persistent(
+                "start a durable LocalBox server and write it into `.localpilot.toml`",
+            ),
+            Self::SelfImprove(action) => match action {
+                SelfImproveAction::Status => Persistence::ReadOnly,
+                SelfImproveAction::Start { .. }
+                | SelfImproveAction::Next
+                | SelfImproveAction::Approve { .. }
+                | SelfImproveAction::Reset => {
+                    Persistence::Persistent("advance the persisted self-improvement loop on disk")
+                }
+            },
+            Self::Skills(arg) => match skills_arg_writes(arg) {
+                Some(what) => Persistence::Persistent(what),
+                None => Persistence::ReadOnly,
+            },
+        }
+    }
 }
 
 impl SlashAction {
@@ -474,7 +594,7 @@ slash_commands! {
         // routes them to real actions; their catalog scope stays full-screen/pair-only.
         Help, Theme, Settings, Diff, Search,
         // Full-screen-only takeover; the pair host keeps it Unknown.
-        LocalMind,
+        LocalMind, Incognito,
         // Permanent pair-only identity: `/abort` is owned by the pair event
         // loop, never parsed by `parse_slash_for`, present only in the pair picker.
         Abort,
@@ -610,6 +730,12 @@ slash_commands! {
             Reject,
             "Browse LocalMind docs, graph, memory, review, skills, and audit"
         ),
+        Incognito => fullscreen_only(
+            "incognito",
+            Optional,
+            Fall,
+            "Incognito: save nothing; new files need approval (`/incognito off` to end)"
+        ),
         // --- permanent pair-only, pair-loop-owned: no-arg, rejects a stray ----
         Abort => pair_only("abort", NoArg, Reject, "Stop the collaboration and both peers"),
         // --- parse-only aliases (hidden; present for lookup + stray policy) ---
@@ -691,6 +817,7 @@ impl SlashAction {
             SlashAction::Diff(_) => C::Diff,
             SlashAction::Search(_) => C::Search,
             SlashAction::LocalMind => C::LocalMind,
+            SlashAction::Incognito { .. } => C::Incognito,
             SlashAction::Invalid { .. } | SlashAction::Unknown(_) => return None,
         })
     }
@@ -982,6 +1109,9 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
         C::LocalMind => routed_fullscreen(host, command, || {
             no_arg(spelling, name, args, command, SlashAction::LocalMind)
         }),
+        C::Incognito => routed_fullscreen(host, command, || SlashAction::Incognito {
+            off: args.trim().eq_ignore_ascii_case("off"),
+        }),
     }
 }
 
@@ -1113,6 +1243,65 @@ mod tests {
     }
 
     #[test]
+    fn persistent_actions_are_refused_by_incognito_and_name_what_they_write() {
+        // A representative persistent member of each family is refused with a
+        // non-empty explanation.
+        let persistent = [
+            SlashAction::Research(Some("topic".into())),
+            SlashAction::Ingest(IngestAction::Run),
+            SlashAction::ContextBuild("q".into()),
+            SlashAction::LocalBoxAdopt { serve: None },
+            SlashAction::LocalBoxServe {
+                model: "m".into(),
+                allow_untuned: false,
+            },
+            SlashAction::SelfImprove(SelfImproveAction::Next),
+            SlashAction::Skills("install foo".into()),
+        ];
+        for action in persistent {
+            let what = action.persistence().persistent_target();
+            assert!(
+                what.is_some_and(|w| !w.is_empty()),
+                "{action:?} must be persistent with a message"
+            );
+        }
+    }
+
+    #[test]
+    fn read_and_memory_actions_are_not_refused_by_incognito() {
+        // Reads/views write nothing; session-store actions are in-memory under
+        // incognito, so neither is a persistent action.
+        for action in [
+            SlashAction::Tree,
+            SlashAction::Sessions,
+            SlashAction::SelfImprove(SelfImproveAction::Status),
+            SlashAction::Skills(String::new()),
+            SlashAction::Skills("list".into()),
+            SlashAction::LocalMind,
+            SlashAction::SetProfile(Profile::Bypass),
+        ] {
+            assert_eq!(action.persistence().persistent_target(), None, "{action:?}");
+        }
+        for action in [
+            SlashAction::NewSession,
+            SlashAction::Fork,
+            SlashAction::NameSession("x".into()),
+        ] {
+            assert_eq!(action.persistence(), Persistence::MemoryOnly, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn skills_write_verbs_are_persistent_but_reads_are_not() {
+        assert!(skills_arg_writes("install foo").is_some());
+        assert!(skills_arg_writes("remove foo").is_some());
+        assert!(skills_arg_writes("repo add url").is_some());
+        assert!(skills_arg_writes("").is_none());
+        assert!(skills_arg_writes("list").is_none());
+        assert!(skills_arg_writes("research query").is_none());
+    }
+
+    #[test]
     fn live_actions_are_host_aware() {
         let shared = [
             SlashAction::SetProfile(Profile::Relaxed),
@@ -1170,7 +1359,7 @@ mod tests {
             from_table, from_enum,
             "SLASH_SPELLINGS identities must equal SlashCommand::ALL"
         );
-        assert_eq!(from_enum.len(), 38, "expected 38 command identities");
+        assert_eq!(from_enum.len(), 39, "expected 39 command identities");
     }
 
     #[test]
@@ -1183,7 +1372,7 @@ mod tests {
         // (a redundant forcing alias of `compact`) and the `wait_resume`/`compact-force`
         // parse-only aliases stay hidden but remain typeable in full-screen.
         // `/localmind` adds the one full-screen-only six-section workspace tab.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 40);
+        assert_eq!(specs_for(Host::Fullscreen).len(), 41);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 

@@ -8,7 +8,7 @@
 //! resume — while the full-screen application itself lives in
 //! `localpilot-terminal-ui`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io::{self};
 use std::time::Instant;
 
@@ -133,6 +133,19 @@ pub async fn run_chat(
     profile: Profile,
     resume: Option<localpilot_core::SessionId>,
 ) -> anyhow::Result<ChatOutcome> {
+    run_chat_with(model, provider_id, profile, resume, false).await
+}
+
+/// [`run_chat`] with the incognito switch. When `incognito`, the session keeps
+/// nothing on disk (in-memory store, prompt history off, no closeout/knowledge
+/// index/reindex) and every file it creates is gated and reported at the end.
+pub async fn run_chat_with(
+    model: Option<&str>,
+    provider_id: Option<&str>,
+    profile: Profile,
+    resume: Option<localpilot_core::SessionId>,
+    incognito: bool,
+) -> anyhow::Result<ChatOutcome> {
     let mut timer = StartupTimer::new();
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
@@ -140,8 +153,8 @@ pub async fn run_chat(
 
     // Best-effort retention so `.localpilot/` cannot grow without bound. Errors
     // are ignored — cleanup must never block starting a chat — and it runs before
-    // the live region is drawn.
-    if config.storage.auto_prune {
+    // the live region is drawn. Never for incognito: it must not touch the store.
+    if config.storage.auto_prune && !incognito {
         let policy = crate::session_cmd::retention_policy(&config.storage, None, None);
         if !policy.is_unbounded() {
             let _ = Store::open(&cwd).prune(policy, crate::session_cmd::now_unix(), false);
@@ -163,7 +176,7 @@ pub async fn run_chat(
         }
     };
     let selected_provider_id = provider_id.unwrap_or(&config.provider.default).to_string();
-    let setup = InteractiveSessionSetup::resolve(cwd, config, profile).await?;
+    let setup = InteractiveSessionSetup::resolve_with(cwd, config, profile, incognito).await?;
     timer.mark("provider registry + mcp servers + tools");
     let InteractiveSessionBundle {
         mut runtime,
@@ -177,12 +190,27 @@ pub async fn run_chat(
     let cwd = setup.cwd().to_path_buf();
     let config = setup.config();
 
-    let fullscreen_startup = resume
+    let mut fullscreen_startup = resume
         .map(|session| {
             prepare_fullscreen_resume(&mut runtime, session)
                 .unwrap_or_else(|notice| vec![crate::fullscreen::StartupItem::Notice(notice)])
         })
         .unwrap_or_default();
+    if incognito {
+        // Session-level informed consent: the acknowledgement for each file
+        // creation is a decision, but the boundary is stated up front, including
+        // the one thing the end report cannot cover.
+        fullscreen_startup.insert(
+            0,
+            crate::fullscreen::StartupItem::Notice(
+                "Incognito: nothing is saved to session memory or LocalMind, and every file \
+                 this session creates needs your approval. Files a shell command writes outside \
+                 the workspace cannot be tracked or listed. Run `/incognito off` to end and see \
+                 what was created."
+                    .to_string(),
+            ),
+        );
+    }
     let resumed_session_name = runtime
         .store()
         .list_sessions()
@@ -193,7 +221,14 @@ pub async fn run_chat(
                 .find(|entry| entry.id == runtime.session_id())
         })
         .and_then(|entry| entry.name);
-    let history = localpilot_store::PromptHistory::new(config.history.persistence.is_enabled());
+    // Incognito never persists prompt history, and snapshots the workspace now so
+    // the files it creates can be reported at the end. The snapshot lives in a
+    // cell the host also drives: `/incognito`/`/incognito off` re-take and clear
+    // it, so the exit report is correct however incognito was entered or left.
+    let history =
+        localpilot_store::PromptHistory::new(!incognito && config.history.persistence.is_enabled());
+    let incognito_entry: RefCell<Option<crate::incognito::WorkspaceSnapshot>> =
+        RefCell::new(incognito.then(|| crate::incognito::WorkspaceSnapshot::take(&cwd)));
     let deferred_selfimprove_reload = Cell::new(false);
 
     timer.mark("READY — entering full-screen TUI");
@@ -211,7 +246,13 @@ pub async fn run_chat(
             branch: git.as_ref().map(|status| status.branch.clone()),
             workspace_dirty: git.as_ref().and_then(|status| status.dirty),
             mode: Mode::Agent,
-            profile: ui_profile(profile).label().to_string(),
+            // A launch-time incognito badge rides the profile label so the header
+            // always shows the session is non-persistent.
+            profile: if incognito {
+                format!("{} · incognito", ui_profile(profile).label())
+            } else {
+                ui_profile(profile).label().to_string()
+            },
             session_id: runtime.session_id().to_string(),
             session_name: resumed_session_name,
         },
@@ -227,10 +268,26 @@ pub async fn run_chat(
             config: &mut fullscreen_config,
             trust_required,
             deferred_selfimprove_reload: &deferred_selfimprove_reload,
+            incognito_entry: &incognito_entry,
         },
     )
     .await;
-    crate::context_inject::close_out(&cwd, runtime.session_id());
+    // A session still incognito at exit (launched with `--incognito`, or entered
+    // via `/incognito` and never turned off) reports what it created and closes
+    // out nothing. `/incognito off` already reported and cleared the entry cell,
+    // so a session that ended normal reaches the else and closes out as usual.
+    if runtime.is_incognito() {
+        let before = incognito_entry.borrow_mut().take().unwrap_or_default();
+        let after = crate::incognito::WorkspaceSnapshot::take(&cwd);
+        let report = crate::incognito::IncognitoReport::assemble(
+            &before,
+            &after,
+            runtime.incognito_ledger(),
+        );
+        eprint!("{}", report.render(&cwd));
+    } else {
+        crate::context_inject::close_out(&cwd, runtime.session_id());
+    }
     let exit = result?;
     if deferred_selfimprove_reload.get() {
         crate::selfimprove_cmd::reload_after_chat(&cwd, &mut io::stdout())?;

@@ -124,6 +124,10 @@ pub(crate) struct InteractiveSessionSetup {
     /// installed skill packages exist but model discovery is off. Copied into
     /// every built runtime's `SessionConfig` — no per-build/per-peer scan.
     package_discovery_hint: bool,
+    /// Incognito session: the built runtime gets an in-memory store and the
+    /// incognito permission floor, and the host skips every persistence path
+    /// (closeout, knowledge index, code-graph reindex, ingest observer).
+    incognito: bool,
 }
 
 /// A fresh interactive runtime and the host-facing halves of its user channels.
@@ -444,6 +448,18 @@ impl InteractiveSessionSetup {
         config: Config,
         profile: Profile,
     ) -> anyhow::Result<Self> {
+        Self::resolve_with(cwd, config, profile, false).await
+    }
+
+    /// [`Self::resolve`] with the incognito switch. When `incognito`, every
+    /// runtime this setup builds is non-persistent (in-memory store + incognito
+    /// permission floor) and the host skips its persistence paths.
+    pub(crate) async fn resolve_with(
+        cwd: PathBuf,
+        config: Config,
+        profile: Profile,
+        incognito: bool,
+    ) -> anyhow::Result<Self> {
         let providers = Arc::new(ProviderRegistry::from_config(&config)?);
         let mcp = crate::mcp::McpTools::load(&config).await;
         let agents = crate::agents_cmd::session_agents(&cwd);
@@ -460,6 +476,7 @@ impl InteractiveSessionSetup {
             agents,
             trust_required,
             package_discovery_hint,
+            incognito,
         })
     }
 
@@ -497,7 +514,12 @@ impl InteractiveSessionSetup {
             tools,
             PermissionEngine::new(self.profile, Vec::new()),
             Box::new(TuiApprover::new(approval_tx.clone())),
-            Store::open(&self.cwd),
+            // Incognito keeps nothing on disk: the store is in-memory.
+            if self.incognito {
+                Store::ephemeral()
+            } else {
+                Store::open(&self.cwd)
+            },
             crate::session_cmd::workspace_with_read_roots(&self.cwd, &self.config)?,
             RecoveryEngine::new(RecoveryBudget::default()),
             interactive_config(
@@ -506,6 +528,7 @@ impl InteractiveSessionSetup {
                 context_window,
                 !self.trust_required,
                 self.package_discovery_hint,
+                self.incognito,
             ),
             Vec::new(),
         );
@@ -620,6 +643,7 @@ impl InteractiveSessionSetup {
             agents: None,
             trust_required,
             package_discovery_hint,
+            incognito: false,
         }
     }
 }
@@ -677,6 +701,7 @@ fn interactive_config(
     context_window: Option<u64>,
     trusted: bool,
     package_discovery_disabled_but_present: bool,
+    incognito: bool,
 ) -> SessionConfig {
     let rails = config.harness.resolved_rails(true);
     SessionConfig {
@@ -684,6 +709,7 @@ fn interactive_config(
         interactivity: Interactivity::Interactive,
         trusted,
         package_discovery_disabled_but_present,
+        incognito,
         context_token_limit: localpilot_harness::effective_context_limit(
             context_window,
             config.harness.context_token_limit,
@@ -990,7 +1016,7 @@ mod tests {
 
         // The trust decision and the package-discovery hint are the launch
         // snapshot passed in verbatim — no longer re-derived from the profile here.
-        let built = interactive_config(&config, "chosen", Some(20_000), true, false);
+        let built = interactive_config(&config, "chosen", Some(20_000), true, false, false);
         assert_eq!(built.model, "chosen");
         assert_eq!(built.interactivity, Interactivity::Interactive);
         assert!(built.trusted);
@@ -1023,7 +1049,7 @@ mod tests {
         assert_eq!(built.verify_command.as_deref(), Some("cargo test"));
 
         // A passed-in untrusted snapshot + a set hint flow straight through.
-        let untrusted = interactive_config(&config, "chosen", None, false, true);
+        let untrusted = interactive_config(&config, "chosen", None, false, true, false);
         assert!(!untrusted.trusted);
         assert!(untrusted.package_discovery_disabled_but_present);
     }

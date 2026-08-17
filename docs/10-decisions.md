@@ -2,6 +2,61 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0160: Incognito Sessions Persist Nothing And Gate Every File They Create
+
+Status: Accepted.
+
+Context: a session normally persists a great deal — its transcript and event log,
+the session index, cached data, tool-output snapshots, provider metadata, the
+prompt history, and (through the host) a LocalMind closeout, knowledge index, and
+code-graph reindex. There was no way to run a session that keeps a secret: work
+through a sensitive problem, or in a private repo, without any of it landing on
+disk or in the local knowledge store.
+
+Decision:
+
+- **`localpilot chat --incognito` (and `/incognito`) runs a session that persists
+  nothing of its own.** Its store is an in-memory backend behind the same `Store`
+  API (`Store::ephemeral`) — transcripts, events, index, cache, tool output, and
+  provider metadata live in a process-local map and are dropped when the session
+  ends. Prompt history is off. The host skips closeout, the knowledge index, the
+  code-graph reindex, the active-session record, and does not register the
+  LocalMind ingest observer. Nothing routes to disk; `root()` is a synthetic path
+  that is never created.
+- **Every file the session creates is gated behind an explicit acknowledgement.**
+  An incognito *floor* on the permission engine turns an `Allow` into an
+  interactive `Ask` (and a headless run into a `Deny`) for any effect that can
+  leave a new file behind — a `write_file` to a path that does not exist, or a
+  write-capable shell command. Overwrites, reads, and network calls keep the
+  profile's own answer; the floor only ever tightens, and it is a session
+  property that survives a mid-session profile swap, so `/bypass` cannot lift it.
+  The acknowledgement states that the file will outlive the session, and that a
+  shell command's writes *outside* the workspace cannot be enumerated, so consent
+  is informed at the moment it is given.
+- **Persistent slash commands are refused, by an exhaustive classification.**
+  Every `SlashAction` is classified `ReadOnly`, `MemoryOnly` (touches only the
+  ephemeral store), or `Persistent(what)` in a wildcard-free match, so a new
+  command cannot be added that an incognito session then silently runs. The
+  persistent ones — research reports, ingest, knowledge-index build, LocalBox
+  adopt/serve, the self-improvement loop, skill installs, and the LocalMind
+  review writes — are refused with a message naming what they would have written.
+- **What the session did create is reported when it ends**, from three sources
+  kept distinct by how exactly each can be known: files created under the
+  workspace (a full filesystem snapshot diffed at the end, with no ignore
+  filtering, so a `target/` write counts; `.git/` internals are collapsed to a
+  count), files a tool wrote outside the workspace (exact, from the tool's own
+  touch report), and the approved shell/background commands verbatim — with the
+  stated limit that files those created outside the workspace are not tracked.
+
+Boundary and compatibility: off by default; an ordinary session is byte-for-byte
+unchanged (the disk backend, full persistence, no floor). No config, provider,
+transcript, event-log, or stored-session schema change. The in-memory backend
+answers the whole `Store` API so a runtime resumes and compacts within the
+process exactly as on disk. Pinned by the ephemeral-store round-trip and
+never-touches-disk tests, the incognito-floor tests across every profile, the
+exhaustive persistence classifier tests, and the snapshot/report tests
+(including a normally-ignored `target/` file and collapsed `.git/`).
+
 ## ADR-0159: The Updater Replaces Its Own Running Executable, And The Copy The Shell Resolves
 
 Status: Accepted. Extends ADR-0155 (`localx`, one umbrella command) and the

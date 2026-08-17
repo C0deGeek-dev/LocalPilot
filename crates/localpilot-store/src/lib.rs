@@ -15,9 +15,10 @@ mod error;
 mod events;
 mod history;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use localpilot_config::redact::redact;
@@ -41,10 +42,26 @@ const TOOL_OUTPUT_DIR: &str = "tool-output";
 const PROVIDERS_DIR: &str = "providers";
 const INDEX_FILE: &str = "index.json";
 
-/// A handle to a workspace's `.localpilot/` state directory.
+/// A handle to a workspace's `.localpilot/` state directory — or, for an
+/// incognito session, to an in-memory stand-in that offers the same API and
+/// writes nothing to disk.
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    backend: Backend,
+}
+
+/// Where the store's records live. Every filesystem primitive the store uses
+/// routes through here, so the memory backend covers the whole surface —
+/// transcripts, event logs, the index, cache, tool-output snapshots, provider
+/// metadata, names, prune — with no code path left that could reach disk.
+#[derive(Debug, Clone)]
+enum Backend {
+    /// Plain files under `root`.
+    Disk,
+    /// A process-local map keyed by the path a file would have had. Shared by
+    /// clones of the same store, so a runtime and its host see one state.
+    Memory(Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>>),
 }
 
 /// One entry in the session index.
@@ -116,6 +133,7 @@ impl Store {
     pub fn open(workspace_root: &Path) -> Self {
         Self {
             root: workspace_root.join(".localpilot"),
+            backend: Backend::Disk,
         }
     }
 
@@ -124,13 +142,114 @@ impl Store {
     pub fn at(localpilot_dir: PathBuf) -> Self {
         Self {
             root: localpilot_dir,
+            backend: Backend::Disk,
         }
+    }
+
+    /// A store that keeps everything in memory and never touches disk — the
+    /// backing for an incognito session. It answers the whole API (a runtime
+    /// can append, read back, compact, and resume within the process) and
+    /// forgets all of it when the last clone is dropped. `root()` is a
+    /// synthetic path that is never created; hosts that derive sibling paths
+    /// from it must check [`Store::is_ephemeral`] first.
+    #[must_use]
+    pub fn ephemeral() -> Self {
+        let nonce = now_unix() ^ u64::from(std::process::id());
+        Self {
+            root: std::env::temp_dir().join(format!("localpilot-incognito-{nonce:x}")),
+            backend: Backend::Memory(Arc::new(Mutex::new(BTreeMap::new()))),
+        }
+    }
+
+    /// Whether this store is the in-memory incognito backend (nothing it holds
+    /// exists on disk, and `root()` is not a real directory).
+    #[must_use]
+    pub fn is_ephemeral(&self) -> bool {
+        matches!(self.backend, Backend::Memory(_))
     }
 
     /// The state directory root.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    // --- backend primitives -------------------------------------------------
+
+    fn write_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+        match &self.backend {
+            Backend::Disk => atomic_write(path, bytes),
+            Backend::Memory(map) => {
+                lock(map).insert(path.to_path_buf(), bytes.to_vec());
+                Ok(())
+            }
+        }
+    }
+
+    fn append_record(&self, path: &Path, line: &str) -> Result<(), StoreError> {
+        match &self.backend {
+            Backend::Disk => atomic::append_line(path, line),
+            Backend::Memory(map) => {
+                let mut map = lock(map);
+                let entry = map.entry(path.to_path_buf()).or_default();
+                if entry.last().is_some_and(|b| *b != b'\n') {
+                    entry.push(b'\n');
+                }
+                entry.extend_from_slice(line.as_bytes());
+                entry.push(b'\n');
+                Ok(())
+            }
+        }
+    }
+
+    fn read_string(&self, path: &Path) -> Result<Option<String>, StoreError> {
+        match &self.backend {
+            Backend::Disk => read_to_string_opt(path),
+            Backend::Memory(map) => Ok(lock(map)
+                .get(path)
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())),
+        }
+    }
+
+    fn read_bytes(&self, path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
+        match &self.backend {
+            Backend::Disk => read_bytes_opt(path),
+            Backend::Memory(map) => Ok(lock(map).get(path).cloned()),
+        }
+    }
+
+    fn remove(&self, path: &Path) -> Result<(), StoreError> {
+        match &self.backend {
+            Backend::Disk => remove_file_if_present(path),
+            Backend::Memory(map) => {
+                lock(map).remove(path);
+                Ok(())
+            }
+        }
+    }
+
+    /// The files directly under `dir` (not recursive). A missing directory is
+    /// an empty list.
+    fn list_files(&self, dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
+        match &self.backend {
+            Backend::Disk => {
+                let entries = match fs::read_dir(dir) {
+                    Ok(entries) => entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                    Err(e) => return Err(StoreError::io(dir, e)),
+                };
+                let mut paths = Vec::new();
+                for entry in entries {
+                    paths.push(entry.map_err(|e| StoreError::io(dir, e))?.path());
+                }
+                Ok(paths)
+            }
+            Backend::Memory(map) => Ok(lock(map)
+                .keys()
+                .filter(|path| path.parent() == Some(dir))
+                .cloned()
+                .collect()),
+        }
     }
 
     // --- transcripts -------------------------------------------------------
@@ -149,9 +268,10 @@ impl Store {
     pub fn append_message(&self, session: SessionId, message: &Message) -> Result<(), StoreError> {
         let path = self.session_path(session);
         let line = redact(&serde_json::to_string(message)?);
-        atomic::append_line(&path, &line)?;
+        self.append_record(&path, &line)?;
 
-        let count = read_to_string_opt(&path)?
+        let count = self
+            .read_string(&path)?
             .map(|content| content.lines().filter(|l| !l.trim().is_empty()).count())
             .unwrap_or(0);
         self.touch_index(session, count)?;
@@ -168,7 +288,7 @@ impl Store {
     /// yields an empty transcript.
     pub fn read_transcript(&self, session: SessionId) -> Result<Vec<Message>, StoreError> {
         let path = self.session_path(session);
-        let Some(content) = read_to_string_opt(&path)? else {
+        let Some(content) = self.read_string(&path)? else {
             return Ok(Vec::new());
         };
         Ok(content
@@ -206,7 +326,7 @@ impl Store {
         };
         let path = self.events_path(session);
         let line = redact(&serde_json::to_string(&event)?);
-        atomic::append_line(&path, &line)?;
+        self.append_record(&path, &line)?;
         Ok(event.id)
     }
 
@@ -241,7 +361,7 @@ impl Store {
         &self,
         session: SessionId,
     ) -> Result<RecoveredEvents, StoreError> {
-        let Some(content) = read_to_string_opt(&self.events_path(session))? else {
+        let Some(content) = self.read_string(&self.events_path(session))? else {
             return Ok(RecoveredEvents::default());
         };
         let mut recovered = RecoveredEvents::default();
@@ -282,7 +402,7 @@ impl Store {
     }
 
     fn load_index(&self) -> Result<SessionIndex, StoreError> {
-        match read_to_string_opt(&self.index_path())? {
+        match self.read_string(&self.index_path())? {
             Some(content) if !content.trim().is_empty() => Ok(serde_json::from_str(&content)?),
             _ => Ok(SessionIndex::default()),
         }
@@ -305,7 +425,7 @@ impl Store {
                 name: None,
             });
         }
-        atomic_write(
+        self.write_bytes(
             &self.index_path(),
             serde_json::to_string_pretty(&index)?.as_bytes(),
         )
@@ -353,7 +473,7 @@ impl Store {
                 name: Some(name.to_string()),
             });
         }
-        atomic_write(
+        self.write_bytes(
             &self.index_path(),
             serde_json::to_string_pretty(&index)?.as_bytes(),
         )
@@ -384,7 +504,7 @@ impl Store {
     /// Returns [`StoreError::InvalidKey`] for an unsafe key, or an io error.
     pub fn put_cache(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
         let path = self.root.join(CACHE_DIR).join(safe_key(key)?);
-        atomic_write(&path, value)
+        self.write_bytes(&path, value)
     }
 
     /// Read cached bytes for `key`, or `None` if absent.
@@ -393,7 +513,7 @@ impl Store {
     /// Returns [`StoreError::InvalidKey`] for an unsafe key, or an io error.
     pub fn get_cache(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
         let path = self.root.join(CACHE_DIR).join(safe_key(key)?);
-        read_bytes_opt(&path)
+        self.read_bytes(&path)
     }
 
     /// Remove a cached entry. A no-op if the key is absent.
@@ -402,11 +522,7 @@ impl Store {
     /// Returns [`StoreError::InvalidKey`] for an unsafe key, or an io error.
     pub fn delete_cache(&self, key: &str) -> Result<(), StoreError> {
         let path = self.root.join(CACHE_DIR).join(safe_key(key)?);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(StoreError::io(&path, source)),
-        }
+        self.remove(&path)
     }
 
     // --- tool-output snapshots --------------------------------------------
@@ -420,7 +536,7 @@ impl Store {
             .root
             .join(TOOL_OUTPUT_DIR)
             .join(format!("{}.txt", safe_key(id)?));
-        atomic_write(&path, redact(output).as_bytes())
+        self.write_bytes(&path, redact(output).as_bytes())
     }
 
     /// Read a tool-output snapshot, or `None` if absent.
@@ -432,7 +548,7 @@ impl Store {
             .root
             .join(TOOL_OUTPUT_DIR)
             .join(format!("{}.txt", safe_key(id)?));
-        read_to_string_opt(&path)
+        self.read_string(&path)
     }
 
     // --- provider metadata -------------------------------------------------
@@ -451,7 +567,7 @@ impl Store {
             .join(PROVIDERS_DIR)
             .join(format!("{}.json", safe_key(provider_id)?));
         let redacted = redact(&serde_json::to_string_pretty(metadata)?);
-        atomic_write(&path, redacted.as_bytes())
+        self.write_bytes(&path, redacted.as_bytes())
     }
 
     /// Read provider metadata, or `None` if absent.
@@ -466,7 +582,7 @@ impl Store {
             .root
             .join(PROVIDERS_DIR)
             .join(format!("{}.json", safe_key(provider_id)?));
-        match read_to_string_opt(&path)? {
+        match self.read_string(&path)? {
             Some(content) => Ok(Some(serde_json::from_str(&content)?)),
             None => Ok(None),
         }
@@ -535,8 +651,8 @@ impl Store {
 
         if !dry_run && !doomed.is_empty() {
             for id in &doomed {
-                remove_file_if_present(&self.session_path(*id))?;
-                remove_file_if_present(&self.events_path(*id))?;
+                self.remove(&self.session_path(*id))?;
+                self.remove(&self.events_path(*id))?;
             }
             let kept = SessionIndex {
                 sessions: index
@@ -545,7 +661,7 @@ impl Store {
                     .filter(|e| !doomed.contains(&e.id))
                     .collect(),
             };
-            atomic_write(
+            self.write_bytes(
                 &self.index_path(),
                 serde_json::to_string_pretty(&kept)?.as_bytes(),
             )?;
@@ -561,14 +677,8 @@ impl Store {
     /// `tool-output/`. A missing directory yields an empty list.
     fn tool_output_stems(&self) -> Result<Vec<String>, StoreError> {
         let dir = self.root.join(TOOL_OUTPUT_DIR);
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(StoreError::io(&dir, e)),
-        };
         let mut stems = Vec::new();
-        for entry in entries {
-            let path = entry.map_err(|e| StoreError::io(&dir, e))?.path();
+        for path in self.list_files(&dir)? {
             if path.extension().and_then(|e| e.to_str()) == Some("txt") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     stems.push(stem.to_string());
@@ -579,7 +689,7 @@ impl Store {
     }
 
     fn remove_tool_output(&self, stem: &str) -> Result<(), StoreError> {
-        remove_file_if_present(&self.root.join(TOOL_OUTPUT_DIR).join(format!("{stem}.txt")))
+        self.remove(&self.root.join(TOOL_OUTPUT_DIR).join(format!("{stem}.txt")))
     }
 }
 
@@ -634,6 +744,15 @@ fn collect_tool_output_keys(message: &Message, keys: &mut HashSet<String>) {
             _ => {}
         }
     }
+}
+
+/// Take the memory backend's lock; a poisoned lock still yields the map (a
+/// panic elsewhere must not turn every later store call into an error).
+fn lock(
+    map: &Mutex<BTreeMap<PathBuf, Vec<u8>>>,
+) -> std::sync::MutexGuard<'_, BTreeMap<PathBuf, Vec<u8>>> {
+    map.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn remove_file_if_present(path: &Path) -> Result<(), StoreError> {
@@ -691,6 +810,108 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path());
         (dir, store)
+    }
+
+    #[test]
+    fn an_ephemeral_store_answers_the_whole_api_and_never_touches_disk() {
+        let store = Store::ephemeral();
+        assert!(store.is_ephemeral());
+        let session = SessionId::new();
+
+        // Transcript + index.
+        store
+            .append_message(session, &Message::text(Role::User, "hi"))
+            .unwrap();
+        store
+            .append_message(session, &Message::text(Role::Assistant, "hello"))
+            .unwrap();
+        assert_eq!(store.read_transcript(session).unwrap().len(), 2);
+        let listed = store.list_sessions().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].message_count, 2);
+        assert_eq!(store.latest_session().unwrap().map(|e| e.id), Some(session));
+
+        // Event log with parent chaining and recovery read.
+        let first = store
+            .append_event(
+                session,
+                None,
+                SessionEventKind::SessionOpened {
+                    reason: OpenReason::New,
+                },
+            )
+            .unwrap();
+        store
+            .append_event(
+                session,
+                Some(first),
+                SessionEventKind::TurnEnded {
+                    stop: "Done".into(),
+                    detail: None,
+                },
+            )
+            .unwrap();
+        let events = store.read_events_recovering(session).unwrap();
+        assert_eq!(events.events.len(), 2);
+        assert_eq!(events.skipped_lines, 0);
+
+        // Names, cache, tool output, provider metadata.
+        store.set_session_name(session, "private").unwrap();
+        assert_eq!(
+            store
+                .find_session_by_name("PRIVATE")
+                .unwrap()
+                .map(|entry| entry.id),
+            Some(session)
+        );
+        store.put_cache("k", b"v").unwrap();
+        assert_eq!(store.get_cache("k").unwrap().as_deref(), Some(&b"v"[..]));
+        store.delete_cache("k").unwrap();
+        assert_eq!(store.get_cache("k").unwrap(), None);
+        store.put_tool_output("t1", "out").unwrap();
+        assert_eq!(store.get_tool_output("t1").unwrap().as_deref(), Some("out"));
+        store
+            .put_provider_metadata("p", &serde_json::json!({ "a": 1 }))
+            .unwrap();
+        assert_eq!(
+            store.get_provider_metadata("p").unwrap(),
+            Some(serde_json::json!({ "a": 1 }))
+        );
+
+        // Prune sweeps orphaned tool output in memory too.
+        let report = store
+            .prune(
+                RetentionPolicy {
+                    max_sessions: 1,
+                    max_age_days: 0,
+                },
+                now_unix(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(report.sessions_removed, 0);
+        assert_eq!(
+            report.tool_outputs_removed, 1,
+            "t1 is referenced by no message"
+        );
+
+        // Nothing under the synthetic root ever reached disk.
+        assert!(!store.root().exists(), "{}", store.root().display());
+
+        // Clones share one state; dropping every clone forgets it.
+        let twin = store.clone();
+        assert_eq!(twin.read_transcript(session).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn two_ephemeral_stores_are_independent() {
+        let a = Store::ephemeral();
+        let b = Store::ephemeral();
+        let session = SessionId::new();
+        a.append_message(session, &Message::text(Role::User, "a"))
+            .unwrap();
+        assert!(b.read_transcript(session).unwrap().is_empty());
+        assert!(b.list_sessions().unwrap().is_empty());
     }
 
     fn entry(updated_unix: u64) -> SessionIndexEntry {

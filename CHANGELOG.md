@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Incognito sessions (`localpilot chat --incognito`, `/incognito`).** An
+  incognito session persists nothing of its own — its store is in-memory, prompt
+  history is off, and it runs no closeout, knowledge index, or code-graph
+  reindex — and every file it creates is gated behind an explicit approval
+  (headless denies), a floor that survives a `/bypass`. Persistent slash
+  commands (research, ingest, context build, LocalBox adopt/serve, the
+  self-improvement loop, skill installs, and LocalMind review decisions) are
+  refused, naming what they would have written. When the session ends —
+  `/incognito off` or exit — it reports every file it created: workspace files
+  (a full snapshot diff with no ignore filtering, so `target/` counts; `.git/`
+  collapsed to a count), files a tool wrote outside the workspace, and the
+  approved shell commands verbatim, with the stated limit that files those
+  created outside the workspace are not tracked (ADR-0160).
+
 - **`localx` can update itself.** On Windows, `localx install --prerelease` /
   `localx update --prerelease` ended with `Access is denied (os error 5)` on the
   last step — cargo's final move onto the running `localx.exe` — and the advice

@@ -316,6 +316,13 @@ pub struct SessionConfig {
     /// elide_seen_reads`. Conservative — a changed file (or any doubt) always
     /// returns full content.
     pub elide_seen_reads: bool,
+    /// Incognito session: nothing is persisted (the store is in-memory, prompt
+    /// history is off, closeout/knowledge-indexing/notify-hooks are skipped by
+    /// the host), and every file a tool creates is gated behind an interactive
+    /// acknowledgement by the incognito permission floor. Off by default. The
+    /// runtime records each created file so the host can report them at the end
+    /// of the session.
+    pub incognito: bool,
 }
 
 impl Default for SessionConfig {
@@ -343,6 +350,7 @@ impl Default for SessionConfig {
             verify_before_done: false,
             verify_command: None,
             elide_seen_reads: false,
+            incognito: false,
         }
     }
 }
@@ -591,6 +599,28 @@ fn file_write_path(input: &serde_json::Value) -> Option<String> {
         .get("path")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
+}
+
+/// The command line an approved shell/background call ran, for the incognito
+/// end report. `None` for any non-command tool. Reads the shared
+/// `command` / `program`+`args` shape of `run_shell` and `run_background`
+/// without depending on their private input types.
+fn incognito_command_line(name: &str, input: &serde_json::Value) -> Option<String> {
+    if name != "run_shell" && name != "run_background" {
+        return None;
+    }
+    if let Some(command) = input.get("command").and_then(serde_json::Value::as_str) {
+        return Some(command.trim().to_string()).filter(|s| !s.is_empty());
+    }
+    let program = input.get("program").and_then(serde_json::Value::as_str)?;
+    let mut line = program.to_string();
+    if let Some(args) = input.get("args").and_then(serde_json::Value::as_array) {
+        for arg in args.iter().filter_map(serde_json::Value::as_str) {
+            line.push(' ');
+            line.push_str(arg);
+        }
+    }
+    Some(line)
 }
 
 /// The normalized string path of a tool call's `path` argument, for a stable
@@ -1005,6 +1035,10 @@ pub struct SessionRuntime {
     /// context hook so a path-scoped instruction file reaches the model exactly
     /// when its `applyTo` glob matches something in play.
     paths_in_play: crate::PathsInPlay,
+    /// The durable trace of an incognito session: files tools wrote outside the
+    /// workspace and the shell commands that were approved. Empty and unused for
+    /// an ordinary session.
+    incognito_ledger: crate::IncognitoLedger,
 }
 
 impl SessionRuntime {
@@ -1038,7 +1072,10 @@ impl SessionRuntime {
         let mut runtime = Self {
             provider,
             tools,
-            engine: PermissionEngineHandle::new(engine),
+            // The incognito floor is a session property, not a profile, so it is
+            // applied to the engine once here and carried across every later
+            // profile swap (`/bypass` must not lift it).
+            engine: PermissionEngineHandle::new(engine.with_incognito(config.incognito)),
             reasoning_effort: ReasoningEffortHandle::new(config.reasoning_effort),
             approver: Arc::from(approver),
             store,
@@ -1079,6 +1116,7 @@ impl SessionRuntime {
             last_handoff: None,
             read_history: crate::elision::ReadHistory::default(),
             paths_in_play: crate::PathsInPlay::new(),
+            incognito_ledger: crate::IncognitoLedger::default(),
         };
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -1349,6 +1387,39 @@ impl SessionRuntime {
         self.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
         });
+    }
+
+    /// Begin an incognito session in place: swap to an in-memory store, turn on
+    /// the incognito permission floor (carried across later profile swaps), and
+    /// start a fresh session. The previous session's persisted records are left
+    /// exactly as they were on disk — this does not touch them. A no-op that
+    /// returns `false` when already incognito.
+    pub fn enter_incognito(&mut self) -> bool {
+        if self.config.incognito {
+            return false;
+        }
+        self.config.incognito = true;
+        self.store = Store::ephemeral();
+        self.engine.set(self.engine.snapshot().with_incognito(true));
+        self.incognito_ledger = crate::IncognitoLedger::default();
+        self.start_new_session();
+        true
+    }
+
+    /// End an incognito session in place: swap back to the on-disk store, clear
+    /// the incognito floor, and start a fresh (persisted) session. Returns
+    /// `false` when not incognito. The incognito session's in-memory records are
+    /// dropped with the ephemeral store.
+    pub fn exit_incognito(&mut self) -> bool {
+        if !self.config.incognito {
+            return false;
+        }
+        self.config.incognito = false;
+        self.store = Store::open(self.workspace.root());
+        self.engine
+            .set(self.engine.snapshot().with_incognito(false));
+        self.start_new_session();
+        true
     }
 
     /// Resume `session` from its durable event log: the conversation is
@@ -1635,6 +1706,21 @@ impl SessionRuntime {
     #[must_use]
     pub fn permission_engine_handle(&self) -> PermissionEngineHandle {
         self.engine.clone()
+    }
+
+    /// The durable trace of this session when it is incognito: files tools wrote
+    /// outside the workspace and the shell commands that were approved. Empty
+    /// for an ordinary session. The host pairs it with a workspace snapshot diff
+    /// to report every file the session created.
+    #[must_use]
+    pub fn incognito_ledger(&self) -> &crate::IncognitoLedger {
+        &self.incognito_ledger
+    }
+
+    /// Whether this runtime was built for an incognito session.
+    #[must_use]
+    pub fn is_incognito(&self) -> bool {
+        self.config.incognito
     }
 
     /// Install the pull-discovery broker (ADR-0031). When set, the per-turn tool
@@ -3521,12 +3607,22 @@ impl SessionRuntime {
                             // alone. Anything that cares — today, a swarm's
                             // advisory conflict alerts — subscribes, so the
                             // tool path stays unaware of the swarm entirely.
-                            dispatched.map(|(result, touched)| {
-                                if !touched.is_empty() {
-                                    let _ = events.send(RuntimeEvent::FilesTouched(touched));
+                            match dispatched {
+                                Some((result, touched)) => {
+                                    // An incognito session records every
+                                    // out-of-workspace write so it can be
+                                    // reported when the session ends.
+                                    if self.config.incognito {
+                                        self.incognito_ledger
+                                            .record_touches(self.workspace.root(), &touched);
+                                    }
+                                    if !touched.is_empty() {
+                                        let _ = events.send(RuntimeEvent::FilesTouched(touched));
+                                    }
+                                    Some(result)
                                 }
-                                result
-                            })
+                                None => None,
+                            }
                         }
                     }
                 };
@@ -3673,6 +3769,15 @@ impl SessionRuntime {
                 if let Some(norm) = normalized_tool_path(&self.workspace, input) {
                     self.paths_in_play
                         .record(self.workspace.root(), std::path::Path::new(&norm));
+                }
+
+                // An incognito session records the shell/background commands it
+                // was granted, so the end report can name them and state that
+                // files they created outside the workspace are not tracked.
+                if self.config.incognito && !result.is_error() {
+                    if let Some(command) = incognito_command_line(name, input) {
+                        self.incognito_ledger.record_command(command);
+                    }
                 }
 
                 // Record a successful workspace mutation for the per-turn handoff,
