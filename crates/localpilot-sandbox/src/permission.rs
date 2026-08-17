@@ -110,6 +110,10 @@ impl Effect {
                     | CommandClass::Destructive
                     | CommandClass::Privileged
                     | CommandClass::Unknown
+                    // A network command creates files — `git clone`/`fetch`,
+                    // `curl -O`, a package install — so it is gated too. The
+                    // pure `Effect::Network` (an in-process request) is not.
+                    | CommandClass::Network
             ),
         }
     }
@@ -607,18 +611,28 @@ mod tests {
                 "{class:?}"
             );
         }
-        for class in [CommandClass::ReadOnly, CommandClass::Network] {
-            assert!(!Effect::RunCommand(class).may_create_files(), "{class:?}");
-            assert_eq!(
-                e.decide(&req(
-                    Effect::RunCommand(class),
-                    Interactivity::Interactive,
-                    true
-                )),
-                Decision::Allow,
-                "{class:?}: bypass still allows a command that cannot write"
-            );
-        }
+        // A network command creates files, so incognito gates it; only a
+        // read-only command and the pure in-process Network effect do not.
+        assert!(Effect::RunCommand(CommandClass::Network).may_create_files());
+        assert_eq!(
+            e.decide(&req(
+                Effect::RunCommand(CommandClass::Network),
+                Interactivity::Interactive,
+                true
+            )),
+            Decision::Ask,
+            "a network command can write files"
+        );
+        assert!(!Effect::RunCommand(CommandClass::ReadOnly).may_create_files());
+        assert_eq!(
+            e.decide(&req(
+                Effect::RunCommand(CommandClass::ReadOnly),
+                Interactivity::Interactive,
+                true
+            )),
+            Decision::Allow,
+            "a read-only command cannot write"
+        );
         assert!(!Effect::Network.may_create_files());
     }
 

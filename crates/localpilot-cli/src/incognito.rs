@@ -166,7 +166,11 @@ impl IncognitoReport {
         }
 
         if !self.commands.is_empty() {
-            out.push_str("shell commands that ran (files they created outside the workspace are not tracked):\n");
+            out.push_str(
+                "shell/background command attempts presented to the permission gate (a denied or \
+                 cancelled one may not have completed; files any created outside the workspace are \
+                 not tracked):\n",
+            );
             for command in &self.commands {
                 out.push_str(&format!("  $ {command}\n"));
             }

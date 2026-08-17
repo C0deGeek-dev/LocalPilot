@@ -2199,6 +2199,19 @@ async fn entering_incognito_swaps_to_an_ephemeral_store_and_arms_the_file_floor(
         "a new file must be acknowledged under incognito"
     );
 
+    // A profile swap while incognito must NOT lift the file-creation floor:
+    // `/bypass` would otherwise silently allow new-file writes.
+    h.runtime
+        .set_permission_profile(Profile::Bypass, Vec::new());
+    assert_eq!(
+        h.runtime
+            .permission_engine_handle()
+            .snapshot()
+            .decide(&request),
+        Decision::Ask,
+        "the incognito floor survives a profile swap to bypass"
+    );
+
     // Re-entering is a no-op; leaving returns to a persisted store.
     assert!(!h.runtime.enter_incognito());
     assert!(h.runtime.exit_incognito());
@@ -2213,4 +2226,133 @@ async fn entering_incognito_swaps_to_an_ephemeral_store_and_arms_the_file_floor(
         "the floor is lifted after leaving incognito"
     );
     assert!(!h.runtime.exit_incognito());
+}
+
+#[tokio::test]
+async fn an_incognito_command_that_writes_outside_then_fails_is_still_reported() {
+    // The case Codex named: a command creates a file OUTSIDE the workspace and
+    // then exits nonzero. Only section (c) — the granted-commands list — can
+    // prove it, because an out-of-workspace file is not in the workspace
+    // snapshot. Recording only successes (or only non-`Unusable` outcomes) would
+    // omit exactly this file-creating command, so the ledger records it at the
+    // dispatch boundary regardless of exit status.
+    let outside = std::env::temp_dir().join(format!(
+        "localpilot-incognito-test-{}.txt",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&outside);
+    let outside_str = outside.display().to_string();
+    // Write the file, then exit nonzero — a partial write followed by failure.
+    // run_shell wraps the command in PowerShell on Windows and `sh` elsewhere.
+    let command = if cfg!(windows) {
+        format!("Set-Content -LiteralPath '{outside_str}' -Value x; exit 1")
+    } else {
+        format!("echo x > '{outside_str}'; exit 1")
+    };
+    let provider = FakeProvider::new()
+        .tool_call("c1", "run_shell", serde_json::json!({ "command": command }))
+        .text("done");
+    let config = SessionConfig {
+        incognito: true,
+        ..SessionConfig::default()
+    };
+    let mut h = build_with(provider, &[], config, Profile::Bypass);
+
+    let reason = h.runtime.run_turn("run it", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    // The command actually created the outside-workspace file (partial write).
+    assert!(outside.exists(), "the command should have created the file");
+    let commands = h.runtime.incognito_ledger().commands();
+    assert!(
+        commands.iter().any(|c| c.contains(&outside_str)),
+        "a nonzero-exit command that created a file must still be reported: {commands:?}"
+    );
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[tokio::test]
+async fn an_incognito_pre_dispatch_failure_is_not_recorded_as_a_command() {
+    // A call that never reached dispatch (an unknown tool → pre-dispatch
+    // failure) is never in the granted-commands list.
+    let provider = FakeProvider::new()
+        .tool_call(
+            "c2",
+            "no_such_tool",
+            serde_json::json!({ "command": "nope" }),
+        )
+        .text("done");
+    let config = SessionConfig {
+        incognito: true,
+        ..SessionConfig::default()
+    };
+    let mut h = build_with(provider, &[], config, Profile::Bypass);
+    let _ = h.runtime.run_turn("go", &h.events, &h.cancel).await;
+
+    let commands = h.runtime.incognito_ledger().commands();
+    assert!(
+        !commands.iter().any(|c| c.contains("nope")),
+        "a pre-dispatch failure is not recorded as a command: {commands:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_incognito_command_cancelled_mid_run_is_still_reported() {
+    // The round-3 case: a command creates an outside-workspace file and then
+    // keeps running; the user cancels while it is still running (so the dispatch
+    // future is dropped and yields no result). Because the command is recorded
+    // when it is presented to the permission gate — before the dispatch/cancel
+    // race — it is still in the end report.
+    let outside = std::env::temp_dir().join(format!(
+        "localpilot-incognito-cancel-{}.txt",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&outside);
+    let outside_str = outside.display().to_string();
+    // Write the file, then sleep well past when we cancel.
+    let command = if cfg!(windows) {
+        format!("Set-Content -LiteralPath '{outside_str}' -Value x; Start-Sleep -Seconds 30")
+    } else {
+        format!("echo x > '{outside_str}'; sleep 30")
+    };
+    let provider = FakeProvider::new()
+        .tool_call("c1", "run_shell", serde_json::json!({ "command": command }))
+        .text("done");
+    let config = SessionConfig {
+        incognito: true,
+        ..SessionConfig::default()
+    };
+    let mut h = build_with(provider, &[], config, Profile::Bypass);
+    let cancel = h.cancel.clone();
+    let events = h.events.clone();
+
+    // Drive the turn until the command has created the file, then cancel. The
+    // turn future is scoped so its mutable borrow of the runtime ends before the
+    // ledger is read.
+    {
+        let turn = h.runtime.run_turn("run it", &events, &cancel);
+        tokio::pin!(turn);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            tokio::select! {
+                _ = &mut turn => break,
+                () = tokio::time::sleep(Duration::from_millis(50)) => {
+                    if outside.exists() || tokio::time::Instant::now() > deadline {
+                        cancel.cancel();
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        outside.exists(),
+        "the command created the outside file before cancel"
+    );
+    let commands = h.runtime.incognito_ledger().commands();
+    assert!(
+        commands.iter().any(|c| c.contains(&outside_str)),
+        "a command cancelled mid-run must still be reported: {commands:?}"
+    );
+    let _ = std::fs::remove_file(&outside);
 }

@@ -116,3 +116,75 @@ fn a_turn_with_no_used_memories_records_no_event() {
         "an empty used-set must record nothing"
     );
 }
+
+/// A context hook that reports one memory used and counts how many times the
+/// runtime asked it to record usage (the write path).
+#[derive(Default)]
+struct CountingMemoryHook {
+    record_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ContextHook for CountingMemoryHook {
+    fn name(&self) -> &str {
+        "counting-memory"
+    }
+    fn context_for(&self, _prompt: &str) -> Option<String> {
+        Some("seeded".to_string())
+    }
+    fn memories_used(&self, _prompt: &str) -> Vec<MemoryUsed> {
+        vec![MemoryUsed {
+            id: "mem-1".to_string(),
+            score: 10,
+            layer: "memory".to_string(),
+        }]
+    }
+    fn record_usage(&self, _memories: &[MemoryUsed]) {
+        self.record_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn run_one_turn(incognito: bool) -> usize {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut runtime = SessionRuntime::new(
+        Arc::new(FakeProvider::new().text("done")),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        if incognito {
+            Store::ephemeral()
+        } else {
+            Store::open(root)
+        },
+        Workspace::new(root).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            incognito,
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    let hook = Arc::new(CountingMemoryHook::default());
+    runtime.hooks_mut().register_context_hook(hook.clone());
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(runtime.run_turn("use memory", &events, &cancel));
+    hook.record_calls.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[test]
+fn an_incognito_turn_never_records_memory_usage() {
+    // A normal turn writes memory hit counts (record_usage fires); an incognito
+    // turn injects the memory but records nothing — reads are allowed, writes
+    // to the LocalMind store are not.
+    assert_eq!(run_one_turn(false), 1, "a normal turn records usage");
+    assert_eq!(
+        run_one_turn(true),
+        0,
+        "an incognito turn must not write memory usage"
+    );
+}

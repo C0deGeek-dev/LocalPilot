@@ -81,13 +81,31 @@ impl HistoryEntry {
 
 /// A handle to the global prompt-history store. Constructed disabled (the opt-out)
 /// or pointed at the per-user file; every operation no-ops when disabled.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PromptHistory {
     /// Whether persistence is active. `false` is the `persistence = "none"`
     /// opt-out: no read, no write, no file created.
     enabled: bool,
     /// The store file location, or `None` when the per-user dir cannot be resolved.
     path: Option<PathBuf>,
+    /// A runtime mute that suspends reads and writes without changing the
+    /// configured `enabled` — set while a session is incognito, cleared when it
+    /// ends, so a mid-session `/incognito` neither persists private prompts nor
+    /// recalls prior ones, and `/incognito off` restores normal history.
+    /// `AtomicBool` (not `Cell`) so the handle stays `Sync` for the async host.
+    muted: std::sync::atomic::AtomicBool,
+}
+
+impl Clone for PromptHistory {
+    fn clone(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            path: self.path.clone(),
+            muted: std::sync::atomic::AtomicBool::new(
+                self.muted.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
 }
 
 impl PromptHistory {
@@ -98,6 +116,7 @@ impl PromptHistory {
         Self {
             enabled,
             path: localpilot_config::prompt_history_path(),
+            muted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -108,13 +127,26 @@ impl PromptHistory {
         Self {
             enabled: path.is_some(),
             path,
+            muted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    /// Whether reads and writes are active.
+    /// Suspend or restore reads and writes at runtime, independent of the
+    /// configured `enabled`. Used by the incognito toggle.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted
+            .store(muted, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn muted(&self) -> bool {
+        self.muted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether reads and writes are active — configured on, with a store, and
+    /// not currently muted.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
-        self.enabled && self.path.is_some()
+        self.enabled && self.path.is_some() && !self.muted()
     }
 
     /// Load the store, newest entry last, capped to [`MAX_HISTORY_ENTRIES`].
@@ -123,7 +155,7 @@ impl PromptHistory {
     /// because history will not load. Returns empty when disabled.
     #[must_use]
     pub fn load(&self) -> Vec<HistoryEntry> {
-        if !self.enabled {
+        if !self.enabled || self.muted() {
             return Vec::new();
         }
         match &self.path {
@@ -147,7 +179,7 @@ impl PromptHistory {
         pastes: &[HistoryPaste],
         cwd: &Path,
     ) -> Result<(), StoreError> {
-        if !self.enabled || text.trim().is_empty() {
+        if !self.enabled || self.muted() || text.trim().is_empty() {
             return Ok(());
         }
         let path = self.path.as_ref().ok_or(StoreError::NoUserDir)?;
@@ -426,6 +458,32 @@ mod tests {
     }
 
     #[test]
+    fn muting_suspends_reads_and_writes_then_restores_them() {
+        // The incognito toggle mutes a normal store: while muted a `/incognito`
+        // session neither persists a prompt nor recalls prior ones; unmuting
+        // (`/incognito off`) restores normal history without losing what was
+        // there before.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(&dir);
+        let cwd = Path::new("/work/p");
+        store.append("before incognito", &[], cwd).unwrap();
+        assert_eq!(store.load().len(), 1);
+
+        store.set_muted(true);
+        assert!(!store.is_enabled(), "muted store is inactive");
+        assert!(store.load().is_empty(), "no recall while muted");
+        store.append("private prompt", &[], cwd).unwrap();
+
+        store.set_muted(false);
+        let entries = store.load();
+        assert_eq!(entries.len(), 1, "the private prompt was never written");
+        assert_eq!(entries[0].text, "before incognito");
+        // Writing resumes after unmute.
+        store.append("after incognito", &[], cwd).unwrap();
+        assert_eq!(store.load().len(), 2);
+    }
+
+    #[test]
     fn project_entries_keeps_mappings_and_scopes_by_cwd() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_at(&dir);
@@ -466,6 +524,7 @@ mod tests {
         let off2 = PromptHistory {
             enabled: false,
             path: Some(candidate.clone()),
+            muted: std::sync::atomic::AtomicBool::new(false),
         };
         off2.append("still nothing", &[], Path::new("/p")).unwrap();
         assert!(off2.load().is_empty());

@@ -10,10 +10,12 @@
 //!
 //! - **Files a tool wrote outside the workspace.** A tool reports precisely
 //!   what it touched (`FileTouch`), so an out-of-workspace write is exact.
-//! - **Approved shell/background commands.** A command carries no contained
-//!   path, so what it wrote outside the workspace cannot be attributed; the
-//!   command line is recorded and the host states that scope limit rather than
-//!   implying a file list it cannot produce.
+//! - **Shell/background command attempts.** Recorded when presented to the
+//!   permission gate (before the dispatch/cancel race), so a cancelled or
+//!   timed-out command is never omitted. A command carries no contained path,
+//!   so what it wrote outside the workspace cannot be attributed; the command
+//!   line is recorded and the host states that scope limit rather than implying
+//!   a file list it cannot produce.
 //!
 //! Files created *inside* the workspace are not tracked here: the host takes a
 //! filesystem snapshot at the start of the session and diffs it at the end,
@@ -48,11 +50,33 @@ impl IncognitoLedger {
         }
     }
 
-    /// Record a shell/background command that was approved and ran.
+    /// Record a shell/background command attempt at the point it is presented to
+    /// the permission gate — before the dispatch/cancel race — so a command the
+    /// user cancels while it is still running, or that times out or exits
+    /// nonzero, is never omitted (any of those can already have created a file).
+    /// The report lists these as *attempts* (a denied or cancelled one may not
+    /// have completed) rather than risk hiding a file-creating one.
     pub fn record_command(&mut self, command: impl Into<String>) {
         let command = command.into();
         if !command.is_empty() && !self.commands.contains(&command) {
             self.commands.push(command);
+        }
+    }
+
+    /// Fold another ledger into this one — used to merge a delegated child
+    /// session's out-of-workspace writes and approved commands into the parent's
+    /// end report, so a delegation cannot hide what it created. De-duplicated in
+    /// first-seen order.
+    pub fn merge(&mut self, other: &IncognitoLedger) {
+        for path in &other.tool_writes_outside_workspace {
+            if !self.tool_writes_outside_workspace.contains(path) {
+                self.tool_writes_outside_workspace.push(path.clone());
+            }
+        }
+        for command in &other.commands {
+            if !self.commands.contains(command) {
+                self.commands.push(command.clone());
+            }
         }
     }
 
@@ -62,8 +86,9 @@ impl IncognitoLedger {
         &self.tool_writes_outside_workspace
     }
 
-    /// Approved shell/background commands, verbatim. Files they created outside
-    /// the workspace are not tracked — the host says so.
+    /// Shell/background command attempts, verbatim — recorded when presented to
+    /// the permission gate, so a cancelled or timed-out command is included.
+    /// Files they created outside the workspace are not tracked — the host says so.
     #[must_use]
     pub fn commands(&self) -> &[String] {
         &self.commands

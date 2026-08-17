@@ -1695,7 +1695,11 @@ impl SessionRuntime {
     /// same shared handle [`Self::permission_engine_handle`] exposes, so both
     /// paths stay consistent.
     pub fn set_permission_profile(&mut self, profile: Profile, allowlist: Vec<String>) {
-        self.engine.set(PermissionEngine::new(profile, allowlist));
+        // Rebuild from the current engine so every session-level floor
+        // (incognito) carries across the swap — `/bypass` must never lift the
+        // incognito file-creation gate.
+        self.engine
+            .set(self.engine.snapshot().with_profile(profile, allowlist));
     }
 
     /// The shared, swappable permission-engine handle. An interactive host
@@ -3541,6 +3545,23 @@ impl SessionRuntime {
                                 name.clone(),
                                 active_input,
                             );
+                            // Record an incognito command *before* the dispatch/
+                            // cancel race: this call has passed the pre-dispatch
+                            // gates (broker redirect, schema repair, precondition,
+                            // rule) and is about to be presented to the permission
+                            // gate. Recording here — not inside the `Some` arm
+                            // below — means a command the user cancels while it is
+                            // still running (which yields `None`) is still listed,
+                            // because a cancelled command can already have created
+                            // a file. Redirects/schema/precondition failures never
+                            // reach this point.
+                            if self.config.incognito {
+                                if let Some(command) =
+                                    incognito_command_line(name, &active_call.input)
+                                {
+                                    self.incognito_ledger.record_command(command);
+                                }
+                            }
                             let retention = StoreRetention(&self.store);
                             let gates = self.hooks.gates();
                             // Snapshot per call: a mid-turn profile swap through
@@ -3565,6 +3586,9 @@ impl SessionRuntime {
                                     approver: Arc::clone(&self.approver),
                                     events: events.clone(),
                                     delegated_calls: std::sync::atomic::AtomicUsize::new(0),
+                                    delegated_incognito: std::sync::Mutex::new(
+                                        crate::IncognitoLedger::default(),
+                                    ),
                                 }
                             });
                             let ctx = ToolContext {
@@ -3602,6 +3626,12 @@ impl SessionRuntime {
                                 h.delegated_calls
                                     .swap(0, std::sync::atomic::Ordering::Relaxed)
                             });
+                            // Capture what a delegated child created (its last
+                            // use of `host`, so its borrow of `self` ends here)
+                            // to merge into this session's incognito ledger below.
+                            let delegated_incognito = host
+                                .as_ref()
+                                .and_then(|h| h.delegated_incognito.lock().ok().map(|l| l.clone()));
                             // Publish what the tool reported touching on the
                             // ordinary event stream, then hand on the result
                             // alone. Anything that cares — today, a swarm's
@@ -3611,10 +3641,14 @@ impl SessionRuntime {
                                 Some((result, touched)) => {
                                     // An incognito session records every
                                     // out-of-workspace write so it can be
-                                    // reported when the session ends.
+                                    // reported when the session ends — including
+                                    // whatever a delegated child created.
                                     if self.config.incognito {
                                         self.incognito_ledger
                                             .record_touches(self.workspace.root(), &touched);
+                                        if let Some(child) = &delegated_incognito {
+                                            self.incognito_ledger.merge(child);
+                                        }
                                     }
                                     if !touched.is_empty() {
                                         let _ = events.send(RuntimeEvent::FilesTouched(touched));
@@ -3771,14 +3805,9 @@ impl SessionRuntime {
                         .record(self.workspace.root(), std::path::Path::new(&norm));
                 }
 
-                // An incognito session records the shell/background commands it
-                // was granted, so the end report can name them and state that
-                // files they created outside the workspace are not tracked.
-                if self.config.incognito && !result.is_error() {
-                    if let Some(command) = incognito_command_line(name, input) {
-                        self.incognito_ledger.record_command(command);
-                    }
-                }
+                // (Incognito command recording happens at the dispatch boundary
+                // above, so a timed-out or failed command that may have created a
+                // file is never omitted from the end report.)
 
                 // Record a successful workspace mutation for the per-turn handoff,
                 // so a timed-out or cut-off run still reports which files it touched.
@@ -4043,8 +4072,13 @@ impl SessionRuntime {
         // Best-effort, post-turn usage tracking: bump the hit count of every
         // memory this turn injected. Delivered once here at the single turn-exit
         // (so it covers interactive and headless alike) and never on the
-        // retrieval read path, keeping retrieval read-only and fast.
-        self.hooks.record_usage(&self.turn_memories_used);
+        // retrieval read path, keeping retrieval read-only and fast. Skipped
+        // while incognito — recording usage writes hit counts to the LocalMind
+        // store, and an incognito session must leave nothing behind (reads that
+        // injected the memory are still allowed).
+        if !self.config.incognito {
+            self.hooks.record_usage(&self.turn_memories_used);
+        }
         self.hooks.notify(&HookEvent::TurnEnded { reason });
         let _ = events.send(RuntimeEvent::Stopped(reason));
         reason

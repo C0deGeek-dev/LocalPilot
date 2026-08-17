@@ -225,8 +225,11 @@ pub async fn run_chat_with(
     // the files it creates can be reported at the end. The snapshot lives in a
     // cell the host also drives: `/incognito`/`/incognito off` re-take and clear
     // it, so the exit report is correct however incognito was entered or left.
-    let history =
-        localpilot_store::PromptHistory::new(!incognito && config.history.persistence.is_enabled());
+    // History stays configured normally and is *muted* while incognito, so a
+    // launched-incognito session neither recalls prior prompts nor persists new
+    // ones, and `/incognito off` restores it.
+    let history = localpilot_store::PromptHistory::new(config.history.persistence.is_enabled());
+    history.set_muted(incognito);
     let incognito_entry: RefCell<Option<crate::incognito::WorkspaceSnapshot>> =
         RefCell::new(incognito.then(|| crate::incognito::WorkspaceSnapshot::take(&cwd)));
     let deferred_selfimprove_reload = Cell::new(false);

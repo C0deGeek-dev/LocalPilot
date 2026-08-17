@@ -760,6 +760,7 @@ fn handle_incognito_toggle(
     runtime: &mut SessionRuntime,
     cwd: &Path,
     incognito_entry: &RefCell<Option<crate::incognito::WorkspaceSnapshot>>,
+    history: &localpilot_store::PromptHistory,
     off: bool,
 ) {
     if off {
@@ -778,6 +779,8 @@ fn handle_incognito_toggle(
             runtime.incognito_ledger(),
         );
         runtime.exit_incognito();
+        // Restore normal prompt history now that the session persists again.
+        history.set_muted(false);
         reset_session_view(app, runtime);
         app.apply_runtime(RuntimeUpdate::Notice(report.render(cwd)));
         app.apply_runtime(RuntimeUpdate::Notice(
@@ -791,6 +794,8 @@ fn handle_incognito_toggle(
             return;
         }
         runtime.enter_incognito();
+        // Stop persisting/recalling prompts for the incognito session.
+        history.set_muted(true);
         *incognito_entry.borrow_mut() = Some(crate::incognito::WorkspaceSnapshot::take(cwd));
         reset_session_view(app, runtime);
         app.apply_runtime(RuntimeUpdate::Notice(
@@ -3207,7 +3212,17 @@ async fn execute_fullscreen_slash(
         return false;
     };
     let incognito_entry = RefCell::new(None);
-    execute_fullscreen_slash_action(app, runtime, config, cwd, &incognito_entry, action).await
+    let history = localpilot_store::PromptHistory::with_store(None);
+    execute_fullscreen_slash_action(
+        app,
+        runtime,
+        config,
+        cwd,
+        &incognito_entry,
+        &history,
+        action,
+    )
+    .await
 }
 
 /// Execute an already-parsed synchronous full-screen slash action. Pumped actions
@@ -3220,11 +3235,12 @@ async fn execute_fullscreen_slash_action(
     config: &localpilot_config::Config,
     cwd: &Path,
     incognito_entry: &RefCell<Option<crate::incognito::WorkspaceSnapshot>>,
+    history: &localpilot_store::PromptHistory,
     action: SlashAction,
 ) -> bool {
     match action {
         SlashAction::Incognito { off } => {
-            handle_incognito_toggle(app, runtime, cwd, incognito_entry, off);
+            handle_incognito_toggle(app, runtime, cwd, incognito_entry, history, off);
         }
         SlashAction::Model {
             provider: Some(provider),
@@ -4313,6 +4329,7 @@ async fn run_event_loop(
                                     config,
                                     cwd,
                                     incognito_entry,
+                                    history,
                                     action,
                                 )
                                 .await
@@ -15521,12 +15538,14 @@ mod tests {
         let cwd = dir.path();
         let mut app = app();
         let incognito_entry = RefCell::new(None);
+        let history = localpilot_store::PromptHistory::with_store(None);
         let _ = execute_fullscreen_slash_action(
             &mut app,
             &mut bundle.runtime,
             &config,
             cwd,
             &incognito_entry,
+            &history,
             SlashAction::SetMode(localpilot_slash::Mode::Research),
         )
         .await;
@@ -17312,9 +17331,17 @@ last_seen = "2026-08-10"
         let cwd = dir.path();
         let mut app = app();
         let incognito_entry = RefCell::new(None);
+        let history = localpilot_store::PromptHistory::with_store(None);
 
         assert!(!bundle.runtime.is_incognito());
-        handle_incognito_toggle(&mut app, &mut bundle.runtime, cwd, &incognito_entry, false);
+        handle_incognito_toggle(
+            &mut app,
+            &mut bundle.runtime,
+            cwd,
+            &incognito_entry,
+            &history,
+            false,
+        );
         assert!(bundle.runtime.is_incognito(), "/incognito entered");
         assert!(bundle.runtime.store().is_ephemeral());
         assert!(
@@ -17330,7 +17357,14 @@ last_seen = "2026-08-10"
         // A read/toggle is not.
         assert!(crate::incognito::incognito_refusal(&SlashAction::Tree).is_none());
 
-        handle_incognito_toggle(&mut app, &mut bundle.runtime, cwd, &incognito_entry, true);
+        handle_incognito_toggle(
+            &mut app,
+            &mut bundle.runtime,
+            cwd,
+            &incognito_entry,
+            &history,
+            true,
+        );
         assert!(!bundle.runtime.is_incognito(), "/incognito off left");
         assert!(!bundle.runtime.store().is_ephemeral());
         assert!(incognito_entry.borrow().is_none(), "entry snapshot cleared");

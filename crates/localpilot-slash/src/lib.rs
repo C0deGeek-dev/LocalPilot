@@ -304,6 +304,10 @@ fn skills_arg_writes(arg: &str) -> Option<&'static str> {
         "install" | "add" | "update" | "sync" => Some("install or update a skill on disk"),
         "remove" | "delete" | "uninstall" => Some("remove an installed skill from disk"),
         "repo" | "source" | "sources" => Some("add or change a skill source repository on disk"),
+        // `/skills research` performs an egress web search and writes the egress
+        // audit, a staging checkout, and review proposals — a persistent write,
+        // not a read.
+        "research" => Some("run a skill web search that writes an egress audit and proposals"),
         _ => None,
     }
 }
@@ -1296,9 +1300,9 @@ mod tests {
         assert!(skills_arg_writes("install foo").is_some());
         assert!(skills_arg_writes("remove foo").is_some());
         assert!(skills_arg_writes("repo add url").is_some());
+        assert!(skills_arg_writes("research query").is_some());
         assert!(skills_arg_writes("").is_none());
         assert!(skills_arg_writes("list").is_none());
-        assert!(skills_arg_writes("research query").is_none());
     }
 
     #[test]

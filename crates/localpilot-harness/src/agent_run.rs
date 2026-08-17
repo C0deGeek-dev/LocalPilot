@@ -81,6 +81,10 @@ pub struct AgentOutcome {
     pub tool_calls: usize,
     /// Why the child's turn ended.
     pub stop: String,
+    /// The child session's incognito ledger (out-of-workspace tool writes and
+    /// approved commands). Empty for a non-incognito delegation; merged into the
+    /// parent's ledger by the host so the end report is complete.
+    pub incognito_ledger: crate::IncognitoLedger,
 }
 
 /// Everything a delegation needs from its caller. Borrowed rather than cloned:
@@ -170,7 +174,12 @@ pub async fn run_agent(
     // Containment by construction: the child's registry is *filtered from the
     // caller's*, and its engine carries the caller's own profile.
     let child_tools = ctx.parent_tools.narrowed(&grants.tools);
-    let engine = PermissionEngine::new(ctx.parent_engine.profile(), Vec::new());
+    // The child rebuilds from the parent engine so every session-level floor
+    // (incognito) carries into the delegation — a child must not escape the
+    // file-creation gate — while its allowlist is reset (a fresh grant scope).
+    let engine = ctx
+        .parent_engine
+        .with_profile(ctx.parent_engine.profile(), Vec::new());
     let prompt = child_prompt(
         definition,
         &child_tools,
@@ -193,6 +202,9 @@ pub async fn run_agent(
         repair_mode: ctx.config.repair_mode,
         elide_seen_reads: ctx.config.elide_seen_reads,
         turn_timeout: ctx.config.turn_timeout,
+        // A delegation of an incognito session is itself incognito: nothing it
+        // does persists either.
+        incognito: ctx.config.incognito,
         ..SessionConfig::default()
     };
 
@@ -204,7 +216,13 @@ pub async fn run_agent(
             inner: ctx.approver,
             agent: definition.name.clone(),
         }) as Box<dyn Approver>,
-        Store::open(ctx.store_root),
+        // An incognito child keeps nothing on disk either — no child transcript,
+        // index, or cache under `.localpilot/`.
+        if ctx.config.incognito {
+            Store::ephemeral()
+        } else {
+            Store::open(ctx.store_root)
+        },
         ctx.workspace.clone(),
         RecoveryEngine::new(RecoveryBudget::default()),
         config,
@@ -241,6 +259,9 @@ pub async fn run_agent(
         narrowed: grants.narrowed.clone(),
         tool_calls,
         stop: format!("{stop:?}"),
+        // Carry what the child created so the parent's incognito end report can
+        // include a delegation's out-of-workspace writes and approved commands.
+        incognito_ledger: child.incognito_ledger().clone(),
     })
 }
 
@@ -327,6 +348,10 @@ pub struct SessionAgentHost<'a> {
     /// its own per-turn count. An `AtomicUsize` because the host is reached
     /// through a shared reference from inside a tool call.
     pub delegated_calls: std::sync::atomic::AtomicUsize,
+    /// The merged incognito ledger of every child spawned this turn, drained by
+    /// the caller into its own ledger. A `Mutex` because the host is reached
+    /// through a shared reference. Unused (and empty) when not incognito.
+    pub delegated_incognito: std::sync::Mutex<crate::IncognitoLedger>,
 }
 
 impl localpilot_tools::AgentHost for SessionAgentHost<'_> {
@@ -377,6 +402,9 @@ impl localpilot_tools::AgentHost for SessionAgentHost<'_> {
                 Ok(outcome) => {
                     self.delegated_calls
                         .fetch_add(outcome.tool_calls, std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(mut ledger) = self.delegated_incognito.lock() {
+                        ledger.merge(&outcome.incognito_ledger);
+                    }
                     let mut text = outcome.summary;
                     if !outcome.narrowed.is_empty() {
                         text.push_str(&format!(
@@ -513,8 +541,74 @@ mod tests {
             narrowed: Vec::new(),
             tool_calls: 7,
             stop: "Done".to_string(),
+            incognito_ledger: crate::IncognitoLedger::default(),
         };
         assert_eq!(outcome.tool_calls, 7);
+    }
+
+    #[tokio::test]
+    async fn an_incognito_delegation_keeps_nothing_on_disk_and_reports_its_commands() {
+        // A delegated child of an incognito session is itself incognito: its
+        // store is in-memory (no `.localpilot/` under the store root), its
+        // file-creation floor is armed, and its approved commands merge into the
+        // outcome so the parent's end report is complete.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let workspace = Workspace::new(root).unwrap();
+        let registry = localpilot_tools::ToolRegistry::with_builtins();
+        // Parent engine carries the incognito floor; the child rebuilds from it.
+        let engine = PermissionEngine::new(localpilot_sandbox::Profile::Bypass, Vec::new())
+            .with_incognito(true);
+        let config = SessionConfig {
+            incognito: true,
+            ..SessionConfig::default()
+        };
+        let shell = if cfg!(windows) {
+            "cmd /c exit 0"
+        } else {
+            "true"
+        };
+        let provider = std::sync::Arc::new(
+            localpilot_llm::FakeProvider::new()
+                .tool_call("c1", "run_shell", serde_json::json!({ "command": shell }))
+                .text("child done"),
+        );
+        let ctx = AgentContext {
+            provider,
+            parent_tools: &registry,
+            parent_engine: &engine,
+            workspace: &workspace,
+            store_root: root,
+            config: &config,
+            depth: 0,
+            max_depth: DEFAULT_MAX_DEPTH,
+            approver: Arc::new(localpilot_sandbox::ScriptedApprover::always()),
+            events: broadcast::channel(8).0,
+        };
+        let cancel = CancellationToken::new();
+        let outcome = run_agent(
+            &definition(&["run_shell"]),
+            "go",
+            &grants(&["run_shell"]),
+            ctx,
+            &cancel,
+        )
+        .await
+        .expect("delegation runs");
+
+        assert!(
+            outcome
+                .incognito_ledger
+                .commands()
+                .iter()
+                .any(|c| c.contains(shell)),
+            "the child's approved command is carried back: {:?}",
+            outcome.incognito_ledger.commands()
+        );
+        assert!(
+            !root.join(".localpilot").exists(),
+            "an incognito child persists nothing under the store root"
+        );
     }
 
     /// Records every request it is asked about, so a test can assert what the
