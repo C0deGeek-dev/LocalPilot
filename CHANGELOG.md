@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localx` can update itself.** On Windows, `localx install --prerelease` /
+  `localx update --prerelease` ended with `Access is denied (os error 5)` on the
+  last step — cargo's final move onto the running `localx.exe` — and the advice
+  to re-run or elevate could never work. The running tool is now built into a
+  staging directory and swapped in with the same rename-then-copy the release
+  channel uses; a refused swap keeps the build and says to copy it over after
+  exit. On the release channel a source-bootstrapped `localx` earlier on `PATH`
+  is refreshed too, so the command the shell resolves is the version just
+  installed, and `localx status` reports the running version and flags a
+  shadowing copy. `localpilot update --source` takes the same self route
+  (ADR-0159).
+
 - **A tool call cut off by the provider's output cap is reported as what it is
   and retried in pieces.** On the Anthropic wire protocol (including local
   servers that speak it) a `write_file` payload truncated at `max_tokens`

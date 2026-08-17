@@ -194,7 +194,7 @@ pub async fn run(
                 // Prefer the published binary: it needs no toolchain and takes
                 // seconds. Compiling stays available on request, and is the
                 // automatic fallback when a platform has no published archive.
-                localpilot_stack::source_install(localpilot, out)?;
+                localpilot_stack::source_install(localpilot, marker.as_ref(), out)?;
             } else if !localpilot_stack::install_release(
                 localpilot,
                 &tag,
@@ -204,7 +204,7 @@ pub async fn run(
             .await?
             {
                 writeln!(out, "falling back to building from source")?;
-                localpilot_stack::source_install(localpilot, out)?;
+                localpilot_stack::source_install(localpilot, marker.as_ref(), out)?;
             }
         }
         Ok(None) => {

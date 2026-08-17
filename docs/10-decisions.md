@@ -2,6 +2,62 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0159: The Updater Replaces Its Own Running Executable, And The Copy The Shell Resolves
+
+Status: Accepted. Extends ADR-0155 (`localx`, one umbrella command) and the
+binary-distribution decisions D011/D012. Closes LocalHub#73.
+
+Context: `localx` updated every train member except itself. On the prerelease
+channel `cargo install … --force` ends with a move onto the destination, and
+when that destination is the executing `localx.exe` Windows refuses with
+`Access is denied (os error 5)` — a mandatory image lock, not an ACL, so the
+"re-run" and "elevate" fixes the output implied cannot work. On the release
+channel the managed copy under the shared `bin/` was refreshed correctly, but a
+source-bootstrapped `localx` in cargo's bin directory (what `install.ps1` /
+`install.sh` create) sits earlier on `PATH`, so the shell kept running the old
+one, and `localx status` reported the cache's newest version as if it were the
+one in use.
+
+Decision:
+
+- **A self-install builds into staging, then swaps.** For the tool this process
+  *is* — and only that tool — the prerelease build runs
+  `cargo install --git … --root <data dir>/<tool>/source-build`, so cargo never
+  touches the live path, and the built executable is then swapped in over the
+  running one with `localpilot_dist::place` (rename-then-copy, the mechanism the
+  release channel already relies on because Windows permits renaming a running
+  image). Companion tools keep the classic in-place `--force` refresh into
+  cargo's bin directory. The staging root is durable, not a temp dir: it is
+  removed after a successful swap and **kept**, with its path printed, when the
+  swap is refused — the build is never lost.
+- **A refused self-replace keeps the raw error authoritative and names the
+  next step.** The placement error is printed as-is (permissions, disk, an
+  antivirus hold, and the Windows image lock all look different); on Windows a
+  hint explains that an access-denied on the running file is the image lock —
+  which exiting lifts and elevation does not — and everywhere the retained
+  build is named to copy over after exit. The run summary never says "re-run to
+  retry" for a self-replace, which a re-run cannot clear.
+- **The release channel refreshes the copy that actually ran.** After the
+  managed copy of the running tool is activated, if the running executable is
+  a different file (a bootstrap in cargo's bin directory earlier on `PATH`),
+  the same executable is placed over it too, and the output says so. This
+  decides the bootstrap-copy question: *refresh it*, never delete it, so the
+  `localx` a shell resolves is always the version just installed while the
+  user keeps ownership of every file. `localpilot update --source` takes the
+  same self route.
+- **Status reports the running version and any shadow.** `localx status`
+  shows this binary's own stamp on its row, flags a managed copy whose version
+  differs, and prints a one-line note when the running executable is not the
+  managed copy.
+
+Boundary and compatibility: no config, manifest, or cache layout change; the
+staging root is a sibling of the release cache under the per-user data
+directory. Pinned by the staged-swap tests (successful swap clears staging;
+refused swap retains the build; failed build leaves nothing), the source-args
+tests (self → `--root`, companions → `--force`), and the report-wording test.
+Verified live on Windows by running `install localx --prerelease` from a copy of
+the built executable.
+
 ## ADR-0158: A Tool Call Cut Off By The Output Cap Is An Output-Budget Fault — Discarded, Named, Steered Once
 
 Status: Accepted. Extends ADR-0038 (an oversized malformed write is recovered by

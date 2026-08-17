@@ -165,6 +165,16 @@ of the newest published release — the way to test work that is pushed but not 
 cut. It needs a Rust toolchain and covers the app tools only; the engine always
 uses its released binaries.
 
+`localx` updates itself last, and can: the running executable is built into a
+staging directory and swapped in (rename-then-copy, so Windows' lock on a running
+image is never hit). If the swap is ever refused, the raw error is printed, the
+build is kept, and the message names the file to copy over after `localx`
+exits; on Windows an access-denied on the running file is that image lock, which
+exiting lifts and an elevated shell does not. On the release channel a
+source-built `localx` earlier on `PATH` (what the from-source installer creates
+in cargo's bin directory) is refreshed alongside the managed copy, and
+`localx status` says which copy is running and flags a version mismatch.
+
 Per-tool commands stay available for finer control:
 
 ```sh

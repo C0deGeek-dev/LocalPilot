@@ -171,7 +171,15 @@ fn update_engine(out: &mut dyn Write) -> Result<()> {
 fn status(out: &mut dyn Write) -> Result<()> {
     writeln!(out, "LocalX stack (localx {VERSION}):")?;
     for tool in localpilot_stack::TRAIN {
-        writeln!(out, "  {:<11} {}", tool.tool, tool_version(tool.tool))?;
+        // This binary's own row reports the version that is actually running —
+        // known exactly from its stamp — and flags a managed copy that differs,
+        // rather than printing the cache's newest as if it were the one in use.
+        let shown = if tool.tool == "localx" {
+            running_localx_version()
+        } else {
+            tool_version(tool.tool)
+        };
+        writeln!(out, "  {:<11} {}", tool.tool, shown)?;
     }
     writeln!(out, "  {:<11} {}", "engine", engine_version())?;
 
@@ -182,7 +190,53 @@ fn status(out: &mut dyn Write) -> Result<()> {
             writeln!(out, "\nnote: {} is not on PATH.", bin.display())?;
         }
     }
+    if let Some(note) = localpilot_stack::running_binary_note("localx") {
+        writeln!(out, "\n{note}")?;
+    }
     Ok(())
+}
+
+/// The running `localx` version, plus the managed copy's version when the two
+/// disagree — the case where the shell resolves a stale bootstrap copy. The
+/// managed copy is *probed*, not read from the cache: the cache's newest entry
+/// may be pinned away, stale after a failed activation, or not what sits at the
+/// managed path at all.
+fn running_localx_version() -> String {
+    describe_running_localx(VERSION, managed_localx_version().as_deref())
+}
+
+/// The version the managed copy of `localx` reports for itself, when there is
+/// one and it is not the running executable. `unknown build` when it runs but
+/// prints no version-shaped token.
+fn managed_localx_version() -> Option<String> {
+    let managed = localpilot_stack::shadowed_managed_copy("localx")?;
+    let output = std::process::Command::new(&managed)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    Some(version_token(&text).unwrap_or_else(|| "unknown build".to_string()))
+}
+
+/// The first version-shaped token in a `--version` line, without a leading `v`.
+fn version_token(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .find(|token| Version::parse(token).is_some())
+        .map(|token| token.trim_start_matches('v').to_string())
+}
+
+/// The status row text for this binary: its own stamp, and the managed copy's
+/// version when that copy is a different build.
+fn describe_running_localx(running: &str, managed: Option<&str>) -> String {
+    match managed {
+        Some(managed) if managed.trim_start_matches('v') != running.trim_start_matches('v') => {
+            format!("{running} (running; managed copy is {managed})")
+        }
+        _ => format!("{running} (running)"),
+    }
 }
 
 /// The installed version of a tool. Prefers the release cache (a clean version
@@ -266,8 +320,35 @@ fn passthrough(args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{channel, Channel, Cli, Command};
+    use super::{channel, describe_running_localx, version_token, Channel, Cli, Command};
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn status_flags_a_managed_copy_whose_probed_version_differs() {
+        assert_eq!(
+            describe_running_localx("3.1.0", Some("3.2.0")),
+            "3.1.0 (running; managed copy is 3.2.0)"
+        );
+        assert_eq!(
+            describe_running_localx("v3.1.0", Some("3.1.0")),
+            "v3.1.0 (running)"
+        );
+        assert_eq!(describe_running_localx("3.1.0", None), "3.1.0 (running)");
+        assert_eq!(
+            describe_running_localx("3.1.0", Some("unknown build")),
+            "3.1.0 (running; managed copy is unknown build)"
+        );
+    }
+
+    #[test]
+    fn the_managed_version_is_the_probed_token_not_a_cache_entry() {
+        assert_eq!(version_token("localx 3.1.0").as_deref(), Some("3.1.0"));
+        assert_eq!(
+            version_token("localx v3.2.0-rc.1").as_deref(),
+            Some("3.2.0-rc.1")
+        );
+        assert_eq!(version_token("localx bc388f9"), None);
+    }
 
     #[test]
     fn cli_definition_is_valid() {

@@ -14,7 +14,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use localpilot_dist::{Cache, ReleaseManifest, Version};
@@ -219,14 +219,21 @@ pub async fn install(
                 let running_version = running.filter(|r| r.tool == t.tool).map(|r| &r.version);
                 install_release(t, tag, running_version, out).await?
             }
-            Channel::Prerelease => source_install(t, out)?,
+            Channel::Prerelease => source_install(t, running, out)?,
         };
         if !ok {
             failed.push(t.tool);
         }
     }
 
-    report(&tools, &failed, resolved_tag.as_deref(), channel, out)
+    report(
+        &tools,
+        &failed,
+        resolved_tag.as_deref(),
+        channel,
+        running.map(|r| r.tool),
+        out,
+    )
 }
 
 /// Install one train tool's published archive at `tag`, verifying it first and
@@ -306,6 +313,14 @@ pub async fn install_release(
             )?;
             if let Some(path) = activate(&cache, t.tool, running, out)? {
                 writeln!(out, "{}: on PATH at {}", t.tool, path.display())?;
+                // `running` is only ever `Some` for the tool this process *is*.
+                // When it runs from somewhere other than the managed copy (a
+                // source bootstrap in cargo's bin directory, earlier on PATH),
+                // refresh that copy too — otherwise the shell keeps resolving
+                // the stale one and the update is invisible.
+                if running.is_some() {
+                    refresh_running_copy(t.tool, &path, out)?;
+                }
             }
             let swept = cache.sweep(KEEP_VERSIONS, &protected(&cache, running));
             if !swept.is_empty() {
@@ -329,9 +344,23 @@ pub async fn install_release(
 /// source-built binary — the same path `localpilot`'s from-source update has
 /// always used.
 ///
+/// The one exception is the tool this process *is* (`running`): cargo's final
+/// step is a plain move onto the destination, and Windows refuses to overwrite
+/// an executing image no matter who asks (an elevated shell changes nothing —
+/// the lock is mandatory, not an ACL). So the running tool is built into a
+/// staging root that cargo owns entirely, and the built executable is then
+/// swapped in over the running one with the same rename-then-copy the release
+/// channel uses, which Windows does permit. The staging root is removed after a
+/// successful swap and kept — with its path printed — when the swap fails, so
+/// the build is never lost.
+///
 /// # Errors
 /// Returns an error only if output cannot be written or cargo cannot be spawned.
-pub fn source_install(t: &StackTool, out: &mut dyn Write) -> anyhow::Result<bool> {
+pub fn source_install(
+    t: &StackTool,
+    running: Option<&Running>,
+    out: &mut dyn Write,
+) -> anyhow::Result<bool> {
     if !cargo_available() {
         writeln!(
             out,
@@ -342,38 +371,216 @@ pub fn source_install(t: &StackTool, out: &mut dyn Write) -> anyhow::Result<bool
         return Ok(false);
     }
 
+    let is_self = running.is_some_and(|r| r.tool == t.tool);
+    let staging = if is_self {
+        source_build_dir(t.tool)
+    } else {
+        None
+    };
+    let Some(staging) = staging else {
+        // A companion tool, or a platform with no per-user data directory: the
+        // classic install straight into cargo's bin directory.
+        writeln!(
+            out,
+            "{}: building {} from {} (main)…",
+            t.tool, t.package, t.repo
+        )?;
+        let built = run_cargo(t, &source_args(t, None))?;
+        if built {
+            writeln!(
+                out,
+                "{}: installed from main into cargo's bin directory",
+                t.tool
+            )?;
+        } else {
+            writeln!(out, "{}: cargo install failed", t.tool)?;
+        }
+        return Ok(built);
+    };
+
+    let Ok(running_exe) = std::env::current_exe() else {
+        writeln!(
+            out,
+            "{}: cannot locate the running executable to replace it; \
+             building into cargo's bin directory instead",
+            t.tool
+        )?;
+        let built = run_cargo(t, &source_args(t, None))?;
+        return Ok(built);
+    };
+    writeln!(
+        out,
+        "{}: building {} from {} (main) into a staging directory, \
+         then replacing the running executable…",
+        t.tool, t.package, t.repo
+    )?;
+    let outcome = stage_and_replace(t.tool, &staging, &running_exe, &mut |root| {
+        run_cargo(t, &source_args(t, Some(root)))
+    })?;
+    describe_self_install(t.tool, &running_exe, &outcome, out)?;
+    Ok(matches!(outcome, SelfInstall::Replaced(_)))
+}
+
+/// What a self-install of the running tool ended with. Every variant names its
+/// actual cause; `Retained` is reserved for a build that verifiably exists on
+/// disk, so the "copy it over after exit" advice never points at nothing.
+#[derive(Debug)]
+enum SelfInstall {
+    /// The staging directory could not be prepared; nothing was built.
+    StagingFailed(String),
+    /// cargo ran and reported failure; nothing was staged.
+    BuildFailed,
+    /// The build succeeded but produced no executable where cargo should have
+    /// put it (`<staging>/bin/<tool>`).
+    MissingArtifact(PathBuf),
+    /// The build succeeded and the running executable now holds it.
+    Replaced(PathBuf),
+    /// The build succeeded but the running executable could not be replaced;
+    /// the built executable is retained at `built` (verified to exist).
+    Retained { built: PathBuf, error: String },
+}
+
+/// Build into `staging` (cargo owns it wholesale), then swap the built
+/// executable in over `running_exe` with rename-then-copy. Independent of
+/// cargo — the build step is injected — so the placement policy is testable
+/// without a toolchain.
+///
+/// # Errors
+/// Propagates a build-step error (cargo could not be spawned); a build that
+/// ran and failed is an outcome, not an error.
+fn stage_and_replace(
+    tool: &str,
+    staging: &Path,
+    running_exe: &Path,
+    build: &mut dyn FnMut(&Path) -> anyhow::Result<bool>,
+) -> anyhow::Result<SelfInstall> {
+    // A fresh staging root every time: a stale artifact must never be mistaken
+    // for this build's output.
+    let _ = std::fs::remove_dir_all(staging);
+    if let Err(error) = std::fs::create_dir_all(staging) {
+        return Ok(SelfInstall::StagingFailed(format!(
+            "could not create {}: {error}",
+            staging.display()
+        )));
+    }
+    if !build(staging)? {
+        let _ = std::fs::remove_dir_all(staging);
+        return Ok(SelfInstall::BuildFailed);
+    }
+    let built = staging
+        .join("bin")
+        .join(localpilot_dist::executable_name(tool));
+    if !built.is_file() {
+        return Ok(SelfInstall::MissingArtifact(built));
+    }
+    let Some(dest_dir) = running_exe.parent() else {
+        return Ok(SelfInstall::Retained {
+            built,
+            error: "the running executable has no parent directory".to_string(),
+        });
+    };
+    Ok(match localpilot_dist::place(dest_dir, tool, &built) {
+        Ok(placed) => {
+            // The payload now lives at the destination; the staging copy is
+            // redundant. Best effort — a leftover is harmless and rebuilt fresh.
+            let _ = std::fs::remove_dir_all(staging);
+            SelfInstall::Replaced(placed)
+        }
+        Err(error) => SelfInstall::Retained {
+            built,
+            error: error.to_string(),
+        },
+    })
+}
+
+/// Say what happened to a self-install in terms the user can act on. A refused
+/// swap of the running executable is named as exactly that: the file is in use
+/// by this very process, an elevated shell does not change it, and the built
+/// executable is kept so the next step is a copy after exit — never "re-run".
+fn describe_self_install(
+    tool: &str,
+    running_exe: &Path,
+    outcome: &SelfInstall,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    match outcome {
+        SelfInstall::StagingFailed(reason) => writeln!(
+            out,
+            "{tool}: could not prepare the staging directory for the build: {reason}"
+        ),
+        SelfInstall::BuildFailed => writeln!(out, "{tool}: cargo install failed"),
+        SelfInstall::MissingArtifact(expected) => writeln!(
+            out,
+            "{tool}: cargo reported success but produced no executable at {}",
+            expected.display()
+        ),
+        SelfInstall::Replaced(path) => writeln!(
+            out,
+            "{tool}: replaced the running executable at {} with the build from main \
+             (the previous copy is displaced beside it and swept on the next run)",
+            path.display()
+        ),
+        SelfInstall::Retained { built, error } => {
+            writeln!(
+                out,
+                "{tool}: built from main, but could not replace the running executable at {}: {error}",
+                running_exe.display()
+            )?;
+            writeln!(out, "  {}", running_image_hint())?;
+            writeln!(
+                out,
+                "  the new build is kept at {} — after this process exits, copy it over {} \
+                 (or run `{}` from there).",
+                built.display(),
+                running_exe.display(),
+                built.display()
+            )
+        }
+    }?;
+    Ok(())
+}
+
+/// The one platform fact worth adding to a refused swap of the running
+/// executable. The raw error above it stays authoritative — the swap can also
+/// fail on permissions, disk, or an antivirus hold — so this only explains what
+/// an image lock means where one exists, and never claims it was the cause.
+fn running_image_hint() -> &'static str {
+    if cfg!(windows) {
+        "if the error is an access-denied on the running file, that is Windows' lock on an \
+         executing image — an elevated shell does not lift it; exiting does."
+    } else {
+        "the safe fallback is to copy the new build over the running file after this process \
+         exits."
+    }
+}
+
+/// Where a self-install stages its build: beside the tool's release cache, in
+/// the per-user data directory — durable across the swap, so a retained build
+/// can be picked up after this process exits.
+fn source_build_dir(tool: &str) -> Option<PathBuf> {
+    Cache::default_root(tool).map(|root| root.join("source-build"))
+}
+
+/// Run `cargo install` with `args`, reporting only whether it succeeded.
+fn run_cargo(t: &StackTool, args: &[String]) -> anyhow::Result<bool> {
     let mut command = std::process::Command::new("cargo");
     // The interactive TUI is unstable on the windows-gnu toolchain; force MSVC
     // when building a tool that links it.
     if cfg!(windows) && t.features.contains(&"tui") {
         command.arg("+stable-x86_64-pc-windows-msvc");
     }
-    command.args(source_args(t));
-
-    writeln!(
-        out,
-        "{}: building {} from {} (main)…",
-        t.tool, t.package, t.repo
-    )?;
+    command.args(args);
     let status = command
         .status()
         .map_err(|e| anyhow::anyhow!("could not run cargo: {e}"))?;
-    if status.success() {
-        writeln!(
-            out,
-            "{}: installed from main into cargo's bin directory",
-            t.tool
-        )?;
-        Ok(true)
-    } else {
-        writeln!(out, "{}: cargo install failed", t.tool)?;
-        Ok(false)
-    }
+    Ok(status.success())
 }
 
 /// Build the source-install arguments separately from process execution so the
-/// package selection cannot regress unnoticed.
-fn source_args(t: &StackTool) -> Vec<String> {
+/// package selection cannot regress unnoticed. With a `root`, cargo installs
+/// into that directory instead of its own bin directory (the self-install
+/// staging path); without one it is the classic `--force` refresh in place.
+fn source_args(t: &StackTool, root: Option<&Path>) -> Vec<String> {
     let mut args = vec![
         "install".to_string(),
         "--git".to_string(),
@@ -382,13 +589,98 @@ fn source_args(t: &StackTool) -> Vec<String> {
         "--branch".to_string(),
         "main".to_string(),
         "--locked".to_string(),
-        "--force".to_string(),
     ];
+    match root {
+        Some(root) => {
+            args.push("--root".to_string());
+            args.push(root.display().to_string());
+        }
+        None => args.push("--force".to_string()),
+    }
     if !t.features.is_empty() {
         args.push("--features".to_string());
         args.push(t.features.join(","));
     }
     args
+}
+
+/// After the managed copy of the running tool was refreshed, refresh the copy
+/// this process actually runs from too, when that is a different file — a
+/// source bootstrap in cargo's bin directory sits earlier on `PATH` for every
+/// installer-created setup, and would otherwise shadow the update forever.
+/// The swap uses the same rename-then-copy the managed copy uses.
+fn refresh_running_copy(tool: &str, managed: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    let Ok(running_exe) = std::env::current_exe() else {
+        return Ok(());
+    };
+    if same_file(&running_exe, managed) {
+        return Ok(());
+    }
+    let Some(dest_dir) = running_exe.parent() else {
+        return Ok(());
+    };
+    match localpilot_dist::place(dest_dir, tool, managed) {
+        Ok(path) => writeln!(
+            out,
+            "{tool}: also refreshed the copy this command ran from, {} \
+             (it is earlier on PATH than the managed copy)",
+            path.display()
+        )?,
+        Err(error) => {
+            writeln!(
+                out,
+                "{tool}: could not refresh the copy this command ran from, {}: {error}",
+                running_exe.display()
+            )?;
+            writeln!(out, "  {}", running_image_hint())?;
+            writeln!(
+                out,
+                "  alternatively remove that copy, or put {} earlier on PATH, so the managed \
+                 copy is the one that runs.",
+                managed.parent().unwrap_or(managed).display()
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether two paths name the same file, tolerant of the `\\?\` prefix and
+/// case differences `canonicalize` normalizes.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// The managed copy of `tool` (`<shared bin>/<tool>`) when it exists and is a
+/// *different* file from the running executable — i.e. when this process was
+/// resolved from somewhere else on `PATH`. `None` when there is no managed
+/// copy, when the running executable is that copy, or when the running path is
+/// unknown.
+#[must_use]
+pub fn shadowed_managed_copy(tool: &str) -> Option<PathBuf> {
+    let running_exe = std::env::current_exe().ok()?;
+    let managed = shared_bin_dir()?.join(localpilot_dist::executable_name(tool));
+    if !managed.is_file() || same_file(&running_exe, &managed) {
+        return None;
+    }
+    Some(managed)
+}
+
+/// A one-line note when the running `tool` is not the managed copy on `PATH`
+/// (`<shared bin>/<tool>`), so a shell resolving a stale bootstrap copy is
+/// visible rather than silent. `None` when there is nothing to say.
+#[must_use]
+pub fn running_binary_note(tool: &str) -> Option<String> {
+    let running_exe = std::env::current_exe().ok()?;
+    let managed = shadowed_managed_copy(tool)?;
+    Some(format!(
+        "note: this {tool} runs from {}, not the managed copy at {}; \
+         `localx install` refreshes both, and the managed copy is the one to keep on PATH.",
+        running_exe.display(),
+        managed.display()
+    ))
 }
 
 fn cargo_available() -> bool {
@@ -478,6 +770,7 @@ fn report(
     failed: &[&str],
     tag: Option<&str>,
     channel: Channel,
+    running_tool: Option<&str>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let where_at = match tag {
@@ -503,6 +796,14 @@ fn report(
             }
         }
         return Ok(());
+    } else if running_tool.is_some_and(|running| failed.contains(&running)) {
+        // A refused self-replace does not clear on a re-run — the same binary
+        // would be running again. Its own message above names the next step.
+        writeln!(
+            out,
+            "\ninstalled{where_at}, except: {}. See the message above for the next step.",
+            failed.join(", ")
+        )?;
     } else {
         writeln!(
             out,
@@ -511,10 +812,12 @@ fn report(
         )?;
     }
     // The shared-bin PATH advice only applies to the release channel; a source
-    // build lands in cargo's bin directory instead.
+    // build lands in cargo's bin directory instead — except the running tool,
+    // which was swapped in place, so a self-only run has nothing to add.
+    let only_self = running_tool.is_some_and(|r| tools.iter().all(|t| t.tool == r));
     if channel == Channel::Release {
         path_notice(out)?;
-    } else {
+    } else if !only_self {
         writeln!(
             out,
             "\nsource-built binaries are in cargo's bin directory; ensure it is on PATH:"
@@ -558,7 +861,8 @@ pub fn path_notice(out: &mut dyn Write) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{source_args, tool, TRAIN};
+    use super::{report, source_args, stage_and_replace, tool, Channel, SelfInstall, TRAIN};
+    use std::path::Path;
 
     #[test]
     fn train_has_five_tools_with_localx_last() {
@@ -576,7 +880,7 @@ mod tests {
     #[test]
     fn localmind_source_build_uses_the_cli_package_not_the_binary_name() {
         let localmind = tool("localmind").expect("localmind in train");
-        let args = source_args(localmind);
+        let args = source_args(localmind, None);
         // `cargo install <package>` needs the package name, which is not the
         // binary name for localmind.
         assert!(args.contains(&"localmind-cli".to_string()));
@@ -587,11 +891,214 @@ mod tests {
     #[test]
     fn localpilot_source_build_carries_its_features() {
         let localpilot = tool("localpilot").expect("localpilot in train");
-        let args = source_args(localpilot);
+        let args = source_args(localpilot, None);
         let features_idx = args
             .iter()
             .position(|a| a == "--features")
             .expect("features");
         assert_eq!(args[features_idx + 1], "tui,learning");
+    }
+
+    #[test]
+    fn a_companion_source_build_still_forces_into_cargos_bin_directory() {
+        // The self-replace route must not leak into the other four tools: with
+        // no staging root the arguments are the classic in-place refresh.
+        let localbox = tool("localbox").expect("localbox in train");
+        let args = source_args(localbox, None);
+        assert!(args.contains(&"--force".to_string()));
+        assert!(!args.contains(&"--root".to_string()));
+    }
+
+    #[test]
+    fn a_self_source_build_targets_a_staging_root_and_never_forces_in_place() {
+        let localx = tool("localx").expect("localx in train");
+        let root = Path::new("staging-root");
+        let args = source_args(localx, Some(root));
+        let root_idx = args.iter().position(|a| a == "--root").expect("--root");
+        assert_eq!(args[root_idx + 1], root.display().to_string());
+        assert!(!args.contains(&"--force".to_string()));
+        assert!(args.contains(&"--locked".to_string()));
+    }
+
+    #[test]
+    fn a_successful_self_build_replaces_the_running_executable_and_clears_staging() {
+        let temp = tempfile::tempdir().expect("temp");
+        let staging = temp.path().join("source-build");
+        let running = temp.path().join("bin").join("tool");
+        std::fs::create_dir_all(running.parent().unwrap()).unwrap();
+        std::fs::write(&running, "old").unwrap();
+
+        let outcome = stage_and_replace("tool", &staging, &running, &mut |root| {
+            let bin = root.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join(localpilot_dist::executable_name("tool")), "new").unwrap();
+            Ok(true)
+        })
+        .unwrap();
+
+        let SelfInstall::Replaced(path) = outcome else {
+            panic!("expected a replacement, got {outcome:?}");
+        };
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert!(
+            !staging.exists(),
+            "staging is cleared after a successful swap"
+        );
+    }
+
+    #[test]
+    fn a_refused_swap_keeps_the_built_executable_where_the_message_says() {
+        let temp = tempfile::tempdir().expect("temp");
+        let staging = temp.path().join("source-build");
+        // A running executable whose parent is a plain file: placement cannot
+        // create the destination directory, so the swap is refused.
+        let blocker = temp.path().join("not-a-dir");
+        std::fs::write(&blocker, "x").unwrap();
+        let running = blocker.join("tool");
+
+        let outcome = stage_and_replace("tool", &staging, &running, &mut |root| {
+            let bin = root.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join(localpilot_dist::executable_name("tool")), "new").unwrap();
+            Ok(true)
+        })
+        .unwrap();
+
+        let SelfInstall::Retained { built, error } = outcome else {
+            panic!("expected the build to be retained, got {outcome:?}");
+        };
+        assert!(
+            built.is_file(),
+            "the retained build must still exist: {}",
+            built.display()
+        );
+        assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn a_failed_self_build_leaves_nothing_behind() {
+        let temp = tempfile::tempdir().expect("temp");
+        let staging = temp.path().join("source-build");
+        let running = temp.path().join("tool");
+        std::fs::write(&running, "old").unwrap();
+
+        let outcome = stage_and_replace("tool", &staging, &running, &mut |_| Ok(false)).unwrap();
+
+        assert!(matches!(outcome, SelfInstall::BuildFailed));
+        assert!(!staging.exists());
+        assert_eq!(std::fs::read_to_string(&running).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_build_that_cannot_be_spawned_is_an_error_not_a_retained_build() {
+        let temp = tempfile::tempdir().expect("temp");
+        let staging = temp.path().join("source-build");
+        let running = temp.path().join("tool");
+        std::fs::write(&running, "old").unwrap();
+
+        let result = stage_and_replace("tool", &staging, &running, &mut |_| {
+            Err(anyhow::anyhow!("could not run cargo: not found"))
+        });
+
+        let error = result.expect_err("a spawn failure propagates");
+        assert!(error.to_string().contains("could not run cargo"));
+        assert_eq!(std::fs::read_to_string(&running).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_refused_swap_keeps_the_raw_error_authoritative_and_never_claims_a_cause() {
+        let mut out = Vec::new();
+        super::describe_self_install(
+            "tool",
+            Path::new("/opt/bin/tool"),
+            &SelfInstall::Retained {
+                built: std::path::PathBuf::from("/data/tool/source-build/bin/tool"),
+                error: "permission denied (os error 13)".to_string(),
+            },
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("permission denied (os error 13)"), "{text}");
+        assert!(text.contains("copy it over"), "{text}");
+        assert!(
+            !text.contains("that file is in use by this process"),
+            "{text}"
+        );
+        assert!(!text.contains("Re-run"), "{text}");
+        if cfg!(windows) {
+            assert!(text.contains("if the error is an access-denied"), "{text}");
+        } else {
+            assert!(!text.contains("elevated"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_staging_directory_that_cannot_be_created_names_that_and_nothing_else() {
+        let temp = tempfile::tempdir().expect("temp");
+        // Staging nested under a plain file cannot be created.
+        let blocker = temp.path().join("not-a-dir");
+        std::fs::write(&blocker, "x").unwrap();
+        let staging = blocker.join("source-build");
+        let running = temp.path().join("tool");
+        std::fs::write(&running, "old").unwrap();
+        let mut built = false;
+
+        let outcome = stage_and_replace("tool", &staging, &running, &mut |_| {
+            built = true;
+            Ok(true)
+        })
+        .unwrap();
+
+        let SelfInstall::StagingFailed(reason) = outcome else {
+            panic!("expected a staging failure, got {outcome:?}");
+        };
+        assert!(reason.contains("could not create"), "{reason}");
+        assert!(!built, "no build runs without a staging directory");
+        let mut out = Vec::new();
+        super::describe_self_install(
+            "tool",
+            &running,
+            &SelfInstall::StagingFailed(reason),
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("access-denied"), "{text}");
+        assert!(!text.contains("copy it over"), "{text}");
+    }
+
+    #[test]
+    fn the_report_never_tells_a_refused_self_replace_to_re_run() {
+        let localx = tool("localx").expect("localx in train");
+        let localbox = tool("localbox").expect("localbox in train");
+        let tools = [localx, localbox];
+
+        let mut out = Vec::new();
+        report(
+            &tools,
+            &["localx"],
+            None,
+            Channel::Prerelease,
+            Some("localx"),
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("Re-run to retry"), "{text}");
+        assert!(text.contains("See the message above"), "{text}");
+
+        let mut out = Vec::new();
+        report(
+            &tools,
+            &["localbox"],
+            None,
+            Channel::Prerelease,
+            Some("localx"),
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Re-run to retry"), "{text}");
     }
 }
