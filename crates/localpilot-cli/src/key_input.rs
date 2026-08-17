@@ -7,11 +7,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 /// paste never pauses this long mid-stream, so it is committed as one block;
 /// ordinary typing never enters a burst, so this never delays it.
 const PASTE_BURST_WINDOW: Duration = Duration::from_millis(150);
-/// A legacy key-record paste presents several records effectively at once.
-/// Requiring a short dense prefix before treating Enter as paste content keeps
-/// scheduler-bunched human typing from swallowing the submit key.
-const PASTE_DENSE_WINDOW: Duration = Duration::from_millis(5);
-const PASTE_DENSE_PREFIX: usize = 3;
 
 pub(crate) fn is_key_action(key: KeyEvent) -> bool {
     key.kind == KeyEventKind::Press
@@ -37,12 +32,19 @@ pub(crate) enum PasteAction {
 /// with more input already queued, or within [`PASTE_BURST_WINDOW`] of the
 /// previous — so a terminal without bracketed paste still collapses a large paste
 /// to a placeholder instead of dumping every line into the composer.
+///
+/// Two pieces of state live here and end at different moments. The *staged
+/// text* (`buffer`) is handed to the composer as soon as the input queue drains
+/// or the burst goes idle. The *burst itself* (`active_until`,
+/// `multiline_confirmed`) stays live for the whole continuation window, across
+/// those flushes, so a paste that reaches the console in several chunks is still
+/// classified once: an Enter early in a later chunk is paste content, not the
+/// user's submit. Only idle expiry, a command key, a real bracketed paste, or a
+/// focus change end the burst.
 #[derive(Debug, Default)]
 pub(crate) struct PasteBurst {
     buffer: String,
     active_until: Option<Instant>,
-    dense_started_at: Option<Instant>,
-    dense_records: usize,
     multiline_confirmed: bool,
     pending_cr: bool,
     bracketed_paste_seen: bool,
@@ -73,33 +75,42 @@ impl PasteBurst {
     /// character was *absorbed* rather than flushed (a trailing event, e.g. a
     /// key-release report, looked like more input was coming). Returns `None`
     /// while the burst is still live, so a momentary gap mid-paste does not commit
-    /// a half-paste.
+    /// a half-paste. Idle expiry also ends the burst, so the next key starts a
+    /// fresh classification.
     pub(crate) fn flush_if_idle(&mut self, now: Instant) -> Option<String> {
         let idle = self.active_until.is_some_and(|until| now > until);
-        (self.has_pending() && idle).then(|| self.take())
+        if !idle {
+            return None;
+        }
+        self.end_and_take()
     }
 
     /// Commit a pending burst immediately when the input owner changes (for
     /// example, when a tool dialog takes focus). This keeps text already typed
-    /// for the composer out of the newly opened dialog.
+    /// for the composer out of the newly opened dialog, and ends the burst.
     pub(crate) fn flush_pending(&mut self) -> Option<String> {
-        self.has_pending().then(|| self.take())
+        self.end_and_take()
     }
 
-    fn take(&mut self) -> String {
+    /// Hand over the staged text without ending the burst: the queue drained,
+    /// but the continuation window (and any multi-line confirmation) still holds
+    /// for input that arrives inside it.
+    fn take_text(&mut self) -> Option<String> {
+        self.has_pending().then(|| std::mem::take(&mut self.buffer))
+    }
+
+    /// Forget the burst classification: the next key is judged from scratch.
+    fn end_burst(&mut self) {
         self.active_until = None;
-        self.dense_started_at = None;
-        self.dense_records = 0;
         self.multiline_confirmed = false;
         self.pending_cr = false;
-        std::mem::take(&mut self.buffer)
     }
 
-    fn record_dense_key(&mut self, now: Instant) {
-        let started = self.dense_started_at.get_or_insert(now);
-        if now.saturating_duration_since(*started) <= PASTE_DENSE_WINDOW {
-            self.dense_records = self.dense_records.saturating_add(1);
-        }
+    /// End the burst and hand over whatever was staged, for the paths where the
+    /// current key is a command (or a human submit) that closes the run.
+    fn end_and_take(&mut self) -> Option<String> {
+        self.end_burst();
+        self.take_text()
     }
 
     /// Append one character, normalizing `\r` and `\r\n` to a single `\n` so the
@@ -119,6 +130,13 @@ impl PasteBurst {
         }
     }
 
+    /// Classify one key press. `buffered_after` reports whether more input was
+    /// already queued behind this key when it was read; `now` is the processing
+    /// time. Only `buffered_after` and the continuation window drive the
+    /// decision — never how long the run took to *process*: a frame is drawn
+    /// between keys (or between batches of keys), so a long first line would
+    /// push its Enter outside any wall-clock density window and turn it into a
+    /// submit.
     pub(crate) fn observe(
         &mut self,
         key: KeyEvent,
@@ -126,50 +144,72 @@ impl PasteBurst {
         now: Instant,
     ) -> PasteAction {
         if !self.unbracketed_enabled() {
-            return if self.has_pending() {
-                PasteAction::FlushThenPass(self.take())
-            } else {
-                PasteAction::Pass
+            return match self.end_and_take() {
+                Some(text) => PasteAction::FlushThenPass(text),
+                None => PasteAction::Pass,
             };
         }
         let Some(c) = paste_char(key) else {
-            return if self.has_pending() {
-                PasteAction::FlushThenPass(self.take())
-            } else {
-                PasteAction::Pass
+            // A command key closes the run: staged text goes to the composer and
+            // the key follows the normal chain.
+            return match self.end_and_take() {
+                Some(text) => PasteAction::FlushThenPass(text),
+                None => PasteAction::Pass,
             };
         };
 
-        let in_burst = buffered_after || self.active_until.is_some_and(|until| now <= until);
-        if matches!(c, '\n' | '\r') && !self.multiline_confirmed {
-            if !self.has_pending() {
-                return PasteAction::Pass;
-            }
-            let dense_prefix = self.dense_started_at.is_some_and(|started| {
-                now.saturating_duration_since(started) <= PASTE_DENSE_WINDOW
-                    && self.dense_records >= PASTE_DENSE_PREFIX
-            });
-            if !(buffered_after && dense_prefix) {
+        let live = self.active_until.is_some_and(|until| now <= until);
+        if !live {
+            // The continuation window lapsed without an idle flush (or this is
+            // the first key ever): whatever follows is a fresh run.
+            self.multiline_confirmed = false;
+        }
+        let in_burst = buffered_after || live;
+        if matches!(c, '\n' | '\r') {
+            let content = if self.multiline_confirmed {
+                // Inside a confirmed multi-line run, Enter is content while text
+                // is still staged or more input is queued behind it. An Enter
+                // that arrives alone after the staged text was already handed
+                // over has no paste evidence left: it is the user's submit, even
+                // inside the continuation window.
+                buffered_after || self.has_pending()
+            } else {
+                // The first Enter of a run is paste content only when the run is
+                // already under way (text staged, or the window still open)
+                // *and* more input is queued behind the Enter — a paste always
+                // has both; a human submit has neither unless the UI stalled
+                // across the whole char+Enter+char sequence.
+                buffered_after && (self.has_pending() || live)
+            };
+            if !content {
                 // An Enter that ends a bunched run is still the user's submit.
                 // Flush the staged text, but let Enter follow the normal path.
-                return PasteAction::FlushThenPass(self.take());
+                return match self.end_and_take() {
+                    Some(text) => PasteAction::FlushThenPass(text),
+                    None => PasteAction::Pass,
+                };
             }
             self.multiline_confirmed = true;
         }
         if in_burst {
-            self.record_dense_key(now);
             self.push(c);
             self.active_until = Some(now + PASTE_BURST_WINDOW);
             if buffered_after {
                 PasteAction::Absorbed
             } else {
-                // Last key of the batch: the burst is complete.
-                PasteAction::Flush(self.take())
+                // Last key of the batch: hand the staged text over now, but keep
+                // the burst live — a paste that reaches the console in chunks
+                // continues inside the window and must not be reclassified.
+                match self.take_text() {
+                    Some(text) => PasteAction::Flush(text),
+                    None => PasteAction::Absorbed,
+                }
             }
-        } else if self.has_pending() {
-            PasteAction::FlushThenPass(self.take())
         } else {
-            PasteAction::Pass
+            match self.end_and_take() {
+                Some(text) => PasteAction::FlushThenPass(text),
+                None => PasteAction::Pass,
+            }
         }
     }
 }

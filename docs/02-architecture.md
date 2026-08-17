@@ -282,8 +282,12 @@ frames, and missed ticks are skipped rather than replayed. The reader is stopped
 and its channel drained before completion projection so a boundary Enter cannot
 be lost. The Windows unbracketed-paste probe is non-blocking for ordinary keys.
 Once `Event::Paste` proves bracketed-paste support, the legacy heuristic retires
-for the session; until then, only a dense multi-record prefix can make an
-embedded Enter paste content while a final Enter remains normal submit.
+for the session; until then an embedded Enter is paste content only when a run
+is under way and more input is already queued behind it, judged from the input
+queue and the 150 ms continuation window rather than from how long the loop
+took to process the run (ADR-0157). Flushing staged text to the composer does
+not end that window, so a chunked paste is classified once; a final Enter with
+nothing queued behind it remains the normal submit.
 The backend-neutral projection stores only a sanitized operation label and a
 monotonic start instant; render derives heartbeat frames and elapsed text, so no
 second timer task or mutable animation counter can drift from work lifecycle

@@ -2,6 +2,48 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0157: Unbracketed Paste Is Classified By Queue Evidence, Not Processing Time
+
+Status: Accepted. Amends ADR-0148 (the legacy key-record paste classifier).
+
+Context: on Windows, Crossterm never yields a bracketed `Event::Paste`, so a
+paste arrives as one key record per character and every newline is an Enter
+key. ADR-0148's fallback absorbed the first Enter of a run only when a "dense"
+prefix of at least three records had been *processed* within 5 ms of the run's
+start. That measured the terminal loop, not the paste: the idle host draws a
+frame per key and the operation pump draws between 64-record batches, so any
+first line longer than a few dozen characters pushed its Enter outside the
+window and turned it into a submit. One paste became a prompt plus one steer
+per long paragraph, while a paragraph whose first line happened to be short
+stayed whole.
+
+Decision:
+
+- **Only queue evidence and the continuation window classify a key.** The
+  first Enter of a run is paste content when more input is already queued
+  behind it (`buffered_after`, the zero-duration probe of ADR-0148) *and* a
+  run is under way — text staged, or the 150 ms continuation window still
+  open. No wall-clock density measured at processing time takes part. A human
+  can only forge that shape if the UI stalls across the whole
+  character+Enter+character sequence, the same trade-off ADR-0148 accepted.
+- **Flushing staged text does not end the burst.** Handing the composer the
+  staged text when the queue drains keeps the continuation window and the
+  multi-line confirmation alive, so a paste that reaches the console in chunks
+  is classified once; only idle expiry, a command key, a real bracketed paste,
+  or a focus change end the burst.
+- **An Enter with no paste evidence left submits.** Inside a confirmed
+  multi-line run an Enter is content while text is still staged or more input
+  is queued behind it; an Enter that arrives alone after the staged text was
+  handed over is the user's submit even inside the window (paste, then Enter
+  straight away). A paste whose very first record is a newline likewise
+  still submits the typed prefix; fixing that needs event look-ahead in the
+  hosts and is deferred as a known, tested limitation rather than guessed at.
+
+Boundary and compatibility: `crates/localpilot-cli/src/key_input.rs` only; no
+host, config, provider, or stored-session change. Pinned by the long-first-line,
+chunked-flush liveness, window-lapse, command-key, and leading-newline tests in
+`crates/localpilot-cli/tests/key_input.rs`.
+
 ## ADR-0156: Successful Tool Runs Group Only As An Opt-In Timeline Projection
 
 Status: accepted
@@ -368,7 +410,9 @@ Decision:
   emits a real bracketed `Event::Paste`, the fallback retires for the session.
   Before that proof, the classifier requires a dense multi-record prefix before
   absorbing an embedded Enter and preserves a confirmed multiline paste as one
-  atomic editor unit. A final Enter after scheduler-bunched human text flushes
+  atomic editor unit. *(Amended by ADR-0157: the dense prefix measured loop
+  processing time and split long-lined pastes; classification now rests on
+  queue evidence and the continuation window only.)* A final Enter after scheduler-bunched human text flushes
   the staged text and follows normal submit routing.
 - **Derive visible activity from operation identity.** Each busy session
   projection owns a sanitized high-level label and monotonic start instant.

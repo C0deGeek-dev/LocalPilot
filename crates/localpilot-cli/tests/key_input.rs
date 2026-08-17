@@ -249,3 +249,198 @@ fn only_unmodified_chars_are_unbracketed_paste_candidates() {
         KeyModifiers::ALT
     )));
 }
+
+fn enter() -> KeyEvent {
+    key(KeyCode::Enter, KeyModifiers::empty())
+}
+
+/// Regression for a paste whose first line is long: with a frame drawn between
+/// keys, its Enter is processed far outside any short wall-clock window, yet
+/// more of the paste is still queued behind it — it is content, not a submit.
+#[test]
+fn a_long_first_line_keeps_its_enter_as_paste_content() {
+    let now = Instant::now();
+    let mut burst = key_input::PasteBurst::default();
+
+    let line = "A ack, tear down the lab now. And once thats done - we can proceed with the swap of the ssd";
+    let mut at = now;
+    for c in line.chars() {
+        // Roughly one frame between keys.
+        at += Duration::from_millis(1);
+        assert_eq!(burst.observe(plain(c), true, at), key_input::PasteAction::Absorbed);
+    }
+    assert!(at.duration_since(now) > Duration::from_millis(50));
+
+    at += Duration::from_millis(1);
+    assert_eq!(
+        burst.observe(enter(), true, at),
+        key_input::PasteAction::Absorbed,
+        "Enter with more paste queued behind it is a newline, not the submit key"
+    );
+    at += Duration::from_millis(1);
+    assert_eq!(burst.observe(plain('n'), true, at), key_input::PasteAction::Absorbed);
+    at += Duration::from_millis(1);
+    assert_eq!(
+        burst.observe(plain('!'), false, at),
+        key_input::PasteAction::Flush(format!("{line}\nn!"))
+    );
+}
+
+/// A paste can reach the console in chunks: the queue drains (Flush) and refills
+/// inside the continuation window. The burst stays classified across that gap,
+/// so an Enter early in the next chunk is still content.
+#[test]
+fn burst_liveness_survives_a_queue_drain_flush() {
+    let now = Instant::now();
+    let mut burst = key_input::PasteBurst::default();
+
+    burst.observe(plain('a'), true, now);
+    burst.observe(plain('b'), true, now + Duration::from_millis(1));
+    assert_eq!(
+        burst.observe(enter(), true, now + Duration::from_millis(2)),
+        key_input::PasteAction::Absorbed
+    );
+    // Chunk boundary: nothing queued after 'c' for a moment.
+    assert_eq!(
+        burst.observe(plain('c'), false, now + Duration::from_millis(3)),
+        key_input::PasteAction::Flush("ab\nc".to_string())
+    );
+    assert!(!burst.has_pending());
+
+    // Next chunk arrives 40 ms later, still inside the window, starting with a
+    // one-character line and then a newline.
+    assert_eq!(
+        burst.observe(plain('d'), true, now + Duration::from_millis(43)),
+        key_input::PasteAction::Absorbed
+    );
+    assert_eq!(
+        burst.observe(enter(), true, now + Duration::from_millis(44)),
+        key_input::PasteAction::Absorbed,
+        "the confirmed multi-line burst is still live after the flush"
+    );
+    assert_eq!(
+        burst.observe(plain('e'), false, now + Duration::from_millis(45)),
+        key_input::PasteAction::Flush("d\ne".to_string())
+    );
+
+    // Even an unconfirmed live burst treats a queued-behind Enter as content
+    // when the window is open and text was just flushed.
+    let mut burst = key_input::PasteBurst::default();
+    assert_eq!(
+        burst.observe(plain('x'), false, now),
+        key_input::PasteAction::Pass,
+        "a lone key with nothing queued is ordinary typing"
+    );
+    burst.observe(plain('y'), true, now + Duration::from_millis(1));
+    assert_eq!(
+        burst.observe(plain('z'), false, now + Duration::from_millis(2)),
+        key_input::PasteAction::Flush("yz".to_string())
+    );
+    assert_eq!(
+        burst.observe(enter(), true, now + Duration::from_millis(30)),
+        key_input::PasteAction::Absorbed
+    );
+}
+
+/// After the continuation window lapses, an Enter is judged afresh: staged text
+/// from a bunched run is committed and Enter goes on to submit.
+#[test]
+fn an_enter_after_the_window_lapses_is_a_submit() {
+    let now = Instant::now();
+    let mut burst = key_input::PasteBurst::default();
+
+    burst.observe(plain('a'), true, now);
+    burst.observe(plain('b'), true, now + Duration::from_millis(1));
+    assert_eq!(
+        burst.observe(enter(), true, now + Duration::from_millis(2)),
+        key_input::PasteAction::Absorbed
+    );
+    // The idle flush commits and ends the burst.
+    assert_eq!(
+        burst.flush_if_idle(now + Duration::from_secs(1)),
+        Some("ab\n".to_string())
+    );
+    // A later Enter, even one that happens to have input queued behind it, is
+    // not part of that paste any more.
+    assert_eq!(
+        burst.observe(enter(), true, now + Duration::from_secs(2)),
+        key_input::PasteAction::Pass
+    );
+}
+
+/// A command key closes the run entirely: an Enter right after it is a submit
+/// even inside what would have been the continuation window.
+#[test]
+fn a_command_key_ends_the_burst_so_a_following_enter_submits() {
+    let now = Instant::now();
+    let mut burst = key_input::PasteBurst::default();
+
+    burst.observe(plain('a'), true, now);
+    burst.observe(plain('b'), true, now + Duration::from_millis(1));
+    assert_eq!(
+        burst.observe(enter(), true, now + Duration::from_millis(2)),
+        key_input::PasteAction::Absorbed
+    );
+    assert_eq!(
+        burst.observe(
+            key(KeyCode::Left, KeyModifiers::empty()),
+            true,
+            now + Duration::from_millis(3)
+        ),
+        key_input::PasteAction::FlushThenPass("ab\n".to_string())
+    );
+    assert_eq!(
+        burst.observe(enter(), true, now + Duration::from_millis(4)),
+        key_input::PasteAction::Pass
+    );
+}
+
+/// Known limitation, kept explicit: a paste whose very first record is a newline
+/// has no run under way yet, so that Enter still passes to the normal chain.
+#[test]
+fn a_leading_newline_with_no_run_under_way_still_passes() {
+    let now = Instant::now();
+    let mut burst = key_input::PasteBurst::default();
+    assert_eq!(
+        burst.observe(enter(), true, now),
+        key_input::PasteAction::Pass
+    );
+    assert!(!burst.has_pending());
+}
+
+/// Paste, then Enter straight away: once the staged text has been handed over
+/// and nothing is queued behind the Enter, there is no paste evidence left, so
+/// the Enter submits — even inside the continuation window of a confirmed
+/// multi-line run.
+#[test]
+fn an_enter_alone_after_a_flushed_paste_submits() {
+    let now = Instant::now();
+    let mut burst = key_input::PasteBurst::default();
+
+    burst.observe(plain('a'), true, now);
+    assert_eq!(
+        burst.observe(enter(), true, now + Duration::from_millis(1)),
+        key_input::PasteAction::Absorbed
+    );
+    assert_eq!(
+        burst.observe(plain('b'), false, now + Duration::from_millis(2)),
+        key_input::PasteAction::Flush("a\nb".to_string())
+    );
+    assert_eq!(
+        burst.observe(enter(), false, now + Duration::from_millis(5)),
+        key_input::PasteAction::Pass,
+        "an unbuffered Enter with nothing staged is the user's submit"
+    );
+    assert!(!burst.has_pending());
+
+    // The trailing newline of the paste itself still belongs to the paste:
+    // text is staged when it arrives.
+    let mut burst = key_input::PasteBurst::default();
+    burst.observe(plain('a'), true, now);
+    burst.observe(enter(), true, now + Duration::from_millis(1));
+    burst.observe(plain('b'), true, now + Duration::from_millis(2));
+    assert_eq!(
+        burst.observe(enter(), false, now + Duration::from_millis(3)),
+        key_input::PasteAction::Flush("a\nb\n".to_string())
+    );
+}

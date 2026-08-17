@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A long multi-line paste on Windows stays one prompt.** The legacy
+  key-record paste fallback judged the first Enter of a run by how fast the
+  terminal loop had *processed* the preceding characters, so any first line
+  longer than a few dozen characters was submitted on its own and each later
+  paragraph became a separate steer. Classification now uses only the input
+  queue and the continuation window, and flushing staged text no longer ends
+  the burst, so chunked pastes are classified once (ADR-0157). A bunched typed
+  line still submits on its Enter.
+
 - **Intermediate progress no longer competes with the final answer.** Assistant
   prose keeps the filled `●` answer cue unless a later tool start proves that
   exact stable segment was intermediate; then it switches in place to a quieter
