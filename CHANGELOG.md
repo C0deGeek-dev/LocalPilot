@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v3.2.0 - 2026-08-18
+
+Coordinated LocalX release.
+
 - **Incognito sessions (`localpilot chat --incognito`, `/incognito`).** An
   incognito session persists nothing of its own — its store is in-memory, prompt
   history is off, and it runs no closeout, knowledge index, or code-graph
