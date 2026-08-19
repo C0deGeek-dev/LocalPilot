@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Automatic compaction now sends the model its real digest and budgets for the
+  reply.** When context is trimmed mid-run, the conversation receives the
+  finalized semantic digest (goal, decisions, per-file operations, command
+  outcomes), shrunk to fit and ordered by recency — not the four-bullet
+  placeholder it used to get, which left the rich digest in the event log only.
+  The session budget now reserves the provider's real output cap (its
+  `max_tokens`, or the adapter default) instead of a flat 4,096, so a history the
+  local estimate believed fit is no longer rejected by the provider and pushed
+  into the destructive overflow path; a pasted image is charged its real token
+  cost rather than zero; and an automatic or overflow compaction posts a
+  host-visible notice, so a dropping context gauge is explained rather than
+  mysterious (ADR-0161, LocalHub#78).
+
 ## v3.3.0 - 2026-08-19
 
 Coordinated LocalX release.

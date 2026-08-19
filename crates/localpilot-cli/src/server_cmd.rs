@@ -252,6 +252,7 @@ impl SessionSetup {
         let context_token_limit = effective_context_limit(
             provider.declaration().max_context_tokens,
             self.config.harness.context_token_limit,
+            provider.declaration().max_output_tokens,
         );
         let mut registry = self.mcp.registry();
         let broker = crate::mcp::install_broker(&self.config.tools, &mut registry);

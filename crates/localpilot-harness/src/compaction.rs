@@ -35,6 +35,12 @@ fn message_chars(message: &Message) -> usize {
             ContentBlock::Text { text } | ContentBlock::Reasoning { text, .. } => text.len(),
             ContentBlock::ToolUse(call) => call.name.len() + call.input.to_string().len(),
             ContentBlock::ToolResult(result) => result.output.len(),
+            // A pasted image is base64 in the request body — count its payload
+            // rather than treating it as free, so a screenshot cannot silently
+            // push the real request past the window the estimate believed fit.
+            ContentBlock::Image { data, .. } => data.len(),
+            // ContentBlock is #[non_exhaustive]; a future block type counts as 0
+            // until it is given a real estimate here.
             _ => 0,
         })
         .sum()
@@ -244,13 +250,26 @@ pub(crate) fn compact_plan(messages: Vec<Message>, token_limit: usize) -> Compac
     // Even when the summary message was dropped to fit the budget, the result
     // digest keeps the carried entries so the event log loses nothing.
     let dropped_messages = dropped.iter().map(Vec::len).sum();
-    let digest = finalize_summary(
+    let mut digest = finalize_summary(
         summary.or_else(|| fold_carried(&carried, None)),
         &dropped,
         &out,
         token_limit,
         truncated_tool_results,
     );
+    // Put the finalized digest into the conversation the model actually sees —
+    // not only the event log. `out` currently carries the placeholder bullets;
+    // replace them with the richer digest, shrunk to fit rather than exceeding
+    // the budget. This mirrors the smart path's `swap_summary` cutover; the full
+    // digest still travels to `result.summary` (and the event log) below.
+    inject_digest(&mut out, &digest, token_limit);
+    // inject_digest changed `out`, so the digest persisted to result.summary and
+    // the event log must describe the projection actually sent, not the
+    // pre-injection placeholder it was budgeted against.
+    let final_tokens = estimate_tokens(&out);
+    digest.budget.estimated_tokens = final_tokens;
+    digest.budget.truncation_reason =
+        (final_tokens >= token_limit).then(|| "context budget pressure".to_string());
     let digest_estimate_tokens = digest.render().len() / 4;
     let kept_messages = exchanges.iter().map(Vec::len).sum::<usize>() + system.len();
 
@@ -336,6 +355,73 @@ fn swap_summary(messages: &[Message], smart: &StructuredSummary) -> Option<Vec<M
 
 fn is_summary_message(message: &Message) -> bool {
     matches!(first_text(message), Some(text) if text.starts_with(SUMMARY_TITLE))
+}
+
+/// Replace the placeholder bullet summary in `messages` with the finalized
+/// `digest`, shrunk to fit `token_limit`. Candidates are ordered for the
+/// conversation by [`prioritized_entries`] — semantic sections first (goal,
+/// files, decisions, …) with carried/critical context last — independent of the
+/// digest's durable entry order (which `finalize_summary` keeps carried-first for
+/// carry-forward). A halving ladder over the prefix sheds the least-important
+/// content first; if even a single entry does not fit — or there is no summary
+/// message to replace (it was dropped under budget pressure) — the placeholder
+/// bullets are left untouched, an acceptable last rung already within budget.
+/// Never leaves the projection over budget.
+fn inject_digest(messages: &mut Vec<Message>, digest: &StructuredSummary, token_limit: usize) {
+    let prioritized = prioritized_entries(digest);
+    let candidates = if prioritized.is_empty() {
+        digest.entries.clone()
+    } else {
+        prioritized
+    };
+    let mut count = candidates.len();
+    while count > 0 {
+        let trimmed = StructuredSummary::new(
+            &digest.title,
+            candidates.iter().take(count).cloned().collect(),
+        );
+        if let Some(swapped) = swap_summary(messages, &trimmed) {
+            if estimate_tokens(&swapped) <= token_limit {
+                *messages = swapped;
+                return;
+            }
+        }
+        count /= 2;
+    }
+}
+
+/// The digest's section items flattened into `label: item` lines in the order
+/// the conversation should keep them under budget pressure: the fresh semantic
+/// sections in priority order, with `CriticalContext` (which holds carried
+/// prior-summary and placeholder bullets) last so it is shed first. Empty when
+/// the digest carries no sections, in which case the caller falls back to the
+/// digest's own entries.
+fn prioritized_entries(digest: &StructuredSummary) -> Vec<String> {
+    const ORDER: [SummarySectionKind; 10] = [
+        SummarySectionKind::Goal,
+        SummarySectionKind::Constraints,
+        SummarySectionKind::Progress,
+        SummarySectionKind::Decisions,
+        SummarySectionKind::NextSteps,
+        SummarySectionKind::RelevantFiles,
+        SummarySectionKind::CommandOutcomes,
+        SummarySectionKind::Risks,
+        SummarySectionKind::StaleOrSuperseded,
+        SummarySectionKind::CriticalContext,
+    ];
+    let mut out = Vec::new();
+    for kind in ORDER {
+        for section in digest
+            .sections
+            .iter()
+            .filter(|section| section.kind == kind)
+        {
+            for item in &section.items {
+                out.push(format!("{}: {item}", kind.label()));
+            }
+        }
+    }
+    out
 }
 
 /// Split one oversized exchange into a digestible prefix and a budget-fitting
@@ -472,6 +558,12 @@ fn finalize_summary(
     let carried_entries = summary.entries.clone();
     let digest = semantic_digest(dropped);
     if !digest.entries.is_empty() || !carried_entries.is_empty() {
+        // Durable/carry order: carried entries first, then the fresh semantic
+        // entries. The next compaction reparses these in order and `fold_carried`
+        // caps by draining from the front, so the oldest carried bullets are shed
+        // first and recent semantic state survives the carry-forward. (The
+        // conversation injection uses its own semantic-first ordering — see
+        // `inject_digest` — so the two concerns do not fight.)
         summary.entries = carried_entries
             .iter()
             .cloned()
@@ -512,7 +604,10 @@ struct DigestBuckets {
     /// lexicographically-greatest one, and never a runtime-synthesized notice.
     latest_user_intent: Option<String>,
     command_counts: BTreeMap<String, usize>,
-    file_paths: BTreeSet<String>,
+    /// Touched paths in chronological order (repeats allowed): the digest orders
+    /// relevant files by recency of touch, not alphabetically, so it names where
+    /// the session is rather than whichever path sorts first.
+    file_paths: Vec<String>,
     /// Per-path file operations (read/modified/created/deleted) derived from the
     /// tool that touched it, so the digest records what happened to each file.
     file_ops: BTreeMap<String, BTreeSet<String>>,
@@ -589,7 +684,7 @@ fn semantic_digest(dropped: &[Vec<Message>]) -> SemanticDigest {
             .or_default()
             .push(item);
     }
-    let file_paths = std::mem::take(&mut buckets.file_paths);
+    let file_paths = recency_unique(std::mem::take(&mut buckets.file_paths));
     let file_ops = std::mem::take(&mut buckets.file_ops);
     for path in file_paths {
         sources
@@ -726,7 +821,9 @@ fn classify_text(role: Role, is_synthetic: bool, text: &str, buckets: &mut Diges
             .entry(truncate(command, 120))
             .or_default() += 1;
     }
-    collect_text_paths(trimmed, &mut buckets.file_paths);
+    let mut text_paths = BTreeSet::new();
+    collect_text_paths(trimmed, &mut text_paths);
+    buckets.file_paths.extend(text_paths);
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -756,14 +853,37 @@ fn classify_file_op(tool_name: &str) -> Option<&'static str> {
     }
 }
 
+/// Deduplicate `items` and keep the most **recent** `max`, preserving
+/// chronological order. Items arrive oldest-first, so the digest should describe
+/// where the session is now — the latest decisions, files, and outcomes — not
+/// where it started; taking from the front would freeze the first four and drop
+/// everything learned since.
 fn bounded_unique(items: &[String], max: usize) -> Vec<String> {
     let mut seen = BTreeSet::new();
-    items
+    let mut recent: Vec<String> = items
         .iter()
+        .rev()
         .filter(|item| seen.insert(item.to_ascii_lowercase()))
         .take(max)
         .cloned()
-        .collect()
+        .collect();
+    recent.reverse();
+    recent
+}
+
+/// Deduplicate `items` keeping the **last** occurrence of each, preserving
+/// chronological order — so a path touched early and again late sorts by its
+/// latest touch. Used to order relevant files by recency rather than the
+/// alphabetical order a set would impose.
+fn recency_unique(items: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out: Vec<String> = items
+        .into_iter()
+        .rev()
+        .filter(|item| seen.insert(item.clone()))
+        .collect();
+    out.reverse();
+    out
 }
 
 fn collect_json_paths(value: &serde_json::Value, paths: &mut BTreeSet<String>) {
@@ -1289,6 +1409,239 @@ mod tests {
         assert!(
             digest.contains("modified src/edited.rs"),
             "digest lacked the file operation: {digest}"
+        );
+    }
+
+    #[test]
+    fn digest_reaches_the_conversation_not_only_the_event_log() {
+        let mut messages = vec![Message::text(Role::System, "sys")];
+        // Older, heavy exchanges (dropped): short user text but a large tool
+        // output, so they force compaction while the digest they produce stays
+        // small (a goal, a file op, a command count). This leaves budget slack
+        // for the digest to occupy — the case where the fix is observable.
+        for i in 0..3 {
+            messages.push(user(&format!("task {i}")));
+            messages.push(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse(ToolCall::new(
+                    ToolUseId::from(format!("w{i}").as_str()),
+                    "write_file",
+                    serde_json::json!({ "path": "src/edited.rs" }),
+                ))],
+            ));
+            messages.push(Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult(ToolResult::success(
+                    ToolUseId::from(format!("w{i}").as_str()),
+                    "z".repeat(400),
+                ))],
+            ));
+        }
+        // Recent, tiny exchanges (kept): they leave ample slack for the digest.
+        for i in 0..3 {
+            messages.push(user(&format!("recent {i}")));
+        }
+        let result = compact_with_summary(messages, 120);
+        assert!(result.compacted);
+        // The system message the model actually sees carries the finalized
+        // digest — the whole point of the fix — not only the four-bullet
+        // placeholder. digest_records_file_operations_by_tool above asserts the
+        // same content on result.summary (the event log); this asserts it on
+        // result.messages (the conversation), where it was previously absent.
+        let injected = result
+            .messages
+            .iter()
+            .filter_map(first_text)
+            .find(|text| text.starts_with(SUMMARY_TITLE))
+            .expect("an injected summary message");
+        assert!(
+            injected.contains("modified src/edited.rs"),
+            "conversation summary lacked the file operation: {injected}"
+        );
+        // The goal (latest dropped real-user intent) must survive too, so a
+        // regression that keeps tool names but loses intent still fails.
+        assert!(
+            injected.contains("goal: task 2"),
+            "conversation summary lacked the goal: {injected}"
+        );
+        // ...and the injected digest never pushes the projection over budget.
+        assert!(estimate_tokens(&result.messages) <= 120);
+    }
+
+    #[test]
+    fn inject_digest_keeps_the_semantic_prefix_and_sheds_placeholder_bullets() {
+        // A summary message to replace, plus a recent turn that eats budget so
+        // the full digest cannot fit and the shrink ladder must engage.
+        let mut messages = vec![
+            Message::text(Role::System, format!("{SUMMARY_TITLE}\n- user asked: old")),
+            Message::text(Role::User, "keep this recent turn"),
+        ];
+        // Mirror a finalized digest: durable entries are carried-first (the order
+        // finalize_summary keeps for carry-forward), while sections hold the
+        // semantic content plus a CriticalContext carrying the placeholder bullet.
+        // inject_digest must order the conversation from sections (semantic-first),
+        // not from the carried-first entries.
+        let digest = StructuredSummary::new(
+            SUMMARY_TITLE,
+            vec![
+                format!("critical context: user asked: {}", "q".repeat(120)),
+                "goal: port the ingest pipeline".to_string(),
+            ],
+        )
+        .with_sections(vec![
+            SummarySection::new(
+                SummarySectionKind::Goal,
+                vec!["port the ingest pipeline".to_string()],
+            ),
+            SummarySection::new(
+                SummarySectionKind::RelevantFiles,
+                vec!["modified src/store.rs".to_string()],
+            ),
+            SummarySection::new(
+                SummarySectionKind::CriticalContext,
+                vec![format!("user asked: {}", "q".repeat(120))],
+            ),
+        ]);
+        // Fits a reduced semantic digest, not the full one.
+        let limit = 45;
+        inject_digest(&mut messages, &digest, limit);
+        let injected = messages
+            .iter()
+            .filter_map(first_text)
+            .find(|text| text.starts_with(SUMMARY_TITLE))
+            .expect("a summary message");
+        // The semantic goal survives under pressure; the placeholder (carried as
+        // CriticalContext) is shed first — bullets are the last rung, never the
+        // first survivor.
+        assert!(
+            injected.contains("goal: port the ingest pipeline"),
+            "{injected}"
+        );
+        assert!(
+            !injected.contains("user asked"),
+            "placeholder bullet survived over semantic content: {injected}"
+        );
+        assert!(estimate_tokens(&messages) <= limit);
+    }
+
+    #[test]
+    fn semantic_file_state_survives_shrink_and_the_next_carry_forward() {
+        // Round 1: heavy dropped exchanges touching a file, tiny kept turns, so a
+        // real semantic digest is injected into the conversation.
+        let mut messages = vec![Message::text(Role::System, "sys")];
+        for i in 0..4 {
+            messages.push(user(&format!("task {i}")));
+            messages.push(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse(ToolCall::new(
+                    ToolUseId::from(format!("w{i}").as_str()),
+                    "write_file",
+                    serde_json::json!({ "path": "src/store.rs" }),
+                ))],
+            ));
+            messages.push(Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult(ToolResult::success(
+                    ToolUseId::from(format!("w{i}").as_str()),
+                    "z".repeat(300),
+                ))],
+            ));
+        }
+        for i in 0..3 {
+            messages.push(user(&format!("recent {i}")));
+        }
+        let first = compact_with_summary(messages, 160);
+        assert!(first.compacted);
+        let round1_summary = first
+            .messages
+            .iter()
+            .filter_map(first_text)
+            .find(|text| text.starts_with(SUMMARY_TITLE))
+            .expect("a round-1 summary message");
+        assert!(
+            round1_summary.contains("src/store.rs"),
+            "round 1 lost the file state: {round1_summary}"
+        );
+
+        // Round 2: feed round 1's result back and add two heavy turns that force
+        // a second compaction (they are dropped), leaving room for the carried
+        // file state to survive — it must not be discarded by the entry cap.
+        let mut round2 = first.messages.clone();
+        for i in 0..2 {
+            round2.push(user(&format!("more {i}")));
+            round2.push(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse(ToolCall::new(
+                    ToolUseId::from(format!("m{i}").as_str()),
+                    "read_file",
+                    serde_json::json!({ "path": "src/other.rs" }),
+                ))],
+            ));
+            round2.push(Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult(ToolResult::success(
+                    ToolUseId::from(format!("m{i}").as_str()),
+                    "w".repeat(400),
+                ))],
+            ));
+        }
+        let second = compact_with_summary(round2, 200);
+        assert!(second.compacted);
+        let round2_summary = second
+            .messages
+            .iter()
+            .filter_map(first_text)
+            .find(|text| text.starts_with(SUMMARY_TITLE))
+            .expect("a round-2 summary message");
+        assert!(
+            round2_summary.contains("src/store.rs"),
+            "file state lost on carry-forward: {round2_summary}"
+        );
+    }
+
+    #[test]
+    fn an_image_block_is_not_free_to_the_estimator() {
+        let data = "A".repeat(4_000);
+        let with_image = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::image("image/png", data)],
+        )];
+        // ~4000 base64 chars / 4 ≈ 1000 tokens — a pasted screenshot is not free.
+        assert!(estimate_tokens(&with_image) >= 900);
+    }
+
+    #[test]
+    fn bounded_unique_keeps_the_most_recent() {
+        let items = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        assert_eq!(
+            bounded_unique(&items, 2),
+            vec!["c".to_string(), "d".to_string()]
+        );
+        // Dedup keeps the recent occurrence and never exceeds max.
+        let dupes = vec!["x".to_string(), "y".to_string(), "x".to_string()];
+        assert_eq!(
+            bounded_unique(&dupes, 2),
+            vec!["y".to_string(), "x".to_string()]
+        );
+    }
+
+    #[test]
+    fn recency_unique_orders_by_last_touch() {
+        let items = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "a".to_string(),
+            "c".to_string(),
+        ];
+        // 'a' was touched again after 'b', so it sorts by its later touch.
+        assert_eq!(
+            recency_unique(items),
+            vec!["b".to_string(), "a".to_string(), "c".to_string()]
         );
     }
 

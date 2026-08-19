@@ -398,7 +398,7 @@ and `--provider`.
 | `google_adc_path` | string | ADC default | Optional path to a gcloud ADC `authorized_user` file |
 | `model` | string | none | Default model when a command does not pass `--model` |
 | `request_timeout_secs` | int | 600 | Stall window: longest tolerated silence on an open response (to first byte, then between stream chunks) — not a total deadline; a server that keeps streaming is never cut off (ADR-0080) |
-| `context_window` | int | none | The model's context window in tokens; when set, the session budget derives from it (window minus a response reserve) and takes precedence over `[harness] context_token_limit` |
+| `context_window` | int | none | The model's context window in tokens; when set, the session budget derives from it and takes precedence over `[harness] context_token_limit`. The reserve subtracted is the provider's own output cap — the `max_tokens` the request will put on the wire (for `anthropic`, the configured `max_tokens` or the adapter default; for an OpenAI-compatible server, the larger forwarded output-limit key) — falling back to a 4,096-token floor when no cap is known, so a full history plus the response still fits (ADR-0161) |
 | `supports_vision` | bool | none | Whether this provider's model accepts image (vision) input. A user assertion that resolves the model's vision capability (config > probe > false, ADR-0061): `true` lifts the image-input gate even for a local server; unset/`false` keeps the text-only default. LocalBox sets this automatically when it loads a multimodal projector. See [04-provider-contract.md](04-provider-contract.md) §Vision. |
 | `prompt_caching` | bool | `false` | Enable prompt caching for an Anthropic provider: place an ephemeral `cache_control` breakpoint on the stable prefix (tools + the stable system prompt) so it is cached across turns, cutting the input cost/latency of a multi-turn session. Off by default; only pays off against a backend that implements prompt caching (hosted Claude or a proxy that does) and is harmless otherwise. The per-turn volatile context (memory, project instructions) stays after the breakpoint and is re-sent each turn. Cached tokens show as `cached:N` in the footer. |
 
@@ -544,7 +544,7 @@ engine.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `mode` | `deterministic` \| `smart_with_fallback` | `deterministic` | Runtime context compaction mode. `smart_with_fallback` keeps deterministic compaction as the completed-only fallback when no validated summarizer backend is available |
+| `mode` | `deterministic` \| `smart_with_fallback` | `deterministic` | Runtime context compaction mode. Either way, the digest injected into the conversation is the finalized semantic one (goal, decisions, per-file operations, command outcomes) — budgeted to fit and ordered by recency — not a bullet placeholder, and an automatic compaction posts a host-visible notice (ADR-0161). `smart_with_fallback` keeps deterministic compaction as the completed-only fallback when no validated summarizer backend is available |
 | `summary_token_limit` | int | `1024` | Target maximum size for rendered compact summaries |
 | `summarizer_input_tokens` | int | `8192` | Reserved input budget for model-backed summarization when enabled |
 | `summarizer_timeout_secs` | int | `20` | Timeout budget for a future model-backed summarizer call |

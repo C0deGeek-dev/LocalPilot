@@ -97,6 +97,12 @@ pub struct ProviderDeclaration {
     pub reasoning_shape: ReasoningShape,
     pub capabilities: Capabilities,
     pub max_context_tokens: Option<u64>,
+    /// The output-token cap this provider will place on the wire (the request's
+    /// `max_tokens`, including an adapter's own default). The session budget
+    /// reserves this from the context window so a full history plus the response
+    /// still fits. `None` when the provider does not model an output cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     pub auth: AuthRequirement,
     pub rate_limit_behavior: Option<String>,
 }

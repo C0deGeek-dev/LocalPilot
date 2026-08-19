@@ -182,6 +182,7 @@ pub async fn build_runtime(
     let context_token_limit = localpilot_harness::effective_context_limit(
         provider.declaration().max_context_tokens,
         config.harness.context_token_limit,
+        provider.declaration().max_output_tokens,
     );
     let mut registry = crate::mcp::McpTools::load(&config).await.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);

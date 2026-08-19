@@ -779,6 +779,7 @@ where
             localpilot_harness::effective_context_limit(
                 provider.declaration().max_context_tokens,
                 config.harness.context_token_limit,
+                provider.declaration().max_output_tokens,
             ),
             rails.tool_call_budget,
             rails.tool_call_budget_max,

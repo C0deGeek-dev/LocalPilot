@@ -438,6 +438,15 @@ pub fn map_event(event: RuntimeEvent) -> Option<ServerEvent> {
             output_tokens: usage.output_tokens,
         },
         RuntimeEvent::ContextUsage { used, limit } => ServerEvent::ContextUsage { used, limit },
+        RuntimeEvent::Compacted {
+            dropped_exchanges,
+            context_used,
+            limit,
+        } => ServerEvent::Compacted {
+            dropped_exchanges,
+            context_used,
+            limit,
+        },
         RuntimeEvent::Warning(message) => ServerEvent::Warning { message },
         RuntimeEvent::Plan(steps) => ServerEvent::Plan {
             steps: steps

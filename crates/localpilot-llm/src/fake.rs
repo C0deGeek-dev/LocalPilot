@@ -171,6 +171,7 @@ fn default_declaration() -> ProviderDeclaration {
             constrained_decoding: false,
         },
         max_context_tokens: Some(8192),
+        max_output_tokens: None,
         auth: AuthRequirement::None,
         rate_limit_behavior: None,
     }

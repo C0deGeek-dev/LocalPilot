@@ -160,6 +160,17 @@ pub enum RuntimeEvent {
     Usage(TokenUsage),
     /// Estimated context usage for the request about to be sent.
     ContextUsage { used: usize, limit: usize },
+    /// Context was compacted automatically — by the pre-request budget check or
+    /// an overflow retry, not a manual `/compact`. Carries how many exchanges
+    /// were trimmed and the resulting projection size, so a host can show why the
+    /// context gauge dropped and tell "the model lost its context two turns ago"
+    /// apart from "the model got confused". Manual `/compact` posts its own
+    /// notice; the automatic and overflow paths had none.
+    Compacted {
+        dropped_exchanges: usize,
+        context_used: usize,
+        limit: usize,
+    },
     /// A provider warning.
     Warning(String),
     /// The model updated the task plan shown to the user.
@@ -363,18 +374,27 @@ const CONTEXT_RESERVE_TOKENS: usize = 4_096;
 /// tiny configured limit still leaves a usable conversation.
 const FORCE_COMPACT_FLOOR: usize = 4_096;
 
-/// The session's effective context budget: the model's real window minus a
-/// response reserve when the window is known (per-provider `context_window`
-/// or discovery), otherwise the configured global limit. Estimates feeding
-/// this budget are the bytes/4 heuristic — see docs/providers.md for its bias.
+/// The session's effective context budget: the model's real window minus the
+/// response reserve when the window is known (per-provider `context_window` or
+/// discovery), otherwise the configured global limit. The reserve is the
+/// provider's own output cap (`max_output`) — the `max_tokens` the request will
+/// actually put on the wire — so a history that fills the budget still leaves
+/// room for the reply; when the cap is unknown the flat `CONTEXT_RESERVE_TOKENS`
+/// is a reasonable floor. Estimates feeding this budget are the bytes/4
+/// heuristic — see docs/providers.md for its bias.
 #[must_use]
-pub fn effective_context_limit(window: Option<u64>, configured: usize) -> usize {
+pub fn effective_context_limit(
+    window: Option<u64>,
+    configured: usize,
+    max_output: Option<u64>,
+) -> usize {
     match window {
         Some(window) => {
             let window = usize::try_from(window).unwrap_or(usize::MAX);
-            window
-                .saturating_sub(CONTEXT_RESERVE_TOKENS)
-                .max(CONTEXT_RESERVE_TOKENS)
+            let reserve = max_output
+                .and_then(|cap| usize::try_from(cap).ok())
+                .unwrap_or(CONTEXT_RESERVE_TOKENS);
+            window.saturating_sub(reserve).max(CONTEXT_RESERVE_TOKENS)
         }
         None => configured,
     }
@@ -2029,8 +2049,9 @@ impl SessionRuntime {
     pub async fn compact_conversation(&mut self) -> ManualCompaction {
         let cancel = CancellationToken::new();
         // Manual compaction shapes stored history only; no per-turn request
-        // context is injected here, so nothing is reserved.
-        let result = self.compacted_history(0, &cancel).await;
+        // context is injected here, so nothing is reserved. The caller renders
+        // its own notice, so the newly-compacted flag is unused here.
+        let (result, _) = self.compacted_history(0, &cancel).await;
         let context_used = estimate_tokens(&result.messages);
         let fallback_reason = result.metadata.fallback_reason.clone();
         let (requested_mode, used_mode) =
@@ -2342,14 +2363,22 @@ impl SessionRuntime {
         let _ = events.send(RuntimeEvent::Warning(
             "provider rejected the request as too large; compacting and retrying once".to_string(),
         ));
-        self.shrink_for_overflow(cancel).await;
+        if let Some((dropped_exchanges, context_used)) = self.shrink_for_overflow(cancel).await {
+            let _ = events.send(RuntimeEvent::Compacted {
+                dropped_exchanges,
+                context_used,
+                limit: self.config.context_token_limit,
+            });
+        }
         true
     }
 
     /// Compact active history to roughly half its current estimate (no smaller
     /// than the force floor) so a retry fits, recording the attempt as an
     /// overflow-driven compaction in the audit log.
-    async fn shrink_for_overflow(&mut self, cancel: &CancellationToken) {
+    /// Returns `Some((dropped_exchanges, context_used))` when a compaction
+    /// actually happened, so the caller can surface a single runtime event.
+    async fn shrink_for_overflow(&mut self, cancel: &CancellationToken) -> Option<(usize, usize)> {
         let target = (estimate_tokens(&self.messages) / 2).max(FORCE_COMPACT_FLOOR);
         let result = self.compact_candidate(target, cancel).await;
         if result.compacted {
@@ -2358,9 +2387,14 @@ impl SessionRuntime {
             }
             self.record_compaction_attempt("overflow_retry", &result.metadata);
             self.hooks.notify(&HookEvent::Compacted);
+            let dropped_exchanges = result.metadata.dropped_exchanges;
+            let context_used = estimate_tokens(&result.messages);
             self.messages = result.messages;
             self.history_generation += 1;
             self.compaction_cache = None;
+            Some((dropped_exchanges, context_used))
+        } else {
+            None
         }
     }
 
@@ -2554,14 +2588,18 @@ impl SessionRuntime {
     /// token budget held back for context that will be injected into the request
     /// but is not part of the stored history (per-turn context-hook retrieval),
     /// so the compacted history plus that context still fits the limit.
+    /// Returns the projection and whether this call *built* a new one. A cache
+    /// hit (same generation and reserve — the common case on a transient/overflow
+    /// retry within a turn) returns `false`, so a host is notified once per real
+    /// compaction, not once per request that reuses the same projection.
     async fn compacted_history(
         &mut self,
         reserve: usize,
         cancel: &CancellationToken,
-    ) -> CompactionResult {
+    ) -> (CompactionResult, bool) {
         if let Some((generation, cached_reserve, cached)) = &self.compaction_cache {
             if *generation == self.history_generation && *cached_reserve == reserve {
-                return cached.clone();
+                return (cached.clone(), false);
             }
         }
         let limit = self.config.context_token_limit.saturating_sub(reserve);
@@ -2574,7 +2612,8 @@ impl SessionRuntime {
             self.hooks.notify(&HookEvent::Compacted);
         }
         self.compaction_cache = Some((self.history_generation, reserve, result.clone()));
-        result
+        let newly_compacted = result.compacted;
+        (result, newly_compacted)
     }
 
     /// Build the deterministic projection, then — in smart mode — make one
@@ -2790,7 +2829,18 @@ impl SessionRuntime {
                 );
             }
 
-            let compacted = self.compacted_history(context_reserve, cancel).await;
+            let (compacted, newly_compacted) =
+                self.compacted_history(context_reserve, cancel).await;
+            // Surface automatic compaction so a host can show why the context
+            // gauge dropped. Only on a fresh projection — a cached reuse this
+            // turn is not a new compaction.
+            if newly_compacted {
+                let _ = events.send(RuntimeEvent::Compacted {
+                    dropped_exchanges: compacted.metadata.dropped_exchanges,
+                    context_used: estimate_tokens(&compacted.messages),
+                    limit: self.config.context_token_limit,
+                });
+            }
             let tools = if tools_enabled {
                 self.tool_specs()
             } else {
@@ -4422,6 +4472,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automatic_compaction_is_announced_once_not_on_cache_reuse() {
+        let (mut runtime, _dir) = test_runtime();
+        // A tiny budget so a handful of turns forces a real compaction.
+        runtime.config.context_token_limit = 200;
+        for i in 0..12 {
+            runtime.messages.push(Message::text(
+                Role::User,
+                format!("turn {i} {}", "x".repeat(40)),
+            ));
+            runtime
+                .messages
+                .push(Message::text(Role::Assistant, format!("reply {i}")));
+        }
+        let cancel = CancellationToken::new();
+        let (first, newly_first) = runtime.compacted_history(0, &cancel).await;
+        assert!(first.compacted, "history over the limit compacts");
+        assert!(newly_first, "the first build is a new compaction");
+        // The same generation and reserve reuse the cached projection, so a
+        // transient/overflow retry within the turn does not re-announce it.
+        let (_second, newly_second) = runtime.compacted_history(0, &cancel).await;
+        assert!(!newly_second, "a cache hit is not a new compaction");
+    }
+
+    #[tokio::test]
     async fn research_exchange_enters_the_next_request_event_log_and_resume_exactly_once() {
         use localpilot_store::MessageOrigin;
 
@@ -4434,7 +4508,7 @@ mod tests {
         ));
         assert_eq!(runtime.messages.len(), before + 2);
 
-        let compacted = runtime
+        let (compacted, _) = runtime
             .compacted_history(0, &CancellationToken::new())
             .await;
         let request_text = compacted
@@ -5224,11 +5298,23 @@ mod tests {
 
     #[test]
     fn effective_limit_derives_from_a_known_window_with_a_reserve() {
-        assert_eq!(effective_context_limit(Some(32_768), 24_000), 28_672);
+        // Unknown output cap falls back to the flat reserve floor.
+        assert_eq!(effective_context_limit(Some(32_768), 24_000, None), 28_672);
+        // A known output cap is reserved exactly — a 16k response on a 131k
+        // window leaves 114,688, not window - 4,096.
+        assert_eq!(
+            effective_context_limit(Some(131_072), 24_000, Some(16_384)),
+            114_688
+        );
+        // A small known cap reserves that cap, not the 4k floor: 32,768 - 1,024.
+        assert_eq!(
+            effective_context_limit(Some(32_768), 24_000, Some(1_024)),
+            31_744
+        );
         // The configured global limit is the fallback only.
-        assert_eq!(effective_context_limit(None, 24_000), 24_000);
+        assert_eq!(effective_context_limit(None, 24_000, Some(16_384)), 24_000);
         // A tiny window never collapses below the reserve floor.
-        assert_eq!(effective_context_limit(Some(1_024), 24_000), 4_096);
+        assert_eq!(effective_context_limit(Some(1_024), 24_000, None), 4_096);
     }
 
     #[test]

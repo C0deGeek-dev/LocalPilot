@@ -2,6 +2,56 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0161: Automatic Compaction Injects Its Real Digest, Budgets Against The Output Cap, And Announces Itself
+
+Status: Accepted.
+
+Context: deterministic compaction computed a rich semantic digest of the history
+it trimmed — goal, constraints, decisions, progress, per-file operations, command
+outcomes, failures — attached it to the `Compacted` event, and then sent the model
+something else: at most four `user asked: …; tools used: …` bullets. The digest
+reached the audit log; the conversation got the placeholder. Three defects sat
+under it: the session budget subtracted a flat 4,096-token reserve while the
+request reserved its own `max_tokens` (often larger, e.g. 16k), so a history the
+local estimate believed fit was rejected by the provider — and the recovery for
+that rejection is the one path that permanently halves live history; the estimator
+counted a pasted image as zero tokens; and automatic/overflow compaction posted no
+timeline signal, so a dropped context gauge was the only clue (LocalHub#78).
+
+Decision:
+
+- **The finalized digest goes into the conversation.** After `finalize_summary`,
+  `compact_plan` rebuilds the summary message from the digest via the smart
+  path's `swap_summary`, shrinking it (a halving ladder over the priority-ordered
+  entries) until it fits `token_limit`; today's bullets are the last rung and the
+  projection never exceeds budget. The full digest still travels to
+  `result.summary` and the event log, with its budget fields refreshed from the
+  post-injection projection so the persisted estimate is not stale.
+- **The context reserve is the provider's real output cap.**
+  `effective_context_limit(window, configured, max_output)` subtracts the
+  provider's `max_output_tokens` — published on `ProviderDeclaration` (Anthropic:
+  the configured `max_tokens` or `DEFAULT_MAX_TOKENS`; OpenAI-compatible: the
+  larger of the forwarded output-limit keys) — falling back to the flat reserve
+  only when the cap is unknown.
+- **The estimator counts what is sent.** `ContentBlock::Image` is charged its
+  base64 length instead of zero, and trimming keeps the most *recent* items:
+  `bounded_unique` keeps the latest unique entries and relevant files are ordered
+  by recency of touch, so the digest describes where the session is, not where it
+  started.
+- **Automatic compaction is announced.** A `RuntimeEvent::Compacted { dropped_exchanges, context_used, limit }` fires from the pre-request budget path and the
+  overflow retry — once per real compaction (a cached projection reused within a
+  turn does not re-announce) — projected to `ServerEvent::Compacted` on the wire
+  and a host notice in the full-screen UI. Manual `/compact` keeps its own notice.
+
+Boundary and compatibility: default behaviour only changes for the better — a
+default install already ran deterministic compaction on every trim. The new
+`max_output_tokens` field is serde-defaulted and skipped when absent; the smart
+summarizer path is unchanged (it still overrides the injected digest when
+enabled). Pinned by tests asserting the digest reaches `result.messages` (goal and
+file operations, within budget), the output-cap reserve arithmetic and per-adapter
+cap derivation, the image cost and recency helpers, and the announce-once /
+cache-reuse behaviour.
+
 ## ADR-0160: Incognito Sessions Persist Nothing And Gate Every File They Create
 
 Status: Accepted.

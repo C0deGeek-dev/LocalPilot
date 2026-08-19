@@ -150,6 +150,14 @@ pub enum ServerEvent {
         used: usize,
         limit: usize,
     },
+    /// Context was compacted automatically (the pre-request budget check or an
+    /// overflow retry), not by a manual command: `dropped_exchanges` were trimmed
+    /// and the projection now uses `context_used` of `limit` tokens.
+    Compacted {
+        dropped_exchanges: usize,
+        context_used: usize,
+        limit: usize,
+    },
     Warning {
         message: String,
     },

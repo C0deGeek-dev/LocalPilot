@@ -202,6 +202,7 @@ mod tests {
                 constrained_decoding,
             },
             max_context_tokens: None,
+            max_output_tokens: None,
             auth: AuthRequirement::None,
             rate_limit_behavior: None,
         }

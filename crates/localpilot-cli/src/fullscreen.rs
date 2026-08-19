@@ -7987,6 +7987,13 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
             cached_input_tokens: usage.cache_read_input_tokens,
         },
         RuntimeEvent::ContextUsage { used, limit } => RuntimeUpdate::ContextUsage { used, limit },
+        RuntimeEvent::Compacted {
+            dropped_exchanges,
+            context_used,
+            limit,
+        } => RuntimeUpdate::Notice(format!(
+            "compacted context: trimmed {dropped_exchanges} exchange(s); now ~{context_used}/{limit} tokens"
+        )),
         RuntimeEvent::Warning(message) => RuntimeUpdate::Warning(message),
         RuntimeEvent::Plan(steps) => RuntimeUpdate::Plan(
             steps

@@ -168,6 +168,9 @@ impl OpenAiProvider {
                     constrained_decoding: matches!(source_type, SourceType::LocalServer),
                 },
                 max_context_tokens: None,
+                // No configured output cap until with_default_options sees one;
+                // an OpenAI-style server has no fixed adapter default here.
+                max_output_tokens: None,
                 auth: auth_requirement,
                 rate_limit_behavior: None,
             },
@@ -193,6 +196,14 @@ impl OpenAiProvider {
     #[must_use]
     pub fn with_default_options(mut self, options: IndexMap<String, Value>) -> Self {
         self.default_options = options;
+        // The output-token cap the wire request will carry. OpenAI-style servers
+        // forward max_completion_tokens and/or max_tokens; reserve the larger of
+        // any configured numeric values (conservative), or nothing when neither
+        // is set — so the session budget never under-reserves the response.
+        self.declaration.max_output_tokens = ["max_completion_tokens", "max_tokens"]
+            .iter()
+            .filter_map(|key| self.default_options.get(*key).and_then(Value::as_u64))
+            .max();
         self
     }
 
@@ -1188,6 +1199,33 @@ mod tests {
         let body = provider.build_body(&ModelRequest::new("m", Vec::new()));
         assert_eq!(body["reasoning_effort"], "minimal");
         assert!(body.get("suppress_thinking").is_none());
+    }
+
+    #[test]
+    fn declaration_reserves_the_larger_configured_output_cap() {
+        // No output-limit key configured: nothing for the budget to reserve.
+        let bare = OpenAiProvider::new(
+            "l",
+            "L",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        );
+        assert_eq!(bare.declaration().max_output_tokens, None);
+        // Both keys present: reserve the larger, so the budget never
+        // under-reserves whichever the server honours.
+        let mut options = IndexMap::new();
+        options.insert("max_completion_tokens".to_string(), json!(2_048));
+        options.insert("max_tokens".to_string(), json!(4_096));
+        let configured = OpenAiProvider::new(
+            "l",
+            "L",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .with_default_options(options);
+        assert_eq!(configured.declaration().max_output_tokens, Some(4_096));
     }
 
     #[test]

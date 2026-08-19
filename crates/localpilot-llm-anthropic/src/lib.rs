@@ -102,6 +102,10 @@ impl AnthropicProvider {
                     constrained_decoding: false,
                 },
                 max_context_tokens: None,
+                // No provider default_options yet, so the request would fall back
+                // to DEFAULT_MAX_TOKENS; with_default_options refines this when a
+                // provider sets its own max_tokens.
+                max_output_tokens: Some(DEFAULT_MAX_TOKENS),
                 auth,
                 rate_limit_behavior: None,
             },
@@ -137,6 +141,15 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_default_options(mut self, options: IndexMap<String, Value>) -> Self {
         self.default_options = options;
+        // Mirror request construction: the wire `max_tokens` is the provider's
+        // configured value or DEFAULT_MAX_TOKENS. Publish it so the session
+        // budget can reserve exactly what the response will claim.
+        self.declaration.max_output_tokens = Some(
+            self.default_options
+                .get("max_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_MAX_TOKENS),
+        );
         self
     }
 
@@ -1438,6 +1451,23 @@ mod tests {
         let body = provider.build_body(&ModelRequest::new("claude", Vec::new()));
         assert_eq!(body["max_tokens"], 123);
         assert!(body.get("suppress_thinking").is_none());
+    }
+
+    #[test]
+    fn declaration_publishes_the_output_cap_for_the_budget() {
+        // No configured max_tokens: the request would use DEFAULT_MAX_TOKENS, so
+        // that is exactly what the session budget must reserve.
+        let default = AnthropicProvider::new("a", "A", "https://api.anthropic.com/v1", None);
+        assert_eq!(
+            default.declaration().max_output_tokens,
+            Some(DEFAULT_MAX_TOKENS)
+        );
+        // A configured cap is published verbatim.
+        let mut options = IndexMap::new();
+        options.insert("max_tokens".to_string(), json!(16_384));
+        let configured = AnthropicProvider::new("a", "A", "https://api.anthropic.com/v1", None)
+            .with_default_options(options);
+        assert_eq!(configured.declaration().max_output_tokens, Some(16_384));
     }
 
     #[test]

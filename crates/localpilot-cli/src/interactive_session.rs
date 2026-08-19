@@ -505,6 +505,9 @@ impl InteractiveSessionSetup {
         // The real context window: per-provider declaration first, then
         // best-effort discovery. Failure falls back to the configured budget.
         let mut context_window = provider.declaration().max_context_tokens;
+        // The output cap the request will reserve, captured before `provider` is
+        // moved into the runtime, so the session budget subtracts it.
+        let max_output = provider.declaration().max_output_tokens;
         if context_window.is_none() {
             context_window = discovered_window(&self.config, provider_id, model).await;
         }
@@ -530,6 +533,7 @@ impl InteractiveSessionSetup {
                 &self.config,
                 model,
                 context_window,
+                max_output,
                 !self.trust_required,
                 self.package_discovery_hint,
                 self.incognito,
@@ -703,6 +707,7 @@ fn interactive_config(
     config: &Config,
     model: &str,
     context_window: Option<u64>,
+    max_output: Option<u64>,
     trusted: bool,
     package_discovery_disabled_but_present: bool,
     incognito: bool,
@@ -717,6 +722,7 @@ fn interactive_config(
         context_token_limit: localpilot_harness::effective_context_limit(
             context_window,
             config.harness.context_token_limit,
+            max_output,
         ),
         compaction_mode: compaction_mode(config.compaction.mode),
         summarizer_tuning: localpilot_harness::SummarizerTuning::from_config(&config.compaction),
@@ -1021,14 +1027,14 @@ mod tests {
 
         // The trust decision and the package-discovery hint are the launch
         // snapshot passed in verbatim — no longer re-derived from the profile here.
-        let built = interactive_config(&config, "chosen", Some(20_000), true, false, false);
+        let built = interactive_config(&config, "chosen", Some(20_000), None, true, false, false);
         assert_eq!(built.model, "chosen");
         assert_eq!(built.interactivity, Interactivity::Interactive);
         assert!(built.trusted);
         assert!(!built.package_discovery_disabled_but_present);
         assert_eq!(
             built.context_token_limit,
-            localpilot_harness::effective_context_limit(Some(20_000), 99_999)
+            localpilot_harness::effective_context_limit(Some(20_000), 99_999, None)
         );
         assert_eq!(
             built.compaction_mode,
