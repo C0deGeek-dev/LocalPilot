@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v3.3.0 - 2026-08-19
+
+Coordinated LocalX release.
+
 ## v3.2.0 - 2026-08-18
 
 Coordinated LocalX release.
