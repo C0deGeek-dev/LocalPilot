@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v3.3.2 - 2026-08-20
+
+Coordinated LocalX release.
+
+- **Fixed self-updates from the prerelease channel.** A tagless `localx`
+  source build now keeps recognizing itself even when its version stamp is not
+  SemVer, so it takes the safe staging-and-replace path instead of trying to
+  overwrite the running executable. The installers use the same staged
+  replacement with rollback, and tagless builds now carry a parseable
+  `<crate-version>-g<sha>` stamp as defense in depth (ADR-0162, LocalHub#79).
+
 ## v3.3.1 - 2026-08-20
 
 Coordinated LocalX release.
