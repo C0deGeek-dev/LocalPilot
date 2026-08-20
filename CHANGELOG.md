@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v3.3.1 - 2026-08-20
+
+Coordinated LocalX release.
+
 - **Automatic compaction now sends the model its real digest and budgets for the
   reply.** When context is trimmed mid-run, the conversation receives the
   finalized semantic digest (goal, decisions, per-file operations, command
