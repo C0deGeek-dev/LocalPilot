@@ -1060,7 +1060,7 @@ mod tests {
         assert_eq!(built.verify_command.as_deref(), Some("cargo test"));
 
         // A passed-in untrusted snapshot + a set hint flow straight through.
-        let untrusted = interactive_config(&config, "chosen", None, false, true, false);
+        let untrusted = interactive_config(&config, "chosen", None, None, false, true, false);
         assert!(!untrusted.trusted);
         assert!(untrusted.package_discovery_disabled_but_present);
     }
