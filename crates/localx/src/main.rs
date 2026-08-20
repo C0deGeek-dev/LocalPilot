@@ -96,20 +96,31 @@ fn channel(prerelease: bool) -> Channel {
     }
 }
 
-/// This binary as a [`Running`] marker, so its own cache gets the strictly-newer
-/// activation rule and its running version is protected from the sweep.
-fn running() -> Option<Running> {
-    Version::parse(VERSION).map(|version| Running {
+/// This binary as a [`Running`] marker. The marker is *always* produced: its
+/// identity ("this process is localx") is what enables the self-replace route
+/// and the refresh of the copy the shell resolves. The version is carried only
+/// when the stamp parses, for the cache's strictly-newer rule and the sweep.
+///
+/// The version does not always parse. Any stamp that is not a semver — a bare
+/// git sha from an older build or a tagless checkout, an operator-supplied
+/// `LOCALX_VERSION`, a source archive — yields `None` here while the binary is
+/// still this running executable. Gating the whole marker on `Version::parse` is
+/// what made the self-replace unreachable on exactly the prerelease channel
+/// (LocalHub#79), so identity never depends on the version. This crate's own
+/// `build.rs` now keeps the stamp parseable as defence in depth, but the marker
+/// must not lean on that — the running binary may have been built any other way.
+fn running_marker(version: &str) -> Running {
+    Running {
         tool: "localx",
-        version,
-    })
+        version: Version::parse(version),
+    }
 }
 
 /// Update every app tool to the newest release (or latest `main`), then refresh
 /// the engine. The full stack in one command.
 async fn update(channel: Channel, out: &mut dyn Write) -> Result<()> {
-    let marker = running();
-    localpilot_stack::install(&Selection::All, None, channel, marker.as_ref(), out).await?;
+    let marker = running_marker(VERSION);
+    localpilot_stack::install(&Selection::All, None, channel, Some(&marker), out).await?;
     update_engine(out)?;
     Ok(())
 }
@@ -118,8 +129,8 @@ async fn update(channel: Channel, out: &mut dyn Write) -> Result<()> {
 async fn install(target: &str, channel: Channel, out: &mut dyn Write) -> Result<()> {
     match target {
         "all" => {
-            let marker = running();
-            localpilot_stack::install(&Selection::All, None, channel, marker.as_ref(), out).await?;
+            let marker = running_marker(VERSION);
+            localpilot_stack::install(&Selection::All, None, channel, Some(&marker), out).await?;
             update_engine(out)?;
         }
         "engine" => update_engine(out)?,
@@ -130,8 +141,8 @@ async fn install(target: &str, channel: Channel, out: &mut dyn Write) -> Result<
                      localpilot, localmind, localbox, localbench, localx"
                 );
             };
-            let marker = running();
-            localpilot_stack::install(&Selection::One(tool), None, channel, marker.as_ref(), out)
+            let marker = running_marker(VERSION);
+            localpilot_stack::install(&Selection::One(tool), None, channel, Some(&marker), out)
                 .await?;
         }
     }
@@ -348,6 +359,23 @@ mod tests {
             Some("3.2.0-rc.1")
         );
         assert_eq!(version_token("localx bc388f9"), None);
+    }
+
+    #[test]
+    fn the_running_marker_is_produced_even_for_a_non_semver_stamp() {
+        // A prerelease build stamped with a bare git sha (a tagless cargo
+        // checkout) still yields a marker — identity is certain — with no
+        // version. This is the production entry point the stack-crate tests
+        // bypass by hand-constructing a marker; gating it on the stamp is what
+        // made the self-replace unreachable (LocalHub#79).
+        let sha = super::running_marker("fa98397");
+        assert_eq!(sha.tool, "localx");
+        assert!(sha.version.is_none());
+
+        // A normal semver stamp carries its version through for the cache rules.
+        let tagged = super::running_marker("3.3.1");
+        assert_eq!(tagged.tool, "localx");
+        assert!(tagged.version.is_some());
     }
 
     #[test]

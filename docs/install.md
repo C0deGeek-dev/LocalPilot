@@ -167,13 +167,18 @@ uses its released binaries.
 
 `localx` updates itself last, and can: the running executable is built into a
 staging directory and swapped in (rename-then-copy, so Windows' lock on a running
-image is never hit). If the swap is ever refused, the raw error is printed, the
-build is kept, and the message names the file to copy over after `localx`
-exits; on Windows an access-denied on the running file is that image lock, which
-exiting lifts and an elevated shell does not. On the release channel a
-source-built `localx` earlier on `PATH` (what the from-source installer creates
-in cargo's bin directory) is refreshed alongside the managed copy, and
-`localx status` says which copy is running and flags a version mismatch.
+image is never hit). It recognises itself by the running executable's path, not
+by its version string, so a prerelease build stamped with a bare git sha — the
+build a cargo checkout produces — still self-replaces (LocalHub#79). If the swap
+is ever refused, the raw error is printed, the build is kept, and the message
+names the file to copy over after `localx` exits; on Windows an access-denied on
+the running file is that image lock, which exiting lifts and an elevated shell
+does not. On the release channel a source-built `localx` earlier on `PATH` (what
+the from-source installer creates in cargo's bin directory) is refreshed
+alongside the managed copy, and `localx status` says which copy is running and
+flags a version mismatch. The from-source installers themselves build `localx`
+into a staging directory and swap it in the same way, so re-running the installer
+over a running `localx` does not hit the image lock either.
 
 Per-tool commands stay available for finer control:
 

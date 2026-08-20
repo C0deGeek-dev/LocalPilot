@@ -2,6 +2,61 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0162: The Self-Replace Is Decided By Identity, Not By A Parseable Version Stamp
+
+Status: Accepted. Extends ADR-0159 (the updater replaces its own running
+executable) and ADR-0155 (`localx`, one umbrella command). Closes LocalHub#79.
+
+Context: ADR-0159's self-replace shipped correct but unreachable on the one
+channel that needs it. Reaching the staging + rename-then-copy route requires the
+process to recognise itself, and that recognition was gated on the running
+binary's version stamp parsing as semver: `localx`'s `running()` built the
+`Running` marker with `Version::parse(VERSION).map(…)`, and `localpilot`'s
+`update` built its marker the same way. Every prerelease build is stamped by
+`git describe --tags --always` with a bare abbreviated sha (a cargo git checkout
+carries no tags), which does not parse, so the marker was `None`. With no marker,
+`source_install` took the classic `cargo install --force` straight onto the live
+path (the original `os error 5`), the release channel never refreshed the copy
+the shell resolves, the cache's strictly-newer rule and sweep protection were
+off, and the run summary fell back to `Re-run to retry` — a re-run of the same
+sha-stamped binary cannot clear it. The half that used `std::env::current_exe()`
+(`localx status`'s shadow note) kept working, which is the tell: identity-based
+detection worked, version-based detection did not.
+
+Decision:
+
+- **Identity and version are separated at the marker.** `Running.version`
+  becomes `Option<Version>`; the `tool` field (identity) is always known. A new
+  `self_view(marker, tool) -> (is_self, Option<&Version>)` in `localpilot-stack`
+  is the single place the install loop asks "am I this tool" (identity) apart
+  from "do I know my version" (for the strictly-newer rule and the sweep).
+- **The marker is always produced for the running tool.** `localx`'s
+  `running_marker(&str)` returns a `Running` unconditionally (version `None` when
+  the stamp does not parse); `localpilot`'s `update` constructs its marker
+  unconditionally in both the `--all` and single-tool paths. So a bare-sha build
+  is still recognised as itself.
+- **The self-replace and the running-copy refresh are gated on identity.**
+  `source_install(tool, is_self, …)` and the release channel's
+  `refresh_running_copy` key on `is_self`, not on a parseable version. A `localx`
+  that cannot parse its own version still stages + rename-then-copies, and still
+  never prints `Re-run to retry` for a refused self-replace.
+- **The stamp is kept parseable as defence in depth, not as the mechanism.**
+  `localx`'s `build.rs` stamps a tagless tree `<crate version>-g<sha>` instead of
+  a bare sha, so the version still parses while naming the commit. This is
+  secondary — the self-replace no longer depends on it. `localpilot`'s stamp goes
+  through the tested `build_meta.rs` policy module and is left unchanged; the
+  identity fix already covers it.
+- **The from-source installers stage too.** `install.ps1` and `install.sh` build
+  `localx` into a staging `--root` and rename-then-copy it into cargo's bin
+  directory, so bootstrapping over an already-running `localx` no longer hits the
+  same image lock (or Linux `ETXTBSY`).
+
+Boundary and compatibility: no config, manifest, or cache layout change. The
+production entry point is now covered by a test — `localx`'s `running_marker`
+yields a marker with no version for a non-semver stamp, and `localpilot-stack`'s
+`self_view` returns `is_self = true` for a `None`-version self — the gap the
+existing tests missed by hand-constructing every marker with a version.
+
 ## ADR-0161: Automatic Compaction Injects Its Real Digest, Budgets Against The Output Cap, And Announces Itself
 
 Status: Accepted.

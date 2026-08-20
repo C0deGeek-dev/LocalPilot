@@ -111,13 +111,20 @@ impl Selection {
     }
 }
 
-/// The tool whose version is known because it is the running binary. Its cache
-/// gets the strictly-newer activation rule (which stops a stale cache
-/// downgrading a from-source build) and its running version is protected from
-/// the sweep — neither is knowable for the other tools from this process.
+/// The tool this process *is* — the running binary. Its identity (the `tool`
+/// name, always known) decides the self-replace route and the refresh of the
+/// copy the shell resolves; neither is knowable for the other tools from this
+/// process.
+///
+/// `version` carries the running version *when it parses*, for the cache's
+/// strictly-newer activation rule (which stops a stale cache downgrading a
+/// from-source build) and the sweep's protection of the running version. It is
+/// `None` for a build whose stamp is not a semver — a bare git sha from a
+/// tagless cargo checkout, a shallow clone, a source archive — and that absence
+/// must never switch off the identity-driven behaviour, which does not need it.
 pub struct Running {
     pub tool: &'static str,
-    pub version: Version,
+    pub version: Option<Version>,
 }
 
 const TAGS_API: &str = "https://api.github.com/repos/C0deGeek-dev/LocalPilot/tags";
@@ -213,13 +220,13 @@ pub async fn install(
 
     let mut failed = Vec::new();
     for t in &tools {
+        let (is_self, running_version) = self_view(running, t.tool);
         let ok = match channel {
             Channel::Release => {
                 let tag = resolved_tag.as_deref().unwrap_or_default();
-                let running_version = running.filter(|r| r.tool == t.tool).map(|r| &r.version);
-                install_release(t, tag, running_version, out).await?
+                install_release(t, tag, is_self, running_version, out).await?
             }
-            Channel::Prerelease => source_install(t, running, out)?,
+            Channel::Prerelease => source_install(t, is_self, out)?,
         };
         if !ok {
             failed.push(t.tool);
@@ -236,6 +243,22 @@ pub async fn install(
     )
 }
 
+/// Split a caller's running marker into what the install loop actually needs:
+/// whether this process *is* `tool` (identity — decides the self-replace route
+/// and the running-copy refresh), and the running version when it is known
+/// (decides the strictly-newer activation rule and the sweep's protection).
+///
+/// The two are returned separately on purpose: a build stamped with a bare git
+/// sha has a certain identity but no parseable version, and identity must never
+/// hinge on the version parsing — that gate is exactly what LocalHub#79 traced
+/// the unreachable self-replace to.
+fn self_view<'a>(running: Option<&'a Running>, tool: &str) -> (bool, Option<&'a Version>) {
+    match running {
+        Some(r) if r.tool == tool => (true, r.version.as_ref()),
+        _ => (false, None),
+    }
+}
+
 /// Install one train tool's published archive at `tag`, verifying it first and
 /// then making it the version on `PATH`.
 ///
@@ -245,6 +268,7 @@ pub async fn install(
 pub async fn install_release(
     t: &StackTool,
     tag: &str,
+    is_self: bool,
     running: Option<&Version>,
     out: &mut dyn Write,
 ) -> anyhow::Result<bool> {
@@ -313,12 +337,14 @@ pub async fn install_release(
             )?;
             if let Some(path) = activate(&cache, t.tool, running, out)? {
                 writeln!(out, "{}: on PATH at {}", t.tool, path.display())?;
-                // `running` is only ever `Some` for the tool this process *is*.
+                // Only the tool this process *is* has a running copy to refresh.
                 // When it runs from somewhere other than the managed copy (a
                 // source bootstrap in cargo's bin directory, earlier on PATH),
                 // refresh that copy too — otherwise the shell keeps resolving
-                // the stale one and the update is invisible.
-                if running.is_some() {
+                // the stale one and the update is invisible. Gated on identity,
+                // not on a parseable version: a bare-sha build is still the
+                // running executable and still needs its copy refreshed.
+                if is_self {
                     refresh_running_copy(t.tool, &path, out)?;
                 }
             }
@@ -344,7 +370,7 @@ pub async fn install_release(
 /// source-built binary — the same path `localpilot`'s from-source update has
 /// always used.
 ///
-/// The one exception is the tool this process *is* (`running`): cargo's final
+/// The one exception is the tool this process *is* (`is_self`): cargo's final
 /// step is a plain move onto the destination, and Windows refuses to overwrite
 /// an executing image no matter who asks (an elevated shell changes nothing —
 /// the lock is mandatory, not an ACL). So the running tool is built into a
@@ -356,11 +382,7 @@ pub async fn install_release(
 ///
 /// # Errors
 /// Returns an error only if output cannot be written or cargo cannot be spawned.
-pub fn source_install(
-    t: &StackTool,
-    running: Option<&Running>,
-    out: &mut dyn Write,
-) -> anyhow::Result<bool> {
+pub fn source_install(t: &StackTool, is_self: bool, out: &mut dyn Write) -> anyhow::Result<bool> {
     if !cargo_available() {
         writeln!(
             out,
@@ -371,7 +393,6 @@ pub fn source_install(
         return Ok(false);
     }
 
-    let is_self = running.is_some_and(|r| r.tool == t.tool);
     let staging = if is_self {
         source_build_dir(t.tool)
     } else {
@@ -861,8 +882,49 @@ pub fn path_notice(out: &mut dyn Write) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{report, source_args, stage_and_replace, tool, Channel, SelfInstall, TRAIN};
+    use super::{
+        report, self_view, source_args, stage_and_replace, tool, Channel, Running, SelfInstall,
+        Version, TRAIN,
+    };
     use std::path::Path;
+
+    #[test]
+    fn self_view_keys_on_identity_not_on_a_parseable_version() {
+        let localx = tool("localx").expect("localx in train");
+
+        // A running localx whose stamp is a bare sha: no parseable version, but
+        // the identity is certain — so the self route stays on. This is exactly
+        // the LocalHub#79 case the old version gate switched off in production.
+        let sha_stamped = Running {
+            tool: "localx",
+            version: None,
+        };
+        let (is_self, version) = self_view(Some(&sha_stamped), localx.tool);
+        assert!(
+            is_self,
+            "a sha-stamped localx must still be recognised as self"
+        );
+        assert!(version.is_none());
+
+        // A parseable version is carried through, for the strictly-newer rule.
+        let tagged = Running {
+            tool: "localx",
+            version: Version::parse("3.3.1"),
+        };
+        let (is_self, version) = self_view(Some(&tagged), localx.tool);
+        assert!(is_self);
+        assert_eq!(version, Version::parse("3.3.1").as_ref());
+
+        // A companion tool is not self, and carries no running version here.
+        let (is_self, version) = self_view(Some(&sha_stamped), "localbox");
+        assert!(!is_self);
+        assert!(version.is_none());
+
+        // No marker at all: not self.
+        let (is_self, version) = self_view(None, localx.tool);
+        assert!(!is_self);
+        assert!(version.is_none());
+    }
 
     #[test]
     fn train_has_five_tools_with_localx_last() {

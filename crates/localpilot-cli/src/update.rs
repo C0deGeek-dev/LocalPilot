@@ -154,15 +154,20 @@ pub async fn run(
             Channel::Release
         };
         let tag = running.as_ref().map(localpilot_stack::tag_for_version);
-        let marker = running.as_ref().map(|v| Running {
+        // The marker is always built: its identity ("this process is
+        // localpilot") drives the self-replace route and the refresh of the copy
+        // the shell resolves, and must not hinge on the version parsing — a
+        // bare-sha stamp still names this binary (LocalHub#79). The version rides
+        // along when it parses, for the cache's strictly-newer rule.
+        let marker = Running {
             tool: "localpilot",
-            version: v.clone(),
-        });
+            version: running.clone(),
+        };
         return localpilot_stack::install(
             &Selection::All,
             tag.as_deref(),
             channel,
-            marker.as_ref(),
+            Some(&marker),
             out,
         )
         .await;
@@ -186,25 +191,26 @@ pub async fn run(
                 )?;
                 return Ok(());
             };
-            let marker = running.as_ref().map(|v| Running {
-                tool: "localpilot",
-                version: v.clone(),
-            });
+            // This is localpilot updating itself, so `is_self` is unconditionally
+            // true — identity is certain even when the version stamp is a bare
+            // sha (LocalHub#79). The running version rides along only when it
+            // parses, for the cache's strictly-newer rule.
             if from_source {
                 // Prefer the published binary: it needs no toolchain and takes
                 // seconds. Compiling stays available on request, and is the
                 // automatic fallback when a platform has no published archive.
-                localpilot_stack::source_install(localpilot, marker.as_ref(), out)?;
+                localpilot_stack::source_install(localpilot, true, out)?;
             } else if !localpilot_stack::install_release(
                 localpilot,
                 &tag,
-                marker.as_ref().map(|m| &m.version),
+                true,
+                running.as_ref(),
                 out,
             )
             .await?
             {
                 writeln!(out, "falling back to building from source")?;
-                localpilot_stack::source_install(localpilot, marker.as_ref(), out)?;
+                localpilot_stack::source_install(localpilot, true, out)?;
             }
         }
         Ok(None) => {

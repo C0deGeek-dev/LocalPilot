@@ -210,14 +210,54 @@ if ($LASTEXITCODE -ne 0) {
 
 # Build the umbrella from the same checkout, so `localx` matches the localpilot
 # you just built. It links no TUI, so it needs no features.
+#
+# Build into a staging root, then rename-then-copy the binary into cargo's bin
+# directory rather than letting cargo move it straight onto the live path: if a
+# localx is already running (a re-run of this installer), that move fails with
+# `os error 5` on Windows' mandatory image lock. Renaming the running file aside
+# first lands the new binary on a free path — the same rename-then-copy the
+# updater uses (LocalHub#79).
 Write-Host "building and installing localx ..."
+$localxStaging = Join-Path $root 'target/localx-install'
+Remove-Item -Recurse -Force $localxStaging -ErrorAction SilentlyContinue
 $localxArgs = @()
 if ($Toolchain) { $localxArgs += "+$Toolchain" }
-$localxArgs += @('install', '--path', (Join-Path $root 'crates/localx'), '--locked', '--force')
+$localxArgs += @('install', '--path', (Join-Path $root 'crates/localx'), '--locked', '--root', $localxStaging)
 if ($Target) { $localxArgs += @('--target', $Target) }
 cargo @localxArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "cargo install localx failed (exit $LASTEXITCODE). See the build error above."
+}
+# Mirror cargo install's own destination precedence — CARGO_INSTALL_ROOT, then
+# CARGO_HOME, then ~/.cargo — so localx lands beside the localpilot cargo just
+# installed. (A config-file `install.root` is not honoured here; that narrower
+# case keeps the plain `cargo install` behaviour by not being covered.)
+$cargoBin = if ($env:CARGO_INSTALL_ROOT) { Join-Path $env:CARGO_INSTALL_ROOT 'bin' }
+            elseif ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' }
+            else { Join-Path $HOME '.cargo/bin' }
+$builtLocalx = Join-Path $localxStaging 'bin/localx.exe'
+if (Test-Path $builtLocalx) {
+    if (-not (Test-Path $cargoBin)) { New-Item -ItemType Directory -Force $cargoBin | Out-Null }
+    $destLocalx = Join-Path $cargoBin 'localx.exe'
+    $asideLocalx = "$destLocalx.old"
+    # Displace the old binary, then copy — with rollback. A running image can be
+    # renamed but not overwritten, so the new binary lands on a free path; if the
+    # copy fails, the displaced binary is restored so the canonical path is never
+    # left empty, and the staged build is kept.
+    $displaced = $false
+    if (Test-Path $destLocalx) {
+        Remove-Item -Force $asideLocalx -ErrorAction SilentlyContinue
+        Move-Item -Force $destLocalx $asideLocalx
+        $displaced = $true
+    }
+    try {
+        Copy-Item -Force $builtLocalx $destLocalx
+    } catch {
+        if ($displaced) { Move-Item -Force $asideLocalx $destLocalx }
+        Write-Error "could not install localx to $destLocalx (the staged build is kept at $builtLocalx): $_"
+    }
+    if ($displaced) { Remove-Item -Force $asideLocalx -ErrorAction SilentlyContinue }
+    Remove-Item -Recurse -Force $localxStaging -ErrorAction SilentlyContinue
 }
 
 Write-Host ""
