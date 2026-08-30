@@ -90,6 +90,8 @@ license to use, reproduce, modify, prepare derivative works of, publicly
 display, publicly perform, sublicense, and distribute your contribution as
 part of this project, including under license terms other than this
 repository's PolyForm Noncommercial License — for example, a commercial
-license. This project does not use a separate signed CLA process; submitting
-a pull request is treated as acceptance of this certificate.
+license. Sign off every commit with `git commit -s`. The resulting
+`Signed-off-by` trailer certifies that you agree to this Contributor
+Certificate of Origin and the license grant above; this project does not use
+a separate signed CLA process beyond that trailer.
 
