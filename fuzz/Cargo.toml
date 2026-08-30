@@ -1,0 +1,34 @@
+[package]
+name = "localpilot-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.localpilot-llm]
+path = "../crates/localpilot-llm"
+features = ["fuzzing"]
+
+# Excluded from the main workspace: fuzzing needs a nightly toolchain and
+# libFuzzer, which must not constrain the MSRV-pinned workspace build.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "openai_sse"
+path = "fuzz_targets/openai_sse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "anthropic_sse"
+path = "fuzz_targets/anthropic_sse.rs"
+test = false
+doc = false
+bench = false

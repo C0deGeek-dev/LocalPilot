@@ -1,0 +1,22 @@
+[package]
+name = "localpilot-contextcheck"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+localpilot-config = { path = "../localpilot-config" }
+localpilot-core = { path = "../localpilot-core" }
+localpilot-harness = { path = "../localpilot-harness" }
+localpilot-skills = { path = "../localpilot-skills" }
+localmind-store = { path = "../../external/localmind/crates/localmind-store" }
+localpilot-selfreview = { path = "../localpilot-selfreview" }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }

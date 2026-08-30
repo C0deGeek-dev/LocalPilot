@@ -1,0 +1,1514 @@
+//! The pull-discovery broker: need→tool resolution, a per-session working set,
+//! and reveal-into-visibility (ADR-0031).
+//!
+//! The broker resolves a *need* (free text, or a failed call's intent) to the
+//! best tool(s) in the live [`Catalog`] using a deterministic in-process
+//! word-overlap scorer, maintains a bounded per-session **working set**, and
+//! **reveals** a resolved tool — adds it to the working set and returns the
+//! tool's exact current schema plus a one-line usage example.
+//!
+//! **Reveal-never-grant.** Reveal mutates *visibility only* — the advertised set
+//! the session projects each turn. It never executes a tool and never touches the
+//! permission engine or the tighten-only gates; a revealed write/network tool
+//! still hits the same `Ask`/`Deny` it would have hit had it always been
+//! advertised. The broker's own surface (`tool_search`, `tool_load`) is read-only
+//! (`Effect::ReadPath`), mirroring `skill_search`/`skill_load`: searching and
+//! revealing inject *content the model reads*; they enable nothing.
+
+use std::fmt::Write as _;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use localpilot_core::{one_line, word_overlap, SUMMARY_CHARS};
+use localpilot_sandbox::Effect;
+use parking_lot::Mutex;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::catalog::{Catalog, CatalogEntry, DeprecationOverlay, ToolSource};
+use crate::error::ToolError;
+use crate::tool::{Tool, ToolContext, ToolOutput};
+
+/// The model-callable name for the search surface.
+pub const TOOL_SEARCH: &str = "tool_search";
+/// The model-callable name for the reveal surface.
+pub const TOOL_LOAD: &str = "tool_load";
+
+/// Ranked locators returned by a search are capped so a turn spends a bounded
+/// number of tokens to *find* a tool before paying for any schema. Mirrors
+/// `skill_search`'s `MAX_LOCATORS`.
+const MAX_LOCATORS: usize = 10;
+/// Default bound on the revealed working set (LRU eviction past it). Evicting a
+/// revealed tool only un-advertises it; the model can re-reveal on demand.
+pub const DEFAULT_WORKING_SET_CAP: usize = 24;
+/// Default minimum resolution score to reveal. At or below it, the broker reports
+/// "no tool matches" rather than revealing an irrelevant tool.
+pub const DEFAULT_SCORE_FLOOR: u32 = 1;
+
+/// The default core working set: the always-advertised builtins a coding turn
+/// needs from turn one. Everything else (git, fetch, knowledge expand/fetch,
+/// memory, skills, MCP tools) is revealed on demand. Projects opt in to the
+/// broker, so this default only takes effect when narrowing is enabled.
+pub const DEFAULT_CORE: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "replace_in_file",
+    "apply_patch",
+    "list_files",
+    "find_files",
+    "search_text",
+    "run_shell",
+    "read_tool_output",
+    "knowledge_search",
+];
+
+/// Tuning the broker reads. The `enabled` switch lives a level up: the session
+/// holds an `Option<Broker>`, so "off" is simply no broker — today's behaviour,
+/// the rollback path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerConfig {
+    /// Tool names always advertised, in addition to the broker's own tools.
+    pub core: Vec<String>,
+    /// Maximum revealed tools retained before LRU eviction.
+    pub working_set_cap: usize,
+    /// Minimum resolution score to reveal.
+    pub score_floor: u32,
+    /// Learn from resolutions: re-rank by past success and graduate hot tools into
+    /// the always-advertised set. Off by default — the broker works with purely
+    /// mechanical freshness when this is off (it just does not learn), honouring
+    /// the same opt-in posture as the learning loop (ADR-0018).
+    pub learning_enabled: bool,
+    /// Reveals of one tool before it graduates into the always-advertised set.
+    pub graduation_threshold: usize,
+}
+
+impl Default for BrokerConfig {
+    fn default() -> Self {
+        Self {
+            core: DEFAULT_CORE.iter().map(|s| (*s).to_string()).collect(),
+            working_set_cap: DEFAULT_WORKING_SET_CAP,
+            score_floor: DEFAULT_SCORE_FLOOR,
+            learning_enabled: false,
+            graduation_threshold: DEFAULT_GRADUATION_THRESHOLD,
+        }
+    }
+}
+
+/// A ranked match for a need: a tool name, a one-line summary, a score, and any
+/// deprecation replacement the overlay records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Locator {
+    pub name: String,
+    pub summary: String,
+    pub score: u32,
+    pub deprecated_replacement: Option<String>,
+    pub deprecated: bool,
+    /// Why this entry matched — the need words it carried and any capability
+    /// terms that bridged them. Bounded metadata, never a schema: `tool_load`
+    /// remains the reveal step.
+    pub reason: String,
+}
+
+/// The cap on the learned re-rank boost, so history nudges ranking without ever
+/// swamping the text-relevance score.
+const LEARNED_BOOST_CAP: u32 = 3;
+/// Default reveals of one tool before it graduates into the always-advertised set.
+pub const DEFAULT_GRADUATION_THRESHOLD: usize = 3;
+
+/// One resolution outcome in the broker's in-session history: which tool was
+/// chosen, and whether a subsequent call to it succeeded. The materialized,
+/// replay-safe form of the durable `ToolResolution` event the host records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionRecord {
+    pub chosen: String,
+    pub succeeded: bool,
+}
+
+/// The learned re-rank boost for `name`: how many *successful* prior resolutions
+/// chose it, capped. A pure function over the resolution history, so a tool
+/// that has resolved and succeeded for similar needs outranks an equal-text peer.
+#[must_use]
+pub fn learned_boost(history: &[ResolutionRecord], name: &str) -> u32 {
+    let succeeded = history
+        .iter()
+        .filter(|record| record.chosen == name && record.succeeded)
+        .count();
+    u32::try_from(succeeded)
+        .unwrap_or(LEARNED_BOOST_CAP)
+        .min(LEARNED_BOOST_CAP)
+}
+
+/// Whether `name` has been resolved at least `threshold` times in `history` — the
+/// graduation predicate. Pure.
+#[must_use]
+fn graduates(history: &[ResolutionRecord], name: &str, threshold: usize) -> bool {
+    threshold > 0
+        && history
+            .iter()
+            .filter(|record| record.chosen == name)
+            .count()
+            >= threshold
+}
+
+/// Split a need into matchable lowercase words (length > 2, like `skill_search`).
+fn need_words(need_lower: &str) -> Vec<&str> {
+    need_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| w.len() > 2)
+        .collect()
+}
+
+/// A first-party capability vocabulary: groups of words that name the same
+/// capability in different vocabularies. A need word in any group also matches a
+/// tool described with any other word from that group, so `Prisma upgrade
+/// problem` can rank a tool described as "query library documentation" without
+/// anyone hardcoding Prisma — or any other vendor — into the resolver.
+///
+/// Vendor-neutral by construction: every entry is a generic capability term.
+const CAPABILITY_GROUPS: &[&[&str]] = &[
+    &["docs", "documentation", "reference", "manual", "guide"],
+    &[
+        "library",
+        "package",
+        "dependency",
+        "framework",
+        "sdk",
+        "module",
+    ],
+    &[
+        "version",
+        "upgrade",
+        "migration",
+        "migrate",
+        "deprecated",
+        "compatibility",
+        "latest",
+        "current",
+    ],
+    &[
+        "api",
+        "cli",
+        "configuration",
+        "config",
+        "schema",
+        "endpoint",
+    ],
+];
+
+/// The capability groups whose words carry a current-documentation intent. A
+/// need phrased in these terms — an upgrade error, a migration, a deprecation —
+/// is asking about behaviour that changes over time, which is what a
+/// documentation tool is for.
+const DOCUMENTATION_INTENT_GROUPS: &[usize] = &[0, 1, 2];
+
+/// The capability terms `word` belongs to, itself excluded: the words a tool
+/// could be described with that mean the same capability.
+fn capability_synonyms(word: &str) -> impl Iterator<Item = &'static str> + '_ {
+    CAPABILITY_GROUPS
+        .iter()
+        .filter(move |group| group.contains(&word))
+        .flat_map(|group| group.iter().copied())
+        .filter(move |synonym| *synonym != word)
+}
+
+/// Whether `word` signals that the need is about behaviour that changes with
+/// versions, and so about current documentation.
+fn is_documentation_intent(word: &str) -> bool {
+    DOCUMENTATION_INTENT_GROUPS
+        .iter()
+        .any(|group| CAPABILITY_GROUPS[*group].contains(&word))
+}
+
+/// A tool's own words — its name and description. The primary index, unchanged
+/// from before capability matching existed.
+fn entry_primary_text(entry: &CatalogEntry) -> String {
+    format!("{} {}", entry.name, entry.description).to_ascii_lowercase()
+}
+
+/// A tool's surrounding metadata: the server that serves it, and its schema's
+/// property **names and descriptions**. A tool generically named `query` on a
+/// `reference` server, whose input property is documented as "the library to
+/// look up", is findable by what it does rather than only by the words its
+/// author happened to fit into one sentence.
+///
+/// Schema *values* and examples never enter the index — only field names and
+/// their descriptions, which are metadata about the tool, not data passed to it.
+fn entry_metadata_text(entry: &CatalogEntry) -> String {
+    let mut text = String::new();
+    if let ToolSource::Mcp(server) = &entry.source {
+        text.push_str(server);
+    }
+    if let Some(properties) = entry
+        .schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (property, spec) in properties {
+            text.push(' ');
+            text.push_str(property);
+            if let Some(description) = spec.get("description").and_then(serde_json::Value::as_str) {
+                text.push(' ');
+                text.push_str(description);
+            }
+        }
+    }
+    text.to_ascii_lowercase()
+}
+
+/// Why an entry matched: the need words it carried, and the capability terms
+/// that bridged the gap. Returned with each locator so the model can tell a
+/// direct hit from a capability inference. Bounded and deterministic.
+fn match_reason(haystack: &str, words: &[&str], capability_hits: &[&str]) -> String {
+    let mut parts = Vec::new();
+    let direct: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|word| haystack.contains(word))
+        .collect();
+    if !direct.is_empty() {
+        parts.push(format!("matched {}", direct.join(", ")));
+    }
+    if !capability_hits.is_empty() {
+        parts.push(format!("capability {}", capability_hits.join(", ")));
+    }
+    parts.join("; ")
+}
+
+/// The score of a catalog entry against a need, plus why it matched.
+///
+/// A tool's **own words** rank it: direct word overlap over name plus
+/// description, with the exact-name bonus, exactly as before. Metadata and
+/// capability synonyms are a strict **fallback** — they apply only to a tool
+/// whose own words matched nothing, so they can surface a tool that would
+/// otherwise be invisible but can never re-rank tools that already matched.
+/// That keeps every existing ranking intact while letting a generically
+/// described documentation tool be found by what it does.
+fn score_entry(entry: &CatalogEntry, words: &[&str], need_lower: &str) -> (u32, String) {
+    let primary = entry_primary_text(entry);
+    let word_hits = word_overlap(&primary, words);
+    let name_lower = entry.name.to_ascii_lowercase();
+    let name_bonus = u32::from(
+        need_lower.contains(&name_lower) || words.iter().any(|w| name_lower.contains(*w)),
+    ) * 2;
+    let direct = word_hits + name_bonus;
+    if direct > 0 {
+        return (direct, match_reason(&primary, words, &[]));
+    }
+
+    // Fallback: the tool's own sentence said nothing the need asked for.
+    let metadata = entry_metadata_text(entry);
+    let haystack = format!("{primary} {metadata}");
+    let metadata_hits = word_overlap(&metadata, words).min(METADATA_SCORE_CAP);
+
+    // Capability expansion: a need word matches a tool described with a synonym
+    // from the same group — `upgrade` reaching a tool that says `documentation`.
+    let mut capability_hits: Vec<&str> = Vec::new();
+    for word in words {
+        if haystack.contains(*word) {
+            continue;
+        }
+        if capability_synonyms(word).any(|synonym| haystack.contains(synonym)) {
+            capability_hits.push(word);
+        }
+    }
+    let capability_score = u32::try_from(capability_hits.len())
+        .unwrap_or(CAPABILITY_SCORE_CAP)
+        .min(CAPABILITY_SCORE_CAP);
+
+    // A need about version-sensitive behaviour lifts a tool that documents
+    // things, so an upgrade error can reach a generically-described
+    // documentation tool. One point, and only when both sides are present, so
+    // an ordinary local editing need gains nothing from a docs tool existing.
+    let doc_intent = words.iter().any(|w| is_documentation_intent(w))
+        && CAPABILITY_GROUPS[0].iter().any(|w| haystack.contains(w));
+    let doc_bonus = u32::from(doc_intent);
+
+    let score = metadata_hits + capability_score + doc_bonus;
+    if score == 0 {
+        return (0, String::new());
+    }
+    (score, match_reason(&haystack, words, &capability_hits))
+}
+
+/// The most a capability-only match can contribute, so it never outweighs an
+/// exact-name hit.
+const CAPABILITY_SCORE_CAP: u32 = 2;
+
+/// The most a tool's surrounding metadata (server name, schema field names and
+/// descriptions) can contribute. Bounded so a tool with a large schema cannot
+/// out-rank one whose description actually answers the need.
+const METADATA_SCORE_CAP: u32 = 2;
+
+/// Whether a tool describes itself as serving documentation — a generic,
+/// vendor-neutral check over the same capability vocabulary the resolver uses,
+/// so the prompt's documentation policy and the broker's ranking agree on what
+/// "a documentation tool" means. No server, product, or library is named.
+#[must_use]
+pub fn describes_documentation(name: &str, description: &str) -> bool {
+    let haystack = format!("{name} {description}").to_ascii_lowercase();
+    CAPABILITY_GROUPS[0].iter().any(|term| {
+        haystack
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == *term)
+    })
+}
+
+/// Resolve a need to ranked locators over `catalog`, de-ranking deprecated
+/// entries per `overlay`. Pure. Highest score first; among equal scores a
+/// non-deprecated tool wins, ties broken by name. Capped to `MAX_LOCATORS`.
+#[must_use]
+pub fn resolve(catalog: &Catalog, overlay: &DeprecationOverlay, need: &str) -> Vec<Locator> {
+    let need_lower = need.to_ascii_lowercase();
+    let words = need_words(&need_lower);
+    let mut hits: Vec<Locator> = catalog
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            let (score, reason) = score_entry(entry, &words, &need_lower);
+            if score == 0 {
+                return None;
+            }
+            let deprecated = overlay.is_deprecated(&entry.name);
+            Some(Locator {
+                name: entry.name.clone(),
+                summary: one_line(&entry.description, SUMMARY_CHARS),
+                score,
+                deprecated_replacement: overlay.replacement_for(&entry.name).map(str::to_string),
+                deprecated,
+                reason,
+            })
+        })
+        .collect();
+    // Highest score first; a non-deprecated tool outranks a deprecated one at the
+    // same score; ties broken by name for a stable order.
+    hits.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.deprecated.cmp(&b.deprecated))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    hits.truncate(MAX_LOCATORS);
+    hits
+}
+
+/// A bounded, per-session set of revealed tool names in LRU order (least-recently
+/// revealed first). Not persisted across sessions.
+#[derive(Debug, Clone, Default)]
+struct WorkingSet {
+    revealed: Vec<String>,
+    cap: usize,
+}
+
+impl WorkingSet {
+    fn new(cap: usize) -> Self {
+        Self {
+            revealed: Vec::new(),
+            cap,
+        }
+    }
+
+    /// Reveal `name`: move it to most-recently-used, evicting the least-recently
+    /// used if the cap is exceeded. A `cap` of 0 means unbounded.
+    fn reveal(&mut self, name: &str) {
+        self.revealed.retain(|n| n != name);
+        self.revealed.push(name.to_string());
+        if self.cap > 0 && self.revealed.len() > self.cap {
+            self.revealed.remove(0);
+        }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.revealed.iter().any(|n| n == name)
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.revealed.clone()
+    }
+}
+
+/// The outcome of a reveal request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevealOutcome {
+    /// The tool was found and revealed; `rendered` is the model-visible block.
+    Revealed { name: String, rendered: String },
+    /// No catalog tool has that exact name.
+    NotInCatalog,
+}
+
+/// The outcome of a failure-driven re-resolution: a model-visible message and, if
+/// a tool was revealed, its name (so the caller can record the resolution).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    /// The tool name revealed (added to the working set), if any.
+    pub revealed: Option<String>,
+    /// The model-visible text to return in place of a bare `unknown tool` error.
+    pub message: String,
+    /// The need the resolution ran against (for telemetry).
+    pub need: String,
+    /// The resolution score of the revealed tool, if any (for telemetry).
+    pub score: u32,
+}
+
+/// The broker's per-session state: tuning, the live catalog, the revealed working
+/// set, the deprecation overlay, and (when learning is on) the resolution history
+/// and the graduated set.
+struct BrokerState {
+    config: BrokerConfig,
+    catalog: Catalog,
+    revealed: WorkingSet,
+    overlay: DeprecationOverlay,
+    /// The in-session resolution history that feeds re-rank and graduation. Empty
+    /// when learning is off.
+    history: Vec<ResolutionRecord>,
+    /// Tools graduated into the always-advertised set this session (and seeded
+    /// from prior sessions when the host persists them). Bounded by the cap.
+    graduated: Vec<String>,
+}
+
+impl BrokerState {
+    fn is_advertised(&self, name: &str) -> bool {
+        name == TOOL_SEARCH
+            || name == TOOL_LOAD
+            || self.config.core.iter().any(|c| c == name)
+            || self.graduated.iter().any(|g| g == name)
+            || self.revealed.contains(name)
+    }
+
+    fn reveal(&mut self, name: &str) -> RevealOutcome {
+        match self.catalog.get(name) {
+            Some(entry) => {
+                let rendered = render_reveal(entry, &self.overlay);
+                self.revealed.reveal(name);
+                if self.config.learning_enabled {
+                    self.history.push(ResolutionRecord {
+                        chosen: name.to_string(),
+                        succeeded: false,
+                    });
+                    // Graduate a frequently-revealed tool so it is advertised from
+                    // turn one (bounded; LRU age-out, like the working set).
+                    if graduates(&self.history, name, self.config.graduation_threshold)
+                        && !self.graduated.iter().any(|g| g == name)
+                    {
+                        self.graduated.push(name.to_string());
+                        if self.config.working_set_cap > 0
+                            && self.graduated.len() > self.config.working_set_cap
+                        {
+                            self.graduated.remove(0);
+                        }
+                    }
+                }
+                RevealOutcome::Revealed {
+                    name: name.to_string(),
+                    rendered,
+                }
+            }
+            None => RevealOutcome::NotInCatalog,
+        }
+    }
+
+    /// Resolve a need to ranked locators, applying the learned re-rank boost when
+    /// learning is on so a tool with past successful resolutions outranks an
+    /// equal-text peer. Pure given the state.
+    fn ranked(&self, need: &str) -> Vec<Locator> {
+        let mut hits = resolve(&self.catalog, &self.overlay, need);
+        if self.config.learning_enabled {
+            for hit in &mut hits {
+                hit.score += learned_boost(&self.history, &hit.name);
+            }
+            hits.sort_by(|a, b| {
+                b.score
+                    .cmp(&a.score)
+                    .then_with(|| a.deprecated.cmp(&b.deprecated))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        }
+        hits
+    }
+
+    /// Record that a revealed tool was subsequently used successfully, so it ranks
+    /// higher next time. A no-op when learning is off or the tool was not revealed.
+    fn note_success(&mut self, name: &str) {
+        if self.config.learning_enabled && self.revealed.contains(name) {
+            self.history.push(ResolutionRecord {
+                chosen: name.to_string(),
+                succeeded: true,
+            });
+        }
+    }
+
+    /// Re-resolve an attempted-but-unavailable tool (unknown, out-of-working-set,
+    /// or retired) to the closest available tool and reveal it. Never executes
+    /// anything; the model retries with the revealed tool. Returns a terminal
+    /// "no tool matches" when nothing scores at or above the floor (the
+    /// resolve-loop guard).
+    fn reresolve(&mut self, attempted: &str) -> Resolution {
+        // A known deprecation replacement (the overlay) sharpens a retired-tool
+        // hint: "X retired; closest now: Y".
+        if let Some(replacement) = self.overlay.replacement_for(attempted).map(str::to_string) {
+            if self.catalog.get(&replacement).is_some() {
+                if let RevealOutcome::Revealed { name, rendered } = self.reveal(&replacement) {
+                    return Resolution {
+                        message: format!(
+                            "tool `{attempted}` is retired; closest available now: `{name}`.\n\
+                             {rendered}\nNow advertised — retry with `{name}`.",
+                        ),
+                        revealed: Some(name),
+                        need: attempted.to_string(),
+                        // An explicit overlay hit clears the bar by fiat; record a
+                        // sane non-text score for telemetry rather than a sentinel.
+                        score: self.config.score_floor.max(1),
+                    };
+                }
+            }
+        }
+
+        let hits = self.ranked(attempted);
+        match hits.into_iter().next() {
+            Some(top) if top.score >= self.config.score_floor => {
+                let score = top.score;
+                let message = match self.reveal(&top.name) {
+                    RevealOutcome::Revealed { name, rendered } if name == attempted => format!(
+                        "tool `{attempted}` was not advertised; it is now revealed.\n\
+                         {rendered}\nRetry the call.",
+                    ),
+                    RevealOutcome::Revealed { name, rendered } => format!(
+                        "tool `{attempted}` is not available; closest available: `{name}`.\n\
+                         {rendered}\nNow advertised — retry with `{name}`.",
+                    ),
+                    RevealOutcome::NotInCatalog => {
+                        format!("no available tool matches `{attempted}`.",)
+                    }
+                };
+                Resolution {
+                    revealed: Some(top.name),
+                    message,
+                    need: attempted.to_string(),
+                    score,
+                }
+            }
+            _ => Resolution {
+                revealed: None,
+                message: format!(
+                    "no available tool matches `{attempted}`. Describe the capability differently \
+                     and call `tool_search`, or proceed without it.",
+                ),
+                need: attempted.to_string(),
+                score: 0,
+            },
+        }
+    }
+}
+
+/// A one-line skeletal example call for a tool, built from its input schema's
+/// required properties (or the first few when none are required).
+fn example_for(name: &str, schema: &Value) -> String {
+    let props = schema.get("properties").and_then(Value::as_object);
+    let required: Vec<String> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let keys: Vec<String> = if required.is_empty() {
+        props
+            .map(|p| p.keys().take(3).cloned().collect())
+            .unwrap_or_default()
+    } else {
+        required
+    };
+    let args = keys
+        .iter()
+        .map(|key| {
+            let ty = props
+                .and_then(|p| p.get(key))
+                .and_then(|field| field.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("value");
+            format!("\"{key}\": <{ty}>")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({{{args}}})")
+}
+
+/// Render a revealed tool: a no-grant header, its description, a one-line example,
+/// the exact schema, and any deprecation replacement hint.
+fn render_reveal(entry: &CatalogEntry, overlay: &DeprecationOverlay) -> String {
+    let mut out = format!(
+        "Revealed `{}` (now advertised — call it normally; revealing runs nothing and grants \
+         nothing, so any action still goes through the permission gate):\n",
+        entry.name
+    );
+    let _ = writeln!(out, "description: {}", entry.description);
+    let _ = writeln!(out, "example: {}", example_for(&entry.name, &entry.schema));
+    if let Some(replacement) = overlay.replacement_for(&entry.name) {
+        let _ = writeln!(
+            out,
+            "note: `{}` is deprecated; prefer `{replacement}`",
+            entry.name
+        );
+    }
+    let _ = write!(out, "schema: {}", entry.schema);
+    out
+}
+
+/// A cloneable handle to the broker's per-session state, shared by the
+/// model-callable tools and the session (which reads the advertised set and drives
+/// the triggers). Cloning shares the same state.
+#[derive(Clone)]
+pub struct Broker(Arc<Mutex<BrokerState>>);
+
+impl Broker {
+    /// Build a broker with an empty catalog; call [`Broker::set_catalog`] (or
+    /// [`Broker::reproject`]) once the registry is built.
+    #[must_use]
+    pub fn new(config: BrokerConfig) -> Self {
+        let cap = config.working_set_cap;
+        Self(Arc::new(Mutex::new(BrokerState {
+            config,
+            catalog: Catalog::default(),
+            revealed: WorkingSet::new(cap),
+            overlay: DeprecationOverlay::new(),
+            history: Vec::new(),
+            graduated: Vec::new(),
+        })))
+    }
+
+    /// Replace the live catalog (e.g. after the registry is built).
+    pub fn set_catalog(&self, catalog: Catalog) {
+        self.0.lock().catalog = catalog;
+    }
+
+    /// Change-aware refresh: reproject the catalog against `fresh`, keeping
+    /// unchanged entries, and return the delta (the invalidation signal).
+    pub fn reproject(&self, fresh: Catalog) -> crate::catalog::CatalogDelta {
+        let mut state = self.0.lock();
+        let items = fresh.entries().iter().map(|e| {
+            (
+                e.name.clone(),
+                e.description.clone(),
+                e.schema.clone(),
+                e.source.clone(),
+            )
+        });
+        let (next, delta) = state.catalog.reproject(items);
+        state.catalog = next;
+        delta
+    }
+
+    /// Record a deprecation in the overlay (old → replacement).
+    pub fn deprecate(&self, old: impl Into<String>, replacement: impl Into<String>) {
+        self.0.lock().overlay.deprecate(old, replacement);
+    }
+
+    /// Whether `name` is in the advertised set this turn (core ∪ broker tools ∪
+    /// revealed). The session's advertise lever calls this to narrow `tool_specs`.
+    #[must_use]
+    pub fn is_advertised(&self, name: &str) -> bool {
+        self.0.lock().is_advertised(name)
+    }
+
+    /// Resolve a need to ranked locators over the current catalog, with the
+    /// learned re-rank applied when learning is on.
+    #[must_use]
+    pub fn resolve(&self, need: &str) -> Vec<Locator> {
+        self.0.lock().ranked(need)
+    }
+
+    /// Whether broker learning (telemetry re-rank + graduation) is enabled.
+    #[must_use]
+    pub fn learning_enabled(&self) -> bool {
+        self.0.lock().config.learning_enabled
+    }
+
+    /// Record that a (previously revealed) tool was used successfully, feeding the
+    /// learned re-rank. A no-op when learning is off or the tool was not revealed.
+    pub fn note_success(&self, name: &str) {
+        self.0.lock().note_success(name);
+    }
+
+    /// The tools graduated into the always-advertised set, for persistence across
+    /// sessions (the host seeds them back via [`Broker::seed_graduated`]).
+    #[must_use]
+    pub fn graduated_names(&self) -> Vec<String> {
+        self.0.lock().graduated.clone()
+    }
+
+    /// Seed graduated tools from a prior session so they are advertised from turn
+    /// one (bounded by the working-set cap). Unknown names are ignored.
+    pub fn seed_graduated(&self, names: &[String]) {
+        let mut state = self.0.lock();
+        let cap = state.config.working_set_cap;
+        for name in names {
+            if state.catalog.get(name).is_some() && !state.graduated.iter().any(|g| g == name) {
+                state.graduated.push(name.clone());
+            }
+        }
+        if cap > 0 && state.graduated.len() > cap {
+            let overflow = state.graduated.len() - cap;
+            state.graduated.drain(0..overflow);
+        }
+    }
+
+    /// Reveal a tool by exact name, adding it to the working set.
+    pub fn reveal(&self, name: &str) -> RevealOutcome {
+        self.0.lock().reveal(name)
+    }
+
+    /// Re-resolve an attempted-but-unavailable tool (the failure-driven trigger):
+    /// reveal the closest available tool and return the model-visible message, or a
+    /// terminal "no tool matches" when nothing scores at or above the floor.
+    pub fn reresolve(&self, attempted: &str) -> Resolution {
+        self.0.lock().reresolve(attempted)
+    }
+
+    /// The revealed tool names, most-recently-revealed last (for tests/inspection).
+    #[must_use]
+    pub fn revealed_names(&self) -> Vec<String> {
+        self.0.lock().revealed.names()
+    }
+
+    /// The configured score floor.
+    #[must_use]
+    pub fn score_floor(&self) -> u32 {
+        self.0.lock().config.score_floor
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ToolSearchInput {
+    /// The capability you need but do not have advertised; matched against the
+    /// catalog of available tools.
+    need: String,
+}
+
+/// `tool_search`: find available tools relevant to a need, returning lean ranked
+/// locators (tool name, one-line summary, score) — no schemas. Read-only.
+pub struct ToolSearch {
+    broker: Broker,
+}
+
+impl ToolSearch {
+    /// Build the search tool over a broker handle.
+    #[must_use]
+    pub fn new(broker: Broker) -> Self {
+        Self { broker }
+    }
+}
+
+#[async_trait]
+impl Tool for ToolSearch {
+    fn name(&self) -> &str {
+        TOOL_SEARCH
+    }
+
+    fn description(&self) -> &str {
+        "Search the available tools for ones relevant to a capability you need but do not have \
+         advertised, returning a short ranked list of locators (tool name, one-line summary, score) \
+         — no schemas. This is the pull-based way to discover tools on demand instead of carrying \
+         every tool in context. Then call `tool_load` with a name to reveal that tool's schema. \
+         Read-only: searching reveals nothing and runs nothing."
+    }
+
+    fn schema(&self) -> Value {
+        serde_json::to_value(schemars::schema_for!(ToolSearchInput)).unwrap_or(Value::Null)
+    }
+
+    fn approval_detail(&self, input: &Value) -> String {
+        input
+            .get("need")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect()
+    }
+
+    fn effects(&self, _input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        Ok(vec![Effect::ReadPath {
+            inside_workspace: true,
+            secret_like: false,
+        }])
+    }
+
+    async fn invoke(&self, input: Value, _ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: ToolSearchInput =
+            serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+        let hits = self.broker.resolve(&input.need);
+        if hits.is_empty() {
+            return Ok(ToolOutput::ok(format!(
+                "no available tool matches \"{}\"",
+                input.need
+            )));
+        }
+        let mut out = String::from(
+            "Matching tools (locators only — call `tool_load` with a name to reveal its schema):\n",
+        );
+        for hit in &hits {
+            let _ = write!(out, "- {} (score {}): {}", hit.name, hit.score, hit.summary);
+            if !hit.reason.is_empty() {
+                let _ = write!(out, " [{}]", hit.reason);
+            }
+            if let Some(replacement) = &hit.deprecated_replacement {
+                let _ = write!(out, " [deprecated; prefer `{replacement}`]");
+            } else if hit.deprecated {
+                let _ = write!(out, " [deprecated]");
+            }
+            out.push('\n');
+        }
+        Ok(ToolOutput::ok(out))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ToolLoadInput {
+    /// The exact name of the tool to reveal (from `tool_search`).
+    name: String,
+}
+
+/// `tool_load`: reveal one tool by exact name — add it to this session's working
+/// set and return its schema + a one-line example. Read-only: revealing changes
+/// visibility only; any action the tool performs still goes through the permission
+/// gate.
+pub struct ToolLoad {
+    broker: Broker,
+}
+
+impl ToolLoad {
+    /// Build the reveal tool over a broker handle.
+    #[must_use]
+    pub fn new(broker: Broker) -> Self {
+        Self { broker }
+    }
+}
+
+#[async_trait]
+impl Tool for ToolLoad {
+    fn name(&self) -> &str {
+        TOOL_LOAD
+    }
+
+    fn description(&self) -> &str {
+        "Reveal one tool by its exact name (from `tool_search`): add it to this session's working \
+         set and read back its schema and a one-line example, so you can then call it. Revealing a \
+         tool changes only what is advertised — it runs nothing and grants nothing, so any action \
+         the tool performs still goes through the normal permission gate."
+    }
+
+    fn schema(&self) -> Value {
+        serde_json::to_value(schemars::schema_for!(ToolLoadInput)).unwrap_or(Value::Null)
+    }
+
+    fn approval_detail(&self, input: &Value) -> String {
+        input
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect()
+    }
+
+    fn effects(&self, _input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        // Revealing is a visibility change and nothing more — never a permission
+        // side channel, exactly like loading a skill.
+        Ok(vec![Effect::ReadPath {
+            inside_workspace: true,
+            secret_like: false,
+        }])
+    }
+
+    async fn invoke(&self, input: Value, _ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: ToolLoadInput =
+            serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+        match self.broker.reveal(input.name.trim()) {
+            RevealOutcome::Revealed { rendered, .. } => Ok(ToolOutput::ok(rendered)),
+            RevealOutcome::NotInCatalog => Ok(ToolOutput::ok(format!(
+                "no available tool named \"{}\" — call `tool_search` to find one",
+                input.name.trim()
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::catalog::ToolSource;
+    use crate::ToolRegistry;
+    use localpilot_core::{ToolCall, ToolUseId};
+    use localpilot_sandbox::{
+        Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace,
+    };
+    use serde_json::json;
+
+    fn schema(required: &[&str]) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" }, "url": { "type": "string" } },
+            "required": required,
+        })
+    }
+
+    fn catalog() -> Catalog {
+        Catalog::project([
+            (
+                "fetch",
+                "retrieve the body of an http/https url over the network",
+                schema(&["url"]),
+                ToolSource::Builtin,
+            ),
+            (
+                "git_commit",
+                "create a git commit for the staged changes",
+                schema(&[]),
+                ToolSource::Builtin,
+            ),
+            (
+                "read_file",
+                "read utf-8 text from a workspace path",
+                schema(&["path"]),
+                ToolSource::Builtin,
+            ),
+        ])
+    }
+
+    fn broker() -> Broker {
+        let broker = Broker::new(BrokerConfig::default());
+        broker.set_catalog(catalog());
+        broker
+    }
+
+    // --- resolution ---
+
+    #[test]
+    fn resolve_ranks_the_relevant_tool_first() {
+        let broker = broker();
+        let hits = broker.resolve("download a file from a url over the network");
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].name, "fetch", "got {hits:?}");
+    }
+
+    #[test]
+    fn resolve_returns_nothing_for_an_unrelated_need() {
+        let broker = broker();
+        assert!(broker.resolve("xyzzy plugh frobnicate").is_empty());
+    }
+
+    #[test]
+    fn locator_summary_is_one_line_capped_with_ellipsis() {
+        // Equivalence guard for the move to localpilot_core::one_line: a long tool
+        // description must collapse to a single SUMMARY_CHARS summary + ellipsis.
+        let long = format!("fetch {}", "bytes over the network ".repeat(20));
+        let cat = Catalog::project([(
+            "fetch",
+            long.as_str(),
+            schema(&["url"]),
+            ToolSource::Builtin,
+        )]);
+        let broker = Broker::new(BrokerConfig::default());
+        broker.set_catalog(cat);
+
+        let hits = broker.resolve("fetch bytes over the network");
+        assert!(!hits.is_empty(), "expected a hit");
+        let summary = &hits[0].summary;
+        assert!(summary.ends_with('…'), "not ellipsized: {summary:?}");
+        assert_eq!(
+            summary.chars().count(),
+            SUMMARY_CHARS + 1,
+            "expected SUMMARY_CHARS chars + ellipsis: {summary:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_deranks_a_deprecated_entry_at_equal_score() {
+        // Two entries match equally; the deprecated one sorts second.
+        let cat = Catalog::project([
+            (
+                "old_fetch",
+                "fetch a url",
+                schema(&["url"]),
+                ToolSource::Builtin,
+            ),
+            (
+                "new_fetch",
+                "fetch a url",
+                schema(&["url"]),
+                ToolSource::Builtin,
+            ),
+        ]);
+        let broker = Broker::new(BrokerConfig::default());
+        broker.set_catalog(cat);
+        broker.deprecate("old_fetch", "new_fetch");
+        let hits = broker.resolve("fetch a url");
+        assert_eq!(hits[0].name, "new_fetch", "deprecated entry should de-rank");
+        assert_eq!(hits[1].deprecated_replacement.as_deref(), Some("new_fetch"));
+    }
+
+    // --- working set + reveal ---
+
+    #[test]
+    fn reveal_adds_to_the_working_set_and_returns_schema_and_example() {
+        let broker = broker();
+        assert!(
+            !broker.is_advertised("fetch"),
+            "not advertised before reveal"
+        );
+        let outcome = broker.reveal("fetch");
+        match outcome {
+            RevealOutcome::Revealed { name, rendered } => {
+                assert_eq!(name, "fetch");
+                assert!(rendered.contains("schema:"), "got {rendered}");
+                assert!(rendered.contains("fetch({"), "example missing: {rendered}");
+                assert!(
+                    rendered.contains("grants nothing"),
+                    "no-grant framing missing: {rendered}"
+                );
+            }
+            RevealOutcome::NotInCatalog => panic!("fetch should be in the catalog"),
+        }
+        assert!(broker.is_advertised("fetch"), "advertised after reveal");
+        assert_eq!(broker.revealed_names(), vec!["fetch".to_string()]);
+    }
+
+    #[test]
+    fn reveal_of_an_unknown_name_is_a_clean_miss() {
+        let broker = broker();
+        assert_eq!(broker.reveal("no_such_tool"), RevealOutcome::NotInCatalog);
+    }
+
+    #[test]
+    fn the_working_set_evicts_least_recently_revealed_past_the_cap() {
+        let broker = Broker::new(BrokerConfig {
+            core: Vec::new(),
+            working_set_cap: 2,
+            score_floor: 1,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(Catalog::project([
+            ("a", "alpha", schema(&[]), ToolSource::Builtin),
+            ("b", "beta", schema(&[]), ToolSource::Builtin),
+            ("c", "gamma", schema(&[]), ToolSource::Builtin),
+        ]));
+        broker.reveal("a");
+        broker.reveal("b");
+        broker.reveal("c"); // evicts "a" (least recently revealed)
+        assert!(!broker.is_advertised("a"), "a should have been evicted");
+        assert!(broker.is_advertised("b"));
+        assert!(broker.is_advertised("c"));
+    }
+
+    // --- failure-driven re-resolution ---
+
+    #[test]
+    fn reresolve_reveals_the_closest_tool_and_asks_to_retry() {
+        let broker = broker();
+        // The model attempted "web_fetch", which does not exist; the closest
+        // available tool is "fetch".
+        let resolution = broker.reresolve("web_fetch");
+        assert_eq!(resolution.revealed.as_deref(), Some("fetch"));
+        assert!(
+            resolution.message.contains("fetch"),
+            "{}",
+            resolution.message
+        );
+        assert!(
+            resolution.message.contains("retry"),
+            "{}",
+            resolution.message
+        );
+        assert!(
+            broker.is_advertised("fetch"),
+            "closest tool is now advertised"
+        );
+    }
+
+    #[test]
+    fn reresolve_of_an_out_of_set_tool_by_its_own_name_reveals_it() {
+        let broker = broker();
+        // "git_commit" exists but is not advertised; resolving its own name
+        // reveals it for retry.
+        let resolution = broker.reresolve("git_commit");
+        assert_eq!(resolution.revealed.as_deref(), Some("git_commit"));
+        assert!(broker.is_advertised("git_commit"));
+    }
+
+    #[test]
+    fn reresolve_routes_a_retired_tool_to_its_replacement() {
+        let broker = broker();
+        broker.deprecate("legacy_fetch", "fetch");
+        let resolution = broker.reresolve("legacy_fetch");
+        assert_eq!(resolution.revealed.as_deref(), Some("fetch"));
+        assert!(
+            resolution.message.contains("retired"),
+            "{}",
+            resolution.message
+        );
+        assert!(broker.is_advertised("fetch"));
+    }
+
+    #[test]
+    fn reresolve_with_no_match_is_terminal() {
+        let broker = broker();
+        let resolution = broker.reresolve("xyzzy plugh frobnicate");
+        assert_eq!(resolution.revealed, None);
+        assert!(
+            resolution.message.contains("no available tool matches"),
+            "{}",
+            resolution.message
+        );
+    }
+
+    // --- telemetry: re-rank + graduation ---
+
+    fn learning_broker() -> Broker {
+        let broker = Broker::new(BrokerConfig {
+            learning_enabled: true,
+            graduation_threshold: 2,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(catalog());
+        broker
+    }
+
+    #[test]
+    fn learned_boost_counts_capped_successful_resolutions() {
+        let history = vec![
+            ResolutionRecord {
+                chosen: "fetch".into(),
+                succeeded: true,
+            },
+            ResolutionRecord {
+                chosen: "fetch".into(),
+                succeeded: true,
+            },
+            ResolutionRecord {
+                chosen: "fetch".into(),
+                succeeded: false,
+            },
+            ResolutionRecord {
+                chosen: "git_commit".into(),
+                succeeded: true,
+            },
+        ];
+        assert_eq!(learned_boost(&history, "fetch"), 2); // two successes
+        assert_eq!(learned_boost(&history, "git_commit"), 1);
+        assert_eq!(learned_boost(&history, "read_file"), 0);
+    }
+
+    #[test]
+    fn a_past_success_reranks_a_tool_above_an_equal_text_peer() {
+        let cat = Catalog::project([
+            (
+                "fetch_a",
+                "fetch a url",
+                schema(&["url"]),
+                ToolSource::Builtin,
+            ),
+            (
+                "fetch_b",
+                "fetch a url",
+                schema(&["url"]),
+                ToolSource::Builtin,
+            ),
+        ]);
+        let broker = Broker::new(BrokerConfig {
+            learning_enabled: true,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(cat);
+        // Tie on text before any history (fetch_a wins by name order).
+        assert_eq!(broker.resolve("fetch a url")[0].name, "fetch_a");
+        // fetch_b reveals and succeeds; now it outranks the equal-text peer.
+        broker.reveal("fetch_b");
+        broker.note_success("fetch_b");
+        assert_eq!(broker.resolve("fetch a url")[0].name, "fetch_b");
+    }
+
+    #[test]
+    fn a_hot_tool_graduates_into_the_always_advertised_set() {
+        let broker = learning_broker(); // threshold 2
+        assert!(!broker.is_advertised("git_commit"));
+        broker.reveal("git_commit");
+        assert!(broker.is_advertised("git_commit"), "revealed once");
+        // Even after the reveal would age out of the working set, a graduated tool
+        // stays advertised. Reveal it a second time to cross the threshold, then
+        // evict the working set past its cap.
+        broker.reveal("git_commit");
+        assert!(
+            broker.graduated_names().contains(&"git_commit".to_string()),
+            "should have graduated after {} reveals",
+            2
+        );
+    }
+
+    #[test]
+    fn with_learning_off_nothing_is_learned_but_resolution_still_works() {
+        let broker = broker(); // learning off (default)
+                               // Resolution and reveal work (mechanical freshness).
+        assert!(matches!(
+            broker.reveal("fetch"),
+            RevealOutcome::Revealed { .. }
+        ));
+        broker.reveal("fetch");
+        broker.note_success("fetch");
+        // No history, no graduation — the broker did not learn.
+        assert!(broker.graduated_names().is_empty());
+        assert!(!broker.learning_enabled());
+        // Scores carry no learned boost (fetch's score is purely text-based).
+        let hits = broker.resolve("fetch a url over the network");
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn graduated_tools_can_be_seeded_from_a_prior_session() {
+        let broker = learning_broker();
+        broker.seed_graduated(&["git_commit".to_string(), "no_such".to_string()]);
+        assert!(broker.is_advertised("git_commit"), "seeded graduate");
+        // An unknown name is ignored, not advertised.
+        assert!(!broker.is_advertised("no_such"));
+    }
+
+    // --- advertised set composition ---
+
+    #[test]
+    fn core_and_broker_tools_are_always_advertised() {
+        let broker = broker();
+        assert!(broker.is_advertised("read_file"), "core tool");
+        assert!(broker.is_advertised(TOOL_SEARCH), "broker's own search");
+        assert!(broker.is_advertised(TOOL_LOAD), "broker's own reveal");
+        assert!(!broker.is_advertised("git_commit"), "non-core, unrevealed");
+    }
+
+    // --- read-only effect ---
+
+    #[tokio::test]
+    async fn the_broker_tools_are_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        let read = vec![Effect::ReadPath {
+            inside_workspace: true,
+            secret_like: false,
+        }];
+        assert_eq!(
+            ToolSearch::new(broker()).effects(&json!({}), &ctx).unwrap(),
+            read
+        );
+        assert_eq!(
+            ToolLoad::new(broker()).effects(&json!({}), &ctx).unwrap(),
+            read
+        );
+    }
+
+    // --- reveal-never-grant ---
+
+    #[tokio::test]
+    async fn a_revealed_write_tool_still_asks_permission() {
+        // Reveal a write tool into the working set, then dispatch a real call to
+        // it through the registry. The permission engine must still gate it:
+        // revealing changed visibility, not authority.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let registry = ToolRegistry::with_builtins();
+
+        let broker = Broker::new(BrokerConfig {
+            core: Vec::new(),
+            working_set_cap: DEFAULT_WORKING_SET_CAP,
+            score_floor: 1,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(registry.catalog());
+        assert!(
+            matches!(broker.reveal("write_file"), RevealOutcome::Revealed { .. }),
+            "write_file should be revealable"
+        );
+        assert!(broker.is_advertised("write_file"), "revealed ⇒ advertised");
+
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::Interactive,
+            trusted: false,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        let call = ToolCall::new(
+            ToolUseId::from("c1"),
+            "write_file",
+            json!({ "path": "new.txt", "content": "hi" }),
+        );
+        // A denying approver stands in for the user refusing the prompt: a write
+        // under the default profile is `Ask`, so a revealed write tool is denied
+        // exactly as a non-revealed one would be — reveal granted nothing.
+        let engine = PermissionEngine::new(Profile::Default, Vec::new());
+        let result = registry
+            .dispatch(&call, &ctx, &engine, &ScriptedApprover::new(vec![false]))
+            .await;
+        assert!(result.is_error(), "got: {}", result.output);
+        assert!(
+            result.output.contains("permission denied"),
+            "revealed write tool bypassed the gate: {}",
+            result.output
+        );
+    }
+
+    /// A synthetic MCP documentation tool: generically named and described, on a
+    /// generically named server. No real vendor is involved anywhere.
+    fn docs_catalog() -> Catalog {
+        Catalog::project([
+            (
+                "query".to_string(),
+                "Query documentation for a package".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "library": {
+                            "type": "string",
+                            "description": "the library or framework to look up"
+                        },
+                        "topic": { "type": "string", "description": "the topic to read about" }
+                    }
+                }),
+                ToolSource::Mcp("reference-server".to_string()),
+            ),
+            (
+                "edit_file".to_string(),
+                "Replace an exact block of text in a file".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "the file to edit" } }
+                }),
+                ToolSource::Builtin,
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_package_upgrade_need_reaches_a_generic_documentation_tool() {
+        // The need names a library the tool has never heard of; only the
+        // capability vocabulary bridges "upgrade" to "documentation".
+        let catalog = docs_catalog();
+        let overlay = DeprecationOverlay::default();
+        for need in [
+            "Prisma version upgrade problem",
+            "migration failure after a dependency bump",
+            "this API is deprecated, what replaced it",
+            "check compatibility with the latest framework release",
+        ] {
+            let hits = resolve(&catalog, &overlay, need);
+            assert_eq!(
+                hits.first().map(|h| h.name.as_str()),
+                Some("query"),
+                "need {need:?} should rank the documentation tool: {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrelated_local_editing_need_gains_nothing_from_a_docs_tool() {
+        let hits = resolve(
+            &docs_catalog(),
+            &DeprecationOverlay::default(),
+            "edit a file",
+        );
+        assert_eq!(hits.first().map(|h| h.name.as_str()), Some("edit_file"));
+        assert!(
+            !hits.iter().any(|h| h.name == "query"),
+            "a docs tool must not match an ordinary editing need: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn server_name_and_schema_field_metadata_feed_the_ranking() {
+        let catalog = docs_catalog();
+        let overlay = DeprecationOverlay::default();
+        // The server name is indexed...
+        assert!(resolve(&catalog, &overlay, "reference server")
+            .iter()
+            .any(|h| h.name == "query"));
+        // ...as are schema property names and their descriptions.
+        assert!(resolve(&catalog, &overlay, "look up a topic")
+            .iter()
+            .any(|h| h.name == "query"));
+    }
+
+    #[test]
+    fn an_exact_name_match_outranks_a_capability_only_match() {
+        let catalog = Catalog::project([
+            (
+                "docs_lookup".to_string(),
+                "Read documentation".to_string(),
+                serde_json::json!({ "type": "object" }),
+                ToolSource::Builtin,
+            ),
+            (
+                "upgrade_helper".to_string(),
+                "Assist with a package upgrade".to_string(),
+                serde_json::json!({ "type": "object" }),
+                ToolSource::Builtin,
+            ),
+        ]);
+        let hits = resolve(&catalog, &DeprecationOverlay::default(), "upgrade_helper");
+        assert_eq!(hits[0].name, "upgrade_helper", "{hits:?}");
+    }
+
+    #[test]
+    fn a_locator_explains_why_it_matched() {
+        // "dependency" appears nowhere in the tool's own words; only the
+        // capability vocabulary connects it to "package".
+        let hits = resolve(
+            &docs_catalog(),
+            &DeprecationOverlay::default(),
+            "dependency upgrade problem",
+        );
+        let hit = hits.iter().find(|h| h.name == "query").expect("a hit");
+        assert!(
+            hit.reason.contains("capability"),
+            "a capability bridge is explained: {:?}",
+            hit.reason
+        );
+        // The reason is bounded metadata, never a schema.
+        assert!(!hit.reason.contains("properties"), "{:?}", hit.reason);
+    }
+
+    #[test]
+    fn documentation_detection_is_generic_not_vendor_specific() {
+        assert!(describes_documentation(
+            "query",
+            "Query documentation for a package"
+        ));
+        assert!(describes_documentation(
+            "read_reference",
+            "read the reference manual"
+        ));
+        assert!(!describes_documentation(
+            "edit_file",
+            "Replace text in a file"
+        ));
+        // A word that merely contains a capability term is not a match.
+        assert!(!describes_documentation(
+            "guidebook_writer",
+            "writes documentational-sounding prose"
+        ));
+    }
+}

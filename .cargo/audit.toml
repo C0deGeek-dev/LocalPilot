@@ -1,0 +1,9 @@
+[advisories]
+ignore = [
+    # time 0.3.37 (via the vendored LocalMind workspace) is affected by
+    # RUSTSEC-2026-0009. The fixed time 0.3.47 crate requires edition 2024
+    # metadata and cannot be parsed by this repository's Rust/Cargo 1.82 MSRV
+    # toolchain. LocalMind does not parse untrusted RFC 2822 timestamps; remove
+    # this ignore when the workspace MSRV is raised enough to adopt time >=0.3.47.
+    "RUSTSEC-2026-0009",
+]

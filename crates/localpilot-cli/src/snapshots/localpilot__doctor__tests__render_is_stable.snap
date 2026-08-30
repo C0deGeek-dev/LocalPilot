@@ -1,0 +1,43 @@
+---
+source: crates/localpilot-cli/src/doctor.rs
+expression: render(&fixture())
+---
+LocalPilot 0.0.0-test
+  binary: /bin/localpilot
+
+platform:
+  os:   testos
+  arch: testarch
+
+config search paths:
+  user: /config/localpilot/config.toml (missing)
+  project: /work/.localpilot.toml (present)
+
+agents:
+  definitions: 0 resolved, 0 shadowed
+  load errors: none
+
+providers:
+  local (local): credential LOCALPILOT_LOCAL_API_KEY [not set]; model (none); context window unknown; vision declared
+  openai (openai): credential OPENAI_API_KEY [keychain]; base https://api.openai.com/v1; model (none); context window unknown
+
+tools:
+  git (git): available
+  ripgrep (rg): not found (optional)
+  sqlite3 (sqlite3): not found (optional)
+
+mcp servers:
+  context7 (npx): connected; protocol 2025-06-18; 1 tool(s): get-library-docs (args: 2; command available)
+
+memory store: /work/.localmind
+research docs: 2 report(s) on disk; report ingestion disabled ([research] ingest_report = false); doc index: 0 chunk(s), 0 with embeddings
+capabilities: doctor-json, models-json
+
+workspace trust: could not be evaluated
+  evaluation failed; run `localpilot trust status` for the error
+
+skills:
+  autonomous discovery: off (set `[skills] autonomous_discovery = true`)
+  discoverable packages: 2
+  user-only packages (hidden): 1
+  project overlay hidden (workspace trust could not be evaluated)

@@ -1,0 +1,486 @@
+//! Loading Model Context Protocol server tools and resources into the session
+//! tool registry.
+//!
+//! Configured servers are launched as local subprocesses. Their tools are
+//! registered alongside the builtins and dispatched through the *same*
+//! permission engine and redaction — MCP is never a side channel.
+
+use std::sync::Arc;
+
+use localpilot_config::{Config, CredentialStore, McpServerConfig, ToolsConfig};
+use localpilot_mcp::{
+    McpClient, McpListResources, McpReadResource, McpTool, McpToolDescriptor, Transport,
+};
+use localpilot_sandbox::Effect;
+use localpilot_tools::{Broker, BrokerConfig, ToolLoad, ToolRegistry, ToolSearch, ToolSource};
+
+use crate::mcp_env::{spawn_server, ServerLaunchError};
+
+/// Connected MCP servers and the tools they advertise. The server processes stay
+/// alive for as long as this value is held, so a single connection backs many
+/// freshly built registries (e.g. one per harness step).
+#[derive(Default)]
+pub struct McpTools {
+    /// Each entry carries its server id, so the catalog projection can attribute
+    /// the tool to that source and a re-enumeration that drops it surfaces as a
+    /// catalog `removed` delta.
+    entries: Vec<(String, McpToolDescriptor, Arc<dyn Transport>)>,
+    /// Servers that advertise the MCP resources capability. Each receives two
+    /// ordinary session tools: discovery and read, backed by this shared pool.
+    resource_servers: Vec<(String, Arc<dyn Transport>)>,
+    /// When set, the model-callable skill discovery tools (`skill_search`,
+    /// `skill_load`) are registered so the agent may reach project skills on its
+    /// own. Off by default — the deterministic `localpilot skills` surface and the
+    /// host-injected user load do not depend on it.
+    skills_autonomous: bool,
+}
+
+impl McpTools {
+    /// Spawn every configured MCP server once and discover its tools. A server
+    /// that fails to start is skipped with a note on stderr, never aborting.
+    pub async fn load(config: &Config) -> Self {
+        let mut entries = Vec::new();
+        let mut resource_servers = Vec::new();
+        for (name, server) in &config.mcp.servers {
+            match connect(server).await {
+                Ok(connected) => {
+                    entries.extend(connected.tools.into_iter().map(|descriptor| {
+                        (name.clone(), descriptor, Arc::clone(&connected.transport))
+                    }));
+                    if connected.supports_resources {
+                        resource_servers.push((name.clone(), connected.transport));
+                    }
+                }
+                Err(error) => eprintln!("mcp: skipping server '{name}': {error}"),
+            }
+        }
+        Self {
+            entries,
+            resource_servers,
+            skills_autonomous: config.skills.autonomous_discovery,
+        }
+    }
+
+    /// Build a tool registry: the builtins plus every discovered MCP tool. An
+    /// MCP tool reaches an external process, so it is gated as a network effect —
+    /// the permission engine prompts (or denies) exactly as for a builtin.
+    #[must_use]
+    pub fn registry(&self) -> ToolRegistry {
+        let mut registry = ToolRegistry::with_builtins();
+        self.extend_registry(&mut registry);
+        registry
+    }
+
+    fn extend_registry(&self, registry: &mut ToolRegistry) {
+        // The project knowledge base is reachable on demand as a read-only tool,
+        // so ingested knowledge is pulled when relevant instead of seeded into
+        // every turn. Harmless when no project is ingested (it returns an empty
+        // result), and present on every session path that builds a registry.
+        registry.register(Box::new(localpilot_localmind::KnowledgeSearch));
+        // The expand and fetch layers of the same knowledge base: locate
+        // neighbours cheaply, then pay for full bodies only for chosen ids, so a
+        // turn spends a bounded number of tokens to find the right context.
+        registry.register(Box::new(localpilot_localmind::KnowledgeExpand));
+        registry.register(Box::new(localpilot_localmind::KnowledgeFetch));
+        // Structural code search, beside the text tools rather than instead of
+        // them: it answers "where is this defined" with the enclosing
+        // declaration, so a broad query costs a handful of signatures instead of
+        // hundreds of call-site lines. Stateless — it parses on demand and keeps
+        // nothing, so it needs no ingest and can never be stale.
+        registry.register(Box::new(localpilot_localmind::SearchDefinitions));
+        // The agent can propose a durable lesson for human review as it works.
+        // Enqueue-only — never a direct accepted-memory write.
+        registry.register(Box::new(localpilot_localmind::Remember));
+        // The agent can read its own LocalMind store directly instead of
+        // reverse-engineering SQL: the review queue and accepted memory. Both are
+        // read-only — they list/search, never decide, promote, or write.
+        registry.register(Box::new(localpilot_localmind::ReviewList));
+        registry.register(Box::new(localpilot_localmind::MemorySearch));
+        // The agent can surface generated skill drafts (candidate reusable
+        // workflows) read-only. Listing a draft never enables it — activation
+        // stays a deliberate human step.
+        registry.register(Box::new(localpilot_localmind::SkillDrafts));
+        // The agent can read active (human-enabled) skills as advisory guidance,
+        // read-only. Reading a skill never runs, installs, or changes it.
+        registry.register(Box::new(localpilot_localmind::ActiveSkills));
+        // Pull-based project-skill discovery (ADR-0027): the agent can list,
+        // search for, and load project-local skills on demand instead of carrying
+        // them in context. Registered only when autonomous discovery is enabled,
+        // so a small local model never reaches for a skill on its own by default;
+        // all three tools are read-only and trust-gated regardless.
+        if self.skills_autonomous {
+            registry.register(Box::new(localpilot_skills::SkillList::new()));
+            registry.register(Box::new(localpilot_skills::SkillSearch::new()));
+            registry.register(Box::new(localpilot_skills::SkillLoad::new()));
+        }
+        for (server, transport) in &self.resource_servers {
+            let server_prefix = sanitize_server_name(server);
+            let list_name = format!("{server_prefix}_resources_list");
+            let read_name = format!("{server_prefix}_resource_read");
+            if registry.get(&list_name).is_some() || registry.get(&read_name).is_some() {
+                eprintln!(
+                    "mcp: skipping resource tools from server '{server}': advertised names collide with existing tools"
+                );
+                continue;
+            }
+            registry.register_from(
+                Box::new(McpListResources::new(
+                    list_name,
+                    server.clone(),
+                    Arc::clone(transport),
+                )),
+                ToolSource::Mcp(server.clone()),
+            );
+            registry.register_from(
+                Box::new(McpReadResource::new(
+                    read_name,
+                    server.clone(),
+                    Arc::clone(transport),
+                )),
+                ToolSource::Mcp(server.clone()),
+            );
+        }
+        for (server, descriptor, transport) in &self.entries {
+            let mut tool = McpTool::new(descriptor, vec![Effect::Network], Arc::clone(transport));
+            if registry.get(&descriptor.name).is_some() {
+                let server_prefix = sanitize_server_name(server);
+                let advertised = format!("{server_prefix}_{}", descriptor.name);
+                if registry.get(&advertised).is_some() {
+                    eprintln!(
+                        "mcp: skipping tool '{}' from server '{}': advertised name '{}' collides with an existing tool",
+                        descriptor.name, server, advertised
+                    );
+                    continue;
+                }
+                eprintln!(
+                    "mcp: tool '{}' from server '{}' collides with an existing tool; advertised as '{}'",
+                    descriptor.name, server, advertised
+                );
+                tool = tool.advertised_as(advertised);
+            }
+            registry.register_from(Box::new(tool), ToolSource::Mcp(server.clone()));
+        }
+    }
+}
+
+fn sanitize_server_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Map the user-facing `[tools]` config into the broker's tuning, falling back to
+/// the broker's own defaults for an empty core.
+fn broker_config(tools: &ToolsConfig) -> BrokerConfig {
+    let defaults = BrokerConfig::default();
+    BrokerConfig {
+        core: if tools.core.is_empty() {
+            defaults.core
+        } else {
+            tools.core.clone()
+        },
+        working_set_cap: tools.working_set_cap,
+        score_floor: tools.score_floor,
+        learning_enabled: tools.learning,
+        graduation_threshold: tools.graduation_threshold,
+    }
+}
+
+/// Build the pull-discovery broker from `[tools]` config when enabled, register
+/// its read-only `tool_search`/`tool_load` tools into `registry`, and seed its
+/// catalog from the full registry. Returns the broker handle to install on the
+/// session via `SessionRuntime::set_broker`, or `None` when the broker is off (the
+/// full tool set is advertised as before — the rollback path).
+#[must_use]
+pub fn install_broker(tools: &ToolsConfig, registry: &mut ToolRegistry) -> Option<Broker> {
+    if !tools.broker {
+        return None;
+    }
+    let broker = Broker::new(broker_config(tools));
+    registry.register(Box::new(ToolSearch::new(broker.clone())));
+    registry.register(Box::new(ToolLoad::new(broker.clone())));
+    broker.set_catalog(registry.catalog());
+    Some(broker)
+}
+
+struct ConnectedServer {
+    tools: Vec<McpToolDescriptor>,
+    supports_resources: bool,
+    transport: Arc<dyn Transport>,
+}
+
+async fn connect(server: &McpServerConfig) -> Result<ConnectedServer, ServerLaunchError> {
+    let (transport, _environment) = spawn_server(server, &CredentialStore::user())?;
+    let client = McpClient::new(Arc::clone(&transport));
+    let status = client.initialize().await?;
+    let tools = if status.supports_tools {
+        client.list_tools().await?
+    } else {
+        Vec::new()
+    };
+    Ok(ConnectedServer {
+        tools,
+        supports_resources: status.supports_resources,
+        transport,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use localpilot_mcp::ScriptedTransport;
+    use serde_json::json;
+
+    fn mcp_entry(server: &str, name: &str) -> (String, McpToolDescriptor, Arc<dyn Transport>) {
+        (
+            server.to_string(),
+            McpToolDescriptor {
+                name: name.to_string(),
+                description: "an MCP tool".to_string(),
+                input_schema: json!({ "type": "object" }),
+            },
+            Arc::new(ScriptedTransport::new()),
+        )
+    }
+
+    fn assert_unique_spec_names(registry: &ToolRegistry) {
+        let specs = registry.specs();
+        let unique = specs
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), specs.len(), "duplicate specs: {specs:?}");
+    }
+
+    #[test]
+    fn the_localmind_tools_are_registered_on_every_session_path() {
+        // Every session path (REPL, harness, RPC, one-shot) builds its registry
+        // through this method, so registering here is registering everywhere.
+        let registry = McpTools::default().registry();
+        let names = registry.names();
+        for expected in [
+            "knowledge_search",
+            "knowledge_expand",
+            "knowledge_fetch",
+            "remember",
+            "localmind_review_list",
+            "localmind_memory_search",
+            "search_definitions",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "expected `{expected}` in the built registry, got: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_discovery_tools_are_gated_off_by_default_and_on_when_enabled() {
+        // Off by default: the model cannot reach project skills on its own.
+        let off = McpTools::default().registry();
+        let off_names = off.names();
+        assert!(!off_names.contains(&"skill_list"), "got: {off_names:?}");
+        assert!(!off_names.contains(&"skill_search"), "got: {off_names:?}");
+        assert!(!off_names.contains(&"skill_load"), "got: {off_names:?}");
+
+        // Opted in: all three read-only discovery tools are registered.
+        let on = McpTools {
+            entries: Vec::new(),
+            resource_servers: Vec::new(),
+            skills_autonomous: true,
+        }
+        .registry();
+        let on_names = on.names();
+        assert!(on_names.contains(&"skill_list"), "got: {on_names:?}");
+        assert!(on_names.contains(&"skill_search"), "got: {on_names:?}");
+        assert!(on_names.contains(&"skill_load"), "got: {on_names:?}");
+    }
+
+    #[test]
+    fn colliding_mcp_tool_is_prefixed_and_builtin_remains_reachable() {
+        let registry = McpTools {
+            entries: vec![mcp_entry("duckduckgo", "fetch")],
+            resource_servers: Vec::new(),
+            skills_autonomous: false,
+        }
+        .registry();
+
+        assert!(registry.get("fetch").is_some());
+        assert!(!registry.is_mcp("fetch"));
+        assert!(registry.get("duckduckgo_fetch").is_some());
+        assert!(registry.is_mcp("duckduckgo_fetch"));
+        assert_unique_spec_names(&registry);
+    }
+
+    #[test]
+    fn host_builtin_is_registered_before_mcp_collision_resolution() {
+        let registry = McpTools {
+            entries: vec![mcp_entry("remote", "ask_user")],
+            resource_servers: Vec::new(),
+            skills_autonomous: false,
+        }
+        .registry();
+
+        assert!(registry.get("ask_user").is_some());
+        assert!(!registry.is_mcp("ask_user"));
+        assert!(registry.get("remote_ask_user").is_some());
+        assert!(registry.is_mcp("remote_ask_user"));
+        assert_unique_spec_names(&registry);
+    }
+
+    #[test]
+    fn tool_is_skipped_when_sanitized_prefixed_name_is_already_taken() {
+        let registry = McpTools {
+            entries: vec![
+                mcp_entry("duck.duckgo", "fetch"),
+                mcp_entry("duck/duckgo", "fetch"),
+            ],
+            resource_servers: Vec::new(),
+            skills_autonomous: false,
+        }
+        .registry();
+
+        assert!(registry.is_mcp("duck_duckgo_fetch"));
+        assert_eq!(
+            registry
+                .names()
+                .iter()
+                .filter(|name| **name == "duck_duckgo_fetch")
+                .count(),
+            1
+        );
+        assert_unique_spec_names(&registry);
+    }
+
+    #[test]
+    fn non_colliding_mcp_tool_keeps_its_remote_name() {
+        let registry = McpTools {
+            entries: vec![mcp_entry("search", "lookup")],
+            resource_servers: Vec::new(),
+            skills_autonomous: false,
+        }
+        .registry();
+
+        assert!(registry.get("lookup").is_some());
+        assert!(registry.is_mcp("lookup"));
+        assert!(registry.get("search_lookup").is_none());
+        assert_unique_spec_names(&registry);
+    }
+
+    #[tokio::test]
+    async fn resource_capability_is_discoverable_and_readable_from_a_session_registry() {
+        let transport = Arc::new(
+            ScriptedTransport::new()
+                .with(
+                    "resources/list",
+                    json!({ "resources": [{ "uri": "file:///guide.txt", "name": "guide" }] }),
+                )
+                .with(
+                    "resources/read",
+                    json!({ "contents": [{ "uri": "file:///guide.txt", "text": "guide body" }] }),
+                ),
+        );
+        let registry = McpTools {
+            entries: Vec::new(),
+            resource_servers: vec![("files".to_string(), transport.clone())],
+            skills_autonomous: false,
+        }
+        .registry();
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = localpilot_sandbox::Workspace::new(directory.path()).unwrap();
+        let context = localpilot_tools::ToolContext {
+            workspace: &workspace,
+            interactivity: localpilot_sandbox::Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+
+        let list = registry.get("files_resources_list").unwrap();
+        assert!(registry.is_mcp("files_resources_list"));
+        assert_eq!(
+            list.effects(&json!({}), &context).unwrap(),
+            vec![Effect::Network]
+        );
+        let listed = list.invoke(json!({}), &context).await.unwrap();
+        assert!(listed.text.contains("file:///guide.txt"));
+
+        let read = registry.get("files_resource_read").unwrap();
+        assert!(registry.is_mcp("files_resource_read"));
+        let content = read
+            .invoke(json!({ "uri": "file:///guide.txt" }), &context)
+            .await
+            .unwrap();
+        assert_eq!(content.text, "guide body");
+        assert_eq!(
+            transport.calls(),
+            vec![
+                ("resources/list".to_string(), json!({})),
+                (
+                    "resources/read".to_string(),
+                    json!({ "uri": "file:///guide.txt" })
+                )
+            ]
+        );
+    }
+
+    // --- one MCP pool, shared across sessions, never re-spawned --------------
+
+    #[test]
+    fn one_mcp_connection_pool_is_shared_across_registries() {
+        // The MCP "pool" is the connected transport, held once by `McpTools`.
+        // Each session projects a fresh `ToolRegistry` from the *same* `McpTools`
+        // (`SessionSetup::build` does this per session), so the transport must be
+        // cloned into each registry — never re-spawned per session.
+        let transport: Arc<dyn Transport> = Arc::new(ScriptedTransport::new());
+        let tools = McpTools {
+            entries: vec![(
+                "search".to_string(),
+                McpToolDescriptor {
+                    name: "lookup".to_string(),
+                    description: "an MCP tool".to_string(),
+                    input_schema: json!({ "type": "object" }),
+                },
+                Arc::clone(&transport),
+            )],
+            resource_servers: Vec::new(),
+            skills_autonomous: false,
+        };
+
+        // External handle + the one held by `McpTools`, before any projection.
+        let before = Arc::strong_count(&transport);
+
+        let reg_a = tools.registry();
+        let reg_b = tools.registry();
+        assert!(reg_a.is_mcp("lookup"), "session A sees the pooled MCP tool");
+        assert!(reg_b.is_mcp("lookup"), "session B sees the pooled MCP tool");
+
+        // Each registry cloned the one shared transport Arc — two sessions add
+        // exactly two strong refs to the same connection, proving the pool was
+        // not re-spawned per session.
+        assert_eq!(
+            Arc::strong_count(&transport),
+            before + 2,
+            "both session registries share the one MCP transport, not a fresh spawn"
+        );
+
+        // Dropping a session's registry releases only its clone of the shared
+        // pool; the connection lives on for the other session.
+        drop(reg_a);
+        assert_eq!(
+            Arc::strong_count(&transport),
+            before + 1,
+            "the shared connection survives one session's teardown"
+        );
+    }
+}

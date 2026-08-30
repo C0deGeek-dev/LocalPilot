@@ -1,0 +1,5 @@
+{
+  "id": "parse-flag-case",
+  "entry": "solution.rs",
+  "problem": "parse_flag(s) parses a boolean flag but only recognises the lowercase spellings true/false, so an input like TRUE or ' Yes ' returns None and the test parses_uppercase_and_trims fails. Make parsing case-insensitive and tolerant of surrounding whitespace so the bundled tests pass."
+}

@@ -1,0 +1,23 @@
+# EditorConfig — cross-platform editor defaults (docs/13 §7, docs/14 §4).
+# rustfmt remains the source of truth for Rust formatting (rustfmt.toml,
+# newline_style = "Auto"); this file covers editors and non-Rust text.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.rs]
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+[*.{toml,yml,yaml,json}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+# Markdown uses two trailing spaces for hard line breaks.
+trim_trailing_whitespace = false

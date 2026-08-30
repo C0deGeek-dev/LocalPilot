@@ -1,0 +1,107 @@
+---
+source: crates/localpilot-cli/src/doctor.rs
+expression: render_json(&fixture())
+---
+{
+  "version": "0.0.0-test",
+  "binary_path": "/bin/localpilot",
+  "os": "testos",
+  "arch": "testarch",
+  "config_paths": [
+    {
+      "label": "user",
+      "path": "/config/localpilot/config.toml",
+      "exists": false
+    },
+    {
+      "label": "project",
+      "path": "/work/.localpilot.toml",
+      "exists": true
+    }
+  ],
+  "providers": [
+    {
+      "name": "local",
+      "kind": "local",
+      "base_url": null,
+      "credential_env": "LOCALPILOT_LOCAL_API_KEY",
+      "credential_source": "none",
+      "model": null,
+      "context_window": null,
+      "supports_vision": true
+    },
+    {
+      "name": "openai",
+      "kind": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "credential_env": "OPENAI_API_KEY",
+      "credential_source": "keychain",
+      "model": null,
+      "context_window": null,
+      "supports_vision": null
+    }
+  ],
+  "tools": [
+    {
+      "name": "git",
+      "command": "git",
+      "available": true,
+      "optional": false
+    },
+    {
+      "name": "ripgrep",
+      "command": "rg",
+      "available": false,
+      "optional": true
+    },
+    {
+      "name": "sqlite3",
+      "command": "sqlite3",
+      "available": false,
+      "optional": true
+    }
+  ],
+  "mcp_servers": [
+    {
+      "name": "context7",
+      "command": "npx",
+      "arg_count": 2,
+      "command_available": true,
+      "connected": true,
+      "protocol_version": "2025-06-18",
+      "tool_count": 1,
+      "tools": [
+        "get-library-docs"
+      ],
+      "env_names": [],
+      "state": "connected",
+      "error": null
+    }
+  ],
+  "memory_root": "/work/.localmind",
+  "research_docs": {
+    "reports_found": 2,
+    "report_ingestion_enabled": false,
+    "doc_chunks": 0,
+    "doc_vectors": 0
+  },
+  "agents": {
+    "resolved": 0,
+    "shadowed": 0,
+    "errors": []
+  },
+  "capabilities": [
+    "doctor-json",
+    "models-json"
+  ],
+  "workspace_trust": "unknown",
+  "workspace_trust_store": "/home/user/.config/localpilot/trusted-folders.txt",
+  "skills": {
+    "autonomous_discovery": false,
+    "readable": {
+      "discoverable": 2,
+      "user_only": 1,
+      "skipped": 0
+    }
+  }
+}

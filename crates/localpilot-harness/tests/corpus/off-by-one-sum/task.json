@@ -1,0 +1,5 @@
+{
+  "id": "off-by-one-sum",
+  "entry": "solution.rs",
+  "problem": "sum_to(n) should return the sum of every integer from 1 through n inclusive, but it stops one short of n, so the bundled test sums_to_five fails. Make the included test pass by summing the inclusive range."
+}

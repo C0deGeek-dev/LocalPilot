@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: LocalX overview and docs
+    url: https://c0degeek-dev.github.io/LocalStack/
+    about: Project landing page and cross-repo documentation.
+  - name: Report a security issue
+    url: https://github.com/C0deGeek-dev/LocalPilot/security/policy
+    about: Do not open a public issue for a vulnerability — follow the security policy.

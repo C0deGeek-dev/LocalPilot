@@ -1,0 +1,279 @@
+//! Hook-fabric behavior: pre-turn context hooks, tighten-only tool gates, and
+//! cancellation reaching a running tool.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use localpilot_core::ContentBlock;
+use localpilot_harness::{ContextHook, RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
+use localpilot_llm::FakeProvider;
+use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
+use localpilot_sandbox::{PermissionEngine, Profile, ScriptedApprover, Workspace};
+use localpilot_store::Store;
+use localpilot_tools::ToolRegistry;
+use serde_json::json;
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+
+struct Harness {
+    _dir: tempfile::TempDir,
+    runtime: SessionRuntime,
+    events: broadcast::Sender<RuntimeEvent>,
+    cancel: CancellationToken,
+    store: Store,
+}
+
+fn build(provider: FakeProvider, profile: Profile) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "contents").unwrap();
+    let store = Store::open(dir.path());
+    let runtime = SessionRuntime::new(
+        Arc::new(provider),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(profile, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    let (events, _rx) = broadcast::channel(256);
+    Harness {
+        _dir: dir,
+        runtime,
+        events,
+        cancel: CancellationToken::new(),
+        store,
+    }
+}
+
+struct StaticContext;
+
+impl ContextHook for StaticContext {
+    fn name(&self) -> &str {
+        "static-context"
+    }
+    fn context_for(&self, _prompt: &str) -> Option<String> {
+        Some("hook-contributed project context".to_string())
+    }
+}
+
+#[tokio::test]
+async fn context_hooks_contribute_system_context_for_the_turn() {
+    let provider = Arc::new(FakeProvider::new().text("ok"));
+    let dir = tempfile::tempdir().unwrap();
+    let mut runtime = SessionRuntime::new(
+        Arc::clone(&provider) as Arc<dyn localpilot_llm::ModelProvider>,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    runtime
+        .hooks_mut()
+        .register_context_hook(Arc::new(StaticContext));
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+
+    let reason = runtime.run_turn("hello", &events, &cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    let request = provider.requests().pop().unwrap();
+    let system_text: String = request
+        .messages
+        .iter()
+        .filter(|m| m.role == localpilot_core::Role::System)
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(system_text.contains("hook-contributed project context"));
+}
+
+#[tokio::test]
+async fn per_turn_retrieval_context_is_replaced_not_accumulated() {
+    // A context hook contributes the same block every turn. Across several
+    // turns the block must be replaced, not piled up, so retrieval seeding does
+    // not grow the context window with turn count.
+    let provider = Arc::new(FakeProvider::new().text("ok").text("ok").text("ok"));
+    let dir = tempfile::tempdir().unwrap();
+    let mut runtime = SessionRuntime::new(
+        Arc::clone(&provider) as Arc<dyn localpilot_llm::ModelProvider>,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    runtime
+        .hooks_mut()
+        .register_context_hook(Arc::new(StaticContext));
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+
+    for _ in 0..3 {
+        let reason = runtime.run_turn("hello", &events, &cancel).await;
+        assert_eq!(reason, StopReason::Done);
+    }
+
+    // The last request carries the hook's block exactly once, not once per turn.
+    let request = provider.requests().pop().unwrap();
+    let system_text: String = request
+        .messages
+        .iter()
+        .filter(|m| m.role == localpilot_core::Role::System)
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let occurrences = system_text
+        .matches("hook-contributed project context")
+        .count();
+    assert_eq!(
+        occurrences, 1,
+        "retrieval context must be replaced each turn, not accumulated (saw {occurrences})"
+    );
+
+    // The block is injected at request-build time adjacent to the system prompt,
+    // so it folds into the single leading system message (not a trailing
+    // user-mapped one).
+    assert_eq!(request.messages[0].role, localpilot_core::Role::System);
+    let leading_text: String = request.messages[0]
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        leading_text.contains("hook-contributed project context"),
+        "retrieval context must fold into the leading system message"
+    );
+
+    // The re-derived retrieval block is not written to the durable transcript:
+    // the transcript records authored turns only (here, three user prompts).
+    let transcript = runtime
+        .store()
+        .read_transcript(runtime.session_id())
+        .unwrap();
+    assert!(
+        transcript
+            .iter()
+            .all(|m| m.role != localpilot_core::Role::System
+                || !m
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("hook-contributed project context")))),
+        "ephemeral retrieval context must not be persisted to the transcript"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_aborts_a_running_tool_without_waiting_for_its_timeout() {
+    // A long sleep through run_shell; cancellation must end the turn promptly
+    // with the pairing contract intact and reap the dropped tool's process tree.
+    #[cfg(windows)]
+    let input = json!({
+        "program": "powershell.exe",
+        "args": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "ping.exe -n 3 127.0.0.1 | Out-Null; Set-Content -LiteralPath agent-orphan.txt -Value leaked"
+        ]
+    });
+    #[cfg(not(windows))]
+    let input = json!({
+        "program": "sh",
+        "args": ["-c", "sleep 2; printf leaked > agent-orphan.txt"]
+    });
+
+    let provider = FakeProvider::new()
+        .tool_call("c1", "run_shell", input)
+        .text("never reached");
+    let mut h = build(provider, Profile::Bypass);
+    let mut runtime_events = h.events.subscribe();
+
+    let cancel = h.cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        cancel.cancel();
+    });
+
+    let started = std::time::Instant::now();
+    let reason = h.runtime.run_turn("wait", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Cancelled);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "cancellation must not wait out the tool: {:?}",
+        started.elapsed()
+    );
+
+    // The aborted execution is recorded and paired.
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let calls = transcript
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|b| matches!(b, ContentBlock::ToolUse(_)))
+        .count();
+    let results: Vec<_> = transcript
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, results.len());
+    assert!(results[0].is_error());
+    assert!(results[0].output.contains("cancelled"));
+
+    let mut saw_cancelled_finish = false;
+    while let Ok(event) = runtime_events.try_recv() {
+        if matches!(
+            event,
+            RuntimeEvent::ToolFinished {
+                cancelled: true,
+                is_error: true,
+                ..
+            }
+        ) {
+            saw_cancelled_finish = true;
+        }
+    }
+    assert!(
+        saw_cancelled_finish,
+        "runtime projection must distinguish cancellation from failure"
+    );
+
+    let events = h.store.read_events(h.runtime.session_id()).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        localpilot_store::SessionEventKind::ToolFinished { is_error: true, .. }
+    )));
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.kind, localpilot_store::SessionEventKind::Cancelled)));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !h._dir.path().join("agent-orphan.txt").exists(),
+        "cancelling an agent run_shell call must not leave a delayed child"
+    );
+}

@@ -1,0 +1,20 @@
+[package]
+name = "localpilot-taskgraph"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "A pure, I/O-free task-graph engine: validated mutations, a deterministic scheduler, and a simulator."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Snapshots (durable plan state) and the wire shape of an assignment are both
+# plain serde over these types; the crate itself never touches a file or a
+# socket, so `serde` is the only reason a `Plan` can be persisted at all.
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

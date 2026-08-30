@@ -1,0 +1,38 @@
+LocalPilot <version>
+  binary: <binary>
+
+platform:
+  os:   <os>
+  arch: <arch>
+
+config search paths:
+  user: <config-home>/localpilot/config.toml (missing)
+  project: <workspace>/.localpilot.toml (present)
+
+agents:
+  definitions: 0 resolved, 0 shadowed
+  load errors: none
+
+providers:
+  local (local): credential LOCALPILOT_LOCAL_API_KEY [not set]; model (none); context window unknown
+  openai (openai): credential OPENAI_API_KEY [not set]; model (none); context window unknown
+  anthropic (anthropic): credential ANTHROPIC_API_KEY [not set]; model (none); context window unknown
+
+tools:
+  git (git): available
+  ripgrep (rg): available
+
+mcp servers:
+  (none configured)
+
+memory store: <memory-root>
+capabilities: doctor-json, models-json, learning-workspace-flag, print-turn-timeout
+
+workspace trust: could not be evaluated
+  evaluation failed; run `localpilot trust status` for the error
+
+skills:
+  autonomous discovery: off (set `[skills] autonomous_discovery = true`)
+  discoverable packages: 3
+  user-only packages (hidden): 0
+  project overlay hidden (workspace trust could not be evaluated)

@@ -1,0 +1,803 @@
+//! The durable, tree-shaped session event log.
+//!
+//! Every entry carries an `id`, a `parent_id`, and an explicit format version.
+//! Normal execution forms a chain (each event's parent is the previous event);
+//! a harness replan forks: the abandoned attempt closes with a
+//! [`SessionEventKind::BranchClosed`] summary and the next attempt's
+//! [`SessionEventKind::BranchForked`] points back at the last good ancestor,
+//! so a replanned run is replayable and auditable from the log alone.
+//!
+//! Loading migrates older format versions on read (a version-0 line — written
+//! before the explicit version field existed — is upgraded in memory); a line
+//! with a *newer* version than this build understands is a typed error, never
+//! a silent misparse.
+
+use localpilot_core::{EventId, Message, StructuredSummary};
+use serde::{Deserialize, Serialize};
+
+/// The current session event-log format version.
+pub const SESSION_EVENT_FORMAT_VERSION: u32 = 8;
+
+/// One memory surfaced and used to answer a turn, for the local inspector.
+/// Carries only the id, its retrieval score, and which layer surfaced it — never
+/// transcript or memory body content — so the record is safe to persist and
+/// replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryUsed {
+    /// The memory id (or knowledge-base chunk id) that was used.
+    pub id: String,
+    /// Its retrieval score at selection time.
+    pub score: i64,
+    /// Which retrieval layer or source surfaced it (e.g. `index`, `fetch`,
+    /// `memory`, `ingest`).
+    pub layer: String,
+}
+
+/// One durable entry in a session's event log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionEvent {
+    /// Format version this entry was written with.
+    pub v: u32,
+    pub id: EventId,
+    /// The event this one descends from; `None` only for the first entry.
+    pub parent_id: Option<EventId>,
+    /// Wall-clock seconds since the Unix epoch when the event was recorded.
+    pub at_unix: u64,
+    /// What happened. Nested (not flattened) so a kind's own fields can never
+    /// collide with the envelope's `id`/`parent_id`.
+    pub kind: SessionEventKind,
+}
+
+/// Why a session was opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenReason {
+    New,
+    Resumed,
+    /// Opened as a fork of another session's history.
+    Forked,
+}
+
+/// Where a transcript message came from. Derivable from the message itself so
+/// the transcript can always be rebuilt from the event log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    /// Typed by the user.
+    UserInput,
+    /// Produced by the model (text/reasoning/tool calls).
+    Assistant,
+    /// A tool's result.
+    ToolResult,
+    /// Setup or host-injected system content.
+    System,
+    /// Synthesized by the runtime (repair prompt, rejection feedback, budget
+    /// notice); `why` records the reason.
+    Synthetic { why: String },
+    /// A user-initiated shell run surfaced into the transcript.
+    Shell,
+}
+
+/// What happened. Growable; the format version covers shape changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SessionEventKind {
+    SessionOpened {
+        reason: OpenReason,
+    },
+    SessionClosed,
+    /// A message entered the model-visible history. The transcript is exactly
+    /// the ordered `Message` events, so it is derivable from the log.
+    Message {
+        message: Message,
+        origin: MessageOrigin,
+    },
+    TurnStarted {
+        model: String,
+    },
+    TurnEnded {
+        stop: String,
+        /// An additive, human-readable qualifier of the coarse `stop` tag: the
+        /// provider's rejection message for `ProviderError`, or the no-progress
+        /// signal (`signal=stuck_repeat tool=… count=…` / `signal=novelty_decay …`
+        /// / `signal=consecutive_failures …`) for `NoProgress`. `None` for a
+        /// normal stop (`Done`, `Cancelled`, ...) or when no further detail was
+        /// available. The `stop` tag itself is unchanged by the detail. Additive:
+        /// absent on any log line written before this field existed, which
+        /// deserializes as `None`.
+        #[serde(default)]
+        detail: Option<String>,
+    },
+    UsageReported {
+        input_tokens: u64,
+        output_tokens: u64,
+        /// Tokens written to a provider prompt cache. Additive and defaulted so
+        /// pre-cache event logs remain readable.
+        #[serde(default)]
+        cache_creation_input_tokens: u64,
+        /// Tokens served from a provider prompt cache.
+        #[serde(default)]
+        cache_read_input_tokens: u64,
+    },
+    /// A permission decision on one effect. Recorded by the permission hook;
+    /// until the hook fabric routes decisions through the runtime, entries of
+    /// this kind may be absent.
+    PermissionDecided {
+        tool: String,
+        decision: String,
+        detail: String,
+    },
+    ToolStarted {
+        id: String,
+        name: String,
+    },
+    ToolFinished {
+        id: String,
+        name: String,
+        is_error: bool,
+        /// Optional refinement of `is_error` distinguishing a tool that could
+        /// not run from one whose wrapped work reported failure. Absent on
+        /// events written before the distinction existed — additive, so old
+        /// logs keep replaying.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<localpilot_core::ToolOutcome>,
+    },
+    RecoveryDiagnostic {
+        kind: String,
+        health: String,
+    },
+    QuotaPaused {
+        reset: String,
+    },
+    QuotaResumed,
+    /// Context compaction ran and trimmed history for the next request.
+    Compacted {
+        summary: StructuredSummary,
+    },
+    /// A compaction attempt was audited. This metadata is safe to persist: it
+    /// carries counts, modes, and source-grounded digest metadata, not raw
+    /// transcript dumps.
+    CompactionAttempt {
+        requested_mode: String,
+        used_mode: String,
+        state: String,
+        dropped_exchanges: usize,
+        kept_messages: usize,
+        dropped_messages: usize,
+        digest_estimate_tokens: usize,
+        fallback_reason: Option<String>,
+        truncated_tool_results: usize,
+    },
+    StepStarted {
+        number: usize,
+        description: String,
+    },
+    StepCompleted {
+        number: usize,
+        commit: Option<String>,
+        attempts: u32,
+    },
+    /// An abandoned line of work (a discarded step attempt) closed with a
+    /// structured digest of what was tried.
+    BranchClosed {
+        summary: StructuredSummary,
+    },
+    /// Work resumed from an earlier ancestor instead of the previous event.
+    BranchForked {
+        from: EventId,
+    },
+    Cancelled,
+    /// The verdict a verifier reached for a tool call, bound to the call id.
+    /// The verdict is a plain label (the verifier's enum serialized) so the
+    /// store keeps no dependency on the verifier crate. This is the durable,
+    /// per-call execution record a claim is checked against.
+    ToolVerified {
+        id: String,
+        verdict: String,
+    },
+    /// The memories surfaced and used to answer the most recent turn — the
+    /// "memories used this turn" record the local inspector renders. Additive
+    /// and replay-safe: ids/scores/layer only, no content.
+    MemoriesUsed {
+        memories: Vec<MemoryUsed>,
+    },
+    /// A tool call's arguments validated against the tool's JSON schema before
+    /// dispatch. Redacted by construction: it carries identifiers and never a
+    /// raw argument value. Additive, replay-safe baseline telemetry — the
+    /// tool-input validity metric the discipline scorecard reads.
+    ToolInputValid {
+        tool: String,
+        provider: String,
+        model: String,
+    },
+    /// A tool call's arguments failed schema validation before dispatch. Carries
+    /// the offending field path(s), the JSON type seen there (`before_type`), and
+    /// the malformed-argument class label — never the raw value.
+    ToolInputInvalid {
+        tool: String,
+        provider: String,
+        model: String,
+        /// The malformed-argument class label (e.g. `bare_string_for_array`).
+        class: String,
+        /// Field path(s) of the offending argument(s); names only, no values.
+        issue_paths: Vec<String>,
+        /// The JSON type seen at the first issue path (e.g. `string`); no value.
+        before_type: String,
+    },
+    /// A schema-aware, model-readable validation error was sent to the model in
+    /// place of the raw deserializer string, so it can self-correct on the next
+    /// turn. Redacted: identifiers only, never the argument value or the message
+    /// body. Paired with a preceding `ToolInputInvalid` for the same call.
+    ToolInputRetryMessageSent {
+        tool: String,
+        provider: String,
+        model: String,
+    },
+    /// A shape-invalid tool call's arguments were repaired to a valid shape and
+    /// executed, with a model-visible note. Redacted: identifiers, the malformed
+    /// class, and the rule ids applied — never the argument value.
+    ToolInputRepaired {
+        tool: String,
+        provider: String,
+        model: String,
+        /// The malformed-argument class label that was repaired.
+        class: String,
+        /// The ids of the repair rules applied (e.g. `wrap_bare_string_as_array`).
+        rules: Vec<String>,
+    },
+    /// A shape-invalid call to a destructive/external/irreversible/MCP tool was
+    /// **refused** repair — it gets a readable error, never a silent rewrite. The
+    /// auditable record that the safety gate held.
+    ToolRepairRejectedHighRisk {
+        tool: String,
+        provider: String,
+        model: String,
+        /// The tool's side-effect class that triggered the refusal.
+        risk: String,
+    },
+    /// A pull-discovery broker resolution (ADR-0031): a need was resolved to a
+    /// tool and revealed. The durable, redacted audit of the learning loop's
+    /// input; the retry outcome is the paired `ToolFinished` for `chosen`.
+    /// Recorded only when broker learning is enabled.
+    ToolResolution {
+        /// The need (the attempted tool name, or the marker capability text).
+        need: String,
+        /// The tool revealed, if any (`None` for a terminal no-match).
+        chosen: Option<String>,
+        /// The resolution score of the chosen tool.
+        score: u32,
+        /// Which trigger drove the resolution (`failure_driven` or `marker`).
+        trigger: String,
+    },
+    /// An external driver steering this session (e.g. an agent host on the
+    /// MCP adapter) intervened: it steered the turn, cancelled it, or
+    /// answered a permission ask. The durable record of who corrected the
+    /// session and how — the client identity comes from the driver's own
+    /// handshake.
+    DriverIntervention {
+        /// What the driver did: `steer`, `cancel`, `allow`, or `deny`.
+        action: String,
+        /// The steer text, or the ask's tool and detail — redacted upstream
+        /// like every event payload.
+        detail: String,
+        /// What the session was doing at the time (e.g. the running tool),
+        /// when known.
+        activity: Option<String>,
+        /// The driving client's self-reported name/version.
+        client: String,
+    },
+    /// A soft interrupt was injected into the running turn at a safe boundary.
+    /// The durable record of a mid-turn injection: which safe point it landed at
+    /// and who produced it, so a replayed turn shows the interruption in place.
+    SoftInterruptInjected {
+        /// The safe point it landed at: `after_tools` (D), `turn_continued` (B),
+        /// or `between_tools` (C, urgent).
+        point: String,
+        /// Who produced it: `user`, `system`, or `background_task`.
+        source: String,
+    },
+}
+
+impl SessionEvent {
+    /// Parse one event-log line, migrating older format versions on load.
+    ///
+    /// # Errors
+    /// Returns [`super::StoreError`] if the line is not valid JSON, is a
+    /// version this build does not know how to read, or fails to migrate.
+    pub fn from_line(line: &str) -> Result<Self, super::StoreError> {
+        let value: serde_json::Value = serde_json::from_str(line)?;
+        let version = value
+            .get("v")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        match u32::try_from(version) {
+            Ok(v) if v <= SESSION_EVENT_FORMAT_VERSION => {
+                let migrated = migrate(value, v)?;
+                Ok(serde_json::from_value(migrated)?)
+            }
+            _ => Err(super::StoreError::UnsupportedFormat {
+                found: version,
+                supported: SESSION_EVENT_FORMAT_VERSION,
+            }),
+        }
+    }
+}
+
+/// Migrate a raw event value from `from_version` up to the current version.
+/// Each step is explicit so adding version N+1 means adding one match arm.
+fn migrate(
+    mut value: serde_json::Value,
+    from_version: u32,
+) -> Result<serde_json::Value, super::StoreError> {
+    let mut version = from_version;
+    while version < SESSION_EVENT_FORMAT_VERSION {
+        value = match version {
+            // v0 -> v1: identical shape; v0 lines simply predate the explicit
+            // version field.
+            0 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(1));
+                }
+                value
+            }
+            // v1 -> v2: additive only. v2 introduced the `ToolVerified` event
+            // kind; existing v1 events keep their shape, so the migration only
+            // stamps the current version.
+            1 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(2));
+                }
+                value
+            }
+            // v2 -> v3: additive only. v3 introduced the `MemoriesUsed` event
+            // kind; existing v2 events keep their shape, so the migration only
+            // stamps the current version.
+            2 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(3));
+                }
+                value
+            }
+            // v3 -> v4: additive only. v4 introduced the `ToolResolution` event
+            // kind; existing v3 events keep their shape, so the migration only
+            // stamps the current version.
+            3 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(4));
+                }
+                value
+            }
+            // v4 -> v5: additive only. v5 introduced the `ToolInputValid` /
+            // `ToolInputInvalid` event kinds; existing v4 events keep their shape,
+            // so the migration only stamps the current version.
+            4 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(5));
+                }
+                value
+            }
+            // v5 -> v6: additive only. v6 introduced the `ToolInputRetryMessageSent`
+            // event kind; existing v5 events keep their shape, so the migration only
+            // stamps the current version.
+            5 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(6));
+                }
+                value
+            }
+            // v6 -> v7: additive only. v7 introduced the `ToolInputRepaired` /
+            // `ToolRepairRejectedHighRisk` event kinds; existing v6 events keep their
+            // shape, so the migration only stamps the current version.
+            6 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(7));
+                }
+                value
+            }
+            // v7 -> v8: additive only. v8 introduced the `DriverIntervention`
+            // event kind; existing v7 events keep their shape, so the migration
+            // only stamps the current version.
+            7 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(8));
+                }
+                value
+            }
+            _ => {
+                return Err(super::StoreError::UnsupportedFormat {
+                    found: u64::from(version),
+                    supported: SESSION_EVENT_FORMAT_VERSION,
+                })
+            }
+        };
+        version += 1;
+    }
+    Ok(value)
+}
+
+/// Rebuild the transcript — the exact model-visible message history — from an
+/// event sequence: the ordered `Message` events.
+#[must_use]
+pub fn transcript_from_events(events: &[SessionEvent]) -> Vec<Message> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            SessionEventKind::Message { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Derive a message's origin from the message itself, so emission sites cannot
+/// disagree with the payload.
+#[must_use]
+pub fn origin_for(message: &Message) -> MessageOrigin {
+    if let Some(why) = &message.metadata.synthetic {
+        return MessageOrigin::Synthetic { why: why.clone() };
+    }
+    match message.role {
+        localpilot_core::Role::User => MessageOrigin::UserInput,
+        localpilot_core::Role::Assistant => MessageOrigin::Assistant,
+        localpilot_core::Role::Tool => MessageOrigin::ToolResult,
+        localpilot_core::Role::System => MessageOrigin::System,
+        localpilot_core::Role::UserShell => MessageOrigin::Shell,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use localpilot_core::Role;
+
+    fn event(kind: SessionEventKind, parent: Option<EventId>) -> SessionEvent {
+        SessionEvent {
+            v: SESSION_EVENT_FORMAT_VERSION,
+            id: EventId::new(),
+            parent_id: parent,
+            at_unix: 1,
+            kind,
+        }
+    }
+
+    #[test]
+    fn every_event_kind_roundtrips_through_a_log_line() {
+        let kinds = vec![
+            SessionEventKind::SessionOpened {
+                reason: OpenReason::New,
+            },
+            SessionEventKind::SessionClosed,
+            SessionEventKind::Message {
+                message: Message::text(Role::User, "hi"),
+                origin: MessageOrigin::UserInput,
+            },
+            SessionEventKind::Message {
+                message: Message::text(Role::User, "repair").into_synthetic("repair prompt"),
+                origin: MessageOrigin::Synthetic {
+                    why: "repair prompt".to_string(),
+                },
+            },
+            SessionEventKind::TurnStarted {
+                model: "m".to_string(),
+            },
+            SessionEventKind::TurnEnded {
+                stop: "done".to_string(),
+                detail: Some("provider rejected the request: bad schema".to_string()),
+            },
+            SessionEventKind::UsageReported {
+                input_tokens: 3,
+                output_tokens: 5,
+                cache_creation_input_tokens: 7,
+                cache_read_input_tokens: 11,
+            },
+            SessionEventKind::PermissionDecided {
+                tool: "run_shell".to_string(),
+                decision: "ask".to_string(),
+                detail: "rm -rf build".to_string(),
+            },
+            SessionEventKind::ToolStarted {
+                id: "c1".to_string(),
+                name: "read_file".to_string(),
+            },
+            SessionEventKind::ToolFinished {
+                id: "c1".to_string(),
+                name: "read_file".to_string(),
+                is_error: false,
+                outcome: Some(localpilot_core::ToolOutcome::Ok),
+            },
+            SessionEventKind::RecoveryDiagnostic {
+                kind: "slash_flood".to_string(),
+                health: "suspect".to_string(),
+            },
+            SessionEventKind::QuotaPaused {
+                reset: "retry in ~30s".to_string(),
+            },
+            SessionEventKind::QuotaResumed,
+            SessionEventKind::Compacted {
+                summary: StructuredSummary::new("trimmed:", vec!["x".to_string()]),
+            },
+            SessionEventKind::CompactionAttempt {
+                requested_mode: "deterministic".to_string(),
+                used_mode: "deterministic".to_string(),
+                state: "completed".to_string(),
+                dropped_exchanges: 1,
+                kept_messages: 2,
+                dropped_messages: 3,
+                digest_estimate_tokens: 4,
+                fallback_reason: None,
+                truncated_tool_results: 0,
+            },
+            SessionEventKind::StepStarted {
+                number: 1,
+                description: "write tests".to_string(),
+            },
+            SessionEventKind::StepCompleted {
+                number: 1,
+                commit: Some("abc123".to_string()),
+                attempts: 1,
+            },
+            SessionEventKind::BranchClosed {
+                summary: StructuredSummary::new("closed:", vec!["attempt 1 failed".to_string()]),
+            },
+            SessionEventKind::BranchForked {
+                from: EventId::new(),
+            },
+            SessionEventKind::Cancelled,
+            SessionEventKind::ToolVerified {
+                id: "c1".to_string(),
+                verdict: "verified".to_string(),
+            },
+            SessionEventKind::MemoriesUsed {
+                memories: vec![
+                    MemoryUsed {
+                        id: "mem-1".to_string(),
+                        score: 42,
+                        layer: "memory".to_string(),
+                    },
+                    MemoryUsed {
+                        id: "chunk-7".to_string(),
+                        score: 10,
+                        layer: "index".to_string(),
+                    },
+                ],
+            },
+            SessionEventKind::ToolResolution {
+                need: "web_fetch".to_string(),
+                chosen: Some("fetch".to_string()),
+                score: 3,
+                trigger: "failure_driven".to_string(),
+            },
+            SessionEventKind::ToolInputValid {
+                tool: "read_file".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
+            },
+            SessionEventKind::ToolInputInvalid {
+                tool: "git_diff".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
+                class: "bare_string_for_array".to_string(),
+                issue_paths: vec!["paths".to_string()],
+                before_type: "string".to_string(),
+            },
+            SessionEventKind::ToolInputRetryMessageSent {
+                tool: "git_diff".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
+            },
+            SessionEventKind::ToolInputRepaired {
+                tool: "git_diff".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
+                class: "bare_string_for_array".to_string(),
+                rules: vec!["wrap_bare_string_as_array".to_string()],
+            },
+            SessionEventKind::ToolRepairRejectedHighRisk {
+                tool: "git_restore".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
+                risk: "destructive".to_string(),
+            },
+        ];
+        let mut parent = None;
+        for kind in kinds {
+            let original = event(kind, parent);
+            parent = Some(original.id);
+            let line = serde_json::to_string(&original).unwrap();
+            let back = SessionEvent::from_line(&line).unwrap();
+            assert_eq!(original, back);
+        }
+    }
+
+    #[test]
+    fn pre_cache_usage_event_defaults_new_counters_to_zero() {
+        let original = event(
+            SessionEventKind::UsageReported {
+                input_tokens: 3,
+                output_tokens: 5,
+                cache_creation_input_tokens: 7,
+                cache_read_input_tokens: 11,
+            },
+            None,
+        );
+        let mut value = serde_json::to_value(original).expect("serialize event");
+        let kind = value
+            .get_mut("kind")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("event kind object");
+        kind.remove("cache_creation_input_tokens");
+        kind.remove("cache_read_input_tokens");
+
+        let restored: SessionEvent = serde_json::from_value(value).expect("read old event");
+        let SessionEventKind::UsageReported {
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            ..
+        } = restored.kind
+        else {
+            panic!("expected usage event");
+        };
+        assert_eq!(cache_creation_input_tokens, 0);
+        assert_eq!(cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn a_version_two_memories_used_line_is_unknown_kind_but_a_v2_event_still_loads() {
+        // A pre-v3 event (no MemoriesUsed) migrates forward cleanly: adding the
+        // new kind did not disturb existing events.
+        let mut value = serde_json::to_value(event(SessionEventKind::QuotaResumed, None)).unwrap();
+        value["v"] = serde_json::json!(2);
+        let line = serde_json::to_string(&value).unwrap();
+        let loaded = SessionEvent::from_line(&line).unwrap();
+        assert_eq!(loaded.v, SESSION_EVENT_FORMAT_VERSION);
+        assert_eq!(loaded.kind, SessionEventKind::QuotaResumed);
+    }
+
+    #[test]
+    fn memories_used_replays_through_the_log() {
+        let original = event(
+            SessionEventKind::MemoriesUsed {
+                memories: vec![MemoryUsed {
+                    id: "mem-1".to_string(),
+                    score: 5,
+                    layer: "fetch".to_string(),
+                }],
+            },
+            None,
+        );
+        let line = serde_json::to_string(&original).unwrap();
+        let back = SessionEvent::from_line(&line).unwrap();
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn a_turn_ended_line_without_detail_loads_as_none() {
+        // A log line written before `detail` existed on `TurnEnded` — the field
+        // is additive, so it must still deserialize, as `None`.
+        let mut value = serde_json::to_value(event(
+            SessionEventKind::TurnEnded {
+                stop: "ProviderError".to_string(),
+                detail: Some("will be removed".to_string()),
+            },
+            None,
+        ))
+        .unwrap();
+        value["kind"].as_object_mut().unwrap().remove("detail");
+        let line = serde_json::to_string(&value).unwrap();
+
+        let loaded = SessionEvent::from_line(&line).unwrap();
+        assert_eq!(
+            loaded.kind,
+            SessionEventKind::TurnEnded {
+                stop: "ProviderError".to_string(),
+                detail: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_no_progress_turn_ended_detail_round_trips() {
+        // The NoProgress signal detail rides the existing additive `detail`
+        // field — no new field and no format-version bump — and the coarse
+        // `stop` tag stays exactly "NoProgress".
+        let detail = "signal=stuck_repeat tool=\"read_file\" count=3".to_string();
+        let original = event(
+            SessionEventKind::TurnEnded {
+                stop: "NoProgress".to_string(),
+                detail: Some(detail.clone()),
+            },
+            None,
+        );
+        let line = serde_json::to_string(&original).unwrap();
+        let loaded = SessionEvent::from_line(&line).unwrap();
+        assert_eq!(loaded.v, SESSION_EVENT_FORMAT_VERSION);
+        assert_eq!(
+            loaded.kind,
+            SessionEventKind::TurnEnded {
+                stop: "NoProgress".to_string(),
+                detail: Some(detail),
+            }
+        );
+    }
+
+    #[test]
+    fn a_version_zero_line_migrates_on_load() {
+        let original = event(
+            SessionEventKind::TurnStarted {
+                model: "m".to_string(),
+            },
+            None,
+        );
+        let mut value = serde_json::to_value(&original).unwrap();
+        value.as_object_mut().unwrap().remove("v");
+        let line = serde_json::to_string(&value).unwrap();
+
+        let loaded = SessionEvent::from_line(&line).unwrap();
+        assert_eq!(loaded.v, SESSION_EVENT_FORMAT_VERSION);
+        assert_eq!(loaded.kind, original.kind);
+    }
+
+    #[test]
+    fn a_newer_version_is_a_typed_error_not_a_misparse() {
+        let mut value = serde_json::to_value(event(SessionEventKind::SessionClosed, None)).unwrap();
+        value["v"] = serde_json::json!(SESSION_EVENT_FORMAT_VERSION + 1);
+        let line = serde_json::to_string(&value).unwrap();
+        assert!(matches!(
+            SessionEvent::from_line(&line),
+            Err(super::super::StoreError::UnsupportedFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn transcript_is_the_ordered_message_events() {
+        let user = Message::text(Role::User, "hi");
+        let assistant = Message::text(Role::Assistant, "hello");
+        let events = vec![
+            event(
+                SessionEventKind::SessionOpened {
+                    reason: OpenReason::New,
+                },
+                None,
+            ),
+            event(
+                SessionEventKind::Message {
+                    message: user.clone(),
+                    origin: MessageOrigin::UserInput,
+                },
+                None,
+            ),
+            event(
+                SessionEventKind::TurnStarted {
+                    model: "m".to_string(),
+                },
+                None,
+            ),
+            event(
+                SessionEventKind::Message {
+                    message: assistant.clone(),
+                    origin: MessageOrigin::Assistant,
+                },
+                None,
+            ),
+        ];
+        assert_eq!(transcript_from_events(&events), vec![user, assistant]);
+    }
+
+    #[test]
+    fn origin_is_derived_from_the_message() {
+        assert_eq!(
+            origin_for(&Message::text(Role::User, "x")),
+            MessageOrigin::UserInput
+        );
+        assert_eq!(
+            origin_for(&Message::text(Role::Tool, "x")),
+            MessageOrigin::ToolResult
+        );
+        assert_eq!(
+            origin_for(&Message::text(Role::User, "x").into_synthetic("repair prompt")),
+            MessageOrigin::Synthetic {
+                why: "repair prompt".to_string()
+            }
+        );
+    }
+}

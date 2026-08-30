@@ -1,0 +1,3 @@
+[submodule "external/localmind"]
+	path = external/localmind
+	url = https://github.com/C0deGeek-dev/LocalMind.git

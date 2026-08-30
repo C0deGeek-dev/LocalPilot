@@ -1,0 +1,18 @@
+/target/
+/xtask/target/
+/localmind.sqlite
+.localpilot/
+/.harness/
+/.localmind/
+/.localmind.toml
+*.log
+*.tmp
+.env
+.env.*
+!.env.example
+
+# Local launch-generated provider config (LocalBox writes this in cwd)
+/.localpilot.toml
+
+# JetBrains IDE project config (Rider/CLion/IntelliJ)
+/.idea/

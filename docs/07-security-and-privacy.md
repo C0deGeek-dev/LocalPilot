@@ -1,0 +1,868 @@
+# Security and Privacy
+
+## Security Model
+
+The model is untrusted. Tool inputs are untrusted. Provider outputs are
+untrusted. User-approved policy is trusted.
+
+## Local Effects
+
+Local side effects include:
+
+- file writes
+- file deletes
+- shell commands
+- package installs
+- git mutations
+- network access
+- credential reads
+
+Every local side effect must be mediated by the tool runtime and permission
+engine.
+
+## Workspace Trust
+
+When opening a directory for the first time, LocalPilot should ask whether the
+workspace is trusted.
+
+Trusted means:
+
+- read normal project files
+- run low-risk commands
+- use configured tools
+
+Trusted does not mean:
+
+- read secrets without approval
+- run destructive commands without approval
+- write outside workspace without approval
+
+Trust is a convenience gate, not a security boundary — the permission engine
+still mediates every effect. Its concrete role: a trusted folder does not
+re-prompt, its project-local skills and skill sources are loaded and visible, and
+its project skill state may be modified. An untrusted folder is served the
+user-global skill baseline only.
+
+### The trusted-folders store
+
+Trusted folders are recorded one canonical absolute path per line in a small
+file next to the user config:
+
+- Windows: `%APPDATA%\localpilot\trusted-folders.txt`
+- Linux/macOS: `$XDG_CONFIG_HOME/localpilot/trusted-folders.txt` (defaulting to
+  `~/.config/localpilot/trusted-folders.txt`)
+
+Trust is **exact-folder**: a trusted folder is not inherited by its
+subdirectories — each is trusted on its own.
+
+### Granting and revoking trust
+
+- The first time you `localpilot chat` in an untrusted folder, the dialog offers
+  three choices: trust for this session only (nothing is written), trust and
+  remember the workspace (the folder is added to the store), or exit. Either
+  accept grants trust to the live session immediately — the session's tools then
+  see the trusted project overlay (e.g. project skills) without a relaunch. The
+  session-only choice grants trust in memory only; nothing is persisted, so a
+  later process in that folder still prompts. The live session-trust value is
+  derived once at launch from the trusted-folders store (not from the permission
+  profile) and updated in place on accept, so a resume and every tool call read
+  the same authority.
+- `localpilot trust add [PATH]` records a folder (default: the current
+  directory); `localpilot trust remove [PATH]` revokes it; `localpilot trust
+  list` shows every trusted folder; `localpilot trust status [PATH]` reports
+  whether a folder is trusted and the store it was evaluated against.
+- `localpilot doctor` reports the current folder's trust state and the store
+  path.
+
+The `bypass` and `unrestricted` permission profiles skip the trust prompt
+entirely, so a folder worked exclusively in those profiles is never recorded;
+`localpilot trust add` remains the way to persist trust for such a folder.
+
+## Secret Redaction
+
+Redact:
+
+- API keys
+- bearer tokens
+- private keys
+- passwords
+- cloud credentials
+- connection strings with credentials
+
+Redaction applies to:
+
+- logs
+- transcripts
+- tool outputs
+- error messages
+- memory entries
+
+Secret detection is best-effort. Inspect/delete controls are the backstop; the
+product must not promise perfect secret filtering.
+
+## Retention
+
+The project-local `.localpilot/` state is bounded by a retention policy so it
+cannot grow without limit (ADR-0024). A conservative cap is on by default —
+`[storage]`: `max_sessions = 100`, `max_age_days = 90`, `auto_prune = true` —
+pruning the oldest session transcripts/event logs and any tool-output snapshot no
+surviving session references. Because deleting history is sensitive, cleanup is
+best-effort and silent at chat startup, every limit is configurable, `0`/`false`
+disables it, and `localpilot session prune --dry-run` reports what would be
+removed without deleting. Cache and provider metadata are out of scope.
+
+Provider metadata at rest is limited to the provider's typed declaration
+(capabilities, limits, source/auth requirements, and display metadata), wrapped
+in a versioned record and redacted before persistence. It never contains a
+resolved credential or per-response payload. An incognito session runs the same
+metadata path against its in-memory store, so no `.localpilot/providers/` file is
+created (ADR-0160).
+
+## Prompt History At Rest
+
+The interactive composer persists submitted prompts so Up/Down recall survives a
+restart (ADR-0040). This store has a **different** posture from transcripts, and
+the difference is deliberate:
+
+- **Stored raw, not redacted.** Transcripts and tool outputs are redacted before
+  write (see Secret Redaction); prompt-history entries are not. An entry exists
+  only to be recalled verbatim into the composer — redacting it would recall
+  `[REDACTED]` and defeat the feature. A prompt can therefore contain a secret the
+  user typed, in cleartext, on disk.
+- **The controls instead are:** an opt-out, a restrictive file mode, a per-user
+  location, and a bounded size.
+  - **Opt-out:** `[history] persistence = "none"` disables it entirely — no read at
+    startup, no write on submit, no file created. The default is `save-all`. See
+    [configuration.md](configuration.md) §`[history]`.
+  - **Location:** a single global file
+    (`prompt-history.jsonl`) under the per-user directory beside `config.toml`
+    (`%APPDATA%/localpilot` on Windows, `$XDG_CONFIG_HOME`/`~/.config/localpilot`
+    elsewhere), never the project-local `.localpilot/`.
+  - **File mode:** `0600` (owner read/write) on unix. Windows has no exact
+    equivalent; the per-user profile directory's own ACL is the protection there.
+    Tier-1 parity (ADR-0007) is behaviour parity — load, append, project-filter,
+    and opt-out are identical on all three platforms; only the filesystem
+    permission mechanism differs.
+  - **Bound:** the file is trimmed to a maximum entry count on write, so it cannot
+    grow without limit.
+- **To disable and purge:** set `persistence = "none"` and delete the
+  `prompt-history.jsonl` file.
+
+Recall is scoped to the current directory by default (each record is tagged with
+the directory it was submitted in); Ctrl-T toggles a view of every project's
+prompts.
+
+## Stored API Credentials At Rest
+
+`localpilot login <provider>` stores a provider API key so a logged-in user needs
+no environment variable (ADR-0042). The posture:
+
+- **Bring-your-own-key only — no subscription tokens (blocking).** The key is one
+  the user creates in the provider's own dashboard. No code path obtains, stores,
+  or routes Claude Free/Pro/Max or ChatGPT Plus/Pro *subscription* credentials,
+  and there is no "sign in with Claude/ChatGPT" flow. Neither provider offers a
+  sanctioned OAuth flow that mints a standard API key for a third-party client,
+  and routing a third party's users through subscription credentials is a terms
+  violation; BYOK is the only sanctioned path.
+- **Where it is stored.** The OS keychain when available — currently the Windows
+  Credential Manager (built with the `keychain` feature). On macOS and Linux, and
+  on any host without a keychain backend, a `0600` file (`credentials.json`) under
+  the per-user directory beside `config.toml`. (The macOS/Linux native keychains
+  are held back by an MSRV-incompatible dependency; see ADR-0042.) A **provider**
+  key never enters the repo or a config file. (MCP servers may carry a sensitive
+  literal in a project-local config file as a documented, explicit exception —
+  see "MCP server environments" below and ADR-0101. That exception does not
+  extend to provider keys.)
+- **Best-effort, never blocking.** A keychain that is absent or locked is a miss,
+  not an error: the store falls back to the file and resolution falls through to
+  the environment, so startup and a live session never depend on keychain
+  availability.
+- **Secret discipline.** The pasted key is wrapped in `Secret` immediately, never
+  logged or echoed in full (only a masked head/tail), and the `Secret` type
+  refuses serialization, so the only places a key leaves the wrapper are the
+  audited keychain/file writes. The fallback file is `0600` on unix (the per-user
+  directory ACL on Windows — tier-1 parity is behaviour parity, ADR-0007).
+- **Resolution precedence:** stored credential (keychain → file) → `api_key_env`
+  environment variable → config. `localpilot doctor` reports the resolved *source*
+  (`keychain` / `file` / `env` / `not set`), never the secret.
+- **Context-hygiene snippets are redacted.** `localpilot doctor --hygiene` reads
+  your instruction files, which can hold cleartext secrets. Every layer body is
+  passed through the canonical redactor before analysis, so any quoted evidence
+  snippet is already redacted; the per-layer summary carries token weights only,
+  never body text. Best-effort, like all redaction here (ADR-0140).
+- **To remove:** `localpilot logout <provider>` deletes it from every tier.
+
+## MCP Server Environments
+
+A configured MCP server may be given environment entries
+(`[mcp.servers.<name>.env]`, ADR-0101). The posture:
+
+- **Named credentials are the recommended path.** `localpilot credential set
+  <name>` stores a value in the same tiers as a provider key — OS keychain, else
+  a `0600` file — and the config holds only the alias. The value is read from
+  stdin, never taken as a command-line argument, never printed in full, and there
+  is no command to reveal, export, or copy it afterwards.
+- **Generic and provider credentials cannot collide.** They live in separate maps
+  on disk and under separate keychain services, so `credential set openai` and
+  `login openai` are independent whatever they are named. The separation is
+  structural, not a naming convention.
+- **The plaintext form is a deliberate, narrower exception.**
+  `KEY = { value = "..." }` puts a credential in a project-local, git-ignored
+  config file. It receives identical runtime masking and identical response
+  filtering to a stored credential; its only weaker property is plaintext at
+  rest. Provider keys have no equivalent — they remain config-free.
+- **A plain string is not a secret.** `KEY = "..."` is an ordinary value and is
+  *not* filtered out of server responses. The object forms are how a value is
+  declared sensitive.
+- **Secret discipline.** A resolved value is wrapped in `Secret` at resolution and
+  leaves the wrapper at exactly one audited point: the child process's
+  environment assignment. It is masked in `Debug`, `Display`, and serialization,
+  so it cannot reach a diagnostic, an error, or a log by accident.
+- **Responses are filtered against the exact values.** An MCP server can read its
+  own environment, so anything given to one can be returned — through the
+  handshake, advertised tool metadata, a tool result, or a protocol error. Every
+  inbound value is stripped of that server's credentials at the transport, before
+  reaching the model, transcripts, stored tool output, or logs. This runs
+  *underneath* the shared pattern-based redactor (ADR-0011), which catches
+  credentials by shape and therefore cannot catch a store-issued value; the two
+  layers are complementary and both run. Values shorter than 8 characters are
+  left to pattern redaction alone, because matching a short string verbatim would
+  corrupt ordinary text.
+- **This is defence in depth, not a boundary.** Exact matching is byte-for-byte,
+  so a server that returns a credential base64-encoded, URL-encoded, or split
+  across fields defeats it. It is a strong guarantee against accidental leakage
+  and a weak one against a determined server. The permission engine and the
+  declared effects remain the actual boundary: a configured environment grants no
+  new tool permission and bypasses no gate.
+- **A missing credential starts nothing.** A `{ credential = "..." }` entry that
+  does not resolve fails that server before any process is spawned. `doctor`
+  reports the variable and alias — never a value, in either its human or JSON
+  rendering.
+
+## Shell Policy
+
+Commands are classified as:
+
+- read-only
+- project-write
+- external-write
+- network
+- destructive
+- privileged
+- unknown
+
+Default decisions:
+
+| Class | Interactive | Non-interactive |
+| --- | --- | --- |
+| read-only | allow | allow |
+| project-write | ask | deny |
+| external-write | ask | deny |
+| network | ask | deny |
+| destructive | ask with explicit warning | deny |
+| privileged | ask with explicit warning | deny |
+| unknown | ask | deny |
+
+Wrapper commands are never auto-allowed. A shell or interpreter invocation that
+executes an embedded command the classifier cannot see into — `bash`/`sh`/
+`zsh`/`dash`/`ksh -c …`, `env`-prefixed commands, `xargs`, `nohup`, `timeout`,
+interpreter `-c`/`-e` one-liners (python, node, perl, ruby), and their
+equivalents reachable on Windows (git-bash, WSL) — classifies as `unknown` at
+best, on every platform. The Windows shells are no exception: a `cmd /c …`,
+`powershell`/`pwsh -Command …`, `-EncodedCommand`, or `-File` invocation carries
+an inline command or script the substring classifier cannot read, so it
+classifies as `unknown` (gated) rather than trusting a coincidental keyword — a
+`cmd /c "echo data > secrets"` is a write, not the read its `echo` looks like.
+Independently, any argument carrying an output redirection (`>`/`>>`) lifts a
+read-looking command to at least `project-write`, so a redirection can never be
+auto-allowed as a read. Destructive flag forms of otherwise project-write
+commands escalate: `git reset --hard`, `git clean -f`, and `git checkout`/
+`git restore` against pathspecs classify as `destructive`, so a raw shell
+command never faces a weaker gate than the purpose-built tool for the same
+effect.
+
+A shell command carries no contained path, so a `read-only` command
+(`cat`/`type`/`head`) could otherwise read a secret-bearing or out-of-workspace
+file and pull it into model context with no prompt. Each non-flag path argument
+of a read-only command is therefore inspected: one that is secret-like (the same
+table the file tools use — `.env`, `*.pem`, `~/.ssh/…`, `.aws/credentials`, …) or
+that resolves outside the workspace adds an explicit read effect, so it faces the
+same prompt the `read_file` tool would. The check is best-effort and
+conservative — ordinary in-workspace reads add no prompt.
+
+The full-screen `!` composer is an explicit user-authored execution surface.
+Submitting there confirms the command-risk effect, so LocalPilot does not ask
+the user to approve the exact command text a second time. This is narrow to
+`run_shell` and does not bypass the permission engine: `deny` remains denied,
+and separate protected effects (network, secret-like reads, and out-of-workspace
+paths) still raise the ordinary approval dialog. Model-authored `run_shell`
+calls keep the additional irreversible-operation confirmation.
+
+## Discovered Tooling
+
+The harness quality gate discovers language-specific check commands from the
+project toolchain (ADR-0009). Discovery is untrusted input and must not become
+execution by itself:
+
+- Discovery *proposes* a gate; the user *ratifies* it into the project's
+  local `.localpilot.toml` (local-only, ADR-0012). Nothing discovered runs
+  before ratification.
+- Ratified check and fix commands are still classified and mediated by the
+  permission engine and shell policy above — ratification records intent, it does
+  not grant a standing bypass.
+- A non-interactive harness run executes only the ratified gate; a newly
+  discovered tool is proposed for the next ratification, never auto-run.
+- Auto-fix commands are `project-write` (or higher) and follow the same default
+  decisions as any other write.
+- A discovered command that classifies as `destructive`, `privileged`, or
+  `network` is surfaced with its class at ratification time, not silently
+  accepted into the gate.
+
+## Permission Profiles
+
+The permission engine is configurable so users can trade safety for speed
+deliberately. Profiles apply in both agent mode and harness mode.
+
+- `default`: least privilege. Risky actions (writes, deletes, shell, network,
+  secret-like reads) require approval. This is the out-of-box behavior.
+- `relaxed`: a user-defined allowlist auto-approves common safe actions; the rest
+  still prompt.
+- `bypass`: a launch mode that approves everything with no prompts, equivalent to
+  running fully localpilot. The single exception is an out-of-workspace path,
+  which prompts (see the boundary rule below).
+- `unrestricted`: a launch mode that approves everything — out-of-workspace
+  paths included — with no prompts at all. The user explicitly accepts full
+  responsibility. Like `bypass` it is never the default, must be set explicitly
+  (`--permission unrestricted`, the `/unrestricted` slash command, or
+  `[permissions] profile`), is always surfaced in the footer/status output, and
+  does not disable redaction or logging (ADR-0070).
+
+Rules:
+
+- **The allowlist is floor-aware.** Under `relaxed`, an allowlisted tool is
+  auto-approved only for low-risk effects: read-only, project-write, and
+  network command classes, in-workspace non-secret file reads, and
+  in-workspace writes. This includes non-interactive runs — it is how the
+  ratified quality gate executes headless (ADR-0009). Destructive,
+  privileged, unknown, and external-write commands, secret-like reads, and
+  out-of-workspace paths keep their gate regardless of the allowlist, in
+  every mode. Allowlisting `run_shell` stops prompt fatigue for routine
+  commands; it does not grant `sudo` or `rm -rf`.
+- `bypass` is never the default. It must be set explicitly, through a launch flag
+  or config, and the active profile is always shown in the footer/status output.
+- `bypass` does not silently disable redaction or logging; disabling those
+  requires separate explicit settings.
+- **Bypass keeps the workspace boundary for path effects only — as a prompt,
+  never a dead end.** The file tools' read/write effects carry path
+  information, and an out-of-workspace path under bypass prompts in an
+  interactive session and is denied non-interactively — exactly the `default`
+  gate, so bypass is never *weaker* than `default` (ADR-0070; it previously
+  hard-denied with no way to approve). Shell commands carry no path
+  information: bypass auto-allows every command class, and a command's own
+  file access is not contained (its working directory is the workspace root,
+  nothing more). Treat bypass as full shell access for the model.
+- **Standing read grants: `[permissions] extra_read_roots`.** Directories
+  listed there (absolute paths, canonicalized at startup) are treated like
+  in-workspace paths for *read* effects only, in every profile and in
+  non-interactive runs — the config-file counterpart of approving the same
+  read prompt every session. Writes under a granted root keep the workspace
+  boundary, and secret-like reads keep their own gate. A listed directory
+  that cannot be canonicalized (typically: it does not exist) is reported at
+  startup and skipped, never silently widened. A denied out-of-workspace
+  access names this key, the interactive prompt, and `--permission
+  unrestricted` in its error, so the denial is actionable (ADR-0070).
+- **The containment root and the spawn working directory are distinct
+  spellings of the same directory.** The sandbox canonicalizes the workspace
+  root to a verbatim extended-length path (`\\?\…` on Windows); that verbatim
+  form is the security boundary — every contained-path check (`starts_with`)
+  uses it, and it is never weakened. A child process cannot use a verbatim path
+  as its working directory, so spawns use a de-verbatim equivalent of the *same*
+  directory (`dunce::simplified`, which keeps the verbatim form whenever it
+  cannot be safely shortened). De-verbatim never widens containment: it changes
+  only the cwd spelling handed to a child, not the boundary the path checks
+  enforce.
+- Harness rule verdicts still apply on top of the permission profile. A profile
+  controls prompting, not the harness correctness gates.
+
+Bypass removes the main safety net against model-initiated destructive actions,
+and unrestricted additionally removes the workspace boundary for the file
+tools. Both should be used only in disposable or sandboxed environments, or
+where the user has deliberately accepted the risk.
+
+## LocalMind Terminal Review
+
+The full-screen `/localmind` Docs, Graph, Memory, Skills, and Audit sections are
+read-only. Store resolution happens before any engine opener is called; if no
+store exists, opening and navigating the view creates no project state. Skills
+reads LocalPilot's proposal store and offers no activation or mutation control.
+When a project store does exist, Memory and Review use LocalMind's standard
+persistence opener, which may initialize its configured user-global memory
+store; the no-creation guarantee is specifically for project state.
+
+Review Accept, Reject, and Promote are explicit user actions, but the underlying
+LocalMind APIs are direct writes. LocalPilot therefore treats each intent as an
+interactive, in-workspace overwrite effect and sends it through the active
+`PermissionEngine`. An `Ask` decision uses the same production `TuiApprover`
+channel as tool calls; `Deny` returns before a worker or LocalMind mutation is
+started. The reviewer identity must be entered deliberately, is held only in
+the open takeover, and is never inferred from provider or session metadata.
+Candidate state is re-read after a successful operation, while invalid or stale
+state fails in the LocalMind API. These controls do not make `bypass` or
+`unrestricted` safer: those explicitly selected profiles retain their documented
+auto-approval behavior.
+
+## Pair Collaboration
+
+`localpilot pair` resolves one permission profile for the run and applies it to
+two independent permission engines. The peers do not share approval state: each
+tool call is authorized by the engine attached to the session that requested it.
+Interactive approval and `ask_user` dialogs identify the originating peer and
+provider/model, and an answer is delivered only to that request's channel.
+
+Peer protocol messages are system-sourced, direct notifications; user steering
+remains user-sourced and targets one peer. Neither path bypasses tool
+authorization. `/abort`, Ctrl+C, terminal loss, and cooperative shutdown fail
+closed: active and queued approvals are denied, questions are dismissed, both
+sessions are cancelled and awaited, and late input is rejected. The command does
+not automatically apply, commit, merge, or publish an agreed candidate.
+
+The normal profile warnings still apply. `--bypass` and `--permission
+unrestricted` are explicit launch choices for both peers, never defaults; pair
+collaboration does not alter the redaction, logging, workspace-boundary, or
+harness-rule semantics of the selected profile.
+
+## Reliability Contract — Permission Invariants
+
+These invariants are the permission half of the reliability contract
+(ADR-0010): the explicit guarantees that make unattended operation
+trustworthy. Each is pinned by a named test; a change that breaks the test is
+a contract change and needs an ADR, not a patch.
+
+1. **No command reachable via `run_shell` faces a weaker gate than the
+   equivalent builtin tool.** Destructive flag/pathspec forms of git commands
+   classify `destructive`, matching the purpose-built `git_restore`.
+   Enforced by `destructive_git_flags_escalate_past_project_write`
+   (`localpilot-sandbox`).
+2. **Allowlists never lift destructive, privileged, or unknown gating.** The
+   relaxed-profile allowlist relaxes *ask* to *allow* only below the risk
+   floor. Enforced by
+   `allowlist_never_lifts_destructive_privileged_or_unknown_commands` and
+   `allowlist_never_lifts_secret_reads_or_out_of_workspace_paths`
+   (`localpilot-sandbox`), and end-to-end by
+   `allowlisted_run_shell_still_prompts_for_destructive_commands`
+   (`localpilot-tools`).
+3. **Wrapper commands never classify below `unknown`** on any platform.
+   Enforced by `shell_wrappers_never_classify_below_unknown_on_any_platform`
+   and the `wrappers_are_never_read_only` property (`localpilot-sandbox`).
+4. **Approval prompts state what is being approved.** Every tool with side
+   effects supplies the concrete target (command line, path, query) in the
+   prompt detail. Enforced by
+   `run_shell_approval_prompt_shows_the_full_command_line`
+   (`localpilot-tools`).
+
+The loop half of the contract (tool-result pairing, transcript fidelity) lives
+in [`docs/06`](06-harness-spec.md) §Reliability Contract.
+
+## Platform Policy (All Tier-1)
+
+Windows, Linux, and macOS are all first-class, tier-1 platforms. Shell and
+filesystem policy must be explicit for both Windows and POSIX, and behavior
+parity across the three is a release requirement. The subsections below split
+the platform-specific rules; neither side is a degraded fallback.
+
+### Windows
+
+- classify PowerShell, `cmd.exe`, and direct executable invocations separately
+- normalize drive-letter, UNC, symlink, junction, and long-path forms
+- treat registry writes as privileged local effects
+- detect destructive PowerShell commands such as `Remove-Item -Recurse`
+- avoid string-built shell commands for filesystem operations
+- prefer native Rust filesystem APIs for tool operations
+- test path escapes with `..`, drive roots, UNC paths, junctions, and symlinks
+
+### Linux and macOS (POSIX)
+
+- normalize symlinks before write/delete decisions
+- detect destructive shell patterns such as `rm -rf`
+- treat privilege escalation commands (`sudo`, `doas`) as privileged
+- distinguish workspace-local writes from external writes
+- test path escapes with `..`, absolute roots, and symlinks
+
+## Network Policy
+
+The core app may call configured model providers. Tools need separate approval
+for arbitrary network commands.
+
+Provider clients must:
+
+- use TLS for hosted APIs
+- redact auth headers in logs
+- expose request IDs when providers return them
+- avoid logging raw prompts by default
+
+## LocalMind Inference Egress
+
+LocalMind's `local_only` setting is its assertion that nothing leaves the
+machine. Until ADR-0164 it constrained only the *storage* scope, so a
+configuration reading `local_only = true` was accepted alongside an
+`embedding_base_url` or `chat_base_url` on any reachable host, and prompt,
+document and memory text was sent there. The setting was redefined to mean what
+its name says rather than renamed to match the narrower behaviour.
+
+**What is permitted.** Literal loopback destinations only: `localhost` and the
+RFC 6761 `.localhost` TLD, `127.0.0.0/8`, and `::1`.
+
+**What is refused, and why each case is not an oversight:**
+
+| Refused | Reason |
+|---|---|
+| Any remote host | This is the change. A local-only engine does not send text off the machine |
+| `0.0.0.0`, `[::]` | Bind-any *listen* addresses. As a destination they route to a real interface |
+| Hostnames that would resolve to loopback | **No name resolution is performed.** The check and the connection are separate lookups, and the interval between them is where DNS rebinding lives. Only literal forms are trusted, so the guarantee does not depend on a resolver |
+| `http://127.0.0.1@remote.example/` | The host is what follows the last `@`. Reading it as "everything before the colon" would let credentials smuggle a remote host past the check |
+| A URL the check cannot parse | Fail closed. Unparseable is never permissive |
+
+**Where it is enforced.** At the request, not at configuration load. A check
+that runs once can be true when it runs and false when the request is made — a
+file edited afterwards, a construction path that skips validation, a value
+threaded through code that never saw the check. Endpoint construction also
+rejects an unusable endpoint, but that is a courtesy so the failure names the
+configuration rather than a later request; it is not the guarantee.
+
+**Why there is no opt-out.** `local_only = false` is rejected outright, so
+there is no configuration in which the constraint is off. The unrestricted
+policy exists in the library as a seam and is unreachable from configuration.
+That cross-crate link is pinned by a test: the two halves live in different
+crates, and relaxing the config rejection would otherwise silently widen what
+the inference layer permits.
+
+**Compatibility.** Inference pointed at another machine — a LAN model server, a
+hostname alias, a tunnelled remote — stops working and reports why, naming the
+host. Such a configuration was already outside what `local_only` claimed; it
+was silent about being so.
+
+This is distinct from [Web Research Egress](#web-research-egress), which is a
+separate, default-off, allowlisted and audited path with its own approval. The
+two never share a channel: research egress does not carry memory or transcript
+content, and inference egress does not leave the machine.
+
+## Session Span Index And Redaction
+
+The session span index derives from `transcript.redacted.txt` — the redacted
+form — and it is written under the project's own `.localmind/`. An index
+configured to live outside the project is refused where the path is used, not
+where it is configured.
+
+**What the index guarantees:** it never retains what its transcript no longer
+contains. A transcript rewritten in place — because it was re-redacted under
+new rules, or edited, or replaced — is detected by content hash, and its old
+spans are removed rather than left orphaned and searchable. Deleting a session
+removes its spans on the next pass, and an outstanding locator reports that the
+target is gone rather than resolving to anything.
+
+**What it does not guarantee:** the index cannot be *more* redacted than its
+source. If redaction rules change and transcripts are not re-redacted, the
+unredacted text is still on disk and the index is not where that exposure lives.
+Re-redacting the transcripts is what removes it from both.
+
+**Nothing ages out.** There is no time-based expiry for sessions or for their
+spans; spans leave the index when their session leaves it.
+
+## Self-Improvement Patch Generation
+
+The self-improvement loop's write half (ADR-0034) is built so the human gate is
+structural, not a convention:
+
+- **No main-branch write without a human.** A proposed change is produced inside
+  an isolated git worktree on its own branch; the only operation that writes
+  outside that worktree (promotion onto the main branch) requires an approval
+  token that authorizes exactly that patch. The token's only constructor is an
+  explicit human-confirmation call — the autonomous loop has no path to mint one,
+  so it can never self-merge.
+- **Conservative promotion.** Promotion refuses a dirty target working tree,
+  fast-forwards only (never silently creates a merge or resolves conflicts), and
+  **never pushes**.
+- **No shell, no network in the git surface.** Every git invocation passes its
+  arguments as an argv array directly to `git` — there is no shell and no string
+  interpolation of model input, so an edit path or branch name can never become
+  another command. No `push`/`fetch`/`pull`/remote subcommand appears anywhere in
+  the patch-generation crate.
+- **Path containment.** Edit paths are joined under the worktree with a guard
+  that rejects absolute paths, `..` traversal, and drive prefixes; an edit can
+  only land strictly inside the worktree.
+- **Scope-bound.** A proposal may touch only the files the finding named; both
+  the declared edits and the produced diff are checked against that set.
+- **Interactive approval is informed and identity-bound.** `/selfimprove
+  approve <reviewer>` first reopens and displays the persisted proposal id and
+  bounded diff, then requires a positive terminal confirmation naming that id
+  and reviewer. The state and id are rechecked after the dialog; a stale or
+  replaced proposal is refused. `/selfimprove next` has no approval argument and
+  cannot mint a token.
+- **Reload happens outside terminal modes.** A Built→Reloaded action requires a
+  separate confirmation, asks the interactive host to exit, restores the
+  alternate-screen state, and only then calls the existing self-dev reload.
+  A failed process swap rolls persisted state back to Built as before.
+
+## Outward Draft Emission
+
+The loop's **outward** half (ADR-0053) lets the agent author a **draft** issue/PR
+describing a proposed improvement and, only with an explicit human approval,
+publish it to an allowlisted repo as a draft. It carries the same structural gate
+as patch promotion:
+
+- **No publish without a human.** Authoring or persisting a draft mints no
+  approval token and touches no network. The only operation that yields a runnable
+  publish plan requires the same value-typed approval token used to promote a
+  patch, and that token's sole constructor is the explicit `--approve` path. The
+  autonomous loop has no path to mint one, so it can propose a draft but never
+  publish — a standing test pins this.
+- **Default-off, fail-closed allowlist.** A draft can only be built (let alone
+  published) when `[self_improvement] enabled = true` **and** its `owner/repo`
+  target is on the `outward_targets` allowlist. Both ship off; an un-allowlisted or
+  disabled target is refused at propose time, before any draft is written, and the
+  allowlist is re-checked again at emit time.
+- **Draft-only, never promote.** Publication runs `gh issue create` /
+  `gh pr create --draft` only. The constructed argv can never carry `ready`,
+  `merge`, `--web`, or an edit/comment/close on an existing item — the builder
+  cannot produce them and a test asserts it. There is no path to mark a PR ready,
+  merge it, or comment on others' issues.
+- **Dry-run by default.** Without `--approve`, `emit-draft` prints the exact `gh`
+  plan it *would* run and publishes nothing. The human reviews the plan (and the
+  resolved `gh` account, surfaced from a `gh auth status` preflight) before
+  approving.
+- **Redacted, locally inspectable.** The draft title/body are redacted with the
+  shared workspace redactor at construction, so a secret never reaches the
+  project-local `.localpilot/outward/` store even before publish. The body carries
+  the change provenance (the finding, its source, the rationale) so a published
+  draft is traceable. Every emit appends a redacted, token-free lifecycle event
+  (proposed → approved → published, with the resulting URL).
+- **No shell.** The `gh` arguments are passed as an argv array, never a shell
+  string, so a redacted title or body can never become another command.
+
+## Web Research Egress
+
+Research (ADR-0060, amended by ADR-0076) gathers from the repo's ingested
+knowledge and accepted memory — read-only, on-machine — **and the web, on by
+default**: a local model's parametric memory cannot carry a research run, so
+reach is the default and the boundary does the protecting. This is a ratified,
+documented exception to the default-off rule of the ecosystem remote-egress
+policy (`policies/remote-egress.md`); the policy's other four rules hold by
+construction:
+
+- **Disableable, twice.** `--no-web` skips the web source for one run — no
+  fetch, and no URL-proposal model call. `[research.web] enabled = false`
+  removes the entire outbound path and is the absolute kill switch — no flag
+  can override it (the consent grant is a no-op against config-off, enforced
+  and tested).
+- **Loud disclosure on every web-active run, both surfaces.** The subcommand
+  and interactive `/research` — in the full-screen chat host — print the same
+  egress disclosure before any request: the default-on
+  posture and both off-switches, what is sent (only the redacted sub-question), the
+  effective reach, blocked domains, and the audit-log path. The full-screen host
+  shows and draws the disclosure before the research run is constructed or polled,
+  from the same config snapshot the run uses, so what is disclosed is exactly what
+  the run may reach. The per-session consent is recorded after the disclosure
+  and is **never persisted**.
+- **Allowlist-gated.** Each candidate URL's host is parsed with a real URL
+  parser and checked against `[research.web] allowlist`. Unset means `["*"]`
+  — the open web — while an **explicitly** empty list means every host needs
+  confirmation, so nothing is fetched (unset and empty are different user
+  statements). An allowed host is fetched (bounded bytes and timeouts).
+  `disallowlist` beats the allowlist, `*` included (ADR-0068).
+- **Anything not already approved is asked about, per request** (ADR-0170).
+  A host with no standing approval stops the fetch and asks: allow this one
+  request, deny it, or allow every request for the rest of the session. The
+  allowlist is the standing approval — putting a host there is a deliberate,
+  written, reviewable act, so an allowlisted host is not asked about again.
+  A **session-wide grant** carries a warning describing what it costs rather
+  than what it switches off, and takes a typed phrase to confirm: a keystroke
+  is the right price for approving one request and the wrong price for
+  approving all of them. It is never persisted, and it does not lift
+  `disallowlist`. Every refusal is **skipped and logged** exactly as a
+  policy skip always was — a refusal nobody can see afterwards is not a
+  record of anything.
+- **One flag answers every prompt in advance** (ADR-0171).
+  `--dangerously-skip-permissions` (aliases `--yolo`, `--full-auto`) pre-approves
+  every tool permission request and every outbound request for the life of the
+  process, for unattended runs. It is never persisted, never read from config and
+  never inferred — it must be typed each time. It **answers questions; it does
+  not overrule refusals already written down**: `enabled = false` remains an
+  absolute kill switch and a `disallowlist` host stays blocked. The warning is
+  printed once at launch, on stderr, in terms of what it costs.
+- **With nobody to ask, the answer is no.** A run with no terminal on both
+  ends — piped, scheduled, CI, an agent with no console — refuses every host
+  that is not allowlisted rather than assuming consent. This is a real
+  behaviour change: automated runs that reached non-allowlisted hosts before
+  will stop. An unattended process cannot consent on a person's behalf, and a
+  default that let it would make the prompt decorative everywhere else. The
+  remedy is the configured allowlist, not a runtime override — that would be
+  the same hole by another name.
+- **Redirects are followed only through the policy, never around it**
+  (ADR-0100). The HTTP client's automatic redirect following stays **off**, so no
+  hop can bypass the allowlist or the audit log. A 3xx is resolved by LocalPilot
+  itself: the `Location` is required and resolved against the URL that produced
+  it, only `http`/`https` destinations are accepted, and the destination is
+  re-gated by the same decision the first hop passed — so the allowlist remains a
+  true per-hop egress boundary rather than a first-hop check. A destination
+  needing confirmation counts as blocked: a redirect never widens the grant in
+  hand — it is asked about on its own terms, because a hop the operator never
+  saw is exactly the reach the prompt exists to stop. A cross-host hop to a loopback, link-local, private-network, or
+  unspecified address is refused **unconditionally, ahead of the allowlist**, so
+  an open-web reach cannot be turned into an SSRF channel; a host redirecting
+  within *itself* inherits the permission it already had. Chains are bounded
+  (5 hops) and cycles are detected. Every hop is audited content-free with its
+  own outcome (`redirect-followed`, `redirect-blocked`, `redirect-malformed`,
+  `redirect-cycle`, `redirect-depth-exceeded`), and evidence records the final
+  URL as its locator while keeping the originally proposed URL as provenance.
+- **Only the sub-question reaches search servers and web hosts.** The
+  outbound text is the sub-question passed through the shared workspace
+  redactor — never gathered evidence, file contents, or memory. The redactor
+  is a second guard over the topic the user typed. This holds for designated
+  MCP search tools too (ADR-0077): a search call sends the redacted query
+  only, is audited like a fetch, and its results are candidate URLs that
+  still pass this gate — a search result never becomes evidence directly.
+  One deliberate carve-out (ADR-0087, ADR-0088): bounded research content —
+  public pages this run just downloaded, and candidate chunks from the
+  workspace's own ingested knowledge — is sent to the **user's own configured
+  model** for a strict relevance classification. That is the same model that
+  already sees the session, workspace content included; no new destination
+  exists. A rejected page is audited (`rejected-low-relevance`); a rejected
+  local chunk is counted in the report's retrieval accounting.
+- **Auditable.** When active, every outbound request and every skip appends one
+  line to the audit log (`[research.web] audit_log`, default
+  `.localpilot/research/egress-audit.log`): the decision, host, URL, and the
+  redacted sub-question — metadata and the redacted question only, never content.
+- **Findings stay review-gated.** Web-derived findings flow through the same
+  provenance cross-check and review queue as local ones; nothing a fetch produced
+  is written to accepted memory without human promotion.
+- **Conversation projection is bounded and explicitly untrusted.** Interactive
+  completion stores no raw evidence body in the transcript. It redacts each
+  field before clipping, then emits at most 4 KiB containing numbered findings,
+  source locators/fetch IDs, open questions, and the redacted report pointer.
+  Its first line tells the model to treat findings and sources as data rather
+  than instructions. The complete report remains the durable review artifact
+  (ADR-0149).
+- **The browser-render fallback stays inside this boundary** (LocalHub#37).
+  Some pages deliver their content only after JavaScript runs; when a fetched
+  page's initial HTML shows a render signal (an empty framework mount, thin
+  content, an iframe-only body, a `Loading…` placeholder), research may render
+  it in a headless system browser. That means **executing the public page's
+  JavaScript and loading its allowlisted subresources and frames** — a wider
+  action than a single GET, so it is bounded the same way:
+  - The renderer is **off by default in the shipped binary** (built only under
+    the `render-browser` feature) and governed by `[research.render].mode`
+    (`auto`/`off`/`always`); `off` is a complete kill switch, and no browser is
+    bundled or downloaded (a system Chromium/Chrome/Edge is discovered or the
+    run records `renderer unavailable`).
+  - **Every browser request — the navigation, each redirect, every subresource,
+    every frame — is gated** through the same `[research.web]` allowlist before
+    it leaves the machine, via CDP request interception installed before the
+    first navigation. A disallowed request is failed in-browser and counted;
+    a redirect is re-gated as a new destination, never inheriting the original
+    host's permission.
+  - **http/https only, and internal addresses are always blocked** regardless
+    of the allowlist: `localhost` and any loopback, link-local, private, or
+    unspecified IP are refused (an SSRF guard, since a rendered page can
+    reference arbitrary hosts). Blocked requests are audited
+    (`render-blocked`, `render-blocked-internal`, `render-blocked-scheme`).
+  - **The browser context is ephemeral and cookie-less** — a fresh throwaway
+    profile removed after the run — so no cookies, storage, or authentication
+    state survive. The render is time-bounded (no indefinite network-idle wait);
+    a page that cannot render leaves an inspectable outcome, never a hang.
+  - Browser requests are **audited content-free** (`render-request` and the
+    block reasons above) with the redacted sub-question — never page bodies,
+    credentials, or unredacted queries. If a constrained allowlist blocks a
+    resource the article needed, the outcome is recorded, not presented as
+    complete content.
+
+A sample audit line:
+
+```
+decision=allowed host=docs.rs url=https://docs.rs/tokio question=how does tokio schedule tasks
+```
+
+**Skill discovery rides this same surface** (ADR-0099). `skills research` and the
+`/research` skill-discovery lane make no separate egress: finding new public skill
+repositories goes through the same `[research.web]` allowlist/disallowlist, egress
+disclosure, audit log, and `--no-web`, using the official public GitHub
+repository-search API as the fresh-install fallback. Discovery is read-only — it
+validates a candidate repository by fetching a snapshot and reading its catalog,
+executing nothing, and it registers no source and installs no skill (that stays
+with `skills repo add`/`install`). A rate limit or outage is a partial result,
+never a failure.
+
+### Two different network surfaces
+
+Research web egress (above) is the **allowlisted, audited, redacted** surface —
+on by default since ADR-0076, disclosed on every run, and disableable per run
+(`--no-web`) or globally (`enabled = false`). It is *not* the only way the
+agent can touch the network, and the others are deliberately looser — know the
+difference:
+
+- **The builtin `fetch` tool** carries `Effect::Network` and no host allowlist:
+  under the `relaxed` permission profile an allowlisted `fetch` reaches **any**
+  host without the research path's per-host audit. It is a general fetch, gated
+  by the permission engine, not by the research allowlist.
+- **MCP tool servers** are gated as `Effect::Network` when invoked, but a stdio
+  MCP server is a local process that can do anything its own code does — the gate
+  covers *invoking the tool*, not what the server then reaches. Trust an MCP
+  server as you would any dependency you run.
+
+So "may the agent touch the network?" has two honest answers: the research path
+is a true audited allowlist boundary; `fetch`/MCP are permission-gated but
+host-agnostic. Choose the profile and allowlist accordingly.
+
+## Quota Wait/Resume Safety
+
+Automatic quota wait/resume is allowed only when it honors the provider's
+documented retry contract and the user's explicit policy.
+
+Safety gates:
+
+- resume only at harness step boundaries
+- never resume while a destructive approval is pending
+- never resume after user cancellation
+- never resume with unrelated dirty workspace state
+- re-probe the provider after the timer instead of trusting local wall-clock time
+- use bounded backoff with jitter when reset metadata is approximate
+- record pause/resume reasons in local state
+- do not present the feature as bypassing or outsmarting limits
+
+## Telemetry
+
+Default: no remote telemetry.
+
+Allowed:
+
+- local logs
+- local performance timings
+- user-exported debug bundles after review
+
+If remote telemetry is ever added:
+
+- it must be opt-in
+- schema must be public
+- redaction must happen before upload
+- no prompts or source code by default
+
+## Supply Chain
+
+Required before public release:
+
+- `cargo audit`
+- `cargo deny`
+- dependency license review
+- release artifact reproducibility notes
+
+## Abuse Resistance
+
+LocalPilot is a coding tool. It should not ship prompts or affordances aimed at:
+
+- malware creation
+- credential theft
+- phishing
+- evasion
+- unauthorized access
+
+The permission engine is a local safety layer, not a replacement for provider
+usage policies.

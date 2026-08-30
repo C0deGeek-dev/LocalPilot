@@ -1,0 +1,139 @@
+[package]
+name = "localpilot"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["parking_lot"]
+
+[[bin]]
+name = "localpilot"
+path = "src/main.rs"
+# Collect the binary's module unit tests (e.g. the inline-driver scrollback-commit
+# tests behind the `tui` feature). CI runs them via `cargo nextest run -p localpilot
+# --features tui --bin localpilot`; a default-feature run finds fewer of them.
+test = true
+
+[features]
+# The interactive `chat` REPL links crossterm. It is opt-in so the default
+# binary (doctor/ask/print/harness/memory/export) links no terminal backend and
+# runs on every toolchain. Release and CI builds enable it.
+default = []
+tui = [
+    "dep:crossterm",
+    "dep:parking_lot",
+    "dep:ratatui",
+    "dep:localpilot-terminal-ui",
+    "dep:localpilot-slash",
+    "dep:ignore",
+    "dep:arboard",
+    "dep:base64",
+    "dep:image",
+    "dep:time",
+]
+# Store provider credentials in the native Windows credential manager. This
+# passthrough keeps the binary's documented `--features keychain` contract
+# independent of the internal config crate that implements the backend.
+keychain = ["localpilot-config/keychain"]
+# The research browser-rendering fallback (LocalHub#37): links the optional
+# `localpilot-render` crate (and its headless-browser CDP stack) so a
+# JavaScript-rendered or iframe-embedded documentation page can be rendered
+# through a discovered system Chromium/Edge, inside the research egress
+# boundary. Off by default so the standard binary links no browser stack; the
+# always-on render-required detection and iframe recovery work without it.
+render-browser = ["dep:localpilot-render"]
+
+[dependencies]
+anyhow.workspace = true
+anstyle.workspace = true
+async-trait.workspace = true
+# Clipboard image capture for pasting images into the chat input (TUI only).
+arboard = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+clap.workspace = true
+crossterm = { workspace = true, optional = true }
+futures.workspace = true
+indexmap.workspace = true
+# Workspace file enumeration for the `@`-mention picker (TUI only).
+ignore = { workspace = true, optional = true }
+# Keep crossterm's parking_lot dependency on a Windows GNU/MSRV-compatible patch:
+# parking_lot_core 0.9.12 crashes before main on rustc 1.82 x86_64-pc-windows-gnu.
+parking_lot = { workspace = true, optional = true }
+# Do NOT enable ratatui's `scrolling-regions` feature here. It makes
+# Terminal::insert_before commit history via DECSTBM margin scrolls
+# (`ESC[t;br` + `ESC[nS`) instead of newline-at-bottom. Windows Terminal does
+# not preserve lines scrolled out of a margin region into its scrollback
+# buffer, so conversation history above the live region is silently discarded
+# (the "scroll up, start of conversation missing" bug). The default
+# (no-scrolling-regions) path uses `append_lines` (`\n` at the bottom row),
+# which feeds scrollback reliably on every terminal, Windows Terminal included.
+ratatui = { workspace = true, features = [
+    "crossterm",
+], optional = true }
+reqwest.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+# A scratch directory for the self-dev publish gauntlet's throwaway smoke config
+# (`selfdev publish`). Also a dev-dependency for tests; declared here because it
+# is used on a non-test code path.
+tempfile.workspace = true
+thiserror.workspace = true
+time = { workspace = true, optional = true }
+tokio.workspace = true
+tokio-util.workspace = true
+# Format-preserving TOML edits: merge [providers.local] into an existing
+# .localpilot.toml without dropping the user's other tables or comments. Already
+# in the tree transitively via toml 0.8; pinned to that resolved version.
+toml_edit = "=0.22.27"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+localpilot-config = { path = "../localpilot-config" }
+localpilot-contextcheck = { path = "../localpilot-contextcheck" }
+localpilot-core = { path = "../localpilot-core" }
+localpilot-harness = { path = "../localpilot-harness" }
+localpilot-llm = { path = "../localpilot-llm" }
+localpilot-agents = { path = "../localpilot-agents" }
+localpilot-dist = { path = "../localpilot-dist" }
+localpilot-stack = { path = "../localpilot-stack" }
+localpilot-localmind = { path = "../localpilot-localmind" }
+localmind-inference = { path = "../../external/localmind/crates/localmind-inference" }
+localpilot-mcp = { path = "../localpilot-mcp" }
+localpilot-patchgen = { path = "../localpilot-patchgen" }
+localpilot-quota = { path = "../localpilot-quota" }
+localpilot-recovery = { path = "../localpilot-recovery" }
+localpilot-render = { path = "../localpilot-render", optional = true }
+localpilot-research = { path = "../localpilot-research" }
+localpilot-rpc = { path = "../localpilot-rpc" }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
+# Self-dev build/reload primitives (source fingerprint, immutable version store,
+# publish gauntlet, reload continuation). Used by the reload-continuation seam on
+# resume and, later, the self-dev build/release surface.
+localpilot-selfdev = { path = "../localpilot-selfdev" }
+# The thin self-improvement loop orchestrator: sequences self-review → patchgen →
+# self-dev behind the human ApprovalToken gate (the `selfimprove` surface).
+localpilot-selfimprove = { path = "../localpilot-selfimprove" }
+localpilot-selfreview = { path = "../localpilot-selfreview" }
+localpilot-slash = { path = "../localpilot-slash", optional = true }
+# The opt-in local-IPC server (`serve`/`connect`): transport, daemon lifecycle,
+# session registry, per-session host, and attach dispatch. Strictly opt-in — the
+# default chat/ask/print/harness in-process path never touches it (D003).
+localpilot-server = { path = "../localpilot-server" }
+localpilot-skills = { path = "../localpilot-skills" }
+localpilot-store = { path = "../localpilot-store" }
+# The pure task-graph crate: the `swarm run` entrypoint seeds a plan from a file
+# (objective, mode, per-node model) and hands it to the swarm driver.
+localpilot-taskgraph = { path = "../localpilot-taskgraph" }
+localpilot-tools = { path = "../localpilot-tools" }
+localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+crossterm = { workspace = true }
+insta = { workspace = true }
+wiremock = { workspace = true }

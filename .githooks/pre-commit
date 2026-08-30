@@ -1,0 +1,15 @@
+#!/bin/sh
+# Opt-in pre-commit gate: formatting plus a fast clippy pass, so style/lint
+# failures surface before push instead of in CI. Enable per clone with:
+#
+#   git config core.hooksPath .githooks
+#
+# It is intentionally not installed automatically, so contributors without a
+# local toolchain are never blocked.
+set -e
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt --check
+
+echo "pre-commit: cargo clippy (fast)"
+cargo clippy --workspace -- -D warnings

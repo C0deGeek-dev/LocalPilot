@@ -1,0 +1,162 @@
+[workspace]
+members = [
+    "crates/localpilot-cli",
+    "crates/localpilot-core",
+    "crates/localpilot-config",
+    "crates/localpilot-llm",
+    "crates/localpilot-llm-core",
+    "crates/localpilot-llm-openai",
+    "crates/localpilot-llm-anthropic",
+    "crates/localpilot-tools",
+    "crates/localpilot-harness",
+    "crates/localpilot-slash",
+    "crates/localpilot-terminal-ui",
+    "crates/localpilot-store",
+    "crates/localpilot-sandbox",
+    "crates/localpilot-mcp",
+    "crates/localpilot-skills",
+    "crates/localpilot-agents",
+    "crates/localpilot-dist",
+    "crates/localpilot-stack",
+    "crates/localx",
+    "crates/localpilot-recovery",
+    "crates/localpilot-rpc",
+    "crates/localpilot-server",
+    "crates/localpilot-taskgraph",
+    "crates/localpilot-quota",
+    "crates/localpilot-localmind",
+    "crates/localpilot-research",
+    "crates/localpilot-render",
+    "crates/localpilot-patchgen",
+    "crates/localpilot-selfdev",
+    "crates/localpilot-selfimprove",
+    "crates/localpilot-selfreview",
+    "crates/localpilot-contextcheck",
+    "crates/localpilot-verify",
+]
+# The LocalMind engine is vendored as a git submodule and consumed by
+# localpilot-localmind via path dependencies. It is its own workspace, so it is
+# excluded from this one. The fuzz harness needs nightly + libFuzzer, so it is
+# its own workspace too and must not constrain the MSRV-pinned build.
+exclude = ["external/localmind", "fuzz"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+authors = ["David <David@c0degeek.dev>", "Bram (C0deGeek.dev)"]
+repository = "https://github.com/C0deGeek-dev/LocalPilot"
+homepage = "https://github.com/C0deGeek-dev/LocalPilot"
+rust-version = "1.82"
+
+[workspace.dependencies]
+anyhow = "=1.0.103"
+anstyle = "=1.0.14"
+# OS clipboard access for pasting an image into the chat input. Used only by the
+# interactive TUI (behind the cli `tui` feature), so the default binary links no
+# clipboard backend.
+arboard = "=3.6.1"
+assert_cmd = "=2.0.16"
+async-trait = "=0.1.83"
+# Encode a captured clipboard image to base64 for the multimodal provider request.
+base64 = "=0.22.1"
+clap = { version = "=4.5.23", features = ["derive", "env"] }
+crossterm = "=0.28.1"
+# De-verbatim a Windows `\\?\` extended-length path back to its ordinary form for
+# a child process's working directory: the launched shell cannot `cd` into a
+# verbatim path, so the workspace cwd must be simplified before spawn. Zero
+# dependencies; `simplified()` correctly leaves a path verbatim when it cannot be
+# safely shortened (>MAX_PATH, reserved names). Used only by `localpilot-sandbox`.
+dunce = "=1.0.5"
+# `unstable-rendered-line-info` exposes `Paragraph::line_count`, used by the
+# transcript renderer to match ratatui's own word-wrapping when computing the
+# scroll bounds (a plain cargo feature; no nightly required).
+ratatui = { version = "=0.29.0", default-features = false, features = [
+    "unstable-rendered-line-info",
+] }
+figment = { version = "=0.10.19", features = ["env", "toml", "yaml"] }
+futures = "=0.3.31"
+globset = "=0.4.16"
+ignore = "=0.4.23"
+# PNG-encode a captured clipboard image (RGBA → PNG), TUI only. `arboard`'s
+# image-data feature pulls `image` regardless, so we reuse it for encoding and
+# pin it: image >= 0.25.6 pulls `moxcms`, which needs edition 2024 and breaks the
+# MSRV-1.82 build. Only the `png` codec is enabled.
+image = { version = "=0.25.5", default-features = false, features = ["png"] }
+indexmap = { version = "=2.7.0", features = ["serde"] }
+insta = "=1.47.2"
+# OS keychain backend for stored API credentials. Enabled only through the
+# opt-in `keychain` feature, so the default build links no credential-store
+# native deps. Default features off; only the Windows Credential Manager backend
+# is built. The macOS (apple-native → security-framework 3.7) and Linux
+# (sync-secret-service → zeroize_derive 1.5) backends are intentionally omitted:
+# both pull a transitive that requires Rust edition 2024, above this workspace's
+# MSRV (1.82), and they break `cargo deny --all-features` cross-target metadata.
+# macOS and Linux therefore use the `0600` fallback file — behaviour parity holds
+# (login/resolution work everywhere); only the backend differs. v3 is pinned
+# because v4 also requires edition 2024.
+# Shared LocalX eval primitives (scorecard contract, blind judge, ablation,
+# gated check runner, verify detection). Pinned by rev per the exact-pin policy.
+localx-eval-core = { git = "https://github.com/C0deGeek-dev/localx-llama.git", rev = "b3b0c844e5a99e855e94865924e5f6bb4dec6fe6" }
+keyring = { version = "=3.6.3", default-features = false, features = [
+    "windows-native",
+] }
+parking_lot = "=0.12.3"
+proptest = "=1.5.0"
+regex = "=1.11.3"
+# `bundled` compiles SQLite (with FTS5) from the amalgamation, so the indexed
+# ingest chunk store needs no system SQLite and loads no runtime extension. Same
+# pin as the LocalMind store this reuses the pattern from.
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+tempfile = "=3.14.0"
+sha2 = "=0.10.8"
+tar = "=0.4.45"
+flate2 = "=1.0.35"
+reqwest = { version = "=0.12.11", features = ["json", "stream", "rustls-tls"], default-features = false }
+schemars = "=0.8.21"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+serde_yaml = "=0.9.34"
+thiserror = "=2.0.9"
+time = { version = "=0.3.37", features = ["local-offset"] }
+toml = "=0.8.23"
+tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util", "io-std", "time", "sync"] }
+tokio-util = { version = "=0.7.13", features = ["rt"] }
+# WebSocket client for the Chrome DevTools Protocol connection to a headless
+# system browser, used only by `localpilot-render` behind the cli `render-browser`
+# feature. No TLS: CDP is a local `ws://127.0.0.1` endpoint, so default features
+# (which pull a TLS backend) are off and only `connect` is enabled — a small,
+# MSRV-1.82-clean tree.
+tokio-tungstenite = { version = "=0.24.0", default-features = false, features = ["connect"] }
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }
+unicode-segmentation = "=1.12.0"
+unicode-width = "=0.2.0"
+uuid = { version = "=1.11.0", features = ["v4", "serde"] }
+wiremock = "=0.6.2"
+
+# Centralized lint policy (docs/13 §9/§12). Members opt in with
+# `[lints] workspace = true`. The clippy::pedantic group is intentionally NOT
+# enabled here yet: the CI gate runs `-D warnings`, so a blanket pedantic-at-warn
+# would become a hard failure across the whole tree before the triggering code
+# exists. Adopt pedantic deliberately in its own later commit (see docs/13 §9).
+# `unwrap_used`/`expect_used` are relaxed inside tests via `clippy.toml`.
+# Profile for a build the running binary intends to replace itself with. It
+# inherits `release` so the produced binary behaves like a shipped one (same
+# codegen units, same panic strategy, same `debug_assertions` state), but drops
+# the optimiser: a binary that exists to be swapped in within the minute should
+# not spend that minute being optimised. Debug info is kept — a self-dev binary
+# is the one most likely to need a backtrace.
+[profile.selfdev]
+inherits = "release"
+opt-level = 0
+debug = 1
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+dbg_macro = "deny"

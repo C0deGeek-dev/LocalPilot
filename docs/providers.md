@@ -1,0 +1,358 @@
+# Configuring a provider
+
+LocalPilot is provider-neutral. It talks to models through official public APIs
+and local OpenAI-compatible servers; it never uses private or undocumented
+endpoints. Providers are configured in `.localpilot.toml`.
+
+## A local OpenAI-compatible server
+
+Works with any local server that speaks the OpenAI Chat Completions API (for
+example Ollama, vLLM, llama.cpp's server, or a local gateway).
+
+```toml
+[provider]
+default = "local"
+
+[providers.local]
+kind = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+# Default model, used when a command does not pass --model (and by the REPL):
+model = "your-local-model"
+# Optional, only if your gateway requires a key:
+api_key_env = "LOCALPILOT_LOCAL_API_KEY"
+# Optional for slow local inference:
+request_timeout_secs = 600
+# Optional: the model's context window in tokens. When set, the session
+# budget becomes (window - response reserve) instead of the global
+# [harness] context_token_limit:
+# context_window = 32768
+```
+
+TLS is not required for `localhost`.
+
+External launchers may also provide a local endpoint without editing
+`.localpilot.toml`: if an OpenAI-compatible provider has no `base_url`,
+`OPENAI_BASE_URL` is used as a fallback. If `api_key_env` is not set,
+OpenAI-compatible providers fall back to `OPENAI_API_KEY`.
+
+With a `model` set on the default provider, running `localpilot` with no
+subcommand launches the interactive REPL against it. Without a resolvable
+provider and model it prints the doctor report instead, so a fresh or headless
+checkout still gives a useful result. (The REPL is in release builds; the
+default-feature build prints the doctor report.)
+
+## Using a LocalBox local model
+
+If you use LocalBox to serve local models, LocalPilot detects it and can adopt a
+running server into your config, so you do not have to hand-write the provider
+block.
+
+- **When no usable model is configured**, `localpilot` at startup, the `/model`
+  command, and `localpilot models` point you at a detected LocalBox: a running
+  server names its endpoint; an installed-but-stopped one suggests
+  `localbox serve <model>`. When no LocalBox is present, these surfaces behave
+  exactly as before.
+- **Adopt a running server** with one permission-gated command:
+
+  ```sh
+  localbox serve <model>        # start a local server (run in LocalBox)
+  localpilot localbox adopt     # write [providers.local] pointing at it
+
+  # …or start the server and adopt in one step (compatibility spelling):
+  localpilot localbox adopt --serve <model>
+  ```
+
+  `adopt` detects the running server, asks before writing (or pass `--yes` to
+  approve non-interactively), then merges a `[providers.local]` block for
+  LocalBox's no-think proxy (`kind = "anthropic"`, the `ANTHROPIC_AUTH_TOKEN`
+  key env) into `.localpilot.toml` and sets it as the default provider. The
+  merge **upserts only `[providers.local]`** — any other providers,
+  `[mcp.servers.*]` tables, and comments already in the file are preserved.
+- **Inside a running chat session**, `/localbox models` lists LocalBox's actual
+  launch catalog—not merely the model currently answering `/v1/models`. Each
+  row starts with the exact copy-pasteable model key and includes aliases,
+  model/quant identity, required engine, tuned/default run-profile state, and
+  the active model when it can be detected.
+- Use `/localbox serve <model>` to start that exact catalog model, wait for
+  readiness, adopt the resulting provider, rebuild the registry, and switch the
+  current idle conversation immediately without losing the transcript. A
+  different running model is replaced; an already-running matching model is
+  reused. `/localbox adopt` remains the command for adopting whatever is
+  already serving, and `/localbox adopt --serve <model>` remains a compatibility
+  alias for the direct serve flow. Starting LocalBox and writing workspace
+  config remain separately permission-gated effects.
+- LocalPilot reads LocalBox's versioned catalog/profile contract before a serve.
+  When no compatible tuned profile exists, it displays LocalBox's warning and
+  starts nothing. Configure with LocalBench, or make the deliberate one-shot
+  choice by retrying `/localbox serve <model> --allow-untuned`; only that retry
+  forwards LocalBox's fallback flag. If the installed LocalBox predates the
+  catalog contract, LocalPilot asks you to update it and points to
+  `localbox info` for the older read-only view.
+
+  Pressing `Ctrl-C` while LocalPilot waits for startup cancels only LocalPilot's
+  wait. LocalBox owns the server process, so startup may continue in the
+  background; once it is ready, run `/localbox adopt` to finish adoption.
+  Stop the server with LocalBox itself.
+
+After CLI adoption, the next `localpilot` session uses the local model. After
+in-session adoption, the current chat uses it immediately, and `/model` can
+switch between it and other configured providers as usual.
+
+## The official OpenAI API
+
+Uses the documented OpenAI API and its API-key authentication.
+
+```toml
+[providers.openai]
+kind = "openai"
+# api_key_env defaults to OPENAI_API_KEY when omitted.
+```
+
+Then set the key in your environment (never commit it):
+
+```sh
+export OPENAI_API_KEY=sk-...        # Linux / macOS
+$env:OPENAI_API_KEY = "sk-..."      # Windows PowerShell
+```
+
+Credentials are read from the named environment variable at use and wrapped so
+they never appear in logs, transcripts, or error output. The config file only
+records the *name* of the variable, never the secret.
+
+## Google Cloud Vertex AI Gemini with ADC
+
+Use this when a Google Cloud project requires Application Default Credentials
+instead of an API key. LocalPilot talks to Vertex AI's documented
+OpenAI-compatible endpoint and mints a short-lived OAuth access token from the
+gcloud ADC file. The supported ADC file shape is gcloud's `authorized_user`
+`application_default_credentials.json`.
+
+```toml
+[provider]
+default = "gemini"
+
+[providers.gemini]
+kind = "google-vertex-openai"
+auth = "google_adc"
+google_project = "your-project-id"
+google_location = "global"
+model = "google/gemini-3.5-flash"
+# Optional. When omitted, LocalPilot checks GOOGLE_APPLICATION_CREDENTIALS and
+# then ~/.config/gcloud/application_default_credentials.json.
+google_adc_path = "/Users/bramhammer/.config/gcloud/application_default_credentials.json"
+request_timeout_secs = 600
+```
+
+The generated base URL is:
+
+```text
+https://aiplatform.googleapis.com/v1/projects/<project>/locations/<location>/endpoints/openapi
+```
+
+`localpilot doctor` reports `google_adc` or `google_adc_file` as the credential
+source. It never prints the ADC JSON, refresh token, client secret, or minted
+access token. `localpilot models`, `/model`, and chat use the same ADC auth path.
+
+## The official Anthropic API
+
+Uses the documented Anthropic Messages API (a distinct wire protocol from
+OpenAI: a top-level `system`, `tool_use`/`tool_result` content blocks, and a
+required `max_tokens`).
+
+```toml
+[providers.anthropic]
+kind = "anthropic"
+model = "claude-sonnet-4-6"
+# api_key_env defaults to ANTHROPIC_API_KEY when omitted.
+# max_tokens defaults to 8192 (sized for a coding agent writing whole files);
+# override per provider if you like:
+# max_tokens = 16384
+```
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...     # Linux / macOS
+$env:ANTHROPIC_API_KEY = "sk-ant-..."   # Windows PowerShell
+```
+
+The credential is sent as the `x-api-key` header with the documented
+`anthropic-version`; it is wrapped so it never appears in logs or transcripts.
+
+`max_tokens` is one budget for the whole reply — prose *and* tool-call
+arguments. A model that narrates at length and then emits a large `write_file`
+can run out mid-call at any cap; LocalPilot discards the truncated call (never
+half-applies it), names the tool and size in the warning, and retries a file
+write once in smaller pieces before stopping. Raising `max_tokens` postpones
+that failure; asking for less preamble or chunked writes removes it.
+
+If `base_url` is omitted, Anthropic providers use
+`ANTHROPIC_BASE_URL` before falling back to the official API URL. If the config
+does not set `model`, `ANTHROPIC_MODEL` can provide the default model for
+`chat` and the no-argument launcher path.
+
+## Storing credentials: `login` / `logout`
+
+Instead of hand-setting an environment variable, you can store a key with the
+bring-your-own-key helper:
+
+```sh
+localpilot login anthropic     # or: localpilot login openai
+localpilot logout anthropic    # remove a stored key
+```
+
+`login` opens the provider's official key-creation page
+(`https://console.anthropic.com/settings/keys` for Anthropic,
+`https://platform.openai.com/api-keys` for OpenAI — the URL is always printed so
+a headless host works by paste alone), prompts for the pasted key, validates it
+with one minimal `GET /models` request, and stores it. The key is shown back
+only masked and is never logged. Flags: `--no-browser` skips opening the browser,
+`--no-verify` skips the validation request (an offline or odd-endpoint key is
+stored with a warning either way). `login <id>` also accepts a configured
+provider id, in which case the key is stored under that id.
+
+This is **bring-your-own-key only**: you create a standard API key in the
+provider dashboard. There is no "sign in with Claude/ChatGPT" and no use of
+Claude/ChatGPT *subscription* credentials — that is a provider terms violation
+(see `docs/07-security-and-privacy.md` and ADR-0042).
+
+**Where the key is stored.** On Windows, in the Credential Manager (built with
+the `keychain` feature). On macOS and Linux, and on any host without a keychain
+backend, in a `0600` file under the per-user directory beside `config.toml`
+(`credentials.json`). A provider key never enters the repo or a config file.
+(MCP servers may carry a sensitive literal in a project-local config file as an
+explicit, documented exception — see [mcp.md](mcp.md) and ADR-0101. Provider keys
+have no such exception.)
+
+**Resolution precedence.** When an API-key provider needs a credential it is
+resolved in order: a stored credential (keychain → fallback file) first, then
+the `api_key_env` environment variable (or the kind default `ANTHROPIC_API_KEY`
+/ `OPENAI_API_KEY`), then config. So a logged-in user needs no environment
+variable, and an existing env-only setup keeps working unchanged. Google ADC
+providers do not use `localpilot login`; they read the configured ADC path or
+the standard Google ADC locations and mint OAuth access tokens at request time.
+
+`localpilot doctor` reports the resolved *source* per provider — `keychain`,
+`file`, `env`, `google_adc`, `google_adc_file`, or `not set` — never the secret
+itself.
+
+`localpilot doctor --format json` (or `--json`; JSON is the default when stdout
+is not a terminal) emits the same report as a machine-readable object for a
+wrapper: the resolved binary path and `git describe` version (compare them to
+detect a stale PATH binary vs the repo build — drift *detection* is the caller's
+job), each provider's kind/base URL/model/context window and credential *source*,
+the resolved memory store root, and a list of capability tokens a wrapper can
+feature-detect against. See ADR-0050.
+
+## Switching provider/model mid-session: `/model`
+
+In the `chat` REPL, `/model` switches the active provider/model without losing
+the conversation:
+
+- `/model` — list the configured providers and the models each reports (via the
+  same `GET /models` discovery as `localpilot models`), marking the active one.
+  Discovery failure is non-fatal: the configured model is shown with a note.
+- `/model <provider>` — switch to that provider, adopting its configured default
+  model (or keeping the current model name with a warning if it has none).
+- `/model <provider> <model>` — switch to that provider and model. An unlisted
+  model id warns but is still used.
+
+The switch selects an already-built provider (every configured provider is built
+once at startup), so it does not rebuild or re-authenticate; it takes effect at
+the next turn boundary and preserves the full transcript, which is
+provider-neutral. An unknown provider id, or a switch attempted while a turn is
+running, is reported as a plain message and leaves the session unchanged. See
+ADR-0041.
+
+## Runtime tuning
+
+`request_timeout_secs` can be set on any provider entry. It is a **stall
+window**, not a total-request deadline (ADR-0080): the longest silence
+tolerated while a response is open — from sending the request to the first
+byte, and between stream chunks after that. A slow server that keeps
+streaming is never cut off mid-response; bound total turn time with
+`[harness] turn_timeout_secs` instead. Default 600. When the window trips,
+the turn stops with a `no data from the model server` error rather than
+retrying — a stalled server cannot finish faster on an identical retry.
+
+Provider options not modeled by LocalPilot are passed through from the provider
+table into the request body. `suppress_thinking = true` is an LocalPilot-owned
+switch: adapters avoid optional thinking output where the public request shape
+supports it, and the switch itself is not forwarded as a raw API field. Inline
+`<think>...</think>` text emitted by compatible local models is routed to the
+reasoning stream and is not treated as final answer text, including blocks that
+span many stream chunks or tags split across chunks.
+
+`reasoning_round_trip` is another LocalPilot-owned switch for OpenAI-compatible
+providers: when true, assistant reasoning is replayed to the server as the
+`reasoning_content`/`reasoning_signature` message fields (a local-inference
+convention used by vLLM-style servers). The default is on for local and custom
+endpoints and off for the official hosted API, which does not document those
+fields. The switch itself is never forwarded as a raw API field.
+
+## Model discovery
+
+`localpilot models` queries each configured OpenAI-compatible server's public
+`GET /models` listing and prints what is actually loaded, with the context
+window where the server reports one. The request is a network effect and
+passes the permission engine like any other. In the interactive REPL the same
+listing is consulted at startup (best-effort, silent on failure) to derive the
+session budget when no `context_window` is configured.
+
+For agent use, `localpilot models` is non-interactive-safe: it takes
+`--format human|json` (`--json`; JSON by default off a terminal) and a `--yes`
+flag. Run with no terminal (or `--yes`) it never blocks on an approval prompt — an
+`Ask` policy without `--yes` is reported as `approval_required`, a `Deny` as
+`denied`, and an unreachable endpoint as `unreachable` — and the command exits
+non-zero when a listing is incomplete, instead of silently skipping. The JSON is a
+script-stable array (an empty result is a valid `[]`). See ADR-0050.
+
+## Reasoning effort
+
+`/effort minimal|low|medium|high` in the REPL sets a typed reasoning-effort
+level for subsequent turns. On effort-aware OpenAI-compatible servers it maps
+to the documented `reasoning_effort` request field; on protocol shapes without
+one it clamps to a no-op. Harness integrations can set it per step via the
+session runtime.
+
+## Context estimates
+
+Before the first provider response, context usage is a bytes/4 heuristic rather
+than a tokenizer count: it over-counts CJK text (up to ~3x) and under-counts
+dense code. The TUI footer marks an estimated figure with `~`. Once the provider
+reports prompt usage, the session pairs that authoritative count with the local
+estimate for the exact same request. Later compaction thresholds use that ratio
+(never less conservative than bytes/4), with a 5% cushion for changes in the
+code/JSON/prose mix; the context gauge is corrected to the reported prompt count
+on every response.
+
+The session budget is the model's real context window minus the provider's
+output cap when the window is known (config `context_window` or discovery), and
+the global `[harness] context_token_limit` otherwise. If a provider returns a
+length stop while its usage shows `prompt + output` filled the declared window
+and output remained below half the configured cap, LocalPilot reports context
+exhaustion with the actual numbers and compacts before retrying once. It does
+not suggest smaller file writes or raising `max_tokens`; those remain the
+recovery for a genuine output-cap stop.
+
+## Evals
+
+The offline golden-task scorecard runs with the normal workspace test suite:
+
+```sh
+cargo test -p localpilot-harness --test evals
+```
+
+Live validation is opt-in and never commits credentials. Set
+`LOCALPILOT_LIVE_TESTS=1` only in a local shell that already has provider
+configuration and credentials. The live runner uses the default configured
+provider and model. If no model is configured, set `LOCALPILOT_LIVE_MODEL` in
+that same local shell.
+
+## Verifying
+
+```sh
+localpilot doctor                       # shows which credentials are present
+localpilot ask --model <name> "hello"   # one-shot streamed completion
+```
+
+Provider names appear here only as compatibility statements. LocalPilot is a
+provider-neutral harness, not a vendor product.

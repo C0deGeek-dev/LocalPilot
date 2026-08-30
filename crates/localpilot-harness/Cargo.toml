@@ -1,0 +1,44 @@
+[package]
+name = "localpilot-harness"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+indexmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+localpilot-config = { path = "../localpilot-config" }
+localpilot-core = { path = "../localpilot-core" }
+localpilot-llm = { path = "../localpilot-llm" }
+localpilot-quota = { path = "../localpilot-quota" }
+localpilot-recovery = { path = "../localpilot-recovery" }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
+localpilot-store = { path = "../localpilot-store" }
+localpilot-agents = { path = "../localpilot-agents" }
+localpilot-tools = { path = "../localpilot-tools" }
+localpilot-verify = { path = "../localpilot-verify" }
+localx-eval-core = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+insta = { workspace = true }
+# Test-only: the live discipline benchmark can opt into LocalMind lesson
+# injection for a lesson-on/off A/B. The adapter depends on this crate, so this
+# is a dev-dependency cycle — allowed by cargo (dev-deps are excluded from the
+# normal dependency graph) — used only by tests/discipline.rs.
+localpilot-localmind = { path = "../localpilot-localmind" }
+proptest = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

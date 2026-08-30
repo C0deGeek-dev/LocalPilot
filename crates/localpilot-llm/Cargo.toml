@@ -1,0 +1,33 @@
+[package]
+name = "localpilot-llm"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Exposes doc-hidden entry points that drive the SSE decoders over arbitrary
+# bytes. Only the fuzz harness enables this; it adds no dependencies. Forwards to
+# the adapter crates that own the decoders.
+fuzzing = [
+    "localpilot-llm-openai/fuzzing",
+    "localpilot-llm-anthropic/fuzzing",
+]
+
+[dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+localpilot-config = { path = "../localpilot-config" }
+localpilot-core = { path = "../localpilot-core" }
+localpilot-llm-core = { path = "../localpilot-llm-core" }
+localpilot-llm-openai = { path = "../localpilot-llm-openai" }
+localpilot-llm-anthropic = { path = "../localpilot-llm-anthropic" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }

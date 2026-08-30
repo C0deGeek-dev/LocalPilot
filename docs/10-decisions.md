@@ -1,0 +1,7640 @@
+# Architecture Decision Records
+
+This file starts the decision log. Add new records at the top.
+
+## ADR-0176: Embedding Ownership Is Exact, Shared, And Reaped By The Process Owner
+
+**Status:** accepted · **Date:** 2026-08-29
+
+**Context.** LocalPilot's private plain-text marker and one-file-per-process
+lease prevented two LocalPilot sessions from stopping each other's embedding
+server, but LocalMind could not join that lifetime. Copying the logic would
+create two liveness and ownership truths. A naive shared RAII guard also leaves
+one hard edge: if a standalone LocalMind command outlives LocalPilot, the last
+remaining process is forbidden to stop LocalBox.
+
+**Decision.**
+
+1. `localmind-inference` owns the product-neutral registry transaction. A
+   schema-1 marker binds owner label, normalized loopback socket, exact live
+   server PID, and active/stopping phase. An exclusive file lock covers legacy
+   migration, stale PID pruning, unique lease creation, release, and last-lease
+   stop reservation.
+2. LocalPilot remains the sole process owner. It starts through its existing
+   LocalBox effect boundary only after receiving a serialized start permit,
+   verifies LocalBox's PascalCase pidfile against the configured endpoint, and
+   stops only after receiving the exact owner token. A user-managed or mismatched
+   listener is neither leased nor stopped.
+3. The session command holds an RAII owner guard for its whole process path,
+   independent of learning close-out. If other live leases remain at drop, it
+   spawns a detached hidden LocalPilot reaper. The reaper has no session and
+   polls the neutral registry; after dead-PID pruning and final client release,
+   one reaper atomically enters `stopping`, invokes `localbox embed-stop`, and
+   confirms success or restores active state for a later retry.
+4. LocalMind may only acquire/drop its unique lease. It contains no LocalBox
+   discovery, spawn, stop, or reaper path. Legacy plain-text ownership is never
+   sufficient for a LocalMind join; LocalPilot alone may migrate it after
+   verifying the runtime PID and endpoint.
+
+This preserves lexical operation on ordinary failures, closes join-versus-stop
+and outliving-client races, and gives one canonical on-disk/liveness contract to
+both products without inverting the process-ownership boundary.
+
+## ADR-0175: Lifecycle Observation Starts With A Consumer, Not A Reserved Hook
+
+**Status:** accepted · **Date:** 2026-08-28
+
+**Context.** `localpilot-harness` exposed a notify-only `SessionObserver` trait,
+eight `HookEvent` variants, registration storage, and notifications throughout
+the session loop. The surface compiled and its own test could register a
+recorder, but no production path in the LocalX workspace ever registered an
+observer. No specification, plan, or earlier decision named an intended
+consumer. The extension guide nevertheless presented observers alongside the
+live context-hook and tool-gate dimensions, implying a supported seam whose
+signature had never been tested against a real use case.
+
+**Decision.**
+
+1. Remove `SessionObserver`, `HookEvent`, observer registration/storage, session
+   notifications, the crate re-export, and the observer-only test. Keep
+   `HookFabric` as the owner of the live `ContextHook` and `ToolGate` paths.
+2. Do not move logging, LocalMind capture, or telemetry onto the seam merely to
+   create a caller. Those concerns already have their own owners and contracts;
+   changing one requires evidence that its real behaviour fits an in-process,
+   synchronous, notify-only callback.
+3. If lifecycle observation gains a concrete production consumer, design the
+   smallest contract from that consumer's delivery, failure, ordering, and
+   back-pressure needs. A future trait need not preserve the deleted signature.
+
+**Consequences.** The session loop stops constructing and cloning observer-only
+events into a vector that is always empty in production. The workspace-internal
+public API narrows, but no shipped runtime behaviour, serialized data, CLI,
+configuration, or external extension protocol changes. Context injection and
+tighten-only gates remain in the same fabric and retain their behaviour tests.
+
+**Rejected:** documenting the current trait as a reserved API; inventing a
+registrant to justify it; deleting the live context-hook or tool-gate paths; and
+keeping observer notifications without a registration surface.
+
+## ADR-0174: Manual Graph Reindex Is A Bounded Host Operation, Not A Phantom Command
+
+**Status:** accepted · **Date:** 2026-08-28. Extends ADR-0152 (neutral
+full-screen LocalMind tab) and ADR-0153 (terminal LocalMind writes use the host
+permission seam), and amends ADR-0160 (incognito persistent-write refusal).
+
+**Context.** An empty full-screen LocalMind Graph section told the user to run
+`localpilot learning graph reindex`. No such LocalPilot command existed. The
+actual graph updater was an in-process closeout side effect limited to 64 files,
+so a large first index could need several saved sessions while the screen that
+reported the empty graph offered no action and no remaining-work signal.
+
+The graph engine's reindex plan is already incremental, content-based, and
+resumable. The missing piece was a host operation: presentation intent, live
+permission policy, work off the async UI driver, progress, cancellation, and an
+in-place refresh. Adding a CLI namespace merely to make incorrect copy become
+true would duplicate the in-panel use case and would not solve its feedback or
+cancellation problem.
+
+**Decision.**
+
+1. **Graph owns one typed in-panel action.** On the Graph section, `r` emits
+   `AppCommand::LocalMindReindex`; other sections cannot emit it. The neutral
+   terminal UI has no LocalMind dependency and performs no I/O. Its footer names
+   the key, while the empty state says that saved sessions update the graph when
+   learning is enabled and that the manual action is unavailable in incognito or
+   with learning disabled. No shell command is advertised or added.
+2. **The CLI remains the authorization and lifecycle boundary.** It refuses the
+   action before work in incognito or when no LocalMind store resolves, represents
+   the possible project-local graph write through the live permission engine and
+   production approver, and starts no worker after denial. LocalMind's project
+   config remains authoritative, so `[learning] enabled = false` fails without
+   creating graph state.
+3. **A manual run wants the whole repository, in bounded units.** The adapter
+   builds one reindex plan and runs it to completion in eight-action batches,
+   reporting cumulative reindexed/pruned/unchanged/rejected counts and the exact
+   remaining count before work and after every committed batch. The existing
+   64-file closeout pass is unchanged; it remains a quiet-session budget, not a
+   manual-operation limit.
+4. **Cancellation is cooperative and observed.** Tokio cannot abort an already
+   running blocking task. The shared cancellation token is therefore checked
+   between batches, and the full-screen pump continues observing the blocking
+   worker through the current batch even after a forced exit request. A cancelled
+   run reports committed counts plus remaining work and refreshes Graph in place;
+   a later run resumes from stored content hashes. Success and recoverable
+   failure also refresh without leaving or resetting the Graph section.
+
+**Consequences.** A first manual index may write partial, valid graph state before
+cancellation; this is intentional and visible, and no detached worker continues
+after the host reports its result. Cancellation latency is bounded by one
+eight-action batch, although initial candidate discovery and fingerprint planning
+still complete before batched writes begin. The new adapter surface has a real
+CLI-host caller; no LocalMind submodule, schema, provider, configuration, or
+standalone CLI change is required.
+
+Pinned by Graph-only key and Ratatui footer tests, exact empty-state/real-Clap-tree
+coverage, missing-store and incognito no-write preflights, permission
+allow/ask/deny tests, learning-disabled no-write coverage, adapter
+partial-progress/cancel/resume fixtures, an end-to-end host population and
+refresh-in-place test, and a pump witness proving forced exit waits for the
+bounded worker.
+
+**Rejected:** adding the nonexistent LocalPilot CLI route; pointing users at the
+vendored `localmind` binary; reusing the 64-file closeout budget as the total
+manual budget; one unbounded blocking pass; dropping a `spawn_blocking` handle on
+cancel; a second permission/progress loop; and giving the presentation crate
+engine or filesystem access.
+
+## ADR-0173: A Served Session Does Not Outlive The Client That Abandoned It
+
+**Status:** accepted · **Date:** 2026-08-25
+
+**Context.** `localpilot mcp serve` ends at end of input, which is correct for a
+client that exits and useless for one that is abandoned. Found on a real
+machine: a server still running **two days** after it started, under a Claude
+Code process that the host's own self-update had renamed and left behind. The
+pipe was still open because the process holding it still existed, so end of input
+never came.
+
+The consequence was not a stray process. It held `~/.cargo/bin/localpilot.exe`
+open, and Windows refuses to replace a running executable — so every prerelease
+install failed with `Access is denied` after a successful two-minute build, which
+reads as a build failure and is not one. The stack updated three tools and
+silently skipped the fourth for days.
+
+**Decision.**
+
+1. **A served session gives up after four hours with no client message.**
+   `--idle-timeout <MINUTES>` overrides it; `0` restores waiting forever. Any
+   client message resets the window, and a running turn produces events, so a
+   long turn is never cut off.
+2. **Four hours is a compromise, not a principle.** Long enough that a session
+   left open over a meal is untouched; short enough that an abandoned one does
+   not hold a binary open for days. The flag exists because somebody's workflow
+   will disagree with the number.
+3. **The install path names the lock.** When a source build succeeds and the
+   replacement is refused with a permission error, the message says the build was
+   fine and points at the file and the usual culprit, rather than reporting a
+   failure that did not happen.
+
+**Consequences.** A client that legitimately idles beyond the window loses its
+server and must reconnect — the cost of not having servers that outlive their
+hosts. The detection is a write-open probe rather than process enumeration, so it
+adds no dependency and answers `false` on platforms that allow replacing a
+running binary, which is the honest answer there.
+
+**What this does not fix.** The host process that was replaced by its own update
+and kept running is not ours to manage; this makes our side survivable rather
+than making that correct.
+
+## ADR-0172: Revalidation Proposes, A Person Decides What Leaves
+
+**Status:** accepted · **Date:** 2026-08-25
+
+**Context.** The offline freshness pass can only guess that a lesson *might* have
+gone stale. The obvious next step is to ask the world — and that means deriving a
+query from a memory and sending it somewhere.
+
+Built and measured against a real store, the first derivation decided what was
+safe to send from token **shape**: a dotted path or a `snake_case` identifier
+read as a public API name. It produced queries like
+`self.global vector_search vector_index review_items=0 0.86` and
+`duplicate_of 0.83 0.86` — internal schema names and tuning thresholds, one
+command away from a search engine.
+
+That is not a missing rule. `vector_search` and `serde_json` have **identical
+shape**; the difference is whether the name is already public, which is not a
+lexical property.
+
+**Decision.**
+
+1. **Publicness must be evidenced, not inferred.** `derive_verification_query`
+   takes the set of names the workspace declares as third-party dependencies —
+   public by construction, having been fetched from a public registry — and
+   emits nothing else. The argument is the point, so the signature offers no way
+   to call it without evidence. Path and workspace dependencies are excluded:
+   those are our own crates.
+
+2. **No automatic pass.** Measured on a real store: 475 memories, 48 read as
+   candidates, **9** produce a query at all, and about **three** are questions
+   anybody could act on — crate names like `path`, `time` and `ignore` collide
+   with ordinary English and match the word rather than the crate. A pass
+   reaching three memories does not earn an outbound request.
+
+3. **`learning revalidate --memory <id>` prepares a check and sends nothing.** It
+   prints the lesson, whether the offline heuristic selects it, and a proposed
+   query, and says plainly that nothing has been sent. The operator writes the
+   question and runs `research`, which asks before every request (ADR-0170),
+   audits each one, and routes findings to review.
+
+**Consequences.** The model-backed pass is unchanged: it consults a loopback-only
+local model (ADR-0164) and nothing leaves the machine. What this closes off is
+the automated *web-backed* pass — deliberately, on the numbers, with the
+machinery kept as a proposal so the evidence stays legible rather than being
+deleted along with the feature.
+
+**What would change this.** A corpus where more lessons name declared
+dependencies, or a workspace with manifests from several ecosystems, would raise
+coverage above the measured 18%. The collision between crate names and English
+words would remain.
+
+## ADR-0171: One Flag Answers Every Prompt, And Only For This Run
+
+**Status:** accepted · **Date:** 2026-08-25
+
+**Context.** ADR-0170 made every outbound request a question, and the tool
+permission system already made every risky action one. Both are right for
+interactive use and wrong for a long unattended run, where the same person ends
+up answering the same question forty times and stops reading it by the fifth.
+Comparable agents ship an escape hatch for exactly this, and users arrive
+expecting one.
+
+**Decision.** `--dangerously-skip-permissions` (aliases `--yolo`, `--full-auto`)
+pre-approves every tool permission request and every outbound request for the
+life of the process.
+
+- **A process-level latch, not a threaded value.** That is honestly what it is:
+  one decision, made once, at launch, covering everything the process does.
+  Threading it would imply some paths could opt out, and none can. It is one-way
+  — nothing turns it off mid-run, because prompts reappearing partway through an
+  unattended run is the failure it exists to prevent.
+- **Never persisted, never in config, never inferred.** It has to be typed, every
+  time, by someone who meant it. A config key would let a stale file silently
+  un-gate a machine months later, which is how a deliberate act becomes an
+  accident.
+- **It answers questions; it does not overrule refusals already written down.**
+  `[research.web] enabled = false` stays an absolute kill switch and a host on
+  `disallowlist` stays blocked. There is a difference between "nobody has said
+  yes" and "someone said no", and only the first is a question.
+- **Announced once, at launch, on stderr**, in terms of what it costs — tools
+  running without asking, edits outside the workspace, prompts travelling with
+  outbound requests — while there is still time to interrupt. Once, not per
+  action: a warning shown forty times is not read the second time.
+
+**Consequences.** The unrestricted permission profile becomes reachable without
+editing config, which is a genuine widening of what a single command can do. It
+is also the honest shape of the request: people run agents unattended, and the
+alternative to a documented flag is a config file people set once and forget,
+which is strictly worse. A test pins that the latch is off unless asked for —
+which also catches any future test that engages it and would otherwise silently
+un-gate every permission assertion in the suite.
+
+## ADR-0170: Nothing Leaves The Machine Without Someone Saying So
+
+**Status:** accepted · **Date:** 2026-08-25
+
+**Context.** `FetchDecision::NeedsConfirmation` did not confirm anything. All
+three consumers — the research fetch loop, the redirect re-gate, and skill
+discovery — treated it as *skip and audit*, and no interactive approval existed
+anywhere in the egress path. The real model was: config is the kill switch, the
+per-session opt-in is the only consent anyone gives, an allowlisted host is
+fetched silently, and everything else is dropped silently.
+
+That is a defensible design. It is not what the type names said, which is the
+same defect shape as `local_only` claiming more than it enforced (ADR-0164): a
+name that promises a gate nobody implemented is worse than no gate, because it
+stops anyone looking.
+
+**Decision.**
+
+1. **Every request with no standing approval asks a person** — allow once, deny,
+   or allow every request for the session. The allowlist *is* the standing
+   approval: putting a host there is deliberate, written and reviewable, so an
+   allowlisted host is not asked about again.
+
+2. **The seam lives inside `WebAccess`, not beside it.** A consumer cannot obtain
+   a permission without consent being present, because there is no other way to
+   get one. The previous shape — a decision variant every caller was trusted to
+   honour — was honoured by none of the three.
+
+3. **A session-wide grant takes a typed phrase**, behind a warning that describes
+   the consequence rather than the mechanism. A keystroke is the right price for
+   approving one request and the wrong price for approving all of them.
+
+4. **With nobody to ask, the answer is no.** Every non-interactive surface gets a
+   refusal. Automated runs that reached non-allowlisted hosts will stop; the
+   remedy is the allowlist, not a runtime override.
+
+5. **`decide` returns its own outcome type.** `FetchDecision` is what standing
+   policy knows *before* anyone is asked, and `NeedsConfirmation` now honestly
+   means that. `EgressOutcome` — `Fetch`, `Skip`, `Off` — is the answer after
+   asking. Collapsing the two lost the audit record: a refusal reported as "off"
+   is never written to the log, and in the source loop "off" also ended the whole
+   gather instead of skipping one host. A test pins the distinction.
+
+**Consequences.** A disallowlisted host now reports `Skip` rather than `Off`, so
+it is audited and only skips itself — previously one blocked host ended the
+entire source gather. Session grants are shared across every clone of the access,
+because the research host clones it per source and per redirect and a grant that
+did not reach the clones would ask again after the operator said "allow
+everything" — the one outcome that teaches people the prompt is noise.
+
+**What this does not do.** It does not make the allowlist itself a per-request
+question. A user who wrote `*` into their allowlist has said yes to the open web
+in advance, and this change honours that rather than second-guessing it.
+
+## ADR-0169: The Relevance Floor Reaches Every Candidate, And Exempts The Ones That Answered The Question
+
+**Status:** accepted · **Date:** 2026-08-25
+
+**Context.** ADR-0168 fixed retrieval for prompts whose subject *is* in the store.
+This is the other half: prompts whose subject is in no memory at all. Measured on
+twenty such prompts — synthetic identifiers whose every token appears in zero
+active memories, so the correct answer is nothing by construction — retrieval
+returned an irrelevant memory **every time**. Always the same one: of 475
+memories it is the only one containing both `about` and (by prefix, through
+*knowledge*) `know`, the two words the question's own phrasing contributes.
+
+Three signals were measured as candidates for separating it, and all three were
+rejected on the numbers rather than on taste:
+
+- **Document frequency of the matched terms.** The junk match and every correct
+  lexical answer both hinge on a term with df 1.
+- **A bm25 floor.** The junk scores **519**; correct answers span **454–801**
+  with a median of 498. A floor that removes the junk removes more than half the
+  right answers.
+- **Cosine alone.** The same memory is the correct answer to one prompt at
+  **0.353** and irrelevant noise for another at **0.351**.
+
+**Decision.**
+
+1. **The relevance gate scores every keyword candidate, not the dense top-k.**
+   The cosine map was truncated to a 64-wide dense window, which inverted the
+   gate it feeds: a hit that is semantically far from the prompt ranks below any
+   dense window *by construction*, so it carried no cosine — and a hit with no
+   cosine is never dropped. The gate existed to drop off-topic hits and was
+   guaranteed to miss exactly those. The comment called it "under-gate rather
+   than over-exclude"; measured, it meant never gate at all. The scan had already
+   computed every cosine, so the truncation saved nothing. The window still
+   governs the *ranked list* fused by RRF, which is its real job.
+
+2. **A hit containing the query's subject is exempt from the floor.** The rarest
+   term is what a question is about; the rest is the shape of the asking. A body
+   containing the subject has already answered lexically. This is what tells 0.353
+   from 0.351 when no threshold can.
+
+3. **The default floor is `0.36`, not `0.6`.** Calibrated on the by-construction
+   negatives alone, whose junk tops out at 0.3533. The old `0.6` was never
+   operative — with the gate inert, no value was. Measured, `0.6` cuts recall on
+   cross-cutting prompts from **0.75 to 0.25**, and buys nothing above the noise
+   band that `0.36` does not.
+
+**Consequences.**
+
+| | Before | After |
+|---|---|---|
+| Over-retrieval, **reserved** negatives | 20/20 | **1/20** |
+| Over-retrieval, development negatives | 20/20 | **0/20** |
+| Held-out lexical recall | 0.70 | **0.70** (unchanged) |
+| Frozen set, paraphrase | 0.89 | 0.78 |
+| Frozen set, lexical / cross-cutting | 0.83 / 0.75 | **unchanged** |
+
+The reserved twenty were committed before the fix existed and read once, at the
+end. They land at 1/20 where development landed at 0/20 — the honest gap a
+reserved set exists to show.
+
+**What this does not fix, stated rather than left to be discovered.** The frozen
+set's own negative queries do not improve: their junk either clears the floor
+(a genuine near-miss at 0.43) or is exempted because the query's rarest term is
+an ordinary word that the junk happens to contain. The exemption is only as good
+as *rarest term = subject*, which holds when the subject is a rare identifier and
+fails when the whole query is common words. Paraphrase costs one query of nine.
+And the positive-side cost is measured on sets already seen; only the negative
+side has a clean reserved check.
+
+## ADR-0168: Memory Stores Merge By Relevance, And The Query's Rarest Term Clears The Coverage Gate
+
+**Status:** accepted · **Date:** 2026-08-25
+
+**Context.** ADR-0167 measured that memory injection's value is bounded exactly by
+retrieval quality, and that the class a keyword index should win outright —
+looking up a known identifier — scored **0.00**. Two defects caused it, and each
+hid the other.
+
+**The store merge was by store, not by relevance.** `search_lang` appended every
+global hit after every project hit, and the caller caps at five, so a global
+memory was unreachable whenever five project memories matched the query *at all*.
+Five of six queries whose answer lives only in the global store never returned
+it; asking the same identifier alone returned it at rank one. The global store is
+where a curated cross-project seed lives, so the effect was to starve exactly the
+memories put there deliberately.
+
+**The coverage gate counted query terms equally.** With three or more significant
+terms a body must match two, so *what should I know about `process_dir`* let the
+question's scaffolding outvote its subject: the memory defining `process_dir`
+matched one term, an unrelated memory containing *know* and *about* matched two.
+
+Neither fix alone moves the failing class. With the old merge, relaxing the gate
+moved it **+0.000**; with the merge fixed, relaxing it moves it **+0.583**.
+
+**Decision.**
+
+1. **Merge both stores by relevance**, normalised against each store's own best
+   hit — raw bm25 is computed against different corpus statistics per index.
+   Project precedence survives where it means something: a project memory still
+   wins a duplicate by id or identical body. Precedence as *absolute ordering* is
+   dropped. The sort is stable, because the stored score is a rounded bm25 and
+   re-sorting rows the index ranked apart would discard an ordering it got right.
+2. **A body containing the query's rarest term clears the coverage gate**
+   regardless of count. That term carries the question's specificity, so such a
+   body is not an incidental hit whatever the count says. It still has to win on
+   rank, so this admits a candidate rather than promoting one.
+3. **Coverage counts tokens, not substrings**, split the way the index splits —
+   including on underscore, which a first attempt got wrong and a golden fixture
+   caught.
+
+**Rejected.** *Removing the gate*: buys lexical 0.583 while costing paraphrase
+0.033, cross-cutting 0.021 and a negative query that starts over-retrieving. *A
+stopword list*: `use`, `type`, `match` and `test` are ordinary English and
+load-bearing in a technical corpus, so a list built from intuition eats meaning.
+*Absolute document frequency*: does not separate the terms — on this corpus
+*about* is rarer than the identifier it was outvoting. Only rarity **relative to
+the query** separates them.
+
+| Class | Before | After |
+|---|---|---|
+| **lexical** | 0.00 | **0.75** |
+| cross-cutting | 0.13 | **0.30** |
+| paraphrase | 0.74 | **0.80** |
+
+Nothing regressed. Cost: one index count per query term, 0.07 ms on a 27 ms path.
+
+**Held-out validation.** The first attempt shipped without one — the reserved
+split was planned and skipped. It was reverted and redone: a 20-query set was
+built and committed **before** the fix was reapplied, so the ordering is
+checkable in git history rather than asserted. Answers are known by construction
+(each anchor appears in exactly one active memory), so no labelling pass stands
+between the corpus and the score.
+
+| | Before | After |
+|---|---|---|
+| Held-out recall | **0.100** | **0.700** |
+| Held-out MRR | 0.100 | 0.650 |
+
+It agrees with the working set's 0.00 → 0.75, so the fix is not fitted to the
+queries that exposed the bug.
+
+**Not evidenced.** The redo did not unlearn the fix; the residual contamination
+is bounded, not eliminated. The reserved set is **lexical-shape only** —
+paraphrase and cross-cutting cannot be held out without a labelling pass and
+carry no held-out validation. One corpus, one machine; the scope defect is
+invisible where the global store is small or empty, which is why it survived.
+Reported recall is known-positive recall against a judged set that is a floor.
+The negative class did not move and one query there still over-retrieves.
+
+## ADR-0167: Memory Injection Works, And Its Value Is Bounded Exactly By Retrieval Quality
+
+**Status:** accepted · **Date:** 2026-08-25
+
+**Context.** Everything measured about memory injection until now was *coverage* —
+how many candidates, how fast, how much disk. None of it said whether the right
+memories were retrieved, or whether injecting them changed an answer. A prior A/B
+on this stack is widely described as having come back null; it ran one trial per
+arm, on a task set where both arms scored 5 of 6, through a harness that could
+not inject at all.
+
+**Measured.** A frozen human-labelled judgment set (24 queries, 312 judgments, 49
+relevant, addressed by content hash), then an injected-versus-suppressed A/B over
+18 knowledge-dependent, exactly-gradeable tasks on a local model with
+deterministic sampling.
+
+| | Suppressed | Injected | Delta | Band |
+|---|---|---|---|---|
+| All 18 tasks | 0.056 | 0.556 | **+0.500** | ±0.398 |
+| Retrieval delivered the answer (12) | 0.083 | 0.833 | **+0.750** | ±0.343 |
+| Retrieval did not deliver (6) | 0.000 | 0.000 | +0.000 | ±0.000 |
+
+**Decision.** Memory injection earns its context cost, and **retrieval quality is
+the binding constraint on its value**. The overall delta is carried entirely by
+the tasks where retrieval found the right memory; where it did not, injection
+changed nothing whatsoever.
+
+That makes retrieval defects expensive rather than academic. The measured
+baseline is uneven — known-positive recall of **0.00** for lexical queries, 0.74
+for paraphrase, 0.13 for cross-cutting — and the largest known cause is a
+term-coverage gate that discards the memory holding an exact identifier while
+keeping one that matches two ordinary English words from the query's own
+phrasing.
+
+**Consequences.** Improving retrieval means improving what **keyword search**
+finds. The dense signal cannot help recall by construction: fusion returns a
+permutation of the keyword candidates, so a dense-only memory is never selected —
+which is why a correctness fix to the dense scan moved no quality metric.
+
+**Narrow by construction.** One developer's store, one machine, one model, 18
+tasks. The A/B is single-turn factual recall, the task shape most favourable to
+injection; the prior A/B measured multi-step tool discipline and saw injected
+context *lengthen* trajectories, a cost this design cannot observe. Reported
+recall is known-positive recall against a judged set that is a floor, so it is
+optimistic by an unknown margin.
+
+## ADR-0166: A Staleness Flag Is Reversible From A Shipped Surface, And Reports What It Did Not Do
+
+**Status:** accepted · **Date:** 2026-08-24
+
+**Context.** `localpilot learning freshness --apply` flags accepted memory for
+review. Nothing shipped could lift a flag: the engine's `clear_stale_candidate`
+existed with **no caller in either repository** — no CLI, no MCP, no UI, not even
+a test — and reached only the project store, while the pass flags both.
+
+The cost was not theoretical. A flagged memory is excluded from the queryless
+context primer, so a false positive stops being offered as background context.
+Keyword search is unaffected, which is precisely why the gap was invisible: the
+obvious check comes back green.
+
+A real run made it concrete. Of 76 flags, a reviewer agreed with **7** (9.21%).
+Sixty-nine memories — including much of a deliberately curated knowledge seed —
+had silently left the primer with no way back.
+
+**Decision.** Ship `localpilot learning keep <ID>...`. Both flagging and clearing
+span the project and global stores, clearing is audited engine-side
+(`MemoryFlagCleared`, D-LM-0035), and ids that were **not** flagged are reported
+separately rather than folded into a success count.
+
+**Consequences.** The lifecycle is symmetric and reviewable in both directions. A
+flag lifted with no trace is indistinguishable from one never set, which is why
+the audit row is part of the decision rather than an implementation detail.
+
+The wider lesson is recorded because it has now cost twice in one workspace: a
+capability that exists in a library but has no caller is not a feature, and the
+gap is hardest to see when the *adjacent* path still works.
+
+## ADR-0165: Dense Session Retrieval Is Worth Pursuing, In Its Own Plan, With The Threshold Calibrated On A Real Corpus
+
+**Status:** accepted · **Date:** 2026-08-24
+
+**Context.** Session spans ship with lexical (FTS5) retrieval. The first
+retrieval-quality measurement over a frozen query set gives, at rank 5:
+
+| Class | Lexical (shipped) | Dense (offline fixture) |
+|---|---|---|
+| lexical | 1.00 / 0.75 / 1.00 | 1.00 / 0.20 / 1.00 |
+| paraphrase | **0.00** / 0.00 / 0.00 | **1.00** / 0.20 / 0.50 |
+| cross-session | 0.67 / 0.67 / 1.00 | **1.00** / 0.60 / 1.00 |
+| redaction-affected | 1.00 / **1.00** / 1.00 | 1.00 / 0.20 / 1.00 |
+| negative | **2 of 2 correct** | 0 of 2 correct |
+
+*(recall / precision / MRR.)* A live endpoint reproduces the offline vectors
+exactly, so these are live numbers, cached.
+
+The two arms are **complementary, not competing**. Lexical scores zero on
+paraphrase — it cannot match words a span does not contain — and dense fills
+exactly that hole. Dense in turn cannot return *nothing*, because cosine always
+returns something; lexical is the only arm that correctly answers a query with
+no answer.
+
+**Decision.** Dense session retrieval is **worth pursuing**, and **not in this
+plan**. A paraphrase recall of 0.00 is a real hole in a retrieval system whose
+purpose is finding what was said in words the asker no longer remembers, and
+dense demonstrably closes it.
+
+It gets its own plan, covering at minimum: the **similarity floor** and its
+calibration, session indexing for vectors, the privacy posture for embedded
+transcript content, retention, and projection semantics.
+
+**The floor is the load-bearing unknown, and this evidence cannot settle it.**
+Answerable queries bottom out at cosine 0.5945 and unanswerable ones top out at
+0.4821 — separated, with no overlap — so a floor exists on this corpus. But that
+corpus is five synthetic sessions and eight queries. Choosing a threshold after
+seeing which queries it rescues is tuning rather than measurement, and
+calibrating one on eight queries is overfitting. A follow-on plan must derive it
+from a corpus large enough to support it, and must treat a floor that does not
+generalise as a result rather than a setup problem.
+
+**Consequences.** Nothing dense ships from the session-span work; the lexical
+path stands as the shipped retriever. The offline dense arm stays **evaluation
+scaffolding** — a committed vector fixture with no production caller, disclosed
+as such so it is not mistaken for a retriever. The frozen query set, the metrics
+and the harness are durable and reusable by the follow-on, which inherits a
+baseline rather than starting from an assumption.
+
+Engine-side storage decisions, if the follow-on needs them, belong in
+`LocalMind/docs/decisions.md`.
+
+## ADR-0164: `local_only` Constrains Inference Egress, And The Check Runs At The Request
+
+**Status:** accepted · **Date:** 2026-08-24
+
+**Context.** `local_only` is LocalMind's promise that nothing leaves the
+machine. It rejected a remote *storage* scope and stopped there: an
+`embedding_base_url` or `chat_base_url` on any reachable host was accepted
+beside `local_only = true`, and prompt, document and memory text went to it.
+The gap surfaced while designing session-span retrieval, where the material
+being embedded is conversation transcript — but the gap was never about
+transcripts. It was a setting whose name overstated its guarantee.
+
+**Decision.** Redefine `local_only` to constrain inference egress as well as
+storage scope, rather than renaming it to `local_storage_only` and adding a
+separate constraint. Inference endpoints carry an `EgressPolicy` defaulting to
+`LoopbackOnly`: `localhost` and the RFC 6761 `.localhost` TLD, `127.0.0.0/8`,
+`::1`. Bind-any addresses are refused. **No name resolution is performed** — a
+hostname that resolves to loopback at check time can resolve elsewhere at
+connect time, and only literal forms make the guarantee independent of a
+resolver. The check runs **at the request**, not only at configuration load,
+because a check that runs once can be stale by the time it matters.
+`EgressPolicy::Unrestricted` is a library seam unreachable from configuration,
+and stays unreachable because `local_only = false` is rejected outright — a
+cross-crate invariant pinned by a test, since the two halves live in different
+crates.
+
+**Consequences.** Breaking for a configuration pointing inference at another
+machine; the refusal names the host and what to do instead. Renaming the
+setting was rejected because it would have documented the narrower behaviour as
+correct, leaving every existing config that reads `local_only = true` still
+sending text off-machine. Engine decision: `LocalMind/docs/decisions.md`
+D-LM-0034.
+
+## ADR-0163: Memory Relevance Scans Its Own Subject Kind, And The Rerank Window Governs Again
+
+Status: Accepted. Refines ADR-0059 (the semantic injection gate) and ADR-0110
+(keyword+dense RRF); honours D-LM-0026's window contract on the host path.
+Behaviour-preserving for any project without an embedding endpoint.
+
+Context: the injection relevance gate scored its dense candidates by taking a
+nearest-neighbour window across the *whole* `vector_index` and filtering for
+`subject_kind = 'memory'` afterwards. The index also holds ingested documentation
+chunks, and a real store is heavily lopsided toward them — measured here at 8,079
+doc against 200 memory vectors — so the shared window was spent on docs before the
+filter ran. This was never a total failure, which is why it survived: memories
+still appeared, just very few. Measured against a live endpoint with realistic
+turn prompts, a 64-wide shared window kept a **median of 1.5** memory candidates
+and returned **none at all for a quarter of prompts**. Against the five keyword
+candidates the gate is applied to, that leaves it gating almost nothing and leaves
+the dense side of the fusion with almost nothing to fuse.
+
+Separately, `[retrieval] rerank_window` was read and discarded: the host matched
+it as `Some(_)` and reordered the entire candidate list. A configured, documented
+key that the code reads and throws away is a defect independent of its value.
+
+Decision:
+
+1. **The dense scan is kind-scoped inside the query.** The engine-owned
+   `localmind_search::hybrid_memory_search` uses the store's diagnosed,
+   kind-scoped memory scan and applies its dense-rank window *after* the kind
+   filter — so every slot in the window is a memory. Filtering a shared top-k by
+   kind is not the same operation and must not be reintroduced.
+2. **`rerank_window` bounds movement, not the ranking.** Fusion scores the whole
+   candidate list; only the leading `rerank_window` hits may be permuted and the
+   tail keeps its keyword order. This is the contract D-LM-0026 documents and the
+   engine's own rerank entry points honour, so the host now matches it rather than
+   permuting everything. A window below two is the identity.
+
+Why not remove the key instead: D-LM-0026 ships and documents it deliberately and
+still honours it engine-side. Removing it host-side would leave the two ends of
+the same config key meaning different things — a worse outcome than either
+honouring it or retiring it everywhere.
+
+Consequences: injected-memory ordering changes for any project with the rerank on
+and an embedding endpoint reachable. Keyword remains the candidate floor, a
+dense-only memory is still never selected, and a project with no endpoint is
+byte-identical. The engine-side change (`vector_scan_for_kind` as public API, plus
+the diagnostics that distinguish "no vectors of this kind" from "vectors exist but
+none is comparable") lands in LocalMind and is consumed here.
+
+Amended 2026-08-26 for LocalHub#84: the full shipped path above now lives behind
+`localmind-search::hybrid_memory_search`. LocalPilot's adapter maps its results
+into host types and no longer owns a second dense scan or fusion module. The
+evaluation-only pre-fix arm remains a reconstruction, but it consumes the
+engine's RRF primitive, so there is still one fusion implementation.
+
+## ADR-0162: The Self-Replace Is Decided By Identity, Not By A Parseable Version Stamp
+
+Status: Accepted. Extends ADR-0159 (the updater replaces its own running
+executable) and ADR-0155 (`localx`, one umbrella command). Closes LocalHub#79.
+
+Context: ADR-0159's self-replace shipped correct but unreachable on the one
+channel that needs it. Reaching the staging + rename-then-copy route requires the
+process to recognise itself, and that recognition was gated on the running
+binary's version stamp parsing as semver: `localx`'s `running()` built the
+`Running` marker with `Version::parse(VERSION).map(…)`, and `localpilot`'s
+`update` built its marker the same way. Every prerelease build is stamped by
+`git describe --tags --always` with a bare abbreviated sha (a cargo git checkout
+carries no tags), which does not parse, so the marker was `None`. With no marker,
+`source_install` took the classic `cargo install --force` straight onto the live
+path (the original `os error 5`), the release channel never refreshed the copy
+the shell resolves, the cache's strictly-newer rule and sweep protection were
+off, and the run summary fell back to `Re-run to retry` — a re-run of the same
+sha-stamped binary cannot clear it. The half that used `std::env::current_exe()`
+(`localx status`'s shadow note) kept working, which is the tell: identity-based
+detection worked, version-based detection did not.
+
+Decision:
+
+- **Identity and version are separated at the marker.** `Running.version`
+  becomes `Option<Version>`; the `tool` field (identity) is always known. A new
+  `self_view(marker, tool) -> (is_self, Option<&Version>)` in `localpilot-stack`
+  is the single place the install loop asks "am I this tool" (identity) apart
+  from "do I know my version" (for the strictly-newer rule and the sweep).
+- **The marker is always produced for the running tool.** `localx`'s
+  `running_marker(&str)` returns a `Running` unconditionally (version `None` when
+  the stamp does not parse); `localpilot`'s `update` constructs its marker
+  unconditionally in both the `--all` and single-tool paths. So a bare-sha build
+  is still recognised as itself.
+- **The self-replace and the running-copy refresh are gated on identity.**
+  `source_install(tool, is_self, …)` and the release channel's
+  `refresh_running_copy` key on `is_self`, not on a parseable version. A `localx`
+  that cannot parse its own version still stages + rename-then-copies, and still
+  never prints `Re-run to retry` for a refused self-replace.
+- **The stamp is kept parseable as defence in depth, not as the mechanism.**
+  `localx`'s `build.rs` stamps a tagless tree `<crate version>-g<sha>` instead of
+  a bare sha, so the version still parses while naming the commit. This is
+  secondary — the self-replace no longer depends on it. `localpilot`'s stamp goes
+  through the tested `build_meta.rs` policy module and is left unchanged; the
+  identity fix already covers it.
+- **The from-source installers stage too.** `install.ps1` and `install.sh` build
+  `localx` into a staging `--root` and rename-then-copy it into cargo's bin
+  directory, so bootstrapping over an already-running `localx` no longer hits the
+  same image lock (or Linux `ETXTBSY`).
+
+Boundary and compatibility: no config, manifest, or cache layout change. The
+production entry point is now covered by a test — `localx`'s `running_marker`
+yields a marker with no version for a non-semver stamp, and `localpilot-stack`'s
+`self_view` returns `is_self = true` for a `None`-version self — the gap the
+existing tests missed by hand-constructing every marker with a version.
+
+## ADR-0161: Automatic Compaction Injects Its Real Digest, Budgets Against The Output Cap, And Announces Itself
+
+Status: Accepted.
+
+Context: deterministic compaction computed a rich semantic digest of the history
+it trimmed — goal, constraints, decisions, progress, per-file operations, command
+outcomes, failures — attached it to the `Compacted` event, and then sent the model
+something else: at most four `user asked: …; tools used: …` bullets. The digest
+reached the audit log; the conversation got the placeholder. Three defects sat
+under it: the session budget subtracted a flat 4,096-token reserve while the
+request reserved its own `max_tokens` (often larger, e.g. 16k), so a history the
+local estimate believed fit was rejected by the provider — and the recovery for
+that rejection is the one path that permanently halves live history; the estimator
+counted a pasted image as zero tokens; and automatic/overflow compaction posted no
+timeline signal, so a dropped context gauge was the only clue (LocalHub#78).
+
+Decision:
+
+- **The finalized digest goes into the conversation.** After `finalize_summary`,
+  `compact_plan` rebuilds the summary message from the digest via the smart
+  path's `swap_summary`, shrinking it (a halving ladder over the priority-ordered
+  entries) until it fits `token_limit`; today's bullets are the last rung and the
+  projection never exceeds budget. The full digest still travels to
+  `result.summary` and the event log, with its budget fields refreshed from the
+  post-injection projection so the persisted estimate is not stale.
+- **The context reserve is the provider's real output cap.**
+  `effective_context_limit(window, configured, max_output)` subtracts the
+  provider's `max_output_tokens` — published on `ProviderDeclaration` (Anthropic:
+  the configured `max_tokens` or `DEFAULT_MAX_TOKENS`; OpenAI-compatible: the
+  larger of the forwarded output-limit keys) — falling back to the flat reserve
+  only when the cap is unknown.
+- **The estimator counts what is sent.** `ContentBlock::Image` is charged its
+  base64 length instead of zero, and trimming keeps the most *recent* items:
+  `bounded_unique` keeps the latest unique entries and relevant files are ordered
+  by recency of touch, so the digest describes where the session is, not where it
+  started.
+- **Automatic compaction is announced.** A `RuntimeEvent::Compacted { dropped_exchanges, context_used, limit }` fires from the pre-request budget path and the
+  overflow retry — once per real compaction (a cached projection reused within a
+  turn does not re-announce) — projected to `ServerEvent::Compacted` on the wire
+  and a host notice in the full-screen UI. Manual `/compact` keeps its own notice.
+
+Boundary and compatibility: default behaviour only changes for the better — a
+default install already ran deterministic compaction on every trim. The new
+`max_output_tokens` field is serde-defaulted and skipped when absent; the smart
+summarizer path is unchanged (it still overrides the injected digest when
+enabled). Pinned by tests asserting the digest reaches `result.messages` (goal and
+file operations, within budget), the output-cap reserve arithmetic and per-adapter
+cap derivation, the image cost and recency helpers, and the announce-once /
+cache-reuse behaviour.
+
+Amendment (2026-08-28, LocalHub#83): reserving the output cap fixed the budget's
+arithmetic but left bytes/4 as the sole gate. Dense code and tool JSON could
+still under-count by enough to fill the real window, and both supported wires
+use the same length/max-token stop for that condition and a genuine output-cap
+stop. The provider's prompt count now calibrates the estimate for the exact
+request that produced it; later compaction converts through the latest ratio,
+clamps ratios below one, and keeps a 5% content-mix cushion. `ContextUsage` is
+also corrected to the reported prompt count when it arrives.
+
+A length stop is reclassified as context exhaustion only with affirmative
+evidence: reported prompt plus output reaches the declared window while output
+is below half the configured cap. The adapter's provisional output-cap warning
+is held until that evidence is available. Context exhaustion discards the
+partial response, compacts live history, and retries once through the existing
+overflow path with no synthetic repair message; a second hit or an already
+minimal history stops with the actual counts and a new-session/split-task
+remedy. Without that evidence the established ADR-0158 output-cap path remains
+unchanged. The calibration is session-local and resets on a provider or model
+switch because tokenizer ratios do not transfer.
+
+## ADR-0160: Incognito Sessions Persist Nothing And Gate Every File They Create
+
+Status: Accepted.
+
+Context: a session normally persists a great deal — its transcript and event log,
+the session index, cached data, tool-output snapshots, provider metadata, the
+prompt history, and (through the host) a LocalMind closeout, knowledge index, and
+code-graph reindex. There was no way to run a session that keeps a secret: work
+through a sensitive problem, or in a private repo, without any of it landing on
+disk or in the local knowledge store.
+
+Decision:
+
+- **`localpilot chat --incognito` (and `/incognito`) runs a session that persists
+  nothing of its own.** Its store is an in-memory backend behind the same `Store`
+  API (`Store::ephemeral`) — transcripts, events, index, cache, tool output, and
+  provider metadata live in a process-local map and are dropped when the session
+  ends. Prompt history is off. The host skips closeout, the knowledge index, the
+  code-graph reindex, the active-session record, and does not register the
+  LocalMind ingest observer. Nothing routes to disk; `root()` is a synthetic path
+  that is never created.
+- **Every file the session creates is gated behind an explicit acknowledgement.**
+  An incognito *floor* on the permission engine turns an `Allow` into an
+  interactive `Ask` (and a headless run into a `Deny`) for any effect that can
+  leave a new file behind — a `write_file` to a path that does not exist, or a
+  write-capable shell command (including a network-class command). Overwrites,
+  reads, read-only shell commands, and pure in-process network effects keep the
+  profile's own answer; the floor only ever tightens, and it is a session
+  property that survives a mid-session profile swap, so `/bypass` cannot lift it.
+  The UI keeps a dedicated incognito indicator visible across launch, idle,
+  profile changes, and active work. Every applicable acknowledgement states that
+  created files will outlive the session, and that a shell command's writes
+  *outside* the workspace cannot be enumerated, so consent is informed at the
+  moment it is given.
+- **Persistent slash commands are refused, by an exhaustive classification.**
+  Every `SlashAction` is classified `ReadOnly`, `MemoryOnly` (touches only the
+  ephemeral store), or `Persistent(what)` in a wildcard-free match, so a new
+  command cannot be added that an incognito session then silently runs. The
+  persistent ones — research reports, ingest, knowledge-index build, LocalBox
+  adopt/serve, the self-improvement loop, skill installs, and the LocalMind
+  review writes — are refused with a message naming what they would have written.
+- **What the session did create is reported when it ends**, from three sources
+  kept distinct by how exactly each can be known: files created under the
+  workspace (a full filesystem snapshot diffed at the end, with no ignore
+  filtering, so a `target/` write counts; `.git/` internals are collapsed to a
+  count), files a tool wrote outside the workspace (exact, from the tool's own
+  touch report), and shell/background command attempts presented to the
+  permission gate verbatim — including denied, cancelled, failed, and timed-out
+  attempts — with the stated limit that files those created outside the
+  workspace are not tracked.
+
+Boundary and compatibility: off by default; an ordinary session is byte-for-byte
+unchanged (the disk backend, full persistence, no floor). No config, provider,
+transcript, event-log, or stored-session schema change. The in-memory backend
+answers the whole `Store` API so a runtime resumes and compacts within the
+process exactly as on disk. Pinned by the ephemeral-store round-trip and
+never-touches-disk tests, the incognito-floor tests across every profile, the
+exhaustive persistence classifier tests, and the snapshot/report tests
+(including a normally-ignored `target/` file and collapsed `.git/`).
+
+## ADR-0159: The Updater Replaces Its Own Running Executable, And The Copy The Shell Resolves
+
+Status: Accepted. Extends ADR-0155 (`localx`, one umbrella command) and the
+binary-distribution decisions D011/D012. Closes LocalHub#73.
+
+Context: `localx` updated every train member except itself. On the prerelease
+channel `cargo install … --force` ends with a move onto the destination, and
+when that destination is the executing `localx.exe` Windows refuses with
+`Access is denied (os error 5)` — a mandatory image lock, not an ACL, so the
+"re-run" and "elevate" fixes the output implied cannot work. On the release
+channel the managed copy under the shared `bin/` was refreshed correctly, but a
+source-bootstrapped `localx` in cargo's bin directory (what `install.ps1` /
+`install.sh` create) sits earlier on `PATH`, so the shell kept running the old
+one, and `localx status` reported the cache's newest version as if it were the
+one in use.
+
+Decision:
+
+- **A self-install builds into staging, then swaps.** For the tool this process
+  *is* — and only that tool — the prerelease build runs
+  `cargo install --git … --root <data dir>/<tool>/source-build`, so cargo never
+  touches the live path, and the built executable is then swapped in over the
+  running one with `localpilot_dist::place` (rename-then-copy, the mechanism the
+  release channel already relies on because Windows permits renaming a running
+  image). Companion tools keep the classic in-place `--force` refresh into
+  cargo's bin directory. The staging root is durable, not a temp dir: it is
+  removed after a successful swap and **kept**, with its path printed, when the
+  swap is refused — the build is never lost.
+- **A refused self-replace keeps the raw error authoritative and names the
+  next step.** The placement error is printed as-is (permissions, disk, an
+  antivirus hold, and the Windows image lock all look different); on Windows a
+  hint explains that an access-denied on the running file is the image lock —
+  which exiting lifts and elevation does not — and everywhere the retained
+  build is named to copy over after exit. The run summary never says "re-run to
+  retry" for a self-replace, which a re-run cannot clear.
+- **The release channel refreshes the copy that actually ran.** After the
+  managed copy of the running tool is activated, if the running executable is
+  a different file (a bootstrap in cargo's bin directory earlier on `PATH`),
+  the same executable is placed over it too, and the output says so. This
+  decides the bootstrap-copy question: *refresh it*, never delete it, so the
+  `localx` a shell resolves is always the version just installed while the
+  user keeps ownership of every file. `localpilot update --source` takes the
+  same self route.
+- **Status reports the running version and any shadow.** `localx status`
+  shows this binary's own stamp on its row, flags a managed copy whose version
+  differs, and prints a one-line note when the running executable is not the
+  managed copy.
+
+Boundary and compatibility: no config, manifest, or cache layout change; the
+staging root is a sibling of the release cache under the per-user data
+directory. Pinned by the staged-swap tests (successful swap clears staging;
+refused swap retains the build; failed build leaves nothing), the source-args
+tests (self → `--root`, companions → `--force`), and the report-wording test.
+Verified live on Windows by running `install localx --prerelease` from a copy of
+the built executable.
+
+## ADR-0158: A Tool Call Cut Off By The Output Cap Is An Output-Budget Fault — Discarded, Named, Steered Once
+
+Status: Accepted. Extends ADR-0038 (an oversized malformed write is recovered by
+chunking) and ADR-0069 (oversized writes are prevented at the prompt and the
+tool). Closes LocalHub#74.
+
+Context: on the Anthropic wire protocol — which any local server can speak
+(`kind = "anthropic"` with a LAN `base_url`) — a tool call whose
+`input_json_delta` fragments stop partway through a string because the model
+ran out of output budget surfaced as `stream decode error: tool input: EOF while
+parsing a string at line 1 column 41806`. Nothing had failed to decode: the
+buffer was exactly what the model sent. The decoder judged the block at
+`content_block_stop`, one event before `message_delta` carries
+`stop_reason: max_tokens`, reported a generic `StreamDecode`, and the harness
+broke out of the stream before the diagnosis arrived. The typed
+`MalformedToolArguments` (and with it the ADR-0038 chunked-write rung) was
+unreachable on this adapter, while the OpenAI decoder already handled the same
+condition correctly.
+
+Decision:
+
+- **Well-formed tool blocks still flush at `content_block_stop`**; only the
+  *failure* decision waits for the stop reason. An unparseable accumulation is
+  parked in block order. `stop_reason: max_tokens` discards it — never
+  repaired, never emitted as a `ToolCall` (a truncated file write that
+  "succeeds" is worse than one that fails) — and the `OutputLimit` names the
+  tool and its byte count. Any other ending, `message_stop`, or end of stream
+  reports it as `MalformedToolArguments { tool, bytes, reason }`.
+- **`ModelEvent::OutputLimit` carries `truncated_tools: Vec<String>`** — every
+  call the cap cut off, from both decoders (the OpenAI adapter's `length`
+  finish discards its whole pending set, which may hold parallel calls). A
+  singular field could name the wrong call and hide the write.
+- **The harness steers once, and never degrades.** An output-budget fault is
+  not the model losing coherence, so it never feeds the bad-output ladder.
+  When a truncated call is a file-write tool, the turn appends the
+  chunked-write instruction (the ADR-0038 prompt) as a synthetic user message
+  and retries once per turn; a second cap hit in the same turn, or a
+  truncation with no file write among the calls, stops the turn honestly. The
+  stop message says the cap is shared by prose and tool arguments — the
+  observed failure had `max_tokens = 16384` and still ran out because the
+  model narrated at length before opening the call — so it recommends a
+  shorter answer, chunked writes, or a raised cap in that order.
+- **No user-visible text carries a bare `serde_json` column offset** for this
+  condition.
+
+Boundary and compatibility: `truncated_tools` is serde-defaulted and skipped
+when empty, so persisted or RPC-carried events remain readable. Pinned by the
+Anthropic decoder tests for cap truncation, complete-but-invalid payloads,
+missing stop reason, and multi-block index order; the OpenAI parallel-call
+`length` test; and the harness steer-once / second-limit / no-write tests.
+
+## ADR-0157: Unbracketed Paste Is Classified By Queue Evidence, Not Processing Time
+
+Status: Accepted. Amends ADR-0148 (the legacy key-record paste classifier).
+
+Context: on Windows, Crossterm never yields a bracketed `Event::Paste`, so a
+paste arrives as one key record per character and every newline is an Enter
+key. ADR-0148's fallback absorbed the first Enter of a run only when a "dense"
+prefix of at least three records had been *processed* within 5 ms of the run's
+start. That measured the terminal loop, not the paste: the idle host draws a
+frame per key and the operation pump draws between 64-record batches, so any
+first line longer than a few dozen characters pushed its Enter outside the
+window and turned it into a submit. One paste became a prompt plus one steer
+per long paragraph, while a paragraph whose first line happened to be short
+stayed whole.
+
+Decision:
+
+- **Only queue evidence and the continuation window classify a key.** The
+  first Enter of a run is paste content when more input is already queued
+  behind it (`buffered_after`, the zero-duration probe of ADR-0148) *and* a
+  run is under way — text staged, or the 150 ms continuation window still
+  open. No wall-clock density measured at processing time takes part. A human
+  can only forge that shape if the UI stalls across the whole
+  character+Enter+character sequence, the same trade-off ADR-0148 accepted.
+- **Flushing staged text does not end the burst.** Handing the composer the
+  staged text when the queue drains keeps the continuation window and the
+  multi-line confirmation alive, so a paste that reaches the console in chunks
+  is classified once; only idle expiry, a command key, a real bracketed paste,
+  or a focus change end the burst.
+- **An Enter with no paste evidence left submits.** Inside a confirmed
+  multi-line run an Enter is content while text is still staged or more input
+  is queued behind it; an Enter that arrives alone after the staged text was
+  handed over is the user's submit even inside the window (paste, then Enter
+  straight away). A paste whose very first record is a newline likewise
+  still submits the typed prefix; fixing that needs event look-ahead in the
+  hosts and is deferred as a known, tested limitation rather than guessed at.
+
+Boundary and compatibility: `crates/localpilot-cli/src/key_input.rs` only; no
+host, config, provider, or stored-session change. Pinned by the long-first-line,
+chunked-flush liveness, window-lapse, command-key, and leading-newline tests in
+`crates/localpilot-cli/tests/key_input.rs`.
+
+## ADR-0156: Successful Tool Runs Group Only As An Opt-In Timeline Projection
+
+Status: accepted
+
+The full-screen timeline may summarize a run of three or more consecutive
+successful tool items behind one expandable row, but only when
+`[terminal] group_successful_tools = true` (or the equivalent session toggle in
+`/settings`). The compatibility default is `false`. Any non-tool item, running,
+failed, or cancelled tool ends a run.
+
+Grouping is presentation-only. Provider-neutral runtime events, retained
+`TimelineItem`s, session storage, and exit/export transcripts keep every
+original tool. A collapsed summary reports the tool count, aggregate duration
+only when every duration is known, whether retained details are hidden, and
+whether any member hit the independent terminal retention bound. Expanding the
+summary reveals the original tool rows, which retain their own disclosure
+controls.
+
+The summary is a typed focus target but not selectable source text. F7/F8,
+Enter, Escape, and prefix clicks use the same `ToolAction` authority as an
+ordinary tool. Search expands the containing group before revealing an original
+match; an anchor inside a collapsed member resolves to the group headline; and
+a selection spanning a collapsed run inserts a counted
+`… N successful tools grouped …` marker instead of silently dropping or joining
+hidden source. Turning grouping off restores the original projection without a
+transcript migration.
+
+Reason:
+
+- repeated successful tools are useful progress evidence but can dominate the
+  conversation's visual hierarchy
+- keeping the feature opt-in preserves the already-approved compact default
+  while making the denser view available for tool-heavy workflows
+- projection-only grouping avoids a second transcript model and keeps search,
+  export, persistence, and provider contracts grounded in retained originals
+- typed focus, explicit omission copy, and non-color/screen-reader cues make the
+  space-saving interaction inspectable rather than opaque
+
+## ADR-0155: `localx`, One Umbrella Command For The Whole Stack
+
+Status: Accepted. Extends the binary-distribution decisions (D011 stack-as-a-set,
+D012 shared PATH `bin/`) and the release-train model.
+
+A single `localx` binary provisions and refreshes the entire LocalX stack, so a
+user no longer has to know that the stack-installer lives under `localpilot`.
+
+- **One install core, two verbs.** The release train, the per-tool install loop,
+  the source-build path, and PATH activation move out of the `localpilot update`
+  command into a new `localpilot-stack` crate (depending only on
+  `localpilot-dist` + `anyhow`, keeping dist's on-disk-contract charter intact).
+  Both `localpilot update --all` and `localx` route through it, so there is
+  exactly one copy of the loop. `localx install` and `localx update` share one
+  `install(selection, tag, channel, …)` entry; the verbs differ in intent
+  (provision at a tag vs. refresh to the newest), not in mechanism.
+- **`localx` ships as a second binary from the LocalPilot release.** The train
+  gains a fifth member whose repository is LocalPilot but whose release manifest
+  is a per-tool `manifest-localx.json`, published alongside the historic
+  `manifest.json`. This lets two binaries ship from one repo release without
+  breaking the one-manifest-one-executable assumption the other four rely on.
+  `localx` self-updates as a train member; the bootstrap installer shrinks to
+  "fetch `localx`, run `localx install`".
+- **A prerelease (developer) channel.** `localx install`/`update --prerelease`
+  builds each app from its repository's latest `main` commit
+  (`cargo install --git … --branch main`) instead of the newest published
+  release — the way to test pushed-but-uncut work. It needs a Rust toolchain,
+  installs to cargo's bin directory (as a from-source build always has), and
+  covers the app tools only; the llama.cpp engine always uses its released
+  binaries. This is deliberately distinct from GitHub's *tagged* alpha/beta/rc
+  pre-releases, which remain part of the release channel's newest-tag resolution.
+- **The engine is delegated, not re-implemented.** `localx` refreshes the
+  llama.cpp engine by invoking the installed `localbox update`, which is
+  non-interactive by construction (plan/effect split), so no LocalBox change was
+  needed. Model and engine ownership stay in LocalBox.
+- A precise engine tag/variant in `localx status` is deferred: it would need an
+  offline stamp seam in localbox that would make `localbox --version` fragile for
+  a status nicety. The engine *refresh* — the value — works today.
+
+## ADR-0154: The Inline Chat Host Is Retired
+
+Status: accepted. Completes the transition begun by ADR-0107 and made default by
+ADR-0129; supersedes the inline-rendering records ADR-0021 and ADR-0039 for the
+interactive chat host.
+
+The temporary inline rollback host is removed. `localpilot chat` (bare and every
+supported launch path) resolves unconditionally to the full-screen application in
+`localpilot-terminal-ui`; the `LOCALPILOT_CHAT_UI` selector and its `ChatUi` enum
+are gone, and no runtime or configuration path can select an inline host. The
+`localpilot-tui` crate is deleted from the workspace.
+
+The contracts the full-screen host consumed from `localpilot-tui` no longer need
+a two-host home. The slash-command surface already lived in the neutral
+`localpilot-slash` crate (ADR-0144), so `Host::Inline`, the inline `parse_slash`
+entry point, and the catalog's inline visibility column are removed with it — the
+catalog now generates only the full-screen and pair pickers, and
+`specs_for(Fullscreen)`/`specs_for(Pair)` are unchanged. The small
+`ApprovalRequest` DTO becomes a CLI-local type in `interactive_session`. LocalBox
+terminal consent collapses to explicit-command consent (ADR-0130): the retired
+approver-dialog path (`TerminalConsent::Prompt`) is gone, so an `Ask` decision
+proceeds on the explicit `/localbox` command and only a hard `Deny` blocks.
+
+Inline-only tests (the inline-viewport invariants, the event-loop and rendering
+tests, and the inline parse-semantics assertions) are removed; non-TTY/plain
+output and terminal-restoration coverage are preserved. Full-screen and pair
+behaviour is unchanged.
+
+The project owner authorized this retirement ahead of the deferred
+cross-terminal/real-screen-reader physical acceptance pass that ADR-0129 named;
+that gate is discharged by owner decision rather than a recorded pass.
+
+## ADR-0153: LocalMind Terminal Review Writes Use The Host Permission Seam
+
+Status: Accepted. Extends ADR-0011 (review-gated memory), ADR-0010 (permission
+invariants), and ADR-0129 (full-screen chat).
+
+Decision:
+
+- **Presentation emits intent, never writes.** The terminal model owns review
+  selection, valid-state controls, and a deliberately entered session-local
+  reviewer identity. It emits only typed Accept, Reject, or Promote intents and
+  has no LocalMind dependency. Edit and Defer remain in LocalMind's standalone
+  review surface.
+- **The CLI supplies the missing authorization boundary.** LocalMind's
+  `review_decide` and `promote` functions are direct mutations, so the
+  full-screen host represents every intent as an interactive in-workspace
+  overwrite effect and evaluates it with the live `PermissionEngine`. `Ask`
+  routes through the production `TuiApprover`; `Deny` returns before a blocking
+  worker or engine mutation starts. Explicit bypass/unrestricted profiles keep
+  their existing documented behavior.
+- **Mutations finish at one durable boundary.** After authorization, the CLI
+  calls the existing LocalMind API off the async driver, awaits completion in
+  the established full-screen operation pump, and reloads the six-section data
+  on success. UI state narrows obviously invalid actions, while LocalMind remains
+  authoritative for stale or concurrently changed candidate state.
+
+Boundary and compatibility: no LocalMind API, store schema, review mode, or
+permission profile changes. The reviewer is not derived from provider/session
+metadata and is not persisted by the tab. Removing the three key actions
+restores a read-only view without affecting standalone review. Pinned by denied-
+write, interactive Ask allow/deny, approved mutation, reviewer/state, and refresh
+tests.
+
+Rejected: calling direct review APIs because the keypress is user-authored (it
+bypasses configured policy); granting the presentation crate engine access
+(breaks layering); inventing a second confirmation channel (approval drift); and
+defaulting reviewer identity (not a deliberate human claim).
+
+## ADR-0152: Full-Screen LocalMind Uses A CLI-Injected Neutral Workspace Tab
+
+Status: Accepted. Extends ADR-0129 (full-screen chat), ADR-0144 (shared host
+surfaces), and ADR-0036 (LocalMind adapter boundary).
+
+Decision:
+
+- **One product tab owns six internal sections.** The ordinary full-screen top
+  bar exposes Session and LocalMind; selecting LocalMind or entering
+  `/localmind` opens Docs, Graph, Memory, Review, Skills, and Audit. Tab and
+  Shift+Tab cycle those sections, while Escape returns to Session. LocalMind
+  state is separate from transient Help/Diff/Settings/Report takeovers, so tab
+  switches preserve section, selection, and reviewer state and an overlay
+  dismisses back to the tab beneath it. Inline and pair hosts do not expose the
+  command or tab.
+- **The CLI joins engine and presentation.** `localpilot-localmind` exports
+  LocalPilot-owned read summaries for the documentation index, architecture
+  overview, memory, review queue, and audit. The CLI resolves the nearest store,
+  reads those APIs plus LocalPilot's skill-proposal store, and injects neutral
+  strings/rows. `localpilot-terminal-ui` and `localpilot-tui` remain free of
+  LocalMind and other engine dependencies.
+- **Read surfaces are inert and bounded.** A missing project store produces empty
+  guidance without creating project `.localmind/`, `.localmind.toml`, or
+  `.localpilot/` state. Existing-store memory/review reads retain LocalMind's
+  configured user-global store behavior.
+  Collections are capped and sanitized at the host/presentation boundaries;
+  read-only text rendering computes exact wrapping but allocates only the visible
+  viewport. Skills is advisory and read-only.
+
+Boundary and compatibility: the root-tab model gains one presentation-owned,
+session-local state slot; there is no store schema, LocalMind submodule,
+provider contract, or dependency change. The standalone LocalMind UI remains
+the richer management surface. Removing the tab plus the single catalog row and
+dispatch makes the additive workspace unreachable. Pinned by catalog and
+host-routing tests, tab/overlay precedence and persistence tests, six-section
+input/render tests, 10,000-row bounding/window tests, absent-store tests, and
+dependency-tree checks.
+
+Rejected: six root tabs (duplicates section lifecycle/input behavior); storing
+LocalMind in the transient takeover slot (hidden state would capture Session
+input or be clobbered by the next overlay); a decorative tab that still requires
+the slash command; reading the engine from a presentation crate (layering
+regression); initializing a store to display an empty view (a read causing
+writes); and reproducing LocalMind's full standalone management UI (scope and
+ownership drift).
+
+## ADR-0151: Chat Hosts Drive The Persisted Self-Improvement Loop
+
+Status: Accepted. Amends ADR-0034 (human-gated patch generation), ADR-0128
+(deferred self-improvement), ADR-0138 (thin loop orchestrator), ADR-0129
+(full-screen chat), and ADR-0144 (shared long-running command hosting). Closes
+LocalHub#69.
+
+Decision:
+
+- **One loop and one approval seam.** `/selfimprove` in both interactive hosts
+  delegates to the existing `localpilot-selfimprove` orchestrator and its
+  `.localpilot/selfimprove/state.json`; chat owns no shadow stage machine.
+  `/selfimprove next` can propose, report the Proposed gate, build an Approved
+  tree, or request reload, but it has no approval argument. Only
+  `/selfimprove approve <reviewer>` may reach the existing
+  `ApprovalToken::approve(id, reviewer) -> Orchestrator::approve` seam.
+- **Selection and approval are explicit and informed.** Start runs the read-only
+  review. One finding may be selected automatically; multiple findings are
+  rendered with stable one-based ranks and create no proposal until the user
+  submits `/selfimprove start <rank>`. Approval reopens and displays the exact
+  persisted id, summary, and bounded patch before a terminal confirmation that
+  repeats the id and human reviewer. The host rechecks both stage and id after
+  the dialog; concurrent/stale state fails closed.
+- **Long work uses the established host pumps.** Review and build blocking work
+  is moved off the async driver. Proposal generation is cancellable before its
+  atomic `propose` transition. The underlying self-dev build has no safe
+  cancellation seam, so a cancellation request remains visible but the host
+  awaits its durable success/failure boundary instead of detaching a worker.
+  Findings, diffs, and logs have byte/line ceilings and use each host's normal
+  report projection.
+- **Reload is deferred past terminal restoration.** Built→Reloaded requires its
+  own confirmation because it exits the live chat and replaces the process. The
+  pumped action returns a typed deferred-reload result and exits the host. Inline
+  raw modes and full-screen alternate-screen modes are restored first; only the
+  caller then invokes the existing `Orchestrator::reload`. That orchestrator
+  remains responsible for marking Reloaded before swap and rolling back to Built
+  if relaunch fails.
+
+Boundary and compatibility: CLI `selfimprove status`/`next`/`reset`, loop-state
+schema, proposal format, provider APIs, and self-dev lifecycle are unchanged.
+The slash catalog gains one shared row (35 inline / 39 full-screen / 8 pair),
+and pair collaboration deliberately keeps the action unavailable. Reverting the
+typed slash action, two host adapters, and post-restore handoff restores the CLI-
+only surface without migrating state. Pinned by grammar/catalog tests,
+stage-policy and no-next-approval tests, bounded-output tests, full-screen pump
+routing, existing CLI gate tests, and terminal-restoration witnesses.
+
+Rejected: a chat-local state machine (drift and split persistence); permitting
+`next --approve` (autonomous paths could grow approval authority); silently
+choosing among multiple findings (uninformed scope); defaulting reviewer identity
+(not a deliberate human claim); abandoning a blocking build worker (unknown
+partial lifecycle); and calling reload from raw/alternate-screen mode (corrupted
+terminal or an invisible successor).
+
+## ADR-0150: LocalBox Owns Catalog And Run-Profile Resolution
+
+Status: Accepted. Amends ADR-0130 (LocalBox adoption) and ADR-0144 (shared
+long-running command hosting). Closes LocalHub#66, LocalHub#67, and LocalHub#68.
+
+Decision:
+
+- **LocalBox owns launch identity and settings.** A schema-versioned
+  `localbox models --json` contract exposes canonical launch keys, aliases,
+  model/quant identity, required mode, and typed tuned/default profile state.
+  LocalPilot consumes that contract defensively; it does not duplicate a model
+  list or parse LocalBox prose. The same LocalBox resolver accepts every
+  advertised alias and supplies one run-profile outcome to direct, guided, and
+  externally requested launches.
+- **Serving is the user action; adoption is its completion.**
+  `/localbox serve <model>` resolves the catalog identity, starts that exact
+  model when it is not already active, waits on the documented endpoint, writes
+  the local provider through the existing permission gate, rebuilds the live
+  registry, and switches the idle session. `/localbox adopt` still adopts an
+  already-running server. `/localbox adopt --serve <model>` parses to the new
+  serve action as a compatibility alias, while help teaches the direct verb.
+- **Fallback cannot hide behind null child stdio.** LocalPilot preflights the
+  typed run-profile state before starting LocalBox. A missing, invalid,
+  unsupported, or incompatible profile produces LocalBox's actionable warning
+  and no launch. The user may configure tuning or explicitly retry once with
+  `--allow-untuned`; only then does LocalPilot pass that flag to the child.
+  LocalBox itself prompts default-no on an interactive direct launch and refuses
+  non-interactive fallback without the same explicit flag. `--no-auto-best`
+  remains LocalBox's deliberate defaults policy; `--auto-best` is retained as a
+  strict compatibility spelling.
+- **Catalog listing stays bounded and inert.** `/localbox models` uses fixed
+  argv, a 1 MiB wire ceiling, schema validation, control-character stripping,
+  per-field limits, and the existing bounded full-screen report presenter. It
+  does not start a model or write project config. Version skew fails with update
+  guidance and the older `localbox info` escape hatch.
+
+Boundary and compatibility: the provider TOML shape, readiness endpoint,
+permission effects, cancellation ownership, and transcript remain unchanged.
+The catalog schema is additive within version 1; an incompatible schema fails
+closed. Reverting the two new slash actions and LocalBox contract restores the
+old adoption-only surface. Pinned by parser/route parity, schema and sanitizing
+tests, tuned/default profile resolution tests, different-running-model serve
+tests, permission/adoption regressions, and both host suites.
+
+Rejected: a LocalPilot-owned catalog (drifts); using `/v1/models` as available
+models (it only reports what is serving); parsing `localbox info` prose
+(unversioned); surfacing child stderr (suppressed in terminal hosts); and
+silently falling back to raw defaults (the original OOM-prone bug).
+
+## ADR-0149: Interactive Research Is A Bounded Durable Conversation Exchange
+
+Status: Accepted. Amends ADR-0060 (research outputs), ADR-0129 (full-screen
+chat), and ADR-0144 (shared long-running command hosting). Closes LocalHub#63.
+
+Decision:
+
+- **One normal session append authority.** A successful interactive research run
+  appends the topic as a user message and its projected result as an assistant
+  message through `SessionRuntime`'s existing append path. The assistant message
+  carries the stable synthetic origin `research result`; the host-derived user
+  line separately carries `research topic`. Those origins distinguish the
+  derived prompt and projected evidence from human/provider prose without
+  introducing a new event variant or stored-session format. Both enter
+  subsequent provider requests, compaction, forks, and resume exactly once.
+  Resume shows these named origins but continues hiding unrelated synthetic
+  repair messages.
+- **Bounded structured context, complete disk artifact.** The model-visible
+  projection is at most 4 KiB and contains the topic, coverage, numbered findings
+  (`F…`), bounded source locators/fetch IDs (`F…:S…`), numbered open questions
+  (`Q…`), omission counts, and a relative pointer to the Markdown report. A
+  reserved tail keeps omission/open-question metadata from being starved by long
+  findings. Raw evidence bodies remain report-only; the full redacted report is
+  still written before completion is returned.
+- **Untrusted and secret-safe by construction.** The projection labels findings
+  and sources as untrusted data, never instructions. Every field is redacted
+  before UTF-8-safe clipping (so truncation cannot split a recognizable secret
+  into an unrecognized prefix), control characters are removed, and the final
+  aggregate is redacted again.
+- **One completion boundary in both hosts.** Inline and full-screen chat render
+  the same returned projection as an assistant item and record it once after the
+  run returns. A stop request is signal-then-await: a well-formed written result
+  joins the conversation as `Partial`. An error or absent result adds no exchange;
+  a runtime already servicing a provider turn refuses the append loudly.
+
+Boundary and compatibility: no command spelling, config key, provider wire
+shape, event variant, event-format version, or report format changes. Headless
+research still prints and writes as before; it returns structured completion to
+its caller but has no session to mutate. Reverting the completion projection,
+runtime append method, and the one replay exception restores report-only
+interactive behavior. Pinned by bounded/redaction/provenance projection tests,
+next-request and event-log tests, exactly-once resume tests, synthetic-noise
+filtering, partial labeling, and refusal tests.
+
+Rejected: injecting the full Markdown report (unbounded context and raw evidence
+exposure); storing only a path (follow-up turns cannot discuss findings without a
+tool round trip); UI-only notices (lost on the next model call and resume); and a
+new `MessageOrigin` variant (unnecessary stored-event compatibility churn).
+
+## ADR-0148: Active Input Wakeups Are Independent From Honest Working Chrome
+
+Status: Accepted. Amends ADR-0129 (the full-screen host) and ADR-0144 (the
+generic long-running operation pump). Closes LocalHub#61, LocalHub#64, and
+LocalHub#65.
+
+Decision:
+
+- **Service input separately from frames.** Active operations give Crossterm one
+  short-lived poll/read-affine reader thread that wakes the async pump as soon as
+  input exists. The pump drains records in bounded batches; an independent
+  50 ms Tokio tick drives progress, heartbeat, and elapsed frames and skips
+  missed ticks. The reader stops and its channel drains before completion is
+  projected, so a boundary Enter cannot disappear. Runtime, approval, question,
+  cancellation, completion, and geometry semantics remain on the same async
+  pump. This removes the former redraw-sized input floor without rendering for
+  every poll.
+- **Never sleep to classify an ordinary key as paste.** The Windows
+  unbracketed-paste probe uses Crossterm's zero-duration poll. Once the terminal
+  emits a real bracketed `Event::Paste`, the fallback retires for the session.
+  Before that proof, the classifier requires a dense multi-record prefix before
+  absorbing an embedded Enter and preserves a confirmed multiline paste as one
+  atomic editor unit. *(Amended by ADR-0157: the dense prefix measured loop
+  processing time and split long-lined pastes; classification now rests on
+  queue evidence and the continuation window only.)* A final Enter after scheduler-bunched human text flushes
+  the staged text and follows normal submit routing.
+- **Derive visible activity from operation identity.** Each busy session
+  projection owns a sanitized high-level label and monotonic start instant.
+  Rendering derives a four-frame heartbeat plus `MM:SS` (or `HH:MM:SS`) elapsed
+  text. Starting a new operation resets the clock and `Stopped`/conversation
+  clear removes it. Generic turns say `Working`; manual digest/compaction says
+  `Compacting`. No timer task, percent estimate, or invented internal phase is
+  added.
+
+Boundary and compatibility: no config, command, provider, transcript, event-log,
+or stored-session schema changes. Idle terminal polling retains its established
+50 ms bound; only the generic active-operation driver changes. Pair projections
+use the same per-projection activity identity. Pinned by zero-timeout paste-probe
+tests, bracketed-paste retirement, genuine multiline-paste and bunched-human
+single-Enter tests, boundary-safe operation-pump tests, work-lifecycle tests, and
+deterministic silent-tick/heartbeat/elapsed rendering tests.
+
+Rejected: polling input only on the 50 ms frame tick (observable lag and
+queued-key paste misclassification), redrawing for every input probe
+(unnecessary terminal traffic), a second animation task (two lifecycle
+authorities), and synthetic compaction stages or percentages that the runtime
+cannot measure.
+
+## ADR-0147: Active-Turn Controls, Staged Ctrl+C, And Stream-Segment Openers
+
+Status: Accepted. Amends ADR-0071 (mid-turn permission-profile switching) and
+ADR-0144 (the shared slash-command surface). Closes LocalHub#70, LocalHub#71,
+and LocalHub#72.
+
+Decision:
+
+- **One host-aware live-command contract.** `localpilot-slash` owns
+  `SlashAction::runs_live(Host)`. Inline and full-screen turns both admit
+  profile changes, `/bg`, `/effort`, and `/think`; the full-screen host also
+  admits its existing `/help`, `/theme`, `/search`, and exit takeovers. Pair
+  remains unchanged. Idle-only actions such as `/clear`, `/model`, settings,
+  and diff are refused with a notice that names the live alternatives. Enter
+  and Ctrl+Q pass slash submissions through the same active-turn dispatcher,
+  so Ctrl+Q can never consume a slash command without executing or refusing it.
+- **Interior-mutable live controls with explicit effect boundaries.** The
+  permission engine remains a shared `PermissionEngineHandle`, `/bg` uses the
+  session's shared background registry, and reasoning effort gains a
+  `ReasoningEffortHandle` (`Arc<RwLock<Option<ReasoningEffort>>>`). A turn clones
+  those handles before it mutably borrows `SessionRuntime`. Profile swaps govern
+  the next tool call; effort swaps govern the next provider request, including
+  a later request in the same turn. Runtime-driven operations without those
+  handles refuse rather than pretending to apply a change. Poisoned locks
+  recover their valid inner value.
+- **Ctrl+C is a state ladder when no selection is active.** Selection copy keeps
+  precedence and its established consecutive-press exit behavior. Otherwise a
+  nonempty composer is atomically stashed and cleared without arming exit. With
+  active work, the next empty-composer press requests cancellation and arms
+  exit; the following consecutive press exits. With idle work, the empty
+  composer arms and the next press exits. Any other input disarms the pending
+  exit. Footer and help text describe the current rung. The existing editor
+  snapshot preserves compact-paste and image attachments for restoration.
+- **Normalize only new streamed segment openers.** When a new assistant or
+  reasoning timeline item is opened, leading CR/LF framing is removed and a
+  whitespace-only opening delta is dropped. Once the item exists, every later
+  delta is appended unchanged, preserving intentional interior/trailing
+  whitespace. Raw stream-byte accounting remains unchanged. The rule applies
+  again after a tool boundary opens a new segment, so the item glyph shares its
+  first rendered row with prose.
+
+Boundary and compatibility: no command spelling, config key, provider wire
+shape, stored transcript format, or pair behavior changes. The shared effort
+handle is seeded from `SessionConfig.reasoning_effort`; thereafter it is the
+runtime source of truth. Reverting this ADR restores the host-local live gates,
+direct effort field read, immediate Ctrl+C cancellation, and raw segment
+openers. Pinned by the slash host-matrix tests, same-turn provider-request effort
+swap, inline/full-screen active-control tests, Ctrl+Q routing/refusal tests, the
+Ctrl+C state matrix and host cancellation test, and backend-rendered segment
+glyph tests.
+
+Rejected: separate inline/full-screen allowlists (they caused the drift); a
+mutable runtime callback from the input pump (it conflicts with the in-flight
+turn borrow); treating Ctrl+Q slash text as provider typeahead; trimming every
+stream delta (it would destroy intentional mid-segment formatting); and
+discarding a typed draft instead of using the existing atomic stash.
+
+## ADR-0146: No-Progress Guard — Recoverable Signal, Windowed Repeats, User-Only Steering Reset, Diagnosable Stop, And Synthetic-Not-Intent Compaction
+
+Status: Accepted. Amends ADR-0052 (the always-on degenerate-loop guard's
+constants) and ADR-0055 (the built-in default rail that fills only the maximum
+and marks the budget not-operator-explicit). The always-on guard's own stop
+notice was degrading the context the model needs; this makes the guard
+recoverable and diagnosable without weakening halting.
+
+Decision:
+
+- **Thresholds stay constants, not configuration (ADR-0052 upheld).** The window
+  (12 successful calls), the repeat threshold (3), the distinct floor, and the
+  new one-shot grace (`NO_PROGRESS_GRACE_CALLS = 1`) are fixed constants
+  co-located with the detector in `recovery/detect.rs`; the consecutive-failure
+  backstop's `UNPRODUCTIVE_CALL_LIMIT` stays in `harness/session.rs`. No new
+  config surface.
+
+- **The detector exposes two views, not an irreversible latch.** A *dynamic*
+  typed signal (`StuckRepeat{count}` / `NoveltyDecay{distinct, window}` / none) is
+  recomputed on **every** successful observation. The default rail reads it and,
+  after the one-shot nudge, grants exactly one grace dispatch; that grace call's
+  observation recomputes the signal, and the turn continues only if the
+  recomputed signal is inactive — the current pair is below the repeat threshold
+  *and* novelty decay is inactive (the window is not full, or its diversity is at
+  or above the floor). A genuinely new call clears a stuck repeat when it does not
+  simultaneously leave novelty decay active, and a borderline novelty window can
+  clear as diversity rises; one novel signature does not by itself clear a
+  deeply-decayed full window. If the recomputed signal is still
+  active, the turn stops. A separate *monotone since-reset* view preserves the old
+  latch behaviour exactly for the explicit cost controller (a turn that trips
+  below its soft start still stops at the soft start), so operator-budget
+  behaviour is unchanged. The one-shot nudge and the single grace are minted once
+  per turn.
+
+- **User-only steering reset.** A user soft interrupt admitted at a safe boundary
+  resets the progress breakers (the detector's history, both signal views, and
+  any pending grace, plus the unproductive-call streak and the error/tool-failure
+  breakers) through one shared reset path at all four admission boundaries — the
+  user changed the trajectory. It never resets the accumulated tool-call count,
+  the cost budget, the wall-clock deadline, or the already-spent per-turn nudge;
+  a System- or background-task interrupt resets nothing.
+
+- **Repeats are window-bounded.** Repeat accounting is decremented on eviction
+  from the single 12-success window (and its map entry removed at zero), so
+  "three times" means three within the window — not across the whole turn — and
+  the repeat map stays bounded by the window.
+
+- **Diagnosable stop, unchanged coarse contract.** Every no-progress stop keeps
+  the coarse `stop == "NoProgress"` tag byte-for-byte (so the self-review friction
+  finding and the scorecard are unaffected) and additionally records a precise,
+  frozen-grammar `TurnEnded.detail` — `signal=stuck_repeat tool="…" count=…`,
+  `signal=novelty_decay window=… distinct=…`, or `signal=consecutive_failures
+  count=…` — on the existing additive `detail` field. No new event field, no
+  `StopReason` payload, and no `SESSION_EVENT_FORMAT_VERSION` bump. One pure
+  builder returns two values: the **notice** (the stop `Warning` and the synthetic
+  `Role::User` message use these same bytes) and the frozen **detail** (embedded
+  inside the notice and persisted verbatim in `TurnEnded.detail`). Stuck-repeat
+  provenance names the tool captured at the observation that produced the signal,
+  never a later failing grace tool.
+
+- **Synthetic messages are evidence, never intent (compaction).** The guard's
+  stop notice is a synthetic `Role::User` message; compaction no longer elects it
+  as the session goal. The compacted Goal is the chronologically-latest real user
+  intent (an overwritten `Option<String>`, not a lexically-ordered set), and a
+  synthetic user message contributes no Goal/Constraints/NextSteps intent while
+  its role-agnostic evidence classification still applies.
+
+Provenance: all code, tests, identifiers, and the `signal=…` grammar are original
+to this repository (clean-room). Rollback and compatibility: the change is
+self-contained to the harness/recovery/store/selfreview crates; the additive
+`detail` is back-compatible (old logs default it to `None`, old builds ignore it),
+`stop` and the format version are unchanged, and reverting the grace + the
+two-view detector restores the prior halting behaviour. Pinned by the
+`localpilot-recovery` detector tests, the `localpilot-harness` budget/rails and
+`no_progress_detail` suites, the `localpilot-store` round-trip, and the
+`localpilot-selfreview` friction-compat test.
+
+## ADR-0145: Skills Are Usable From Chat — Canonical Live Trust, Package Discovery UX, And Lane Separation
+
+Status: Accepted. Clarifying amendment to ADR-0027 (the pull-based, opt-in skill
+model), ADR-0097/0098/0099 (global baseline overlay, sources, review-only
+discovery), ADR-0143 (workspace trust), and ADR-0144 (the shared slash surface).
+It changes no security boundary; it makes installed skills usable from an
+interactive chat session and makes the diagnostics truthful. Closes LocalHub#60.
+
+Decision:
+
+- **Canonical live-session trust.** `SessionRuntime.trusted` (`SessionConfig.trusted`,
+  via `set_trusted`) is the one live authority every `ToolContext` and resume path
+  reads. It is derived from the folder-trust store, not the permission profile: a
+  single launch snapshot `trust_required = prompt_required(profile, cwd)` is
+  computed once in `InteractiveSessionSetup::resolve`, used for `SessionConfig.trusted
+  = !trust_required` and for the host trust gate (no re-read, no TOCTOU), and copied
+  into every built runtime including both pair peers. When the user accepts the trust
+  dialog, full-screen (ContinueSession + Remember) and inline accept paths set runtime
+  trust true before any live/resumed work; a pair grants both peers all-or-error before
+  spawn. The full-screen `session_trusted` resume shadow and the inline `state.trusted`
+  trust-authority are removed, so resume reads the same value as a live turn. Memory-only
+  (ContinueSession) vs persisted-store (Remember) is preserved; the launch gate is
+  unweakened.
+
+- **Package discovery UX.** The installed SKILL.md package catalog (the user-global
+  baseline plus the trusted project overlay) is reachable by the model through three
+  read-only tools: `skill_list` pages the whole discoverable catalog (name + one-line
+  summary + scope, bounded/paginated, default 50 / max 100), `skill_search` ranks it by
+  one skill-local normalization signal shared by the inclusion gate and the ranking
+  (punctuation-insensitive: `threejs`↔`Three.js`; matches name + description + command
+  triggers; honest overflow/no-match counts, never a fabricated hit), and `skill_load`
+  reads one skill's body by exact name. The shared `word_overlap` relevance core and the
+  tool broker are untouched. `UserOnly` packages are never revealed by name,
+  description, or body to the model: `skill_list` may report only the aggregate
+  UserOnly count, `skill_search` excludes UserOnly packages entirely and does not
+  report that aggregate, and a UserOnly package is reachable solely by an exact
+  user-supplied name via `skill_load`.
+
+- **Lane separation.** The installed-package tools are lexically and in prose distinct
+  from the LocalMind advisory-skill lane (`active_skills`/`skill_drafts`); each tool's
+  description and system-prompt cue names its lane and states that one lane's results do
+  not establish the other's presence or absence.
+
+- **Disabled-not-empty cue.** When installed packages are readable but model discovery
+  is off, a single harness-owned system-prompt cue — count-derived and presence-only
+  (the count decides only whether the cue fires; no count, name, or description is
+  injected) — tells the model discovery is disabled, not that no skills exist — and points at
+  `/skills list` or `[skills] autonomous_discovery = true`; it forbids inferring package
+  absence from the LocalMind lane. It is seeded at initial prompt construction and
+  appended monotonically (exactly once) when an in-session trust grant first makes
+  packages readable. `doctor` and a static `/settings` row surface the on/off state
+  truthfully (doctor with trust-safe counts that distinguish unreadable from empty).
+
+- **Opt-in posture reaffirmed.** `autonomous_discovery` stays off by default and gates
+  registration of all three package tools (their schemas + cues are themselves a
+  model-reachable content path); the disabled-not-empty cue is count-derived
+  truthfulness, not content injection. ADR-0027's small-model-first, pull-based posture
+  and ADR-0099's autonomous-load gate hold.
+
+Rejected: merging the LocalMind active/draft lane into the package tools (a disabled
+draft is not an available package); flipping the `autonomous_discovery` default; a
+second trust authority or a second discovery/invocation filter.
+
+## ADR-0144: One Shared Slash-Command Surface For Inline, Full-Screen, And Pair Hosts
+
+Status: accepted. A fifth increment adds the **synchronous command + bounded
+report tier**: `/tree`, `/knowledge`, `/context`, `/agents`, `/skills`, and `/bg`
+run in the full-screen host and present their output through a bounded presenter
+— a short result is one multi-line `Notice`; a long one opens a scrollable,
+copyable `TakeoverKind::Report` plus one breadcrumb (the body never floods the
+timeline, and is excluded from search and the print transcript); a failure is one
+inline `Warning`. Ceilings are applied to the serialized sanitized body
+(separators and truncation marker included). The 11 fast ingest subcommands route
+here via a production `IngestTier` (`Fast`/`LongRunning`) classifier; the three
+long-running ingest actions and the `/ingest` picker row remained deferred through
+this fifth increment and are delivered by the seventh increment below. The command execution helpers are shared through a presentation-neutral
+seam (the inline host keeps its byte/item-equivalent Notice behaviour). Covers the
+first five increments of LocalHub#56: extracting
+the shared `localpilot-slash` surface; making the five full-screen/pair takeover
+commands (`/help`, `/theme`, `/settings`, `/diff`, `/search`) host-aware parsed
+actions; wiring the four permission profiles (`/default`, `/relaxed`,
+`/bypass`, `/unrestricted`) and `/effort` in the idle full-screen host — each
+updates the runtime permission engine and the shared header/settings projection
+in one synchronous branch (no intermediate frame), so the footer stays truthful;
+and `/think`, a host-level toggle that hides `ItemKind::Reasoning` items from the
+full-screen timeline (render, scroll geometry, search, selection, and
+new-content — the raw items are retained and the `/exit print` path keeps its
+own independent reasoning drop). Modes (`/agent`/`/harness`) stay deferred at this
+increment: the full-screen host has no real mode transition yet, so relabelling the
+footer would make it false; a real mode route is settled in the tenth increment below
+(bare `/harness` proved to be exact inline parity — a silent label flip). A sixth
+increment restructures the full-screen operation pump with no surface change:
+the ~90%-duplicated turn and shell input loops become one generic operation
+driver (detailed in the Boundary), so the catalog stays **34/31/8**. A seventh
+increment puts `/compact` (and `/compact force`) and the three long-running ingest
+runs (`run`/`refresh`/`resume`) on that operation pump as full-screen commands,
+growing the catalog to **34/33/8** (`/compact_force` stays a hidden-but-typeable
+alias). An eighth increment puts `/research` (one-shot `/research <topic>` and a
+persistent bare-`/research` mode) on that operation pump, growing the catalog to
+**34/34/8**; it introduces a typed live full-screen session mode
+(`localpilot_slash::Mode`, Agent/Research reachable — `/agent` the hidden-but-typeable
+research exit, `/harness` still deferred) and a per-prompt `PromptKind` captured at
+enqueue so a mid-queue mode switch cannot reinterpret an already-queued prompt, a
+text-only research attachment contract (a Research-mode prompt carrying images is
+declined before submit with its draft and attachments preserved), and a shared
+prepared-research snapshot so the web-egress disclosure is shown and drawn before any
+request from one config load (no display/egress race). A ninth increment puts the last
+two deferred inline-only resume commands — `/harness-resume` and `/wait-resume` — on the
+pump, growing the catalog to **34/36/8**; each enters `Mode::Harness` synchronously at
+dispatch (mirroring the inline oracle) and snapshots the live model/provider/sandbox
+profile plus the retained single-host session-trust grant (per ADR-0143's
+session-only/remember semantics) at dispatch rather than launch time. Bare `/harness`
+stays deferred (it has no distinct harness prompt loop); `/agent` is the hidden exit.
+A tenth increment closes the loop and corrects the final count. Bare `/harness` becomes
+a real SILENT typed mode entry — exact inline parity (a label flip whose plain prompts
+take the ordinary turn, identical to Agent; the resume commands remain the only real
+harness loop in both hosts), so the earlier "no distinct loop → keep deferred" stance was
+stricter than inline. The two canonical mode commands `/agent` and `/harness` become
+visible full-screen rows (`SetMode` handled by one exhaustive arm where each typed mode
+selects itself — `SetMode(Research)`, though never produced by a spelling, keeps
+`Research(None)`'s egress disclosure rather than a silent bypass). The redundant forcing
+alias `compact_force` stays hidden-but-typeable (`/compact` + `/compact force` already
+cover it; a visible row would duplicate `compact`), so the truthful final full-screen
+surface is **34/38/8** — not the earlier over-counted 39, which only reached 39 by shipping
+`compact_force` as a duplicate. With every `SlashAction` now reaching a real or defensive
+route, the deferred arm and its "not available in full-screen chat yet" notice are deleted,
+and a generated dispatch matrix (derived from the shared spec table, not a hand-maintained
+allow-list) proves every visible full-screen row parses host-aware without `Unknown` and
+reaches a typed pumped/synchronous route; no new ADR.
+
+An eleventh increment moves the already-visible `/localbox` action from the
+synchronous tier onto the same full-screen operation pump, without changing the
+**34/38/8** catalogs. `/localbox adopt --serve <model>` may wait while LocalBox
+starts, so it gets responsive draw/input handling and `Ctrl-C`; unlike in-process
+compact, ingest, research, and resume work, cancellation drops only LocalPilot's
+wait and never stops the unowned server. Success refreshes the idle runtime's
+provider registry and the host's model projections, then switches the existing
+provider-neutral conversation to `local`. This is an amendment to ADR-0130, not
+a new slash-command identity or ADR.
+
+The slash-command surface was defined three times: the inline composer parsed
+and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
+second (a `SUPPORTED` allow-list filtered against the inline table plus
+hand-pushed takeover rows in `localpilot-cli::fullscreen`), and the pair picker
+hand-pushed a third. Three lists drift: a command added to one host silently
+skips the others, and the "why is `/search` in full-screen but not inline"
+knowledge lived only in a test.
+
+Decision: parsing and the three host catalogs are generated from **one** table.
+
+- A new dependency-free crate, **`localpilot-slash`**, owns the parser
+  (`parse_slash` and its helpers — a behaviour-preserving relocation and refactor
+  into lookup-first typed dispatch, proven byte-for-byte by the relocated parser
+  tests) and one globally-ordered `SLASH_SPELLINGS` table. The
+  `SlashCommand` enum, the table, and a `SlashCommand::ALL` identity list are
+  generated from **one** `slash_commands!` macro invocation, so a table row can
+  only name a real variant (a typo is a compile error) and a `the_table_
+  identities_equal_the_generated_command_set` test asserts set equality between
+  the table's identities and `ALL` (an omitted variant or orphan row fails it —
+  no count that can't see a missing variant). Each spelling carries an `ArgSpec`,
+  a `StrayArgs` policy, and a per-host `Option<&str>` description
+  (inline / full-screen / pair). `specs_for(Host)` filters the table by "does
+  this host describe this spelling" and yields that host's catalog in global
+  order. `parse_slash` is **lookup-first**: it resolves the name to its spelling
+  once, then dispatches on the spelling's typed `SlashCommand` through one
+  wildcard-free match (a new identity is a compile error there too), reading the
+  `compact` force flag from table metadata rather than re-matching the spelling
+  string. `localpilot-tui` and `localpilot-cli` both consume it; no host owns a
+  private list.
+
+- The surface is **36 command identities** = 30 shared + 5 takeovers + 1
+  pair-only. This ADR is explicit that two kinds of host-specific routing exist,
+  and they are not the same thing:
+  - **Full-screen/pair takeovers** (`help`, `theme`, `settings`, `diff`,
+    `search`): commands the full-screen and pair hosts service on their own
+    screens. They are now routed through the **host-aware** parser: `parse_slash`
+    (the inline rollback host) still resolves them to `Unknown`, while
+    `parse_slash_for(Fullscreen | Pair, …)` resolves them to real actions
+    (`Help`, `Theme(Option)`, `Settings(Option)`, `Diff(Option)`, `Search(Option)`),
+    so their argument-bearing forms (`/theme dim`, `/diff src`) are handled
+    truthfully instead of reported "unknown". Their **catalog scope stays
+    full-screen/pair-only**: they are not deferred-inline rows and never join the
+    inline picker. Inline stays **34** through #56 (this change adds no inline
+    command); the final full-screen catalog is **38** (33 visible shared rows + 5
+    takeovers — the redundant forcing alias `compact_force` stays hidden-but-typeable,
+    so it is not a full-screen row; see the tenth increment), the takeovers being
+    additive to full-screen while inline is unchanged. A future command could still
+    grow the inline catalog on its own.
+  - **The permanent pair-only `abort`**: `/abort` is owned by the pair
+    collaboration loop, never parsed by `parse_slash`, and never bridged into
+    the inline or full-screen hosts. It is structurally pair-scoped, so it lives
+    only in the pair catalog. Its metadata reflects that owning host: no-arg,
+    rejecting a stray argument with the pair usage notice.
+
+- `ArgSpec`/`StrayArgs` metadata is **truthful against the shipped parser**, not
+  decorative: `skills` is `Optional` (`/skills` → `Skills("")`), `quit` accepts
+  the optional `print` argument like `exit`, `help` and the pair-only `abort` are
+  no-arg (a stray argument is `Invalid`), and `theme`/`settings`/`diff`/`search`
+  are `Optional` — each takes an optional name/query/path in its owning host
+  (`/theme dim`, `/settings mouse`, `/diff src`, `/search foo`). A metadata test
+  exercises the argument shapes so they cannot silently diverge from the parser
+  again.
+
+- Stray-argument behaviour of the **pre-existing shared commands** is preserved
+  exactly, not normalized. `StrayArgs` records the frozen per-spelling policy
+  (`InvalidNoArgs` for the spellings the old parser rejected with an arg,
+  `FallThroughUnknown` for those that fell through to the unknown-command path).
+  Unifying that policy is deliberately deferred. The inline rollback host's parse
+  results stay frozen; the only intended user-visible change is that the five
+  takeover forms are now handled truthfully in full-screen/pair — their
+  argument-bearing forms act (`/theme dim` applies, `/help me` reports
+  "takes no arguments") instead of reporting "unknown".
+
+Invariants are locked by tests, not prose: the three catalogs are asserted
+byte-for-byte (inline / full-screen / pair = **34 / 38 / 8** rows — the four
+permission profiles and `/effort` grew full-screen 19→24, `/think` 24→25, the six
+synchronous commands 25→31, `/compact` + the long-running ingest runs 31→33,
+`/research` 33→34, `/harness-resume` + `/wait-resume` 34→36, then the `/agent` +
+`/harness` mode entries 36→38; inline and pair are unchanged), every semantic name parses to its
+command id, all 36 identities are globally unique and equal to
+`SlashCommand::ALL`, and the frozen stray-arg forms parse as the old parser did.
+The full-screen dispatcher is an **exhaustive, wildcard-free match** — every
+`SlashAction` variant is either handled or listed in an explicit deferred group,
+so a newly-added command cannot fall silently into "deferred" (the profiles and
+`/effort` are now handled arms, not deferred).
+
+The durable obligations that remain OPEN for later work:
+
+- The default full-screen host reaches the **whole** shared command surface —
+  **CLOSED** by the tenth increment at the truthful final **34/38/8**. (The earlier
+  "→ 39 = 34 shared + 5 takeovers" target over-counted: it only reached 39 by shipping
+  the redundant forcing alias `compact_force` as a duplicate `compact` picker row.
+  `compact_force` stays hidden-but-typeable — `/compact` and `/compact force` already
+  cover it — so 38, not 39, is the truthful whole surface.)
+- The **approval-type half of ADR-0129's extraction gate remains OPEN** — only
+  the slash-command types have moved to their neutral home here; the rollback
+  inline host cannot be removed until the approval types are extracted too.
+- A **real full-screen mode transition** (`/agent`/`/harness`) is **CLOSED** by the
+  tenth increment: both are silent typed mode entries at exact inline parity (a label
+  flip whose plain prompts take the ordinary turn, same as Agent), so the footer
+  relabels truthfully rather than falsely — no fabricated distinct loop.
+
+The atomic mode/profile-and-display obligation is **closed for permission
+profiles and effort** in the third increment: each `/default`/`/relaxed`/
+`/bypass`/`/unrestricted` updates the permission engine and then the shared
+header projection in one synchronous branch (no intermediate frame), and
+`/effort` updates the runtime with its value read back single-host in settings
+(`None` → "provider default"; pair, having two runtime owners, shows no effort
+row).
+
+Boundary: the first increment was a pure relocation of where the surface is
+defined (no command added, removed, renamed, or re-described). The second
+increment added **host-aware routing and argument behaviour** for the five
+takeovers in full-screen/pair only. The third increment makes the four
+permission profiles and `/effort` switchable in the idle full-screen host with a
+truthful, atomically-projected footer/settings — the inline composer stays
+frozen throughout, `/abort` stays pair-loop-owned, and modes stay deferred. The
+fourth increment adds `/think`, a host-level reasoning-visibility toggle that
+hides `ItemKind::Reasoning` items from the full-screen timeline (render, scroll
+geometry, search, selection, and new-content route through one visibility
+authority; hidden items are zero-height layout entries so index identity holds)
+while retaining the raw items and leaving the `/exit print` path's independent
+reasoning drop unchanged. The fifth increment wires the six synchronous commands
+(`/tree`, `/knowledge`, `/context`, `/agents`, `/skills`, `/bg`) plus the 11 fast
+`/ingest` subcommands through a bounded report presenter: short output is one
+multi-line Notice, long output opens a scrollable, copyable `Report` takeover
+plus one breadcrumb, and a failure is one bounded Warning — every size measured
+on the serialized sanitized body including separators and the truncation marker.
+The commands stay effectful; a shared UI-neutral `CommandOutput` result feeds the
+inline host (byte/item-equivalent) and the full-screen presenter. `/ingest`'s row
+stayed deferred through that increment pending its three long-running actions (its
+bare form is a long-running action), now dispatched by the seventh increment below;
+a production `Fast`/`LongRunning` classifier routes ingest.
+The sixth increment is a pure internal realization with no surface change: the
+full-screen turn and shell input pumps — previously duplicated arm-for-arm — are
+unified into one generic operation driver behind a small injected terminal-I/O
+seam (poll/read/draw closures; production still calls the exact `crossterm`
+functions) and a by-value context of the ambient owners, parameterised by a typed
+runtime-event/steering/question lane config. The typing carries the real
+invariants: a shell (`Bare`) operation binds an inert receiver and never services
+or drains questions, and steering promotion cannot exist without its runtime-event
+lane. Behaviour is preserved exactly — the poll/read/paste diagnostics stay
+operation-specific, and the completion order (runtime-event drain → projection →
+draw → boundary cleanup) is unchanged, with post-loop approval/question denial
+still running when a draw or input error propagates. The catalog stays **34/31/8**
+and no parser, provider-input routing, Report presenter, or pair pump changes.
+The seventh increment makes `/compact` (and `/compact force`) and the three
+long-running ingest runs (`run`/`refresh`/`resume`) full-screen commands on that
+operation pump. A pumped slash command enters the serial chain as a head variant
+with no timeline item (so no synthetic transcript row); it runs busy, so a single
+Ctrl+C cancels only the command and returns to chat — never an exit: compaction's
+summarizer future is dropped before its history mutation (leaving the conversation
+unchanged), and an ingest walk pauses (resumable). Compaction has no approvals and
+no inner runtime; ingest is a `spawn_blocking` walk whose `Fn() -> bool` predicate
+is a cloned cancellation token plus a cancel-on-drop owner, so every future-drop
+path signals the walk rather than orphaning it. Ingest progress reaches the
+timeline through a UI-agnostic progress lane draining a shared quarter-mark
+throttle, so the generic driver never learns the ingest types; the preflight,
+throttle, and result formatting are shared verbatim with the inline host. The
+catalog grows to **34/33/8** (`compact_force` stays a hidden-but-typeable alias;
+pair unchanged); no new ADR.
+
+The eighth increment puts `/research` on the same pump. Research is the third
+cancellation shape: not compact's drop and not ingest's resumable pause, but
+signal-then-await-partial — a Ctrl+C sets the runner's stop flag and the future is
+kept and awaited so it returns a partial report, never dropped. The full-screen host
+owns a typed live session mode for the first time (`localpilot_slash::Mode`, a
+dependency-free leaf now on `localpilot-terminal-ui`'s path); `set_shared_mode`
+updates the typed authority and every projection (footer, settings, composer hint) in
+one synchronous arm, and `/agent` becomes a hidden-but-typeable real transition solely
+as Research mode's exit while `/harness` stays deferred. A per-prompt `PromptKind`
+captured at enqueue (Agent and Harness drain to a turn, Research reroutes) prevents a
+mid-queue mode switch from reinterpreting a queued prompt, since enqueue and drain
+straddle the queue. The web-egress disclosure — required before any request
+(`docs/07-security-and-privacy.md`) — is satisfied by a shared prepared-research
+snapshot: one config load feeds both the shown disclosure and the runner, the
+disclosure is applied and drawn before the research future is constructed, and the
+snapshot is the sole egress authority so a later config edit cannot broaden the reach
+that was shown. Research is text-only: a Research-mode prompt carrying images is
+declined at the submit boundary before the editor is consumed, preserving the draft
+and attachments. The catalog grows to **34/34/8** (only `/research` becomes visible;
+inline and pair unchanged); no new ADR.
+
+The ninth increment puts `/harness-resume` and `/wait-resume` on the pump — the last
+deferred inline-only resume commands. Each enters `Mode::Harness` synchronously before
+Busy (mirroring the inline oracle) and keeps it across completion, builder/result error,
+and first-cancel; `/agent` is the hidden exit, and bare `/harness` stays deferred (no
+distinct harness prompt loop drives a mode). The model, provider, sandbox profile, and
+workspace trust are LIVE dispatch-time snapshots, not launch-time values: the model and
+provider come from `runtime.active_model()`/`active_provider_id()` (a `/model` switch is
+honored, and passing the live provider makes wait-resume's provider-identity check
+observe an in-session switch and block it), the profile comes straight from the shared
+permission-engine handle, and trust comes from a new single-host `session_trusted` bool
+initialized from the launch trust-prompt result and set true on either accept branch
+(session-only or remember, per ADR-0143) — session-only trust is honored for the live
+resume but never persists, so the launch gate is unweakened; no pair-host change.
+**[Superseded by ADR-0145: the resume-only `session_trusted` shadow was removed; live
+trust is now the one `SessionRuntime.trusted` authority read by resume and every turn.]** The
+inner runtime runs through the existing resume builders with a cloned `TuiApprover` whose
+approvals land on the same `approval_rx` the pump already services (the only new plumbing:
+an `approval_tx` on the host context); its runtime events drain on the `Runtime` lane;
+questions are `Inert` because that runtime is prompter-less. Cancellation is
+signal-and-await through the builder's token — an in-process future, no detached worker,
+so no cancel-on-drop guard; a builder/result error becomes a bounded `Warning`, while a
+terminal I/O failure propagates out of the host. Output is buffered and presented through
+the bounded report presenter, unlike the inline host's single raw notice. The catalog
+grows to **34/36/8** (only the canonical `harness-resume`/`wait-resume` rows become
+visible; the `wait_resume` alias stays parse-only; inline and pair unchanged); no new ADR.
+
+The tenth increment closes the loop. `SetMode` is now one exhaustive arm where each typed
+mode selects itself: `/agent` and `/harness` are silent label flips (no notice, no synthetic
+timeline row — exact inline parity, since inline `/harness` is `state.mode = Harness` and its
+plain prompts take the ordinary turn just like Agent), while a `SetMode(Research)` — never
+produced by a spelling but required for exhaustiveness — keeps `Research(None)`'s egress
+disclosure rather than a silent bypass. The two canonical mode commands flip to `both`, so the
+full-screen catalog reaches its truthful final **34/38/8**; the redundant forcing alias
+`compact_force` stays hidden-but-typeable (a visible row would duplicate `compact`, which is
+why the earlier "39" over-counted). Every `SlashAction` now reaches a real or defensive route,
+so the deferred arm, its "not available in full-screen chat yet" notice, and the orphaned
+`deferred_label` map are deleted; a generated visible-catalog dispatch matrix — derived from
+`specs_for(Host::Fullscreen)`, not a hand-maintained list — proves every visible row parses
+host-aware without `Unknown` and reaches a typed pumped/synchronous route, and the picker,
+autocomplete, and `/help` agree because they project the one shared catalog. Inline and pair
+byte-unchanged (pair stays 8); no new ADR.
+
+The eleventh increment keeps the operation boundary but adds a distinct
+detach-and-report cancellation shape for `/localbox`: the worker owns only the
+launch/readiness/adoption workflow, not the server it asks LocalBox to start, so
+dropping the wait cannot imply teardown. A successful result returns the updated
+session-local config and fresh provider registry to the host; replacement is
+allowed only while the session runtime is idle, transcript history is untouched,
+and the existing provider/model switch seam performs activation. Failure or
+cancellation becomes one bounded terminal notice, with no synthetic conversation
+turn. The shared spelling and all three catalog counts are unchanged; no new ADR.
+
+## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
+
+Status: accepted. Closes LocalHub#57.
+
+Workspace trust was a half-built gate: it was enforced (an untrusted workspace
+could not modify project skill state) but had no key. The only writer was the
+interactive chat dialog; there was no `localpilot trust` command, no config key,
+and no env var. `doctor` hardcoded the state to `unknown`, so the one command
+whose job is to explain the environment could not see the flag that was blocking
+a `skills repo add`. Worse, reads and writes disagreed — `skills list`/`show`
+loaded the project overlay unconditionally while mutations refused — so a user
+could see a project skill but not install one, with no way to grant trust.
+
+Decision: keep the gate, and make it reachable, inspectable, and consistent.
+
+- **Keep the gate.** The folder-trust gate is the reachable half of a
+  defence-in-depth model; its permission-engine half (the `untrusted_floor`
+  escalation) is still driven by the permission profile this revision, and
+  LocalHub#60 is what will derive the session's trust from this folder store so
+  the two halves align. Removing the folder gate now would strand that model and
+  leave no user-facing trust surface, so it is made usable rather than removed.
+- **A `localpilot trust` CLI** with `status` (default), `add`, `remove`, and
+  `list`; paths default to the current directory. It is built on result-returning
+  store operations: `status` exits zero for a successfully evaluated
+  trusted-or-untrusted folder, while `add`/`remove`/`list` exit non-zero on an
+  invalid target, an unavailable config base, or a real store read/write error —
+  never the fire-and-forget behaviour the interactive dialog uses. Removal
+  rewrites the store atomically (a same-directory staged file and a same-volume
+  rename) so a failed write can never truncate the trust list, and deletes every
+  duplicate line so a single `remove` actually revokes trust.
+- **`doctor` reads the real store** through the same result-returning query and
+  reports `Trusted`/`Untrusted`, or `Unknown` only when evaluation genuinely
+  fails (an unreadable store, an unresolvable cwd/config base) — an unreadable
+  store is never collapsed into a confident `Untrusted`. It shows the store path
+  and advertises a `trust-cli` capability token.
+- **A distinct trust query.** The interactive boolean `is_trusted` stays
+  fail-closed for the startup gate; the CLI and `doctor` use a result-returning
+  query so a broken store is diagnosable rather than silently untrusted.
+- **Effective reads are gated on folder trust.** An untrusted workspace
+  contributes no project skills, sources, or catalogs to an effective read
+  (`skills list`/`show`/`repo list`/`available`, and the source-catalog half of
+  `skills research`); it is served the global baseline only, with a disclosure
+  naming `localpilot trust add`. An explicit `--global` read is notice-free. This
+  closes the read/write bypass; the handoff skill-suggestion path is gated the
+  same way.
+- **The refusal names the remedy** (`run localpilot trust add … or retry with
+  --global`), and the trust dialog relabels its choices so the session-only vs
+  remembered distinction is visible at the point of choice (the persistent-trust
+  option is not made the Enter default).
+- **The startup prompt predicate** is factored into one `trust::prompt_required`
+  used by every host, so the decision (a prompting profile over an untrusted
+  folder) has a single source of truth.
+
+Boundary: the harness `SessionConfig.trusted` derivation (which currently follows
+the permission profile rather than the folder-trust store) is deliberately left
+to LocalHub#60; this record makes trust reachable and consistently consumed by
+the surfaces already intended to consult folder trust.
+
+## ADR-0142: Image Ingress Is Complete And Never Silent
+
+Status: accepted. Extends and amends ADR-0061 (vision is a resolved capability,
+config > probe > false).
+
+Image input shipped with ADR-0061, but only one narrow ingress — a clipboard
+bitmap via Ctrl+V — and several paths dropped the paste with no message at all:
+a blocked attach with no `else`, bare `return`s when an overlay or dialog owned
+input, and a `quiet_when_absent` flag that suppressed the "no image" notice on
+the very path Windows Terminal routes Ctrl+V through. Copying an image file in
+Explorer/Finder — what most users try — did nothing, because only a bitmap was
+read. The product spec still listed image input as "Later," contradicting the
+shipped code.
+
+Decision: image ingress is completed and made non-silent.
+
+- Three ingress forms use existing dependencies, no new Cargo feature: the
+  clipboard **bitmap** and **copied image file** ingress use the pinned
+  `arboard 3.6.1` — the copied file is read from `get().file_list()` (Windows
+  CF_HDROP, macOS file URLs, Linux X11/XWayland URI lists — the
+  `wayland-data-control` feature is deliberately not enabled) when no bitmap is
+  present; the **pasted or dropped image-file path** uses the existing terminal
+  paste channel (`Event::Paste`) and the shared file loader, the
+  compositor-independent complement that also covers a pure-Wayland terminal
+  where the native file list is unavailable. No new dependency; no `@mention`
+  semantics change and no `/image` command.
+- The clipboard file selector classifies **cardinality only** (`None | One |
+  Multiple`); a single shared loader is the one content authority that decides
+  unreadable / unsupported / oversize, with an overflow-safe size preflight from
+  metadata before any bytes are read.
+- Supported formats — PNG, JPEG, WebP, GIF — have their MIME type selected from
+  **magic bytes**, not extension, so a non-image hidden behind a supported
+  extension is rejected while supported image content is accepted under its true
+  type (a JPEG named `.png` attaches as `image/jpeg`). For a pasted path a
+  supported extension is only a conservative interception gate; capability is
+  resolved before any file bytes are read, so a text-only model refuses without
+  a read and a fake image is rejected after capability passes. A paste that is
+  not an image path stays ordinary composer text.
+- Every outcome surfaces a notice; nothing is silent. `AppModel` keeps one
+  ownership predicate, `image_attach_block`, and the CLI renders the specific
+  reason (which overlay/dialog/mode declined) plus a defensive post-read notice;
+  the `quiet_when_absent` suppression is removed from both hosts.
+- The feature is discoverable in quick help and `/help`, and `docs/01-product-spec`
+  no longer lists image input as "Later."
+
+## ADR-0141: A Tool Start Retires The Open Assistant And Reasoning Segments
+
+Status: accepted. Refines ADR-0107 (the single stable-ID timeline model) and
+ADR-0129 (the full-screen host as the interactive default); neither is
+rewritten.
+
+The full-screen timeline is one ordered list of items, and the host streams
+assistant text, reasoning, and tool rows into it as they arrive. It tracked the
+currently open assistant and reasoning segments so consecutive text deltas
+append to one item, but it never closed those segments when a tool started. Text
+or reasoning streamed *after* a tool call therefore appended to the item created
+*before* it — the item that already sat above every tool row pushed since — so a
+turn shaped `text -> tool -> tool -> text` rendered all of its prose as one block
+above a wall of tool rows, in an order the model never produced. With the
+viewport following the bottom, that merged prose scrolled off the top and the
+screen became only tool rows.
+
+Decision: a tool start is a segmentation boundary. When a tool row is pushed, the
+host first finalizes the semantic styling (headings, code, links) of the open
+assistant and reasoning segments, and only then retires their pointers, so any
+text or reasoning that follows the tool opens its own item below it, in true
+stream order. Styling before retiring is load-bearing: the styling pass runs at
+the currently open segment pointers, and the later `Stopped` pass can only style a
+segment its pointer still references — a segment whose pointer was retired at the
+tool boundary would otherwise keep its raw text and lose its heading/code styles.
+This is the boundary the inline host already enforced by flushing the streaming
+assistant before committing a tool row; the full-screen host now matches it. The
+tool start is the semantic boundary and always precedes the tool's completion, so
+no second reset is needed when a tool finishes. Interleaving needs no structural
+change — the timeline already stores text and tool calls in one ordered list;
+retiring the segment pointers is what makes that order visible.
+
+Boundary: this changes only where a new item begins, not what a tool row or an
+assistant paragraph contains, and not the queued-prompt insertion barrier —
+post-tool segments still land ahead of prompts queued during the turn. Bounding
+the number of tool rows (run-collapsing) and keyboard expansion of a collapsed
+row are separate concerns, deliberately out of scope here.
+
+2026-08-11 presentation amendment: the same tool-start boundary is also the only
+proof that the open assistant segment was intermediate. Before retiring its
+pointer, the full-screen model changes provider-neutral presentation metadata
+from Answer to Progress on that same stable item. Text, kind, bytes, styles,
+search, copy, persistence, and export do not change. The renderer uses a hollow
+muted `○` and `Progress update:` screen-reader label for Progress, while the
+default/final Answer keeps its filled `●`; a turn that stops without a later
+tool start is never reclassified. This refines presentation only and does not
+alter ADR-0141's segmentation or provider contract.
+
+## ADR-0140: Context Hygiene Is A Read-Only, Opt-In Section Of `doctor`
+
+Status: accepted. Extends ADR-0050 (the `doctor` report and its `--format`
+contract) and reuses ADR-0056 (instruction-file discovery) and ADR-0103 (the
+composed system prompt).
+
+Anthropic's Claude-5-generation context-engineering guidance (right-size
+`CLAUDE.md` and skills, remove redundancy, keep a single source of truth) is
+worth surfacing to a LocalPilot user — but LocalPilot serves weaker local
+backends, for which an over-specific rule may still be load-bearing. So the
+feature *reports*; it never trims guidance on its own.
+
+Decision: a new library crate, `localpilot-contextcheck`, builds a read-only
+inventory of the statically authored context a session assembles — the
+instruction files (via the existing `ContextDiscovery`), the visible skills, and,
+when a caller supplies it, the composed system prompt — attaches a token estimate
+to each (reusing the harness estimator), and analyzes them into severity-ranked
+advisory findings: redundancy and conflict across layers (reusing the store's
+text-overlap primitives), plus oversized-layer / token-budget signals. Findings
+reuse the self-review `Severity` scale but a local finding taxonomy (the
+self-review `FindingKind` is code-oriented). The CLI surfaces this as an opt-in
+`--hygiene` section of the existing `doctor` command — not a new command and not
+a model-callable tool (ADR-0134): one command, one `--format` vocabulary. The
+`context` field is absent from the report unless `--hygiene` is passed, so the
+established `doctor` output is unchanged.
+
+Boundary: it is **report-only** — it reads and never edits, trims, or reorders
+any file. Every emitted snippet passes the canonical redactor
+(`localpilot-config::redact`), as the instruction-injection path already does, so
+a cleartext secret in an instruction file is not echoed. It stays offline. The
+CLI reports the user-editable layers (instruction files + skills); the
+system-prompt layer needs the live tool registry and is a library capability used
+by the dev-facing sweep. Dynamic per-turn memory/reference injection and the
+reserved harness runtime files (`brief.md`/`PROGRESS.md`/`DECISIONS.md`/
+`LESSONS.md`) are out of scope. Model-tier-conditional prompt assembly
+(strip-for-frontier vs keep-rails-for-local) is deliberately not pursued: it is
+untestable without a frontier backend LocalPilot does not target.
+
+## ADR-0139: A Pair Is Two Ordinary Agent Sessions Adopted Into A Symmetric Exact-Two Swarm Topology
+
+Status: accepted and consumed by the shipped `localpilot pair` interactive
+command. Builds on the convergence protocol (ADR-0136) and reuses the swarm
+membership, one-to-one messaging, and advisory-conflict substrate
+(ADR-0124..0127, ADR-0126).
+
+A pair is not a new session mode. Two peers are ordinary interactive Agent-mode
+sessions — the same construction as a solo chat, with tools, approvals,
+questions, and per-peer model selection intact — placed into a symmetric
+two-member swarm topology so the convergence driver can schedule and address them
+with no protocol change.
+
+- **Symmetric topology, exactly two, atomic.** Swarm membership gains a `Peer`
+  role and a private, mutually exclusive topology: a swarm is hierarchical
+  (coordinator plus workers) or a pair, never both. The two topologies refuse each
+  other's operations — a pair rejects the hierarchy-only paths (root admission,
+  reservation, confirmation, coordinator election, plan restore and set, spawning,
+  and dispatch) and a hierarchy rejects pair mixing — and the public `MemberRole`
+  enum is marked non-exhaustive as it gains `Peer`, so the role set can grow
+  without breaking callers. A pair is admitted in one write-locked step that
+  requires exactly two distinct peers, takes no coordinator
+  and builds no spawn edges, checks both capacity slots together, is
+  order-independent and exact-retry idempotent, and mutates nothing on any failure
+  (duplicate, capacity, mixed topology, or already in another swarm). A session
+  belongs to at most one swarm.
+- **Two fresh sessions, one workspace, shared only capability sources.** The two
+  peers are built from one construction seam that creates two independent runtimes
+  — each with its own tool registry, permission engine, and approval and question
+  channels — over one validated shared workspace and the one exact original task,
+  with an explicit per-peer provider and model. It shares only cloneable capability
+  sources (the provider and MCP transports and the resolved agent set), never
+  runtime, tool, permission, or channel state, and installs the protocol context on
+  both peers before either takes its first turn.
+- **A pair addresses only its partner.** Neither peer is a coordinator, so
+  whole-swarm broadcast is refused; the only messaging a pair uses is the direct
+  one-to-one notify between its two members that the convergence protocol requires
+  (ADR-0136).
+- **Bound hosting, no reconstructed transport.** Adopting the pair yields, per
+  side, the exact session host and the exact messaging view already installed on
+  that runtime. The convergence driver runs over the adopted pair through an
+  endpoint adapter implemented directly on that adopted value — no wrapper type and
+  no new public server type — so a peer reaches its partner only through the
+  binding it was adopted with, and can never send as the other or through a rebuilt
+  topology.
+- **Shared-workspace edits stay advisory.** Adoption installs the existing
+  file-touch watchers on both peers; when the two write overlapping lines in the
+  shared workspace both are told, and neither write is locked, owned, rolled back,
+  or cancelled (ADR-0126).
+- **Exact turn output, read from the runtime.** A driven turn's protocol envelope
+  and token cost are the turn's own final assistant message and summed usage,
+  captured in the runtime and read under the drive lock — never a concatenation of
+  streamed deltas across a turn's several provider iterations, and absent rather
+  than a prior turn's when a turn produces none. The driver's per-slot cancellation
+  is carried to the session's lock-free cancel and the torn-down turn is awaited.
+
+Scope and boundary: this decision covers the shipped topology, atomic admission,
+bound hosting, and adapter that wires the ADR-0136 driver to real sessions.
+`localpilot pair` is the runnable consumer: its interactive host constructs two
+ordinary Agent-mode sessions, adopts them, and drives the pair. The substrate and
+command add no new session mode.
+
+Consequences: the swarm layer gains a peer role, a private pair topology, atomic
+pair admission and hosting, and a private endpoint adapter binding the ADR-0136
+driver to real sessions; the runtime gains a narrow, protocol-neutral pair of
+turn-capture getters; the CLI consumes its private construction surface in the
+single-terminal pair host.
+
+## ADR-0138: The Self-Improvement Loop Is A Thin Orchestrator Over Separate Stage Crates
+
+Status: accepted. Builds on ADR-0034 (the human-gated loop) and keeps ADR-0128
+(the unattended autonomous loop) deferred.
+
+LocalPilot's self-improvement stages already ship as separate crates: the
+read-only find (`localpilot-selfreview`), the scope-confined, human-gated source
+mutation (`localpilot-patchgen`), and the binary lifecycle — build, gauntlet,
+immutable store, reload (`localpilot-selfdev`). They are wired into one loop by a
+**thin orchestrator** (`localpilot-selfimprove`) that sequences their existing
+entrypoints and surfaces the loop state — **not** by fusing them into one module.
+
+The stages are kept separate because they have different blast radii. Source
+mutation is guarded by a human-merge gate: the agent may propose a minimal edit
+in an isolated worktree, but promotion to `main` requires an `ApprovalToken` that
+only an explicit human confirmation mints. The binary lifecycle is guarded by a
+build gauntlet (identity, freshness, a real handshake) and a rollback circuit
+breaker, and it is a compiled-artefact concern, not a source-text one. Merging
+the two would couple unrelated concerns and blur the single most important
+property — that a human, not the agent, decides what reaches `main`. The two also
+share no logic worth merging: the only common code is the `executable_name()`
+one-liner, and self-dev's never-overwrite-repoint store is the deliberate
+opposite of the distribution updater's rename-and-replace activation.
+
+The orchestrator therefore holds only sequencing and state. It advances one
+explicit step at a time (`localpilot selfimprove status` / `next`), persists its
+state under `.localpilot/selfimprove/` so a step resumes across processes, and
+stops hard at the `ApprovalToken` gate. It never mints the token: the crossing
+reuses `patchgen`'s structural gate, and the loop's `next` promotes only when the
+human passes `--approve --reviewer`. After approval it builds the **approved,
+merged tree** (the workspace root), never the proposal worktree, and it reuses
+`selfdev`'s existing rollback circuit breaker rather than adding its own. No code
+path auto-mints a token or auto-advances build→reload, so ADR-0128's autonomous
+loop stays deferred by construction, proven by architecture tests over the
+shipped source.
+
+Consequences: a new but thin public surface (`selfimprove status` / `next`,
+wired to the orchestrator); the shared build→gauntlet→promote composition moves
+into `localpilot-selfdev` as `build_gauntlet_promote` so the CLI release surface
+and the orchestrator reuse one definition instead of each re-deriving it. If the
+orchestrator ever starts to hold stage logic, that is design pressure to push it
+back into the owning crate, not to fuse the crates.
+
+## ADR-0137: A Pair Uses One Frame With Two Cohesive Session Projections
+
+Status: accepted and consumed by the shipped `localpilot pair` host. Extends the
+full-screen terminal ownership boundary (ADR-0107) and presents the two ordinary
+Agent sessions adopted by ADR-0139.
+
+A pair does not create two terminal applications. One full-screen application
+shell presents two session projections, keeping geometry, drawing, input, and
+hit-testing under the same authorities that single chat already uses.
+
+- **One shared shell, two cohesive projections.** Theme and terminal
+  capabilities, workspace identity, tabs, composer, dialogs, takeovers, exit
+  state, and pair status are shared. Each session projection owns its provider,
+  model, session identity, timeline and live assistant/reasoning/tool state,
+  work and plan state, usage and context totals, stream accounting, viewport,
+  search, and selection. A shared workspace is rendered once; peer labels carry
+  the per-session identity.
+- **One typed geometry authority.** `FrameLayout` remains the sole source of
+  drawing and hit-test rectangles. Its timeline region is a typed single- or
+  pair-pane layout rather than parallel optional fields. A pane owns its label,
+  timeline content, and scrollbar geometry; a wide pair tiles two panes around
+  one explicit divider. The wide threshold is two supported single-pane widths
+  plus the divider, and a pair label never reduces timeline content below the
+  existing minimum height.
+- **Narrow is defined, never blank.** Before richer responsive reflow is added,
+  a pair below the wide threshold shows the active peer at full width with its
+  textual peer label and the shared composer target. An undersized height keeps
+  the existing resize guidance. A later stacked layout may improve this fallback
+  without changing the state or hit-test model.
+- **Routing is explicit.** Peer-tagged runtime updates enter through one routing
+  seam and can mutate only the named session projection. Accessors select the
+  active or named projection explicitly; there is no dereference trick, duplicate
+  shadow state, or implicit "last rendered" pane. Timeline search stays with its
+  originating projection and resumes unchanged when that peer is selected again.
+- **Drawing and input share one pane contract.** One pane renderer serves single
+  chat, the two wide panes, and the active-only narrow fallback. Hit maps retain
+  a separate timeline/row/scrollbar bundle per visible peer. Keyboard focus uses
+  a legacy-terminal-safe peer toggle; a click selects a peer, pointer scrolling
+  follows the pane under the pointer without retargeting the composer, and drag
+  gestures remain pinned to their origin pane. Text labels identify the active
+  peer without relying on color.
+- **Single chat is the invariant.** With pair presentation off, frame geometry,
+  buffers, event routing, key behavior, mouse behavior, and accessibility remain
+  unchanged. Deterministic component tests compare the single path to its existing
+  output while independently exercising both peer projections and hit maps.
+
+Scope and boundary: this decision owns only backend-neutral terminal state,
+geometry, rendering, and interaction. The executable host still owns Crossterm,
+runtime channels, approvals, questions, and terminal lifecycle. The shipped
+`localpilot pair` host constructs and drives those two projections through that
+boundary.
+
+Consequences: the terminal UI gains typed single/pair timeline geometry, an
+explicit shared-shell/session-projection split, peer-aware rendering and hit maps,
+and a narrow active-peer safety fallback. It gains no provider, transport,
+permission engine, session mode, or second terminal event loop. Public UI enums
+that grow for peer interaction are non-exhaustive; the exact-two peer identity
+itself remains a closed two-value contract.
+
+## ADR-0136: A Peer Pair Converges Through A Typed Envelope Over Direct One-To-One Messaging, Driver-Scheduled And Finitely Bounded
+
+Status: accepted and wired to the shipped `localpilot pair` command. Reuses the
+in-app peer-messaging substrate from ADR-0124..0127 (the `SessionPeers`
+soft-interrupt transport and its coordinator-only-broadcast rule).
+
+Two *symmetric* peers work one shared artifact and converge — or a bound stops
+them. The convergence protocol is a pure state core plus a transport-agnostic
+driver behind an endpoint trait, so it runs identically over deterministic test
+fakes and, in a production integration, over real session-host and peer-messaging
+endpoints.
+
+- **One typed boundary.** A peer speaks through an original, versioned JSON
+  envelope parsed exactly once into a typed action (propose, revise, agree). No
+  part of the driver scans prose to decide what happened, and an envelope that
+  tries to name a peer is ignored: the acting identity is whichever peer the
+  driver scheduled, never anything the envelope claims.
+- **Direct addressing, no broadcast, no wake.** Protocol traffic reaches the
+  other peer as a one-to-one notify over the existing soft-interrupt substrate;
+  whole-swarm broadcast stays unavailable to a pair, and nothing but the driver's
+  own scheduled drive starts a turn — the wake path is never used for protocol
+  traffic. Exactly one peer turn is in flight at a time.
+- **Driver-owned candidate.** The driver, not a peer, owns the shared candidate:
+  canonical artifact bytes (line endings normalised so two platforms agree on one
+  digest), a monotonic, never-reused revision, and a SHA-256 digest. An agreement
+  must name the current revision *and* digest; any proposal or revision installs a
+  new revision and clears every prior agreement, so a stale agreement can never
+  pass for a live one. Convergence is both scheduled peer identities agreeing the
+  same current candidate.
+- **Finite by construction.** A per-slot wall-clock deadline and a per-slot token
+  budget together cover delivery, the primary drive, and one same-slot repair — a
+  repair resets neither. A hard round cap and an always-available user abort bound
+  the whole run. Cancellation is *observed*: the endpoint is handed a token it
+  awaits and tears its turn down cleanly, never a dropped in-flight future, and at
+  a hard boundary the deadline wins deterministically. Every exit is one of a
+  finite typed terminal set — converged, cap reached, aborted, timed out, peer
+  failed, provider error, protocol error, budget exceeded, or no progress — and
+  the timed-out, budget-exceeded, and no-progress reasons also carry through the
+  underlying session's own runtime stops rather than fabricating them.
+- **Diagnosable outcome.** A single report carries the typed terminal reason plus
+  immutable snapshots: both peer identities, each peer's latest raw response
+  (recorded before any parse, budget, or terminal decision discards it), and one
+  atomic snapshot of the last valid candidate. A read-only progress view — a
+  nonblocking latest snapshot plus an asynchronous wait for the next update —
+  reports round versus cap, the next scheduled peer or none at termination, the
+  candidate, and per-peer agreement in stable order while the run is live.
+
+Consequences: a crate-internal protocol and driver in the swarm layer beside the
+DAG driver, reusing the one messaging substrate and adding no second transport;
+its public driver/report/progress surface is wired by ADR-0139 to real
+adopted-session endpoints and consumed by the CLI's runnable pair host; the
+parser and state internals stay crate-private.
+
+## ADR-0135: A Swarm Worker's Model Is Verified Before And After The Build; An Unserved Model Is Refused, Never Defaulted
+
+Status: accepted. Extends ADR-0124..0127 (the swarm substrate); complements the
+substrate's existing post-build `ModelMismatch` refusal.
+
+A swarm plan may pin the model each task's worker runs on. Two gates keep that
+honest, and both refuse rather than fall back — because a task that silently ran
+on a model it did not ask for produces work that reads normally and never says
+so, which is the worst available outcome.
+
+- **Before the build (availability).** When a spawn names a model, the host
+  checks a configured provider serves it and refuses with a typed
+  `SpawnError::ProviderUnavailable` otherwise, releasing the slot it reserved. A
+  model is "served" iff some configured provider advertises it
+  (`[providers.<id>].model`) or it is the session default; the configuration
+  advertises one model per provider, so this is the honest, offline-checkable
+  contract. To pin model X on a node, configure a provider with `model = "X"`.
+- **After the build (mismatch).** The substrate's existing check stays: if the
+  built session landed on a different model than asked, the spawn is refused
+  (`SpawnError::ModelMismatch`). A provider can advertise a model yet build a
+  different one, so both gates matter.
+
+The availability check is a defaulted `WorkerFactory::ensure_model_available`
+method (default: assume available), so the substrate's single-provider hosts and
+test factories are unchanged; the CLI's multi-provider factory overrides it.
+Multi-provider routing maps each advertised model to its provider, so different
+workers run on models served by different providers.
+
+## ADR-0134: The Swarm's Production Entrypoint Is A `swarm run` CLI Command, Not A Spawn-Capable Tool
+
+Status: accepted. Completes ADR-0124..0127, which shipped the swarm substrate
+library-only (no production entrypoint).
+
+`localpilot swarm run <plan>` is the surface that runs a swarm: it reads a JSON
+plan (objective, mode, and nodes with optional per-node models), constructs the
+`SwarmHost` over a production `WorkerFactory`, adopts a coordinator, and drives
+the plan to completion. The model-callable `swarm` tool stays messaging-only.
+
+The rejected alternative was a spawn-capable action on the `swarm` tool. The CLI
+command wins on four axes: **provider/model ownership** — the CLI is the layer
+that holds a provider and a model; a tool runs inside a session that may not, and
+would need a second session-construction path; **containment** — a tool action
+lets a mid-turn agent fan out workers on its own, which is autonomous-loop
+territory deliberately out of scope, whereas a user-invoked verb keeps "run this
+plan" a deliberate act; **discoverability** — a CLI verb is the obvious surface
+for running a plan; and **testability** — a command constructs the host directly
+and is driven offline with fake providers. The production factory is the CLI's,
+built on the same `SessionSetup` recipe `serve`/`rpc` use, so there is no second
+session builder.
+
+## ADR-0130: LocalPilot Adopts a Running or Startable LocalBox Server
+
+Status: accepted.
+
+LocalPilot detects LocalBox and can put a local model behind its `[providers.local]`
+provider without the user hand-editing config, closing what was a one-directional
+handoff (LocalBox wrote LocalPilot's config; LocalPilot knew nothing of LocalBox).
+
+Detection is a `PATH` lookup plus a read-only probe of LocalBox's documented
+default no-think proxy endpoint (`GET :11435/v1/models`, which the proxy forwards
+to the backend). The **endpoint probe is the authoritative "serving" signal** —
+`localbox status` prints prose for humans, not a machine contract, so LocalPilot
+does not parse it. The action is exposed by a **dedicated surface** — the CLI
+`localpilot localbox adopt [--serve <model>]` and the in-session
+`/localbox adopt [--serve <model>]`
+— never by overloading `/model`; a failed `/model` switch only *points* at
+`/localbox` when LocalBox is present. `--serve` starts a stopped server via
+`localbox serve <model>`, which blocks until the model is ready and then returns,
+leaving the server as its own detached process: LocalPilot never owns or reaps a
+LocalBox server (`localbox stop` is LocalBox's teardown).
+
+In terminal chat, adoption is a pumped idle operation. A successful config write
+rebuilds the immutable provider registry from the updated session-local config,
+replaces the idle runtime registry, and switches the current conversation to the
+new local provider/model without rewriting its provider-neutral transcript. The
+full-screen header, model completion, and image-capability projection update from
+that same live result. Cancelling LocalPilot's readiness wait drops only the wait:
+the unowned LocalBox launch may continue in the background, no stop command is
+issued, and a later bare `/localbox adopt` finishes adoption once it is ready.
+
+Writing config **upserts only `[providers.local]`** (and points `[provider] default`
+at it), preserving every other provider, `[mcp.servers.*]` table, and comment —
+deliberately unlike LocalBox's own emitter, which owns and wholesale-replaces the
+`providers` table. The written fields **mirror** LocalBox's proxied-route contract
+(`kind = "anthropic"`, `api_key_env = "ANTHROPIC_AUTH_TOKEN"`, `base_url` ending
+`/v1`) rather than importing them; LocalBox and LocalPilot are the same coordinated
+release train, so that contract is stable-by-governance and any breaking change
+warrants its own plan. Every side effect (starting a server, writing config) passes
+the permission engine; in the full-screen chat host an explicit user-typed
+`/localbox adopt [--serve <model>]` is itself the consent for its requested start
+and workspace config write, and the engine still hard-denies under a `Deny`
+policy. No new runtime dependencies
+(`toml_edit` was already in the tree via `toml`).
+
+## ADR-0129: Full-Screen Chat Is The Interactive Default
+
+Status: accepted; the temporary inline rollback host it retained has since been
+removed by ADR-0154, and the record below describes the state at the time.
+
+Bare interactive `localpilot chat` now launches the authoritative full-screen
+alternate-buffer host. `LOCALPILOT_CHAT_UI=fullscreen` remains an accepted
+explicit spelling; `LOCALPILOT_CHAT_UI=inline` selects the legacy inline host
+only as a temporary recovery path. Invalid values remain errors. This selector
+does not affect non-interactive/plain output.
+
+The inline host is not a second product direction. Its removal is gated on the
+remaining physical Windows, cross-terminal, and screen-reader checks plus a
+small extraction: full-screen code still consumes shared slash-command and
+approval types currently housed in `localpilot-tui`. Keeping that tested escape
+hatch until the matrix closes limits terminal-specific rollout risk; making the
+accepted full-screen experience the default prevents the rollback from defining
+normal product behavior.
+
+## ADR-0108: A Scoped Owner Exception Allows Observable Terminal-Chat Parity
+
+Status: accepted. Amends ADR-0005 and `docs/00-clean-room.md` for one surface;
+the rest of the clean-room policy is unchanged.
+
+The project owner explicitly authorizes LocalPilot's interactive terminal chat
+to match the observable layout, geometry, interactions, and behavior of the
+normally used public GitHub Copilot CLI 1.0.75 distribution. Normal-use
+observation, public documentation, and its public versioned changelog may define
+that behavioral contract. This is a deliberate product requirement, not an
+accidental weakening of provenance review.
+
+The boundary remains strict: no proprietary/leaked source or source maps,
+hidden prompts, private endpoints, credentials, non-UI internals, copied
+implementation structure, or vendor-specific service integration. The shipped
+interface retains LocalPilot identity and original copy—no GitHub/Copilot name,
+logo, wordmark, mascot, brand theme, or brand-identifying verbatim strings.
+Implementation and tests are authored in this repository from the observable
+contract. Any broader exception requires another explicit owner decision.
+
+## ADR-0107: Interactive Chat Is A Full-Screen Application With Stable Content Coordinates
+
+Status: accepted. Retains ADR-0006's Ratatui/Crossterm choice; supersedes
+ADR-0021 and ADR-0039 for the new interactive-chat host and narrows ADR-0064's
+LocalPilot reference. The old inline host it kept as a temporary rollback was
+retired by ADR-0154.
+
+Interactive chat is rebuilt as an alternate-buffer, full-frame application. It
+captures mouse reporting and therefore owns timeline scrolling, scrollbar
+interaction, text selection, clipboard copy, and click hit-testing. Timeline
+items receive monotonic stable IDs; viewport anchors and selection endpoints are
+content coordinates (item ID plus a grapheme-safe UTF-8 byte boundary), never
+screen-row offsets. Editor movement, wrapping, cursor placement, and hit-testing
+share one extended-grapheme/display-width layout calculation.
+
+The implementation boundary is intentionally narrow:
+
+1. `localpilot-terminal-ui` is backend-neutral. It owns authoritative app,
+   timeline, editor, focus/lifecycle, frame, hit-map, and semantic capability
+   state and renders with Ratatui's backend-neutral `Frame`/`TestBackend` APIs.
+   It has no Crossterm, provider, store, or harness dependency.
+2. `localpilot-cli` owns Crossterm mode entry/restore, raw terminal events,
+   clipboard access, and the mapping from the existing provider-neutral
+   `RuntimeEvent`, approval, steering, and cancellation channels into semantic
+   UI actions. `run_chat` remains the single provider/session initializer; a UI
+   choice may select a host but must not create a second runtime.
+3. The exact-pinned Ratatui 0.29 and Crossterm 0.28 stack stays on MSRV 1.82.
+   A physical Windows Terminal coexistence run proved alternate screen, captured
+   mouse, application selection/copy, timeline scrolling, and wrapped-grapheme
+   editing together. No observed requirement justifies Ratatui 0.30 or a custom
+   damage/composition engine.
+4. Ctrl+C is contextual application input. With selected text, the first press
+   copies it; otherwise active work receives cancellation and idle state arms
+   exit. Only a consecutive second Ctrl+C exits, including while cancellation
+   acknowledgement is pending; any other input disarms the exit. A process-
+   global Ctrl+C handler must not preempt selection copy or terminal cleanup.
+   The driver owns key-event routing and terminal cleanup.
+
+The foundation initially kept the inline UI as the default rollback while
+`fullscreen` selected the new host. ADR-0129 advances that transition:
+full-screen is now the default and explicit `inline` is the temporary rollback.
+Both compile against the same runtime contracts. The compatibility host and
+selector are removed after their remaining physical gates and shared-type
+extraction close; they are not two permanent UIs.
+
+The historical alternate-screen renderer, current inline state/widgets, and the
+abandoned custom terminal surface are evidence about failure modes, not source
+architectures. Only bounded content-coordinate, grapheme-editor, terminal-mode
+accounting, and regression-test ideas are adapted into the new foundation.
+## ADR-0128: Self-Dev Reload Ships Primitives, Not A Crash-Detect-And-Revert Loop
+
+Status: accepted.
+
+LocalPilot can build a binary from its own source and swap onto it while a
+session is live (`localpilot-selfdev`). The obvious next thing — a loop that
+watches the new build, notices it crashing, and automatically reverts — is
+deliberately **not** built. It is the one piece a working reference implemented
+and then *deleted*, because it was the source of an infinite-reload bug family
+rather than the cure. Three plainer mechanisms replace it, and each is chosen
+against a more tempting alternative that does not hold up:
+
+1. **A rollback token, not crash detection.** Before a channel is repointed at a
+   new build, the previous target is written to a `PendingActivation` token. The
+   new build is confirmed only by a successful post-reload handshake; anything
+   else rolls the channel pointer back to the recorded previous version. There is
+   no heuristic deciding whether a crash "counts" — either the new build
+   handshook or it did not.
+
+2. **A no-downgrade, no-phantom comparison.** An auto-reload may trigger only when
+   the candidate payload is *provably* newer than the running one: both
+   modification times readable and the candidate strictly newer. An unreadable
+   mtime is "no update", never "newer" — the reference's loops began with an
+   unreadable timestamp read as "newer forever". The comparison reads the
+   concrete immutable binary a channel resolves to, never the channel marker, so
+   a wrapper's timestamp can never stand in for the payload's (structural here,
+   because a channel is a separate marker file resolving to an immutable version
+   directory, not a symlink).
+
+3. **A durable circuit breaker.** A persisted counter bounds auto-reload attempts
+   and is incremented *before* each relaunch, so a relaunch that never returns is
+   still counted and a looping process cannot reset the bound by restarting. Once
+   tripped, auto-reload halts with a clear error until a *successful* reload
+   resets it.
+
+The autonomous self-editing loop these primitives make possible stays opt-in and
+off by default; enabling it is a separate product decision, not a consequence of
+shipping the primitives.
+
+## ADR-0127: A Failing Task Fails Loudly, And A Plan Survives A Restart
+
+Status: accepted. The failure half of ADR-0125.
+
+A worker will die holding an assignment. Four things follow, and each replaces
+something more obvious that does not work.
+
+1. **Staleness is measured from the last heartbeat, and never-observed is not
+   dead.** Measuring from admission reaps every worker the instant it starts.
+   The distinction has its own test because it only appears under load.
+
+2. **Salvage is bounded.** A departed worker's unfinished tasks return to the
+   plan, but each task carries a reclaim counter, and past the budget it is
+   **failed** rather than requeued. A task that keeps outliving its workers is
+   failing, not unlucky; requeuing it forever turns one bad task into a plan
+   that never finishes and never says why. Salvage is idempotent, so two sweeps
+   racing cannot reclaim the same work twice.
+
+3. **Re-election is deterministic — the lowest surviving member id.** Not the
+   oldest, not the nearest: every observer of the same state has to reach the
+   same answer without coordinating, or there is a window in which two of them
+   believe different things and both act. Children are reparented onto the
+   nearest surviving ancestor (grandparent → coordinator → root), because a
+   report-back edge pointing at a member that no longer exists is a completion
+   report delivered nowhere.
+
+4. **Somebody is told.** A salvage report naming each task and its fate reaches
+   whoever now owns the work. A plan that silently re-runs a task is
+   indistinguishable from one that is stuck.
+
+**Snapshots are their own stream.** A swarm's plan and membership persist
+separately from session event logs, so recovering a plan never requires replaying
+anybody's transcript. Writes are serialised, atomic (temp then rename), keep the
+previous good file as a backup, and **refuse to go backwards**: a write whose
+revision is not newer than what is on disk is dropped, because a slow writer
+restoring an older plan over a newer one is worse than not persisting at all. A
+torn primary falls back to the backup, costing the newest revision rather than
+the plan.
+
+**The driver treats silence as death, not success.** A worker that returns
+nothing, times out, or produces a report the graph refuses is salvaged rather
+than completed. Marking a task done because a worker said nothing is the failure
+that makes a plan finish and be wrong.
+
+## ADR-0126: File-Conflict Alerts Are Advisory, Reported By Tools, And Reach Readers Too
+
+Status: accepted. Applies to sessions sharing one working tree under ADR-0125.
+
+**The guarantee is advisory and is stated as such.** No lock is taken, no write
+is blocked, nothing is rolled back. Two agents that edit the same lines both
+succeed and both are told. Git stays the merge substrate and the task graph stays
+the ordering mechanism; this exists so agents find out *now* rather than at merge
+time. Saying that plainly matters: the honest version is less impressive than
+"conflict detection" sounds and far more useful than a lock agents route around.
+
+**Tools report what they touched; nothing infers it.** Every file-mutating
+builtin, and `read_file`, attach a typed `FileTouch` to their own output. The
+three alternatives all fail: inferring from the tool name and arguments works for
+`write_file` and not for `multi_edit` (one call, several ranges, some of which may
+not apply); parsing the range out of prose output reads like it works and stops
+silently when the wording changes; watching the filesystem catches everything and
+attributes nothing.
+
+**The line range is diffed from content, not taken from arguments.** Comparing
+the file before and after gives the extent that actually changed, uniformly,
+without per-tool plumbing. Scattered edits in one call collapse into the
+enclosing range — over-reporting costs a message, under-reporting costs the
+collision.
+
+**Prior readers are alerted, not only prior writers.** An agent that read a
+function and is now reasoning about it is exactly the agent whose conclusions
+just went stale. The wording differs: a reader has not lost work, it has lost
+currency, and telling it its edit may have been overwritten would send it looking
+for an edit it never made.
+
+**Paths are compared after normalisation.** `src/lib.rs` and `./src/lib.rs` must
+land in one bucket; getting this wrong fails *open* — two agents editing one file,
+each told nothing. Touches expire on a short, configurable window, and recording
+and querying happen under one lock, because a gap between them is a race in which
+two simultaneous edits each record before either queries and neither is told.
+
+Known gap: a file changed by `run_shell` reports nothing. The shell tool cannot
+know what the command it ran touched without watching the filesystem, which is the
+option that attributes nothing. Documented rather than left to be discovered.
+
+## ADR-0125: A Swarm Is Scoped By Repository, Bounded By Reservation, And Shaped By One Edge
+
+Status: accepted. Builds on ADR-0123 (the hosting server) and reuses ADR-0111
+(the soft-interrupt substrate). Strictly opt-in: nothing on the single-agent path
+changed.
+
+**Scope is the repository, not the path.** A git worktree has its own directory
+and is the same repo, so a path-keyed swarm would let a worker spawned into a
+worktree found an invisible second swarm that the coordinator then waits on
+forever. Resolution reads git's own on-disk contract — `.git` as a directory, or
+as a `gitdir:` pointer whose target names its `commondir` — with no `git`
+subprocess, because a swarm id is needed on every spawn. Outside a repository the
+canonical path is used, so non-git workspaces work rather than erroring.
+
+**The spawn tree is one stored edge.** A member records only who it reports back
+to; children, ancestry, and subtrees are derived by walking it. A stored child
+list is a second copy of the same fact, and the two disagree the first time a
+member departs.
+
+**Admission is a reservation, and there are two caps.** Building a worker session
+is slow, so the caps are enforced *before* that work starts, under the lock that
+counts them: reserve → build → confirm-or-release. Checking a cap and inserting
+afterwards lets a burst of concurrent spawns all read the same count and all
+proceed. The caps are a **lifetime** member cap and a **live** concurrency
+budget, because they stop different failures — only a cap counting departed
+members ends a coordinator that keeps replacing work that keeps failing.
+Idempotency keys are answered from the reservation table as well as the member
+table, so a retry whose first attempt is still building is told so rather than
+starting a second worker on the same task.
+
+**A worker is an ordinary hosted session with a swarm edge** — not a second
+process, not a second loop, and not a special case on the session path, so
+cancel, steer, fanout, and reaping all work on it unchanged. Building it stays
+behind a host-supplied factory: narrowing tools, attributing the approver, and
+resolving a provider need wiring the server crate does not have. A spawn naming a
+model is **refused** if the built session is on a different one; running anyway
+produces work that reads normally and never says the wrong model produced it.
+
+**Messaging scope is the spawn tree.** A member may address what it spawned; only
+the coordinator may address the whole swarm. Without that, one worker deciding to
+keep everyone informed costs every other worker a turn, and the cost scales with
+the square of the swarm. An ambiguous recipient is refused rather than resolved
+arbitrarily. Delivery rides the one soft-interrupt substrate the user's own
+steering uses, so there is one set of ordering rules rather than two.
+
+## ADR-0124: The Task Graph Is A Pure Crate, Simulated Before It Is Wired
+
+Status: accepted. Establishes `localpilot-taskgraph`; see
+[`docs/02-architecture.md`](02-architecture.md).
+
+The hard part of running several agents on one plan is not spawning them. It is
+that the graph is shared mutable state under concurrent, unreliable, occasionally
+creative writers. So every rule that keeps it coherent lives in **one pure crate**
+— no I/O, no sessions, no models, no tools, and no LocalPilot dependencies — where
+it can be tested exhaustively in microseconds and run end to end by a
+deterministic simulator with no live agents attached.
+
+That ordering is the decision, not a nicety. A stuck plan and a slow one look
+identical from outside; a mis-scheduled dispatch and an unhelpful model look
+identical too. Building the engine first and simulating it separates them: a plan
+that misbehaves in the simulator is the engine's fault, and one that misbehaves
+only live is not. It paid immediately — the two defects that survived a full unit
+suite were both composition bugs that only whole-plan scenarios found.
+
+Four invariants hold across every mutation:
+
+1. **Ownership** — only a task's owner or its current assignee may change it, so
+   one worker cannot rewrite another's subtree unnoticed.
+2. **Acyclicity** — checked before an edge is written, and for a *batch* of new
+   tasks before any of them is created. A batch is the one place a caller names
+   edges among nodes that do not exist yet, so the graph's own check has nothing
+   to look at.
+3. **Terminality** — a finished task never changes; rework enters as new tasks,
+   which keeps the record of what went wrong.
+4. **Honest completion** — a completion carries a typed handoff. In deep mode it
+   must also state what was *not* checked, and a review gate must say how it
+   reviewed and cite something. A gate that waves work through is worse than no
+   gate, because the plan then claims a review happened.
+
+Two structural choices follow from wanting the graph to stay coherent rather than
+merely correct. **Expansion makes a task a join over its children** instead of
+replacing it, so nothing downstream is rewired and an expanding worker cannot
+corrupt the part of the graph it cannot see. **Readiness is derived, never
+stored** — a stored flag is a second source of truth that can disagree with the
+edges — and a third state, `Blocked`, names a task whose upstream ended badly,
+because without it a driver waits forever on a plan that is already over.
+
+Determinism is load-bearing: ordered maps throughout, no clock and no randomness
+in the engine or the simulator, so the same plan produces the same frontier and
+the same dispatch order on every machine. Without that the simulator is a flaky
+test rather than a safety net.
+
+## ADR-0123: The Server Hosts Many Sessions As Actors With Broadcast Fanout, Lock-Free Control, A Shared Pool, And Reaping
+
+Status: accepted. Builds on ADR-0122 (the opt-in server) and reuses ADR-0111 (the
+soft-interrupt substrate); the crate map is in
+[`docs/02-architecture.md`](02-architecture.md).
+
+How the daemon hosts sessions, given that the in-process `SessionRuntime` stays the
+one execution engine.
+
+1. **Actor-per-session.** A turn drives `run_turn(&mut self, …)`, so a session is
+   owned by exactly one task and never shared `&mut` across clients; the registry
+   holds `Arc<tokio::Mutex<SessionRuntime>>` behind a short-held structural
+   `RwLock<HashMap>` — a turn on one session never blocks structural access to
+   another. `SessionRuntime` is compile-time-asserted `Send` so it can live in a
+   task.
+
+2. **The registry is generic over a `SessionFactory`.** The heavy construction
+   recipe (provider registry, tools, MCP, broker, hooks, permission engine) lives in
+   the CLI, not the server crate; the server takes a caller-supplied factory, so the
+   crate dependency direction stays sane and the registry is unit-testable with a
+   fake. The CLI factors the recipe into one builder that both the existing `rpc`
+   command and the server share — one construction, not two.
+
+3. **Fanout is a session-lifetime broadcast; control is lock-free.** Each session
+   holds one `broadcast::Sender<RuntimeEvent>` (not the per-turn channel), so many
+   clients `subscribe()` and a mid-turn joiner still sees subsequent events. Cancel
+   and steer reach an in-flight turn **without** the session mutex: the turn's
+   `CancellationToken` clone and the `SteerQueue` clone are extracted into control
+   slots at construction, so a client cancels/steers while the turn holds the mutex
+   (proven by a test that holds the mutex unacquirable while control still lands).
+   Steer arrives as a `SoftInterrupt` at the next turn safe point (ADR-0111).
+
+4. **Connection-scoped attach, not per-message multiplexing.** A connection names
+   its session once — an additive `Attach { OpenNew | ResumeId | ResumeName }`
+   command answered by `Attached { session_id, server_version }` — rather than every
+   message carrying a `session_id`. Resume-by-id is guarded against minting a ghost
+   session for an unseen id (the store index is the source of truth). Existing stdio
+   clients that never send `Attach` are unaffected; new optional fields are
+   `#[serde(default)]`/`skip_serializing_if`, and the coarse `RPC_PROTOCOL_VERSION`
+   fence stays for structural breaks.
+
+5. **One shared pool; per-session cost is only mutable state.** The provider stack
+   and the MCP server connections are captured once at `serve` startup (`Arc`s) and
+   cloned into each session; only the mutable `SessionRuntime` is per-session. A soak
+   measured **~11 KiB of resident memory per added session** at N=32 — three orders
+   of magnitude below a fresh-stack-per-session — while per-session state stays
+   isolated.
+
+6. **Sessions are reaped, busy-safe and persist-first.** A periodic reaper removes a
+   session after its last client disconnects (a grace) or after an idle timeout,
+   calling `close()` (which records `SessionClosed`) **before** removal and refusing
+   to reap a session whose turn holds the mutex (`try_lock`, taken under the same
+   host-map lock as attach, so there is no attach/reap race). Clean shutdown stops
+   the reaper and persists every remaining session.
+
+**Deferred, disclosed:** multi-client permission-ask fanout — today the wire
+approver is single-owner (only the connection that created a session answers its
+asks; a second client's reply fails closed with a clear error). Broadening it to
+per-client ask routing is a follow-up, not silently dropped.
+
+## ADR-0122: An Opt-In Persistent Server Over A Local-IPC Transport, With A Safe-Only Daemon Lifecycle
+
+Status: accepted, opt-in. Extends the embedding surface in
+[`docs/embedding.md`](embedding.md); bound by ADR-0007 (tri-platform tier-1),
+ADR-0004/ADR-0042 (local/official endpoints only — the socket is local, never a
+vendor client), and the `#![forbid(unsafe_code)]` workspace rule.
+
+`localpilot serve` runs an **optional** persistent daemon hosting many sessions in
+one process; `localpilot connect` is a thin client attaching over a local
+transport. The default in-process path (`chat`/`ask`/`print`/`harness`) keeps
+working with **no daemon** and identical behaviour — the server is additive and
+never a silent default; a broken or absent daemon cannot degrade the single-process
+product.
+
+1. **One cross-platform local transport, reusing the framing.** A Unix domain
+   socket (Unix) / named pipe (Windows) carries the existing `localpilot-rpc` NDJSON
+   record framing — the framing and the `serve<R, W>` loop were already generic over
+   the byte stream, so there is no second codec. The endpoint lives under the OS
+   runtime dir, keyed by a stable hash of the workspace root, overridable by
+   `LOCALPILOT_SERVER_SOCKET`.
+
+2. **The lifecycle uses only safe std primitives.** No `unsafe`/`libc`/`flock`/
+   `setsid`: the singleton is the Windows named pipe's `first_pipe_instance(true)`
+   (auto-released on process death) plus a Unix `create_new` (O_EXCL) lock file;
+   detached spawn is `CommandExt::process_group(0)` (Unix) / `creation_flags(
+   DETACHED_PROCESS)` (Windows) with null stdio; the ready handshake is retry-connect
+   (distinguishing down from busy). The tradeoff — the O_EXCL lock has no
+   crash-auto-release a `flock` would — is covered by a bounded stale-endpoint reap.
+   tokio's `net` feature is enabled per-crate (as `localpilot-render` already does),
+   keeping it out of every other crate's build.
+
+3. **Tier-1 with an honest gap.** Both OS paths are implemented and the Windows path
+   is tested live; the Unix path is compile-verified but its live run is deferred on
+   a Windows-only build box per the workspace offline-evidence policy — the first
+   real Unix run is where a socket-perms/path-length/reap edge could still surface.
+
+## ADR-0121: The Agent Can Ask The User Through A Shared Host Capability
+
+Status: accepted. Supersedes ADR-0081 §4's "no multiple-choice UI machinery
+exists", which was the standing reason the intake gate asks over stdin. Issue
+#53.
+
+The agent had no way to put a question to the user. It could only write the
+question into its answer as prose — which the user had to find, interpret, and
+answer by retyping — and the prompt told it to finish or state a blocker, never
+to ask, so ambiguity was resolved by a silent guess. Meanwhile the machinery to
+suspend a turn and wait for a human already existed and worked; its answer type
+was just hardcoded to `bool`.
+
+1. **Asking is a host capability, following the delegation precedent.** A tool
+   cannot reach the user by itself, so `UserPrompter` is handed in through
+   `ToolContext` beside `retention`, `processes`, and `agents`. `ask_user` stays
+   an ordinary tool with no special path through the registry, and the REPL —
+   the one surface with a human on it — is the only caller that wires a prompter.
+
+2. **The capability is the gate, not the permission engine.** `ask_user`
+   declares no effects: a profile that grants everything still cannot conjure a
+   user, and a profile that grants nothing should not stop one being asked. Where
+   no human is reachable the tool returns a model-visible string telling the model
+   to choose and state its assumption, exactly as `delegate` does when no agents
+   are loaded — so a piped run, a CI run, and a subagent never stall.
+
+3. **Hosts project one typed question contract.** The default full-screen host
+   renders ordered single- and multi-select questions in its timeline/dialog
+   model, including the screen-reader projection. During the rollback window,
+   `localpilot-tui` adapts the same `UserQuestion`/`UserAnswer` contract to its
+   inline top section. The REPL owns the channel and reads each answer before a
+   host clears its widget; neither presentation defines a second tool or result
+   path.
+
+4. **A closed channel is a dismissal, never an invented answer** — the same rule
+   the approver follows for a denial. Ctrl-C cancels the turn *and* answers the
+   waiting call, so the tool resolves instead of hanging.
+
+5. **The prompt cue carries its threshold.** "Ask when different readings would
+   lead to materially different work, or before something hard to undo;
+   otherwise pick the obvious option and state the assumption." Without the
+   second half a model starts asking permission for everything, which is worse
+   than the guess this replaces. Gated on the tool being registered and on its
+   own `PromptParts` flag.
+
+6. **Intake asks through the same widget.** `Clarification::Ask` now takes a
+   `QuestionAsker`: `StdinAsker` is today's loop moved behind the trait, so every
+   existing piped/non-TTY intake test passes unchanged and the "empty answer
+   delegates this axis" contract is preserved; a terminal drives the widget
+   instead. The stored `guidance["answers"]` and `assumed_judgment` shape does
+   not change.
+
+The approval gate is deliberately untouched: folding it into this widget is a
+change to a safety surface and deserves its own decision. Editor integrations
+(RPC/ACP) get the non-interactive string for now.
+
+## ADR-0120: Documentation Tools Are Reached By A Prompt Threshold And Capability-Aware Resolution
+
+Status: accepted. Extends the broker contract in ADR-0031 and the agent prompt.
+Issue #45.
+
+A configured MCP documentation tool was available but not reliably *used*: with
+the broker off it was advertised and ignored; with the broker on a need like
+`<library> upgrade error` did not match a tool that describes itself as
+"query documentation". Availability is not use, and the gap was in two places.
+
+1. **The prompt states when current documentation is needed, not just that
+   tools exist.** One version-sensitive policy: a task depending on current or
+   version-specific behaviour of an external library, framework, SDK, API, CLI,
+   or cloud service consults documentation instead of recollection, with upgrade
+   errors, migrations, deprecations, changed configuration shapes, and version
+   mismatches named as the triggers. It is bounded in both directions — stable
+   local implementation questions do not trigger a lookup, and with nothing
+   suitable configured the model continues from local evidence and says so.
+
+2. **The policy has two forms because reaching a tool differs by mode.** With
+   the full registry advertised, the guidance is to call the suitable tool
+   directly and the discovery surface is never mentioned; with the broker on, it
+   is `tool_search` → `tool_load` → call. The cue appears only when one of those
+   routes exists — a documentation tool is advertised, or the broker can reveal
+   one — so the model is never told to do something it cannot.
+
+3. **Vendor neutrality is structural.** No prompt text, no resolver mapping, and
+   no core working-set entry names Context7, any other MCP server, or any
+   library. What "a documentation tool" means is one generic capability
+   vocabulary, shared by the prompt gate and the resolver so they cannot drift.
+
+4. **Resolution indexes more, but ranks the same.** A tool's own name and
+   description remain the primary index with the exact-name bonus unchanged.
+   Only when those match nothing does a bounded fallback apply: the MCP server
+   name, the schema's property names and descriptions (never values or
+   examples), and capability synonyms. The fallback can surface an otherwise
+   invisible tool; it can never re-rank tools that matched directly, which is
+   what keeps every existing resolution intact. Deprecation de-ranking, score
+   floors, learned boosts, working-set limits, and reveal-never-grant are
+   untouched, and `tool_search` still returns lean locators — now each with a
+   short match reason, still never a schema.
+
+## ADR-0119: Path-Scoped Instruction Files Are Matched At Injection, Against The Files In Play
+
+Status: accepted. Extends the context-file discovery contract in
+[`docs/configuration.md`](configuration.md) and ADR-0056. Issue #44.
+
+`.github/instructions/*.instructions.md` files carry an `applyTo` glob in
+frontmatter, so a repo can say "this rule is about the Rust crates, that one is
+about the web app" without either bleeding into the other. Until now every
+instruction kind was all-or-nothing per directory, which in a monorepo is the
+difference between usable instructions and a wall of irrelevant ones.
+
+1. **Discovery adds a kind; matching happens per turn.** The glob is parsed at
+   discovery (which runs once per session — the files do not change mid-session),
+   but *whether it applies* is decided each turn, because which files are in play
+   is a per-turn fact. `ProjectContext::render_for(paths)` filters scoped files;
+   `render()` keeps rendering everything for the ingest path.
+
+2. **"In play" is what the session touched, plus what the prompt names.** The
+   runtime records every workspace path a tool call names — read, write, or
+   failed, since the rule is about the file, not the outcome — in a shared,
+   bounded, session-scoped set. The hook adds any workspace file the prompt names
+   outright, so "fix the types in src/app.ts" reaches a `**/*.ts` rule on the
+   first turn, before any tool has run.
+
+3. **Precedence sits beside repo-root instructions, after them.** A scoped rule
+   refines the general ones and is narrowed further by its own glob. A scoped
+   file with no `applyTo` applies project-wide, matching the convention's
+   default; an unparseable glob also applies rather than silently swallowing the
+   rule.
+
+4. **Only the root `.github/` is read.** A nested `.github/instructions/` is
+   deliberately not discovered, for the same reason a nested
+   `copilot-instructions.md` is not: `.github` is a repo-level directory, and
+   per-directory instructions already work through the nested
+   `Navigator.md`/`CLAUDE.md`/`AGENTS.md` walk.
+
+5. **Frontmatter parsing is deliberately narrow.** Only `applyTo` is read, and
+   only from a `---` block opening the first line of a path-scoped file. Every
+   other kind keeps its bytes verbatim, so a leading `---` in an ordinary
+   `CLAUDE.md` stays markdown.
+
+## ADR-0118: Print-Mode Diagnostics Are Loss-Tolerant, Checked, And Fed From The Harness
+
+Status: accepted. Extends the print-mode contract in
+[`docs/01-product-spec.md`](01-product-spec.md) and the turn-handoff record in
+[`docs/06-harness-spec.md`](06-harness-spec.md). Issues #47 and #50.
+
+1. **A lagged printer keeps printing.** The print-mode event loop consumes a
+   broadcast receiver, and a receiver that falls behind returns `Lagged`, not
+   `Closed`. Treating both as end-of-stream silently truncated the answer under
+   load. The loop now skips the dropped events, notes the drop count on stderr,
+   and ends only on `Closed`. Losing some events must never mean losing the rest.
+
+2. **Per-turn failure counters live in the runtime, not in any event consumer.**
+   Because a broadcast subscriber can drop events by design, any consumer-side
+   tally undercounts. The runtime — which sees every call by construction —
+   counts malfunctions and reported failures (ADR-0116's distinction) and the
+   tools that crossed the stuck threshold, and folds them into the turn handoff:
+   `tool_failures`, `reported_failures`, `stuck_tools`. A headless caller can now
+   distinguish a clean turn from one whose every build failed; existing handoff
+   keys are unchanged.
+
+3. **Failures are visible on the diagnostics stream, and only there.** The
+   printer renders failing `ToolFinished`, `Warning`, and `ToolStuck` events as
+   bounded one-line stderr notes (whitespace collapsed, capped, already redacted
+   at the dispatch chokepoint). Stdout carries the answer and nothing else.
+
+4. **Stderr gets the same checked-write discipline as stdout, with independent
+   fates.** The `eprintln!` family panics on a write error — the forbidden
+   runtime-path panic — so diagnostics go through the checked writer. A closed
+   stdout cancels the turn (the answer has nowhere to go); a closed stderr only
+   silences further diagnostics and is never reported as the consumer going away.
+
+## ADR-0117: Every Model-Visible Tool Result Takes The Same Redaction And Bounding Path
+
+Status: accepted. Closes a structural gap against the invariants in
+[`docs/05-tool-system.md`](05-tool-system.md) §Result Model and §Safety
+Invariants. Issue #52.
+
+At the dispatch chokepoint, the success arm redacted and bounded tool output;
+the error arm handed `err.to_string()` to the model verbatim — unredacted,
+unbounded. The guarantee "tool outputs are stored only after redaction" held
+per happy path, not per result, and its safety depended on every tool author
+keeping error strings short and secret-free forever.
+
+Both arms now converge on one exit: error text (including the registry's own
+synthesized refusals — unknown tool, effects error, permission denial, gate
+block, whose denial message interpolates a caller-supplied path) is redacted,
+then bounded to the context budget with the explicit truncation note, then
+formatted. The retention spill applies to oversized errors as a side effect of
+sharing the path; a second, spill-free error path was judged not worth the
+asymmetry it would reintroduce.
+
+## ADR-0116: A Tool Result Carries A Three-State Outcome, Not A Boolean
+
+Status: accepted. Refines the result model in
+[`docs/05-tool-system.md`](05-tool-system.md) and the degenerate-loop guards in
+[`docs/06-harness-spec.md`](06-harness-spec.md) (ADR-0052). Issues #46, #48,
+#49, #51.
+
+`ToolResult.is_error` conflated two materially different outcomes: the tool ran
+to completion and the work it wrapped reported failure (a `cargo test` exiting
+1 — information the model must act on), and the tool could not do its job at
+all (a spawn error, timeout, denial — nothing learned about the work). The
+session loop's guards treated the first as the second, so an ordinary
+edit/test debugging loop accused a healthy `run_shell` of being stuck.
+
+1. **The type carries the distinction.** `ToolOutcome { Ok, ReportedFailure,
+   Unusable }` replaces the boolean on `ToolResult` and `ToolOutput`, with
+   `is_error()` (what the model sees) and `is_malfunction()` (what tool-health
+   guards measure) as the two consumer questions. The model-visible rendering is
+   unchanged: both failure kinds are `status: error`.
+
+2. **The wire format is a superset, because transcript reads drop unparseable
+   lines.** `is_error` is always written; `outcome` is an optional refinement;
+   a line without it degrades to the boolean's meaning (`error` → `Unusable`).
+   The same additive pattern extends the durable `ToolFinished` session event
+   and the verifier's `Observation`, so old logs keep replaying (the #21 lesson).
+
+3. **Producers classify at the source.** A completed non-zero exit, a delivered
+   non-2xx fetch, a background process dying inside its grace period, a refused
+   delegation (#48), and an MCP response carrying `isError: true` (#49) are
+   reported failures — the tool worked; the world said no. Everything returning
+   `ToolError`, plus an unknown background id (polling a stale id is exactly the
+   spin the guard catches), is a malfunction. `delegate`'s "no agent definitions
+   are loaded" stays a success: a configuration fact whose correct next step is
+   doing the work directly.
+
+4. **Guards measure what they claim to measure.** The per-tool stuck guard
+   counts only malfunctions and is *cleared* by a reported failure — a call that
+   spawned, ran, and captured output is direct evidence against malfunction. The
+   unproductive-call streak counts both kinds (a missing binary routed through
+   the shell comes back as exit 127, a reported failure, and must not spin
+   unchecked) and still resets on success. The repeated-error breaker observes
+   both kinds but injects failing-work wording for reported failures — re-running
+   will not change the result — instead of the malfunction-shaped "write it to a
+   script file" advice. The stuck-threshold message no longer claims the runtime
+   is "stopping further calls": it never did (#51); the guard's job is
+   signalling, and the real stop remains the whole-turn unproductive limit.
+
+5. **Boolean surfaces stay boolean, converting at the edge.** The RPC/ACP
+   protocols (exactly `completed`/`failed`), the TUI event, hook events, and the
+   Anthropic wire field keep `is_error`; the verifier keeps judging a declared
+   `ResultStatus` postcondition as failed on a non-zero exit, so the claim gate
+   stays closed. The lesson extractor now counts only malfunctions as tool
+   failures, so memory stops learning "run_shell failed N times" from turns in
+   which run_shell never failed.
+
+## ADR-0115: Harness Correctness And Safety Fixes — Phase-Cadence Firing, Full Tool-Output Retention, And Secret-Path Write Gating
+
+Status: accepted. Refines ADR-0009 (discovered quality gate), the tool-output
+contract in [`docs/05-tool-system.md`](05-tool-system.md), and the permission
+model in [`docs/07-security-and-privacy.md`](07-security-and-privacy.md).
+
+A cluster of harness-correctness fixes that share no feature but the same bar —
+the runtime should not silently do the wrong safe-looking thing.
+
+1. **A `cadence = "phase"` quality-gate check fires at the plan boundary.** The
+   PROGRESS.md model is a flat step list with no sub-phase markers, so the only
+   unambiguous phase boundary is plan completion: the `phase_complete` trigger
+   fires when a committed step leaves no incomplete step behind, and the ratified
+   phase-cadence checks run once there instead of never. A check configured to run
+   per phase that never runs is worse than no check — it reads as covered.
+
+2. **Tool output is retained in full past the display cap.** The output cap
+   truncates what the model is *shown* in-band, but the full output is retained so
+   a later `read_tool_output` can page the untruncated bytes. Capping the retained
+   copy at the same bound as the shown copy made the paging tool a no-op past the
+   cap — the data the tool existed to reach was already gone.
+
+3. **A write to a secret-looking path asks, even in a trusted workspace.** Trust
+   authorizes ordinary edits without a prompt; it does not silently authorize
+   writing a `.env`/key/credential path. The permission engine treats a
+   secret-like write target as ask-or-deny regardless of workspace trust, because
+   the blast radius of a mistaken secret write is not what workspace trust was
+   granted for.
+
+4. **SemVer-stable config keys built but not yet wired are reserved, not deleted**
+   (D005): `[harness] mode`, `[memory] outcome_downweight`, and
+   `PackSource::ManualPin` each carry a documented "reserved" note rather than
+   being removed. Deleting a stable config key or a cross-referenced public enum
+   variant for zero runtime benefit trades a compatibility promise for nothing.
+
+## ADR-0114: The Provider Layer Is Split Into A Shared-Contract Core Plus One Crate Per Adapter
+
+Status: accepted. Refines ADR-0001 (narrow crates) and ADR-0002 (provider-neutral
+core); the crate map is in [`docs/02-architecture.md`](02-architecture.md) and the
+per-adapter build loop in [`docs/14-dev-tooling.md`](14-dev-tooling.md).
+
+`localpilot-llm` had grown to a single ~5.9k-line crate holding the trait, the
+event model, and both hand-written adapters, so editing one adapter recompiled the
+whole provider layer as one unit. It is now four crates: **`localpilot-llm-core`**
+(the shared contract — the `ModelProvider` trait, stream events, error taxonomy,
+auth, header parsing, request shapes; no adapter, so no dependency cycle);
+**`localpilot-llm-openai`** and **`localpilot-llm-anthropic`** (one adapter each,
+depending only on core); and **`localpilot-llm`** as a thin umbrella that keeps the
+registry, discovery, vision, and the test fake, and **re-exports the identical
+public surface** so `harness`/`cli`/`rpc`/`quota` compile unchanged.
+
+The move was behaviour-neutral: only cross-crate use-path rewrites and widening six
+adapter-facing items from `pub(crate)` to `pub`; the full test suite passed with no
+downstream edits. **Honestly scoped by measurement:** the win is the isolated
+inner loop — `cargo check -p localpilot-llm-anthropic` checks a 1.4k-line unit
+without re-checking the sibling adapter or core — *not* a faster full
+`cargo build --workspace`, which still recompiles the downstream spine through the
+umbrella. The docs say so rather than claiming a whole-build speedup the split does
+not deliver.
+
+## ADR-0113: A Claude Code Session Imports By Text-Flattening; The Quota Pause Is Waited Out And Escalated
+
+Status: accepted. Extends the resume/quota model in
+[`docs/06-harness-spec.md`](06-harness-spec.md) and the migration guide in
+[`docs/install.md`](install.md); bound by ADR-0004/ADR-0042 — the import reads only
+local files, never a private or subscription endpoint.
+
+Two self-contained items sharing the resume machinery.
+
+1. **Import text-flattens rather than re-homing foreign structure.**
+   `localpilot import claude-code` reads a Claude Code session
+   (`~/.claude/projects/.../<id>.jsonl`, one content block per line chained by
+   `parentUuid`), parses leniently, and flattens: tool calls and results become
+   plain-text markers and provider-specific reasoning is dropped, because foreign
+   tool ids/schemas and reasoning signatures cannot be replayed under a different
+   provider. The result is prose any adapter serializes verbatim. It writes both
+   the transcript and the event log (so the session both counts and resumes),
+   redacted on write, under a distinct `imported_cc_<id>` name with a `[cc-import]`
+   badge; a re-import never overwrites a session and refuses without `--force`. The
+   format was verified against a real Claude Code file, not inferred.
+
+2. **`wait-resume` actually waits and escalates.** The pause estimator and
+   decision rules already existed but the call site printed an ETA and exited and
+   pinned the retry attempt to 1. The paused-run marker now records the real
+   provider id and a pause-attempt count that grows the backoff across repeated
+   pauses (a provider-stated retry-after still wins), and `wait-resume` waits out
+   the window in a bounded, cancellable loop — re-checking the safety gates on a
+   capped poll, honouring `max_wait_minutes` — then resumes. A pure `wait_nap`
+   helper computes each clamped nap so the loop is unit-testable without a clock.
+
+## ADR-0112: An Already-Seen Read Elides To A Stub, In-Memory And Exact-Match
+
+Status: accepted, opt-in (`[tools] elide_seen_reads`). Extends the tool-output
+contract in [`docs/05-tool-system.md`](05-tool-system.md).
+
+A `read_file` that returns a path+range already read this session, unchanged since
+(same mtime and length), is replaced with a compact stub pointing at the earlier
+read instead of re-spending context on identical bytes. The read-history is
+**in-memory per session, not a durable store event**, and matching is **exact
+`(path, start, end)`, not full-read-covers-sub-range** (D008): the smallest blast
+radius (no store-format bump, no elision across a resume boundary) that still
+captures the dominant repeated-identical-read waste. Coverage matching is a
+follow-up if it is ever measured worthwhile; a conservative elision that never
+hides changed bytes is the point.
+
+## ADR-0111: A Typed Soft-Interrupt Substrate Delivers Steering At Turn-Loop Safe Points
+
+Status: accepted. Extends the turn loop in
+[`docs/06-harness-spec.md`](06-harness-spec.md); the non-user producers are
+library-only for now (D007).
+
+Steering, cancellation, and background/system signals reach an in-flight turn
+through one typed `SoftInterrupt { source }` queue admitted only at labelled safe
+points, never mid-tool. Non-urgent interrupts are admitted between tool dispatch
+and the next model call. An urgent interrupt may also preempt an open provider
+stream: the incomplete assistant response is discarded from history, queued
+interrupts are admitted in FIFO order, and the same turn starts a fresh provider
+call. The queue is the durable source of truth; notification is only a wakeup
+mechanism. `User` steering is produced by interactive and hosted clients, while
+the server/swarm path may inject labelled `System` or `BackgroundTask` messages
+without making them read as user-authored input.
+
+## ADR-0110: Memory Retrieval Fuses Keyword And Dense Ranks With Reciprocal Rank Fusion
+
+Status: accepted. Amends the rank composition of ADR-0086 (normalized-relevance
+context pack) and reuses the embeddings of ADR-0059; keyword search stays the
+candidate floor, so retrieval is byte-identical when embeddings are absent.
+
+Context hits are fused from the BM25 keyword ranking and the dense/vector ranking
+by **Reciprocal Rank Fusion** (k=60): each list contributes `1/(k + rank)` and the
+sums are combined, with cosine similarity as the tiebreak. RRF ranks on position
+not raw score, so it needs no score normalization across two incomparable scales
+and an item that both rankers surface beats one that only a single ranker finds —
+while a single-list query degrades to the identity of that list's order. A separate
+per-turn injection-dedup TTL (`[memory] injection_dedup_ttl_turns` in
+`.localpilot.toml`) stops the same memory being re-injected every turn within the
+window. RRF's convexity is the reason a naive "consistent middle rank beats a
+split high/low rank" intuition is wrong and the tests assert the both-lists rule
+instead.
+
+Ownership amendment (2026-08-26, LocalHub#84): this algorithm is implemented by
+`localmind-search::hybrid_memory_search` and consumed by
+`localpilot-localmind::context_hits`. The former host-owned `fuse.rs` is removed.
+A workspace contract test pins `localpilot-localmind` as the sole production
+consumer so adding or removing an edge requires this decision to be updated.
+
+## ADR-0109: Anthropic Prompt Caching Marks The Stable Prefix Only
+
+Status: accepted, opt-in (`prompt_caching` on a `[providers.<id>]` table). Extends
+the provider contract in [`docs/04-provider-contract.md`](04-provider-contract.md)
+and [`docs/providers.md`](providers.md).
+
+The Anthropic adapter emits a `cache_control: {type: "ephemeral"}` breakpoint on
+the **stable prefix** — the tools block plus the first, stable system block — and
+reads back `cache_creation_input_tokens`/`cache_read_input_tokens` from
+`message_start`, surfaced through `TokenUsage` with an `effective_input_tokens`
+accessor. Caching the tools+system prefix is the highest-ROI, lowest-blast-radius
+breakpoint: that prefix is the largest always-identical span of the request, so it
+is where a cache hit pays most. The **rolling message-history cache is deliberately
+deferred** (D006): a breakpoint on the growing conversation needs per-turn
+block-array expansion of collapsed turns and ≤4-breakpoint management —
+disproportionate request-path risk against a marginal gain over the prefix already
+cached. A follow-on can add it.
+
+Cache counters are also stored as defaulted additive fields on usage events, so
+resumed sessions and offline scorecards retain effective-input truth while event
+logs written before prompt caching continue to deserialize with zero cache use.
+## ADR-0105: Releases Ship Verified Prebuilt Binaries With A Version-Keyed Cache
+
+Status: accepted. Extends the release process in
+[`docs/09-release-plan.md`](09-release-plan.md) and the installation guide in
+[`docs/install.md`](install.md); bound by ADR-0007 (tri-platform tier-1). The
+ecosystem-wide rule lives in the hub's distribution policy.
+
+Installing meant `cargo install --git`: a Rust toolchain, a multi-minute compile,
+and no way back if a release misbehaved. For a stack meant to be usable by people
+who are not Rust developers, that is the barrier that matters. Five decisions.
+
+1. **A tag publishes verified archives, or it publishes nothing.** Every release
+   builds an archive per supported target, each with a SHA-256, plus a
+   `manifest.json` indexing the release. Publishing happens **once**, from a job
+   that requires the whole matrix to have succeeded and re-checks the staged files
+   against the expected targets. Previously each target attached its own archive,
+   so one broken build produced a release that looked complete and was silently
+   missing a platform — indistinguishable, to a downloader, from a good one. A
+   partial release is worse than a failed one.
+
+2. **Integrity from checksums, authenticity from keyless build provenance.** A
+   digest published beside an archive proves the bytes were not corrupted or
+   truncated; on its own it does not prove origin, because a party able to alter
+   the release can alter the digest. Origin therefore comes from **Sigstore-backed
+   build attestations** (`actions/attest-build-provenance`), which bind each
+   archive to the workflow, repository, and commit that produced it.
+   LocalPilot's public-repository visibility selects Sigstore's public-good
+   instance and the public Rekor transparency log; GitHub's private/internal
+   instance has no transparency log, so this claim must be revisited if the
+   repository visibility changes. Verification is `gh attestation verify`.
+
+   Keyless was chosen over a self-managed signing key deliberately: the workflow's
+   OIDC identity is the signer, so there is no key to hold, rotate, or leak, and
+   nothing to distribute to users. It is also free, which is the constraint.
+
+   **This is not OS-level code signing.** macOS Gatekeeper still wants an Apple
+   Developer ID and Windows SmartScreen an EV certificate — both paid annual
+   accounts, neither in place. Every surface that mentions verification says which
+   of the two it provides, because claiming more than is true invites the
+   misplaced trust the whole decision exists to avoid.
+
+3. **Every version installs into its own directory.** Switching is a rename,
+   rollback is free, and the running binary is never the file being replaced —
+   the only shape that behaves identically on Windows, where a running executable
+   cannot be overwritten. A version becomes resolvable only when its marker file
+   exists, and the marker is written inside a staging directory that is then
+   renamed into place, so there is no window in which a half-written version can
+   be selected. An interrupted update leaves the previous version working.
+
+4. **Verify before extracting; the cache records rather than re-verifies.** The
+   order is download → verify against the manifest → extract to staging → commit
+   by rename. Nothing is executed and nothing becomes resolvable before the digest
+   matches. The cache then *stores* the verified digest in its marker instead of
+   re-hashing on every resolve: verification needs the bytes, which only the
+   downloader has, and startup should not pay for a check install already did.
+   Archive members are refused if they would escape the destination.
+
+5. **Resolution is pin → newest cached → running build, and never downgrades.**
+   A cached version wins only if it is strictly newer than the build asking,
+   because a developer running a fresh from-source build must not be silently
+   replaced by an older release sitting in the cache. A pin to a version that is
+   not installed does **not** fall through to "newest" — a pin is an instruction
+   not to move. Every resolution carries its reason, because "why am I running
+   this version" is the first question asked.
+
+6. **The resolved version is published to a `PATH`-visible directory.** A
+   resolver whose answer reaches only a `list` command is reporting, not
+   resolving: before this, `pin` and `rollback` changed what the tool *said* it
+   would run and not what ran. Every train tool's executable is now copied into
+   one shared `bin/` directory — one `PATH` entry for the whole stack — refreshed
+   after any change to the cache. A copy rather than a symlink (a privilege or
+   developer mode on Windows) or a hard link (cannot cross volumes), and replaced
+   by **rename-then-copy**, because Windows refuses to overwrite a running
+   executable but does permit renaming one aside.
+
+7. **The stack installs as a set; the installer script is only a bootstrap.** The
+   release train cuts every tool to one version and one tag, and they are tested
+   only together, so `update --all` installs all of them at one tag rather than
+   each tool carrying its own updater. Version skew between a CLI and the engine
+   it talks to fails silently, which is exactly the failure independent updaters
+   would make easy to reach.
+
+   The install scripts therefore fetch and verify **one** binary and hand off to
+   it. Reimplementing the cache layout and marker rules in shell *and* PowerShell
+   would be two more implementations of an on-disk contract that already has one —
+   and a script users pipe into a shell unread should stay short enough to read.
+
+One archive format — `.tar.gz` — is used on every platform including Windows,
+which has shipped `tar` since 2018. The `zip` crate no longer publishes a version
+compatible with this workspace's MSRV, and paying a dependency conflict to carry
+a second format and a second extractor was the worse trade. Releases before 2.6.0
+shipped a Windows `.zip`, so the updater's first installable Windows release is
+2.6.0; `install.md` says so. The bootstrap has the mirror-image constraint:
+`update --all` first exists in 2.6.0, so installing an older release leaves the
+companions uninstalled — the script reports that plainly rather than failing.
+
+
+## ADR-0103: Subagents Are Declarative Data With Containment By Construction
+
+Status: accepted. Extends the tool surface in
+[`docs/05-tool-system.md`](05-tool-system.md) and the harness runtime in
+[`docs/06-harness-spec.md`](06-harness-spec.md); bound by ADR-0007
+(tri-platform), ADR-0020/ADR-0027 (skills are read-only advisory prompt
+modules), ADR-0029 (per-turn ceilings), ADR-0031 (reveal-never-grant), and
+ADR-0097 (user-global baseline plus project overlay).
+
+A specialised agent — review this diff, run the tests, explore this subsystem —
+should be a file, not a release. Four decisions make that safe.
+
+1. **A definition is data, and only data.** A `*.agent.yaml` names a model, an
+   upper bound on tools, which prompt sections it wants, and its instructions.
+   Its prompt supports a closed placeholder vocabulary; an unknown placeholder or
+   an unknown field is a **load-time error**, not text passed through. A typo in
+   a field name is the difference between "this agent has three tools" and "this
+   agent has every tool", so silence is the wrong default. Discovery mirrors the
+   skill precedence exactly (project shadows global, native outranks
+   cross-harness) and the shadowed definition stays listable, so a user can see
+   why their file is not the one running.
+
+2. **Containment is structural, not a check.** The child's registry is produced
+   by **filtering the parent's own registry**, and its permission engine is
+   constructed with the **parent's own profile**. Filtering can only remove, so a
+   child cannot hold a tool its parent lacked, and no runtime guard has to be
+   remembered for that to stay true. Two failures are kept distinct: a name that
+   is not a registered tool at all fails at load, while one the parent simply
+   lacks is reported as narrowing — conflating them would make a typo look like a
+   permission decision. `delegate` declares no effect of its own; the child's
+   calls each declare theirs and are authorized individually, so delegation
+   changes *who asks*, never *what is allowed*.
+
+3. **Bounded by default, and refusals are outcomes.** A child's tool calls are
+   charged to the delegating turn's own per-turn ceiling, so delegation cannot be
+   used to slip past it, and its token usage is republished to the caller so a
+   delegating turn reports what it really cost. Child tokens are deliberately
+   *not* added to the caller's context estimate: the child's messages are not in
+   the caller's history — only its bounded summary is — so counting them there
+   would compact a context that is not actually large. Subagents nest one level
+   deep (a subagent cannot spawn one), a child with no usable tools is refused
+   before it starts, and the caller receives a bounded summary rather than the
+   child's transcript — a subagent that returns everything it read is worse than
+   no subagent, because the entire reason to delegate is that the caller's
+   context stays clean. Every refusal is readable output that says what to do
+   instead, never a panic or a failed tool call. A child never answers its own
+   permission asks — they are forwarded to the caller's approver with the agent
+   named in the prompt. Attribution is not cosmetic: without it a user is asked to
+   approve a command they did not issue and cannot place, which is worse than
+   refusing.
+
+4. **Subagents are not skills.** A skill is text the model may read; loading one
+   grants nothing. A subagent is an execution with authority. They share no
+   loader, no registry, and no file format, so nothing can drift from "advisory
+   prompt module" into "thing that can run commands".
+
+The system prompt was split into named sections to support this: a narrow agent
+should not pay context for guidance it cannot act on. The main session selects
+every section through the same composer, so the two paths cannot drift, and the
+tool list and closing contract are not selectable — a model with no tool list has
+nothing to call, and one with no closing contract has no way to end a turn.
+
+
+## ADR-0104: Declaration-Scoped Code Search Is A Stateless Tool That Reuses The Code-Intelligence Grammars
+
+Status: accepted. Extends the tool surface described in
+[`docs/05-tool-system.md`](05-tool-system.md); bound by ADR-0007 (tri-platform
+tier-1), ADR-0031 (reveal-never-grant), ADR-0036 (the adapter boundary: the host
+owns filesystem walking), and ADR-0070 (out-of-workspace read grants).
+
+The model's search surface was `find_files` (by name) and `search_text` (by
+line). Neither answers the question it most often has — *where is this defined* —
+so a broad query returned hundreds of call-site lines and provoked follow-up
+reads to find the one declaration among them. Four decisions follow.
+
+1. **A hit is a declaration, not a line.** `search_definitions` resolves every
+   text match to its enclosing function, type, module, or test and returns that
+   declaration's symbol path, signature with the body elided, and location.
+   Multiple matches inside one declaration collapse to a single hit with a count,
+   so a popular helper cannot crowd out every other result. Measured across this
+   workspace, a broad identifier costs 3–6× less output than the equivalent
+   `search_text` call. A query that is *already* narrow does not improve — the
+   signature line costs more than a trimmed source line when there are few of
+   them — and the tool's own description says so rather than leaving the model to
+   discover it.
+
+2. **Stateless, deliberately.** The tool parses on demand and keeps no index,
+   cache, or database. The indexed code graph answers project-wide questions
+   (callers, change impact) and pays for it with an ingest step and a staleness
+   surface; this answers per-file questions and is always current because it has
+   nothing to be stale. Two indexes over the same trees would drift and would
+   have to be invalidated in two places. Anything requiring persistence or
+   cross-file resolution stays with the code graph.
+
+3. **Text-first, because parsing is not free.** Parsing measured at roughly
+   2 MB/s in a debug build, so parsing every walked file would make a search cost
+   seconds and scale with repository size rather than with the number of results.
+   The cheap literal/regex scan therefore runs first and only files that already
+   contain a match are parsed. A search that finds nothing costs one pass over
+   the bytes and zero parses. This is a correctness property as much as a
+   performance one: it is what keeps the tool's cost proportional to the answer.
+
+4. **Grammars are reused, not vendored, and the host still owns the walk.** The
+   code-intelligence crate is already a path dependency through the vendored
+   submodule, so its grammars are already compiled into every build; the tool
+   adds no dependency and lives in the adapter crate that already holds both
+   sides. Vendoring would duplicate the grammars; shelling out to a separate
+   binary would add a runtime dependency the user may not have installed and
+   would move filesystem walking to the wrong side of ADR-0036. The walk, ignore
+   handling, and workspace scoping stay on the host side and use the same calls
+   the built-in search tools use, so ignore files and out-of-workspace read
+   grants behave identically and the permission engine — not the tool — decides
+   containment. If the vendored dependency is ever dropped, or stops exposing
+   per-file parsing, the fallback is to vendor a narrowed grammar subset.
+
+## ADR-0101: An MCP Server Gets A Configured Environment — Named Credentials By Reference, A Local Plaintext Escape Hatch, One Resolution Seam, And Exact-Value Redaction Coming Back
+
+Status: accepted. Closes LocalHub#43. Amends the credential-storage boundary in
+ADR-0042 and [`docs/07-security-and-privacy.md`](07-security-and-privacy.md);
+extends the canonical-redactor position in ADR-0011; bound by ADR-0007 (tri-platform
+tier-1) and ADR-0031 (reveal-never-grant).
+
+An MCP server entry accepted only `command` and `args`, so the child received
+nothing but LocalPilot's own inherited environment. A server needing
+configuration or a credential could only be set up by exporting the variable
+before LocalPilot started — outside the config file, outside the credential
+store, and invisible to `doctor`. Four decisions follow from fixing that.
+
+1. **Three entry forms, distinguishable at a glance, validated after the
+   merge.** A plain string is an ordinary value; `{ value = "..." }` is a
+   credential written literally into a local, git-ignored config file;
+   `{ credential = "alias" }` names an entry in the credential store and is the
+   recommended path. Validation runs on the *merged* configuration rather than
+   per file, and that ordering is load-bearing: config layers combine per key, so
+   a user file supplying `KEY = { credential = "a" }` and a project file
+   supplying `KEY = { value = "b" }` — each valid alone — merge into one entry
+   carrying both, which is precisely the shape that must be rejected. A per-file
+   check never sees it.
+
+   Two entries whose names differ only by ASCII case are also rejected. Windows
+   matches environment names case-insensitively and Linux/macOS do not, so such a
+   pair is one variable on one tier-1 platform and two on the others; every
+   possible resolution is wrong somewhere, and refusing the ambiguous
+   configuration is the only behaviour identical on all three (ADR-0007). For the
+   same reason the environment *layer* is documented rather than
+   "corrected": `LOCALPILOT_MCP__SERVERS__<server>__ENV__<VAR>` arrives
+   lower-cased, and that cannot be distinguished after the fact from a genuinely
+   lower-case key.
+
+2. **Generic credentials are separated from provider credentials structurally,
+   not by convention.** `localpilot credential set|list|delete` stores named
+   values in their own map on disk and under their own OS-keychain service, so
+   `credential set openai` cannot reach the key `localpilot login openai` stored,
+   whatever either is called. A naming prefix would have left the guarantee
+   resting on alias validation. The value is read from stdin, never taken as a
+   command-line argument, and never printed in full; there is deliberately no
+   command to reveal, export, or copy one afterwards. Listing keeps a name-only
+   index because the keychain exposes no enumeration API — the index holds names,
+   never values. Every on-disk field is additive, so a credential file written by
+   an earlier version still parses and its logins still resolve.
+
+3. **One resolution and spawn seam.** Session tool discovery, designated research
+   search, and the `doctor` probe each spawned servers independently, which is
+   how one policy becomes three that drift. They now share a resolver and a
+   spawn, and a test asserts the structural property so a fourth path that grows
+   its own spawn fails the suite. Resolution completes *before* anything starts:
+   a server whose credential is missing is never spawned, so the failure stays a
+   configuration error naming the variable and the alias instead of an obscure
+   fault from a server that came up without the value it needed. `doctor`
+   accordingly distinguishes command-unavailable, credential-missing,
+   startup-failure, and connected, reporting variable *names* and never values in
+   either rendering.
+
+4. **Inbound traffic is filtered against the exact values we handed out.** An MCP
+   server is an untrusted subprocess that can read its own environment, so any
+   credential given to one can come straight back — through the `initialize`
+   handshake, advertised `tools/list` metadata, a tool result, or a protocol
+   error. Only tool *output* was covered before, by the tool registry's
+   pattern-based redaction, and that layer detects credentials by shape and so
+   matches nothing issued from the credential store. Filtering now happens at the
+   transport, the one place all four surfaces pass through; anywhere higher would
+   have repeated the original omission by covering tool output and missing the
+   advertised tool descriptions that reach the model on every session. The walk
+   is recursive and rewrites object keys as well as values.
+
+   The two layers are complementary, not redundant: pattern detection catches
+   credentials by shape and cannot catch a store-issued value, while exact
+   matching catches the values we handed out and cannot catch anything else. Both
+   run (ADR-0011 keeps the pattern detector canonical).
+
+   Values shorter than **8 characters** are never matched verbatim. Below that a
+   "secret" occurs in ordinary prose, and blanking every occurrence would corrupt
+   the output the user is trying to read — a worse outcome than not matching a
+   value no credential system should have issued. The floor is the same order as
+   the pattern detector's own length floors, so the two layers agree on what is
+   too short to be credible.
+
+**Boundary, stated plainly.** Exact-value redaction is byte-for-byte, so a
+server that returns a credential transformed — base64-encoded, URL-encoded, split
+across two JSON fields — defeats it. This is a strong guarantee against
+accidental leakage and a weak one against a determined server. It is defence in
+depth, not a containment boundary; the permission engine and the effect
+declarations remain the actual boundary, and a configured environment grants no
+new tool permission and bypasses no existing gate (ADR-0031).
+
+**The amendment to ADR-0042.** That decision says a provider key never enters a
+config file, and that remains true: provider credentials stay config-free and are
+reachable only through `login`. The sensitive-literal form is a deliberate,
+documented exception for a *different* class of secret — one belonging to a
+third-party subprocess the user chose to run, in a project-local, git-ignored
+file. It receives identical runtime masking and identical inbound redaction to a
+store-backed credential; its only weaker property is plaintext at rest. The
+credential-store reference remains the recommended path and the documentation
+says so.
+
+**Rejected.** Automatic `.env` loading, `${VAR}` expansion in TOML, and per-tool
+environment configuration were all rejected as scope that would add implicit
+behaviour to a surface whose whole value is being explicit. Passing secrets as
+command-line arguments was rejected outright: argv is world-readable on every
+tier-1 platform.
+
+## ADR-0100: Research Follows Redirects Through Its Own Policy — Every Hop Re-Gated And Audited, Automatic Following Still Off
+
+Status: accepted. Closes LocalHub#42. Amends the absolute no-follow boundary in
+[`docs/07-security-and-privacy.md`](07-security-and-privacy.md) and reuses the
+per-destination render gating (ADR-0095, LocalHub#37).
+
+Research treated every 3xx as the end of a candidate: the client ran with
+`redirect::Policy::none()` and `fetch` mapped any redirection straight to
+`Redirected`, never reading `Location`. That made the allowlist a true egress
+boundary, but it also discarded same-host relocations, canonical host moves,
+`http`→`https` upgrades, and — the case that surfaced it — the attribution and
+grounding **wrapper URLs** that real search providers return instead of direct
+source URLs. A designated MCP search tool could find exactly the right source and
+still contribute zero evidence, because only the wrapper was ever fetched. An
+open-web allowlist did not help, and browser rendering could not recover it
+either: rendering is considered only after a static fetch has produced a page,
+and a redirect exits before that.
+
+The fix is not to hand redirect handling to the HTTP client — that would move
+egress decisions somewhere the allowlist and audit log cannot see them.
+
+1. **Automatic following stays off.** `redirect::Policy::none()` is retained.
+   LocalPilot resolves each hop itself, so every request it makes is one it
+   decided to make and logged.
+2. **Every hop is re-gated by the same decision the first hop passed.** A hop
+   requires a `Location`, resolves it against the URL that produced it (so a
+   relative target behaves as a browser would), accepts only `http`/`https`, and
+   then passes the destination through the shared `decide_destination` — the same
+   function the browser render gate uses, so static and rendered navigation
+   enforce one boundary instead of two drifting copies. A destination needing
+   confirmation is blocked: the grant in hand is the only authority, and a
+   redirect must never be the thing that widens it.
+3. **Internal addresses are refused ahead of the allowlist, except within one
+   host.** A cross-host hop to loopback, link-local, a private range, or an
+   unspecified address is refused unconditionally, so an open-web reach cannot
+   become an SSRF channel. A host that redirects *within itself* inherits the
+   permission it already had — continuing a conversation with a host already
+   being fetched grants no new reach.
+4. **Chains are bounded and loops are caught.** Five hops, with every visited URL
+   remembered so a cycle stops on detection rather than being walked to the
+   limit. Cooldown, pacing, timeouts, body bounds, redaction, and admission all
+   apply per hop, exactly as on a direct fetch.
+5. **Outcomes are distinct, not collapsed.** The audit log records
+   `redirect-followed`, `redirect-blocked`, `redirect-malformed`,
+   `redirect-cycle`, or `redirect-depth-exceeded` per hop, content-free, and the
+   retrieval account separates hops *followed* from candidates that *ended* at a
+   redirect — "we refused to go there" reads differently from "we went there and
+   it worked". The previous single `redirect-not-followed` decision is gone.
+6. **Evidence points at the page, provenance keeps the lead.** The locator is the
+   final fetched URL, because that is where the content is and where a reader
+   must land; the originally proposed URL is retained as redirect provenance.
+   No vendor host is special-cased — a grounding wrapper resolves because every
+   hop is revalidated, not because anyone is trusted.
+
+## ADR-0099: Skill Discovery Is Review-Only — It Recommends, Never Registers Or Installs; Web Discovery Reuses The `/research` Egress With A Public GitHub Search Fallback
+
+Status: accepted. Closes LocalHub#41. Builds on the effective skill catalog
+(ADR-0097), skill source repositories and managed installs (ADR-0098), and the
+`/research` egress contract (ADR-0060/ADR-0076).
+
+ADR-0098 gave a curated, user-managed way to *install* skills but deliberately
+excluded discovery. This adds discovery as a strictly **read-only** lane:
+`localpilot skills research [-g] <query>` and `/skills research …`, plus an
+automatic lane inside `/research <topic>` that adds a separate `Relevant skills`
+report section. Discovery classifies matches, ranks them, validates a candidate
+repository, and saves a review proposal — it **never** registers a source or
+installs a skill, and a skill recommendation is **never** a research finding or a
+memory candidate.
+
+1. **Read-only by construction.** Discovery searches the effective project+global
+   catalog and registered-source caches, classifies each match `installed` /
+   `available` / `discovered`, and validates a candidate repository by fetching a
+   snapshot read-only (the ADR-0098 `RepoFetcher` + `read_catalog`), executing
+   nothing and leaving no snapshot behind. Every mutation stays with the ADR-0098
+   `SkillsManager`; the model may classify/recommend through an optional
+   classifier seam but can never invoke a mutation.
+2. **Ranking is deterministic with an optional model overlay.** A term-match
+   baseline over name+description gives a stable, order-independent ranking; an
+   optional classifier may only refine the *primary* recommendation to a real
+   candidate — it never reorders, rescores, or mutates. Discovery stays
+   reproducible and its tests stay hermetic.
+3. **Web discovery reuses one disclosed egress surface.** A bounded search for new
+   public HTTPS GitHub repositories runs only when web research is enabled, through
+   the existing `[research.web]` allowlist/disallowlist, egress disclosure, audit
+   log, and `--no-web`. Configured research search providers are preferred; the
+   official public **GitHub repository-search API** (`GET /search/repositories`,
+   unauthenticated) is the fresh-install fallback. A rate limit or outage yields an
+   honest partial result and never discards local matches. Official public
+   endpoints only (clean-room).
+4. **Proposals are a separate surface, de-duplicated.** A proposal records the
+   normalized URL, resolved commit, catalog root, available skills, recommendation,
+   confidence/reason, query, intended scope, provenance, and timestamps, keyed by
+   (repository, recommended skill, scope) so a repeat run refreshes evidence rather
+   than duplicating. Proposals live in `<scope>/.localpilot/skill-proposals.toml`,
+   read by LocalMind's dedicated Skills review tab (D-LM-0031) — never the memory
+   review queue.
+5. **Autonomous loading is gated.** A relevant skill is loaded into a research run
+   only when it is already installed, model-discoverable, and
+   `[skills].autonomous_discovery` is on; an available/discovered match, a
+   user-only skill, or the toggle off all stay report-only. Installed matches are
+   always reported.
+
+## ADR-0098: Skill Sources Are Explicit Public-HTTPS Git Snapshots; Managed Installs Are Provenance-Tracked And Never Overwrite Or Delete Unmanaged Content
+
+Status: accepted. Closes LocalHub#40. Builds on the effective skill catalog
+(ADR-0097) and the read-only advisory skill model (ADR-0020, ADR-0027).
+
+A reusable skill still had to be copied into a repository by hand. This adds a
+curated, user-managed way to pull skill packages from public Git repositories —
+`localpilot skills repo …`, `skills available`, `skills install`, `skills delete`
+(and `list`/`show`), each also reachable as `/skills …` in the REPL. It is a
+curated source list, not a marketplace: LocalPilot never discovers, ranks, or
+trusts a repository for the user.
+
+1. **A source is one explicit, cached commit snapshot.** `skills repo add`
+   validates a public **HTTPS** URL (SSH, embedded credentials, explicit refs,
+   private repos, and local paths are rejected), fetches the default branch once,
+   validates its catalog, and records the URL + commit in a per-scope
+   `skill-sources.toml`. Adding installs nothing. `.git`/trailing-slash variants
+   normalize to one identity, so re-adding a registered URL is refused — `skills
+   repo refresh` is the only network update, and it is atomic: a fetch/validation
+   failure keeps the previous usable cache, and a refresh never changes an
+   already-installed skill. `repo delete` removes only the registration and cache;
+   installed skills remain usable with their provenance.
+2. **Exactly one catalog root, chosen by fixed precedence.** A fetched snapshot
+   exposes one intentional catalog, taking the first non-empty of
+   `.localpilot/skills`, `.agents/skills`, `.claude/skills`, `skills`, or a single
+   root `SKILL.md`. Only that root's immediate package directories are read
+   (mirrored plugin/bundle trees are ignored). A source with no supported root, an
+   invalid manifest, or a duplicate manifest name in the selected root is rejected
+   as a whole.
+3. **Managed installs land in `.localpilot/skills` and carry provenance.** An
+   install copies the complete package snapshot into the scope's
+   `.localpilot/skills/<name>` (already a discovery root, so the skill becomes
+   effective through ADR-0097's resolver with no enable step) and records source
+   id/url/commit/source-path/scope/time in a per-scope `installed-skills.toml`
+   ledger, kept outside the third-party content. Nothing in a package is executed
+   and no permission is granted. A same-scope skill is never overwritten (a project
+   install may still deliberately shadow a global one); a bulk `--all` install
+   preflights and is all-or-nothing. `skills delete` removes only a
+   ledger-proven managed skill and refuses hand-authored or checked-in content;
+   removing a project install reveals the matching global skill again.
+4. **Management is user-only, gated, and side-effect-seamed.** These commands are
+   never model-callable tools. Project mutations require a trusted workspace;
+   global mutations require a resolvable home and add a global-impact disclosure.
+   Every network/write/delete discloses source/commit/destination/impact before
+   acting; the CLI confirms interactively or via explicit `--yes` and refuses an
+   unattended run without it, and the REPL (which owns stdin) treats a mutation as
+   non-interactive so it discloses and requires `--yes`. Content is bounded
+   (size/file caps) and escaping symlinks are rejected. The network is a
+   `RepoFetcher` seam, the clock is injected, and confirmation is an `Approval`
+   value, so the one management service is fully testable without live Git and the
+   `/skills` slash and `localpilot skills` CLI forms parse to and execute the same
+   operations.
+
+## ADR-0097: User-Global Skills Are A Baseline Overlaid By The Trusted Project, Resolved To One Effective Skill Per Name
+
+Status: accepted. Closes LocalHub#39. Builds on the skill model (ADR-0027) and
+the BOM/skip loader contract (ADR-0096).
+
+Skill discovery read only the active project (`<project>/.localpilot/skills`,
+`<project>/.agents/skills`), so a reusable skill had to be copied into every
+repository before `skills list`/`show`, `skill_search`, or `skill_load` could
+see it. The feature spec already named a `user-local` scope; this wires it into
+live discovery with explicit collision semantics.
+
+1. **Two scopes, four roots, one effective skill per name.** A per-user global
+   baseline (`~/.localpilot/skills`, `~/.agents/skills`) is overlaid by the
+   project (`<project>/.localpilot/skills`, `<project>/.agents/skills`).
+   Resolution is by parsed manifest `name` — not directory name — into a single
+   effective skill per name. Precedence, highest to lowest:
+   project `.localpilot` › project `.agents` › global `.localpilot` › global
+   `.agents`. `SkillScope` carries this on every `Skill` as origin metadata.
+2. **Whole-package replacement, never a merge.** The winning definition replaces
+   the shadowed one atomically; no body, manifest field, trigger, permission,
+   asset, or script is merged across scopes. Removing a project override reveals
+   the unchanged global skill again with no reinstall.
+3. **Deterministic, enumeration-independent.** `SkillSet::load(dirs)` became
+   `SkillSet::resolve(&[(PathBuf, SkillScope)])`: precedence comes from the scope,
+   not list position or `read_dir` order, and a same-scope name collision breaks
+   by the lexicographically smaller directory path. Resolution keys on a
+   `BTreeMap<name, Skill>`, so the effective set is stable and sorted.
+4. **Trust gates the project overlay, never the global baseline.** Global skills
+   are user-controlled advisory content and load independently of workspace
+   trust; the project overlay loads only when the workspace is trusted, so an
+   untrusted project cannot shadow a global skill with checked-in instructions.
+   The home directory is resolved cross-platform (consistent with `~/.localpilot/`
+   global instructions); an absent home cleanly omits the global layer and leaves
+   project-only behaviour unchanged.
+5. **Surfaced everywhere the catalog is.** `skills list`/`show` report one line
+   per effective name with its origin scope; `skill_search`/`skill_load` and
+   handoff suggestions rank and load the same effective definition. A user-only
+   skill (`disable-model-invocation: true`) stays reachable by exact name but
+   absent from autonomous search, unchanged. Loading remains read-only and grants
+   nothing — any action still passes the permission engine.
+
+## ADR-0096: Skill Loading Tolerates A UTF-8 BOM And Skips A Malformed Skill Instead Of Aborting The Set
+
+Status: accepted. Closes LocalHub#38.
+
+A `SKILL.md` or `skill.toml` saved as "UTF-8 with BOM" (a common Windows/editor
+default) begins with `U+FEFF`. The manifest parser required the decoded string
+to start literally with `---`, so a BOM produced `SKILL.md must start with '---'
+YAML frontmatter` even though the frontmatter was present — and because
+discovery aborted on the first parse error, one BOM-prefixed file hid **every**
+valid project skill (the repo's own `.agents/skills` had five such files).
+
+1. **One optional leading BOM is stripped before any delimiter check**, in both
+   `SkillManifest::parse` (toml) and `parse_skill_md` (frontmatter). Exactly the
+   `U+FEFF` prefix is removed — no other whitespace is trimmed, so the `---`
+   delimiter contract and all frontmatter validation stay strict (junk or
+   whitespace before `---` is still rejected).
+2. **A malformed skill is skipped and reported, not fatal.** The loader entry
+   (`SkillSet::load` at the time; renamed to the scope-aware `SkillSet::resolve`
+   in ADR-0097, skip-behaviour unchanged) collects per-skill parse/read failures
+   into `SkillSet::skipped()` (each a `path: error` line) and loads the valid
+   skills regardless — one bad file never hides the rest. `skills list`/`show`
+   surface the skipped entries as warnings. The entry keeps its `Result`
+   signature (currently always `Ok`) so a future catastrophic failure can still
+   be surfaced without a breaking change. This is the explicit resolution of the
+   abort-vs-skip question, matching the recover-and-continue posture of ADR-0083.
+3. **The repository's own checked-in skill files are normalised to UTF-8
+   without BOM**, so they load on existing binaries too; the parser tolerance is
+   the durable fix, the normalisation is hygiene.
+4. **Tolerance is verified by byte-level tests** (the literal `EF BB BF` prefix),
+   not an editor-specific fixture encoding, so the behaviour cannot silently
+   regress.
+
+## ADR-0095: Research Renders JavaScript-Only Pages In A Headless Browser, Inside The Egress Boundary
+
+Status: accepted. Closes LocalHub#37. Builds on the research egress boundary
+(ADR-0060/0076) and the topic-scope admission contract (ADR-0094).
+
+Static HTTP extraction cannot recover content that only appears after JavaScript
+runs: a single-page-app shell, a hydration-only document, or an iframe-embedded
+page reduces to empty/shell-only text, and admitting that shell as complete
+evidence is a silent failure. The fix is a bounded browser-rendering fallback —
+but rendering executes public-page JavaScript and loads subresources/frames, a
+wider action than one GET, so it must stay strictly inside the research egress
+boundary rather than be delegated to a permission-gated-but-host-agnostic
+browser MCP.
+
+1. **Detection is dependency-free and always on.** `localpilot-research` gains a
+   `render_signal` heuristic (empty framework mount, hydration markers,
+   iframe-only body, `Loading…` placeholder, script-heavy thin content) run over
+   the fetched HTML after reduction. A `[research.render].mode`
+   (`auto` default / `off` kill switch / `always`) governs the fallback.
+2. **The render contract is host-neutral; the browser is optional.** The
+   `Renderer`/`RenderGate` traits and render value/outcome types live in
+   `localpilot-research`. The concrete `ChromiumRenderer` is a separate crate
+   `localpilot-render`, pulled in by the cli only under the `render-browser`
+   feature. The default binary links no browser stack; without the feature or a
+   browser, research records `renderer unavailable` and falls back to iframe
+   recovery.
+3. **The mechanism is an original CDP client over the system browser.** A
+   dependency-light Chrome DevTools Protocol client over `tokio-tungstenite`
+   drives a discovered system Chromium/Chrome/Edge (none bundled or downloaded).
+   CDP is an official documented protocol; keeping the client in-repo keeps the
+   security-critical `Fetch`-domain interception in reviewed code rather than a
+   black-boxed dependency.
+4. **One egress boundary, enforced per browser request.** Every browser request
+   — navigation, redirect, subresource, frame — is gated through the same
+   `[research.web]` allowlist (a `WebAccessGate` over `WebAccess`) before it
+   leaves the machine, http/https only, with an **unconditional** SSRF block on
+   `localhost`/loopback/link-local/private addresses ahead of the allowlist
+   (a rendered page can reference arbitrary hosts). Redirects are re-gated as new
+   destinations. Every request/block is audited content-free.
+5. **Bounded, ephemeral, and honest.** The browser runs with a throwaway
+   cookie-less profile removed after the run; the render is time-bounded (no
+   indefinite network-idle wait). Rendered main-document and same-origin/`srcdoc`
+   frame content is reduced and admitted through the *same* topic-scope admission
+   path (ADR-0094) as static content, with the frame's URL (or a `srcdoc`
+   locator) as provenance; cross-origin frame documents are recovered via the
+   gated HTTP path. A page that renders empty records `no substantive rendered
+   content`; a page that needed rendering but could not get it records an
+   explicit render-required outcome — never fabricated evidence.
+6. **Documented limitations** (kept honest, never presented as prose): frames
+   nested more than one level deep via the browser, a cross-origin frame whose
+   content is itself JavaScript-rendered, and non-HTML (PDF) frame extraction are
+   out of scope — such frames yield no extractable content and are skipped.
+
+## ADR-0094: The Research Topic Is A Contract Through Decomposition And Admission; Evidence Relevance And Candidate Trust Are Separate
+
+Status: accepted. Closes LocalHub#36. Follows ADR-0088's model-backed
+admission (which judged only the generated sub-question) and ADR-0090's
+full-evidence contract.
+
+Model-backed admission (ADR-0088) judged a fetched page or local chunk against
+the *generated sub-question* alone. A decomposed sub-question can silently drop
+the topic's load-bearing constraints — "three.js procedural materials" produced
+"How are parametric controls exposed to users in real-time?", which named no
+framework — so the search returned Unreal/Unity/Substance pages and admission
+scored them ~0.85 against the generic question. Separately, every review
+candidate read `0.30` because candidate creation caps confidence at the
+unreviewed-trust ceiling; admitted evidence scoring 0.75–0.95 all collapsed to
+that one number, conflating *evidence relevance* with *candidate trust*.
+
+1. **The original topic is threaded to admission.** Both the web source and the
+   local knowledge source carry the topic and pass it to the classifier
+   alongside the sub-question. The classifier is instructed that the topic's
+   load-bearing constraints — framework, library, language, runtime, platform,
+   version — always apply, and to reject a page that answers the sub-question
+   but is about a different framework/engine unless the topic itself asks for a
+   comparison or transferable techniques.
+2. **Decomposition is constrained.** The decompose prompt requires every
+   sub-question to stay within the topic's scope and keep its named constraints,
+   rather than broadening into a question another tool could answer.
+3. **Search queries are re-scoped to the topic.** When a sub-question no longer
+   carries the topic's significant terms, the topic is prefixed before the
+   redacted query leaves the machine (`scope_to_topic`), so a generic
+   sub-question cannot silently become a generic web search. The same scoped
+   text feeds the deterministic term-overlap fallback, making the no-model path
+   topic-aware: a cross-framework page missing the topic's terms floors below
+   the admission floor instead of matching the generic sub-question.
+4. **Evidence relevance and candidate trust are distinct, truthfully named.**
+   `CandidateSpec` preserves the finding's uncapped `evidence_relevance` beside
+   the capped `confidence` (candidate trust). The enqueued candidate names both
+   ("evidence relevance 0.85, candidate trust 0.30"), so a reviewer distinguishes
+   strong from weak evidence without the trust cap being raised — unreviewed
+   research stays low-trust and review-gated (ADR-0011).
+5. **The classifier's reason is preserved.** Admission parses and carries the
+   model's short rationale into the admission trail and the report's retrieval
+   accounting, so "admitted at 0.85" is auditable, content-free.
+6. **The deterministic fallback stays topic-aware, never dropping constraints
+   silently.** Losing the admission model degrades to topic-scoped term overlap,
+   not the previous constraint-blind sub-question overlap.
+
+## ADR-0093: A Catalog Model May Name Its Drafter; One Speculation Engine Per Launch
+
+Status: accepted. LocalBox/shared-tier decision (series home per ADR-0062).
+
+Model repos increasingly ship a small companion drafter GGUF for classic
+speculative decoding (the Bonsai repos ship DSpark Q4_1 drafters with a
+claimed ~1.34× CUDA decode uplift). The launcher had an MTP spec-type path
+but no way to use a drafter file; catalog prose honestly said "not wired".
+
+1. **`DraftModule` is a first-class catalog field**, the drafter sibling of
+   `VisionModule`: a filename in the model's repo, resolved to the model's
+   folder, opt-in per launch (`--draft`), shown in dry-run as
+   present/will-download, downloaded on demand, and a failed download stops
+   the launch rather than silently degrading. Configured-only — a drafter is
+   never auto-detected from disk, because an arbitrary neighbouring GGUF is
+   not a safe drafter guess (unlike the `mmproj-*` vision convention).
+2. **The argv contract lives in the shared tier**: a resolved drafter path
+   emits `--spec-type draft-simple --spec-draft-model <path>` (with
+   `--spec-draft-n-max` riding along when set) from the same builder every
+   consumer shares.
+3. **One speculation engine per launch.** A drafter combined with any
+   explicit spec-type other than `draft-simple` (notably the MTP family) is
+   a typed error at plan time, not ambiguous server behaviour. A
+   tokenizer-mismatched drafter remains the server's own startup refusal,
+   surfaced honestly.
+4. **The tuner does not search the drafter.** It is a catalog-driven launch
+   lever; benchmark arms that want it set it explicitly, keeping tuned
+   profiles comparable.
+
+## ADR-0092: Shipped Config Layers Refresh; The User Catalog Merges Additively
+
+Status: accepted. LocalBox-tier decision (shared-series home per ADR-0062);
+the config-file half of ADR-0091's anti-staleness posture.
+
+LocalBox reads its three config layers from disk
+(`defaults.json` < `llm-models.json` < `settings.json`), but first-run
+seeding wrote each file once and never touched it again. The consequence:
+upgrading the binary changed nothing an existing install actually read —
+new engine pins, new repos, and newly shipped catalog models silently never
+arrived. The layers have different ownership, so they get different rules:
+
+1. **Shipped layers refresh.** `defaults.json` and `llm-models.example.json`
+   are the binary's property: seeding now rewrites them whenever they differ
+   from the embedded copies, so an existing install always reads the pins and
+   shipped-model set of the binary it runs. This is safe by layer precedence
+   — user overrides belong in `settings.json`, which always wins; editing
+   `defaults.json` directly is documented as unsupported.
+2. **The user catalog is never rewritten.** `llm-models.json` is the user's
+   file: seeded when absent, then additive-only. `localbox update` reports
+   shipped models the catalog predates; `localbox update --merge-models`
+   adds exactly the missing model keys from the embedded shipped catalog —
+   an existing entry is never modified, `CommandAliases` and every other
+   top-level key survive, and `--check` previews the keys before any write.
+3. **The embedded catalog is the merge source**, not the on-disk example —
+   the binary knows what it ships; the on-disk example is a human-readable
+   mirror of the same bytes.
+4. **A source checkout keeps its dev override**: inside the repo,
+   `local-llm/` remains the live tree, so development exercises the shipped
+   files directly.
+
+## ADR-0091: Engine Pins Age Loudly And Advance Deliberately — Freshness Reporting Plus A Digest-Verified Pin Refresh
+
+Status: accepted. LocalBox-tier decision (the shared-series home per ADR-0062's
+repo split); extends the verified-download posture of the launcher stack.
+
+LocalBox pins every downloadable `llama-server` engine (mainline, turboquant,
+PrismML) to a release tag plus SHA-256 asset pins. Pinning is correct — but it
+aged silently: nothing ever said "your pin is N releases behind", and advancing
+a pin was a hand-ceremony of editing tags and copying hashes. In practice pins
+lagged for months without anyone deciding that.
+
+1. **Staleness is reported, never acted on.** `localbox update --check` now
+   reports, per pinned mode, whether the pinned tag is the latest upstream
+   release. The report is informational; no path auto-installs a newer
+   release. A pinned build must never re-download or advance because upstream
+   moved (the `.build-stamp` freshness contract keyed to the *resolved* tag is
+   unchanged).
+2. **Advancing is one deliberate command.** `localbox update --mode <m>
+   --refresh-pins` resolves the *latest* release for that mode, selects this
+   host's assets through the existing per-mode selectors, and installs them.
+   The flag requires an explicit `--mode`; there is no refresh-everything
+   sweep. `--refresh-pins --check` previews the tag and asset set without
+   downloading.
+3. **A freshly recorded pin is digest-verified, not trust-on-first-use.** For
+   an asset with no local pin, the upstream release API's `sha256` digest is
+   the integrity check: computed bytes that do not match the published digest
+   refuse to install or be recorded. Only well-formed `sha256:<hex>` digests
+   count; other algorithms are ignored rather than mistrusted. Where upstream
+   publishes no digest, the computed hash is recorded and disclosed — the
+   pre-existing unpinned behaviour.
+4. **Refreshed pins land in the settings layer.** The refresh writes the
+   mode's pinned-tag key and the asset hashes into `~/.local-llm/settings.json`
+   (upserting only those keys, preserving everything else). Settings win layer
+   precedence and survive upgrades; the shipped `defaults.json` stays the
+   fresh-install baseline.
+5. **The local pin table remains the install-time authority.** Upstream
+   digests are a cross-check at pin-recording time only; a normal pinned
+   install verifies against the locally recorded hash exactly as before, and
+   a mismatch still deletes the file and refuses.
+
+## ADR-0090: Local Research Evidence Carries The Full Bounded Chunk; A Snippet Never Poses As Full Source
+
+Status: accepted. Completes ADR-0087's full-evidence review contract for the
+local source (LocalHub#34).
+
+The research adapter used to map a local hit into evidence as only its
+`KnowledgeHit::snippet` — an ~320-character match window — while the review
+surface labelled that field "Full source evidence." For web evidence the same
+field holds the complete bounded fetched page; the cross-source label was not
+truthful, and the fetchable `chunk_id` was discarded before candidate
+creation.
+
+1. **After a local hit passes admission, its complete bounded chunk is
+   fetched** through the existing read-only fetch layer (`fetch_layer`, one
+   batch call per gather) and carried as the evidence's `full_source`. The
+   compact match-centred snippet stays as the finding preview/claim; the full
+   chunk becomes the finding's review-only `evidence` — the same
+   statement-vs-evidence split fetched pages get, so promotion still writes
+   only the reviewer-distilled lesson (D-LM-0029), never the expanded source.
+2. **Local evidence is explicitly bounded** (64 KiB, matching the web fetch
+   bound and sitting under the renderer's 100 k safety net) and any cut is
+   disclosed in place — never a silent truncation.
+3. **Unavailable or stale is an explicit state.** A chunk id the index no
+   longer holds renders a loud `[full source unavailable: …]` marker around
+   the snippet; a stale chunk is prefixed with a `[stale: …]` warning that
+   the content reflects the ingested version. A search snippet must never
+   silently pose as full source.
+4. **The chunk id survives** as `Provenance::fetch_id` next to the
+   human-readable `path:start-end` locator, so review/diagnostic surfaces can
+   re-fetch exactly what the locator points at.
+
+## ADR-0089: Coverage Counts Source Families; The Report Accounts Retrieval Per Question
+
+Status: accepted. Refines ADR-0078's coverage scoring and ADR-0079's loud
+accounting (LocalHub#33).
+
+Coverage used to treat every locator as an independent origin, so two chunks
+from two files of one repository marked a question `covered`, ended its
+follow-up rounds, and — with zero admitted web evidence — produced a fully
+covered report that never said why web contributed nothing.
+
+1. **Independence is measured in origins *and* source families.** An origin
+   stays `source label + locator` (each web host one origin). A *family* is
+   each web host for web evidence and the source label for everything else:
+   files of one repository are one family. Full `Covered` requires ≥ 2
+   floor-passing observations from ≥ 2 origins **and** ≥ 2 families; the same
+   counts inside one family yield the new verdict `CoveredSingleSource`,
+   rendered "covered (single source — not independently corroborated)".
+   Local-only research stays legitimate — it is reported as locally
+   supported, never as cross-validated.
+2. **A single-family question keeps earning bounded follow-up rounds** while
+   the source set could still supply a second family (another source label,
+   or a web source — hosts are families); rounds stay bounded by the round
+   budget and saturation. With only one family reachable, single-family
+   coverage is the honest ceiling and is not re-targeted.
+3. **Per-question, per-source retrieval accounting rides the report.** Every
+   source call returns an account (proposed, admitted, rejected-low-relevance,
+   policy-skipped, redirects, failures) that the engine merges per question,
+   adds the engine-side below-floor count to, and publishes on
+   `QuestionCoverage`; the Markdown report renders it with the admission
+   diagnostics of ADR-0088. Counts and reasons only — no source content, no
+   unredacted queries (those stay in the egress audit). With web enabled, a
+   question with zero admitted web evidence carries an explicit source-gap
+   line.
+4. **A failing URL is a counted outcome, not a source abort.** A transport
+   error or unreadable body on one web fetch is audited (`fetch-error`),
+   counted as failed, and the gather continues — it no longer discards the
+   evidence the same call already gathered.
+
+## ADR-0088: Local Research Evidence Is Admitted At Question Level, Never By Within-Source Rank
+
+Status: accepted. Amends ADR-0087 §2 (and the ADR-0086-rationale relative
+normalization it referenced) for the local research source (LocalHub#32).
+
+Relative-to-best normalization pinned every query's best non-zero local hit
+to relevance `1.0`, so a corpus whose least-bad match shared only generic
+terms with the question still cleared the `0.25` admission floor and could
+become a supported finding. Rank answers "how does this hit compare with its
+corpus siblings," not "does this answer the question" — the floor needs the
+latter.
+
+1. **Within-source rank and question-level admission are separate values.**
+   The bm25-derived rank (relative to the query's best hit) is kept for
+   ordering and diagnostics only. The relevance the engine's floor sees is a
+   question-level admission signal.
+2. **The admission judge is shared with web evidence.** When a model resolves
+   (ADR-0087's reuse-only resolution), each candidate local chunk is
+   classified against the sub-question with the same strict-JSON contract as
+   a fetched page; a rejection is a counted outcome. Without a model, the
+   deterministic fallback is `term_overlap_relevance` — significant-term
+   coverage of the question against the chunk content — never the rank.
+3. **Zero admitted local evidence is an honest outcome.** No hit is promoted
+   merely for being its corpus's best; adding one genuinely answering chunk
+   admits that chunk without lifting its corpus siblings, and unrelated
+   chunks cannot change an admitted hit's relevance.
+4. **The score contract is explicit.** `KnowledgeHit::relevance` (raw
+   engine signal), the within-source rank, and the final admission relevance
+   plus reason travel on the evidence as an `AdmissionTrail`, rendered
+   content-free in the report's retrieval accounting (ADR-0089). Accepted
+   memory keeps its reviewed-at-face-value relevance (ADR-0011), with its
+   own trail reason.
+
+## ADR-0087: Research Evidence Passes An Admission Gate; Promotion Writes Lessons, Never Source Dumps
+
+Status: accepted. Amends ADR-0060 (which scoped the model to decomposition
+only) and refines ADR-0067/0072/0075's evidence contract at the promotion
+boundary; the review experience keeps the complete bounded evidence.
+
+Two coupled defects (LocalHub#30, #24): every fetched page above zero term
+overlap became a `Supported` finding and a low-confidence memory candidate
+regardless of whether it answered anything, and the candidate fused its
+statement with the full fenced source — so a later promotion wrote entire web
+pages (navigation chrome included) into searchable accepted memory with the
+trust bonuses of curated knowledge.
+
+1. **Model-backed relevance admission for fetched web content**, immediately
+   after reduction and bounding, before coverage, synthesis, findings, or
+   candidates. Strict-JSON classification only (`relevant`, `score`,
+   `reason`) against the sub-question — the model judges, it never authors
+   or rewrites a finding. Model resolution is **reuse-only**: LocalMind's
+   `[inference]` chat model first (when configured with its research feature
+   enabled), the host's already-resolved default provider second; no third
+   provider or research-specific model setting exists. A rejected page is
+   recorded in the egress audit (`rejected-low-relevance`) — inspectable,
+   never a silent drop — and its content never becomes a finding. An
+   unavailable model or unusable reply degrades to the deterministic path.
+   This deliberately amends ADR-0060: bounded fetched content may now be
+   sent to the (local/consented) model for classification; the synthesis
+   contract is unchanged (provenance-preserving heuristic, D010).
+2. **The coverage floor is an admission floor.** Deterministically, evidence
+   below the floor (`0.25`, one shared constant) neither counts toward
+   coverage nor enters synthesis/findings/candidates; the count of withheld
+   items is disclosed as a retrieval note. Local knowledge hits are
+   normalized relative to their query's best hit before the floor (bm25
+   magnitudes are corpus-dependent — same rationale as ADR-0086).
+3. **Statement and evidence ride the candidate separately** (LocalMind
+   D-LM-0029). The candidate's lesson text is the concise statement plus its
+   source line; a distilled excerpt carries its full bounded source in the
+   candidate's review-only evidence field and is marked as requiring a
+   reviewer's edit before promotion — promotion of an unedited excerpt is
+   refused with an actionable error. Sentence-free boilerplate statements
+   (navigation chrome) get the same edit requirement, and are never
+   auto-deleted. The report and review surfaces keep the full evidence
+   (ADR-0067/0072/0075 hold); only the promotion projection narrowed.
+4. **Legacy items are untouched**: candidates without the new fields promote
+   exactly as before, and LocalMind's quality classifier retroactively flags
+   existing raw-dump accepted memories for manual review (flag-only).
+
+## ADR-0086: The Context Pack Ranks On Normalized Relevance — Reserve Floors, Task-Scored Session Facts, A Relevance-Ordered Window
+
+Status: accepted. Amends ADR-0015: the composite rank's relevance component
+is no longer the raw source score; everything else that ADR guarantees —
+deterministic two-phase allocation, per-source reserves, the inspectable
+signal breakdown, and manual-pin/accepted-memory protection — stands.
+
+Three field failures shared one root (LocalHub#22, #25, #26): the allocator
+summed raw scores from incompatible scales (ingest bm25 at a 10⁶ fixed
+point, memory FTS at 10², fixed single digits for graph and session rows),
+so the bounded bonuses were noise for one source and decisive for another;
+reserves filled in source-priority order with no relevance requirement; and
+the model-visible window rendered the pack in allocation order, letting one
+source's reserve hide every relevant hit from the rest.
+
+1. **One bounded relevance range.** Every candidate carries a unit relevance
+   in `0.0..=1.0`, scaled to 200 rank points — the only relevance compared
+   across sources. The two lexical sources (ingest, accepted memory) are
+   normalized **relative to their own best hit of the query**: bm25
+   magnitudes are corpus-dependent (IDF collapses toward zero on a
+   degenerate corpus where every document matches — observed on the
+   single-file test fixture), so no absolute bm25 curve can hold; relative-
+   to-own-best is bounded, corpus-independent, and preserves each source's
+   internal order, including the hybrid keyword-above-vector tiering inside
+   ingest. Session facts score by lexical task overlap; graph rows carry
+   fixed moderate values; a manual pin is `1.0`. Raw scores remain in the
+   signal breakdown (`raw_relevance`) for diagnostics and are never compared
+   across sources. On the 200-point scale the bonuses (source quality 5..40,
+   recency ≤50, file match 20, confidence ≤15, proximity ≤9) close small
+   relevance gaps and cannot overturn decisive ones — measurable and
+   bounded, pinned by tests.
+2. **Reserves demand relevance.** A candidate below its source's reserve
+   floor (session facts 0.25; lexical sources 0.05; pins and graph rows
+   unfloored — user-chosen and task-derived respectively) cannot consume its
+   source's reserve. It still competes in the shared pool, so recall is not
+   lost; the unused reserve falls to the pool. Reserve *protection* now
+   means: relevant trusted content survives a flood — not: any content with
+   the right source label gets a guaranteed slot.
+3. **Session facts are scored against the current task** by term overlap
+   before they become candidates at all; a fact sharing no significant term
+   with the task contributes nothing, and one incidental term on a
+   three-plus-term task reads as below-floor (mirroring the accepted-memory
+   engine's coverage gate). Recency stays a boost for relevant facts, never
+   a substitute for relevance.
+4. **The visible window is relevance-ordered.** `knowledge_search` renders
+   the selected pack sorted by final score, withholding entries below a
+   small relevance floor (manual pins always render), and honestly returns
+   fewer than `max_hits` — including zero — when nothing clears it. This
+   filters and orders the *rendering only*; it never re-allocates or removes
+   protected entries from the pack.
+
+## ADR-0085: A Clean Stop Settles The Plan Panel — Truthful Statuses, Ended Presentation
+
+Status: accepted.
+
+The task checklist is a pure mirror of the model's most recent `update_plan`
+call, and nothing reconciled it when a turn stopped: if the model finished
+without a final all-`done` update (common — the tool relies on the model
+remembering), steps lingered as `in_progress`/`pending` until the next
+prompt's plan replaced them (LocalHub#20).
+
+1. **A normal completion (`StopReason::Done`) settles the panel** via a
+   dedicated `PlanSettled` UI event: the header becomes `plan (d/n) — turn
+   ended` and non-`done` steps render inactive (dimmed). Statuses are never
+   rewritten — a step the model left unfinished still says so; only the
+   liveness presentation changes. Any later `update_plan` makes the panel
+   live again.
+2. **Abnormal stops (cancelled, timed out, degraded, provider error, budget,
+   no-progress) never settle** — there the dangling `in_progress` view is
+   the truth, and the UI must not dress an interrupted turn as an ended one.
+3. The UI does not depend on the model remembering a final `update_plan`;
+   no prompt-nudge change rides along.
+
+## ADR-0084: Recalled Prompts Carry Their Pastes — Placeholders Rehydrate Instead Of Replaying Verbatim
+
+Status: accepted. Extends ADR-0040 (durable prompt history) additively; the
+history file format version stays 1.
+
+A prompt containing a large paste is collapsed to a placeholder (`[10 pasted
+rows #1]`) in the composer, and only the placeholder form was recorded into
+recall — in-session (the placeholder→content map was cleared on submit) and
+durable (only the visible text was persisted). Recalling such a prompt and
+submitting it sent the literal placeholder string to the model; the pasted
+content was unrecoverable (LocalHub#19).
+
+1. **A recall entry is text plus its paste mappings.** The composer's three
+   recall lists and the durable `HistoryEntry` each carry the
+   placeholder→content pairs the prompt's visible form depends on (only the
+   mappings whose placeholder actually occurs in the submitted text).
+   Recalling an entry restores its mappings into the active paste set, so the
+   input line stays compact and submit expands exactly as the original did —
+   in-session and across restarts.
+2. **Placeholder numbers are session-monotonic.** The paste counter no longer
+   restarts after each submit, so two pastes in one session can never share a
+   placeholder string; on the residual cross-session collision (same row
+   count, same number) expansion prefers the newest mapping.
+3. **Paste content in history stays raw, like the prompt text around it** —
+   the module's founding rule (recall must be verbatim; redaction would
+   corrupt what the user resubmits) applies unchanged, and the same privacy
+   controls cover it: the `[history] persistence` opt-out (mappings ride the
+   same entry and the same no-op), the 0600/per-user file, the entry cap.
+4. **A per-entry budget (64 KiB of paste content) bounds the file.** The
+   global history is re-read and rewritten every submit, so a monster paste
+   would tax every future submission. Over budget, the entry is kept without
+   its mappings — recall then replays the placeholder, exactly the old
+   behaviour, for that entry only.
+5. **Old history lines load unchanged** (`pastes` defaults to empty; entries
+   without pastes serialize in their old shape), and old builds reading a new
+   file ignore the extra field.
+
+## ADR-0083: Session Logs Append And Recover — One Damaged Line Never Loses A Session
+
+Status: accepted. Refines the store's write discipline (crate docs previously
+promised temp-then-rename for *everything*); resume, replay, and audit stay
+one mechanism.
+
+A session's `<id>.events.jsonl` reached the field with one physically
+truncated line (LocalHub#21): the record was cut mid-`[REDACTED]` marker —
+after serialization and redaction, so the damage was byte-level, most likely
+a torn write during a crash or power loss (`fs::write` never syncs data
+blocks, so a rename can survive a crash whose data does not). The reader
+(`read_events` → `collect::<Result<…>>`) was all-or-nothing, so that single
+line poisoned all 1,923 intact events and resume refused the session
+entirely. Worse, every append re-read and rewrote the whole file, faithfully
+carrying the damaged line forward forever — O(n) per append and structurally
+unable to self-limit corruption.
+
+1. **Line-delimited session logs (events and transcripts) grow by guarded
+   append (`append_line`), not read-modify-rewrite.** Appending one record
+   touches only the tail: existing damage is never re-written, re-serialized,
+   or propagated, and each append is O(1). If the current tail is an
+   unterminated line (a torn write), the append first seals it with a newline
+   so the damaged bytes stay quarantined on their own physical line and can
+   never swallow the new record.
+2. **Reads recover around damage instead of dying of it.**
+   `read_events_recovering` skips a line that is not a parseable record and
+   counts it; `read_events` and `read_transcript` share the behavior. Resume
+   (`load_session`) returns the skip count as a `SessionRecovery`, and every
+   resume surface (REPL notice, `print --resume`, `rpc serve`) tells the user
+   when lines were skipped. The file itself is left untouched — recovery is
+   read-side, and the log remains inspectable evidence.
+3. **The version fence stays fatal.** A line whose `v` is newer than the
+   build understands is still a typed `UnsupportedFormat` error, never a
+   skip: that is a build/downgrade incompatibility, not disk damage, and
+   silently dropping records a newer build wrote would be a silent misparse
+   (unchanged from the events module's founding rule).
+4. **Appends still do not fsync.** Durability of the final pre-crash record
+   is not the goal — bounded blast radius is. With appends the worst a crash
+   can leave is one torn tail line, which (1) and (2) contain and recover.
+
+## ADR-0082: Folder Ingest Bridges Markdown Into LocalMind's Documentation Index
+
+Status: accepted. Narrows ADR-0013 (ingestion is derived, disposable state
+under `.localmind/ingest/`).
+
+The LocalMind UI presents a Docs tab, but nothing in the product flow
+populated it: folder ingest wrote only its derived chunk store, and the sole
+writer of the documentation index (`doc_chunk`) was a separate CLI command
+(`localmind ingest docs`) users had no reason to know about. The tab read as
+broken (LocalHub#18).
+
+1. **Each ingest run bridges candidate Markdown files into the project's
+   `doc_chunk` index** through `localmind_store::ingest_doc_text`, reusing the
+   walk's own candidate set (include/exclude rules honored) and redacting
+   content with the same scrub every persisted chunk gets.
+2. **This is a deliberate exception to ADR-0013's derived-state-only rule, and
+   it is not a memory write.** `doc_chunk` is a documentation *index* of files
+   already in the workspace — not accepted memory, so the review gate does not
+   apply. The research-report bridge (`[research] ingest_report`) set the
+   precedent; that one stays opt-in because its content is model-generated,
+   while this one is on by default (`[ingest] docs_index = true`) because the
+   content is the user's own files and an empty-by-default Docs tab recreates
+   the bug.
+3. **A hash ledger (`.localmind/ingest/docs-index.json`) keeps the bridge
+   incremental and honest**: unchanged files are a no-op, vanished files are
+   deleted from the index, and the ledger only ever deletes paths the bridge
+   itself wrote — doc entries from other hosts (research reports) are never
+   touched. Best-effort throughout: a doc-index failure never fails the run.
+4. **`[ingest] embed_chunks = false` keeps its promise across the bridge.**
+   Doc-chunk vector writes ride the same suppression as chunk-store
+   embeddings (`ingest_doc_text`'s `embed` flag): text still lands and stays
+   browsable, it just is not semantically searchable until embedded.
+
+## ADR-0081: Intake Carries A Guidance Gate — Model-Proposed Axes, A Deterministic Score, And A Pause Instead Of A Guess
+
+Status: accepted. Builds on ADR-0010 (the model proposes, the runtime
+decides) and ADR-0035 (planning judgment expressed as contracts on the
+documents the flow already produces).
+
+Job 1 happily turned an under-specified idea into a confident `brief.md`:
+nothing checked whether the idea actually contained the product decisions the
+brief was about to encode, so the harness would pick an interpretation and
+build the wrong thing — burning a full plan-and-execute cycle before the user
+found out (LocalHub#15).
+
+1. **The model proposes axes; the runtime scores them.** An off-by-default
+   pre-brief assessment (`[harness.guidance]`, per-run `--guidance` /
+   `--no-guidance`) has the model enumerate the idea's *decision axes* — the
+   small set of product decisions that would change what gets built, invented
+   per idea, never a fixed domain list — marking each resolved (the idea's own
+   words, quoted verbatim) or not specified, with a settling question for open
+   axes. The score is deterministic and runtime-computed: resolved ÷ total,
+   `1.0` on zero axes. The model never reports its own score.
+2. **Below the threshold, intake pauses instead of guessing.** On a terminal:
+   stdin Q&A (empty answer delegates that one axis); answers fold into the
+   idea as an explicit user-decisions block, so the brief still stands without
+   the transcript. On a non-terminal: a structured `needs_guidance` JSON
+   report, no `brief.md`, exit 0 — pausing is a deliberate outcome, not an
+   error. `--assume-judgment` proceeds anyway with the delegation recorded.
+3. **The score is a signal, never a safety claim.** Its recall failure mode is
+   structural: an axis the model never lists cannot count against the score,
+   so a confidently wrong high score is possible. Every surface that shows the
+   number also records the full axis list (`.localpilot/intake.jsonl` carries
+   axes, score, threshold, questions, answers, and any assumed-judgment flag),
+   and an instrument suite gates trust: an authored idea corpus with
+   ground-truth axes, an offline ordering self-test (every under-specified
+   fixture strictly below every well-specified one, violations named —
+   refuse-to-trust, not a softened threshold), and live-gated recall/precision
+   drift checks where a missed ground-truth axis fails its fixture regardless
+   of the score.
+4. **Scope.** v1 gates ground-up `harness intake` only, asks over stdin (no
+   multiple-choice UI machinery exists), scores axes equal-weight, and records
+   the clarified-before-brief signal in LocalPilot's own artifacts rather than
+   the shared scorecard schema.
+
+## ADR-0080: Provider HTTP Timeouts Bound Silence, Not Duration
+
+Status: accepted. The provider adapters applied `request_timeout_secs`
+(default 600) as a whole-request `reqwest` deadline, covering the entire
+streamed response. On a slow local server — CPU-fallback inference is the
+common case — a healthy turn simply outlasts the deadline: the client cuts
+the connection at exactly 600 s, the cut surfaces as a stream truncation,
+and the turn loop retries an identical request into a server that is now
+*slower* (the abort invalidated its prompt cache; SWA/hybrid models
+reprocess the full prompt from zero). Each retry is guaranteed to die the
+same way, and after the retry ceiling the user is told the server "may have
+crashed or run out of VRAM" — blaming the server for a client-imposed
+deadline (LocalHub#17).
+
+1. **The HTTP layer bounds liveness only.** `request_timeout_secs` is now a
+   **stall window**: the longest tolerated silence while a response is open —
+   from sending the request to the first byte (a local server may hold
+   headers back until prompt processing ends), and between stream chunks
+   after that. A server that keeps streaming, however slowly, is never cut
+   off. Total turn duration is the harness's concern
+   (`[harness] turn_timeout_secs`), not the transport's. TCP connect gets
+   its own short budget (30 s) so an unreachable server still fails fast.
+2. **A stall is its own error, and it does not retry.** A tripped stall
+   window surfaces as `ProviderError::StreamStalled` — distinct from
+   `StreamTruncated` (the server *closed* the response early, which stays
+   retryable). A stalled server is most likely still working, just slower
+   than the window; re-issuing the identical request cannot finish faster
+   and restarts prompt processing from zero on models without reusable
+   prompt cache. The turn stops immediately with guidance naming the two
+   real remedies: check GPU offload (CPU-speed inference), or raise
+   `request_timeout_secs`.
+
+Fixes the failure mode where 4 × 10-minute futile retries ended in a
+message that misdirected the user at the server.
+
+## ADR-0079: Research Evidence Is Deduplicated, Diversity-Capped, Relevance-Scored, And Every Cut Is Loud
+
+Status: accepted. At exhaustive scale (ADR-0078 rounds × ADR-0076 open-web
+reach) the evidence pool needs discipline that a single-pass loop never did:
+mirrors repeat content, one domain can flood a question, and web evidence
+carried a flat 0.5 relevance that said nothing about the page.
+
+1. **Near-duplicates fold, provenance survives.** Word-shingle Jaccard
+   (≥ 0.7, std-only hashing) folds a snippet that re-states kept content into
+   the survivor; the duplicate's provenance rides on the surviving evidence
+   (`also_from`) into the finding's `supporting` list and the coverage
+   account — a mirror on a second origin counts as corroboration and as an
+   independent origin, it just doesn't repeat the text.
+2. **No origin saturates a question.** After each question's gather, a soft
+   per-origin cap (3 snippets per question per origin, highest relevance
+   kept) applies whenever more than one origin is answering — order-
+   independent, and a lone origin is never capped.
+3. **Web evidence is scored, not assumed.** A fetched page's relevance is its
+   content-term overlap with the sub-question (the shared search path's
+   ≥ 2-term coverage rule applied to pages: fewer than two matching terms
+   floors at 0.1, under the coverage floor), replacing the flat constant —
+   so an off-topic page can be fetched yet never counts as coverage.
+4. **Every cut is loud.** Folds, diversity drops, the evidence cap, the time
+   budget, and cancellation each append a `Retrieval notes` line to the
+   report and the run output — silent truncation reads as "covered
+   everything" when it didn't (the standing lesson from the evidence-budget
+   saga, ADR-0075).
+5. **Fetching is polite.** Within a run: repeat visits to a host are paced by
+   the host's own last response time (clamped 250 ms–3 s), and a 429/5xx
+   cools the host down for the rest of the run — a host-level signal, not a
+   per-URL one — audited as `host-cooldown`. Rate-limited designated search
+   tools were already classified (ADR-0077); together the run degrades
+   gracefully instead of hammering.
+
+Extends ADR-0075/0076/0077/0078.
+
+## ADR-0078: The Research Loop Is Multi-Round And Coverage-Driven, With Deterministic Scoring And Stops
+
+Status: accepted. The research loop was single-pass: one gather per
+sub-question, and a question whose gather returned nothing was reported as an
+"open question" with no further attempt — the loop stopped exactly where a
+weak local model's first query landed. Field evidence (a 16-source run ending
+with two open questions) showed that reads as shallow, not safe.
+
+1. **Rounds, targeted.** Round 1 gathers for every sub-question; each later
+   round re-queries only the questions not yet covered. `max_rounds = 1`
+   reproduces the old single-pass behaviour exactly.
+2. **Coverage is scored deterministically.** Per question: evidence at or
+   above a relevance floor counts, and independence is measured in distinct
+   origins (web host, or source label + locator). Covered = ≥ 2 floor-passing
+   snippets from ≥ 2 origins; Weak = some evidence; Open = none. No model
+   judges coverage — the scoring is unit-tested arithmetic, so a weak model
+   cannot talk the loop into stopping (or spinning).
+3. **Follow-up queries are retrieval-side and drift-guarded.** A targeted
+   question is re-asked verbatim plus one reformulation from the
+   `Synthesizer` seam. The default (and only shipped) reformulator is
+   deterministic pseudo-relevance expansion: salient terms from the
+   question's own evidence, each required to appear in ≥ 2 distinct origins
+   (one off-topic page cannot steer the query), appended to the original
+   question. The model may later assist through the same seam — retrieval
+   assistance only, never synthesis (the ADR-0060 provenance contract is
+   untouched).
+4. **Depth escalates for stubborn questions.** Later rounds widen the
+   per-source gather depth (×2, capped ×3), so a re-query can reach past the
+   first page of results — still inside the caps.
+5. **Every stop is explicit, all any-of.** All covered · a round with zero
+   previously-unseen evidence (saturation — dedup is against everything
+   *seen*, not kept, so re-finding old ground is not progress) · `max_rounds`
+   · a hard total-evidence cap · an optional wall-clock budget · an external
+   stop flag (`RunControl`), which yields a partial but well-formed outcome
+   for cancellation.
+6. **The report carries the account.** Per-question coverage (verdict,
+   counts, distinct origins) and per-round summaries ship in the outcome;
+   open questions are exactly the questions still `Open` after the final
+   round. Both research surfaces print the round lines and a coverage
+   summary.
+
+Extends ADR-0060; the sanitize/cross-check passes and ADR-0072 candidate
+provenance are unchanged.
+
+## ADR-0077: Designated MCP Search Tools Propose Research URLs — Leads, Never Evidence
+
+Status: accepted. Research web retrieval had no real search: the model
+proposed URLs from its own parametric memory (a documented limitation of
+ADR-0060's v1), which is exactly the weakness a small local model brings.
+MCP search servers exist and users run them; the question was how research
+uses one without breaking the egress boundary (ADR-0076) or the clean-room
+rule.
+
+1. **Explicit designation, never discovery.** `[research.mcp] tools` names
+   `(server, tool)` pairs referencing `[mcp.servers]` entries; empty means no
+   MCP server is consulted. Auto-detecting "search-capable" tools is both
+   unreliable (no naming convention exists across search servers: `search`,
+   `brave_web_search`, `tavily-search`, `web_search_exa`, …) and
+   policy-hostile (consulting a server egresses the sub-question). The only
+   portable input is `query`; the proposer sends only that.
+2. **Proposals are leads, never evidence.** Extracted URLs join the model's
+   proposals (search first, model filling the remaining budget, exact-dedup)
+   and flow through the unchanged `WebAccess` gate: allowlist/disallowlist,
+   no-redirect bounded fetch, per-request audit. A search result's snippet
+   text never becomes evidence — only a gated fetch does. The audited
+   boundary stays total.
+3. **The search call is audited egress.** Each designated-tool invocation
+   writes an audit line (`decision=search`, or `search-error` /
+   `search-rate-limited` / `search-timeout`) carrying the redacted query —
+   the same redaction contract as every other outbound research byte. The
+   run disclosure names every designated tool before any call.
+4. **Best-effort by construction.** Connection failures are disclosed and
+   skipped; a call is bounded by a fixed timeout (the stdio transport has
+   none of its own); an `isError` result is classified (rate-limit vs
+   failure) and never parsed for URLs; a URL-less result is an empty round,
+   not an error. Research works with search and no model, a model and no
+   search, both, or neither.
+5. **Parsing is spec-grounded and shape-tolerant.** The extractor
+   (`localpilot-mcp`) reads `structuredContent`, JSON-in-text (the
+   spec-sanctioned dominant shape), plain-text scans (`URL:` lines, markdown
+   links, bare URLs), and `resource_link` items, in that order, iterating
+   every content item. Research consumes the MCP **client** crate directly —
+   it does not enter the agentic tool loop, and the designated call rides
+   the research run's own consent + disclosure rather than a per-call
+   permission ask (the run banner is the consent surface; the permission
+   engine still governs MCP tools in normal sessions).
+6. **Clean-room posture.** LocalPilot itself never scrapes a search engine.
+   Reach comes from the user's explicitly designated server; docs disclose
+   that some community servers scrape while vendor/self-hosted ones speak
+   official APIs — that choice and its provenance belong to the user.
+
+Extends ADR-0060/ADR-0076; the ADR-0031 catalog/broker and ADR-0073 server
+adapter are untouched.
+
+## ADR-0076: Research Web Egress Is On By Default — Disclosed, Audited, Disableable — On Both Surfaces
+
+Status: accepted. Amends ADR-0060 point 5 (web egress off by default,
+subcommand-only) after field evidence that default-off research is
+self-defeating for the product's job: a local model's parametric memory
+cannot carry a research run, and a run that silently stops at whatever the
+local stores contain reads as shallow rather than safe. The product-owner
+ratified flipping the default; the egress *boundary* does not move.
+
+1. **On by default, open reach by default.** `[research.web].enabled`
+   defaults to `true`, and an unset allowlist defaults to `["*"]` (open web).
+   An **explicitly** empty `allowlist = []` keeps the old meaning — every
+   host needs confirmation, so nothing is fetched in v1 — because unset and
+   empty are different user statements: absence takes the product default,
+   a written empty list is a deliberate restriction.
+2. **Both surfaces, same posture.** Interactive `/research` now runs the same
+   web-enabled path as the subcommand (amending the interactive-local-only
+   scoping ADR-0060 inherited from its plan), printing the same disclosure
+   into the transcript. One research surface, one egress posture.
+3. **The kill switches are two, and one is absolute.** `--no-web` skips the
+   web source for a run — no fetch, no URL-proposal model call.
+   `[research.web].enabled = false` removes the outbound path entirely and
+   cannot be overridden by any flag: `WebAccess::grant_session` remains a
+   no-op against config-off, so the guarantee is structural, not
+   conventional. `--web` is kept as a compatibility no-op.
+4. **Everything the 2026-06-30 security review pinned still holds.**
+   Disallowlist beats allowlist including `*` (ADR-0068); only the redacted
+   sub-question ever leaves the machine; every outbound request (and every
+   skipped host and unfollowed redirect) is audited one line each to the
+   egress audit log, whose default path applies whenever web is active;
+   redirects are never followed; fetches stay time- and size-bounded.
+5. **The disclosure is the consent carrier.** Every web-active run prints,
+   before any request: the default-on posture and both off-switches, what
+   egresses, the effective reach ("open web" under `*`, the domain list
+   otherwise, or the explicit-empty warning), disallowlist carve-outs, and
+   the audit-log path. Per-session consent (`grant_session`) is recorded
+   after the disclosure rather than after a `--web` flag.
+
+This is a ratified, documented exception to the default-off rule (rule 1) of
+the ecosystem remote-egress policy; the policy's other four rules —
+explicit control, disclosure, auditability, kill switch — are unchanged and
+load-bearing.
+
+## ADR-0075: Web Evidence Is Reduced To Markdown And Carried In Full, With Truncation As A Loud Safety Net
+
+Status: accepted. Refines ADR-0067/0072 after the third and fourth rounds of
+the same field report (LocalHub#1): evidence still ended in a silent mid-word
+"… (truncated)" — a display budget far below what a source legitimately
+gathers — and the flat-text HTML reduction had discarded the structure
+(headings, links, code blocks) that a reviewer and a model both read.
+
+1. **HTML becomes Markdown at gather time, not flat text.** The
+   dependency-free reducer maps structural tags onto Markdown — headings to
+   `#`, list items to `- `, `<a href>` to `[text](url)`, `<pre>` to a fenced
+   code block whose fence is sized past any inner backtick run, inline
+   `code`/`strong`/`em` to their Markdown forms — while still dropping whole
+   non-content elements (script/style/chrome) body-and-all, decoding entities,
+   and staying total and panic-free on malformed input. The `Content-Type`
+   gate is unchanged: declared non-HTML bodies stay verbatim.
+2. **Content is bounded at gather; render is not a budget.** The only real
+   content bound is the per-fetch cap on already-reduced text. The render
+   ceiling (`MAX_EVIDENCE_CHARS`) sits deliberately *above* every gather
+   bound, so a finding's full source rides the Markdown report and the review
+   candidate intact — a reviewer judges and reuses the whole content, which
+   was the point of carrying evidence at all.
+3. **Any cut is loud and lands on a line boundary.** Both the fetch bound and
+   the render safety net cut on a line boundary (falling back to a plain cut
+   only for one enormous line) and append an explicit note saying a cut
+   happened — the render note quantifies kept-of-total characters, and the
+   finding's provenance URL always points at the full source. A silent
+   mid-word ellipsis is never emitted.
+4. **One-line excerpts flatten Markdown syntax too.** The sanitize pass
+   distils excerpts from the original multi-line text (Markdown markers are
+   positional), stripping fences, heading/list/quote markers, and collapsing
+   `[text](url)` to its text, so a claim line never leaks syntax; an over-long
+   prose statement is titled `Excerpt from <source>: …` like any other blob.
+5. **Still no model rewrite.** Synthesis stays heuristic (ADR-0060): findings
+   are never model-authored, so a finding can never carry an unbacked claim.
+   Readability comes from faithful reduction, not generation.
+
+## ADR-0074: Driver Corrections Are Captured With Honest Provenance And Ride The Review-Gated Queue
+
+Status: accepted. Extends ADR-0037/0072 to sessions driven by an external
+agent host over the MCP adapter (ADR-0073): the driver's corrections are
+training signal, and they must reach memory the same gated way everything
+else does — no new store, no auto-promotion, no masquerade.
+
+1. **Capture at the adapter, durably.** Steers, cancellations, and permission
+   replies are recorded as `driver_intervention` events in the session event
+   log (format v8, additive), carrying the action, its detail (the steer text
+   or the answered ask's tool+detail), the running activity when known, and
+   the driving client's self-reported identity from the MCP handshake. The
+   log is written whenever the runtime is free — the pinned turn future owns
+   the runtime mid-turn, so mid-turn interventions persist at the next turn
+   boundary.
+2. **Corrections become candidates; consent does not.** On disconnect the
+   session's steers, cancels, and denies are offered to the ADR-0037
+   review-gated queue (capped per session); approvals stay event-log-only —
+   routine consent teaches nothing and would flood review.
+3. **Honest provenance, ADR-0072 pattern.** The candidates are enqueued under
+   the `driver-intervention` session label with a `driver-` id prefix, a
+   `driver_intervention` evidence kind, and evidence naming the driving
+   client — never presented as the session's own retrospective. All existing
+   gates apply: quality bar, near-duplicate folding, human promotion
+   (ADR-0011).
+4. **Candidate text leads with the correction.** The review queue folds
+   lexical near-duplicates, so templated boilerplate would merge distinct
+   corrections into one candidate; the composed text puts the distinct
+   content first and keeps framing minimal. Pinned by capture, provenance,
+   filter, and cap tests across the adapter, bridge, and host layers.
+
+## ADR-0073: An MCP Server Adapter Exposes The Session Runtime To Agent Hosts
+
+Status: accepted. Extends the headless-drive family (native RPC, ACP) with a
+third stdio adapter in `localpilot-rpc`, so an MCP client — an agent host
+such as Claude Code or Codex — can drive and steer a LocalPilot session
+through ordinary tool calls (`localpilot mcp serve`).
+
+1. **Same crate, same runtime, same plumbing.** The adapter lives beside the
+   ACP adapter in `localpilot-rpc` (the crate that owns headless wire
+   adapters over the in-process `SessionRuntime`), reuses the `RpcApprover`
+   halves, the native protocol's event vocabulary, and a shared LF-framed
+   JSON reader. `localpilot-mcp` remains the MCP *client* only. No HTTP
+   server, no SDK dependency: JSON-RPC 2.0 (spec revision 2025-06-18) is
+   hand-rolled, as the ACP adapter proved viable.
+2. **Pull-based events with counted loss.** MCP is request/response, so
+   session events are buffered in a bounded, monotonically numbered feed;
+   the `events` tool pages after a client cursor with a server-capped
+   bounded wait (well under common client tool timeouts). Overflow drops
+   oldest entries and reports the count — a lagging client sees that it
+   lagged, never a silent gap.
+3. **The permission engine stays authoritative.** The client only answers
+   asks it is shown; an unanswered ask denies, exactly as non-interactive
+   mode; `--no-approvals` withholds the reply tool entirely
+   (watch-and-steer: every ask denies, fail-closed). Nothing the adapter
+   exposes can widen an engine verdict.
+4. **A served session is a full session.** `steer`/`follow_up` dispositions,
+   session resume (`--continue`/`--resume`, shared with `rpc`), and the
+   closeout-on-disconnect learning path behave identically to the other
+   interactive hosts. Pinned by a duplex integration suite and CLI parse
+   tests.
+
+## ADR-0072: Research Memory Candidates Carry Honest Provenance, And Excerpts Are Distilled, Not Dropped
+
+Status: accepted; point 2 amended (see below) after the original rule proved to
+zero the pipeline. Refines ADR-0060/0067/0037 after a review-queue item proved
+unreadable: a `/research` candidate whose body was a truncated console-log
+excerpt, enqueued under the `completion-retrospective` session label — the
+reviewer could tell neither where it came from nor what it was supposed to
+teach.
+
+1. **Honest provenance on the shared queue.** Research findings keep riding
+   the `write_retrospective_lesson` review-gated path (ADR-0060), but the
+   lesson now carries its origin: a research candidate is enqueued under the
+   `research` session label with a `research-` id prefix and
+   `research_finding` evidence kind; only genuine completion retrospectives
+   are labelled `completion-retrospective`/`retro-`.
+2. **A candidate body is the distilled statement, not the raw blob.** The
+   ADR-0067 sanitize pass reduces a finding whose statement was a raw source
+   blob to a readable, single-line, length-capped excerpt titled with its
+   source (`Finding.statement`), and moves the full text to `Finding.evidence`.
+   `candidates_from` uses that already-distilled `statement` as the candidate
+   body; the raw blob in `evidence` stays in the rendered report only. So the
+   reviewer sees a clean claim with provenance, never a pasted log or code
+   chunk — the original readability goal — without discarding the finding.
+   *(Superseded in part: the "report only" clause proved to leave the reviewer
+   a one-line excerpt they could neither judge nor reuse; the full source now
+   rides the review candidate as a fenced evidence block under the distilled
+   claim, and is carried in full per ADR-0075.)*
+3. Pinned by a candidates-filter test and a queue-label test.
+
+**Amendment (regression fix).** Point 2 originally *excluded* every finding with
+`evidence.is_some()` from the review queue (report-only). Because synthesis is
+provenance-preserving and heuristic (the model only decomposes; every finding is
+a gathered source excerpt), the sanitize pass sets `evidence` on essentially all
+findings over code/HTML/long-doc sources — so the exclusion silently enqueued
+*zero* candidates for the common research run, and nothing reached the LocalMind
+review UI. The rule is corrected to distil-not-drop: an excerpt finding stays a
+candidate, carrying its sanitized one-line `statement` (already readable and
+length-capped) as the body, while the raw blob remains report-only. Lesson: a
+candidate filter must be validated against the real producer's output (heuristic
+excerpts), not an idealized clean-claim fixture.
+
+## ADR-0071: Permission Profile Slash Commands Apply Mid-Turn Through A Shared Engine Handle
+
+Status: accepted. Extends ADR-0070 after `/unrestricted` proved to be
+idle-only: a profile switch only reconfigures LocalPilot's own permission
+engine, so making the user wait out a generating model was gratuitous.
+
+1. **The engine is shared and swappable.** `SessionRuntime` holds the
+   permission engine behind a `PermissionEngineHandle`
+   (`Arc<RwLock<PermissionEngine>>` in `localpilot-sandbox`); the runtime
+   snapshots it fresh per tool call (it always re-decided per call — the swap
+   just needed a path around the turn's mutable runtime borrow). A poisoned
+   lock recovers the inner value: a half-finished swap is impossible, both
+   pre- and post-swap engines are valid.
+2. **Profile slash commands join the mid-turn allowlist.** `SetProfile` is
+   accepted by the live-slash gate — the same pattern `/bg` uses (a cloned
+   handle, never the borrowed runtime) — swaps the shared engine, updates the
+   footer, and notices that the profile is in force from the next tool call.
+   `set_permission_profile` (the idle path) writes through the same handle, so
+   the two paths cannot diverge.
+3. **Scope: the agent turn only.** Drives without a live session runtime
+   (compaction, research, the harness resume — which constructs its own inner
+   runtime from the profile captured at start) degrade to an explanatory
+   notice. A pending approval prompt still captures its y/n keys first; the
+   switch applies once answered.
+4. Pinned by an engine-handle swap test, a runtime dispatch test (deny → swap
+   via handle → next dispatch allowed), and a live-slash wiring test.
+
+## ADR-0070: Out-Of-Workspace Access Is Grantable — Prompt, Standing Read Grants, And An Unrestricted Profile
+
+Status: accepted. Amends the permission-profile rules in docs/07 after an
+out-of-workspace `list_files` denial proved to be a dead end: under `bypass`
+the path effect was hard-denied with no prompt (strictly *weaker* than
+`default`, which asks), and no profile offered a standing or non-interactive
+grant.
+
+1. **Bypass asks instead of hard-denying the workspace boundary.** An
+   out-of-workspace path effect under `bypass` now takes the same gate as
+   `default`: prompt when interactive, deny when non-interactive. Bypass's
+   "no prompts" property is narrowed to everything *inside* the boundary; the
+   one prompt it keeps is the boundary itself. This is a permission-contract
+   change; the pinned test is
+   `bypass_asks_for_out_of_workspace_paths_and_denies_them_headless`.
+2. **`[permissions] extra_read_roots` — standing read grants.** Configured
+   directories are canonicalized at startup and widen only the *read* scope
+   (`Workspace::read_scoped`), in every profile and non-interactively. Writes
+   and `Workspace::resolve` keep the hard boundary; secret-like reads keep
+   their gate; a root that fails to canonicalize is reported and skipped —
+   never silently widened or ignored.
+3. **A fourth profile, `unrestricted`.** Approves every effect — out-of-
+   workspace paths included — with no prompts; the user explicitly accepts
+   full responsibility. Never the default; set per launch (`--permission
+   unrestricted`), per session (`/unrestricted`), or per project config. It
+   is rendered in the footer in the strongest warning style, implies
+   workspace trust like `bypass`, and does not disable redaction, logging,
+   or harness rule verdicts.
+4. **Denials are actionable.** An out-of-workspace permission denial names
+   the target and all three remedies (interactive approval,
+   `extra_read_roots`, `--permission unrestricted`) in the model-visible
+   error, so the model can relay how the user lifts the restriction instead
+   of dead-ending.
+
+## ADR-0069: Oversized Single-File Writes Are Prevented At The Prompt And The Write Tool, Not Only Recovered
+
+Status: accepted. Complements ADR-0038 (an oversized malformed write is
+recovered by chunking): that rung is the *cure*; this ADR adds *prevention* so
+the pathological single-huge-file generation is usually avoided before the call
+is ever sent.
+
+1. **Always-on prompt guidance.** The agent system prompt now instructs the
+   model to split a large implementation across several small, modular files
+   rather than emitting one enormous file, and to treat a "keep it in one file"
+   request as a preference that yields once a file would become very large. This
+   is the only surface that reaches every run — the curated seed lessons are
+   ingest-gated and do not.
+2. **Soft write-size guard in the tool path.** `write_file` refuses a single
+   payload larger than a soft limit (64 KiB) with a message steering the model
+   to split into modular files or build the file up with `append_file`. The
+   limit sits above any normal source file, so it only trips on the pathological
+   path; `append_file` is deliberately unguarded because it is the piece-wise
+   escape hatch.
+3. **Recovery is unchanged.** The ADR-0038 chunked-write recovery remains as the
+   backstop for an oversized call that still slips through. Prevention plus cure,
+   not prevention instead of cure.
+4. **Seed reinforcement.** The opt-in curated coding lessons gain the same
+   "decompose a large implementation into modular files" guidance; this only
+   reaches a project after `ingest run`, so it reinforces (1), it does not
+   replace it.
+
+## ADR-0068: Research Web Egress Supports Wildcard Allow And A Deny List, With Deny Winning
+
+Status: accepted. Extends ADR-0060 (research web egress off by default). The
+`[research.web]` gate gains broader-but-carve-out expressiveness without
+weakening the fail-closed default.
+
+1. **Wildcard patterns in both lists.** A list entry of `*` matches every host;
+   `*.example.com` matches `example.com` and any subdomain; a bare domain keeps
+   the prior exact-or-subdomain rule. One `host_matches` helper serves the
+   allowlist and the new disallowlist (no duplicate matcher).
+2. **A `disallowlist`, checked first.** `[research.web].disallowlist` blocks
+   hosts even when the allowlist — including `*` — would permit them. Deny is
+   evaluated before allow and wins ties, so `allowlist = ["*"]` with a
+   `disallowlist` allows broad access while carving out specific domains.
+3. **Fail-closed default is unchanged.** `enabled = false` with empty lists still
+   fetches nothing, and per-session operator consent is still required at
+   runtime; the wildcard is only ever an entry the user typed, never a default.
+4. **Egress-safety is pinned by tests**: deny-beats-wildcard-allow,
+   deny-beats-exact-allow, `*.domain` matches apex and subdomain, and the empty
+   fail-closed default.
+
+## ADR-0067: Research Findings Are Concise Claims With Raw Source Text Carried As Separate Evidence
+
+Status: accepted. Refines ADR-0060 (the research loop) after raw retrieved
+chunks (JavaScript, HTML boilerplate, analytics) were surfacing verbatim as
+"findings" and breaking the report layout.
+
+1. **A finding is a claim, not a snippet.** `Finding` gains an `evidence` field.
+   A deterministic sanitize pass in the research loop (one choke point, after
+   synthesis and before cross-check) moves any statement that is a code/HTML blob
+   or is over-long into `evidence` and replaces the statement with a concise,
+   single-line excerpt; a clean statement is only whitespace-flattened. No
+   finding is ever dropped.
+2. **The model-free path stays model-free.** This is a deterministic sanitize,
+   not a model-backed synthesizer (explicitly not built): the degrade path
+   labels an excerpt honestly ("Excerpt from {source}: …") rather than
+   fabricating a summary. A future model-backed synthesizer could improve wording
+   without changing this contract.
+3. **One pass fixes both consumers.** Because sanitize runs in the loop, both the
+   rendered Markdown report and the enqueued review-queue memory candidates get
+   the clean statement — a raw blob can no longer leak into memory.
+4. **Rendering is defensive.** The Markdown heading flattens the statement so it
+   can never break the `_(supported)_`/`Sources:` layout, and evidence renders in
+   a fenced block whose fence is chosen longer than any backtick run inside it,
+   truncated at a display cap.
+
+## ADR-0066: The Discard/Reset Rung Is Real, Fed By Rule Severity, With A True Working-Tree Restore
+
+Status: accepted. Implements the harness-spec anti-sunk-cost `discard`
+verdict that had been documented but structurally unreachable
+(`RuleVerdict::Discard` was never constructed; the worker folded `Discard`
+into `Retry`; the resume arm was dead and restored nothing).
+
+1. **Construction path is config-driven rule severity.** `RuleSeverity` gains
+   `discard`: a rule configured `[harness.rules] <name> = "discard"` (e.g.
+   `quality_gate = "discard"`) escalates its actionable `retry` failures to
+   `RuleVerdict::Discard`. It is an *escalation*, not a ceiling — `block`
+   still wins, `allow`/`warn` pass through. Rule-level only: per-check
+   `severity = "discard"` is rejected at config load, because the per-check
+   severity rides the shared check-runner contract, which has no discard
+   notion.
+2. **The worker preserves discard-ness.** `StepAction::Discard` ranks between
+   `Retry` and `Block`; the resume loop feeds it to the anti-sunk-cost
+   `StepLoop` as `AttemptResult::Discard`, reaching the previously-dead
+   `DiscardAndReset` arm.
+3. **DiscardAndReset now restores committed state** before the fresh attempt:
+   `git reset --hard HEAD` + `git clean -fd` (ignored files — the
+   `.localpilot/` execution record — untouched; the resume flow refuses to
+   start over unrelated uncommitted changes, so everything removed belongs to
+   the discarded attempt). The abandoned attempt still closes its transcript
+   branch with a failure digest and the fresh attempt forks from the step
+   anchor, so the discarded line stays auditable.
+4. **Default behaviour is unchanged**: no baseline rule defaults to
+   `discard`; without the config the ladder is Retry-only exactly as before.
+   An end-to-end harness test on a scratch repository pins the contract: a
+   discarded attempt's stray file never leaks into the next attempt or the
+   step commit.
+
+## ADR-0065: Memory-Injection Retrieval Consumes The Engine's Rerank Stage, Opt-In Via The Engine's Own Config Keys
+
+Status: accepted. Refines ADR-0059 (semantic relevance gate); the engine-side
+contract is LocalMind D-LM-0026.
+
+The always-on context-injection retrieval (`context_hits`) gains an **opt-in
+rerank stage** consumed from the engine's `localmind-search` crate instead of
+a host-grown reordering: when the project's `.localmind.toml` sets
+`[retrieval] rerank = true` *and* an embedding endpoint is configured
+(`ProjectConfig::rerank_active`, the engine's single gate), the top
+`rerank_window` keyword candidates are reordered by the **same stored-vector
+cosines the ADR-0059 relevance gate already computes** (`rerank_scored`, the
+engine's stored-vector entry point) — no second embedding pass on the
+injection path.
+
+1. **Keyword stays the candidate floor** (mirrors D-LM-0022): rerank reorders
+   keyword candidates, never introduces hits.
+2. **Default-off and byte-identical when off**: without the flag, without an
+   endpoint, or without stored vectors the injected order is unchanged — the
+   ADR-0045/0059 posture (additive, best-effort, offline-identical) holds.
+3. **Gate and rerank share one score source** (the `vector_index` cosines), so
+   filtering and ordering can never disagree about a memory's relevance.
+4. This closes the ecosystem's one live parallel-retrieval risk by consuming
+   the engine capability rather than duplicating it (reuse-before-add).
+
+Amended 2026-08-26: ADR-0110 superseded the cosine-slot algorithm above with RRF,
+so LocalPilot did not consume `rerank_scored`; D-LM-0026 records that entry point
+as library-only. LocalHub#84 closes the remaining ownership drift by moving the
+RRF path itself into `localmind-search::hybrid_memory_search`, which is now the
+production call made by `context_hits`.
+
+## ADR-0064: The Non-Developer TUI Is Native ratatui, With The Guided-Launcher Doctrine Enforced By Tests
+
+Status: accepted for LocalBox (which ships the TUI) and the ecosystem doctrine.
+ADR-0107 supersedes this record's former statement that LocalPilot's inline-TUI
+rules remain unchanged; LocalPilot now owns a separate full-screen chat model.
+
+The launcher TUI for non-developers is a native **ratatui** flow inside the
+product binary. The previous stack — a .NET/Terminal.Gui TUI talking to an
+out-of-process PowerShell backend over a JSON seam — is retired with the
+PowerShell sources.
+
+1. **Flow logic is pure; frontends only pick indexes.** Every guided-flow
+   decision (vocabulary, plan summary, customize transitions, save gates) is a
+   pure function layer with unit tests. The interactive frontends — a ratatui
+   inline-viewport list on a TTY, numbered plain-text menus otherwise — do
+   nothing but select indexes, so behaviour cannot fork between them and a
+   non-TTY session degrades gracefully by construction.
+
+2. **The non-dev doctrine is enforced by test, not convention.** Plain language
+   over jargon (a snapshot fails if implementation vocabulary leaks into the
+   plan summary); progressive disclosure (the fast path is model → short
+   confirm → launch, with power knobs one level down in Customize); safe
+   recommended defaults with markers; a recommended-tier model filter with an
+   explicit reveal for the rest (and a no-dead-end fallback when nothing is
+   marked recommended); fit-aware colouring; one-keystroke replay of a saved
+   default; scrollback-safe inline rendering (no alternate screen, no
+   whole-screen clear).
+
+3. **The TUI talks typed in-process calls.** There is no JSON back-channel
+   between the interface and the launcher: the ratatui flow calls the launcher
+   library directly, so the old TUI-API seam (and its smoke guard) retired with
+   the .NET TUI instead of being rebuilt in Rust.
+
+Boundary: machine consumers are not the TUI's job — scripted use goes through
+the CLI commands and their machine-output discipline (JSON to a clean stdout).
+
+## ADR-0063: The No-Think Filter Runs In-Process, Hosted By The Product Binary
+
+Status: accepted. Removes the last Python runtime dependency from the local
+stack; honours the provider contract (ADR-0001) — the filter presents the same
+documented Anthropic-compatible surface agents already speak.
+
+The think-stripping proxy that sits between a coding agent and a local
+llama-server is a Rust **in-process** HTTP filter (axum on the shared runtime
+tier), not a Python sidecar script.
+
+1. **The filter is a library with a bind-and-serve entry point.** The shared
+   runtime crate owns the streaming think-block stripper, the `/health`
+   endpoint reporting the proxied target (`{target_host, target_port}`), and
+   the forward path — unit-testable against a mock upstream with no socket.
+
+2. **The product binary hosts it by re-invoking itself.** LocalBox spawns the
+   proxy as its own executable in a plumbing mode, so there is no second
+   binary to distribute or version, and proxy lifecycle is ordinary process
+   management: the tri-state target check (right target / wrong target /
+   down), repoint-not-restart, and reap-before-probe semantics are preserved.
+
+3. **A gateway posture is explicit and guarded.** The proxy binds loopback by
+   default. A LAN exposure carries an optional API key that gates every
+   forwarding request (both common header spellings; `/health` stays open for
+   target checks), and a public-looking bind with no key is refused with a
+   remedy unless explicitly opted into.
+
+Boundary: the filter never rewrites model output beyond reasoning-block
+routing; sampler and template policy stay on the server side.
+
+## ADR-0062: The Shared llama Tier Is A Public Repo Of Narrow Crates, Consumed By Rev-Pinned Git Dependency; The Launcher Contract Is A Trait
+
+Status: accepted. Extends the narrow-crate rule (ADR-0001) across repository
+boundaries; clean-room provenance (ADR-0005) applies to the shared tier in
+full.
+
+The domain logic that LocalBox, LocalBench, and LocalPilot all need lives in a
+separate **public** repository of narrow crates (`localx-llama`), consumed by
+each product as a **git dependency pinned by revision** (recorded in each
+consumer's committed `Cargo.lock`; a local path override is used during active
+development). It is not a git submodule, and it is not vendored.
+
+1. **Three crates, one responsibility each.** A pure domain crate (model
+   catalog types, server-argument construction, VRAM/fit, config-layer
+   precedence, the tuner store schema, the launcher contract); a runtime crate
+   (process lifecycle, pin-verified downloads, health classification, the
+   in-process no-think filter, port and spawn utilities); and an eval crate
+   (the capability-scorecard wire contract, discipline metrics, the blinded
+   judge core, ablation, the gate-mediated check runner, verify-command
+   detection, the test-count grade table).
+
+2. **The launcher contract is a Rust trait with a versioned envelope.** What
+   was a documented list of PowerShell functions is now a trait the launcher
+   implements and consumers depend on: parameter obligations are the type
+   system's job, and compatibility is a small versioned envelope
+   (`api_version` / `launcher_export_version` / supported targets and
+   runtimes) gated by the consumer with a suffix-free product-version floor.
+   Conformance runs cross-repo in CI in both directions, so a breaking change
+   fails at its source.
+
+3. **LocalPilot's eval primitives moved down; hosts keep adapters.** The
+   shared eval crate owns contract types and pure math; anything bound to a
+   host (session-trace projection, the permission engine, live judge calls)
+   stays in the host as a thin adapter re-exporting the shared names, so the
+   host's public API survives the extraction.
+
+4. **Public visibility is load-bearing.** Consumers are public repositories:
+   a private shared dependency would break `cargo build` from source and
+   public CI. The tier holds nothing secret, so it is public, and no CI needs
+   a fetch token.
+
+Boundary: consumers must track a single revision of the shared tier per
+lockstep (two revisions of the crate in one dependency graph split the trait
+into incompatible types); pins are advanced deliberately, never floated.
+
+## ADR-0061: Vision (Image-Input) Capability Resolves Config > Probe > False, And The Image Gate Is Lifted To Match
+
+Status: accepted. Keeps the change additive and default-off (cross-cutting
+KISS/default-off): an undeclared, unprobed provider is byte-identical to before.
+Honours the provider-contract capability model (ADR-0001, no vendor coupling) and
+clean-room provenance (ADR-0005) — the probe reads a documented public llama.cpp
+endpoint, never a private one.
+
+LocalPilot assumed every local OpenAI-compatible server was text-only: the OpenAI
+adapter advertised image input **only** for the official hosted API, so an
+image-capable local model (e.g. a llama.cpp server with a multimodal projector
+loaded) was refused images, and an image attached to any other model was sent
+blind. A model's vision support is a *capability* that should be resolved and
+acted on, not assumed from the source.
+
+1. **Capability resolves from two signals, precedence config > probe > false.**
+   The resolved vision support is: (1) an explicit per-provider `supports_vision`
+   config flag (authoritative — set by the user, or auto-written by LocalBox on a
+   vision launch); else (2) a best-effort, read-only discovery-time **probe**; else
+   (3) `false`. Config always wins so a user can override a wrong probe, and an
+   unknown probe never asserts a capability. The pure resolver
+   (`resolve_vision`/`VisionSource`) is shared by every surface so they cannot
+   diverge.
+
+2. **The OpenAI `Image` input gate becomes `OfficialApi OR resolved-true`.** The
+   adapter still advertises image input for the official API; a local/custom server
+   advertises it when vision resolves true (config-declared at provider-build time;
+   a probe lift is applied at the interactive image-attach seam). With the flag
+   defaulting unset, **no existing local provider changes behaviour**.
+
+3. **The probe is read-only `/props`, best-effort, default-on; no trial-image
+   probe.** llama.cpp's `llama-server` exposes a documented `GET /props` reporting
+   `modalities.vision` (set when an `--mmproj` projector is loaded); the probe reads
+   it and runs **no model inference** (`/props` is at the server root, so a trailing
+   `/v1` is stripped first). It is toggleable via `[discovery] vision_probe` (default
+   `true`) and is skipped when config already declared. An unreachable, non-200, or
+   signal-less server resolves to `None` (unknown ⇒ no vision), never a false claim.
+   An **active** trial-image probe (sending a 1×1 image through inference) is *not*
+   in v1.
+
+4. **LocalBox is the authoritative declarer for its launch path.** When LocalBox
+   loads the projector for a `-UseVision` agent launch it writes `supports_vision =
+   true` into the generated `.localpilot.toml`, so the primary local-vision path is
+   zero-config and never depends on the probe. (LocalBox-side; recorded in its
+   CHANGELOG.)
+
+5. **The preflight refuses-with-guidance, never sends blind.** An image attached to
+   a model not known to accept one is refused with an actionable message naming how
+   to declare `supports_vision`; a declared/probed-vision model passes.
+
+Boundary: LocalPilot does **not** augment the upstream `GET /v1/models` response
+with a non-standard vision field — llama-server owns that response, so augmenting
+it would be stateful, fragile, and non-standard; that is explicitly deferred. The
+`supports_vision` flag is a user/launcher **assertion**: a wrong declaration (a
+text-only model marked vision) can still send images that the server rejects, which
+`doctor`/`models` surface so the assertion is visible. `doctor` stays offline
+(deterministic, no egress), so it surfaces the config-declared half; the full
+config-or-probe resolution and its source surface in `localpilot models`, which
+already performs gated network discovery.
+
+Addendum (image paste in interactive chat): an explicit image paste (Ctrl+V, or a
+terminal that routes it as a bracketed paste) re-runs this same config > probe
+resolution once before the preflight decides, so a vision server that became
+reachable after session start is picked up; on refusal the notice now names both
+levers (`supports_vision` and `[discovery] vision_probe`). Separately, a clipboard
+read that fails for any reason other than "no image present" always surfaces a
+notice, so an image paste never fails silently — closing the "nothing happened, no
+message" gap without changing the default-false capability posture.
+
+## ADR-0060: Research Is A Two-Surface, Provenance-Preserving Loop In Its Own Crate, With Web Egress Off By Default
+
+Status: accepted. Honours the ecosystem remote-egress policy (the five rules:
+default-off, explicit opt-in, disclosed, auditable, disableable) and reuses the
+loop-safety rails (ADR-0055), the review-gated candidate path (ADR-0037), and the
+single workspace redactor (ADR-0011). Keeps the LocalMind adapter thin (ADR-0036)
+by landing the loop in a new crate, not the adapter. The bundled `deep-research`
+harness concept is a behavioural reference only — code, prompts, identifiers, and
+UI copy are original (ADR-0005, clean-room).
+
+LocalPilot can already retrieve across local code, accepted memory, and ingested
+knowledge, but only one source at a time and without a loop that decomposes a
+question, cross-checks support, or produces a reviewable artefact. A *research*
+capability wants to fan out across those sources — and, for some questions, the
+web — then synthesise with provenance. The web reach is the hazard: LocalPilot's
+posture is local-first with no telemetry, so any outbound path must be inert
+unless the operator explicitly turns it on for that run.
+
+1. **One engine, two surfaces.** A single bounded loop is exposed as both an
+   interactive `/research` (one-shot `/research <topic>` runs and returns to the
+   prior mode; a bare `/research` enters a persistent research mode where a typed
+   prompt is researched) and a headless `localpilot research <topic>` subcommand
+   (`--no-report`, `--no-memory`). The interactive surface is a thin shell over
+   the loop; no research logic lives in the TUI/CLI layer.
+
+2. **Host-neutral loop in a new crate (`localpilot-research`).** The crate defines
+   the `Source`/`Synthesizer` traits, the bounded `run_research` loop, the value
+   types (`Provenance`/`Evidence`/`Finding`/`ResearchReport`), the Markdown
+   renderer, the review-candidate spec, and the pure web-egress policy gate. It
+   carries no filesystem, network, or model dependency. The concrete sources
+   (knowledge/memory/web), the model-backed synthesizer, the report writer, and
+   the candidate enqueue live in the binding layer (`localpilot-cli`), where those
+   capabilities already exist — so the loop stays dependency-light and
+   unit-testable with fakes, and the LocalMind adapter gains no research logic
+   (ADR-0036).
+
+3. **Dual output, always review-gated.** A run emits both a redacted, human-
+   readable Markdown report and review-gated memory candidates. Candidates derive
+   only from supported, provenance-backed findings, are redacted, and are enqueued
+   through the existing review path (the `write_retrospective_lesson` queue,
+   ADR-0037) — never written to accepted memory. Knowledge production stays
+   human-gated.
+
+4. **The model assists decomposition only; synthesis stays provenance-preserving.**
+   When a provider and model are configured, the model decomposes the topic into
+   sub-questions (one per line, bounded by `[research].max_questions`). Synthesis
+   is **not** delegated: each finding is a gathered evidence snippet carrying that
+   snippet's provenance, and the loop's adversarial cross-check downgrades any
+   finding with no supporting evidence to `unsupported`. So the model can never
+   inject an unbacked or hallucinated finding into a report or a memory candidate.
+   With no model, decomposition degrades to the single-topic heuristic and a run
+   still completes.
+
+5. **Web egress is off by default and opt-in by construction.** The whole web path
+   is governed by `[research.web]` (`enabled` default `false`, an `allowlist`, and
+   an `audit_log` path) layered with per-session, runtime consent:
+   - **Default-off / disableable.** `enabled = false` (the unset default) removes
+     the entire outbound path; the loop runs local-only. The switch is the kill
+     switch — runtime consent can never override it.
+   - **Explicit, loud opt-in.** Web research is reachable only via the headless
+     `research --web` flag, which prints an egress disclosure (what is sent — only
+     the redacted sub-question — which allowlisted domains, and the audit-log path)
+     and then records a per-session opt-in that is never persisted. The interactive
+     surface stays local-only. A freshly built run is inactive until both config
+     and the per-session opt-in agree (fail-closed).
+   - **Allowlist-only per host.** Each candidate URL's host is parsed with a real
+     URL parser; an allowlisted host is fetched (bounded bytes + timeouts), every
+     other host is **skipped and logged** — there is no interactive per-fetch
+     prompt in v1. (The policy gate already models a `NeedsConfirmation` decision
+     for a future UI; v1 treats it as skip.)
+   - **Auditable.** Every outbound request and every skip appends one line to the
+     audit log (decision, host, URL, redacted sub-question) — metadata and the
+     redacted question only, never gathered evidence or file contents.
+
+Reason:
+
+- a research loop that fans out across sources is a genuinely new operating mode,
+  but its *logic* is host-neutral; isolating it in its own crate keeps the LocalMind
+  adapter thin (ADR-0036) and lets the security-sensitive gate be tested in
+  isolation with fakes
+- the trust hazard is egress, so the egress path is made inert by construction:
+  default-off, a loud per-run opt-in with disclosure, an allowlist with skip-on-
+  miss, and an audit trail — the five remote-egress rules, satisfied structurally
+  rather than by convention
+- delegating *decomposition* to the model is low-risk (it only shapes which
+  questions are asked); delegating *synthesis* is not, because an ungrounded
+  finding could become a report claim or a memory candidate — so synthesis keeps
+  real provenance and the cross-check stays authoritative
+- candidates route to the existing review queue, so research can never silently
+  enlarge durable memory
+
+Consequence: the default build makes no network request and is byte-identical to
+the no-web path; `research --web` against an empty allowlist fetches nothing (every
+host confirms→skips) and says so up front. Live evaluation of model decomposition
+and URL-proposal quality on a local model is opportunistic, not blocking (the
+offline `wiremock` egress tests are the accepted bar). A future interactive
+per-fetch confirm flow can light up the gate's existing `NeedsConfirmation`
+decision without changing the crate boundary.
+
+## ADR-0059: Accepted-Memory Injection Is Gated By Semantic Relevance, And A Lesson That Hurt The Uplift Eval Is Routed To Review
+
+Status: accepted. Implements the two halves ADR-0045/ADR-0046 left as mechanism:
+the relevance gate now has a real (semantic) signal, and the outcome-aware
+down-weight is wired to an outcome. Reuses LocalMind's `embed_query` /
+global-aware `vector_search` (D-LM-0023) and the route-to-review flag
+(D-LM-0016).
+
+A model-pinned benchmark showed learning is net-positive but noisy: a
+same-language but off-topic lesson injected into an unrelated task and misled the
+model (negative transfer). ADR-0045's relevance gate keyed only on the keyword
+bm25 score, which is **unnormalized** — there is no portable threshold to tighten
+— and ADR-0046's outcome-aware down-weight was never wired to an outcome.
+
+1. **Semantic relevance gate (default-on, best-effort).** The injection layer
+   embeds the prompt once per turn and scores each keyword candidate by
+   **normalized cosine** over the stored vectors, gating any hit below
+   `[memory] injection_min_cosine` (default `0.6`; `0.0` disables). Because cosine
+   is normalized and portable it ships **default-on** — unlike the
+   default-preserving levers of ADR-0045. It is **best-effort**: with no embedding
+   endpoint, an unreachable one, or an unembedded lesson, the hit carries no
+   cosine and is injected exactly as on the keyword path, so a no-embed run is
+   byte-identical. The keyword bm25 search stays the candidate floor; cosine only
+   re-filters it, never selects.
+
+2. **Outcome-aware down-weight (default-off).** When the uplift A/B eval shows an
+   arm that injected a set of lessons under-performed its control, those lessons
+   are routed to review (never deleted) for a human to re-judge, joined by the
+   per-turn `memories_used` audit. The join is the **A/B verdict, not a live
+   turn** — a single turn is too weak a signal (ADR-0046's intent). Gated by
+   `[memory] outcome_downweight` (default off); only `memory`-layer ids are
+   eligible; reversible.
+
+Both reuse existing primitives — no new retrieval engine, no second flag path —
+and never delete. Rollback is `injection_min_cosine = 0.0` and leaving
+`outcome_downweight` off.
+
+## ADR-0058: The Solve Loop Can Build, Test, And Edit In The Workspace — De-Verbatim cwd, `&&` Shell, Anchored Edits, Verify-On-Eval
+
+Status: accepted. Refines ADR-0054 (the verify-before-done gate — flips its
+deferred default on *for eval*) and ADR-0007 (tier-1 parity — this is largely a
+Windows-parity fix). Builds on the read-only behaviour reference under
+clean-room rules (ADR-0005): the behaviours below were replicated originally, no
+code/prompt/identifier copied.
+
+A model-pinned benchmark exposed that the solve loop was **blind on Windows**.
+The sandbox canonicalizes the workspace root to a verbatim extended-length path
+(`\\?\C:\…`) for path containment; handed verbatim to a child process as its
+working directory, a launched shell cannot use it (cmd falls back to
+`C:\Windows`, PowerShell resolves relative paths against a broken `$PWD`), so
+every model-issued build/test command ran **outside** the workspace and failed.
+The grader ran in a separate raw cwd and still scored the final file, which
+**masked** the bug and depressed solve quality — and poisoned the learning
+corpus (≈25% of warm-store lessons were artifacts of the broken tooling, e.g.
+"PowerShell doesn't support `&&`"). Four changes make the loop robust, each
+guarded so containment and no-regression hold:
+
+1. **De-verbatim child-process cwd.** `Workspace::process_dir()` returns the root
+   in a form a child can use (`dunce::simplified`, which leaves a path verbatim
+   when it cannot be safely shortened). Every spawn — the shell and git tools,
+   background processes, and the verify gate's runner — uses it. The verbatim
+   `Workspace::root()` and its `starts_with` containment boundary are **never**
+   touched; `process_dir()` is a spawn-only accessor, never used for a contained
+   path. The sandbox boundary tests (verbatim/case/UNC/ADS) stay green.
+
+2. **`&&`-capable shell.** The Windows shell wrapper prefers PowerShell 7
+   (`pwsh`) when it is on PATH (cached detection), falling back to
+   `powershell.exe`. `pwsh` supports the `&&`/`||` chain operators that Windows
+   PowerShell 5.1 lacks, so a chained command runs as written instead of teaching
+   the corpus junk shell lessons. *Prefer*, not *require*. A timed-out command's
+   whole process tree is killed (`taskkill /T /F`; a process-group `kill` on
+   Unix) so a hung build's grandchildren never orphan.
+
+3. **Anchored, indentation-tolerant edits with guiding errors.** `edit_file`,
+   `multi_edit`, and `apply_patch` share one matcher: an exact unique match
+   first, then a single leading-indentation-tolerant rung that applies only on a
+   *unique* block whose indentation differs by one consistent whitespace prefix
+   (re-indenting the replacement to the file), else a guiding error (the match
+   count, or the nearest line + a re-read hint). Matching stays **anchored, never
+   fuzzy** — no Levenshtein/best-guess location, because a wrong-location edit is
+   worse than a failed one. CRLF handling and `multi_edit`/`apply_patch`
+   atomicity are unchanged.
+
+4. **Verify-before-done default-on for `eval`.** ADR-0054 left the gate off
+   "pending a fair arm"; `eval` is that arm. `localpilot eval` defaults the gate
+   on (opt out `--no-verify`, byte-identical to the prior behaviour), so the
+   benchmark measures compiled+tested solves. Interactive and `print` are
+   unchanged (the `[harness] verify_before_done` config default stays `false`).
+   Stack detection gains a C++ branch: C++ sources at the root are compile-checked
+   with an artifact-free `g++ -std=c++17 -I. -fsyntax-only <sources>` — a single
+   `CheckRunner` program+args that writes no build artifacts (so it never pollutes
+   the captured diff) and catches the dominant "never compiled" failure, rather
+   than the three-command CMake configure/build/`ctest` pipeline that does not fit
+   one call (a full `ctest` stays available via `verify_command`).
+
+Reason:
+
+- a verbatim `\\?\` path is a *containment* form, not a *spawn* form; the fix is
+  to distinguish the two, not to weaken containment — so the security boundary is
+  unchanged and the launched tools finally run where the work is
+- the harness defect did not just lower scores, it **poisoned the learning
+  corpus**; fixing the build/test/edit surface is a prerequisite to any learning
+  re-run, and removes the source of the `&&` bug-lessons at the root
+- anchored-and-unique edit matching turns the common "model rewrites the whole
+  file because its `old_text` indentation was slightly off" failure into a
+  landed edit, without ever risking a best-guess wrong-location write
+- a benchmark that scores code the model never built measures the grader's cwd,
+  not the solver's; defaulting verification on *for eval* closes that gap while
+  leaving interactive behaviour untouched
+
+Consequence: the eval baseline now reflects verified solves (the in-flight
+comparison ledger is reset before the next run, dropping the blind-cwd failures
+and keeping the valid results). The warm-store cleanup — pruning the
+bug-artifact lessons and investigating the semantic-dedup miss — is a separate
+operational/LocalMind follow-up before any learning re-run. The C++-as-`g++`
+choice is recorded as a deliberate, single-command refinement of "CMake → ctest".
+
+## ADR-0057: Ingest Keyword Retrieval Ranks By FTS bm25, And Short Query Terms Match Whole Tokens
+
+Status: accepted. Refines ADR-0025 (the indexed chunk store) — specifically its
+"ranking is unchanged" clause, which this record supersedes.
+
+ADR-0025 narrowed candidates through the FTS5 index but then **re-derived** a
+relevance score in Rust: a flat term-count (`text.matches(term)`) plus a `+3`
+substring path bonus, re-sorting by that. Two flaws followed. First, the scorer
+matched **substrings mid-word**, and the candidate expression wildcarded **every**
+term as a prefix (`"term"*`) — so a 2-character query term like `an` matched the
+token `and` (and `do` matched `docker`/`documentation`), floating irrelevant
+chunks into the keyword tier. Second, the flat term-count **discarded bm25's
+IDF weighting**, so a common token counted the same as a rare one.
+
+Ingest keyword retrieval now ranks by the FTS index's **bm25** score directly
+(IDF-weighted; a common token contributes far less than a rare one), with the
+`path` column weighted above the body (`bm25(fts, 0.0, 5.0, 1.0)`) so a term that
+names a file boosts that chunk — the principled replacement for the substring
+path bonus. The Rust term-count rescore is gone; `ChunkStore::search` returns each
+row paired with its (negated, higher-is-better) bm25 relevance, and the keyword
+order is the index's order. Query terms of three or more characters still match as
+FTS **prefixes** (so `pars` matches `parser`); **shorter terms match a whole token
+exactly** (so `an` matches only the token `an`, never `and`).
+
+`KnowledgeHit::score` is therefore a bm25-derived relevance (fixed-point scaled),
+not a term count. The hybrid keyword+vector blend (the chunk-vector layer) is
+unchanged in shape: keyword hits keep an absolute floor above every vector-only
+hit, with cosine sub-ordering; only the keyword tier's internal ordering moved
+from term-count to bm25.
+
+Reason:
+
+- bm25 is the FTS index's own IDF-weighted ranking; re-deriving a cruder flat
+  count on top threw that away and reintroduced the very "common words rank high"
+  problem bm25 exists to solve
+- substring + unconditional-prefix matching is not token-aware; gating the prefix
+  by term length and matching short terms as whole tokens removes a class of false
+  hits (`an`⊂`and`, `do`⊂`docker`), not just one symptom
+- column-weighted bm25 expresses the path-name boost inside the ranker instead of
+  a parallel substring pass, so there is one matching definition, not two
+
+Consequence: the prior `linear_scan` no-regression oracle (which pinned the
+term-count ranking) is retired; new tests pin the bm25 behaviour, the
+whole-token short-term match, and the path-weight boost. This changes observed
+ordering for some queries (by design — it is the fix), so it is a deliberate
+ranking-contract change, not a silent one.
+
+## ADR-0056: Project Instruction Files Are Injected Directly Into Context, Ungated, Every Turn
+
+Status: accepted.
+
+Context: a project's instruction files (`CLAUDE.md`, `AGENTS.md`) are the user's
+authoritative orientation for the agent. LocalPilot discovered and merged them
+(`ContextDiscovery`, with precedence + `@`-imports), but the **only** consumer was
+the LocalMind ingest path: the merged document became a derived chunk in the
+review-gated learning store, surfaced via `knowledge_search` only after a human
+accepted it (and only when learning was enabled). So a fresh checkout's
+`CLAUDE.md` could *never* reach the model — the opposite of how a mature harness
+treats a repo's own instructions.
+
+Decision: inject the merged instruction document **directly into the turn
+context every turn**, ungated and independent of learning, behind
+`[context] inject_instructions` (default **on**). The injection reuses
+`ContextDiscovery::discover().render()` (no second discovery walker) through a
+`ProjectInstructionsContext` hook — the same `ContextHook` fabric
+`project_analysis` uses, so the block folds into the leading system message, is
+never persisted, and does not accumulate. It is **bounded**
+(`instruction_char_budget`, truncate-with-marker over budget) and **redacted**
+through the canonical host redactor before it is sent. Discovery is also widened:
+a first-class **`Navigator.md`** convention (LocalPilot's own, highest precedence)
+and **`.github/copilot-instructions.md`** (GitHub Copilot's, lowest), ranked by
+kind within a tier (`Navigator` > `CLAUDE` > `AGENTS` > Copilot).
+
+Consequences: a repo's instructions are respected immediately on a fresh
+checkout, with learning off and an empty store — the parity gap a model-pinned
+sweep exposed. The ingest→retrieval path is unchanged and still review-gated, so
+`knowledge_search` keeps working; the two paths are complementary (direct
+injection for always-on orientation, retrieval for on-demand recall). The
+injection is **default-on** because reading a repo's own committed instructions
+is the expected, safe behaviour — not a speculative feature — but it is bounded,
+redacted, and opt-out (`inject_instructions = false`) to cap context cost and
+contain a secret-bearing file. The `.cursorrules`/`GEMINI.md` conventions are a
+documented future option behind config, deferred (YAGNI) until a project needs
+them. Clean-room: the injection wording is original to this repository.
+
+## ADR-0055: A Fresh Project Self-Bounds — Built-In Loop Safety Rails When The Config Is Silent
+
+Status: accepted.
+
+Context: the per-turn tool-call budget (ADR-0029) and `turn_timeout_secs`
+(ADR-0049) both ship **off by default**. With neither set — an empty or minimal
+`.localpilot.toml`, the out-of-the-box state — a turn ran with no cost ceiling and
+no wall-clock bound. The always-on degenerate-loop guard (ADR-0052) catches a
+*spinning* turn (repeated/cyclic or failing calls), but not a long
+varied-but-non-converging trajectory or a single hung operation: a weak local
+model could run a turn to an external SIGKILL that printed no scorecard. An
+unbounded out-of-the-box loop is a defect, not a feature default.
+
+Decision: when `[harness]` leaves a rail unset, apply a **conservative built-in
+bound** rather than running unbounded. An explicit `[harness]` value always wins;
+the default only fills an unset rail. The bound is profile-aware, because the
+safety need is strongest where no human is watching:
+
+- **Headless** (`eval` / `print` / a `harness` step): a tool-call ceiling (200)
+  **and** a wall-clock bound (600 s).
+- **Interactive** (REPL / `serve`): a higher tool-call ceiling (500) and **no**
+  default wall-clock — a long interactive turn is legitimate and the user can
+  cancel it; the ceiling still stops an unattended runaway.
+
+Resolution lives in one place — `HarnessConfig::resolved_rails(interactive)` in
+`localpilot-config` — which every runtime-construction site (the headless
+`build_runtime`, the harness step runner, the REPL, and `serve`) calls, so the
+default is consistent and explicit-wins is enforced once. The verify gate
+(ADR-0054) is also tied to the no-progress signal: when its build never goes
+green within the re-entry cap the turn stops with `StopReason::NoProgress`, not a
+clean `Done`.
+
+Consequences: this is a **safety default, not a feature lever** — unlike the
+verify gate, broker, and global memory (which ship off pending corpus evidence),
+an unbounded loop is a bug, so the rails ship **on** by default. The values are
+conservative enough not to cut a legitimate run (an ordinary task stays well
+under 200/500 calls and a step finishes well under 600 s); the soft/hard budget
+split (ADR-0029) and the clean `TimedOut`/`BudgetExceeded` finalize + handoff
+(ADR-0049/0052) are unchanged — this only fills the *default*. Rollback/tuning is
+config: set explicit `tool_call_budget`/`turn_timeout_secs`. Refines
+ADR-0029 (progress-aware budget) and ADR-0052 (degenerate-loop guard); a
+library consumer building `SessionConfig` directly is unaffected (the default
+fill is in the config-resolution layer, not the harness).
+
+## ADR-0054: A Turn Verifies The Workspace Builds Before It Is Allowed To Finalize (Opt-In)
+
+Status: accepted.
+
+Context: a solve loop finalizes when the model stops calling tools — it "submits"
+by replying with no tool call. That accepts a turn's work without ever confirming
+it builds. A model-pinned corpus sweep showed this is the single largest avoidable
+cause of compiled-language losses: every C++ loss was a workspace that did not
+compile, yet the turn declared success. The harness already has a command runner
+(the quality-gate [`CheckRunner`], ADR-0009) and a feedback-and-retry shape
+(`harness resume`); what was missing was running a build/test signal on the
+*finalize* transition and feeding a failure back instead of stopping.
+
+Decision: add an opt-in **verify-before-done** gate. With
+`[harness] verify_before_done` on, a turn that would finalize with no tool call
+first runs a verification command; on failure the captured diagnostics are fed
+back as the next turn's input and the loop continues; on a pass, no detectable
+target, or the gate off, the turn finalizes as before. The command is resolved
+from `[harness] verify_command` (a whitespace-split command line, no shell) or
+detected from the workspace's marker files; a workspace with neither is a clean
+no-op. It **reuses** `CheckRunner` (one permission-gated command path, no second
+engine) and does **not** add a second retry loop. It is bounded by the per-turn
+tool-call budget and `turn_timeout` rails *and* a fixed re-entry cap, so it can
+never loop forever; a denied or unstartable command finalizes the turn without a
+signal rather than wedging it. `localpilot eval --verify`/`--verify-command`
+enables it for one run so a benchmark arm can quantify its lift.
+
+Consequences: the definition of "done" gains an optional, observable build/test
+postcondition at the finalize seam — distinct from the per-call contract
+verifier (`localpilot-verify`, which checks a single tool call's postconditions,
+not the whole workspace). It ships **default-off** (a feature lever; features ship
+off): defaulting it on is gated on corpus evidence (a fair arm) per the
+validation-evidence policy (D008). Rollback is config — unset the flag. The
+detector covers the common single-command stacks; a stack it does not cover
+(e.g. a CMake-only C++ project) is served by an explicit `verify_command`, which
+the benchmark sets per language.
+
+## ADR-0053: The Outward Self-Improvement Surface Is Human-Gated By Construction, Draft-Only, And Default-Off
+
+Status: accepted.
+
+ADR-0034 built the self-improvement loop's write half so the human gate is
+structural: the agent may **propose** a code patch in an isolated worktree, but
+promoting it onto the branch requires a value-typed `ApprovalToken` the autonomous
+loop cannot mint. That ADR deferred the *outward* analogue — emitting an issue/PR
+to an external repo — as a safety call, not a scope cut. This record lifts that
+deferral and ships the narrowest publishable outward surface under the same gate.
+
+Decision: add an `OutwardDraft` to `localpilot-patchgen` as a sibling of
+`ProposedPatch`, reusing the **exact same** `ApprovalToken` — one token type, one
+mint path, no second gate.
+
+- **Human-gated by construction.** Authoring or persisting a draft mints no token
+  and touches no network. The only producer of a runnable `PublishPlan` is
+  `OutwardDraft::publish_plan(&self, &ApprovalToken)`; the token's sole constructor
+  (`ApprovalToken::approve`) is called only on the explicit `emit-draft --approve`
+  CLI path, mirroring `promote`. So the loop can author a draft but can never
+  publish one — a standing API-shape test pins that every loop-reachable operation
+  (build/persist/load/list/preview) completes token-free.
+- **Default-off, fail-closed allowlist.** New `[self_improvement]` config:
+  `enabled` (bool) + `outward_targets` (`owner/repo` allowlist), both off. A draft
+  is refused at propose time unless the feature is enabled **and** the target is
+  allowlisted; the allowlist is re-checked at emit time.
+- **Draft-only, never promote.** Publication runs `gh issue create` /
+  `gh pr create --draft` only, via the official `gh` CLI (clean-room — no private
+  endpoint). The argv is built so it can never carry `ready`/`merge`/`--web`/an
+  edit/comment/close, is passed as an array (no shell), and `emit-draft` is
+  **dry-run by default** (no `--approve` ⇒ print the plan, publish nothing). A
+  `gh auth status` preflight surfaces the resolved account before approval.
+- **Redacted and traceable.** The draft title/body are redacted with the shared
+  workspace redactor at construction (so a secret never reaches the local
+  `.localpilot/outward/` store), and the body carries the change provenance
+  (finding + source + rationale). Every emit appends a redacted, token-free
+  lifecycle event.
+
+The propose surface's pure finding→draft-spec mapping lives in the read-only
+`localpilot-selfreview`; the gated artefact, store, and `gh`-running command live
+in `localpilot-patchgen`/`localpilot-cli`, keeping the read-only scanner free of
+provider/network deps. Extends ADR-0034.
+
+## ADR-0052: An Always-On Degenerate-Loop Guard Bounds A Spinning Turn Even When The Cost Budget Is Off
+
+Status: accepted.
+
+The per-turn tool-call budget (ADR-0029) is opt-in: with neither `tool_call_budget`
+key set it is `Unlimited`, and a turn runs with no cost ceiling and no no-progress
+stop. That left one unbounded path — a turn that keeps calling tools without making
+progress, most sharply a weak local model whose tool calls are all denied or all
+fail, loops until the model happens to stop. Observed live: under a permission
+profile that denied the probe tools, a model produced ~1240 messages over ~17
+minutes. The per-turn timeout (ADR-0049) bounds one turn, not the loop, and the
+per-tool failure threshold only nudges (a model evades it by cycling tools).
+
+Decision: add an always-on degenerate-loop guard in the session loop, independent
+of the opt-in budget. When the budget is `Unlimited`, the turn still stops with
+`StopReason::NoProgress` if either signal fires:
+
+- the progress-aware no-progress detector (ADR-0029) trips — a repeated or cyclic
+  *successful* call set, which previously only stopped a turn when the budget was
+  configured; or
+- a run of `UNPRODUCTIVE_CALL_LIMIT` consecutive *failing* calls with no successful
+  call in between — the denied/failing spin the no-progress detector never sees (it
+  is fed only by successful calls). The streak resets on any successful call.
+
+This narrows, it does not widen, the budget contract: "budget off" still means no
+*cost* ceiling, and the bound never fires on a productive turn (distinct,
+progressing calls never trip the detector and never accumulate a failure streak).
+When the budget is configured, the controller (ADR-0029) still owns the no-progress
+stop and this guard is inert. The limit is a fixed conservative constant, not a
+config knob — it is a safety backstop, not a cost control, and the opt-in budget
+remains the tunable lever. Pinned by the `localpilot-harness` budget tests: a
+spinning loop and a run of failing calls both halt with the budget off, and a long
+productive turn is not cut. Refines ADR-0029.
+
+## ADR-0051: Tool Arguments Get A Schema-Aware Error And An Opt-In, Contract-Gated Repair
+
+Status: accepted.
+
+A local/open model often emits a tool call whose arguments are well-formed JSON
+but violate the tool's contract — a bare string where an array is expected, a
+stringified array, a markdown autolink in a path. Today the model was handed the
+raw serde error string and wasted a turn (or degraded the session). The validity
+metric scaffold (`CallRecord.schema_valid`, `DisciplineMetrics.schema_valid_rate`)
+shipped but was never lit up.
+
+Decision: add three coordinated, measurement-gated stages on the existing
+deserialize chokepoint — no new crate, no global preprocess — built as additions
+to `localpilot-tools` and wired once at the pre-dispatch seam.
+
+- **A shared schema validator** (`localpilot-tools::validate`) classifies a call's
+  structural issues by failure mode. It lights up `schema_valid` in the evidence
+  projection and the `eval` scorecard (`schema_valid_rate`), and emits redacted
+  `tool_input_valid` / `tool_input_invalid` session events. The raw `schema_valid`
+  signal stays honest — a repaired call is recorded as raw-invalid plus repaired,
+  never flipped, so the anti-gaming paired metric can see the model's real rate.
+- **A model-readable error** replaces the raw serde blob with a concise,
+  schema-aware message (offending field, expected shape, a valid example from the
+  tool's `ToolContract.examples`), built value-free so it cannot leak a secret.
+  It is delivered as the tool result at the pre-dispatch seam (the validator-first
+  / retry-with-error pattern). `[tools] readable_errors` defaults **on**; off
+  restores the raw message exactly. The arg-shape retry loop is bounded by the
+  per-turn tool-call budget (ADR-0029), not the bad-output degrade counter — a
+  recoverable argument mistake is not degenerate output, so the new
+  `RecoveryAction::RepairToolArguments` rung is non-degrading.
+- **A validator-first repair stage** repairs **only** the validator-reported
+  fields with three schema-typed rules (`wrap_bare_string_as_array`,
+  `parse_stringified_json`, `unwrap_markdown_autolink`), re-validates, and either
+  runs the repaired call (with a model-visible note) or falls back to the readable
+  error. `[tools] repair` is `off|warn|on`, default **off**, warn-before-on.
+
+Safety is provable from the contract: repair runs only on a `ReadOnly`/`ProjectWrite`,
+non-`Irreversible`, non-MCP tool, and never on a content/command field. To make
+that gate provable, three under-classified git contracts are corrected to their
+honest side-effect class (`git_restore` → `Destructive`, `git_commit` →
+`ExternalWrite`, `apply_patch` → `Destructive`); this is advisory metadata only —
+the permission path and the prompts are unchanged, and the verifier does not read
+`side_effect`. A schema-intent marker (`#[schemars(schema_with = "...")]` helpers
+emitting `x-localpilot-intent`) declares each field's intent so a rule keys off the
+declared meaning, not a field-name guess, and a content/command field is provably
+repair-exempt. Repair changes arguments, never authority: the permission engine
+runs on the repaired input (reveal-never-grant). Every repair and every high-risk
+refusal is a redacted session event.
+
+LocalMind participation is reuse-only and opt-in (`[tools] repair_learning`,
+default off): the session's repair patterns are offered to the existing
+review-gated queue as aggregate, redacted candidates — no raw inputs, no accepted
+memory, no new store. Reject the marketing (repair does not make a weak model
+out-reason a strong one); the offline `localbench-uplift-v1` A/B closes the work
+with a `task_completeness`-paired-with-`tool_call_validity` headline (a validity-only
+lift is a no-win) and a cheap-prompt control; the live local-model arm is
+opportunistic (D008). Supersedes nothing; extends the Tool Discipline track (the
+cure sibling of grammar's prevent, ADR-0044, and the model re-prompt, ADR-0038).
+
+## ADR-0050: `doctor` And `models` Are Agent-Consumable Under The `--format` Contract
+
+Status: accepted.
+
+A dogfood run drove a coding-agent wrapper against the CLI and found two
+agent-hostile surfaces. `doctor` had only human text, so the wrapper string-matched
+`providers:`. `models` prompted for network approval and, run non-interactively,
+printed `skipped (network request not approved)` and exited **0** — a silent
+no-op a wrapper reads as success. The same run hit a stale PATH binary that lacked
+`--workspace`, with no way to detect the drift programmatically.
+
+Decision: extend the ADR-0048 `--format human|json` plumbing (the same `output`
+module, `--json` alias, non-terminal-defaults-to-JSON resolver) to both commands
+rather than invent a second JSON convention.
+
+- **`doctor --format json`** serializes the existing `DoctorReport`, enriched with
+  the signals a wrapper needs: the resolved executable path (`current_exe`), the
+  build's `git describe` version, provider kind + base URL + model + context
+  window, the resolved LocalMind store root, and an append-only list of **capability
+  tokens**. Drift *detection* stays the caller's job (compare exe path + version);
+  doctor only reports the facts. Capability tokens let a wrapper feature-detect a
+  surface (e.g. `learning-workspace-flag`) instead of inferring it from a version
+  number. The credential is reported as a source label (`keychain`/`file`/`env`/
+  `none`) only — never the value, the ADR-0048/secrets invariant.
+- **`models` is non-interactive-safe.** It gains `--format human|json` and a `--yes`
+  flag. Under a non-interactive run (no TTY, or `--yes`) it never blocks on a stdin
+  prompt: an `Ask` decision without `--yes` is reported as `approval_required`, a
+  policy `Deny` as `denied`, and an unreachable endpoint as `unreachable` with the
+  error — and the command **exits non-zero** when a listing was incomplete
+  (unreachable or approval-required). It no longer silently skips. JSON is a
+  script-stable array (an empty result is a valid `[]`).
+
+Reuse, not fork: one `output` resolver, one `--format` vocabulary across `learning
+search` / `memory search` / `doctor` / `models`. Additive and reversible — the human
+forms are unchanged for an interactive caller, and the JSON surfaces are new. Tier-1
+parity holds (`IsTerminal` is the std cross-platform gate). Extends ADR-0048; the
+drift signal is *detection only* — no auto-update and no PATH scan.
+
+## ADR-0049: `print` Is Closed-Pipe-Safe And Bounds A Turn With A Parseable Handoff
+
+Status: accepted.
+
+A dogfood `print --allow-writes` run hung for minutes, then aborted with `failed
+printing to stdout: The pipe is being closed` when its reader closed stdout. Two
+distinct defects: the streamed-answer write used the bare `print!`/`println!`
+macros, which **panic the process** on a write error (the forbidden runtime-path
+panic — `docs/13-rust-best-practices.md`); and the turn had no bound, so a long or
+stuck turn hangs indefinitely with no terminal state a caller can read.
+
+Decision: make the non-interactive `print` path always reach a clean, readable
+terminal state.
+
+- **A closed reader is a clean stop, not a panic.** The streamed write is checked;
+  an error classified as the consumer going away — `ErrorKind::BrokenPipe`, or the
+  Windows `ERROR_BROKEN_PIPE` (109) / `ERROR_NO_DATA` (232, the observed "The pipe
+  is being closed") raw codes — cancels the turn and exits **141** (the POSIX
+  SIGPIPE convention, `128 + 13`, that broken-pipe-aware tooling already expects),
+  so a wrapper can tell "the reader left" from a real failure. Any other IO error
+  is still surfaced (to stderr), never as a panic. The raw-code check is explicit
+  so the classification holds on every tier-1 platform, not only where std maps the
+  codes to `BrokenPipe`.
+- **A turn is bounded by an optional wall-clock timeout.** `[harness]
+  turn_timeout_secs` (unset by default — no behaviour change) stops a turn that
+  runs past it with a new `StopReason::TimedOut` instead of hanging. The deadline
+  is an absolute `tokio` instant checked at the loop boundary and armed in the
+  stream `select!`, so it cannot drift across iterations.
+- **Every turn leaves a bounded, parseable handoff.** At the turn's single exit the
+  runtime records a `TurnHandoff` (stop reason, tool-call count, files changed,
+  whether memory was written) and `print` renders it as one machine-readable
+  `handoff:` JSON line on **stderr** — never stdout, so it can't pollute the
+  answer. The granular durable record stays the session event log
+  (`ToolFinished`/`MemoriesUsed`/`TurnEnded`); the handoff is a derived summary, so
+  this adds no second reporting channel. `memory_written` is always `false` on the
+  `print` one-shot path (it reads accepted memory but never closes out, per
+  ADR-0018), which is exactly the signal a caller needs to decide to run a close-out.
+
+Additive and reversible: the timeout is opt-in and off by default, the handoff is a
+new stderr line, and the exit code is raised only when the consumer actually went
+away. Rollback is reverting the checked-write wire and the deadline arm. Tier-1
+parity holds — the broken-pipe code differs per OS and all variants are matched.
+
+## ADR-0048: Non-Terminal Callers Get Structured Output By Default
+
+Status: accepted.
+
+`learning search` already grew a `--json` flag, yet a dogfood run proved that
+*adding* a flag is not enough: both the human operator and the local model missed
+it and tab-parsed the human table, because the parent `--help` hides leaf flags
+and the human output advertised no structured alternative. The failure is a
+*discoverability* class, not a missing capability.
+
+Decision: the read commands resolve their output format from context rather than
+forcing the caller to know a flag.
+
+- **Non-terminal stdout defaults to structured.** When stdout is not a terminal
+  (`std::io::IsTerminal` — a pipe or a file, i.e. a program is reading),
+  `learning search` and `memory search` emit a JSON array by default; a real
+  terminal still gets the human table. The gate is strictly `!stdout.is_terminal()`
+  so an interactive session is never changed.
+- **A uniform `--format human|json` overrides either way**, with `--json` kept as
+  an alias for `--format json`. `--format human` forces the table even when piped
+  (the escape hatch for a consumer that parses the text); `--format json` forces
+  JSON on a terminal.
+- **An affordance hint points at the structured form.** When the human table is
+  shown interactively, a single stderr line names `--format json` / `--json`. It is
+  suppressed when output is already structured or non-interactive, so it can never
+  pollute a pipe.
+
+Reuse, not a second serializer: both commands emit through the existing `--json`
+writer (`SearchHit` serialization), and the format/hint logic lives in one small
+`output` module the two commands share. Stdout stays script-stable in every case —
+an empty result is a valid empty JSON array, and the diagnostics ride on stderr.
+
+Tier-1 parity: `IsTerminal` is the std cross-platform check (Windows/Linux/macOS),
+and the resolver is unit-tested independent of a real terminal. Rollback is the
+flag-gated behaviour: revert the resolver wire (no state change). Scope is the two
+search commands — the surfaces the run tab-parsed; other read commands keep their
+current output.
+
+## ADR-0047: An Advisory Whole-Repo Teardown Sweep At The Completion Seam
+
+Status: accepted.
+
+The harness mirrors the developer-process ceremonies it asks of its own builders:
+the completion **retrospective** (ADR-0035) is the backward look at the brief, and
+the quality gate (ADR-0009) blocks a step on failing checks. What it lacked is the
+whole-repo **cruft sweep** the plan template now requires at a plan's §7 gate (the
+c0degeek `cleanup-audit`): dead/abandoned code, duplicate/parallel logic,
+over-engineering, redundant data access, and doc/test drift surfaced as triaged,
+advisory findings before work is called done.
+
+Decision: extend the existing read-only scanner `localpilot-selfreview` — already
+the whole-repo analog of `cleanup-audit` — with detectors for those categories, and
+run it at the completion seam alongside the retrospective behind a default-off
+`[harness] teardown_sweep` flag. It is **not** a second scanner and **not** a new
+gate:
+
+- **Extend, don't fork.** New detectors join the one bounded walk and the one
+  ranked `Report`; findings carry the existing severity/confidence plus a new
+  `risk`, a recommended action, and the hidden-usage channels the detector ruled
+  out (the cleanup-audit safety invariant). No finding reaches high confidence from
+  the absence of local references alone.
+- **Lean on tools, don't re-derive them.** Categories tooling owns — unused deps
+  (`cargo machete`), unused imports/vars and dead-code warnings (`clippy`),
+  advisories (`cargo deny`) — are surfaced as pointer findings that name the
+  command to run, never reimplemented.
+- **Advisory by construction (ADR-0034/0035 lineage).** The sweep is deterministic
+  and offline (no provider call), read-only, and human-gated: it never blocks
+  completion, edits code, or commits, and nothing is auto-enqueued as accepted
+  memory (review-gated only, ADR-0037). A finding opens a *new* plan; it is never
+  folded back into the run that surfaced it.
+
+Opt-in and default-off: the completion sweep runs only under `[harness]
+teardown_sweep = true`; the same pass is available on demand as `self-review
+--cleanup`. Rollback is the flag (off) or reverting the one-line seam wire. The
+`localpilot-selfreview` report schema stays `localpilot-selfreview-v1` — the new
+fields are additive and serde-defaulted, so an existing consumer is unaffected.
+Refines ADR-0034 (self-improvement loop) and ADR-0035 (advisory completion
+retrospective).
+
+## ADR-0046: Promote A Curated Lesson To A Rule Cue; Down-Weight By Routing To Review
+
+Status: accepted.
+
+Two ways to make memory help a weak local model better:
+
+1. **Rule cue.** A curated lesson can be promoted to an **always-on rule cue** —
+   terse guidance injected every turn independent of prompt relevance. A weak
+   model acts on a short, always-present rule better than on a paragraph it must
+   retrieve. Per the rules-vs-skills model (ADR-0027) a rule cue is **advisory**
+   (content the agent reads), not an **enforced** harness rule (the rule engine's
+   `Block`/`Warn` gates are untouched): promoting a lesson never gates execution.
+   Opt-in: a seed lesson carries the `rule-cue` tag; at seed time its memory id is
+   recorded in a host-side cue registry (`.localmind/rule-cues.json`), and the
+   context hook injects those memories always-on under a `rule-cue` audit layer.
+   A cue is excluded from the relevance-retrieval block so it is never injected
+   twice. Injection assembly is the host adapter's job (ADR-0036), so the
+   promotion list is host state keyed to engine memory ids, not engine state.
+
+2. **Outcome-aware down-weight.** When the uplift eval shows a lesson did not
+   improve (or hurt) outcomes, the host's learning loop **routes it to review** —
+   it never auto-deletes. This reuses the engine's reasoned route-to-review flag
+   (LocalMind D-LM-0016): the memory stays active and a human re-judges it, the
+   same human-gated discipline as change-aware invalidation and the
+   self-improvement loop (ADR-0034).
+
+Both are additive and opt-in; the default path (no promoted cues, no flagged
+lessons) is unchanged, and each ships default-off until the uplift eval clears
+it. Rollback is removing the `rule-cue` tag / clearing the cue registry, and
+clearing a review flag.
+
+## ADR-0045: Accepted-Memory Injection Earns Its Context Cost
+
+Status: accepted.
+
+Always-on accepted-memory injection took every top-k match up to a fixed
+1200-char cap, regardless of match strength, regardless of the model's context
+window, and even when a memory restated guidance a harness rule already enforces.
+On a weak/small model that is wasted context the model spends effort on without a
+behaviour gain.
+
+Decision: the host injection layer (`localpilot-localmind`) gains a `[memory]`
+policy, every field of which **defaults to the prior behaviour** (additive,
+opt-in):
+
+- **Relevance gate** (`injection_min_score`, default `0`): a retrieved memory
+  whose score is below the threshold is not injected, so a weak match cannot fill
+  the per-turn budget.
+- **Context-window-aware budget** (`injection_context_aware`, default `false`):
+  when on, the injected char budget is scaled toward the default provider's
+  declared context window (a small model gets less), never above
+  `injection_char_budget` and never below a one-line floor.
+- **Dedup-vs-enforced** (`injection_skip_categories`, default empty): a memory
+  whose lesson category is listed is skipped, because a rule already enforces
+  equivalent guidance — injection should add signal, not restate a rule.
+
+The category needed for the dedup is exposed by the engine on the search result
+(LocalMind D-LM-0015), so the host does not do a second lookup. The policy is
+host-side because injection assembly is the adapter's job (ADR-0036), not the
+engine's. Every lever ships **default-off** until the uplift eval clears it; this
+ADR records the mechanism and the default-preserving contract, not a default
+change. Rollback is leaving (or resetting) the `[memory]` defaults.
+
+## ADR-0044: Selectable Constraint Encoding To Reach A Local Server's Grammar
+
+Status: accepted.
+
+The constrained-decoding capability targets a local OpenAI-compatible server
+whose grammar engine makes tool-call arguments schema-valid by construction. We
+sent the constraint only as the OpenAI structured-output `response_format`
+wrapper (`{ type: "json_schema", json_schema: { schema } }`). Some local
+`llama-server` builds — including a turboquant build — reject that wrapper with a
+client error, so the F2 fallback drops the constraint and the server runs with
+native tool-calling, never engaging its grammar.
+
+Decision: the wire encoding of a tool-call constraint is **selectable** per
+provider via a `constraint_mode` option:
+
+- `response_format` (**default, the floor**) — the OpenAI structured-output
+  wrapper. Unchanged for every existing provider, hosted or local.
+- `json_schema` — a documented llama.cpp server extension: the JSON schema is
+  sent as a **top-level `json_schema` field**, which the server compiles to a
+  GBNF grammar internally. This reaches the same grammar engine without us
+  authoring or shipping a GBNF converter, and without the wrapper the server
+  rejects.
+
+The selector is a local concern — it never leaks into the request body — and an
+unknown value falls back to the default, so a typo cannot break a turn. The F2
+reject→native fallback (a client error on a constrained request caches the
+rejection and drops the constraint for the session) is unchanged and remains the
+floor for any server that accepts neither encoding.
+
+Provenance (clean-room): the top-level `json_schema` field and the GBNF
+`grammar` field are part of the **documented public llama.cpp HTTP server API**;
+no private or undocumented endpoint behaviour is used. A raw-GBNF `grammar` mode
+is intentionally **not** implemented — the documented `json_schema` field reaches
+the same grammar engine server-side, so a hand-written schema→GBNF converter
+would add surface for no capability gain.
+
+Rationale: this is the smallest additive change that lets a constraint engage a
+grammar on a server that rejects the OpenAI wrapper, it is opt-in and
+default-off, and it preserves the native-tool-calling floor. The mode ships
+default-off until an uplift eval clears it; this ADR records only the mechanism,
+not a default change.
+
+Boundary: this does not change which providers *declare* constrained decoding
+(still gated to local servers), nor the fallback semantics; it only changes how a
+declared, non-rejected constraint is encoded when `constraint_mode = "json_schema"`.
+
+Live finding (2026-06-22): against a turboquant `q3635ba3bapex` server, the
+top-level `json_schema` field is **not** sufficient — it returns the same
+`400 "empty grammar stack after <think>"` as the `response_format` wrapper,
+because the json-schema→grammar conversion forbids the model's `<think>` opening.
+Only a raw **GBNF `grammar` field** engages (turboquant's lazy-grammar tolerates
+the `<think>` prefix, returns `200`).
+
+So a third encoding was added: `constraint_mode = "grammar"` emits a top-level
+GBNF `grammar` built from the tool names — a *valid tool call* grammar
+(`{ "name": <one of the tools>, "arguments": <any JSON object> }`) with a JSON
+sub-grammar authored from the JSON spec (original, not copied). Live-verified:
+the grammar engages on the turboquant server (`200`, the model emits a valid
+constrained tool call after its `<think>` prefix). Argument payloads are
+constrained to *valid JSON*, not to each tool's own argument schema — that finer
+per-schema constraint (a generic json-schema→GBNF converter) remains a follow-up.
+
+All three encodings ship **opt-in**, default `response_format`. The `grammar`
+encoding now *engages* the grammar (subject-02's goal), but a default-on change
+still needs a tool-discipline uplift eval to clear it (D002); on `q3635ba3bapex`
+discipline is near-ceiling (native already `first_call_arg=100%`), so it stays
+default-off pending that measurement.
+
+## ADR-0042: BYOK Credential Storage; No Subscription-OAuth Login
+
+Status: accepted.
+
+LocalPilot's credential helper (`login` / `logout`) is **bring-your-own-key
+only**: the user creates a standard API key in the provider's own dashboard
+(`login` can deep-link there), pastes it, we validate it with one minimal
+request, and store it in the **OS keychain** (Windows Credential Manager / macOS
+Keychain), or a restrictive-mode fallback file when no keychain backend is
+present. Stored credentials enter resolution at a new top tier, ahead of the
+existing environment variable: **keychain → fallback file → `api_key_env` →
+config**, so a logged-in user needs no environment variable. `doctor` reports the
+resolved credential *source* (keychain / file / env / none), never the secret.
+
+No subscription-OAuth login is added, and **no code path obtains, stores, or
+routes Claude Free/Pro/Max or ChatGPT Plus/Pro subscription credentials**, nor
+adds a "sign in with Claude/ChatGPT" flow. Primary-source research (2026-06-21)
+confirmed neither provider offers a sanctioned OAuth flow that mints a standard
+pay-per-token API key for a third-party client: Anthropic's terms forbid routing
+third-party requests through subscription credentials (server-enforced since
+early 2026), and OpenAI's "Sign in with ChatGPT" is subscription-billed and
+locked to OpenAI's own first-party tools. BYOK is therefore the only sanctioned
+path. (Full findings: LocalHub research note; the early-2026 enforcement is
+flagged "re-verify before release".)
+
+Decisions folded in:
+
+- **Keychain crate selection.** The `keyring` crate (v3, exact-pinned) backs the
+  Windows Credential Manager store behind an opt-in `keychain` Cargo feature, so
+  the default build links no native credential deps and stays green headless. The
+  macOS (`apple-native` → `security-framework 3.7`) and Linux
+  (`sync-secret-service` → `zeroize_derive 1.5`) native backends are *not* built:
+  both pull a transitive requiring Rust edition 2024, above this workspace's MSRV
+  (1.82), and they break `cargo deny --all-features` cross-target metadata. macOS
+  and Linux therefore use the `0600` fallback file. Behaviour parity (ADR-0007)
+  holds across all three platforms — `login` / `logout` / resolution / `doctor`
+  work everywhere; only the secret backend differs (Windows keychain vs file), and
+  that difference plus the keychain-absent fallback is documented. (Revisit the
+  native macOS/Linux backends when the keyring dependency tree builds on the MSRV.)
+- **Best-effort keychain, never blocking.** A keychain that is absent or locked
+  is a miss, never an error: the store falls back to the file and resolution
+  falls through to the environment, so startup and a live session never depend on
+  keychain availability.
+- **Secret discipline.** The pasted key is wrapped in `Secret` immediately, never
+  logged or echoed in full (only a masked prefix/suffix), and the fallback file is
+  owner-only (`0600` on unix) under the user-profile directory. The `Secret` type
+  still refuses `Serialize`, so the only places a key leaves the wrapper are the
+  audited keychain/file writes.
+
+Reason:
+
+- the only sanctioned credential path is BYOK, so the value we can add is a better
+  BYOK *experience* (deep-link + paste + validate + keychain) — never a prohibited
+  subscription login. The legality basis, the keychain choice, the resolution
+  precedence, and the redaction guarantees are durable and security-sensitive, so
+  they live here. Implementation, config keys, URLs, and tests are original to this
+  repository; only public key-creation URLs and published policy are referenced
+  (clean-room, ADR-0005).
+
+## ADR-0041: Mid-Session Provider/Model Switch Selects An Already-Built Provider
+
+Status: accepted.
+
+A live session can switch its active provider and/or model mid-conversation via
+the `/model` command without losing the transcript. The provider registry already
+builds **every** configured provider up front into a `HashMap<id, Arc<dyn
+ModelProvider>>`; the runtime is handed a shared `Arc<ProviderRegistry>` and the
+switch re-points its `provider` + `config.model` by looking the target up — it
+does **not** rebuild or re-authenticate a provider on switch. The transcript is
+provider-neutral (`Vec<Message>`) and is left untouched, so the conversation
+continues against the new provider on the next turn.
+
+Decisions folded in:
+
+- **Turn-boundary only.** A switch is refused while a turn is in flight (a typed
+  error) and applied cleanly between turns, so the transcript is never re-pointed
+  mid-turn (which could strand a partial tool-call turn the new provider cannot
+  continue). The interactive host already defers slash commands until the turn is
+  idle; the runtime guard is the belt-and-suspenders contract.
+- **Model follows the provider.** A provider-only switch adopts the new provider's
+  configured default model; when it has none, the current model name is kept and a
+  non-fatal warning is surfaced. `/model <provider> <model>` sets both.
+- **Listing reuses discovery.** The `/model` picker lists providers from config and
+  their models through the existing `discover_models()` path (`GET /models`) that
+  `localpilot models` already uses — no new `ModelProvider` trait method. Discovery
+  failure is non-fatal: the configured model is shown with a note.
+
+Reason:
+
+- reusing the build-all-up-front registry makes the switch the cheapest correct
+  operation (a lookup, no new auth, no lost state), and pinning it to a turn
+  boundary keeps the provider-neutral transcript continuable. A single attached
+  registry handle, mirroring the existing `set_*` runtime mutators, avoids a second
+  provider-construction path.
+
+## ADR-0040: Prompt History Is A Global Per-User JSONL Store With Project-Scoped Recall
+
+Status: accepted. Adds a per-user persistence surface beside the project-local
+session store (`localpilot-store`); the committed storage conventions (atomic
+temp-then-rename writes, line-delimited JSON) are unchanged.
+
+The interactive composer's Up/Down recall was in-memory only: every launch
+started empty and a restart lost everything. Recall is now seeded from a durable
+store so it survives a restart.
+
+The store is a single global append-only JSONL file under the per-user directory
+(`%APPDATA%/localpilot` on Windows, `$XDG_CONFIG_HOME`/`~/.config/localpilot`
+elsewhere — the same base as `config.toml`), **not** the project-local
+`.localpilot/`. Each record carries the visible prompt text, the directory it was
+submitted in, and a timestamp. At session start the store is loaded and recall is
+seeded with **only the current directory's** entries; a key (Ctrl-T) toggles a
+view of every project's entries. Each submitted prompt is appended.
+
+Decisions folded in:
+
+- **One global file, per-project recall filter (not a file per project).** A
+  single store is simpler to manage and crash-safe; the directory tag keeps recall
+  relevant to the repo, while the toggle preserves cross-project reach. A per-repo
+  file would fragment the store and break "view all".
+- **Opt-out, default-on (`[history] persistence = "save-all" | "none"`).** The
+  best default is recall that survives a restart, but prompts can hold secrets, so
+  a full off-switch is mandatory. `none` reads nothing and writes nothing.
+- **Stored raw, not redacted (the deliberate divergence from transcripts).**
+  Transcripts redact before write; a history entry exists only to be recalled
+  verbatim into the composer, so redacting it would recall `[REDACTED]` and defeat
+  the feature. The privacy controls are instead the opt-out, mode `0600` on unix
+  (the per-user directory's ACL on Windows — tier-1 parity is behaviour parity,
+  ADR-0007), the per-user location, and a bounded on-disk cap.
+
+Consequences:
+
+- Recall survives restarts and stays scoped to the project by default; the full
+  store is one keystroke away.
+- The store is line-crash-safe: a partial final line from an interrupted append is
+  skipped on load, and the file is trimmed to a maximum entry count on write so it
+  cannot grow unbounded.
+- A prompt that carried a collapsed large paste recalls the placeholder, not the
+  expanded content — identical to the pre-existing in-session recall behaviour.
+- Disk I/O is off the hot path: one bounded, tolerant read at session open and a
+  single appended line per submit, never blocking the turn loop; a write failure is
+  surfaced as a notice and never breaks the session.
+
+Reason:
+
+- a durable, project-aware recall is a real ergonomic win for a terminal REPL, and
+  the secret-leak risk it introduces is fully controlled by the opt-out plus the
+  restrictive mode and location. The shape (global JSONL + directory tag +
+  per-project filter + opt-out + `0600`) was cross-checked against read-only
+  behaviour references; the implementation, config keys, paths, and tests are
+  original to this repository (clean-room, ADR-0005).
+
+## ADR-0039: The Inline Live Region Is A Fixed-Height Band, Re-initialised Only On Terminal Resize
+
+Status: superseded for the new interactive-chat host by ADR-0107. It continues
+to govern only the temporary inline rollback path until that path is removed.
+Refines ADR-0021 (inline rendering); the committed ratatui + crossterm stack is
+unchanged.
+
+The interactive REPL's inline live region reserves a constant height and is held
+there for the life of the session. It is re-initialised only when the terminal's
+own dimensions change — a window resize, or a clamp on a short window — never when
+its own content changes height.
+
+ADR-0021 originally sized the region to its content and re-initialised the terminal
+on every height change. That dropped scroll-up history: ratatui's `insert_before`
+only moves a committed block into the terminal's native scrollback once the inline
+viewport has reached the bottom of the screen; until then, committed blocks sit
+on-screen *above* the viewport. The per-content re-initialisation (`clear` + a fresh
+`Terminal`) ran on every composer/activity/picker height change and clobbered those
+not-yet-scrolled-back rows, leaving a hole in the middle of scroll-up history — early
+conversation gone — while pre-launch shell output, already in real scrollback,
+survived.
+
+Consequences:
+
+- Committed transcript blocks are never dropped by a live-region height change;
+  history fidelity no longer depends on terminal or session timing.
+- The region reserves a small constant band, so a modest blank gap sits above the
+  composer when idle. The band height (`LIVE_REGION_HEIGHT` in the terminal driver)
+  is the single tuning knob, trading the idle gap against how much in-progress output
+  is visible at once.
+- The activity tail, composer, and autocomplete pickers render *within* the band
+  (each already caps and scrolls internally) instead of growing it.
+- A terminal window resize still re-initialises the viewport. This is rare and a
+  repaint is expected then; the per-frame churn that caused the loss is gone.
+
+Reason:
+
+- holding the band fixed removes the teardown that caused the loss outright, which is
+  simpler and stronger than reducing its frequency. The fixed-height commit path is
+  pinned by offline tests over a `TestBackend` (which records a scrollback buffer);
+  the user-visible loss is confirmed by manual terminal testing. Behaviour was
+  cross-checked against a local read-only behaviour reference, while the
+  implementation, prompts, and tests are original to this repository (clean-room,
+  ADR-0005).
+
+## ADR-0038: An Oversized Malformed Write Is Recovered By Chunking The Write
+
+Status: accepted. Extends the bad-output recovery ladder (`localpilot-recovery`)
+and the tool surface (`localpilot-tools`).
+
+A local model that cannot emit a large file-write tool call as one well-formed
+payload makes the provider reject the streamed arguments. The session then treated
+this as a generic bad turn: it re-prompted blindly, and because the recovery ladder
+only ever shrank *input* context (which does nothing for an oversized *output*), the
+model replayed the same too-large call until the repair budget was spent and the turn
+degraded — the file never written. This was the root cause of a real session that ran
+48 clean tool calls and then failed only on the final large document write.
+
+The malformed payload is invisible to the harness turn loop — the provider adapter
+rejects unparseable tool arguments before they become a parsed `ToolCall` event, so
+the harness cannot measure the attempted output post-hoc. The failed tool *name* is,
+however, in scope where the adapter fails to parse. The fix routes that name out and
+acts on it:
+
+- **A typed provider signal.** `ProviderError::MalformedToolArguments { tool, bytes,
+  reason }` carries the failed tool name and argument size out of the
+  OpenAI-compatible adapter, replacing a flat `StreamDecode` string. Like a stream
+  decode, it does not stop the turn — it is a recoverable bad turn.
+- **An output-side recovery rung.** `RecoveryAction::RequestChunkedWrite` is the
+  counterpart to the input-shrink actions, emitted from the first repair attempt for
+  the malformed-output kinds.
+- **A targeted repair prompt.** When the failed call was a file-write tool, the
+  generic repair prompt is replaced by one that steers the model to write the file in
+  pieces — the first section with `write_file`, each remaining section with the new
+  `append_file` builtin — rather than replaying the oversized call. The gate is the
+  failed tool *name*, not a tunable byte threshold (the name is exact; a threshold is a
+  magic number).
+- **A first-class append.** `append_file` makes "write in pieces" a native primitive
+  instead of tail-anchor `edit_file` gymnastics: atomic, newline-preserving,
+  binary-refusing, non-idempotent.
+
+Rejected: transparent harness auto-split of an oversized `write_file` — it pushes
+atomicity and partial-failure handling into the harness for no gain over teaching the
+model the chunked pattern. Also out of scope: a model-serving fix; LocalBox already
+pins the `tqp-v0.2.0` lazy-grammar build, and this is a distinct failure class.
+
+Reason: the recovery acts on the *content* of the next attempt (write smaller), not
+just the fact of a retry, so an oversized write completes within the existing repair
+budget instead of degrading. The same change also wires up the ladder's previously
+inert input-shrink actions (`ReduceContext` / `SummarizeOversizedToolResults`), which
+were computed but never consumed, so a repeated bad turn now compacts history before
+re-prompting.
+
+## ADR-0037: Completion-Retrospective Lessons Are Offered To Review-Gated Memory
+
+Status: accepted. Builds on ADR-0035 (the advisory completion retrospective that
+records lessons to `LESSONS.md`), ADR-0011 (store split / review-gated accepted
+memory), and ADR-0034 (the review-gated memory path). Closes the deferral recorded
+in the ADR-0035 "review-gated bridge" note (and DriftRemediation D007).
+
+The completion retrospective writes advisory lessons to the root `LESSONS.md`, a
+human-editable mirror. An un-gated file next to a review-gated memory engine is a
+half-measure: a lesson worth keeping should be promotable to accepted memory through
+the same human review every other memory passes, not stranded in a file. So each
+retrospective lesson is **also offered** to LocalMind's review-gated candidate queue.
+
+**The bridge.** `localpilot_localmind::write_retrospective_lesson` enqueues a lesson
+as a `CandidateLesson`; the cli calls it for each lesson after the run prints the
+retrospective summary.
+
+- **Advisory and non-blocking.** A failed enqueue never breaks a finished run; the
+  host swallows the result (`if let Ok(Some(_))`), which is safe because the bridge
+  returns `Err`, never a panic. `LESSONS.md` is written by the retrospective before
+  the offer runs and is left untouched — it stays the human-editable mirror.
+- **A different shape from a loop-outcome lesson.** A retrospective lesson is a
+  free-text advisory note: it sets **no** accepted/rejected `outcome` and **no**
+  change-provenance ref (reusing `LoopLesson` would fabricate both — the exact reason
+  the bridge was deferred). It is a `Process` candidate, `completion_retrospective`
+  evidence kind, with a deliberately lower prior confidence (`0.4`, below the
+  loop-outcome `0.75`) — an unverified self-observation, not a confirmed patch outcome.
+- **Queue-noise policy.** Too-short/sentinel lessons are skipped; duplicates are
+  deduped by the review queue's own canonical-hash (a repeat bumps a seen-count). No
+  custom dedup — the store already provides it.
+- **Review-gated by construction.** The candidate is `PromoteToMemory`; promotion to
+  accepted memory stays a human step (ADR-0011); a rejected candidate never reaches
+  memory. The bridge writes **no** accepted memory and adds **no** second redaction
+  authority.
+
+Reason: routing advisory lessons through the same human-gated queue makes
+`LESSONS.md` a mirror rather than a competing sink, without loosening any safety floor
+— promotion is still human, and the lower prior confidence plus the store dedup keep
+the queue from being flooded. The mapping is a small adapter function plus a few
+advisory host lines; the harness gains no LocalMind dependency (the edge stays
+host→adapter).
+
+Supersedes nothing.
+
+## ADR-0036: The `localpilot-localmind` Adapter Boundary And Its Extraction Trigger
+
+Status: accepted. Builds on ADR-0011 (store split: `.localpilot/` execution record
+vs `.localmind/` memory) and ADR-0012 (`.localpilot/` derived state is disposable).
+Host-side only: the engine's matching invariant (host-neutral `localmind-core`) is
+already LocalMind `D-LM-0002`, so this record adds no new cross-engine decision.
+
+`localpilot-localmind` has grown from a thin adapter into a sizable subsystem:
+the ingest engine alone is ~3000 lines, alongside the chunk store, layered pack,
+cold-start primer, the derived search index, and the model-callable tools. This is
+defensible today — it is one cohesive host-side concern (turn a workspace into
+retrievable, redacted, host-owned derived context for the bundled engine) — but it
+will not stay defensible if the next knowledge feature simply lands here too.
+
+**The boundary, as it stands.** The adapter owns the *host* role and nothing the
+engine owns:
+
+- **The host owns filesystem walking and redaction.** Discovery, ignore rules,
+  and the canonical redaction pass run host-side before anything is persisted —
+  one redaction authority (ADR-0011); LocalMind's import redaction is defense in
+  depth, never a second authority. The engine never walks the filesystem itself.
+- **`.localmind/ingest/` derived state is disposable and rebuildable** (ADR-0012):
+  the index/chunk/pack artifacts can be deleted and regenerated from the workspace
+  plus the engine; nothing durable lives only there.
+- **Accepted-memory writes stay LocalMind review-gated.** The adapter enqueues
+  candidates; promotion to accepted memory is a human, review-gated step in the
+  engine. The adapter never writes accepted memory directly.
+- **The dependency edge is one-way:** LocalPilot depends on LocalMind, never the
+  reverse; `localmind-core` stays host-neutral.
+
+**The extraction trigger (no move now).** Before the **next** major
+ingestion/knowledge capability lands in `localpilot-localmind`, pick one of two
+splits rather than growing the adapter again:
+
+1. split the derived **index / search / pack** primitives into a narrower
+   LocalPilot crate (e.g. `localpilot-localmind-index`), leaving the adapter as
+   the contract/redaction/permission seam; **or**
+2. move the host-neutral derived-context primitives **behind a LocalMind API**, so
+   the engine owns them and the adapter shrinks to capture + redaction + wiring.
+
+Either split must preserve the four invariants above. This ADR is the recorded
+trigger; it deliberately does **not** move code today (the current size is
+cohesive and tested), so a future contributor extends against a fixed boundary
+instead of an ad-hoc one.
+
+Reason: recording the boundary + trigger now is cheap and keeps the "adapter, not a
+second engine" intent legible; discovering the boundary only when the subsystem is
+already too large is the expensive path. Deferring the move avoids a churny
+refactor with no present payoff (§ KISS/YAGNI) while still preventing silent
+unbounded growth.
+
+Supersedes nothing.
+
+## ADR-0035: Plan Mode Carries Planning Judgment — Reuse-Before-Add, Acceptance-Criteria Coverage, And An Advisory Completion Retrospective
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls — the
+model proposes, the runtime decides) and ADR-0003 (`brief.md` / `PROGRESS.md` /
+`DECISIONS.md` are authoritative, user-editable runtime documents).
+
+The harness plan-mode flow (idea → `brief.md` → `PROGRESS.md` → per-step resume)
+was strong on machinery — per-step commits, the anti-sunk-cost replan loop, the
+quality gate, the evidence-grounded decision log — but thin on the planning
+*judgment* a good plan needs. This record fixes three additions, all expressed as
+properties of the documents the model already produces, with the runtime
+plan-document shape unchanged (a flat numbered step list, no sub-plan ceremony).
+
+**Reuse before add, and cover every criterion (planning time).** The planner is
+instructed to study the repository summary it already receives and prefer a step
+that extends or reuses an existing module/type/function — naming it — over adding
+parallel code, and to produce a step list that collectively satisfies every
+acceptance criterion in the brief. These are contracts on the generated document,
+not a `PROGRESS.md` schema change.
+
+**Risks and doc-currency (structural cues).** `brief.md` gains an optional
+`## Risks & Rollback` section (absent in an older brief, rendered only when
+present, round-trips losslessly); the per-step worker prompt tells the model to
+update the matching documentation in the same step when a change alters observable
+behaviour, configuration, or interfaces.
+
+**An advisory completion retrospective (completion time).** When no incomplete
+step remains, the harness runs one bounded review over the brief and the completed
+plan — acceptance criteria still unmet, scope drift, tests that pin implementation
+detail — and appends durable lessons to a root `LESSONS.md` (a new authoritative,
+user-editable runtime document alongside `DECISIONS.md`). The retrospective is
+**advisory by construction**: it reports findings and records lessons; it never
+blocks completion, never edits shipped code, and never commits. It runs once,
+after the final step is already committed, and a provider/quota error there is
+swallowed so it can never break a finished run.
+
+Reason:
+
+- planning judgment belongs in the instruction that generates the document, not
+  in a new analysis engine bolted onto the loop — reuse-before-add and
+  criteria-coverage are properties of the plan the model writes, so they live in
+  the planner prompt and are pinned by a stable prompt snapshot plus a behaviour
+  test that the contract and its inputs reach the model;
+- the retrospective stays on the propose side of ADR-0010's boundary: like the
+  read-only stages of the self-improvement loop (ADR-0034) it only *reports*, so a
+  confused or wrong review costs an advisory line, never an unintended write or a
+  blocked completion;
+- a flat `PROGRESS.md` is correct for plan mode's scale — importing sub-plan
+  structure (subjects, owners, gates) would add ceremony a single autonomous build
+  does not need;
+- `LESSONS.md` mirrors `DECISIONS.md` (root-sited, append-only, round-tripping,
+  user-editable) so the lessons are reviewable and survive a context reset, rather
+  than hiding in a disposable cache.
+
+Supersedes nothing. A config switch to disable the retrospective, structured
+per-step → criterion reference tags, and writing lessons back into LocalMind
+memory are explicit non-goals here; each is a separable later decision behind the
+same seam.
+
+**Review-gated bridge — shipped (ADR-0037).** `LESSONS.md` remains the
+human-editable *mirror*; each retrospective lesson is now **also** offered to
+LocalMind's review-gated queue as a `Process` candidate with its own lower prior
+confidence and the store's canonical-hash dedup — never accepted memory without a
+human promotion. The bridge deliberately does **not** reuse
+`write_loop_lesson`/`LoopLesson` (a patch-outcome shape that would fabricate an
+`outcome` + a change-provenance ref a completion retrospective lacks); it is a
+separate `write_retrospective_lesson` mapping, advisory and non-blocking, with the
+harness still free of a LocalMind dependency (the edge stays host→adapter). See
+ADR-0037 for the full decision.
+
+## ADR-0034: The Developer-Process Self-Improvement Loop Is Human-Gated By Construction — Read-Only Up To "Propose", Never Self-Merges
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls — every
+side effect passes a typed permission engine), ADR-0011 (store split:
+`.localpilot/` is the execution record, `.localmind/` is memory), ADR-0023
+(deterministic-first verification), ADR-0028 (handoff is a checked execution
+record, never memory), and ADR-0033 (external corpora never enter the clean-room
+tree). Cross-engine half recorded as LocalMind `D-LM-0014`. Source consulted
+clean-room: a comparison of a self-styled "self-evolving" agent fork in LocalHub
+research — its *premise* (an agent that observes its own friction and proposes
+improvements) is adapted; **no code, prompt, identifier, or branding is ported**,
+and its stated anti-goal (autonomy → human-oversight → zero) is explicitly
+rejected.
+
+LocalPilot grows a developer-process self-improvement capability: it can scan a
+repository for drift, observe its own harness friction during real work, propose
+a minimal fix, gate that fix on offline evals, and learn from the outcome. The
+hazard a capability like this carries is **autonomy creep** — each convenience
+quietly erodes the point at which a human must say yes, until an agent is editing,
+committing, and merging its own changes. This record fixes the invariant that
+makes the loop safe to build, so every later layer composes against fixed terms.
+
+**The loop and its one-way boundary.** The stages are
+`observe → retrieve → detect → propose → evaluate → patch → human-approve → merge → lesson-writeback`.
+A single boundary cuts the loop in two:
+
+- **Up to and including `propose`, every stage is read-only** and the agent may
+  run it autonomously. `observe` (repo scan + harness-friction findings),
+  `retrieve` (prior lessons from LocalMind, read-only), `detect` (rank findings),
+  and `propose` (emit a ranked, advisory findings report) perform **no workspace
+  mutation** — their only effect is a workspace read (`Effect::ReadPath`), exactly
+  like `knowledge_search`/`skill_load`.
+- **From `patch` onward, every stage that can change code, push, or merge is
+  hard-gated on explicit human approval.** Patch generation writes only inside an
+  **isolated git worktree**, never to `main`; the agent stops at "proposed patch +
+  provenance + eval result" and cannot apply, commit, push, or merge it without an
+  explicit human approval token. The gate is enforced **by construction** — the
+  apply path requires the token as a parameter and there is no code path that
+  reaches a write to `main` without one — **not by prompt convention.**
+
+**No self-merge, ever.** The agent never merges its own patch to `main` and never
+auto-pushes. Merge is a human action outside the loop. Rollback for any proposed
+change is to drop the worktree/branch; nothing durable was mutated.
+
+**The eval gate is necessary, not sufficient.** A LocalBench offline eval gate
+(reusing the ADR-0033 capability scorecard) scores a proposed patch and can
+*block* it from reaching the human queue, but a green gate **never** substitutes
+for human approval — it only filters out obviously-bad patches before a human
+spends attention. Offline benchmarks are the accepted bar (ecosystem
+validation-evidence policy / D008); a live local-model run is opportunistic.
+
+**Learning carries provenance and negative signals.** Accepted and rejected
+outcomes are written back as durable LocalMind lessons through the existing
+review-gated memory path (ADR-0011) — a rejected patch writes a *negative-signal*
+lesson — so the next run retrieves prior outcomes and stops repeating a mistake.
+Lessons carry provenance and outcome; a bad lesson is curated/superseded, never
+silently trusted.
+
+**Outward publication is the highest-risk tail and is defer-by-default.** Emitting
+a finding or patch as a GitHub/Azure DevOps issue or PR is an irreversible outward
+action: it is **draft-only**, confirm-gated, never auto-merged, and ships only
+after the read-only and gated layers are proven.
+
+Reason:
+
+- the invariant is **structural, not aspirational**: "read-only ≤ propose; every
+  write/push/merge is human-gated; no self-merge" is enforced by the permission
+  engine and an approval-token-typed apply path, so a confused or prompt-injected
+  model cannot reach a mutation the human did not authorize — the same posture
+  ADR-0010 fixed for tools and ADR-0027/0031 fixed for skills/tools (reach injects
+  content the agent reads; it grants no effect);
+- keeping the autonomous half **read-only** means the agent can run the expensive,
+  useful part (observe → propose) unattended without ever being one bug away from
+  an unintended write;
+- composing existing mechanisms (worktree isolation, the permission engine, the
+  LocalMind review-gated memory path, the LocalBench scorecard) rather than
+  building a new engine keeps the safety guarantees the stack already proved, and
+  the loop adds a *bound*, not a second control plane;
+- defer-by-default outward automation means the irreversible surface is built last
+  and behind a separate human sign-off, so the loop is useful long before it can
+  publish anything.
+
+Supersedes nothing. Auto-instrumenting the harness to capture per-tool-call
+friction (beyond the audit-prompt friction source), a model-judged eval critic,
+and any move toward reducing the human gate are explicit non-goals here; each
+would need its own decision and, for anything touching the gate, a fresh security
+review against this invariant.
+
+**As shipped (2026-06).** The read-only half (`localpilot-selfreview`: observe →
+detect → propose, advisory findings report) **and the write half** are now wired.
+The write half (`localpilot-patchgen`: worktree proposal + `ApprovalToken`-gated
+promotion) is reached only through `localpilot self-review propose-patch` /
+`promote` / `discard`: `propose-patch` has a model author a minimal, scope-confined
+edit for a ranked finding into an isolated worktree and **stops**; `promote` applies
+it onto `main` only when an explicit human `--approve` mints the token (fast-forward
+only, never pushes); `discard` drops the worktree/branch. A proposal **persists
+across invocations** via the on-disk worktree plus its provenance record
+(`ProposedPatch::persist`/`reopen`), so a human reviews the diff between proposing
+and promoting; reattaching mints no token and writes no `main`. The by-construction
+invariant is unchanged: the sole `ApprovalToken` constructor is the explicit-human
+`--approve` path, and `promote`'s signature requires the token, so no autonomous or
+reattach path reaches a `main` write without a human act. Behaviour is proven
+against `FakeProvider` offline (D008); a live local-model run is opportunistic.
+Edit generation, model-judged critique quality, and any move toward reducing the
+gate remain separate later decisions.
+
+## ADR-0033: External Benchmark Corpora Never Enter The Clean-Room Tree
+
+Status: accepted. Builds on `docs/00-clean-room.md` (clean-room provenance) and
+the golden-task eval scorecard in `docs/08-testing.md`.
+
+Measuring this harness against public coding benchmarks (SWE-bench, the Aider
+polyglot set) is valuable, but those corpora are authored elsewhere and their task
+instances, fixtures, and prompts are exactly the kind of external material the
+clean-room policy forbids from entering this repository.
+
+Decision: a public benchmark corpus is **never** vendored into this repository or
+materialized under any checkout of it. Instead, an external runner (owned by the
+benchmarking tool, not this repo) drives the `localpilot` binary as the
+solver-under-test against workspaces materialized in a user-local, git-ignored
+cache **outside** this tree, and consumes the same machine-readable capability
+scorecard. The runner refuses to write task data under a path that contains this
+project's checkout. The first-party corpus mined from this repository's own git
+history (original, uncontaminated) stays in-repo and is the trusted bar.
+
+Reason:
+
+- keeps clean-room provenance intact — no copied corpus, fixture, or prompt enters
+  the tree, even for measurement
+- still lets the harness be graded against public benchmarks, reported as deltas
+  between harness arms (public absolute numbers are contamination-suspect)
+- the in-repo first-party corpus remains the contamination-proof, trusted measure
+- the boundary is enforced in code (a path guard), not by convention
+
+## ADR-0032: Inline Shell Commands And Redirections Are Opaque To The Command Classifier
+
+Status: accepted. Builds on ADR-0007 (tri-platform tier-1) and the permission
+engine's command-class table.
+
+The `run_shell` permission decision rests on classifying a command into a risk
+class. The classifier reads the program and its arguments; it must never trust a
+substring of a command it cannot actually parse. Two Windows-specific gaps let a
+write masquerade as an auto-allowed read:
+
+- `cmd`/`powershell`/`pwsh` were routed to substring classifiers *before* the
+  opaque-wrapper check, so `cmd /c "echo data > file"` matched the `echo`
+  keyword and classified `read-only` — auto-allowed — while the shell honoured
+  the `>` and wrote the file (anywhere, since a command carries no contained
+  path). POSIX `bash -c` was already opaque; the Windows shells were not.
+- The substring classifiers ignored output redirection entirely.
+
+Decision: an invocation of `cmd`/`powershell`/`pwsh` that carries an inline
+command or script — `/c`, `/k`, `-Command` (and its prefix abbreviations),
+`-EncodedCommand`, `-File` — is **opaque**, exactly like `bash -c`, and
+classifies `unknown` (gated: ask interactive, deny non-interactive). Separately,
+any argument containing a redirection (`>`/`>>`) lifts a `read-only` verdict to
+at least `project-write`. The classifier always fails toward a prompt, never
+toward a silent allow.
+
+A command also carries no contained path, so a `read-only` command
+(`cat`/`type`/`head`) could read a secret-bearing or out-of-workspace file and
+pull it into model context unprompted — the redaction stack runs at persistence,
+not on the live request. Each non-flag path argument of a read-only command is
+therefore inspected against the same secret-path table the file tools use and
+the workspace boundary; a secret-like or out-of-workspace argument adds an
+explicit read effect, so the command faces the same prompt the `read_file` tool
+would. Best-effort and conservative: ordinary in-workspace reads add no prompt.
+
+Reason:
+
+- a permission boundary must hold against a confused or prompt-injected model;
+  a false prompt costs a keystroke, a misclassified write costs a file
+- substring parsing of an opaque inline command is unreliable in both
+  directions (it missed `echo >` as a write and only caught `del` as destructive
+  by coincidence); treating the whole inline command as opaque is the honest,
+  parser-free position, identical to the long-standing `bash -c` rule
+- `unknown` and `destructive` share the same gate (`ask`/`deny`), so reclassifying
+  an inline destructive command as `unknown` changes the label, not the
+  protection — verified by the boundary tests and a proptest invariant that no
+  inline or redirected `cmd`/`powershell` argv is ever `read-only`
+
+## ADR-0031: The Tool Surface Is Pull-Based — A Per-Session Working Set, A Broker That Reveals, Reveal-Never-Grant
+
+Status: accepted. The tool-surface sibling of ADR-0027 (the skill model:
+pull-based discovery via `skill_search`/`skill_load`); applies ADR-0016 (project
+knowledge is pulled on demand, not pushed every turn) and ADR-0017 (retrieval
+context is a request-time projection) to *tools*; builds on ADR-0010 (the runtime
+validates and controls). Source consulted clean-room: the change-aware-invalidation
+and layered-retrieval findings in the LocalHub comparison research — concepts
+reimplemented, nothing vendored.
+
+Every registered tool's full schema was advertised to the model on every turn.
+That is the tool-surface analogue of the always-loaded-skill-description model
+ADR-0027 rejected: it taxes every turn's context and hurts small local models,
+and it grows linearly as MCP servers add tools. This record makes the tool surface
+**pull-based**, the same shape skills and knowledge already use.
+
+The model holds a small per-session **working set** — the bounded subset of tools
+whose specs are advertised this turn, seeded from a core default plus the broker's
+own tools. When the model needs a capability the working set does not contain it
+**signals** a need, and a **broker** resolves that need to the best tool(s) over a
+**live, fingerprinted catalog** of the current registry, then **reveals** the
+resolved tool: it adds the tool to the working set and returns the tool's exact
+current schema plus a one-line usage example. The model then calls the tool
+normally.
+
+**Reveal changes visibility only — reveal-never-grant.** Revealing a tool mutates
+the advertised set and nothing else. Dispatch is unchanged: the permission engine
+(`Allow`/`Ask`/`Deny`) runs first on every call, then the tighten-only gate chain,
+exactly as before. A freshly revealed write or network tool therefore hits the
+*same* `Ask`/`Deny` it would have hit had it always been advertised. The broker's
+own surface (`tool_search`, `tool_load`) is read-only (`Effect::ReadPath`), like
+`skill_search`/`skill_load`: searching and revealing inject *content the model
+reads*; they enable nothing.
+
+**Two triggers feed one broker core.** *Failure-driven* (always built, needs no new
+model behaviour): a call to a tool the working set does not contain — unknown,
+out-of-working-set, or retired (an MCP tool that vanished from `tools/list`) —
+returns a re-resolution ("closest available: Y — schema, example; now available,
+retry") instead of a bare `unknown tool` error, reveals Y, and lets the model
+retry. The attempted call does **not** execute. *Loose NL marker* (secondary,
+config-gated **off by default**): the model writes a short marker (`NEED:
+<capability>`) and the harness parses assistant output, resolves, and reveals
+proactively. The marker needs new model behaviour, so it ships off until a live
+small-model reliability run validates it; failure-driven carries the feature
+meanwhile.
+
+**The catalog is live, fingerprinted, and change-aware.** It is a projection over
+the registry (`registry.specs()`), rebuilt on the registry-change signal
+(registration / MCP (re)connect), never a second source of truth. Each entry
+carries a content fingerprint — a stable hash of (name + description + schema +
+source version) — so adds, removals, and schema bumps produce an index delta with
+no manual upkeep. MCP is the volatile edge: a server's advertised list is
+authoritative for its entries on each enumeration, and a tool absent from the new
+list is removed. MCP carries no deprecation field (spec rev 2025-06-18), so
+deprecation is an **overlay only** — an optional hand-maintained old→replacement
+map that annotates and de-ranks an entry; it grants and removes nothing.
+
+**Ranking is deterministic-first.** Need→tool resolution uses an in-process
+word-overlap scorer (the `skill_search` primitive applied to catalog entries), so
+the change set stays LocalPilot-only and the path stays fast and offline. A
+model/LocalMind ranker is a future drop-in behind the same `resolve()` seam.
+
+**Defaults reproduce today's behaviour.** The broker is config-gated and **off by
+default**: with it off, the full registry is advertised exactly as before — the
+rollback path. Cross-session persistence of the live working set is out of scope;
+only graduation-derived core defaults persist (a separate, opt-in learned-freshness
+tier). Resolve-and-run is explicitly out of scope: the broker reveals and the model
+retries; it never translates the model's args and executes a tool the model did not
+itself call.
+
+Reason:
+
+- **structural local-model-first posture:** tool guidance is fetched when relevant
+  rather than taxing every turn, mirroring `knowledge_search` and ADR-0027 — the
+  same proven pull pattern, now over tools;
+- **reveal-never-grant keeps the safety floor intact:** the permission engine and
+  tighten-only gates remain the sole execution authority; reveal is a visibility
+  hint and dispatch is truth, so a stale revealed schema costs at most one
+  correction round-trip and can never execute with wrong params;
+- **change-aware by construction:** a metadata fingerprint computed on the
+  registry-change signal (not polled, not a filesystem walk) tracks a surface that
+  MCP servers mutate, so LocalPilot evolves as the surface evolves;
+- **failure-driven needs zero new model behaviour:** the model already attempts
+  tool calls; the re-resolution only makes the miss helpful, so the feature pays
+  off even on a small model that never learns the marker convention.
+
+Supersedes nothing. A model-judged relevance scorer, a hard MCP rename-continuity
+protocol, and resolve-and-run are explicit non-goals here; each is a future drop-in
+behind the same seam and would need its own decision (and, for any move toward
+auto-execution, a fresh security review against reveal-never-grant).
+
+As shipped: a `[tools]` config block (`broker`, `core`, `working_set_cap`,
+`score_floor`, `marker`, `learning`, `graduation_threshold`) gates the feature,
+all defaults reproducing prior behaviour. The catalog/broker live in
+`localpilot-tools` (the registry projects a fingerprinted catalog; the broker
+holds the working set and the `tool_search`/`tool_load` read-only tools); the
+session owns the advertise lever and the failure-driven/marker triggers; learning
+records a redacted `ToolResolution` session event and persists graduated tools in
+the disposable project store across sessions.
+
+## ADR-0030: Inspect A Named Target Before Launching Your Own, Enforced As An Evidence-Grounded Rule
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and the
+`RequiresPriorRead` precondition lineage (a side effect grounded in current
+evidence, not the model's memory).
+
+A task that names an existing target the agent can reach — a local URL, a running
+service, a `host:port` — should be *inspected* before the agent assumes it must
+stand up its own competing server or scaffold a competing entry page. Prompt
+guidance alone did not hold: a model would ignore an explicit "test it at this
+URL" and launch its own server anyway. That is a model-behaviour drift the
+deterministic harness layer is meant to catch, exactly like an unread overwrite.
+
+Two complementary mechanisms ship. A system-prompt convention (the always-on
+nudge) states the look-before-launch discipline. A deterministic
+`check_before_launch` rule enforces it: when a local serveable target was named in
+the task prompt and **not** probed this session, an attempt to launch a local HTTP
+server or scaffold a competing entry file surfaces a model-visible verdict —
+*probe it first; only launch your own server if the probe fails*. The probe state
+is read from the session evidence ledger (a real prior `fetch`, or a probe shell
+command such as `curl`/`Invoke-WebRequest` whose arguments hit the target), never
+from the model's claim that it "already checked" — the same doctrine as
+`RequiresPriorRead`. Named targets are auto-extracted from the prompt (loopback
+hosts, or any `host:port` with an explicit port); a bare external reference URL is
+not a serveable target and is ignored.
+
+Reason:
+
+- the rule is **evidence-grounded**, not memory-grounded: a satisfied probe in the
+  ledger clears it, exactly as a prior `read_file` clears `RequiresPriorRead`
+- it is **tighten-only and advisory**: non-critical, default `Warn` (the call
+  still runs, the nudge reaches the model), tunable to `Block` (refuses the launch
+  before it runs, like a precondition) or `off`. It never grants a side effect the
+  permission engine would deny; the permission engine stays the authority
+- the trigger is scoped to **local serveable targets** so an external reference URL
+  never nags, and the offline false-positive rate (0/3 over the negative set) is
+  measured before any move from the `Warn` default to a harder one — a control
+  signal is tightened on evidence, never shipped on faith, honouring the
+  reliability contract
+- launch and probe matching is a curated, **extensible, best-effort pattern set**
+  over Windows/Linux/macOS variants; an unrecognised launcher is a documented miss,
+  not a guarantee of completeness — the docs say so plainly
+
+Supersedes nothing. Config-declared target lists and auto-probe injection are
+explicit non-goals here: the rule *requires* a probe, never injects one, and a
+`[harness]` target list is a future drop-in behind the same signal.
+
+## ADR-0029: The Per-Turn Tool-Call Ceiling Is Progress-Aware, With A Hard Cost Contract
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and
+ADR-0023 (deterministic-first verification).
+
+The per-turn tool-call ceiling was a single fixed count: every turn stopped at
+the same number of calls. That number is a blunt proxy — it cuts a legitimately
+long turn (a large refactor that genuinely needs many calls) at the same point
+it would stop a runaway, and it is slow to catch the loop the failure breakers
+miss: *successful* calls that make no forward progress (re-reading the same file,
+re-running the same search) where every call returns success.
+
+The ceiling is now progress-aware. A deterministic detector flags no forward
+progress from two signals — an identical `(call signature, output)` succeeding
+repeatedly, and novelty decay (the share of distinct call signatures over a
+sliding window falling below a floor). A budget controller turns the ceiling into
+a bound with two numbers: a **soft start** and a **hard maximum**. A turn that
+keeps making progress runs up to the hard maximum; a turn the detector flags
+stops at the soft start; the hard maximum **always** stops the loop. When the
+detector first fires, a one-shot strategy-change hint is appended to the tool
+result, nudging the model to break out before any stop. The no-progress stop is a
+distinct `StopReason` from the cost-ceiling stop, so the two are diagnosable.
+
+Defaults are parity: the soft start and hard maximum both default to the previous
+fixed value, so absent or pre-existing configuration reproduces the old stop
+behaviour exactly. Raising the hard maximum above the soft start opts a deployment
+into the adaptive extension.
+
+Reason:
+
+- the hard maximum is an unconditional cost contract: a turn can never loop
+  unbounded regardless of any heuristic's confidence — the bound holds even if the
+  progress signal is wrong, which is what makes raising it safe
+- progress is judged by deterministic, offline-testable signals (no model in the
+  hot path), mirroring ADR-0023; a model-critic progress judge is a future
+  drop-in, not a dependency
+- the detector composes the existing per-turn breakers' philosophy rather than
+  duplicating their counters; it lives beside them in `localpilot-recovery`, and
+  the controller is a pure decision unit, so the loop gains a bound, not a second
+  control plane
+- shipping at parity and measuring the false-positive rate before tightening the
+  default honours the reliability contract: a control bound is tightened or
+  relaxed, never a permission or safety outcome
+
+## ADR-0028: The Handoff Is A Redacted, Git-Ignored Execution Record, Checked Deterministically, Never Memory
+
+Status: accepted. Builds on ADR-0011 (store split: `.localpilot/` is the execution
+record, `.localmind/` is memory), ADR-0003 (project files are the harness source of
+truth), and ADR-0012 (`.localpilot/` is local, disposable, never committed). Related
+to ADR-0027 (skills; a handoff suggests skills for the next session).
+
+A session that ends mid-task leaves no first-class way for a fresh agent to pick it
+up: the transcript is long and unredacted-for-sharing, and the harness documents
+describe the plan but not "where we are right now." A **handoff** fills that gap.
+
+Shape:
+
+- **A small machine-checkable header + a human-readable Markdown body.** The header
+  carries every field the resume check needs — schema, id, repo, branch, commit,
+  dirty, session, references, suggested skills, confidence, created — so the check
+  reads structured fields, not prose (the "query-time fields live in the header, not
+  the source body" lesson from the retrieval work). The body separates **confirmed
+  facts** (what the event log and git actually record) from **assumptions** (the
+  inferred objective and next action).
+- **Reference, don't duplicate.** The handoff points at `brief.md` / `PROGRESS.md` /
+  `DECISIONS.md` by path and tells the reader to read them, rather than copying their
+  contents — they stay the source of truth (ADR-0003).
+- **Written from durable state, not the raw transcript.** The writer reads the session
+  event log (committed steps) and the harness documents — the facts LocalPilot already
+  recorded — never the conversation buffer.
+- **Redacted through the canonical host redactor** (ADR-0011) over the *whole*
+  artifact before it touches disk.
+
+Storage and boundary:
+
+- It lives at `.localpilot/handoffs/<id>.md` — an **execution record**, git-ignored
+  and never committed (ADR-0012), distinct in name and location from the harness
+  `brief.md` / `PROGRESS.md` runtime files (which live at the repo root and are
+  committed plan state).
+- It is **never promoted to LocalMind accepted memory.** Session close-out reads the
+  transcript, never the handoff file, so a handoff body cannot become a review
+  candidate or accepted memory. Close-out may still extract durable *lessons* from the
+  session itself as evidence; the full handoff stays transient.
+
+Resume check:
+
+- `handoff resume <id>` runs a **deterministic** check before a fresh agent acts:
+  branch identity, whether the recorded commit still exists, dirty-state match,
+  referenced paths present, referenced session present. No model judges the prose.
+- A mismatch is a **flag to re-verify, not a hard failure** — stale facts are surfaced
+  as warnings, never silently dropped (the *flag-don't-drop* precedent from the
+  change-aware staleness work).
+
+Reason:
+
+- the cross-context win is a small, honest, *checkable* snapshot the next agent
+  verifies against the live repo — not a large unverified context dump or a second
+  memory store;
+- keeping the handoff an execution record (git-ignored, redacted, never memory) means
+  it inherits the store split's privacy and disposability guarantees and adds no new
+  long-term-storage surface;
+- a deterministic, warning-not-failure resume check matches the local-first posture: no
+  model in the verification path, and a moved repo degrades to "re-verify," never to a
+  false "all good." Rollback is to stop writing handoffs; nothing else depends on them.
+
+The runtime shape is documented in `docs/06-harness-spec.md` (§Handoff).
+
+## ADR-0027: The Skill Model — Invocation × Authority, Two Artifact Types, Pull-Based Discovery
+
+Status: accepted. Generalizes ADR-0020 (skills are read-only advisory prompt
+modules), and applies ADR-0016 (knowledge is pulled on demand, not pushed every turn)
+and ADR-0017 (retrieval context is a request-time projection) to skills; related to
+ADR-0028 (the handoff artifact). Source consulted clean-room: the `mattpocock/skills`
+comparison in LocalHub research (§5, §16) — concepts reimplemented, no file vendored.
+
+"Skill" had drifted into an overloaded word across the stack. This record names the
+model so the later runtime work (frontmatter invocation parsing, loader wiring,
+handoff) builds on fixed terms. A skill-shaped artifact is placed on **two
+independent axes**:
+
+- **Invocation — *who can reach it*:** **user-only** (reached only by a human typing
+  its name) or **discoverable** (the model can also reach it on its own — *and* the
+  human can still type its name; discoverable always includes user reach). Invocation
+  is carried in a `SKILL.md` by the `disable-model-invocation` flag (present ⇒
+  user-only; absent ⇒ discoverable).
+- **Authority — *what reaching it does*:** **advisory** (the artifact is *content the
+  agent reads* — guidance it may apply or ignore; reaching it performs no effect
+  beyond a workspace read) or **enforced** (the artifact is a *rule the runtime
+  applies* — it can block or gate an action).
+
+**Two artifact types** occupy this space (an earlier draft proposed a third,
+"user-invoked command"; it was dropped as redundant — a typed, user-only invocation is
+just a *user-invoked skill*):
+
+1. **Harness rule / quality-gate check** — *authority: enforced*, invocation:
+   runtime-triggered (cadence/event, not a human or model name). Owned by the rule
+   engine and the discovered quality gate (ADR-0009); it can refuse or gate an effect
+   and never bypasses the permission engine.
+2. **Advisory skill** — *authority: advisory*, invocation: user-only or discoverable.
+   The read-only prompt module of ADR-0020 (LocalMind-distilled or project-local
+   `SKILL.md`), surfaced as content. Reading one never installs, enables, disables, or
+   runs anything. A *user-invoked* skill is simply this with invocation set to
+   user-only.
+
+Discovery is **pull-based, not push-based**: a discoverable skill is
+**not** loaded into the turn context just because it exists. The model finds skills the
+same way it finds knowledge — an on-demand **search**: a `skill_search` surface returns
+lean ranked locators (name + one-line summary + score), and only the **chosen** skill
+body is loaded into context. This applies ADR-0016/0017 to skills: a discoverable skill
+costs ~no standing context (at most a small fixed cue that skills exist and can be
+searched), and the always-loaded-description model is explicitly rejected as the
+default — it taxes every turn and hurts small local models.
+
+Load-bearing rules:
+
+- **User invocation is deterministic and needs no model judgement.** A human typing a
+  skill's name loads that skill's body directly — no search, no ranking, no autonomy.
+  This works for *every* skill regardless of its invocation flag.
+- **Model discovery is search-on-demand and opt-in.** The model reaches a discoverable
+  skill only by searching for it and then loading the chosen body; **autonomous**
+  (model-initiated) search-and-load is config-gated and **off by default**, so a small
+  local model never auto-injects a skill unless the project opts in. The candidate set
+  is the *discoverable* skills only; user-only skills are never returned by search.
+- **No-silent-execution is reaffirmed, not weakened.** Nothing here executes, installs,
+  enables, or auto-fires a skill without an explicit human step or a disclosed config
+  opt-in. Enabling/disabling/retiring stay deliberate human steps (ADR-0020). Loading a
+  skill injects *content* the agent reads; any script/asset a skill declares still runs
+  only through the permission engine (never a side channel).
+
+Reason:
+
+- one durable vocabulary (two axes, two types) stops "skill" from meaning a harness
+  rule and an advisory module interchangeably across LocalPilot and LocalMind — the
+  later subjects parse, wire, and document against fixed terms;
+- **pull-based discovery** keeps the local-model-first posture structural: skill
+  guidance is fetched when relevant rather than taxing every turn, reusing the proven
+  `knowledge_search`→`knowledge_fetch` pattern (the ranking primitive already exists as
+  `SkillSet::relevant`);
+- both types share a safety floor (no silent execution; permission engine never
+  bypassed), so naming them adds clarity without adding a new risk surface.
+
+The cross-engine half of this decision (LocalMind skills stay advisory/read-only) is
+recorded as LocalMind `D-LM-0013`, which points here as the single source of truth.
+
+## ADR-0026: The Cold-Start Repo Primer Is A Review-Gated, Always-On Context Block
+
+Status: accepted. Builds on ADR-0013 (disposable project-local artifacts) and the
+LocalMind engine decision D-LM-0009 (deterministic, review-gated, supersedable
+repo primer).
+
+A session starting on an unfamiliar repository should orient without spending its
+context window reading files. The engine distils a deterministic **repo primer**
+from the code-graph architecture overview (languages, packages, entry points,
+call hotspots) — no model in the path. The host's role is *when* and *whether* to
+surface it:
+
+- **Distillation** runs at session close-out, right after the code-graph reindex,
+  once the graph is fully current (`remaining == 0`). It reuses that existing
+  trigger — no new watcher — and is gated by the project's learning flag. It only
+  enqueues a review candidate; it never writes accepted memory.
+- **Injection** is the pre-turn context hook. The *accepted* primer (an active
+  `Project` memory whose id carries the `repo-primer-` marker) is contributed as
+  an always-on, token-bounded block — orientation, not prompt-relevance — ahead of
+  the relevance-filtered memory and any pushed ingest chunks. An unaccepted or
+  stale (superseded) primer is not active, so it is never injected.
+- **Staleness** rides the engine's content hash over the overview shape: a drifted
+  repo distils a primer with a new id the reviewer accepts as a supersede of the
+  prior one, retiring it.
+
+Reason: the cold-start win is an off-context, queryable index plus a small
+reviewed orientation — not a larger prompt. Keeping the primer review-gated and
+honestly heuristic (confidence < 1.0, `repo@commit` provenance) means the agent is
+never handed unverified "truth," and the host adds no graph logic of its own
+(it discovers, gates, drives, and injects).
+
+## ADR-0025: Ingested Chunks Live In An Indexed SQLite Store
+
+Status: accepted. Builds on ADR-0013 (folder ingestion uses disposable
+project-local artifacts) and ADR-0017 (retrieval context is a request-time
+projection).
+
+Folder ingestion persisted every derived chunk in a single `chunks.json` under
+`.localmind/ingest/`. Every search and every refresh deserialized the whole file
+into memory and scanned it linearly, so a large repo paid a full-RAM load and an
+O(n) scan on each query — the opposite of the "lean on modest machines" goal.
+
+Derived chunks now live in an embedded SQLite store at
+`.localmind/ingest/chunks.sqlite` with an FTS5 virtual table, versioned by a
+`PRAGMA user_version` stepper — the same pattern the accepted-memory store uses.
+Search narrows to the matching rows through the FTS index (bounded by a
+relevance-ordered limit), then recomputes the existing term-count +
+path-name-boost score over just those rows, so ranking is unchanged while the
+whole index is never loaded. *(The term-count rescore was later replaced by the
+index's own bm25 ranking — see ADR-0057, which supersedes this "ranking is
+unchanged" clause.)* Refresh updates only the paths that changed:
+unchanged files are reused by `path:content_hash`, a changed file's prior rows
+are kept as stale tombstones pointing at the new hash, and a vanished file's rows
+are tombstoned with no successor. An existing `chunks.json` migrates into the
+database on first open and is then removed; `ingest rebuild` recreates the store
+from source. Only the large chunk index moved — the small manifest/job/review/
+last-pack files stay JSON.
+
+The stepper has since taken two additive steps, each nullable/defaulted so a
+pre-existing store upgrades clean: **v2** adds a `context_prefix` column
+(contextual chunk prefixing); **v3** adds a nullable `language` column
+(language-tagged chunks + workspace-language-filtered search, reusing
+`localmind_store::language_for_extension`); **v4** adds a rebuildable
+`ingest_chunk_vectors` table (chunk id → LE-f32 BLOB + content fingerprint +
+model + dimensions), mirroring the accepted-memory `vector_index` shape, for
+best-effort chunk embeddings. Embeddings are gated on a configured embedding model
+(the same `InferenceCapability` gate accepted memory uses) and never fail ingest;
+chunk vectors are dropped with their chunks, so the keyword path and the
+disposable/rebuildable contract are unchanged.
+
+Endpoint failures remain best-effort, but an operator-selected folder-ingest
+budget is authoritative: `[ingest] max_model_calls = 0` means unlimited, while a
+nonzero value counts the primary chunk embedding requests and stops before the
+request that would exceed it. The incomplete path is removed from derived state
+so a refresh can retry it. Because the LocalMind documentation bridge owns a
+separate embedding loop, capped LocalPilot runs index its text without vectors;
+this keeps the advertised per-run bound hard without duplicating LocalMind's
+chunker or embedding implementation.
+
+Reason:
+
+- the persisted index exists to keep retrieval lean on modest machines; a
+  full-RAM load plus linear scan on every query defeats that, and an indexed
+  store fixes it without changing the chunk model or the ranking contract
+- SQLite + FTS5 is already in the dependency tree and proven by the
+  accepted-memory store, so the chunk store reuses a known-good, offline,
+  extension-free pattern (rusqlite `bundled`) rather than inventing storage
+- the store is derived and disposable (ADR-0013): migration is one-way and
+  rebuild is always a valid fallback, so the change carries no durable-data risk
+
+## ADR-0024: Session Store Has A Conservative Default Retention
+
+Status: accepted. Builds on ADR-0011 (store convergence: the execution record)
+and ADR-0012 (`.localpilot` is local, disposable, never committed).
+
+The project-local `.localpilot/` state grew without bound: one transcript and
+event-log pair per session, and one `tool-output/<id>.txt` snapshot per tool
+call, none of it ever removed. A `RetentionPolicy` (`max_sessions`,
+`max_age_days`; `0` = unbounded on that axis) now governs cleanup. `Store::prune`
+removes the sessions outside the policy, trims the index, and sweeps any
+tool-output snapshot no surviving session still references (a mark-and-sweep over
+survivors' tool-call ids plus their `recovery-<id>` snapshot — no mtime
+heuristics). It is exposed as `localpilot session prune [--keep] [--older-than]
+[--dry-run]` and run best-effort at interactive chat startup.
+
+A conservative cap is **on by default** (`[storage]`: 100 sessions, 90 days,
+`auto_prune = true`) so the directory cannot grow forever without anyone opting
+in. Both limits and the auto-prune are configurable, and `0`/`false` disable
+them.
+
+Reason:
+
+- unbounded growth is a real disk and inspectability problem; a default cap fixes
+  it for users who never touch config, the common case
+- retention is the store's concern, so the policy and the mark-and-sweep live in
+  `localpilot-store` behind one `prune` entry point rather than scattered deletes
+- deletion of user history is sensitive (the privacy model treats inspect/delete
+  as user controls), so cleanup is best-effort, silent, fully configurable, and
+  has an explicit `--dry-run`; cache and provider metadata stay out of scope
+
+## ADR-0023: Deterministic Result Verification In A Thin `localpilot-verify` Crate
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and
+ADR-0001 (narrow crates, one-way dependencies).
+
+The permission engine controls *whether* a tool may run; it does not check
+*whether the call did what it claimed*. A separate stage closes that gap: after
+a call executes, a `Verifier` judges it against its tool contract and returns a
+`Verdict` of `Verified`, `Unverified`, or `Failed`. An effect a contract marks
+`Unverifiable`, or one with no checkable postcondition, is `Unverified` — never
+silently a success. The verdict is recorded durably (a `ToolVerified` event in
+the execution log), and an opt-in gate refuses a final reply that claims an
+action completed without a `Verified` call to support it.
+
+This lives in a thin new crate, `localpilot-verify`, depending only on `core`,
+`tools`, and `sandbox` — not on the harness — so verification is a stage the
+harness composes, not a parallel control loop. A model-critic verifier is a
+future drop-in behind the same `Verifier` trait; the deterministic verifier is
+the default.
+
+Reason:
+
+- "no success claim without verified evidence" becomes a structural property of
+  the loop, not a prompt convention — the gap ADR-0010 left between *controlling*
+  an action and *confirming* it
+- a deterministic-first stage keeps verification offline, testable, and free of a
+  model in the hot path, with the model critic gated behind the same seam
+- a narrow crate with a one-way dependency keeps the reliability contract from
+  drifting into a second control plane; dropping the crate dependency returns the
+  loop to its prior behaviour
+
+Update (later): the opt-in gate is reachable through configuration —
+`[harness] claim_gate = "off" | "warn"`, default `off` — so its false-positive
+rate can be measured in real use without recompiling, the precondition for any
+future default-on decision. The gate matches **per claim**: a completed-action
+claim is supported only by a verified call *capable of that effect* (a shell
+command is opaque and backs any category; the structured file tools are matched
+by kind), so one verified action no longer excuses a different, unverified one.
+An offline false-positive/recall benchmark scores the gate against a labelled
+corpus so a regression is caught without a live model (validation-evidence
+policy).
+
+## ADR-0022: The Final Alternate-Screen TUI Is Preserved As An Annotated Tag
+
+Status: accepted. Supports ADR-0021.
+
+Before the move to inline rendering, the last full alternate-screen terminal UI
+— with mouse capture and the mouse-mode toggle — was frozen as an annotated,
+immutable git tag, `legacy-altscreen-tui`, on the pristine pre-change release
+commit. It is a keep-for-posterity restore point only and is not maintained
+further.
+
+To restore and run it from a clean checkout, the bundled LocalMind submodule
+must be initialised first:
+
+```text
+git checkout legacy-altscreen-tui
+git submodule update --init --recursive
+cargo run -p localpilot --features tui -- chat
+```
+
+Reason:
+
+- a clearly named, immutable, zero-maintenance restore point lets anyone recover
+  the previous interface in one step without keeping dead code on the main line
+- recording the exact restore command — including the submodule step, which a
+  fresh checkout or worktree otherwise misses — makes the rollback reproducible
+
+## ADR-0021: Inline Terminal Rendering, No Alternate Screen Or Mouse Capture
+
+Status: superseded for the new interactive-chat host by ADR-0107. It continues
+to govern only the temporary inline rollback path until that path is removed.
+Refines ADR-0006; the committed ratatui + crossterm stack is unchanged and this
+record fixes how the rollback stack is driven.
+
+The interactive REPL renders inline in the terminal's main screen buffer rather
+than taking over an alternate screen. Finished transcript items — user messages,
+assistant turns, tool results, system notices — are written once into the
+terminal's native scrollback with ratatui's `Terminal::insert_before`, and a
+small bottom region (a `Viewport::Inline`) holds the only redrawn surface: the
+in-progress activity, the composer, and the status line. The mouse is never
+captured.
+
+Consequences:
+
+- Native scrollback, text selection, copy/paste, scrollwheel, and the terminal's
+  own search work again, because the app neither switches screen buffers nor
+  captures the mouse. The previous mouse-mode toggle is removed.
+- History is append-only: a finished block is emitted once and never redrawn;
+  only the bottom region repaints each frame.
+- The inline region's height tracks the composer. Because the framework has no
+  in-place inline-height setter, the terminal is re-initialised when the height
+  changes. The `scrolling-regions` capability is enabled so inserting history
+  uses the terminal's scroll regions instead of clearing the region each commit.
+- Arbitrary full-screen layout — a sticky top bar, or split panes that survive
+  scrolling — is given up. For a header-once, stream-output, input-at-bottom
+  agent REPL this loses nothing that matters.
+
+Reason:
+
+- the alternate-screen renderer was large and unstable and it disabled the
+  terminal features users expect; inline rendering is less code and restores them
+- the target API is ratatui's public `Viewport::Inline` / `Terminal::insert_before`;
+  behaviour was cross-checked against a local read-only behaviour reference, while
+  the implementation, prompts, and tests are original to this repository
+  (clean-room, ADR-0005)
+
+## ADR-0020: Skills Are Read-Only Advisory Prompt Modules
+
+Status: accepted. Builds on ADR-0011 (review-gating) and ADR-0013.
+
+A "skill" surfaced to the host is a reviewable advisory prompt module, never an
+executable workflow. The host exposes skills through read-only, model-callable
+tools only — `skill_drafts` (disabled candidate workflows) and `active_skills`
+(human-enabled skills, surfaced as guidance with provenance). Each tool's only
+effect is a workspace read; reading a skill never installs, enables, disables, or
+runs anything, and active skills are not auto-injected into always-on context.
+
+Reason:
+
+- a wrong or stale skill is then at worst irrelevant guidance the agent ignores,
+  never an unintended action;
+- enabling/disabling/retiring stay deliberate, review-gated human steps;
+- it keeps the local-first, no-surprise posture and is safe to automate later.
+
+The consumption contract is documented in `docs/localmind-integration.md`.
+
+## ADR-0019: The Host Selects The Extractor From Inference Config, Defaulting To A Local Endpoint
+
+Status: accepted. Realizes the learning loop's model path; complements ADR-0018.
+
+Session closeout selects the extractor from the project's `.localmind.toml`: the
+model-backed extractor when `[inference].features.extraction` is set, otherwise
+the deterministic extractor. The model path falls back to deterministic when the
+endpoint is unreachable or returns malformed output. On first use, when the
+project's default provider points at a loopback endpoint, the adapter writes an
+`[inference]` block targeting that same local endpoint (stripping the `/v1`
+suffix LocalMind appends itself), so "local models do the learning jobs" needs no
+manual plumbing.
+
+Reason:
+
+- the default learning experience may depend on a local model, with deterministic
+  as a graceful, always-available fallback;
+- detection is project-scoped, so behaviour does not depend on the host machine;
+- a remote provider is never wired automatically — pointing inference at a
+  non-loopback endpoint is an explicit, disclosed opt-in (ecosystem remote-egress
+  policy). LocalMind stays host-neutral: it only ever sees a generic local
+  endpoint (LocalMind decision D-LM-0002).
+
+## ADR-0018: The Learning Write-Path Closes On Every Opted-In Session, Keyed On Structured Signals
+
+Status: accepted. Complements ADR-0011 (the store split and review-gating) and
+ADR-0016/0017 (the read path); this record fixes the *write/learn* path.
+
+LocalMind was first-class on the read path but second-class on the learn path:
+close-out ran only in the interactive REPL, and it flattened the transcript to
+text and re-parsed prose. This record closes the loop.
+
+- **Close-out runs on every deliberate, opted-in session-end path** — the
+  interactive REPL, each headless harness step, and the RPC/ACP serve loop —
+  through one shared best-effort, non-fatal helper. It skips an empty session, so
+  opening and closing one leaves no artifacts. One-shot `localpilot print` is
+  excluded, so a bare prompt never creates project files. The headless harness
+  builds a fresh runtime per step, so per-step close-out is the natural granularity
+  and captures step-level failure/fix/commit.
+- **The import is keyed on structured signals, not re-parsed prose.** Close-out
+  builds the import from the redacted transcript and then appends compact lines
+  from the session **event log** — failed tools, recovery diagnostics, committed
+  steps — so the deterministic extractor sees the fact LocalPilot already recorded.
+  Only names, statuses, and short commit hashes are appended; never raw payloads.
+  The deterministic text path stays the baseline: when the event log has nothing
+  notable, the import is the transcript alone, unchanged. LocalMind-core's adapter
+  contract is metadata-thin and is **not** changed.
+- **In-session surfaces never bypass review-gating.** The `remember` tool lets the
+  agent propose a durable lesson — it enqueues a review candidate (permission-gated,
+  project-local write) and never writes accepted memory. The read-only
+  `skill_drafts` tool lists or inspects generated drafts without enabling them; the
+  disabled flag stays authoritative and activation stays a human step. Each tool
+  has a tool-gated system-prompt cue that appears only when the tool is registered.
+
+Consequences:
+
+- Autonomous runs learn, not just the REPL: a headless or RPC session produces
+  reviewable candidates enriched with execution outcomes.
+- Close-out cannot regress the autonomous critical path: it is best-effort,
+  non-blocking, off the turn path, and gated on the existing opt-in.
+- Review-gating (ADR-0011) holds end to end: nothing on the write path writes
+  accepted memory or activates a skill automatically; everything new produces a
+  review candidate or a read-only suggestion.
+- The change is a contained host-edge change (call sites plus the adapter import
+  text); LocalMind-core stays host-neutral and unchanged.
+
+Reason:
+
+- The structured truth LocalPilot already records in the event log is the
+  high-value, low-risk lever: enriching the import text the extractor consumes
+  needs no engine change, while flattening to prose threw that truth away.
+- Per-step close-out matches how the harness already builds sessions, so it adds
+  no new lifecycle.
+- All prompt, tool, and behavior text remains original to this repository
+  (clean-room, ADR-0005 / docs/00-clean-room.md).
+
+## ADR-0017: Retrieval Context Is A Request-Time Projection
+
+Status: accepted. Refines ADR-0016 and ADR-0014 (pull-over-push and
+runtime-only projection still hold; this record fixes *how* the per-turn seed
+reaches the model).
+
+Per-turn context-hook output — lean accepted project memory, plus ingest chunks
+only under `[ingest] mode = "push"` — is computed once per turn and injected into
+the outgoing `ModelRequest` adjacent to the leading system prompt. It is **never**
+appended to `self.messages`, the durable transcript, or the event log. Its token
+estimate is reserved from the compaction budget so the request still fits the
+limit. The ingest knowledge base is reached on demand through the read-only
+`knowledge_search` tool, which returns a ranked cross-source pack (ingest,
+accepted memory, recent-session facts, code graph) via a compute-only path that
+performs no write. On an interactive REPL the index is built in the background on
+first use (trust-gated, off the turn path).
+
+Consequences:
+
+- `self.messages` equals the authored history equals the stored transcript again:
+  the synthetic-message persistence invariant ("a resumed session reconstructs
+  exactly the history the model received") holds without a retrieval exception.
+- Re-derived retrieval cannot accumulate across turns, and folding it into the
+  leading system run means it rides the wire as top-level `system`, not as a
+  resent user message (on Anthropic, a non-leading system message maps to user).
+- Because the injected block is no longer part of the compacted history, the
+  compaction budget explicitly reserves its token estimate; reported context
+  usage is the real request total.
+- The evict-on-replace seed path (and its synthetic marker) are deleted — less
+  code, fewer states.
+- A present-but-unreadable ingest index is reported distinctly from a missing
+  one, so corruption is visible rather than masked as "no knowledge"; a turn
+  never breaks on a knowledge miss.
+
+Reason:
+
+- The interim ephemeral-but-in-`messages` seed (ADR-0016) softened the
+  synthetic-persistence invariant and required eviction bookkeeping and a
+  compaction cache that already counted it. Treating retrieval as a request-time
+  projection — what it always was conceptually — is the correct model and removes
+  that machinery.
+- Keeping the pull tool read-only (compute-only pack) means a model can pull
+  ranked project knowledge with no write or heavy side effect.
+- All behavior, tool, and prompt text remain original to this repository
+  (clean-room, ADR-0005 / docs/00-clean-room.md).
+
+## ADR-0016: Project Knowledge Is Pulled On Demand, Not Pushed Every Turn
+
+Status: accepted. Refines ADR-0014 and ADR-0015 (the runtime-only projection and
+the ranked budget still hold; this record changes how the *ingest* source is
+delivered).
+
+Ingested folder knowledge is reached on demand through a read-only
+`knowledge_search` tool, not auto-seeded into every turn. The only always-on
+retrieval seed is accepted, review-gated memory, and it is contributed leanly:
+bounded in size, re-derived each turn, and **replaced** rather than accumulated.
+A new `[ingest] mode` selects behavior — `pull` (default) or `push` (legacy
+auto-injection of ingest chunks), the latter kept only as an escape hatch.
+
+The per-turn retrieval block is marked synthetic and is **not** written to the
+durable transcript or event log: it is re-computable context, not authored
+history.
+
+Consequences:
+
+- Retrieval no longer grows the context window with turn count. Previously the
+  pre-turn context hook appended a fresh system message every turn, so
+  re-derived retrieval accumulated; on the Anthropic wire a non-leading system
+  message also maps to a resent user message, compounding the growth.
+- The event-log → transcript projection and session close-out lesson extraction
+  stay clean, because the ephemeral retrieval seed never enters them.
+- Ingested knowledge is still ranked and budgeted when pulled (the tool wraps the
+  deterministic read-only ingest search; the ADR-0015 allocator remains available
+  via the pack path).
+- A fresh project's knowledge base is empty until `localpilot ingest` runs; the
+  tool returns a useful "not indexed yet" result rather than an error. The
+  first-use auto-ingest was removed from the turn path so a heavy walk/chunk no
+  longer stalls the first turn.
+- `push` mode restores the prior always-on ingest injection without a rebuild.
+
+Reason:
+
+- Auto-seeding the lowest-trust, highest-volume source (ingest) on every turn was
+  the dominant cause of context filling quickly, and it duplicated content the
+  model rarely needed standing by.
+- Pull keeps high-trust accepted memory passively available and lean while making
+  bulk project knowledge reachable on demand at no standing context cost — the
+  retrieval analogue of reading a file only when relevant.
+- The behavior, tool, config, and prompt cue are original to this repository
+  (clean-room, ADR-0005 / docs/00-clean-room.md).
+
+## ADR-0015: Derived Context Sources Compete Under One Ranked Budget
+
+Status: accepted
+
+Derived knowledge that can be injected into a turn — accepted memory anchors,
+recent session facts, ingest hits, code-graph neighbors, and explicit manual
+pins — competes for one token budget instead of each source getting a fixed
+slice. Selection is a deterministic two-phase allocation: a per-source reserve
+phase (filled highest-precedence source first) guarantees a high-value entry
+survives a flood from a noisier source, then a shared pool fills the remainder by
+a composite rank.
+
+The rank is composed from explicit, inspectable signals: raw relevance, a
+source-quality weight (manual pin > accepted memory > recent session > ingest >
+code graph), recency, a stale penalty, and a redundancy penalty that demotes the
+second and later hits from the same file. Every candidate is recorded as either
+selected or skipped with its reason and full signal breakdown.
+
+Consequences:
+
+- A context pack is auditable end to end: a reader can see why each entry was
+  included and why a high-ranking near-miss was dropped.
+- Runtime conversation context (the kept raw suffix and the compaction digest)
+  is owned by the compaction layer (ADR-0014); the ranked budget governs the
+  derived-knowledge layer. The two compose by precedence — system context and
+  the current turn are hard, then the recent suffix and digest, then the ranked
+  derived sources.
+- Manual pins and accepted memory are protected by reserves so a lexical ingest
+  flood cannot crowd out review-gated or user-chosen context.
+
+Reason:
+
+- Fixed per-source slices either waste budget or starve a strong signal; one
+  ranked competition spends the budget where it is most useful while keeping
+  trusted sources protected.
+- OpenCode and Pi informed the layered-precedence and budget concepts; the
+  ranking, signal set, reserve math, and data shapes are original to this
+  repository (clean-room, ADR-0005 / docs/00-clean-room.md). No reference code
+  or prompt text was copied.
+
+## ADR-0014: Context Projection Is Runtime-Only And Audit-First
+
+Status: accepted
+
+Runtime compaction, derived ingest packs, accepted memory retrieval, and code
+graph facts all contribute to the active model request, but they keep distinct
+ownership and lifetime boundaries. Compaction rewrites only the active runtime
+projection; it may persist source-grounded summary and attempt metadata in the
+session event log, but it does not write accepted memory, skill drafts, review
+items, or ingestion artifacts.
+
+Consequences:
+
+- Compaction cutover is completed-only: a candidate projection must pass
+  pairing, budget, and digest validation before it becomes active.
+- The deterministic compactor is the correctness baseline. Smart modes must
+  report fallback reasons and leave a valid deterministic projection.
+- Compaction audit events store mode, fallback reason, counts, estimates, and
+  truncation metadata without raw dropped transcript dumps.
+- Ingestion remains rebuildable `.localmind/ingest/` state, and accepted memory
+  remains LocalMind review-gated state.
+
+Reason:
+
+- Treating runtime context as memory would silently teach LocalMind unreviewed
+  facts and weaken ADR-0011.
+- Provider output-limit and partial tool-call failures require atomic request
+  projection, not in-place mutation of transcript history.
+- Shared source hints and budget metadata make context decisions inspectable
+  without leaking private plan state or raw oversized content.
+
+## ADR-0013: Folder Ingestion Uses Disposable Project-Local Artifacts
+
+Status: accepted
+
+Project folder ingestion writes derived state under `.localmind/ingest/`:
+manifests, redacted chunks, job state, skipped-file reports, review candidates,
+and context packs. These artifacts are rebuildable from the trusted project
+folder and may be deleted without touching accepted memory.
+
+Accepted memory remains owned by LocalMind's reviewed memory path. Ingestion may
+enqueue review candidates through LocalMind, but it must not write accepted
+memory directly.
+
+Consequences:
+
+- `.localmind/ingest/` is disposable derived state. Rebuild and forget commands
+  remove only ingestion artifacts.
+- Persisted ingestion content is redacted by the LocalPilot redaction stack
+  before it is written.
+- The first implementation keeps deterministic JSON artifacts and Rust-side
+  ranking. SQLite-backed search can be added later if the derived corpus needs
+  FTS behavior, but that would remain rebuildable ingestion state.
+- Context packs are persisted as the latest derived pack for inspection and
+  staleness handling; they are not durable memory.
+
+Reason:
+
+- ADR-0011 already reserves `.localpilot/` for execution records and LocalMind
+  for memory/learning. Folder ingestion is broad mechanical project knowledge,
+  so it belongs beside LocalMind state but outside accepted memory.
+- Keeping the v1 artifacts rebuildable avoids migration risk while the schema is
+  still young.
+- Review-queue promotion preserves the curated-memory boundary and gives users
+  an explicit approval point before broad file observations become durable
+  knowledge.
+
+## ADR-0012: Project `.localpilot.toml` Is Local-Only, Never Committed
+
+Status: accepted. Amends the "committed `.localpilot.toml`" wording in
+ADR-0009.
+
+The project-local `.localpilot.toml` is a machine-local file: it is listed in
+`.gitignore` and is not committed. External launchers generate provider
+config into it in the project directory (base URL, model, key env-var name),
+and those values are inherently machine-local. The ratified quality gate
+(`[[harness.checks]]`, ADR-0009) lives in the same file and is therefore also
+local-only.
+
+Consequences:
+
+- The ratification trust boundary is the explicit user action that writes
+  checks into the local file — not version control. Wording in
+  [`docs/06`](06-harness-spec.md) and [`docs/07`](07-security-and-privacy.md)
+  says "ratified into the project's local `.localpilot.toml`" rather than
+  "committed".
+- A fresh clone has no ratified gate; `gate propose` / `gate ratify` is the
+  supported way to re-establish one. A team that wants a shared, reviewed
+  gate definition can keep one in its own committed docs and ratify from it,
+  but the harness never reads checks from a committed file.
+
+Reason:
+
+- committing the file would leak machine-local endpoints and invite config
+  drift between what a launcher generates and what the repo pins
+- one file with one clear lifecycle (generated/edited locally, ignored) beats
+  splitting harness config across a committed and an ignored file
+- ratification was always defined as the user's explicit act; tying trust to
+  VCS state added nothing and contradicted the launcher workflow
+
+## ADR-0011: Store Convergence — Execution Record vs Memory
+
+Status: accepted
+
+LocalPilot persists state in two stacks, which were growing toward overlap.
+This record fixes the ownership boundary:
+
+- **The LocalPilot store (`.localpilot/`) is the execution record, and only
+  that**: transcripts, the durable session event log (tree-shaped, format-
+  versioned), caches, tool-output snapshots, provider metadata, and recovery
+  diagnostics. It never grows memory, lesson, retrieval, or review features.
+- **LocalMind (`.localmind/`) is the only memory and learning backend**:
+  session closeout, candidate lessons, the review queue, accepted memory,
+  retrieval/context injection, skill drafts, and audit. New rich-learning
+  behavior lands in LocalMind, never as a host-local memory implementation.
+- **One redaction authority at the host boundary.** LocalPilot's redaction
+  stack (`localpilot-config::redact`) is the canonical redactor: everything
+  the host persists or hands to LocalMind is redacted by it first. LocalMind's
+  import-time redaction remains as engine-internal defense in depth, not a
+  second authority — divergence between the two pattern sets is resolved by
+  updating the host stack.
+
+Reason:
+
+- two stores with drifting responsibilities and two redaction pattern sets is
+  how secrets leak and how features get implemented twice
+- the event log needs a single unambiguous home (the execution record) before
+  later features (headless drive, hooks, subagents) build on it
+- LocalMind is host-neutral and reusable; baking memory into the LocalPilot
+  store would fork that capability
+
+## ADR-0010: Reliability Contract for Unattended Operation
+
+Status: accepted
+
+LocalPilot's differentiator is unattended multi-step execution. That claim is
+made testable by an explicit **reliability contract**: a small set of named
+invariants the runtime guarantees on every exit path, each pinned by a named
+test, split across the owning specs:
+
+- Session-loop invariants (tool-result pairing on every exit path, no partial
+  replies persisted, transcript fidelity) —
+  [`docs/06`](06-harness-spec.md) §Reliability Contract.
+- Permission invariants (no `run_shell` path weaker than the equivalent
+  builtin, floor-aware allowlists that never lift destructive/privileged/
+  unknown gating, wrapper commands never auto-allowed, approval prompts that
+  state their target) — [`docs/07`](07-security-and-privacy.md) §Reliability
+  Contract.
+
+A change that breaks a contract-pinning test is a contract change: it requires
+a superseding ADR, not a test edit. The bypass profile's scope is part of the
+contract: bypass keeps the workspace boundary for path-bearing effects only;
+shell commands are not path-contained, and the docs state this rather than
+implying containment that does not exist.
+
+Reason:
+
+- the product's central claim ("every side effect passes a typed permission
+  engine"; "safe to run unsupervised") was previously aspiration enforced
+  only by convention — line-level review found exit paths and classification
+  gaps that falsified it
+- invariants stated in the spec and enforced by property tests survive
+  refactors; workflow descriptions do not
+- naming the tests in the spec makes the contract auditable: a reader can run
+  the contract
+
+## ADR-0009: Discovered Project Quality Gate
+
+Status: accepted
+
+The harness's single `test_command` is generalized into a quality gate: a set of
+language-specific inspection checks — format, lint, test, dependency hygiene,
+advisory audit, static analysis — drawn from the project's own toolchain rather
+than hardcoded into the engine. Built-in toolchain profiles per stack declare
+the default checks, how to interpret a check's findings, and which findings are
+safely auto-fixable; a discovery step detects the stack, probes which tools are
+actually available, and proposes a gate the user ratifies into committed
+`.localpilot.toml`. The rule engine runs checks at a per-check cadence (fast
+checks each step, full checks at phase boundaries) and acts on findings: safe
+deterministic fixers are applied and re-run, remaining failures feed the
+anti-sunk-cost loop (retry, bounded, then replan recorded in `DECISIONS.md`), and
+dependency/audit findings block for a human decision. Discovered commands are
+untrusted — discovery proposes, the user ratifies, and every check runs through
+the same permission engine and sandbox as any other shell command.
+
+Reason:
+
+- replaces a single test hook with real per-language cleanup and inspection
+  without baking tool lists into the engine
+- keeps the engine stack-neutral: the abstraction is built in, the instances are
+  discovered (the spirit of ADR-0002)
+- makes findings actionable inside the loop instead of advisory, with bounded
+  auto-fix and replan rather than runaway churn
+- preserves the security model: discovered commands are ratified once and always
+  mediated by the permission engine ([`docs/07`](07-security-and-privacy.md)),
+  never auto-trusted
+- per-check cadence keeps fast per-step feedback without paying full-suite cost
+  on every step
+
+## ADR-0008: Anthropic Messages API as the Second Provider
+
+Status: accepted
+
+A second, protocol-distinct provider adapter is added alongside the
+OpenAI-compatible one: the Anthropic Messages API. It is implemented clean-room
+from the public API reference, talks only to the documented official endpoint,
+and exercises the provider trait's generality (top-level `system`,
+`tool_use`/`tool_result` content blocks, a required `max_tokens`, and a typed
+SSE stream).
+
+Reason:
+
+- satisfies the Stable requirement of at least two provider implementations
+  ([`docs/09`](09-release-plan.md))
+- proves the provider abstraction is not OpenAI-shaped by construction
+- adds a major hosted model family without coupling the core to it (ADR-0002)
+
+## ADR-0007: Windows, Linux, and macOS Are All Tier-1
+
+Status: accepted
+
+LocalPilot targets Windows, Linux, and macOS as equal first-class platforms. No
+platform is a second-class port. Behavior parity is a release requirement, CI
+builds and tests on all three, and installers ship for all three.
+
+Reason:
+
+- the target users run on all three platforms
+- shell/filesystem security policy must be correct per-platform, not POSIX-only
+- treating one OS as primary causes silent breakage on the others
+- forces explicit Windows and POSIX command/path handling from the start
+
+## ADR-0006: Ratatui as the TUI Framework
+
+Status: accepted; refined by ADR-0107.
+
+The terminal UI is built on `ratatui` with the `crossterm` backend. The original
+input-widget choice has since been replaced by a hand-rolled editor so wrapping,
+grapheme movement, history, and hit-testing share one owned layout model. This
+is a committed framework choice, not a recommendation.
+
+Reason:
+
+- `ratatui` is actively maintained and the de facto Rust TUI framework
+- `crossterm` provides one terminal backend across Windows, Linux, and macOS,
+  supporting the tier-1 platform commitment (ADR-0007)
+- a single committed stack keeps rendering, layout, and snapshot tests uniform
+- alternatives are out of scope unless a future ADR supersedes this one
+
+## ADR-0005: Read-Only Local Behavior Reference
+
+Status: accepted
+
+A local working implementation may be inspected as a read-only behavior
+reference while planning and implementing this Rust project.
+
+The reference may be used to clarify expected workflows, command behavior,
+configuration shape, user-facing edge cases, and high-level product
+requirements. It must not be used as source material for copied, translated, or
+mechanically ported code, prompts, tests, private endpoint behavior,
+implementation structure, identifiers, UI copy, branding, or other prohibited
+material.
+
+Reason:
+
+- preserves momentum while the Rust specs are still incomplete
+- gives implementers a working behavior baseline for ambiguous flows
+- keeps this repository independently authored and clean-room auditable
+- makes provenance expectations explicit in planning and review
+
+## ADR-0004: No Private Endpoint Adapters
+
+Status: accepted
+
+LocalPilot will not implement adapters for private, undocumented, or
+consumer-product endpoints. Provider integrations must use official APIs, local
+servers, or explicit user-owned custom endpoints.
+
+Reason:
+
+- reduces legal and account risk
+- keeps provider contracts stable
+- avoids brittle reverse-engineered behavior
+- preserves trust in the project
+
+## ADR-0003: Project Files Are Harness Source of Truth
+
+Status: accepted
+
+The harness treats `brief.md` and `PROGRESS.md` as authoritative. Transcripts
+are helpful context but not authoritative state.
+
+Reason:
+
+- users can inspect and edit plans
+- sessions can resume after crashes
+- implementation remains auditable
+
+## ADR-0002: Provider-Neutral Core
+
+Status: accepted
+
+The core crate must not depend on provider-specific APIs or payload shapes.
+
+Reason:
+
+- avoids coupling the product to one vendor
+- makes local models first-class
+- keeps tests independent of network access
+
+## ADR-0001: Rust Workspace with Narrow Crates
+
+Status: accepted
+
+LocalPilot is split into narrow crates rather than one large binary crate.
+
+Reason:
+
+- clearer boundaries
+- easier clean-room review
+- smaller test surfaces
+- easier future embedding
+
+## ADR-0043: Curated Lesson Seeding And A Re-Enable Toggle For The Memory A/B
+
+Status: accepted.
+
+LocalPilot can seed a curated, author-reviewed set of best-practice lessons
+directly into LocalMind accepted memory, and can re-enable context injection it
+previously disabled. Two host-side additions, no engine change:
+
+- **`localpilot learning seed --file <pack.json>`** reads a seed pack
+  (`{ "lessons": [ { "body", "category"?, "confidence"?, "related_files"?,
+  "related_entities"?, "evidence"?, "tags"? } ] }`) and writes each lesson as
+  active accepted memory through `MemoryPersistence::persist_memory_entry` — the
+  write path `localmind-store` already sanctions for "hosts accepting memory
+  through their own review surface". It is **idempotent**: a lesson whose
+  whitespace-normalised body already exists is skipped, and the memory id is a
+  stable FNV-1a hash of that body. `--dry-run` validates and counts without
+  writing.
+- **`localpilot memory enable`** clears the `.localmind/context-injection-disabled`
+  flag that `memory disable` writes (idempotent), giving the previously one-way
+  toggle a counterpart.
+
+Rationale: the in-session candidate→review→promote queue is the right path for
+lessons *discovered* during work, but a curated pack of durable best-practice
+lessons is reviewed *at authoring time* — routing dozens of hand-written lessons
+through the per-session queue adds no safety and much friction. The human gate
+moves to authoring, not the queue; nothing is auto-extracted. The enable toggle
+exists so a lesson-on vs lesson-off measurement can be scripted (disable → run →
+enable → run) rather than hand-deleting a flag file, and the
+memories-used audit (`localpilot memory used`) proves an arm actually injected.
+
+Boundary: seeding writes accepted memory directly and therefore skips the
+contradiction-detection and code-graph anchoring that promotion-through-review
+adds; that is acceptable for curated prose lessons, and `related_entities` can
+still be supplied for retrieval. The seed path is additive — projects that never
+run `learning seed` are unchanged, and seeded memory is ordinary accepted memory
+(searchable, deletable, injection-gated like any other).

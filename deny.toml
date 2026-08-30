@@ -1,0 +1,75 @@
+# Supply-chain policy (docs/13 §1-2, §8). Every workspace dependency is
+# exact-pinned (`=x.y.z`) in the root `[workspace.dependencies]` and referenced by
+# members with `dep = { workspace = true }`; there is no second pin in a member
+# crate. New dependencies must pass `cargo deny check` and `cargo audit` before
+# use. Run `cargo deny check` as part of the pre-release gate.
+#
+# Minimum release age: a newly adopted crate *version* must have been published
+# at least 14 days before adoption (supply-chain attacks are usually caught in
+# the first days after a malicious publish). cargo-deny cannot check publish
+# dates, so this is enforced at review: the CI lockfile guard fails any
+# Cargo.lock drift that has no matching manifest change, and the reviewer of a
+# manifest change verifies the version's publish date on crates.io.
+#
+# Build scripts: a new dependency that adds a `build.rs` (or a new proc-macro)
+# gets its build script read at review before adoption — build scripts run
+# arbitrary code at compile time on every contributor machine and in CI.
+
+[advisories]
+# RustSec advisory database. Advisories are normally resolved by upgrading, not
+# ignoring. Each entry below is a deep transitive we do not control directly.
+ignore = [
+    # rustls-pemfile is unmaintained; pulled transitively via rustls. No known
+    # vulnerability — an advisory of category "unmaintained" only.
+    "RUSTSEC-2025-0134",
+    # paste is unmaintained; pulled transitively via ratatui. No known
+    # vulnerability — an "unmaintained" advisory only.
+    "RUSTSEC-2024-0436",
+    # time 0.3.37 (transitive via the LocalMind submodule, which pins it
+    # exactly): a stack-exhaustion DoS reachable only by parsing maliciously
+    # crafted RFC 2822 input. LocalMind formats/parses its own timestamps and
+    # never parses untrusted RFC 2822, so it is unreachable here. The fix (time
+    # >= 0.3.47) requires edition 2024 / Rust 1.88, above this project's MSRV
+    # 1.82, so it cannot be adopted without raising the MSRV workspace-wide;
+    # revisit when the MSRV is bumped.
+    "RUSTSEC-2026-0009",
+]
+
+[licenses]
+# Permissive licenses only. A dependency under any other license is a blocker and
+# must be replaced or its inclusion justified here.
+# CDLA-Permissive-2.0 is the license of webpki-roots, which bundles Mozilla's CA
+# certificate data used for TLS to official provider APIs; it is a permissive
+# data license, not a copyleft code license.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    # Zlib is a permissive license used by a ratatui transitive (e.g. foldhash).
+    "Zlib",
+]
+
+[bans]
+# Duplicate versions are tolerated (warn) while the tree is small; tighten to
+# "deny" before release once the graph stabilizes.
+multiple-versions = "warn"
+# Internal `{ path = ... }` members carry no version and read as wildcards;
+# `allow-wildcard-paths` does not exempt them while the crates remain publishable.
+# Keep this at "warn" until the publish posture is settled for release,
+# then tighten to "deny" alongside `publish = false` on internal crates.
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+# Crates come from crates.io only. An unknown registry or git source is a blocker
+# until explicitly allow-listed here with justification.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# First-party LocalX shared tier (rev-pinned in Cargo.toml; the pin moves in
+# lockstep with LocalBox/LocalBench per the launcher-contract rule).
+allow-git = ["https://github.com/C0deGeek-dev/localx-llama"]

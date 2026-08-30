@@ -1,0 +1,391 @@
+//! MCP transport abstraction.
+//!
+//! A real transport speaks JSON-RPC over a server process's stdio; tests use a
+//! scripted transport so the client can be exercised offline.
+
+use std::collections::HashMap;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex as AsyncMutex;
+
+use localpilot_core::{is_exact_redactable, redact_exact, Secret};
+
+use crate::error::McpError;
+
+/// Windows `CREATE_NO_WINDOW`: give the server its own invisible console
+/// instead of attaching it to the interactive TUI's (see `StdioTransport::spawn`).
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// A request/response transport to an MCP server.
+#[async_trait]
+pub trait Transport: Send + Sync {
+    /// Send a JSON-RPC method call and await the result value.
+    ///
+    /// # Errors
+    /// Returns [`McpError::Transport`] or [`McpError::Protocol`] on failure.
+    async fn call(&self, method: &str, params: Value) -> Result<Value, McpError>;
+
+    /// Send a JSON-RPC notification: a request with no `id` for which no
+    /// response is awaited. Used for `notifications/initialized`.
+    ///
+    /// The default is a no-op, which suits transports (e.g. the scripted test
+    /// transport) that have nothing to notify.
+    ///
+    /// # Errors
+    /// Returns [`McpError::Transport`] or [`McpError::Protocol`] on failure.
+    async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
+        let _ = (method, params);
+        Ok(())
+    }
+}
+
+/// A live transport that speaks newline-delimited JSON-RPC over an MCP server
+/// process's stdin/stdout. Calls are serialized: each `call` writes one request
+/// and reads responses until the matching id, skipping notifications.
+pub struct StdioTransport {
+    inner: AsyncMutex<StdioInner>,
+    next_id: AtomicU64,
+    /// The credentials this server was handed, for the inbound exact-value pass.
+    ///
+    /// An MCP server is an untrusted subprocess that can read its own
+    /// environment, so anything we gave it can come back — in the handshake, in
+    /// advertised tool metadata, in a tool result, or in a protocol error. Every
+    /// inbound value is filtered against this set before it can reach the model,
+    /// a transcript, tool-output storage, or a log. Empty for every server that
+    /// configures no environment, which is the default and costs nothing.
+    secrets: Vec<Secret>,
+}
+
+struct StdioInner {
+    // Owned so the server process lives as long as the transport; `kill_on_drop`
+    // tears it down when the transport is dropped.
+    #[allow(dead_code)]
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+/// One resolved environment entry for an MCP server.
+///
+/// The value is always wrapped, sensitive or not, so no entry can reach a log or
+/// a `Debug` render by accident. `sensitive` records whether the value came from
+/// the credential store or an explicit sensitive literal — that subset is what
+/// inbound responses are filtered against, since only a secret is worth the
+/// exact-match pass.
+#[derive(Clone)]
+pub struct ResolvedEnvEntry {
+    /// The environment variable name.
+    pub name: String,
+    /// The resolved value.
+    pub value: Secret,
+    /// Whether the value must be treated as a credential.
+    pub sensitive: bool,
+}
+
+impl std::fmt::Debug for ResolvedEnvEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The name and the sensitivity flag are safe to show; the value never is.
+        f.debug_struct("ResolvedEnvEntry")
+            .field("name", &self.name)
+            .field("value", &self.value)
+            .field("sensitive", &self.sensitive)
+            .finish()
+    }
+}
+
+/// A fully resolved environment overlay for one MCP server.
+///
+/// Deliberately config-agnostic: this crate never reads configuration or the
+/// credential store, it receives an already-resolved overlay. That keeps the
+/// resolution policy (which entry form means what, what a missing credential
+/// does) in one place in the CLI instead of splitting it across layers.
+#[derive(Debug, Clone, Default)]
+pub struct ServerEnvironment {
+    entries: Vec<ResolvedEnvEntry>,
+}
+
+impl ServerEnvironment {
+    /// Build an overlay from resolved entries.
+    #[must_use]
+    pub fn new(entries: Vec<ResolvedEnvEntry>) -> Self {
+        Self { entries }
+    }
+
+    /// The configured variable names, in order. Safe for diagnostics — a name is
+    /// not a secret.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|entry| entry.name.as_str())
+    }
+
+    /// The sensitive values, for the inbound exact-value redaction pass.
+    pub fn secrets(&self) -> impl Iterator<Item = &Secret> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.sensitive)
+            .map(|entry| &entry.value)
+    }
+}
+
+impl StdioTransport {
+    /// Spawn `command` with `args` and connect to it over stdio, overlaying
+    /// `environment` on the environment this process passes to the child.
+    ///
+    /// The child starts from the inherited environment; each configured entry
+    /// then replaces any inherited variable of the same name. Note that "same
+    /// name" is the platform's own predicate — Windows matches environment names
+    /// case-insensitively, Linux and macOS do not — which is why configuration
+    /// refuses entries that differ only by case.
+    ///
+    /// # Errors
+    /// Returns [`McpError::Transport`] if the process cannot be spawned or its
+    /// stdio cannot be captured.
+    pub fn spawn(
+        command: &str,
+        args: &[String],
+        environment: &ServerEnvironment,
+    ) -> Result<Self, McpError> {
+        let mut builder = Command::new(command);
+        builder
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        // The single audited point a configured credential leaves its wrapper.
+        // Everything upstream keeps it inside `Secret`; everything downstream
+        // filters it back out of whatever the server sends us.
+        for entry in &environment.entries {
+            builder.env(&entry.name, entry.value.expose());
+        }
+        // An MCP server lives for the whole session next to the interactive
+        // TUI. Isolate it from the user's terminal: on Windows a shared
+        // console would let it read `CONIN$` (stealing keystrokes) or re-cook
+        // the shared console mode; on Unix a new process group means a direct
+        // `/dev/tty` read gets SIGTTIN instead of the TUI's input.
+        #[cfg(windows)]
+        builder.creation_flags(CREATE_NO_WINDOW);
+        #[cfg(unix)]
+        builder.process_group(0);
+        let mut child = builder
+            .spawn()
+            .map_err(|e| McpError::Transport(format!("spawn {command}: {e}")))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| McpError::Transport("server stdin unavailable".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| McpError::Transport("server stdout unavailable".to_string()))?;
+        Ok(Self {
+            inner: AsyncMutex::new(StdioInner {
+                child,
+                stdin,
+                stdout: BufReader::new(stdout),
+            }),
+            next_id: AtomicU64::new(1),
+            // Only values long enough to match verbatim are kept; a short one
+            // would blank unrelated text wherever it happened to occur.
+            secrets: environment
+                .secrets()
+                .filter(|secret| is_exact_redactable(secret))
+                .cloned()
+                .collect(),
+        })
+    }
+}
+
+impl StdioTransport {
+    /// Strip every configured credential from an inbound value, recursively.
+    ///
+    /// Applied at the transport rather than at each caller, because that is the
+    /// one place every inbound message passes through: the `initialize`
+    /// handshake, `tools/list` metadata, and `tools/call` results all arrive
+    /// here. Filtering further up would cover tool output — which the tool
+    /// registry already redacts by pattern — and miss the handshake and the
+    /// advertised tool descriptions entirely.
+    fn redact_inbound(&self, value: &mut Value) {
+        if self.secrets.is_empty() {
+            return;
+        }
+        redact_value(value, &self.secrets);
+    }
+}
+
+/// Walk `value` and redact every string it contains, at any depth. Object *keys*
+/// are rewritten too: a server can put a credential in a key as easily as in a
+/// value.
+fn redact_value(value: &mut Value, secrets: &[Secret]) {
+    match value {
+        Value::String(text) => {
+            if let std::borrow::Cow::Owned(redacted) = redact_exact(text, secrets) {
+                *text = redacted;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_value(item, secrets);
+            }
+        }
+        Value::Object(map) => {
+            let needs_key_rewrite = map
+                .keys()
+                .any(|key| matches!(redact_exact(key, secrets), std::borrow::Cow::Owned(_)));
+            if needs_key_rewrite {
+                let rebuilt = map
+                    .iter()
+                    .map(|(key, item)| (redact_exact(key, secrets).into_owned(), item.clone()))
+                    .collect();
+                *map = rebuilt;
+            }
+            for item in map.values_mut() {
+                redact_value(item, secrets);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+#[async_trait]
+impl Transport for StdioTransport {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        let mut line =
+            serde_json::to_string(&request).map_err(|e| McpError::Protocol(e.to_string()))?;
+        line.push('\n');
+
+        let mut inner = self.inner.lock().await;
+        inner
+            .stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+        inner
+            .stdin
+            .flush()
+            .await
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+
+        loop {
+            let mut response = String::new();
+            let read = inner
+                .stdout
+                .read_line(&mut response)
+                .await
+                .map_err(|e| McpError::Transport(e.to_string()))?;
+            if read == 0 {
+                return Err(McpError::Transport(
+                    "server closed the connection".to_string(),
+                ));
+            }
+            let trimmed = response.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+                // A non-JSON line (e.g. server logging) is not our response.
+                continue;
+            };
+            // Skip notifications and responses to other in-flight ids.
+            if value.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = value.get("error") {
+                // A protocol error is server-authored text like any other, and
+                // is one of the four inbound surfaces a credential can ride out
+                // on. Filter it exactly as a result is filtered.
+                return Err(McpError::Protocol(
+                    redact_exact(&error.to_string(), &self.secrets).into_owned(),
+                ));
+            }
+            let mut result = value.get("result").cloned().unwrap_or(Value::Null);
+            self.redact_inbound(&mut result);
+            return Ok(result);
+        }
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
+        // A notification carries no `id` and expects no response.
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        let mut line =
+            serde_json::to_string(&request).map_err(|e| McpError::Protocol(e.to_string()))?;
+        line.push('\n');
+
+        let mut inner = self.inner.lock().await;
+        inner
+            .stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+        inner
+            .stdin
+            .flush()
+            .await
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+        Ok(())
+    }
+}
+
+/// A scripted transport returning canned results per method, for tests.
+#[derive(Default)]
+pub struct ScriptedTransport {
+    responses: Mutex<HashMap<String, Value>>,
+    calls: Mutex<Vec<(String, Value)>>,
+}
+
+impl ScriptedTransport {
+    /// An empty scripted transport.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Script a result for a method.
+    #[must_use]
+    pub fn with(self, method: &str, result: Value) -> Self {
+        if let Ok(mut responses) = self.responses.lock() {
+            responses.insert(method.to_string(), result);
+        }
+        self
+    }
+
+    /// Calls received so far, in order, with their JSON parameters.
+    #[must_use]
+    pub fn calls(&self) -> Vec<(String, Value)> {
+        self.calls
+            .lock()
+            .map(|calls| calls.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl Transport for ScriptedTransport {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push((method.to_string(), params));
+        }
+        self.responses
+            .lock()
+            .ok()
+            .and_then(|r| r.get(method).cloned())
+            .ok_or_else(|| McpError::Protocol(format!("no scripted response for {method}")))
+    }
+}

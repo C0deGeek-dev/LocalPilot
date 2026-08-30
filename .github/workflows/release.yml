@@ -1,0 +1,225 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # Build one archive per target for each published binary. `fail-fast: false`
+  # is deliberate: when a release build breaks we want to see *every* target that
+  # broke in one run, not just the first. Nothing is published from here — see
+  # `publish`.
+  archives:
+    name: archive (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+            localpilot_features: tui
+          # One static binary that runs on any Linux regardless of glibc vintage
+          # — Alpine, containers, and older distributions all use this one.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            ext: tar.gz
+            apt: musl-tools
+            localpilot_features: tui
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            ext: tar.gz
+            apt: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+            localpilot_features: tui
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: tar.gz
+            localpilot_features: tui
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: tar.gz
+            localpilot_features: tui,keychain
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.82"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: cross toolchain
+        if: matrix.apt != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      # The `cc`-built dependencies (sqlite, tree-sitter) need the cross compiler
+      # too, not just the Rust linker, or the C bits build for the host and the
+      # link fails late and confusingly.
+      - name: cross linker
+        if: matrix.linker != ''
+        run: |
+          triple_env=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+          echo "CARGO_TARGET_${triple_env}_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
+          echo "CC_${{ matrix.target }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p localpilot --features ${{ matrix.localpilot_features }}
+      # The umbrella `localx` binary ships from this repo's release too, as a
+      # second archive with its own manifest. It links no TUI, so it needs no
+      # extra features and builds the same way on every target.
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p localx
+      # Stage each binary alongside the license files so every archive ships them.
+      - name: stage (unix)
+        if: runner.os != 'Windows'
+        run: |
+          for tool in localpilot localx; do
+            mkdir -p "dist/$tool"
+            cp "target/${{ matrix.target }}/release/$tool" "dist/$tool/"
+            cp LICENSE README.md LICENSING.md CHANGELOG.md "dist/$tool/"
+            tar -C dist -czf "$tool-${{ matrix.target }}.tar.gz" "$tool"
+          done
+      - name: stage (windows)
+        if: runner.os == 'Windows'
+        run: |
+          foreach ($tool in 'localpilot', 'localx') {
+            New-Item -ItemType Directory -Force "dist/$tool" | Out-Null
+            Copy-Item "target/${{ matrix.target }}/release/$tool.exe" "dist/$tool/"
+            Copy-Item LICENSE, README.md, LICENSING.md, CHANGELOG.md "dist/$tool/"
+            tar -C dist -czf "$tool-${{ matrix.target }}.tar.gz" "$tool"
+          }
+      # Digest computed where the bytes are produced, so it covers exactly what
+      # was archived. It proves a download was not corrupted or truncated; it
+      # does not prove origin — only signing does that, and this repo does not
+      # sign. Say so wherever it is surfaced.
+      - name: checksum
+        shell: bash
+        run: |
+          for tool in localpilot localx; do
+            sha256sum "$tool-${{ matrix.target }}.${{ matrix.ext }}" > "$tool-${{ matrix.target }}.${{ matrix.ext }}.sha256"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            localpilot-${{ matrix.target }}.${{ matrix.ext }}
+            localpilot-${{ matrix.target }}.${{ matrix.ext }}.sha256
+            localx-${{ matrix.target }}.${{ matrix.ext }}
+            localx-${{ matrix.target }}.${{ matrix.ext }}.sha256
+
+  # Publish once, and only when **every** target built. `needs` is the
+  # completeness gate: each matrix job used to publish its own archive, so one
+  # broken target produced a release that looked finished and was quietly
+  # missing a platform. A partial release is worse than a failed one — a
+  # downloader cannot tell the difference.
+  publish:
+    name: publish release
+    needs: archives
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless signing: the workflow's own OIDC identity is the signer, so
+      # there is no key to hold, rotate, or leak.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          path: staged
+          merge-multiple: true
+      - name: verify every target is present for every binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc"
+          missing=""
+          for tool in localpilot localx; do
+            for target in $expected; do
+              if ! ls staged/"$tool"-"$target".* >/dev/null 2>&1; then
+                missing="$missing $tool/$target"
+              fi
+            done
+          done
+          if [ -n "$missing" ]; then
+            echo "refusing to publish a partial release; missing:$missing" >&2
+            exit 1
+          fi
+      # A machine-readable index of the release per binary: what exists, for
+      # which target, and the digest to check it against. An updater reads this
+      # instead of guessing archive names from a naming convention. localpilot
+      # keeps the historic `manifest.json`; the second binary gets a per-tool name
+      # so both can live in one release.
+      - name: build manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd staged
+          version="${GITHUB_REF_NAME#v}"
+          build_manifest() {
+            tool="$1"; out="$2"
+            {
+              printf '{\n  "manifest_version": 1,\n  "tool": "%s",\n  "version": "%s",\n  "artifacts": [\n' "$tool" "$version"
+              first=1
+              for archive in "$tool"-*.tar.gz; do
+                [ -e "$archive" ] || continue
+                target="${archive#"$tool"-}"
+                target="${target%.tar.gz}"
+                digest=$(cut -d' ' -f1 < "$archive.sha256")
+                size=$(wc -c < "$archive" | tr -d ' ')
+                [ $first -eq 1 ] || printf ',\n'
+                first=0
+                printf '    { "target": "%s", "file": "%s", "size": %s, "sha256": "%s" }' \
+                  "$target" "$archive" "$size" "$digest"
+              done
+              printf '\n  ]\n}\n'
+            } > "$out"
+            cat "$out"
+          }
+          build_manifest localpilot manifest.json
+          build_manifest localx manifest-localx.json
+      - name: aggregate checksums
+        shell: bash
+        run: cd staged && cat localpilot-*.sha256 localx-*.sha256 > SHA256SUMS && cat SHA256SUMS
+      # Build provenance, signed keylessly through Sigstore. Because LocalPilot
+      # is a public repository, GitHub uses Sigstore's public-good instance and
+      # records the attestation in the public Rekor transparency log. This is
+      # what a checksum cannot do: it binds an archive to the workflow,
+      # repository, and commit that produced it, so a user can verify *origin*
+      # and not merely that a download was intact. Private/internal GitHub
+      # repositories use a different instance without a transparency log, so
+      # this public-log statement must be revisited if repository visibility
+      # changes.
+      #
+      #   gh attestation verify <archive> --repo ${{ github.repository }}
+      #
+      # It is free and needs no key custody. It is **not** OS-level code signing:
+      # macOS Gatekeeper still wants an Apple Developer ID and Windows SmartScreen
+      # an EV certificate, both paid. Say so wherever this is surfaced.
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            staged/localpilot-*.tar.gz
+            staged/localx-*.tar.gz
+
+      - name: extract release notes
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v v="$ver" '$0 ~ "^## v" v "( |$)"{f=1;next} f&&/^## /{exit} f{print}' CHANGELOG.md > RELEASE_NOTES.md
+          [ -s RELEASE_NOTES.md ] || echo "Release ${GITHUB_REF_NAME}." > RELEASE_NOTES.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            staged/localpilot-*.tar.gz
+            staged/localx-*.tar.gz
+            staged/SHA256SUMS
+            staged/manifest.json
+            staged/manifest-localx.json

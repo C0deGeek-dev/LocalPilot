@@ -1,0 +1,26 @@
+[package]
+name = "localpilot-rpc"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+localpilot-core = { path = "../localpilot-core" }
+localpilot-harness = { path = "../localpilot-harness" }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
+localpilot-store = { path = "../localpilot-store" }
+
+[dev-dependencies]
+localpilot-llm = { path = "../localpilot-llm" }
+localpilot-recovery = { path = "../localpilot-recovery" }
+localpilot-tools = { path = "../localpilot-tools" }
+tempfile = { workspace = true }

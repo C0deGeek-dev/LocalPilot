@@ -1,0 +1,949 @@
+---
+source: crates/localpilot-tools/tests/tools.rs
+expression: "serde_json::to_string_pretty(&schemas).unwrap()"
+---
+[
+  [
+    "read_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "end_line": {
+          "default": null,
+          "description": "Last line to include (1-based, inclusive).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-localpilot-intent": "line"
+        },
+        "path": {
+          "description": "Workspace-relative or absolute path to read.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        },
+        "start_line": {
+          "default": null,
+          "description": "First line to include (1-based, inclusive).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-localpilot-intent": "line"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "ReadFileInput",
+      "type": "object"
+    }
+  ],
+  [
+    "write_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "content": {
+          "description": "File contents.",
+          "type": "string",
+          "x-localpilot-intent": "content"
+        },
+        "overwrite": {
+          "default": null,
+          "description": "Allow replacing an existing file. Defaults to true (overwrite is gated by the permission engine).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path to write within the workspace.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        }
+      },
+      "required": [
+        "content",
+        "path"
+      ],
+      "title": "WriteFileInput",
+      "type": "object"
+    }
+  ],
+  [
+    "append_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "content": {
+          "description": "Content to append to the end of the file.",
+          "type": "string",
+          "x-localpilot-intent": "content"
+        },
+        "path": {
+          "description": "Path to append to within the workspace.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        }
+      },
+      "required": [
+        "content",
+        "path"
+      ],
+      "title": "AppendFileInput",
+      "type": "object"
+    }
+  ],
+  [
+    "edit_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "new_text": {
+          "description": "Replacement text.",
+          "type": "string",
+          "x-localpilot-intent": "content"
+        },
+        "old_text": {
+          "description": "Exact text to replace; must match exactly once.",
+          "type": "string",
+          "x-localpilot-intent": "content"
+        },
+        "path": {
+          "description": "Path to edit within the workspace.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        }
+      },
+      "required": [
+        "new_text",
+        "old_text",
+        "path"
+      ],
+      "title": "EditFileInput",
+      "type": "object"
+    }
+  ],
+  [
+    "multi_edit",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "TextEditInput": {
+          "properties": {
+            "new_text": {
+              "description": "Replacement text.",
+              "type": "string",
+              "x-localpilot-intent": "content"
+            },
+            "old_text": {
+              "description": "Exact text to replace.",
+              "type": "string",
+              "x-localpilot-intent": "content"
+            }
+          },
+          "required": [
+            "new_text",
+            "old_text"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "edits": {
+          "description": "Ordered exact-text replacements. Each `old_text` must match exactly once at the point that edit is applied.",
+          "items": {
+            "$ref": "#/definitions/TextEditInput"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "Path to edit within the workspace.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        }
+      },
+      "required": [
+        "edits",
+        "path"
+      ],
+      "title": "MultiEditInput",
+      "type": "object"
+    }
+  ],
+  [
+    "replace_in_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "all": {
+          "default": null,
+          "description": "Replace every occurrence. Defaults to true; false replaces only the first.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "find": {
+          "description": "Text to find — an exact block that may span multiple lines. A platform-native regex when `regex` is true.",
+          "type": "string",
+          "x-localpilot-intent": "content"
+        },
+        "path": {
+          "description": "Path to edit within the workspace.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        },
+        "regex": {
+          "default": false,
+          "description": "Treat `find` as a regex (.NET on Windows, Perl on Unix). Defaults to false (literal block).",
+          "type": "boolean"
+        },
+        "replace": {
+          "description": "Replacement text. May span multiple lines.",
+          "type": "string",
+          "x-localpilot-intent": "content"
+        }
+      },
+      "required": [
+        "find",
+        "path",
+        "replace"
+      ],
+      "title": "ReplaceInFileInput",
+      "type": "object"
+    }
+  ],
+  [
+    "list_files",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "hidden": {
+          "default": false,
+          "description": "Include hidden files. Defaults to false.",
+          "type": "boolean"
+        },
+        "path": {
+          "default": null,
+          "description": "Directory to list, relative to the workspace. Defaults to the root.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        }
+      },
+      "title": "ListFilesInput",
+      "type": "object"
+    }
+  ],
+  [
+    "find_files",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "hidden": {
+          "default": false,
+          "description": "Include hidden files. Defaults to false.",
+          "type": "boolean"
+        },
+        "max_matches": {
+          "default": null,
+          "description": "Maximum number of paths to return.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "default": null,
+          "description": "Directory to search, relative to the workspace. Defaults to the root.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        },
+        "pattern": {
+          "description": "Glob-like filename pattern. Supports `*` and `?`.",
+          "type": "string",
+          "x-localpilot-intent": "glob"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "title": "FindFilesInput",
+      "type": "object"
+    }
+  ],
+  [
+    "search_text",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "is_regex": {
+          "default": false,
+          "description": "Treat `query` as a regular expression. Defaults to false (literal).",
+          "type": "boolean"
+        },
+        "max_matches": {
+          "default": null,
+          "description": "Maximum number of matches to return.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "default": null,
+          "description": "Directory to search, relative to the workspace. Defaults to the root.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        },
+        "query": {
+          "description": "Text or regular expression to search for.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "SearchTextInput",
+      "type": "object"
+    }
+  ],
+  [
+    "apply_patch",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "PatchHunk": {
+          "properties": {
+            "new_text": {
+              "description": "Replacement text.",
+              "type": "string"
+            },
+            "old_text": {
+              "description": "Exact text to replace; must match exactly once at the point this hunk is applied.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "new_text",
+            "old_text"
+          ],
+          "type": "object"
+        },
+        "PatchOperation": {
+          "oneOf": [
+            {
+              "description": "Create a new file (fails if the file already exists).",
+              "properties": {
+                "action": {
+                  "enum": [
+                    "create"
+                  ],
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action",
+                "content",
+                "path"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Apply exact-match hunks to an existing file, in order.",
+              "properties": {
+                "action": {
+                  "enum": [
+                    "update"
+                  ],
+                  "type": "string"
+                },
+                "hunks": {
+                  "items": {
+                    "$ref": "#/definitions/PatchHunk"
+                  },
+                  "type": "array"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action",
+                "hunks",
+                "path"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Delete an existing file.",
+              "properties": {
+                "action": {
+                  "enum": [
+                    "delete"
+                  ],
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action",
+                "path"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "description": "A structured multi-file patch. The grammar is typed JSON generated from these structs (original to this repository): an ordered list of operations, each creating, updating (exact-match hunks), or deleting one file.",
+      "properties": {
+        "operations": {
+          "description": "Ordered file operations; the whole patch is validated before any write.",
+          "items": {
+            "$ref": "#/definitions/PatchOperation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "operations"
+      ],
+      "title": "ApplyPatchInput",
+      "type": "object"
+    }
+  ],
+  [
+    "run_shell",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "Arguments passed to `program` for direct execution.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "default": null,
+          "description": "Shell command line to execute through the platform shell.",
+          "type": "string",
+          "x-localpilot-intent": "command"
+        },
+        "program": {
+          "default": null,
+          "description": "Program to execute directly when `args` is provided; otherwise treated as a shell command line.",
+          "type": "string",
+          "x-localpilot-intent": "command"
+        },
+        "timeout_secs": {
+          "default": null,
+          "description": "Timeout in seconds. Defaults to 60.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "RunShellInput",
+      "type": "object"
+    }
+  ],
+  [
+    "run_background",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "BackgroundAction": {
+          "oneOf": [
+            {
+              "description": "Start a long-running command as a background process (the default).",
+              "enum": [
+                "start"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "List the tracked background processes.",
+              "enum": [
+                "list"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Read the captured output of a tracked process by `id`.",
+              "enum": [
+                "logs"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Stop and forget a tracked process by `id`.",
+              "enum": [
+                "stop"
+              ],
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "action": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/BackgroundAction"
+            }
+          ],
+          "description": "What to do. Defaults to starting a process."
+        },
+        "args": {
+          "default": [],
+          "description": "For `start`: arguments passed to `program` for direct execution.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "default": null,
+          "description": "For `start`: a shell command line to run in the background.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "grace_secs": {
+          "default": null,
+          "description": "For `start`: seconds to wait before judging the process stayed up. Defaults to 2.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "default": null,
+          "description": "For `logs`/`stop`: the id of the tracked process (as returned by `start`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "program": {
+          "default": null,
+          "description": "For `start`: a program to run directly when `args` is provided; otherwise treated as a shell command line.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "RunBackgroundInput",
+      "type": "object"
+    }
+  ],
+  [
+    "fetch",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "max_bytes": {
+          "default": null,
+          "description": "Maximum number of body bytes to return. Capped at the tool output limit.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_secs": {
+          "default": null,
+          "description": "Request timeout in seconds. Defaults to 30.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "http or https URL to retrieve.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "FetchInput",
+      "type": "object"
+    }
+  ],
+  [
+    "read_tool_output",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "end_line": {
+          "default": null,
+          "description": "Last line to include (1-based, inclusive).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-localpilot-intent": "line"
+        },
+        "id": {
+          "description": "The retention id from a truncated tool result.",
+          "type": "string"
+        },
+        "start_line": {
+          "default": null,
+          "description": "First line to include (1-based, inclusive).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-localpilot-intent": "line"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ReadToolOutputInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_status",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "GitStatusInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_diff",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "paths": {
+          "default": [],
+          "description": "Optional paths to limit the diff.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-localpilot-intent": "path-list"
+        },
+        "staged": {
+          "default": false,
+          "description": "Show staged changes. Defaults to false.",
+          "type": "boolean"
+        }
+      },
+      "title": "GitDiffInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_log",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "max_count": {
+          "default": null,
+          "description": "Maximum commits to show. Defaults to 10.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "GitLogInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_add",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "paths": {
+          "description": "Paths to operate on.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-localpilot-intent": "path-list"
+        }
+      },
+      "required": [
+        "paths"
+      ],
+      "title": "GitPathInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_restore",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "paths": {
+          "description": "Paths to operate on.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-localpilot-intent": "path-list"
+        }
+      },
+      "required": [
+        "paths"
+      ],
+      "title": "GitPathInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_commit",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "message": {
+          "description": "Commit message. Must not contain secrets.",
+          "type": "string",
+          "x-localpilot-intent": "content"
+        },
+        "paths": {
+          "default": [],
+          "description": "Specific paths to stage and commit. Empty commits already-staged changes.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-localpilot-intent": "path-list"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "title": "GitCommitInput",
+      "type": "object"
+    }
+  ],
+  [
+    "delegate",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Input for [`Delegate`].",
+      "properties": {
+        "agent": {
+          "description": "Name of the agent to delegate to, as listed by `localpilot agents list`.",
+          "type": "string"
+        },
+        "task": {
+          "description": "The task to hand over. Be specific: the agent starts with an empty context and cannot see this conversation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "task"
+      ],
+      "title": "DelegateInput",
+      "type": "object"
+    }
+  ],
+  [
+    "ask_user",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "OptionInput": {
+          "properties": {
+            "description": {
+              "default": null,
+              "description": "What choosing this means, when the label alone is not enough.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "description": "The answer text the user picks.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "type": "object"
+        },
+        "QuestionInput": {
+          "properties": {
+            "header": {
+              "default": null,
+              "description": "A short label for the question's topic (a few words).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "multi_select": {
+              "default": false,
+              "description": "Whether several options may be chosen together. Only for choices that genuinely combine.",
+              "type": "boolean"
+            },
+            "options": {
+              "description": "Two to four distinct answers to offer. The user can always type something else instead, so these are a best guess, not a ceiling.",
+              "items": {
+                "$ref": "#/definitions/OptionInput"
+              },
+              "type": "array"
+            },
+            "question": {
+              "description": "The question to put to the user.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "options",
+            "question"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "questions": {
+          "description": "The questions to ask, in order. One to four.",
+          "items": {
+            "$ref": "#/definitions/QuestionInput"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "title": "AskUserInput",
+      "type": "object"
+    }
+  ],
+  [
+    "swarm",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "action": {
+          "description": "What to do: `send` a message to one peer, `broadcast` to the agents you spawned (or, if you are the coordinator, to the whole swarm), or `roster` to see who is here.",
+          "type": "string"
+        },
+        "body": {
+          "default": null,
+          "description": "The message itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delivery": {
+          "default": null,
+          "description": "`notify` (default) to leave the recipient undisturbed, `interrupt` to reach its running turn, or `wake` to also start a turn if it is idle.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "default": null,
+          "description": "For `broadcast`: `swarm` to address every member. Coordinator only; otherwise the message goes to the agents you spawned.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tldr": {
+          "default": null,
+          "description": "A one-line summary. Required when the body is long.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "default": null,
+          "description": "For `send`: the peer, by name or session id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "SwarmInput",
+      "type": "object"
+    }
+  ],
+  [
+    "update_plan",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "PlanStepInput": {
+          "properties": {
+            "status": {
+              "description": "One of: `pending`, `in_progress`, `done`.",
+              "type": "string"
+            },
+            "title": {
+              "description": "Short imperative description of the task.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "title"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "steps": {
+          "description": "The ordered task list shown to the user.",
+          "items": {
+            "$ref": "#/definitions/PlanStepInput"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "title": "UpdatePlanInput",
+      "type": "object"
+    }
+  ]
+]
