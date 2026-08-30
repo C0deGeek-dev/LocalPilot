@@ -1,4 +1,4 @@
-﻿---
+---
 name: add-mcp-integration
 description: >-
   Wire an MCP client integration so MCP tools/resources go through the same

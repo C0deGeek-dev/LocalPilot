@@ -1,4 +1,4 @@
-﻿---
+---
 name: add-tool
 description: >-
   Add or change a builtin tool — Tool trait, schema gen, registration, permission

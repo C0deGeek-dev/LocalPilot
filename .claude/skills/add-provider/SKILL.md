@@ -1,4 +1,4 @@
-﻿---
+---
 name: add-provider
 description: >-
   Add or change a model provider — provider trait in localpilot-llm, stream-event

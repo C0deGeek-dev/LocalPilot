@@ -1,4 +1,4 @@
-﻿---
+---
 name: implement-harness-step
 description: >-
   Implement or modify the harness execution loop (brief.md / PROGRESS.md, rule
