@@ -71,3 +71,25 @@ No private endpoint behavior used.
 - [ ] No secrets in fixtures.
 - [ ] No broad unrelated refactors.
 
+## Contributor Certificate of Origin
+
+By submitting a contribution (for example, a pull request) to this
+repository, you certify that:
+
+1. the contribution was created in whole or in part by you and you have the
+   right to submit it under the terms below; or
+2. the contribution is based on prior work that, to your knowledge, is
+   covered under an appropriate license, and you have the right to submit
+   that work under this license; or
+3. the contribution was provided to you by someone who certified (1) or (2)
+   and you have not modified it.
+
+You keep copyright in your contribution. You grant David Ben-Yishai and Bram
+Hammer a perpetual, worldwide, non-exclusive, royalty-free, irrevocable
+license to use, reproduce, modify, prepare derivative works of, publicly
+display, publicly perform, sublicense, and distribute your contribution as
+part of this project, including under license terms other than this
+repository's PolyForm Noncommercial License — for example, a commercial
+license. This project does not use a separate signed CLA process; submitting
+a pull request is treated as acceptance of this certificate.
+

@@ -327,6 +327,8 @@ LocalPilot is the agent layer in the
 
 ## License
 
+![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0-blue.svg)
+
 LocalX-owned source is available under the
 [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use requires a
 separate license. See [LICENSING.md](LICENSING.md) for the commercial contact,
