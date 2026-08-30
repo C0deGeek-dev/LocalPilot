@@ -1,27 +1,17 @@
-﻿# Agent Notes
+# Agent Notes
 
-When working in this repository, `D:\repos\localpilot` may be inspected as a
-read-only behavior reference when local docs are incomplete.
+Treat this repository's tracked source, tests, and documentation as the complete
+implementation reference. Keep implementation, prompts, tests, private endpoint
+details, identifiers, UI copy, and branding original to this repository.
 
-Use it only to understand workflows, command behavior, configuration shape,
-user-facing edge cases, and high-level requirements. Keep implementation,
-prompts, tests, private endpoint details, identifiers, UI copy, and branding
-original to this repository.
-
-Do not modify files outside this workspace unless the user explicitly asks for
-that.
+Do not inspect or modify files outside this checkout unless the user explicitly
+places them in scope.
 
 ## Planning your work
 
-Plan at the right weight. Small change (1-2 files, one session, no new crate):
-`EnterPlanMode` in-session, then `/code-review` + `/simplify`. Large change (3+
-crates, a new crate, multi-session, a non-negotiable surface, or a new ADR): use
-the `plan-large-task` skill — copy its template to `tasks/<Name>-Plan.md` and
-run subjects with resume-safe checkpoints and a Captain Hindsight review at each
-subject close. The trigger and rules live in
-[`docs/14-dev-tooling.md`](docs/14-dev-tooling.md) §7.
-
-`tasks/` holds disposable build-plan files (deleted before v1); shipped code and
-commits stay plan-agnostic, and durable architecture decisions are promoted to
-ADRs in [`docs/10-decisions.md`](docs/10-decisions.md). Never name a build-plan
-file `PROGRESS.md` or `brief.md` — those belong to the product harness runtime.
+Plan at the right weight. Small changes can use an in-session plan; large or
+multi-session changes can use the `plan-large-task` skill with an ignored local
+`tasks/` workspace and resume-safe checkpoints. Never commit those transient
+plans to the distribution. Durable architecture decisions belong in
+[`docs/10-decisions.md`](docs/10-decisions.md). Never name a build-plan file
+`PROGRESS.md` or `brief.md` — those belong to the product harness runtime.

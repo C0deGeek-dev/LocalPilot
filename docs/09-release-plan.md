@@ -2,8 +2,8 @@
 
 > **Historical — superseded.** This is the pre-1.0 release plan. LocalPilot ships
 > as part of the coordinated LocalX release train (the current version is the
-> top-level `VERSION` file); the live ceremony lives in the private LocalHub
-> repo (`policies/coordinated-release.md`). Kept for history.
+> top-level `VERSION` file); the live ceremony is maintained in private release
+> operations. Kept for history.
 
 ## Versioning
 
@@ -90,4 +90,3 @@ Scan for:
 
 Provider names in official API docs are allowed when used only as integration
 labels.
-

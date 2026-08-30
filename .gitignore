@@ -3,6 +3,7 @@
 /localmind.sqlite
 .localpilot/
 /.harness/
+/tasks/
 /.localmind/
 /.localmind.toml
 *.log

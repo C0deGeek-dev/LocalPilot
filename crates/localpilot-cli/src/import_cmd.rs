@@ -361,8 +361,8 @@ mod tests {
     #[test]
     fn encode_cwd_matches_claude_codes_folder_scheme() {
         assert_eq!(
-            encode_cwd(Path::new(r"D:\repos\LocalX\LocalPilot")),
-            "D--repos-LocalX-LocalPilot"
+            encode_cwd(Path::new(r"D:\work\LocalPilot")),
+            "D--work-LocalPilot"
         );
     }
 

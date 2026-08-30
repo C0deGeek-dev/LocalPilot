@@ -13,7 +13,7 @@
 //!
 //! ```text
 //! cargo run --release -p localpilot-localmind --example memory_retrieval_quality -- \
-//!     D:/repos/LocalX  D:/repos/LocalX/LocalHub/plans/memoryretrievalquality
+//!     D:/work/project  D:/work/project/evaluation/memory-retrieval
 //! ```
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]
 
