@@ -4,6 +4,10 @@ description: >-
   Add or change a builtin tool — Tool trait, schema gen, registration, permission
   routing, sandbox/path policy, allow/deny tests. Use when working in
   localpilot-tools.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # add a tool (stub)

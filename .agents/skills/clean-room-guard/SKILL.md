@@ -5,6 +5,10 @@ description: >-
   read-only behavior reference, before writing prompts/identifiers/UI copy, and
   before opening any PR — to know what may be copied (nothing proprietary), when
   a provenance note is required, and what framing is prohibited.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # clean-room guard

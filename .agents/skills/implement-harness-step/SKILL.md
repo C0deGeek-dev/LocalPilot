@@ -5,6 +5,10 @@ description: >-
   running a step, applying rule verdicts, respecting attempt limits, updating
   progress, and committing per the commit policy. Use when touching
   localpilot-harness or any init/status/intake/plan/feature/resume command.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # implement a harness step

@@ -4,6 +4,10 @@ description: >-
   Wire an MCP client integration so MCP tools/resources go through the same
   permission and redaction pipeline as builtin tools. Use when working in
   localpilot-mcp.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # add an MCP integration (stub)

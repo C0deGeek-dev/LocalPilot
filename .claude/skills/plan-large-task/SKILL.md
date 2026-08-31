@@ -6,6 +6,10 @@ description: >-
   the canonical plan template (c0degeek-ai plan-from-template skill) into
   tasks/<Name>-Plan.md with subjects, a decision log, resume-safe checkpoints,
   and a Captain Hindsight review at each subject close.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # plan a large task (stub)

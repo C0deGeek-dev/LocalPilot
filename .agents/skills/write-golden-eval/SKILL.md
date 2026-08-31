@@ -4,6 +4,10 @@ description: >-
   Author a golden-task eval — a deterministic, original task fixture with the
   scorecard fields the suite records. Use when adding to the eval suite so tasks
   stay first-party and reproducible, not ad hoc benchmarks.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # write a golden eval

@@ -5,6 +5,10 @@ description: >-
   schema from typed structs, register it, route every call through the permission
   engine, apply the sandbox/path policy, and write the required allow/deny tests.
   Use when working in localpilot-tools.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # add a tool

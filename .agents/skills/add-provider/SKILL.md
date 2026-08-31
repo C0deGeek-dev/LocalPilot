@@ -5,6 +5,10 @@ description: >-
   behind the registry, map the stream-event model, declare capabilities and quota
   metadata, handle the error taxonomy, and write the required provider tests. Use
   for provider/adapter work.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # add a provider

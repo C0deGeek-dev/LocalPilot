@@ -4,6 +4,10 @@ description: >-
   Apply this repository's clean-room provenance rules. Use before consulting the
   read-only behavior reference, before writing prompts/identifiers/UI copy, and
   before opening any PR.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # clean-room guard (stub)

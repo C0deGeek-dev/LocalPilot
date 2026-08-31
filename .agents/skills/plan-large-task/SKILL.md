@@ -8,6 +8,10 @@ description: >-
   subjects, a decision log, resume-safe checkpoints, and a Captain Hindsight
   review at each subject close. Use when starting any multi-step build effort
   and you must decide how heavy the plan should be.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # plan a large task

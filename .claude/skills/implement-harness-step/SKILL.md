@@ -4,6 +4,10 @@ description: >-
   Implement or modify the harness execution loop (brief.md / PROGRESS.md, rule
   verdicts, attempt limits, progress update, commit policy). Use when touching
   localpilot-harness or the init/status/intake/plan/feature/resume commands.
+license: PolyForm-Noncommercial-1.0.0
+metadata:
+  version: "1.0.0"
+  spec: https://agentskills.io/specification
 ---
 
 # implement a harness step (stub)
