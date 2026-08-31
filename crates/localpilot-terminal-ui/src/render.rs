@@ -838,7 +838,20 @@ fn render_takeover(
         TakeoverKind::Settings => 3,
         TakeoverKind::Sessions => 2,
         TakeoverKind::Diff | TakeoverKind::Help | TakeoverKind::Report => 1,
-        TakeoverKind::LocalMind => 3,
+        // Review answers three questions under its list — who is reviewing,
+        // which candidate is selected and why it withholds its verbs, and what
+        // the candidate carries — so it keeps one row more than the read-only
+        // sections.
+        TakeoverKind::LocalMind => {
+            if takeover
+                .localmind
+                .is_some_and(|localmind| localmind.section == LocalMindSection::Review)
+            {
+                4
+            } else {
+                3
+            }
+        }
     };
     let content_offset = 2;
     let content = Rect::new(
@@ -890,7 +903,26 @@ fn render_takeover(
         }
         TakeoverKind::LocalMind => match takeover.localmind {
             Some(localmind) => {
-                if localmind.section == LocalMindSection::Review {
+                if localmind.section == LocalMindSection::Review && localmind.reading_evidence {
+                    // The carried source, over the list it belongs to: the one
+                    // preview row cannot hold a bounded chunk, so this is where
+                    // the evidence is actually read.
+                    let lines = localmind
+                        .review
+                        .get(takeover.selected)
+                        .and_then(crate::app::review_detail)
+                        .map(|(_, lines)| lines)
+                        .unwrap_or_default();
+                    let (start, total, rendered) = text_takeover_window(
+                        &lines,
+                        localmind.evidence_scroll,
+                        viewport_rows,
+                        content.width,
+                        theme,
+                    );
+                    frame.render_widget(Paragraph::new(rendered), content);
+                    (start, total, viewport_rows, Vec::new(), Vec::new())
+                } else if localmind.section == LocalMindSection::Review {
                     let maximum = localmind.review.len().saturating_sub(viewport_rows);
                     let start = takeover.scroll.min(maximum);
                     let mut hits = Vec::new();
@@ -910,21 +942,26 @@ fn render_takeover(
                         } else {
                             " "
                         };
+                        // A research excerpt's summary is a source dump, so a
+                        // flag appended after it is the first thing truncation
+                        // eats — and it is the flag that explains why the pane
+                        // withholds accept and promote. The state and the flags
+                        // lead; the summary takes what is left.
                         let promoted = if row.promoted { " · promoted" } else { "" };
-                        let edit = if row.requires_edit {
+                        let edit = if row.requires_edit && row.replacement.is_none() {
                             " · edit required"
                         } else {
                             ""
                         };
                         let text = truncate_end(
                             &format!(
-                                "{marker} [{}] {} — {} · {}{}{}",
+                                "{marker} [{}{}{}] {} · {} — {}",
                                 row.state,
-                                row.summary,
+                                promoted,
+                                edit,
                                 row.category,
                                 row.confidence,
-                                promoted,
-                                edit
+                                row.summary,
                             ),
                             content.width,
                         );
@@ -1230,24 +1267,79 @@ fn render_takeover(
                 .style(theme.ui(UiRole::Muted)),
             Rect::new(
                 area.x.saturating_add(1),
+                area.bottom().saturating_sub(4),
+                area.width.saturating_sub(3),
+                1,
+            ),
+        );
+        // Which candidate is selected, and why it is holding its verbs back.
+        // The id is here because every route outside this pane addresses a
+        // candidate by it, and the reason is here because #152 stopped
+        // advertising the withheld keys and nothing took their place.
+        let selection = match (
+            app.localmind_selected_candidate(),
+            app.localmind_review_hint(),
+        ) {
+            (Some(id), Some(hint)) => format!("id {id} · {hint}"),
+            (Some(id), None) => format!("id {id}"),
+            (None, Some(hint)) => hint,
+            (None, None) => String::new(),
+        };
+        frame.render_widget(
+            Paragraph::new(truncate_end(&selection, area.width.saturating_sub(3)))
+                .style(theme.ui(UiRole::Muted)),
+            Rect::new(
+                area.x.saturating_add(1),
                 area.bottom().saturating_sub(3),
                 area.width.saturating_sub(3),
                 1,
             ),
         );
-        let detail = localmind
+        // The carried text under the summary, named by the field it came from:
+        // source evidence, a reviewer's replacement and a reviewer's note are
+        // different claims and must not share one label. Reading, this row
+        // reports where in the source the reader is instead.
+        let carried = localmind
             .review
             .get(takeover.selected)
-            .and_then(|row| {
-                row.evidence
-                    .as_deref()
-                    .or(row.replacement.as_deref())
-                    .or(row.note.as_deref())
-            })
-            .map_or_else(String::new, |text| format!("Evidence: {text}"));
+            .and_then(crate::app::review_detail);
+        let detail = match carried {
+            // The lesson being written replaces the preview: it is what the
+            // operator is looking at while they type it.
+            _ if localmind.editing_replacement => {
+                format!("Lesson: {}_", localmind.replacement_draft)
+            }
+            Some((label, _)) if localmind.reading_evidence => {
+                let shown = start.saturating_add(scrollbar_rows).min(total_rows);
+                format!(
+                    "{label} · lines {}-{shown} of {total_rows}",
+                    start.saturating_add(1).min(total_rows)
+                )
+            }
+            Some((label, lines)) => {
+                let mut body = lines.iter().filter(|line| !line.trim().is_empty());
+                match body.next() {
+                    Some(first) => {
+                        let rest = body.count();
+                        if rest == 0 {
+                            format!("{label}: {}", first.trim_end())
+                        } else {
+                            format!("{label}: {} · +{rest} more lines", first.trim_end())
+                        }
+                    }
+                    None => format!("{label}: (empty)"),
+                }
+            }
+            None => "No evidence carried by this candidate.".to_string(),
+        };
+        // A draft follows its cursor; every other line here reads from the start.
+        let detail = if localmind.editing_replacement {
+            truncate_start(&detail, area.width.saturating_sub(3))
+        } else {
+            truncate_end(&detail, area.width.saturating_sub(3))
+        };
         frame.render_widget(
-            Paragraph::new(truncate_end(&detail, area.width.saturating_sub(3)))
-                .style(theme.ui(UiRole::Muted)),
+            Paragraph::new(detail).style(theme.ui(UiRole::Muted)),
             Rect::new(
                 area.x.saturating_add(1),
                 area.bottom().saturating_sub(2),
@@ -1272,6 +1364,12 @@ fn render_takeover(
             let busy = app.active_work_activity().is_some();
             if localmind.editing_reviewer {
                 "Type reviewer identity · Enter save · Esc cancel".to_string()
+            } else if localmind.section == LocalMindSection::Review
+                && localmind.editing_replacement
+            {
+                "Write one standalone lesson · Enter save · Esc cancel".to_string()
+            } else if localmind.section == LocalMindSection::Review && localmind.reading_evidence {
+                "↑/↓ scroll · Ctrl+C copy · e write lesson · v/Esc back".to_string()
             } else if localmind.section == LocalMindSection::Graph {
                 if busy {
                     "Tab/Shift+Tab section · ↑/↓ scroll · reindex running · Esc close".to_string()
@@ -1280,22 +1378,41 @@ fn render_takeover(
                         .to_string()
                 }
             } else if localmind.section == LocalMindSection::Review {
+                // Reading is read-only, so it stays offered while an operation
+                // holds the deciding verbs — but only on a row that has
+                // something to read.
+                let reader = if localmind
+                    .review
+                    .get(takeover.selected)
+                    .and_then(crate::app::review_detail)
+                    .is_some_and(|(_, lines)| lines.iter().any(|line| !line.trim().is_empty()))
+                {
+                    " · v evidence"
+                } else {
+                    ""
+                };
                 if busy {
-                    "Tab/Shift+Tab section · ↑/↓ select · actions resume when idle · Esc close"
-                        .to_string()
+                    format!(
+                        "Tab/Shift+Tab section · ↑/↓ select · actions resume when idle{reader} · Esc close"
+                    )
                 } else {
                     let available = app.localmind_review_available();
-                    let verbs: Vec<&str> = [("a accept", 0), ("r reject", 1), ("p promote", 2)]
-                        .into_iter()
-                        .filter(|(_, index)| available[*index])
-                        .map(|(verb, _)| verb)
-                        .collect();
+                    let verbs: Vec<&str> = [
+                        ("a accept", 0),
+                        ("r reject", 1),
+                        ("p promote", 2),
+                        ("e edit", 3),
+                    ]
+                    .into_iter()
+                    .filter(|(_, index)| available[*index])
+                    .map(|(verb, _)| verb)
+                    .collect();
                     let verbs = if verbs.is_empty() {
                         "no action for this candidate".to_string()
                     } else {
                         verbs.join(" · ")
                     };
-                    format!("Tab/Shift+Tab section · ↑/↓ select · {verbs} · Esc close")
+                    format!("Tab/Shift+Tab section · ↑/↓ select · {verbs}{reader} · Esc close")
                 }
             } else {
                 "Tab/Shift+Tab section · ↑/↓ scroll · Ctrl+C copy · Esc close".to_string()
@@ -4024,6 +4141,33 @@ fn two_sided(left: &str, right: &str, width: u16) -> String {
     let left_width = UnicodeWidthStr::width(left.as_str());
     let gap = width.saturating_sub(left_width).saturating_sub(right_width);
     format!("{left}{}{right}", " ".repeat(gap))
+}
+
+/// Keep the **end** of `text`, marking the elision at the front.
+///
+/// A line being typed into follows the cursor, so when a draft outgrows the row
+/// the tail is what the writer needs to see — the opposite of every other line
+/// in this pane, which is read from its start.
+fn truncate_start(text: &str, width: u16) -> String {
+    let budget = usize::from(width);
+    if UnicodeWidthStr::width(text) <= budget {
+        return text.to_string();
+    }
+    if budget <= 1 {
+        return "…".to_string();
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 1usize;
+    for grapheme in text.graphemes(true).rev() {
+        let width = UnicodeWidthStr::width(grapheme);
+        if used.saturating_add(width) > budget {
+            break;
+        }
+        used = used.saturating_add(width);
+        kept.push(grapheme);
+    }
+    kept.reverse();
+    format!("…{}", kept.concat())
 }
 
 fn truncate_end(text: &str, width: u16) -> String {
@@ -7611,6 +7755,16 @@ mod tests {
         assert!(footer.contains("Ctrl+C / Esc interrupt"));
     }
 
+    /// The shape a research candidate actually stores: the fenced block the
+    /// Markdown report renders, its own `Evidence:` header included. A bare
+    /// one-line string is not a shape any production path can produce.
+    const STORED_EVIDENCE: &str = "Evidence:\n\
+         ```\n\
+         [stale: the source file changed since ingest]\n\
+         A large report stayed responsive.\n\
+         The second line of the source chunk.\n\
+         ```";
+
     /// One pending candidate plus a populated graph — enough for the section
     /// cycle, the footer rules and the operation status.
     fn localmind_fixture() -> crate::LocalMindData {
@@ -7628,7 +7782,7 @@ mod tests {
                 note: None,
                 replacement: None,
                 seen_count: 1,
-                evidence: Some("A large report stayed responsive.".to_string()),
+                evidence: Some(STORED_EVIDENCE.to_string()),
                 requires_edit: false,
                 promoted: false,
             }],
@@ -7654,7 +7808,7 @@ mod tests {
                 note: None,
                 replacement: None,
                 seen_count: 1,
-                evidence: Some("A large report stayed responsive.".to_string()),
+                evidence: Some(STORED_EVIDENCE.to_string()),
                 requires_edit: false,
                 promoted: false,
             }],
@@ -7709,7 +7863,153 @@ mod tests {
         // model will honour rather than all three unconditionally.
         assert!(rendered.contains("a accept · r reject"));
         assert!(!rendered.contains("p promote"));
-        assert!(rendered.contains("Evidence: A large report stayed responsive."));
+        // The stored text carries its own `Evidence:` header, so the label is
+        // never printed twice, and the preview shows source rather than the
+        // envelope — including the marker that says the source has moved on.
+        assert!(!rendered.contains("Evidence: Evidence:"));
+        assert!(rendered
+            .contains("Evidence: [stale: the source file changed since ingest] · +2 more lines"));
+        assert!(rendered.contains("v evidence"));
+    }
+
+    /// The one-row strip is a preview; the reader is where a bounded chunk is
+    /// actually read. `v` opens it over the row list, with the source scrolled
+    /// and the position disclosed.
+    #[test]
+    fn v_reads_the_carried_evidence_over_the_review_list() {
+        let mut app = model();
+        app.open_localmind(localmind_fixture());
+        for _ in 0..3 {
+            let _ = app.handle_input(crate::InputAction::AcceptCompletion, 80);
+        }
+        assert_eq!(
+            app.localmind_section(),
+            Some(crate::LocalMindSection::Review)
+        );
+        let _ = app.handle_input(crate::InputAction::Insert("v".to_string()), 80);
+
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("render evidence reader");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("[stale: the source file changed since ingest]"));
+        assert!(rendered.contains("A large report stayed responsive."));
+        assert!(rendered.contains("The second line of the source chunk."));
+        // The envelope stays out of the body, and the row list is covered.
+        assert!(!rendered.contains("```"));
+        assert!(!rendered.contains("Prefer bounded terminal views"));
+        assert!(rendered.contains("Evidence · lines 1-3 of 3"));
+        assert!(rendered.contains("v/Esc back"));
+    }
+
+    /// A source excerpt used to be a row you could only reject, with nothing on
+    /// screen saying why. The pane now names the candidate, states the step that
+    /// unblocks it, keeps the `edit required` marker ahead of the excerpt that
+    /// would truncate it away, and offers the key that writes the lesson.
+    #[test]
+    fn an_excerpt_row_shows_why_it_holds_back_and_which_key_unblocks_it() {
+        let mut app = model();
+        let mut data = localmind_fixture();
+        data.review[0].requires_edit = true;
+        data.review[0].summary = "Excerpt from knowledge: ".to_string() + &"source ".repeat(40);
+        app.open_localmind(data);
+        for _ in 0..3 {
+            let _ = app.handle_input(crate::InputAction::AcceptCompletion, 80);
+        }
+
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("render review");
+        let rendered = terminal.backend().to_string();
+
+        // The marker leads, so a 300-character excerpt cannot truncate it away.
+        assert!(rendered.contains("[Pending · edit required]"));
+        assert!(rendered.contains("id candidate-1"));
+        assert!(rendered.contains("Source excerpt — e rewrites it as a standalone lesson"));
+        // Accept and promote are withheld, and the verb that unblocks them is
+        // offered in their place.
+        assert!(!rendered.contains("a accept"));
+        assert!(!rendered.contains("p promote"));
+        assert!(rendered.contains("r reject · e edit"));
+    }
+
+    /// The lesson is written where the excerpt is read: the editor takes the
+    /// carried-text row and the footer says what is expected in it.
+    #[test]
+    fn e_writes_the_lesson_in_the_pane_that_shows_the_excerpt() {
+        let mut app = model();
+        let mut data = localmind_fixture();
+        data.review[0].requires_edit = true;
+        app.open_localmind(data);
+        for _ in 0..3 {
+            let _ = app.handle_input(crate::InputAction::AcceptCompletion, 80);
+        }
+        let _ = app.handle_input(crate::InputAction::Insert("i".to_string()), 80);
+        for letter in ["B", "r", "a", "m"] {
+            let _ = app.handle_input(crate::InputAction::Insert(letter.to_string()), 80);
+        }
+        let _ = app.handle_input(crate::InputAction::Submit, 80);
+        let _ = app.handle_input(crate::InputAction::Insert("e".to_string()), 80);
+        for letter in ["B", "o", "u", "n", "d"] {
+            let _ = app.handle_input(crate::InputAction::Insert(letter.to_string()), 80);
+        }
+
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("render lesson editor");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("Lesson: Bound_"));
+        assert!(rendered.contains("Write one standalone lesson · Enter save · Esc cancel"));
+        assert!(rendered.contains("Reviewer: Bram"));
+    }
+
+    /// A draft longer than its row keeps its tail: a line being typed into
+    /// follows the cursor, unlike every other line in this pane.
+    #[test]
+    fn a_long_lesson_draft_shows_the_end_it_is_being_typed_into() {
+        assert_eq!(truncate_start("abcdef", 10), "abcdef");
+        assert_eq!(truncate_start("abcdefghij", 5), "…ghij");
+        assert_eq!(truncate_start("wide 好好好好", 6), "…好好");
+        assert_eq!(truncate_start("abcdef", 1), "…");
+    }
+
+    /// A candidate carrying nothing says so, instead of leaving a blank row
+    /// that reads as a broken renderer, and its reader key is not advertised.
+    #[test]
+    fn a_candidate_without_carried_text_says_so_and_offers_no_reader() {
+        let mut app = model();
+        let mut data = localmind_fixture();
+        data.review[0].evidence = None;
+        app.open_localmind(data);
+        for _ in 0..3 {
+            let _ = app.handle_input(crate::InputAction::AcceptCompletion, 80);
+        }
+
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("render review");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("No evidence carried by this candidate."));
+        assert!(!rendered.contains("v evidence"));
     }
 
     /// The LocalMind tab replaces the session body, so an operation started

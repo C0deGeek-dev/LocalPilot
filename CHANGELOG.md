@@ -6,6 +6,38 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A source excerpt is no longer a review candidate you can only reject**
+  (ADR-0177, amending ADR-0153). `e` on the LocalMind tab's Review section
+  writes the standalone lesson that a `/research` excerpt needs before it can be
+  accepted or promoted, through the same permission seam as the other verdicts;
+  the editor opens over the row and stays available inside the evidence reader,
+  refuses a blank lesson before it becomes a write, and leaves the approval
+  prompt free of the lesson text. Refusals now name the rule that actually
+  fired — accepting an excerpt said "only a pending candidate can be accepted;
+  this one is Pending", a reason the row satisfied — and say what a standalone
+  lesson is and which key writes one. The pane states what it withholds without
+  a keypress: the Review section shows the selected candidate's id and why its
+  verbs are held back, and the `edit required` marker now leads the row instead
+  of being truncated away behind a several-hundred-character excerpt. "Still an
+  excerpt" means the flag **and** no replacement, exactly as the store decides
+  it, so the pane no longer refuses a candidate LocalMind would have written
+  (LocalHub#154).
+
+- **The LocalMind tab's Review section shows the evidence it carries, and shows
+  it once.** The stored candidate text arrives with the `Evidence:` header and
+  fence the Markdown report renders, and the pane prefixed a second label onto
+  it in a one-row strip — so the only visible payload was the word twice. The
+  envelope is stripped, the preview shows the first line of actual source with
+  a count of what is left, and the label now names the field it came from
+  (`Evidence:` / `Replacement:` / `Note:`) instead of presenting a reviewer's
+  own note as source. A candidate carrying nothing says so. **`v` opens the
+  full source over the row list**, scrolls with the arrows and Page Up/Page
+  Down, reports its position, copies with Ctrl+C, and closes with `v` or Esc —
+  which now peels the reader before leaving the tab. The reader is read-only:
+  `a`/`r`/`p` inside it are refused with a reason rather than deciding on a row
+  the operator cannot see. ADR-0090's `[stale: …]` and
+  `[full source unavailable: …]` markers reach the screen (LocalHub#153).
+
 ## v5.0.0 - 2026-08-30
 
 - Began a new public Git history under PolyForm Noncommercial 1.0.0. Versions

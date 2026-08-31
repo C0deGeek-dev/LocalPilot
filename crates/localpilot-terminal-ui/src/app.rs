@@ -21,6 +21,10 @@ const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
 const MAX_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_SETTINGS_QUERY_BYTES: usize = 256;
 const MAX_REVIEWER_BYTES: usize = 128;
+/// A promoted lesson is one reusable statement, not a pasted source dump; the
+/// cap is generous enough for a full sentence and firm enough to keep the
+/// excerpt from being retyped wholesale.
+const MAX_REPLACEMENT_BYTES: usize = 1024;
 const MAX_LOCALMIND_VIEW_ROWS: usize = 1_000;
 const DOUBLE_ESCAPE_WINDOW: Duration = Duration::from_millis(500);
 
@@ -289,6 +293,58 @@ pub struct LocalMindReviewRow {
     pub promoted: bool,
 }
 
+/// The carried text a review row can show under its summary, with the name of
+/// the field it came from.
+///
+/// The three fields are not interchangeable — source evidence, a reviewer's
+/// replacement and a reviewer's note are different claims — so the label
+/// travels with the text instead of being fixed at the call site.
+#[must_use]
+pub(crate) fn review_detail(row: &LocalMindReviewRow) -> Option<(&'static str, Vec<String>)> {
+    let carried = |text: &Option<String>| {
+        text.as_deref()
+            .map(str::trim_end)
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string)
+    };
+    if let Some(evidence) = carried(&row.evidence) {
+        return Some(("Evidence", evidence_body_lines(&evidence)));
+    }
+    if let Some(replacement) = carried(&row.replacement) {
+        return Some(("Replacement", plain_lines(&replacement)));
+    }
+    carried(&row.note).map(|note| ("Note", plain_lines(&note)))
+}
+
+fn plain_lines(text: &str) -> Vec<String> {
+    text.lines().map(str::to_string).collect()
+}
+
+/// Strip the envelope the stored evidence already carries.
+///
+/// Research candidates store the same fenced block the Markdown report renders,
+/// which begins with its own `Evidence:` header. A surface that labels the
+/// field itself would otherwise print the word twice and spend its first two
+/// rows on chrome instead of source.
+fn evidence_body_lines(text: &str) -> Vec<String> {
+    let is_fence = |line: &&str| {
+        let trimmed = line.trim();
+        trimmed.len() >= 3 && trimmed.chars().all(|character| character == '`')
+    };
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.first().is_some_and(|line| line.trim() == "Evidence:") {
+        lines.remove(0);
+    }
+    // Only a matched pair is removed: an unfenced body keeps every line it has.
+    if lines.first().is_some_and(is_fence) && lines.iter().skip(1).any(is_fence) {
+        lines.remove(0);
+        if let Some(closing) = lines.iter().rposition(is_fence) {
+            lines.remove(closing);
+        }
+    }
+    lines.into_iter().map(str::to_string).collect()
+}
+
 impl fmt::Debug for LocalMindReviewRow {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -362,6 +418,10 @@ pub enum LocalMindReviewAction {
     Accept,
     Reject,
     Promote,
+    /// Replace the candidate's summary with a reviewer-written lesson. The text
+    /// rides [`LocalMindReviewIntent::replacement`] so the action stays `Copy`
+    /// and can be asked about without carrying a draft around.
+    Edit,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -369,6 +429,9 @@ pub struct LocalMindReviewIntent {
     pub candidate_id: String,
     pub reviewer: String,
     pub action: LocalMindReviewAction,
+    /// The lesson text for [`LocalMindReviewAction::Edit`]; `None` for every
+    /// other action.
+    pub replacement: Option<String>,
 }
 
 impl fmt::Debug for LocalMindReviewIntent {
@@ -378,6 +441,10 @@ impl fmt::Debug for LocalMindReviewIntent {
             .field("candidate_id", &self.candidate_id)
             .field("reviewer", &"<redacted>")
             .field("action", &self.action)
+            .field(
+                "replacement",
+                &self.replacement.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -388,6 +455,20 @@ struct LocalMindState {
     data: LocalMindData,
     reviewer: String,
     editing_reviewer: bool,
+    /// The Review section is showing the selected candidate's carried source
+    /// over the row list. The one-line preview cannot hold a bounded chunk, so
+    /// the reader is where the evidence is actually read.
+    reading_evidence: bool,
+    /// The reviewer is writing the lesson that replaces a source excerpt's
+    /// summary. Editing is what clears the promotion gate, so it lives where
+    /// the excerpt is read rather than only in a separate surface.
+    editing_replacement: bool,
+    /// The lesson being typed. Empty until the reviewer writes one; a draft is
+    /// never submitted blank.
+    replacement_draft: String,
+    /// Scroll offset inside that reader, kept apart from the row list's own
+    /// scroll so closing the reader returns to the list where it was.
+    evidence_scroll: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -397,6 +478,10 @@ pub(crate) struct LocalMindView<'a> {
     pub review: &'a [LocalMindReviewRow],
     pub reviewer: &'a str,
     pub editing_reviewer: bool,
+    pub reading_evidence: bool,
+    pub evidence_scroll: usize,
+    pub editing_replacement: bool,
+    pub replacement_draft: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2028,17 +2113,30 @@ impl AppModel {
             && matches!(self.active_body(), ActiveBody::LocalMind)
         {
             self.exit_armed = false;
+            let selected = self
+                .localmind_tab
+                .as_ref()
+                .map_or(0, |state| state.selected);
             let lines = self
                 .localmind_tab
                 .as_ref()
                 .and_then(|state| state.localmind.as_ref())
                 .map(|localmind| match localmind.section {
-                    LocalMindSection::Docs => &localmind.data.docs,
-                    LocalMindSection::Graph => &localmind.data.graph,
-                    LocalMindSection::Memory => &localmind.data.memory,
-                    LocalMindSection::Review => &localmind.data.memory[..0],
-                    LocalMindSection::Skills => &localmind.data.skills,
-                    LocalMindSection::Audit => &localmind.data.audit,
+                    LocalMindSection::Docs => localmind.data.docs.clone(),
+                    LocalMindSection::Graph => localmind.data.graph.clone(),
+                    LocalMindSection::Memory => localmind.data.memory.clone(),
+                    // The row list is a set of selection targets, not a body to
+                    // copy; the evidence the reader is showing is.
+                    LocalMindSection::Review if localmind.reading_evidence => localmind
+                        .data
+                        .review
+                        .get(selected)
+                        .and_then(review_detail)
+                        .map(|(_, lines)| lines)
+                        .unwrap_or_default(),
+                    LocalMindSection::Review => Vec::new(),
+                    LocalMindSection::Skills => localmind.data.skills.clone(),
+                    LocalMindSection::Audit => localmind.data.audit.clone(),
                 });
             return lines
                 .filter(|lines| !lines.is_empty())
@@ -2755,6 +2853,10 @@ impl AppModel {
                     review: &localmind.data.review,
                     reviewer: &localmind.reviewer,
                     editing_reviewer: localmind.editing_reviewer,
+                    reading_evidence: localmind.reading_evidence,
+                    evidence_scroll: localmind.evidence_scroll,
+                    editing_replacement: localmind.editing_replacement,
+                    replacement_draft: &localmind.replacement_draft,
                 }
             }),
         }
@@ -2918,6 +3020,10 @@ impl AppModel {
                 data: data.sanitize(),
                 reviewer: String::new(),
                 editing_reviewer: false,
+                reading_evidence: false,
+                evidence_scroll: 0,
+                editing_replacement: false,
+                replacement_draft: String::new(),
             }),
         });
     }
@@ -2938,6 +3044,13 @@ impl AppModel {
             return;
         };
         localmind.data = data.sanitize();
+        // The rows behind the reader have just been replaced, so a refresh
+        // hands the operator back the list rather than leaving them reading
+        // evidence that may no longer belong to the selected row.
+        localmind.reading_evidence = false;
+        localmind.evidence_scroll = 0;
+        localmind.editing_replacement = false;
+        localmind.replacement_draft.clear();
         state.selected = state
             .selected
             .min(localmind.data.review.len().saturating_sub(1));
@@ -2975,6 +3088,10 @@ impl AppModel {
             localmind.section.previous()
         };
         localmind.editing_reviewer = false;
+        localmind.reading_evidence = false;
+        localmind.evidence_scroll = 0;
+        localmind.editing_replacement = false;
+        localmind.replacement_draft.clear();
         if let Some(state) = self.localmind_tab.as_mut() {
             state.scroll = 0;
             state.selected = 0;
@@ -2994,6 +3111,39 @@ impl AppModel {
         let remaining = MAX_REVIEWER_BYTES.saturating_sub(localmind.reviewer.len());
         let end = previous_grapheme_boundary(&text, remaining);
         localmind.reviewer.push_str(&text[..end]);
+    }
+
+    fn append_localmind_replacement(&mut self, text: &str) {
+        let Some(localmind) = self
+            .localmind_tab
+            .as_mut()
+            .and_then(|state| state.localmind.as_mut())
+            .filter(|state| state.editing_replacement)
+        else {
+            return;
+        };
+        let text = sanitize_inline(text);
+        let remaining = MAX_REPLACEMENT_BYTES.saturating_sub(localmind.replacement_draft.len());
+        let end = previous_grapheme_boundary(&text, remaining);
+        localmind.replacement_draft.push_str(&text[..end]);
+    }
+
+    fn backspace_localmind_replacement(&mut self) {
+        let Some(localmind) = self
+            .localmind_tab
+            .as_mut()
+            .and_then(|state| state.localmind.as_mut())
+            .filter(|state| state.editing_replacement)
+        else {
+            return;
+        };
+        if let Some((start, _)) = localmind
+            .replacement_draft
+            .grapheme_indices(true)
+            .next_back()
+        {
+            localmind.replacement_draft.truncate(start);
+        }
     }
 
     fn backspace_localmind_reviewer(&mut self) {
@@ -3052,7 +3202,36 @@ impl AppModel {
             candidate_id: row.id.clone(),
             reviewer: localmind.reviewer.trim().to_string(),
             action,
+            replacement: None,
         })
+    }
+
+    /// The id of the selected candidate, so the pane can name the row it is
+    /// showing — an operator needs it to act on the same candidate anywhere
+    /// else.
+    #[must_use]
+    pub(crate) fn localmind_selected_candidate(&self) -> Option<&str> {
+        let state = self
+            .localmind_tab
+            .as_ref()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)?;
+        state
+            .localmind
+            .as_ref()
+            .filter(|localmind| localmind.section == LocalMindSection::Review)
+            .and_then(|localmind| localmind.data.review.get(state.selected))
+            .map(|row| row.id.as_str())
+            .filter(|id| !id.is_empty())
+    }
+
+    /// Whether this row is still a source excerpt rather than a lesson.
+    ///
+    /// The store gates promotion on the flag **and** the absence of a
+    /// replacement, because it is the reviewer's text that promotes — not the
+    /// flag flipping. Mirroring that here keeps the pane from refusing a
+    /// candidate the engine would accept.
+    fn review_needs_edit(row: &LocalMindReviewRow) -> bool {
+        row.requires_edit && row.replacement.is_none()
     }
 
     /// Whether `row` can take `action`. One rule, read by the intent that acts
@@ -3060,22 +3239,34 @@ impl AppModel {
     fn review_allows(row: &LocalMindReviewRow, action: LocalMindReviewAction) -> bool {
         match action {
             LocalMindReviewAction::Accept => {
-                row.state.eq_ignore_ascii_case("pending") && !row.requires_edit && !row.promoted
+                row.state.eq_ignore_ascii_case("pending")
+                    && !Self::review_needs_edit(row)
+                    && !row.promoted
             }
             LocalMindReviewAction::Reject => row.state.eq_ignore_ascii_case("pending"),
             LocalMindReviewAction::Promote => match row.state.to_ascii_lowercase().as_str() {
-                "accepted" => !row.requires_edit && !row.promoted,
+                "accepted" => !Self::review_needs_edit(row) && !row.promoted,
                 "edited" => !row.promoted,
                 _ => false,
             },
+            // Editing is how an excerpt becomes promotable, so it stays open
+            // for as long as the candidate can still change: everything but a
+            // finished promotion.
+            LocalMindReviewAction::Edit => {
+                !row.promoted
+                    && matches!(
+                        row.state.to_ascii_lowercase().as_str(),
+                        "pending" | "accepted" | "edited" | "deferred"
+                    )
+            }
         }
     }
 
-    /// The review verbs the selected candidate can take, as accept/reject/
-    /// promote. The footer advertises exactly these, so it never offers a key
-    /// the model is going to refuse.
+    /// The review verbs the selected candidate can take, in accept/reject/
+    /// promote/edit order. The footer advertises exactly these, so it never
+    /// offers a key the model is going to refuse.
     #[must_use]
-    pub fn localmind_review_available(&self) -> [bool; 3] {
+    pub fn localmind_review_available(&self) -> [bool; 4] {
         let Some(row) = self
             .localmind_tab
             .as_ref()
@@ -3088,14 +3279,221 @@ impl AppModel {
                     .and_then(|localmind| localmind.data.review.get(state.selected))
             })
         else {
-            return [false; 3];
+            return [false; 4];
         };
         [
             LocalMindReviewAction::Accept,
             LocalMindReviewAction::Reject,
             LocalMindReviewAction::Promote,
+            LocalMindReviewAction::Edit,
         ]
         .map(|action| Self::review_allows(row, action))
+    }
+
+    /// Why the selected candidate is holding back its verbs, said without
+    /// requiring a keypress to discover it.
+    ///
+    /// A source excerpt withholds accept and promote, and #152 correctly stops
+    /// advertising them — which leaves an operator looking at a pane that
+    /// narrowed itself for reasons it never states.
+    #[must_use]
+    pub(crate) fn localmind_review_hint(&self) -> Option<String> {
+        let state = self
+            .localmind_tab
+            .as_ref()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)?;
+        let localmind = state
+            .localmind
+            .as_ref()
+            .filter(|localmind| localmind.section == LocalMindSection::Review)?;
+        let row = localmind.data.review.get(state.selected)?;
+        if row.promoted {
+            return Some("Already promoted to durable memory.".to_string());
+        }
+        // Short enough to survive an 80-column row next to the candidate id.
+        // The full explanation — what a standalone lesson is — belongs to the
+        // refusal an operator gets when they press the withheld key, and to
+        // the editor's own footer.
+        Self::review_needs_edit(row)
+            .then(|| "Source excerpt — e rewrites it as a standalone lesson".to_string())
+    }
+
+    /// Whether the Review section is currently showing the evidence reader.
+    #[must_use]
+    pub(crate) fn localmind_reading_evidence(&self) -> bool {
+        self.localmind_tab
+            .as_ref()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)
+            .and_then(|state| state.localmind.as_ref())
+            .is_some_and(|localmind| {
+                localmind.section == LocalMindSection::Review && localmind.reading_evidence
+            })
+    }
+
+    /// Open or close the evidence reader for the selected candidate.
+    ///
+    /// A row that carries nothing gets a spoken refusal rather than a key that
+    /// appears to do nothing — the footer already withholds the verb, and a
+    /// deliberate press deserves the reason.
+    fn toggle_localmind_evidence(&mut self) -> AppCommand {
+        let Some(state) = self
+            .localmind_tab
+            .as_mut()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)
+        else {
+            return AppCommand::None;
+        };
+        let selected = state.selected;
+        let Some(localmind) = state
+            .localmind
+            .as_mut()
+            .filter(|localmind| localmind.section == LocalMindSection::Review)
+        else {
+            return AppCommand::None;
+        };
+        if localmind.reading_evidence {
+            localmind.reading_evidence = false;
+            localmind.evidence_scroll = 0;
+            return AppCommand::None;
+        }
+        let carries = localmind
+            .data
+            .review
+            .get(selected)
+            .and_then(review_detail)
+            .is_some_and(|(_, lines)| lines.iter().any(|line| !line.trim().is_empty()));
+        if carries {
+            localmind.reading_evidence = true;
+            localmind.evidence_scroll = 0;
+            return AppCommand::None;
+        }
+        self.apply_runtime(RuntimeUpdate::Notice(
+            "This candidate carries no evidence, replacement or note to read.".to_string(),
+        ));
+        AppCommand::None
+    }
+
+    /// Whether the Review section is capturing a replacement lesson.
+    #[must_use]
+    pub(crate) fn localmind_editing_replacement(&self) -> bool {
+        self.localmind_tab
+            .as_ref()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)
+            .and_then(|state| state.localmind.as_ref())
+            .is_some_and(|localmind| {
+                localmind.section == LocalMindSection::Review && localmind.editing_replacement
+            })
+    }
+
+    /// Open the lesson editor for the selected candidate.
+    ///
+    /// Rewriting is the step `ADR-0087` requires of every research excerpt, so
+    /// the pane that shows the excerpt is where it is written. The draft starts
+    /// from an existing replacement when there is one — never from the excerpt
+    /// itself, which is the source the lesson has to replace.
+    fn begin_localmind_replacement(&mut self) -> AppCommand {
+        let Some(state) = self
+            .localmind_tab
+            .as_ref()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)
+        else {
+            return AppCommand::None;
+        };
+        let selected = state.selected;
+        let Some(localmind) = state
+            .localmind
+            .as_ref()
+            .filter(|localmind| localmind.section == LocalMindSection::Review)
+        else {
+            return AppCommand::None;
+        };
+        if localmind.reviewer.trim().is_empty() {
+            if let Some(localmind) = self
+                .localmind_tab
+                .as_mut()
+                .and_then(|state| state.localmind.as_mut())
+            {
+                localmind.editing_reviewer = true;
+            }
+            return AppCommand::None;
+        }
+        let draft = match localmind.data.review.get(selected) {
+            None => {
+                self.apply_runtime(RuntimeUpdate::Notice(
+                    "No review candidate is selected.".to_string(),
+                ));
+                return AppCommand::None;
+            }
+            Some(row) if !Self::review_allows(row, LocalMindReviewAction::Edit) => {
+                if let Some(reason) = self.localmind_review_refusal(LocalMindReviewAction::Edit) {
+                    self.apply_runtime(RuntimeUpdate::Notice(reason));
+                }
+                return AppCommand::None;
+            }
+            Some(row) => row.replacement.clone().unwrap_or_default(),
+        };
+        if let Some(localmind) = self
+            .localmind_tab
+            .as_mut()
+            .and_then(|state| state.localmind.as_mut())
+        {
+            localmind.replacement_draft = draft;
+            localmind.editing_replacement = true;
+        }
+        AppCommand::None
+    }
+
+    /// Submit the drafted lesson as an Edit intent.
+    ///
+    /// The store refuses a blank replacement, so the pane refuses it first and
+    /// says so instead of sending a write it knows will fail.
+    fn submit_localmind_replacement(&mut self) -> AppCommand {
+        let Some(state) = self
+            .localmind_tab
+            .as_ref()
+            .filter(|state| state.kind == TakeoverKind::LocalMind)
+        else {
+            return AppCommand::None;
+        };
+        let selected = state.selected;
+        let Some(localmind) = state
+            .localmind
+            .as_ref()
+            .filter(|localmind| localmind.editing_replacement)
+        else {
+            return AppCommand::None;
+        };
+        let replacement = localmind.replacement_draft.trim().to_string();
+        if replacement.is_empty() {
+            self.apply_runtime(RuntimeUpdate::Notice(
+                "A lesson cannot be empty: write the statement, or press Esc to cancel."
+                    .to_string(),
+            ));
+            return AppCommand::None;
+        }
+        let reviewer = localmind.reviewer.trim().to_string();
+        let Some(candidate_id) = localmind
+            .data
+            .review
+            .get(selected)
+            .map(|row| row.id.clone())
+        else {
+            return AppCommand::None;
+        };
+        if let Some(localmind) = self
+            .localmind_tab
+            .as_mut()
+            .and_then(|state| state.localmind.as_mut())
+        {
+            localmind.editing_replacement = false;
+            localmind.replacement_draft.clear();
+        }
+        AppCommand::LocalMindReview(LocalMindReviewIntent {
+            candidate_id,
+            reviewer,
+            action: LocalMindReviewAction::Edit,
+            replacement: Some(replacement),
+        })
     }
 
     /// Turn a review key into a command, and say why when there is none.
@@ -3105,6 +3503,15 @@ impl AppModel {
     /// refusal now states its reason, and the LocalMind tab renders the latest
     /// notice, so the rule that blocked the action is visible where it applies.
     fn localmind_review_command(&mut self, action: LocalMindReviewAction) -> AppCommand {
+        // The evidence reader is a reading surface, not a deciding one: it
+        // covers the list the verbs act on, so a decision made from it would
+        // land on a row the operator cannot see.
+        if self.localmind_reading_evidence() {
+            self.apply_runtime(RuntimeUpdate::Notice(
+                "Close the evidence reader with v before deciding on this candidate.".to_string(),
+            ));
+            return AppCommand::None;
+        }
         if let Some(intent) = self.localmind_review_intent(action) {
             return AppCommand::LocalMindReview(intent);
         }
@@ -3133,23 +3540,34 @@ impl AppModel {
             LocalMindReviewAction::Accept => "accepted",
             LocalMindReviewAction::Reject => "rejected",
             LocalMindReviewAction::Promote => "promoted",
+            LocalMindReviewAction::Edit => "edited",
         };
+        // The rule that fired is the rule that gets named. Reporting the state
+        // for a refusal the state did not cause produced the self-contradicting
+        // "only a pending candidate can be accepted; this one is Pending".
+        let excerpt = "it is still a source excerpt, not a standalone lesson: rewrite it with e \
+                       into a statement that stands without its source";
         let reason = match action {
             _ if row.promoted => "it is already promoted".to_string(),
+            LocalMindReviewAction::Accept | LocalMindReviewAction::Promote
+                if Self::review_needs_edit(row) =>
+            {
+                excerpt.to_string()
+            }
             LocalMindReviewAction::Accept | LocalMindReviewAction::Reject => {
                 format!(
                     "only a pending candidate can be {verb}; this one is {}",
                     row.state
                 )
             }
-            LocalMindReviewAction::Promote if row.requires_edit => {
-                "it must be edited into a standalone lesson first".to_string()
-            }
             LocalMindReviewAction::Promote => {
                 format!(
                     "only an accepted or edited candidate can be promoted; this one is {}",
                     row.state
                 )
+            }
+            LocalMindReviewAction::Edit => {
+                format!("a {} candidate can no longer be rewritten", row.state)
             }
         };
         Some(format!(
@@ -3158,6 +3576,7 @@ impl AppModel {
                 LocalMindReviewAction::Accept => "accept",
                 LocalMindReviewAction::Reject => "reject",
                 LocalMindReviewAction::Promote => "promote",
+                LocalMindReviewAction::Edit => "edit",
             }
         ))
     }
@@ -3442,6 +3861,20 @@ impl AppModel {
         let Some(state) = self.active_body_state_mut() else {
             return;
         };
+        // While the evidence reader is open the arrows read the source, not the
+        // row list underneath it.
+        if let Some(localmind) = state
+            .localmind
+            .as_mut()
+            .filter(|localmind| localmind.reading_evidence)
+        {
+            let maximum = total_rows.saturating_sub(viewport_rows);
+            localmind.evidence_scroll = localmind
+                .evidence_scroll
+                .saturating_add_signed(delta)
+                .min(maximum);
+            return;
+        }
         let localmind_review = state.kind == TakeoverKind::LocalMind
             && state
                 .localmind
@@ -3507,6 +3940,14 @@ impl AppModel {
         let Some(state) = self.active_body_state_mut() else {
             return;
         };
+        if let Some(localmind) = state
+            .localmind
+            .as_mut()
+            .filter(|localmind| localmind.reading_evidence)
+        {
+            localmind.evidence_scroll = start.min(total_rows.saturating_sub(viewport_rows));
+            return;
+        }
         let localmind_review = state.kind == TakeoverKind::LocalMind
             && state
                 .localmind
@@ -4706,13 +5147,28 @@ impl AppModel {
     fn handle_localmind_input(&mut self, action: InputAction) -> AppCommand {
         match action {
             InputAction::Escape => {
+                // Innermost surface first: the reviewer editor, the lesson
+                // editor, the evidence reader, then the tab itself. Escape
+                // never skips a layer the operator can see.
                 if let Some(localmind) = self
                     .localmind_tab
                     .as_mut()
                     .and_then(|state| state.localmind.as_mut())
-                    .filter(|state| state.editing_reviewer)
+                    .filter(|state| {
+                        state.editing_reviewer
+                            || state.editing_replacement
+                            || state.reading_evidence
+                    })
                 {
-                    localmind.editing_reviewer = false;
+                    if localmind.editing_reviewer {
+                        localmind.editing_reviewer = false;
+                    } else if localmind.editing_replacement {
+                        localmind.editing_replacement = false;
+                        localmind.replacement_draft.clear();
+                    } else {
+                        localmind.reading_evidence = false;
+                        localmind.evidence_scroll = 0;
+                    }
                 } else {
                     let _ = self.activate_tab(TabId::Session);
                 }
@@ -4729,6 +5185,26 @@ impl AppModel {
             }
             InputAction::NavigateTimeline(TimelineNavigation::PageDown) => {
                 AppCommand::NavigateTakeover(TakeoverNavigation::PageDown)
+            }
+            InputAction::Insert(text) | InputAction::Paste(text)
+                if self
+                    .localmind_tab
+                    .as_ref()
+                    .and_then(|state| state.localmind.as_ref())
+                    .is_some_and(|state| state.editing_replacement) =>
+            {
+                self.append_localmind_replacement(&text);
+                AppCommand::None
+            }
+            InputAction::Backspace
+                if self
+                    .localmind_tab
+                    .as_ref()
+                    .and_then(|state| state.localmind.as_ref())
+                    .is_some_and(|state| state.editing_replacement) =>
+            {
+                self.backspace_localmind_replacement();
+                AppCommand::None
             }
             InputAction::Insert(text)
                 if self
@@ -4779,6 +5255,16 @@ impl AppModel {
                 AppCommand::None
             }
             InputAction::Insert(text)
+                if text.eq_ignore_ascii_case("v") && self.localmind_review_is_active() =>
+            {
+                self.toggle_localmind_evidence()
+            }
+            InputAction::Insert(text)
+                if text.eq_ignore_ascii_case("e") && self.localmind_review_is_active() =>
+            {
+                self.begin_localmind_replacement()
+            }
+            InputAction::Insert(text)
                 if text.eq_ignore_ascii_case("a") && self.localmind_review_is_active() =>
             {
                 self.localmind_review_command(LocalMindReviewAction::Accept)
@@ -4798,6 +5284,9 @@ impl AppModel {
                 AppCommand::None
             }
             InputAction::Submit => {
+                if self.localmind_editing_replacement() {
+                    return self.submit_localmind_replacement();
+                }
                 if let Some(localmind) = self
                     .localmind_tab
                     .as_mut()
@@ -9472,8 +9961,9 @@ mod tests {
         ));
     }
 
-    /// Promotion of a candidate that still needs editing names the edit, not
-    /// the state, because that is the step the reviewer has to take.
+    /// Promotion of a candidate that still needs rewriting names the rewrite,
+    /// not the state, because that is the step the reviewer has to take — and
+    /// it says what a standalone lesson is and which key writes one.
     #[test]
     fn promoting_an_unedited_candidate_names_the_edit_it_needs() {
         let mut app = review_ready(review_row("Accepted", true, false));
@@ -9482,21 +9972,440 @@ mod tests {
             AppCommand::None
         );
         let reason = app.last_notice().expect("a refusal must be spoken");
-        assert!(reason.contains("edited"), "{reason}");
+        assert!(reason.contains("source excerpt"), "{reason}");
+        assert!(reason.contains("stands without its source"), "{reason}");
+        assert!(reason.contains(" e "), "{reason}");
+    }
+
+    /// The refusal that started LocalHub#154: accept was blocked by the edit
+    /// requirement and the message reported the state rule the row satisfies.
+    #[test]
+    fn accepting_an_excerpt_names_the_rewrite_not_the_state_it_already_has() {
+        let mut app = review_ready(review_row("Pending", true, false));
+        assert_eq!(
+            app.handle_input(InputAction::Insert("a".to_string()), 80),
+            AppCommand::None
+        );
+        let reason = app.last_notice().expect("a refusal must be spoken");
+        assert!(reason.contains("source excerpt"), "{reason}");
+        assert!(
+            !reason.contains("this one is Pending"),
+            "a pending row must never be told its state is the problem: {reason}"
+        );
+    }
+
+    /// A replacement satisfies the store's promotion gate, so it satisfies the
+    /// pane's: the rule keyed on the flag alone could refuse what the engine
+    /// would have written.
+    #[test]
+    fn a_rewritten_excerpt_is_no_longer_treated_as_one() {
+        let row = LocalMindReviewRow {
+            replacement: Some("Bound terminal reports before rendering them.".to_string()),
+            ..review_row("Accepted", true, false)
+        };
+        let app = review_ready(row);
+        assert_eq!(
+            app.localmind_review_available(),
+            [false, false, true, true],
+            "an accepted candidate carrying a lesson can promote"
+        );
+        assert!(app.localmind_review_hint().is_none());
     }
 
     /// The footer advertises exactly the verbs the model will honour, so the
     /// two cannot drift apart the way they had.
     #[test]
     fn advertised_review_verbs_track_the_selected_candidate() {
+        // accept, reject, promote, edit.
         let pending = review_ready(review_row("Pending", false, false));
-        assert_eq!(pending.localmind_review_available(), [true, true, false]);
+        assert_eq!(
+            pending.localmind_review_available(),
+            [true, true, false, true]
+        );
 
         let accepted = review_ready(review_row("Accepted", false, false));
-        assert_eq!(accepted.localmind_review_available(), [false, false, true]);
+        assert_eq!(
+            accepted.localmind_review_available(),
+            [false, false, true, true]
+        );
 
+        // Promotion is the end of the line: nothing is left to decide or write.
         let promoted = review_ready(review_row("Accepted", false, true));
-        assert_eq!(promoted.localmind_review_available(), [false, false, false]);
+        assert_eq!(
+            promoted.localmind_review_available(),
+            [false, false, false, false]
+        );
+
+        // A source excerpt withholds accept and promote and offers the rewrite
+        // that unblocks them, instead of being a candidate you can only reject.
+        let excerpt = review_ready(review_row("Pending", true, false));
+        assert_eq!(
+            excerpt.localmind_review_available(),
+            [false, true, false, true]
+        );
+    }
+
+    /// The shape a research candidate actually stores: the fenced block the
+    /// Markdown report renders, its own `Evidence:` header included.
+    const STORED_EVIDENCE: &str = "Evidence:\n\
+         ```\n\
+         [stale: the source file changed since ingest]\n\
+         A large report stayed responsive.\n\
+         The second line of the source chunk.\n\
+         ```";
+
+    /// The stored envelope is chrome, not source: the header and the fence pair
+    /// come off so a surface that labels the field itself does not print the
+    /// word twice and does not spend its rows on backticks.
+    #[test]
+    fn stored_evidence_sheds_its_header_and_fence_and_keeps_its_body() {
+        let row = LocalMindReviewRow {
+            evidence: Some(STORED_EVIDENCE.to_string()),
+            ..review_row("Pending", false, false)
+        };
+        let (label, lines) = review_detail(&row).expect("carried evidence");
+        assert_eq!(label, "Evidence");
+        assert_eq!(
+            lines,
+            vec![
+                "[stale: the source file changed since ingest]".to_string(),
+                "A large report stayed responsive.".to_string(),
+                "The second line of the source chunk.".to_string(),
+            ]
+        );
+
+        // An unfenced body keeps every line it has.
+        let plain = LocalMindReviewRow {
+            evidence: Some("one\ntwo".to_string()),
+            ..review_row("Pending", false, false)
+        };
+        assert_eq!(
+            review_detail(&plain).map(|(_, lines)| lines),
+            Some(vec!["one".to_string(), "two".to_string()])
+        );
+    }
+
+    /// A reviewer's own note is not source evidence, so it does not borrow the
+    /// evidence label; a candidate carrying nothing says so.
+    #[test]
+    fn carried_review_text_is_named_by_the_field_it_came_from() {
+        let note = LocalMindReviewRow {
+            evidence: None,
+            note: Some("Looks duplicated.".to_string()),
+            ..review_row("Pending", false, false)
+        };
+        assert_eq!(review_detail(&note).map(|(label, _)| label), Some("Note"));
+
+        let replacement = LocalMindReviewRow {
+            evidence: None,
+            replacement: Some("Bound terminal reports.".to_string()),
+            ..review_row("Pending", false, false)
+        };
+        assert_eq!(
+            review_detail(&replacement).map(|(label, _)| label),
+            Some("Replacement")
+        );
+
+        let empty = LocalMindReviewRow {
+            evidence: None,
+            note: Some("   ".to_string()),
+            ..review_row("Pending", false, false)
+        };
+        assert!(review_detail(&empty).is_none());
+    }
+
+    /// `v` opens the reader and `v` closes it again, leaving the row selection
+    /// and the reviewer identity exactly as they were.
+    #[test]
+    fn v_opens_and_closes_the_evidence_reader() {
+        let mut app = review_ready(LocalMindReviewRow {
+            evidence: Some(STORED_EVIDENCE.to_string()),
+            ..review_row("Pending", false, false)
+        });
+        assert!(!app.localmind_reading_evidence());
+
+        assert_eq!(
+            app.handle_input(InputAction::Insert("v".to_string()), 80),
+            AppCommand::None
+        );
+        assert!(app.localmind_reading_evidence());
+        assert_eq!(app.localmind_section(), Some(LocalMindSection::Review));
+
+        assert_eq!(
+            app.handle_input(InputAction::Insert("V".to_string()), 80),
+            AppCommand::None
+        );
+        assert!(!app.localmind_reading_evidence());
+        assert_eq!(app.localmind_reviewer(), Some("dev"));
+    }
+
+    /// Escape peels one layer at a time: the reader first, the tab second.
+    #[test]
+    fn escape_closes_the_reader_before_it_leaves_the_tab() {
+        let mut app = review_ready(LocalMindReviewRow {
+            evidence: Some(STORED_EVIDENCE.to_string()),
+            ..review_row("Pending", false, false)
+        });
+        let _ = app.handle_input(InputAction::Insert("v".to_string()), 80);
+        assert!(app.localmind_reading_evidence());
+
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(!app.localmind_reading_evidence());
+        assert_eq!(app.active_body(), ActiveBody::LocalMind);
+
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert_eq!(app.active_body(), ActiveBody::Session);
+    }
+
+    /// While the reader is open the arrows read the source; the row selection
+    /// underneath it does not move.
+    #[test]
+    fn the_reader_scrolls_the_source_not_the_row_list() {
+        let mut app = review_ready(LocalMindReviewRow {
+            evidence: Some(STORED_EVIDENCE.to_string()),
+            ..review_row("Pending", false, false)
+        });
+        let selected = app
+            .localmind_tab
+            .as_ref()
+            .map(|state| state.selected)
+            .expect("review state");
+        let _ = app.handle_input(InputAction::Insert("v".to_string()), 80);
+
+        app.scroll_takeover_by(1, 3, 1);
+        let localmind = app
+            .localmind_tab
+            .as_ref()
+            .and_then(|state| state.localmind.as_ref())
+            .expect("review state");
+        assert_eq!(localmind.evidence_scroll, 1);
+        assert_eq!(
+            app.localmind_tab
+                .as_ref()
+                .map(|state| state.selected)
+                .expect("review state"),
+            selected
+        );
+    }
+
+    /// The reader covers the rows the verbs act on, so a decision taken from it
+    /// is refused out loud rather than landing on a row nobody can see.
+    #[test]
+    fn a_review_verb_pressed_inside_the_reader_is_refused_with_its_reason() {
+        let mut app = review_ready(LocalMindReviewRow {
+            evidence: Some(STORED_EVIDENCE.to_string()),
+            ..review_row("Pending", false, false)
+        });
+        let _ = app.handle_input(InputAction::Insert("v".to_string()), 80);
+
+        assert_eq!(
+            app.handle_input(InputAction::Insert("a".to_string()), 80),
+            AppCommand::None
+        );
+        let reason = app.last_notice().expect("a refusal must be spoken");
+        assert!(reason.contains("evidence reader"), "{reason}");
+        assert!(app.localmind_reading_evidence());
+    }
+
+    /// A row with nothing to read refuses the key out loud instead of leaving
+    /// it looking dead.
+    #[test]
+    fn v_on_a_candidate_without_carried_text_says_so() {
+        let mut app = review_ready(LocalMindReviewRow {
+            evidence: None,
+            ..review_row("Pending", false, false)
+        });
+        assert_eq!(
+            app.handle_input(InputAction::Insert("v".to_string()), 80),
+            AppCommand::None
+        );
+        assert!(!app.localmind_reading_evidence());
+        let reason = app.last_notice().expect("a refusal must be spoken");
+        assert!(reason.contains("carries no evidence"), "{reason}");
+    }
+
+    /// Ctrl+C copies what the reader is showing — the source without its stored
+    /// envelope, not the row list underneath.
+    #[test]
+    fn the_reader_copies_the_source_it_shows() {
+        let mut app = review_ready(LocalMindReviewRow {
+            evidence: Some(STORED_EVIDENCE.to_string()),
+            ..review_row("Pending", false, false)
+        });
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::None,
+            "the row list is a set of selection targets, not a body to copy"
+        );
+
+        let _ = app.handle_input(InputAction::Insert("v".to_string()), 80);
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::Copy(
+                "[stale: the source file changed since ingest]\n\
+                 A large report stayed responsive.\n\
+                 The second line of the source chunk."
+                    .to_string()
+            )
+        );
+    }
+
+    /// A refresh replaces the rows behind the reader, so it hands the operator
+    /// back the list rather than leaving them reading a row that may have moved.
+    #[test]
+    fn a_refresh_returns_from_the_reader_to_the_list() {
+        let row = LocalMindReviewRow {
+            evidence: Some(STORED_EVIDENCE.to_string()),
+            ..review_row("Pending", false, false)
+        };
+        let mut app = review_ready(row.clone());
+        let _ = app.handle_input(InputAction::Insert("v".to_string()), 80);
+        assert!(app.localmind_reading_evidence());
+
+        app.refresh_localmind(localmind_data(vec![row]));
+        assert!(!app.localmind_reading_evidence());
+        assert_eq!(app.localmind_section(), Some(LocalMindSection::Review));
+        assert_eq!(app.localmind_reviewer(), Some("dev"));
+    }
+
+    /// Type a lesson into the open editor, one grapheme per keypress the way
+    /// the terminal delivers it.
+    fn type_lesson(app: &mut AppModel, text: &str) {
+        for character in text.chars() {
+            let _ = app.handle_input(InputAction::Insert(character.to_string()), 80);
+        }
+    }
+
+    /// The rewrite `ADR-0087` requires now happens in the pane that shows the
+    /// excerpt: `e` opens the editor, Enter emits the typed lesson as an Edit
+    /// intent for the host to authorize.
+    #[test]
+    fn e_writes_the_lesson_that_unblocks_an_excerpt() {
+        let mut app = review_ready(review_row("Pending", true, false));
+        assert_eq!(
+            app.handle_input(InputAction::Insert("e".to_string()), 80),
+            AppCommand::None
+        );
+        assert!(app.localmind_editing_replacement());
+
+        // Every letter belongs to the draft while the editor is open — `a` does
+        // not accept, `r` does not reject.
+        type_lesson(&mut app, "Bound a report before rendering it.");
+        assert_eq!(
+            app.handle_input(InputAction::Submit, 80),
+            AppCommand::LocalMindReview(LocalMindReviewIntent {
+                candidate_id: "candidate-1".to_string(),
+                reviewer: "dev".to_string(),
+                action: LocalMindReviewAction::Edit,
+                replacement: Some("Bound a report before rendering it.".to_string()),
+            })
+        );
+        assert!(!app.localmind_editing_replacement());
+    }
+
+    /// The store refuses a blank replacement, so the pane refuses it first and
+    /// keeps the editor open instead of sending a write it knows will fail.
+    #[test]
+    fn an_empty_lesson_is_refused_before_it_becomes_a_write() {
+        let mut app = review_ready(review_row("Pending", true, false));
+        let _ = app.handle_input(InputAction::Insert("e".to_string()), 80);
+        type_lesson(&mut app, "   ");
+
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert!(app.localmind_editing_replacement());
+        let reason = app.last_notice().expect("a refusal must be spoken");
+        assert!(reason.contains("cannot be empty"), "{reason}");
+    }
+
+    /// Escape peels the lesson editor before the reader and before the tab, and
+    /// the abandoned draft is not kept.
+    #[test]
+    fn escape_discards_the_lesson_draft_and_keeps_the_reader() {
+        let mut app = review_ready(LocalMindReviewRow {
+            evidence: Some(STORED_EVIDENCE.to_string()),
+            ..review_row("Pending", true, false)
+        });
+        let _ = app.handle_input(InputAction::Insert("v".to_string()), 80);
+        // Writing the lesson is what the reader is for, so `e` opens over it.
+        let _ = app.handle_input(InputAction::Insert("e".to_string()), 80);
+        type_lesson(&mut app, "half a thought");
+        assert!(app.localmind_editing_replacement());
+        assert!(app.localmind_reading_evidence());
+
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(!app.localmind_editing_replacement());
+        assert!(app.localmind_reading_evidence());
+
+        let _ = app.handle_input(InputAction::Insert("e".to_string()), 80);
+        let localmind = app
+            .localmind_tab
+            .as_ref()
+            .and_then(|state| state.localmind.as_ref())
+            .expect("review state");
+        assert!(
+            localmind.replacement_draft.is_empty(),
+            "a cancelled draft must not come back"
+        );
+    }
+
+    /// A reviewer identity is a deliberate claim, and an edit is signed by it
+    /// like every other verdict.
+    #[test]
+    fn e_asks_for_the_reviewer_identity_first() {
+        let mut app = model();
+        app.open_localmind(localmind_data(vec![review_row("Pending", true, false)]));
+        for _ in 0..3 {
+            let _ = app.handle_input(InputAction::AcceptCompletion, 80);
+        }
+        assert_eq!(app.localmind_section(), Some(LocalMindSection::Review));
+
+        assert_eq!(
+            app.handle_input(InputAction::Insert("e".to_string()), 80),
+            AppCommand::None
+        );
+        assert!(!app.localmind_editing_replacement());
+        assert!(
+            app.localmind_tab
+                .as_ref()
+                .and_then(|state| state.localmind.as_ref())
+                .is_some_and(|localmind| localmind.editing_reviewer),
+            "the identity editor is the answer to an unsigned edit"
+        );
+    }
+
+    /// An excerpt is no longer a candidate you can only reject: the pane names
+    /// the id it is showing and the step that unblocks the withheld verbs,
+    /// without needing a keypress to discover either.
+    #[test]
+    fn the_pane_names_the_selected_candidate_and_why_it_holds_back() {
+        let app = review_ready(review_row("Pending", true, false));
+        assert_eq!(app.localmind_selected_candidate(), Some("candidate-1"));
+        let hint = app
+            .localmind_review_hint()
+            .expect("a withheld verb explains itself");
+        assert!(hint.contains("Source excerpt"), "{hint}");
+        assert!(hint.contains("standalone lesson"), "{hint}");
+        assert!(hint.contains(" e "), "{hint}");
+        assert!(
+            hint.len() < 60,
+            "the hint shares one row with the candidate id: {hint}"
+        );
+    }
+
+    /// Switching sections leaves the reader behind: it belongs to the Review
+    /// row it was opened from.
+    #[test]
+    fn cycling_sections_closes_the_evidence_reader() {
+        let mut app = review_ready(LocalMindReviewRow {
+            evidence: Some(STORED_EVIDENCE.to_string()),
+            ..review_row("Pending", false, false)
+        });
+        let _ = app.handle_input(InputAction::Insert("v".to_string()), 80);
+        assert!(app.localmind_reading_evidence());
+
+        let _ = app.handle_input(InputAction::AcceptCompletion, 80);
+        assert_eq!(app.localmind_section(), Some(LocalMindSection::Skills));
+        assert!(!app.localmind_reading_evidence());
     }
 
     #[test]
@@ -9583,6 +10492,7 @@ mod tests {
                 candidate_id: "candidate-1".to_string(),
                 reviewer: "Ada".to_string(),
                 action: LocalMindReviewAction::Accept,
+                replacement: None,
             })
         );
 

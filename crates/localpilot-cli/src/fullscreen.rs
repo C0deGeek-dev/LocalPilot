@@ -4714,6 +4714,9 @@ fn localmind_review_request(trusted: bool, intent: &LocalMindReviewIntent) -> Pe
                 LocalMindReviewAction::Accept => "accept",
                 LocalMindReviewAction::Reject => "reject",
                 LocalMindReviewAction::Promote => "promote",
+                // The lesson text itself stays out of the prompt: an approval
+                // detail is a description of the write, not its payload.
+                LocalMindReviewAction::Edit => "rewrite",
             },
             intent.candidate_id
         ),
@@ -4752,6 +4755,22 @@ fn mutate_localmind_review(
             None,
         ),
         LocalMindReviewAction::Promote => localpilot_localmind::promote(root, &intent.candidate_id),
+        // The store refuses a blank replacement, and so does the pane before it
+        // gets here; an intent that arrives without one is a bug, not a write.
+        LocalMindReviewAction::Edit => match intent.replacement.clone() {
+            Some(replacement) if !replacement.trim().is_empty() => {
+                localpilot_localmind::review_decide(
+                    root,
+                    &intent.candidate_id,
+                    localpilot_localmind::ReviewVerdict::Edit { replacement },
+                    &intent.reviewer,
+                    None,
+                )
+            }
+            _ => Err(localpilot_localmind::LearningError::Review(
+                "a review edit needs a non-empty lesson".to_string(),
+            )),
+        },
     }
 }
 
@@ -17813,6 +17832,7 @@ last_seen = "2026-08-10"
             candidate_id: "candidate-1".to_string(),
             reviewer: "Ada".to_string(),
             action: LocalMindReviewAction::Accept,
+            replacement: None,
         };
         let request = localmind_review_request(false, &intent);
         let permissions = PermissionEngineHandle::new(localpilot_sandbox::PermissionEngine::new(
@@ -17839,6 +17859,7 @@ last_seen = "2026-08-10"
             candidate_id: "candidate-1".to_string(),
             reviewer: "Ada".to_string(),
             action: LocalMindReviewAction::Reject,
+            replacement: None,
         };
         let request = localmind_review_request(false, &intent);
         assert!(matches!(
@@ -17879,6 +17900,7 @@ last_seen = "2026-08-10"
             candidate_id: candidate.id,
             reviewer: "Ada".to_string(),
             action: LocalMindReviewAction::Accept,
+            replacement: None,
         };
         let request = localmind_review_request(false, &intent);
         let permissions = PermissionEngineHandle::new(localpilot_sandbox::PermissionEngine::new(
@@ -17899,6 +17921,95 @@ last_seen = "2026-08-10"
         assert!(matches!(outcome, LocalMindReviewOutcome::Updated(_)));
         let updated = localpilot_localmind::review_list(dir.path()).expect("updated review list");
         assert_eq!(updated[0].state, "Accepted");
+    }
+
+    /// A source excerpt only leaves the queue through a reviewer's lesson, and
+    /// that write goes through the same permission seam as the other verdicts
+    /// (ADR-0177 amending ADR-0153). After it lands, the candidate is `Edited`
+    /// and carries the reviewer's text — the state the store will promote.
+    #[tokio::test]
+    async fn an_approved_edit_writes_the_lesson_and_unblocks_promotion() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let lesson = localpilot_localmind::RetrospectiveLesson::new(
+            "Excerpt from knowledge: bounded terminal reports",
+        )
+        .with_evidence_text("Evidence:\n```\nsource\n```")
+        .requiring_edit();
+        localpilot_localmind::write_retrospective_lesson(dir.path(), &lesson)
+            .expect("enqueue candidate");
+        let candidate = localpilot_localmind::review_list(dir.path())
+            .expect("review list")
+            .into_iter()
+            .next()
+            .expect("review candidate");
+        assert!(candidate.requires_edit);
+        assert!(localpilot_localmind::promote(dir.path(), &candidate.id).is_err());
+
+        let intent = LocalMindReviewIntent {
+            candidate_id: candidate.id.clone(),
+            reviewer: "Ada".to_string(),
+            action: LocalMindReviewAction::Edit,
+            replacement: Some("Bound a terminal report before rendering it.".to_string()),
+        };
+        let request = localmind_review_request(false, &intent);
+        assert!(request.detail.contains("rewrite"));
+        assert!(
+            !request.detail.contains("Bound a terminal report"),
+            "the approval prompt describes the write, it does not carry its payload"
+        );
+        let permissions = PermissionEngineHandle::new(localpilot_sandbox::PermissionEngine::new(
+            Profile::Default,
+            Vec::new(),
+        ));
+        let approver = localpilot_sandbox::ScriptedApprover::new(vec![true]);
+
+        let outcome = perform_localmind_review(
+            permissions,
+            &approver,
+            request,
+            dir.path().to_path_buf(),
+            intent,
+        )
+        .await;
+
+        assert!(matches!(outcome, LocalMindReviewOutcome::Updated(_)));
+        let updated = localpilot_localmind::review_list(dir.path()).expect("updated review list");
+        assert_eq!(updated[0].state, "Edited");
+        assert_eq!(
+            updated[0].replacement.as_deref(),
+            Some("Bound a terminal report before rendering it.")
+        );
+        localpilot_localmind::promote(dir.path(), &candidate.id)
+            .expect("a rewritten candidate promotes");
+    }
+
+    /// An Edit intent that arrives without a lesson is a bug, not a write: the
+    /// store's own refusal is never reached because nothing is sent.
+    #[tokio::test]
+    async fn an_edit_without_a_lesson_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        localpilot_localmind::write_retrospective_lesson(
+            dir.path(),
+            &localpilot_localmind::RetrospectiveLesson::new("Keep terminal data bounded."),
+        )
+        .expect("enqueue candidate");
+        let candidate = localpilot_localmind::review_list(dir.path())
+            .expect("review list")
+            .into_iter()
+            .next()
+            .expect("review candidate");
+        let intent = LocalMindReviewIntent {
+            candidate_id: candidate.id,
+            reviewer: "Ada".to_string(),
+            action: LocalMindReviewAction::Edit,
+            replacement: Some("   ".to_string()),
+        };
+
+        let error = mutate_localmind_review(dir.path(), &intent).expect_err("a blank lesson");
+        assert!(error.to_string().contains("non-empty"));
+        let unchanged = localpilot_localmind::review_list(dir.path()).expect("review list");
+        assert_eq!(unchanged[0].state, "Pending");
+        assert!(unchanged[0].replacement.is_none());
     }
 
     #[tokio::test]

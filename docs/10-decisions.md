@@ -2,6 +2,83 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0177: The Terminal Review Pane Owns The Rewrite That Unblocks An Excerpt
+
+**Status:** accepted · **Date:** 2026-08-31. Amends ADR-0153 (terminal LocalMind
+review writes use the host permission seam), which reserved Edit and Defer for
+LocalMind's standalone review surface. Upholds ADR-0087 (excerpts promote only
+as a reviewer's lesson), ADR-0011 and ADR-0152.
+
+**Context.** Three independently sound decisions composed into a wall.
+ADR-0087 §3 marks every distilled research excerpt `requires_edit_before_promotion`;
+the LocalMind tab plan ruled that such a row must not falsely offer Accept; and
+ADR-0153 left Edit out of the pane. The only thing that clears the promotion
+gate is a reviewer's replacement text, and the pane had no way to write one — so
+on a `/research`-fed queue every candidate was reject-only. A field report
+(LocalHub#154) found ten of ten rows in that state.
+
+The refusal made it worse rather than explaining it: `review_allows` blocked
+Accept on the edit flag while the refusal text had an arm only for the state
+rule, so a pending row was told "only a pending candidate can be accepted; this
+one is Pending". Nothing on screen named the rule that actually fired, and the
+`edit required` marker was appended after a several-hundred-character excerpt,
+where truncation ate it first.
+
+**Decision.**
+
+1. **Edit is a fourth typed intent from the same seam.** `e` on Review captures
+   one reviewer-written lesson and emits `LocalMindReviewAction::Edit` with the
+   text on the intent; the CLI represents it as the same interactive
+   in-workspace overwrite effect as the other three verdicts, evaluates it with
+   the live `PermissionEngine`, and mutates only after approval. The
+   presentation crate keeps no LocalMind dependency and performs no I/O. Defer
+   remains with LocalMind's standalone surface — it is not part of the gate this
+   ADR opens.
+2. **The lesson is written where the excerpt is read.** The editor opens over
+   the Review row and stays available inside the evidence reader, because the
+   source is what the reviewer is distilling. It starts from an existing
+   replacement, never from the excerpt. A blank lesson is refused in the pane
+   before it becomes a write, matching the store's own `InvalidEdit`. The
+   approval prompt names the candidate and the action; it never carries the
+   lesson text.
+3. **A refusal names the rule that fired.** Accept and Promote report the edit
+   requirement when the edit requirement is what blocked them, and the state
+   rule only when the state is the reason. Every refusal for this class says
+   what a standalone lesson is — a statement that stands without its source —
+   and which key writes one.
+4. **The pane states what it withholds, without a keypress.** Review carries one
+   more chrome row than the read-only sections: the selected candidate's id (the
+   address every other route uses) and the reason its verbs are held back. The
+   `edit required` marker moves ahead of the summary so a long excerpt cannot
+   truncate away the explanation of the pane's own behaviour.
+5. **The pane's rules mirror the engine's.** "Still an excerpt" means the flag
+   **and** no replacement, exactly as `promote_review_item` decides it — the
+   pane no longer refuses a candidate the store would have written. Accept stays
+   stricter than the engine on purpose: accepting something that cannot be
+   promoted is not a useful state to reach, and the rewrite that lifts both is
+   now one key away.
+
+**Consequences.** A `/research` queue is fully actionable from the terminal:
+read the source with `v`, write the lesson with `e`, promote the result. The
+lesson is bounded (1 KiB) and single-line — long-form editing stays with
+LocalMind's own surface. Edit is a write and is therefore refused in incognito
+and gated by the same profile behaviour as the other verdicts. A successful edit
+refreshes the queue, which closes the reader and the editor by design.
+
+Pinned by refusal-text tests (an excerpt is never told its state is the
+problem), availability tests over all four verbs, editor tests (open, type,
+submit, blank refusal, Escape discards, unsigned edit asks for identity),
+Ratatui tests for the marker order, the candidate line and the editor row, and
+host tests proving an approved edit writes the lesson, that the candidate then
+promotes, and that a blank intent writes nothing.
+
+**Rejected:** leaving the rewrite to `localpilot learning review edit` alone
+(the pane did not even show the id that command needs, and the operator has no
+reason to expect a CLI route from a keyboard-driven pane); relaxing Accept to
+match the engine (it reaches a state with no forward move); prefilling the
+draft with the excerpt (the lesson replaces the source, it does not start from
+it); and putting the lesson text in the approval prompt.
+
 ## ADR-0176: Embedding Ownership Is Exact, Shared, And Reaped By The Process Owner
 
 **Status:** accepted · **Date:** 2026-08-29

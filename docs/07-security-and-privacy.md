@@ -399,10 +399,12 @@ When a project store does exist, Memory and Review use LocalMind's standard
 persistence opener, which may initialize its configured user-global memory
 store; the no-creation guarantee is specifically for project state.
 
-Review Accept, Reject, and Promote are explicit user actions, but the underlying
-LocalMind APIs are direct writes. LocalPilot therefore treats each intent as an
-interactive, in-workspace overwrite effect and sends it through the active
-`PermissionEngine`. An `Ask` decision uses the same production `TuiApprover`
+Review Accept, Reject, Promote, and Edit are explicit user actions, but the
+underlying LocalMind APIs are direct writes. LocalPilot therefore treats each
+intent as an interactive, in-workspace overwrite effect and sends it through the
+active `PermissionEngine`. An Edit carries the reviewer's own lesson text; the
+approval prompt describes the write and names the candidate, and never repeats
+that text. An `Ask` decision uses the same production `TuiApprover`
 channel as tool calls; `Deny` returns before a worker or LocalMind mutation is
 started. The reviewer identity must be entered deliberately, is held only in
 the open takeover, and is never inferred from provider or session metadata.
