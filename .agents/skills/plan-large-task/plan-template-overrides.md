@@ -45,7 +45,7 @@ Durable architecture decisions graduate to a real ADR in
 `docs/10-decisions.md` in the house format; cite the ADR number in the Refs
 column. Transient build-sequencing choices stay in the plan's decision log.
 
-## §6 plan-specific principles (slot 16)
+## §6 plan-specific principles (slot 18)
 
 - **Clean-room provenance is blocking.** All code, prompts, tests,
   identifiers, and UI copy original to this repo; official public APIs or
