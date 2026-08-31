@@ -20,14 +20,21 @@
 # ignoring. Each entry below is a deep transitive we do not control directly.
 ignore = [
     # rustls-pemfile is unmaintained; pulled transitively via rustls. No known
-    # vulnerability — an advisory of category "unmaintained" only.
+    # vulnerability — an advisory of category "unmaintained" only. Owner:
+    # c0degeek-dev. First observed: 2026-06-02. Disposition: accept
+    # indefinitely.
     "RUSTSEC-2025-0134",
     # paste is unmaintained; pulled transitively via ratatui. No known
-    # vulnerability — an "unmaintained" advisory only.
+    # vulnerability — an "unmaintained" advisory only. Owner: c0degeek-dev.
+    # First observed: 2026-06-02. Disposition: accept indefinitely.
     "RUSTSEC-2024-0436",
     # lru 0.12.5 is pulled transitively by ratatui 0.29. LocalPilot does not
     # call IterMut or pop on the transitive cache. Replace the exception when
-    # ratatui moves to a fixed lru release.
+    # ratatui moves to a fixed lru release. Owner: c0degeek-dev. First
+    # observed: 2026-08-30. Disposition: accept indefinitely — note
+    # cargo-deny's default `unsound = "workspace"` scope does not evaluate a
+    # transitive-only crate like this anyway, so `cargo audit` in CI is what
+    # actually keeps this pair visible, not this ignore entry.
     "RUSTSEC-2026-0002",
     "RUSTSEC-2026-0253",
     # time 0.3.37 (transitive via the LocalMind submodule, which pins it
