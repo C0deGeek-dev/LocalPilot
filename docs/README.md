@@ -12,15 +12,15 @@ in two places. `CLAUDE.md` ("## The specs") routes here; ADRs in
 | 00 | [`00-clean-room.md`](00-clean-room.md) | Clean-room provenance (read first) |
 | 01 | [`01-product-spec.md`](01-product-spec.md) | Product definition, jobs, operating modes |
 | 02 | [`02-architecture.md`](02-architecture.md) | System shape, per-crate responsibilities |
-| 03 | [`03-implementation-plan.md`](03-implementation-plan.md) | Implementation phases |
+| 03 | [`03-implementation-plan.md`](03-implementation-plan.md) | *Historical* — pre-1.0 implementation phases, superseded by shipped behaviour |
 | 04 | [`04-provider-contract.md`](04-provider-contract.md) | Provider contract |
 | 05 | [`05-tool-system.md`](05-tool-system.md) | Tool system |
 | 06 | [`06-harness-spec.md`](06-harness-spec.md) | Harness runtime (`brief.md`/`PROGRESS.md` are runtime files) |
 | 07 | [`07-security-and-privacy.md`](07-security-and-privacy.md) | Security and privacy |
 | 08 | [`08-testing.md`](08-testing.md) | Testing |
-| 09 | [`09-release-plan.md`](09-release-plan.md) | Release plan |
+| 09 | [`09-release-plan.md`](09-release-plan.md) | *Historical* — pre-1.0 release plan; the live release ceremony is `policies/coordinated-release.md` in LocalHub |
 | 10 | [`10-decisions.md`](10-decisions.md) | Decisions / ADRs |
-| 11 | [`11-implementation-checklist.md`](11-implementation-checklist.md) | Implementation checklist |
+| 11 | [`11-implementation-checklist.md`](11-implementation-checklist.md) | *Historical* — frozen 2026-06-05 status snapshot, not a current dependency exception source |
 | 12 | [`12-feature-specs.md`](12-feature-specs.md) | Feature specs |
 | 13 | [`13-rust-best-practices.md`](13-rust-best-practices.md) | Engineering style guide |
 | 14 | [`14-dev-tooling.md`](14-dev-tooling.md) | Developer tooling |

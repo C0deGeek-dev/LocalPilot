@@ -219,7 +219,7 @@ Recommended skills to author (each maps to an existing spec):
 | Skill | Encodes | Why repo-specific |
 | --- | --- | --- |
 | `clean-room-guard` | [00-clean-room.md](00-clean-room.md), ADR-0004/0005 | How to use the documented read-only reference (see `AGENTS.md`) without copying; when a provenance note is required; what is prohibited (prompts, identifiers, structure, UI copy, branding). Easy to get wrong, unique to this project. |
-| `implement-harness-step` | [06-harness-spec.md](06-harness-spec.md), [03-implementation-plan.md](03-implementation-plan.md) | The core product loop: `brief.md` / `PROGRESS.md` contracts, rule verdicts, attempt limits, progress update, commit policy. Central and easy to do ad hoc. |
+| `implement-harness-step` | [06-harness-spec.md](06-harness-spec.md) | The core product loop: `brief.md` / `PROGRESS.md` contracts, rule verdicts, attempt limits, progress update, commit policy. Central and easy to do ad hoc. |
 | `add-tool` | [05-tool-system.md](05-tool-system.md) | Implement the `Tool` trait, generate JSON schema, register, route through the permission engine (never bypass), sandbox policy, required allow/deny tests. |
 | `add-provider` | [04-provider-contract.md](04-provider-contract.md) | Where a provider impl lives (`localpilot-llm` module, behind the trait), quota metadata, stream-event model, required tests (text/tool/stream/malformed/quota), provenance note from public API docs. |
 | `add-mcp-integration` | [02-architecture.md](02-architecture.md) §`localpilot-mcp` | MCP is v1 scope. Forces MCP tools/resources through the *same* permission and redaction pipeline as builtin tools — not a side channel. |

@@ -2,7 +2,11 @@
 
 > **Historical — frozen at 2026-06-05, pre-1.0.** This checklist predates the
 > 1.0.0 cut and the v2.0.0 native-stack era; it is not a current status report.
-> For shipped behaviour, read the owning spec doc and `CHANGELOG.md`.
+> For shipped behaviour, read the owning spec doc and `CHANGELOG.md`. Do not
+> update checkbox state here as things ship — a note clarifying that a
+> since-completed item is now done (like the one below) is fine; toggling the
+> checkbox itself is not, since the point of a frozen record is what was true
+> on the freeze date, not a running tally.
 
 Status as of 2026-06-05. Checked items mean the implementation exists and has
 local automated coverage unless the note says it still needs live validation.
@@ -129,7 +133,14 @@ local automated coverage unless the note says it still needs live validation.
       cannot parse. Remove the ignore when the workspace MSRV is raised enough
       to adopt `time >=0.3.47`.
 
-## Not Implemented
+## Not Implemented (as of the 2026-06-05 freeze date above)
+
+All five items below were genuinely unimplemented at this checklist's freeze
+date. All five exist now — `CHANGELOG.md`, `CONTRIBUTING.md`, `docs/install.md`,
+alpha tags `v0.1.0-alpha.1`/`.2`/`.3`, and the product has since shipped past
+1.0.0 to the current `VERSION`. Left unchecked deliberately: this is a frozen
+historical record of what was true on the date above, not a status report to
+keep current — see `CHANGELOG.md` for what actually shipped and when.
 
 - [ ] Changelog.
 - [ ] Contributor guide.

@@ -18,13 +18,13 @@ restating them.
 | Clean-room provenance (**read first**) | [`docs/00-clean-room.md`](docs/00-clean-room.md) |
 | Product definition, jobs, operating modes | [`docs/01-product-spec.md`](docs/01-product-spec.md) |
 | System shape, per-crate responsibilities | [`docs/02-architecture.md`](docs/02-architecture.md) |
-| Implementation phases | [`docs/03-implementation-plan.md`](docs/03-implementation-plan.md) |
+| Implementation phases (historical, pre-1.0) | [`docs/03-implementation-plan.md`](docs/03-implementation-plan.md) |
 | Provider contract | [`docs/04-provider-contract.md`](docs/04-provider-contract.md) |
 | Tool system | [`docs/05-tool-system.md`](docs/05-tool-system.md) |
 | Harness spec | [`docs/06-harness-spec.md`](docs/06-harness-spec.md) |
 | Security and privacy | [`docs/07-security-and-privacy.md`](docs/07-security-and-privacy.md) |
 | Testing | [`docs/08-testing.md`](docs/08-testing.md) |
-| Release plan | [`docs/09-release-plan.md`](docs/09-release-plan.md) |
+| Release plan (historical, pre-1.0 — live ceremony is LocalHub's `policies/coordinated-release.md`) | [`docs/09-release-plan.md`](docs/09-release-plan.md) |
 | Decisions (ADRs win over style rules) | [`docs/10-decisions.md`](docs/10-decisions.md) |
 | Engineering style guide | [`docs/13-rust-best-practices.md`](docs/13-rust-best-practices.md) |
 | Developer tooling | [`docs/14-dev-tooling.md`](docs/14-dev-tooling.md) |

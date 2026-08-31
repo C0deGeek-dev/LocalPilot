@@ -13,5 +13,4 @@ metadata:
 # implement a harness step (stub)
 
 Canonical skill: [`.agents/skills/implement-harness-step/SKILL.md`](../../../.agents/skills/implement-harness-step/SKILL.md).
-Spec: [`docs/06-harness-spec.md`](../../../docs/06-harness-spec.md),
-[`docs/03-implementation-plan.md`](../../../docs/03-implementation-plan.md).
+Spec: [`docs/06-harness-spec.md`](../../../docs/06-harness-spec.md).

@@ -1,5 +1,12 @@
 # Implementation Plan
 
+> **Historical — superseded.** This is the pre-1.0 phased implementation plan
+> (through "Phase 15: Release Hardening" and its public-alpha goal). The
+> product has since shipped past 1.0.0 to the current `VERSION`, well beyond
+> what this plan describes; read `CHANGELOG.md` and the owning spec doc for
+> what actually shipped. Kept for history — do not read "ship a public alpha"
+> below as a live goal.
+
 ## Phase 0: Repository Foundation
 
 Goal: stable clean-room Rust workspace.
