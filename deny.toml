@@ -34,9 +34,10 @@ ignore = [
     # exactly): a stack-exhaustion DoS reachable only by parsing maliciously
     # crafted RFC 2822 input. LocalMind formats/parses its own timestamps and
     # never parses untrusted RFC 2822, so it is unreachable here. The fix (time
-    # >= 0.3.47) requires edition 2024 / Rust 1.88, above this project's MSRV
-    # 1.82, so it cannot be adopted without raising the MSRV workspace-wide;
-    # revisit when the MSRV is bumped.
+    # >= 0.3.47) requires edition 2024, which stabilized in Rust/Cargo 1.85.0
+    # (https://doc.rust-lang.org/edition-guide/rust-2024/index.html), above
+    # this project's MSRV 1.82, so it cannot be adopted without raising the
+    # MSRV workspace-wide; revisit when the MSRV reaches 1.85.0.
     "RUSTSEC-2026-0009",
 ]
 
