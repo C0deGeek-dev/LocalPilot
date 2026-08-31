@@ -61,13 +61,16 @@ allow = [
 ]
 
 [bans]
-# Duplicate versions are tolerated (warn) while the tree is small; tighten to
-# "deny" before release once the graph stabilizes.
+# Duplicate versions are tolerated (warn), not tightened to "deny": whether
+# LocalPilot's internal crates are ever meant to publish to crates.io is
+# still an open, unanswered product decision, so this stays a conservative
+# placeholder rather than a confirmed post-v5.0.0 policy. Revisit once that
+# publish-intent question has an actual answer.
 multiple-versions = "warn"
 # Internal `{ path = ... }` members carry no version and read as wildcards;
-# `allow-wildcard-paths` does not exempt them while the crates remain publishable.
-# Keep this at "warn" until the publish posture is settled for release,
-# then tighten to "deny" alongside `publish = false` on internal crates.
+# `allow-wildcard-paths` does not exempt them while the crates remain
+# publishable. Same open question as above — kept at "warn" pending a real
+# publish-intent decision, not because permissiveness was deliberately chosen.
 wildcards = "warn"
 allow-wildcard-paths = true
 
