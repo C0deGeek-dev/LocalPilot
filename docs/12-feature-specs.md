@@ -399,6 +399,13 @@ touches the main branch on its own:
 - **Path containment.** Edit paths are joined under the worktree with a guard
   that rejects absolute paths, `..` traversal, and drive prefixes — an edit can
   only land inside the worktree.
+- **Reply repair on a malformed or truncated model reply.** The model rewrites
+  the whole target file inline as one JSON object (`{"new_content", "rationale"}`);
+  a reply that fails to parse, or that looks cut off mid-generation before the
+  object closes (a real risk on a large file), is fed back to the model with the
+  parse error and retried, bounded to a small attempt budget, before surfacing a
+  typed error that distinguishes "truncated" from "malformed" so an operator can
+  tell the two apart (#156).
 - **Change-provenance record.** Every proposal carries
   `{ prompt, model, tools_used, test_evidence, rationale, risks, rollback_notes,
   lessons }` (plus an eval result once the gate runs). It is meant to live with

@@ -139,9 +139,19 @@ pub enum GenerateError {
     /// The model request failed.
     #[error("the model request failed")]
     Provider,
-    /// The model reply was not the expected JSON object.
+    /// The model reply was not the expected JSON object, and repair retries
+    /// (if any remained) also failed to produce one.
     #[error("the model reply was not the expected JSON object: {0}")]
     Malformed(String),
+    /// The reply looks cut off mid-generation rather than simply wrong — no
+    /// closing `}` at all, or the parser ran out of input before a value
+    /// closed (e.g. mid-string on a large file) — after repair retries (if
+    /// any remained) still failed to produce a complete object.
+    #[error(
+        "the model reply looks truncated after {reply_len} bytes (ran out of \
+         room before the JSON object closed): {detail}"
+    )]
+    Truncated { reply_len: usize, detail: String },
     /// The model proposed no change at all.
     #[error("the model proposed no change to `{0}`")]
     NoChange(String),
@@ -152,6 +162,13 @@ the single file it names. Change only what the finding requires; keep everything
 byte-for-byte identical, and never touch any other file. Reply with ONLY a JSON object \
 of shape {\"new_content\": \"<the complete new content of the file>\", \"rationale\": \
 \"<one sentence on why this fixes the finding>\"} and nothing else.";
+
+/// Repair-attempt budget for a malformed or truncated model reply: the parse
+/// error is fed back and the model is asked to retry, bounded so a model that
+/// cannot produce valid JSON degrades to a typed error instead of looping.
+/// Mirrors `localpilot-recovery`'s tool-input-repair rung, applied here to
+/// this command's own structured-output generation.
+const MAX_REPAIR_ATTEMPTS: u32 = 2;
 
 /// Generate a scope-confined patch proposal for `finding` by asking `provider` to
 /// rewrite the single file the finding names. The proposal touches only that file;
@@ -175,16 +192,35 @@ pub async fn generate_proposal(
          {path}:\n```\n{current}\n```\n\nRewrite {path} to address the finding.",
         evidence = finding.evidence,
     );
-    let request = ModelRequest::new(
-        model,
-        vec![
-            Message::text(Role::System, SYSTEM_PROMPT),
-            Message::text(Role::User, user),
-        ],
-    );
+    let mut messages = vec![
+        Message::text(Role::System, SYSTEM_PROMPT),
+        Message::text(Role::User, user),
+    ];
 
-    let reply = collect_text(provider, request).await?;
-    let parsed = parse_reply(&reply)?;
+    let mut attempt = 0_u32;
+    let parsed = loop {
+        let request = ModelRequest::new(model, messages.clone());
+        let reply = collect_text(provider, request).await?;
+        match parse_reply(&reply) {
+            Ok(parsed) => break parsed,
+            Err(err) => {
+                if attempt >= MAX_REPAIR_ATTEMPTS {
+                    return Err(err);
+                }
+                attempt += 1;
+                // Hand the model its own reply back plus the parse error, so
+                // the retry is a correction rather than a blind repeat.
+                messages.push(Message::text(Role::Assistant, reply));
+                messages.push(Message::text(
+                    Role::User,
+                    format!(
+                        "Your last reply had a problem: {err}. Reply again with ONLY \
+                         the corrected JSON object of the same shape, nothing else."
+                    ),
+                ));
+            }
+        }
+    };
     if parsed.new_content == current {
         return Err(GenerateError::NoChange(path));
     }
@@ -230,18 +266,35 @@ async fn collect_text(
     Ok(text)
 }
 
-/// Extract the first complete JSON object from a possibly fenced/prose-wrapped reply.
+/// Extract the first complete JSON object from a possibly fenced/prose-wrapped
+/// reply. A reply with no closing `}` at all, or one `serde_json` reports an
+/// `Eof` error on (it ran out of input mid-value, e.g. mid-string on a large
+/// file), is reported as [`GenerateError::Truncated`] rather than
+/// [`GenerateError::Malformed`] — the two call for different operator
+/// reactions, and the caller's repair retry says something different too.
 fn parse_reply(reply: &str) -> Result<EditReply, GenerateError> {
     let start = reply
         .find('{')
         .ok_or_else(|| GenerateError::Malformed(truncate(reply)))?;
-    let end = reply
-        .rfind('}')
-        .ok_or_else(|| GenerateError::Malformed(truncate(reply)))?;
+    let Some(end) = reply.rfind('}') else {
+        return Err(GenerateError::Truncated {
+            reply_len: reply.len(),
+            detail: "no closing '}' anywhere in the reply".to_string(),
+        });
+    };
     if end < start {
         return Err(GenerateError::Malformed(truncate(reply)));
     }
-    serde_json::from_str(&reply[start..=end]).map_err(|e| GenerateError::Malformed(e.to_string()))
+    serde_json::from_str(&reply[start..=end]).map_err(|e| {
+        if e.classify() == serde_json::error::Category::Eof {
+            GenerateError::Truncated {
+                reply_len: reply.len(),
+                detail: e.to_string(),
+            }
+        } else {
+            GenerateError::Malformed(e.to_string())
+        }
+    })
 }
 
 fn truncate(s: &str) -> String {
@@ -417,8 +470,23 @@ fn run_discard(repo_root: &Path, id: &str, out: &mut dyn Write) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use localpilot_core::ContentBlock;
     use localpilot_llm::FakeProvider;
     use localpilot_selfreview::{FindingKind, Severity};
+
+    /// The text of a request's last message, for asserting what a repair
+    /// retry actually asked the model.
+    fn last_message_text(request: &ModelRequest) -> Option<String> {
+        request
+            .messages
+            .last()?
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+    }
 
     fn finding_at(path: &str) -> Finding {
         Finding::new(
@@ -470,6 +538,48 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, GenerateError::Malformed(_)));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_reply_recovers_on_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "x\n").unwrap();
+        let provider = FakeProvider::new()
+            .text("not json at all")
+            .text("{\"new_content\": \"y\\n\", \"rationale\": \"fixed\"}");
+
+        let generated = generate_proposal(&provider, "fake", dir.path(), &finding_at("a.rs"))
+            .await
+            .unwrap();
+        assert_eq!(generated.proposal.edits[0].new_content, "y\n");
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2, "one initial attempt, one repair retry");
+        let repair_prompt = last_message_text(&requests[1]).unwrap_or_default();
+        assert!(repair_prompt.contains("had a problem"), "{repair_prompt}");
+    }
+
+    #[tokio::test]
+    async fn a_truncated_reply_is_distinguished_and_retried_to_exhaustion() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "x\n").unwrap();
+        // A `}` is present (inside the never-closed string), so this exercises
+        // `serde_json`'s own EOF classification, not just "no `}` anywhere".
+        let cut_mid_string = "{\"new_content\": \"abc } def";
+        let provider = FakeProvider::new()
+            .text(cut_mid_string)
+            .text(cut_mid_string)
+            .text(cut_mid_string);
+
+        let err = generate_proposal(&provider, "fake", dir.path(), &finding_at("a.rs"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GenerateError::Truncated { .. }), "{err:?}");
+        assert_eq!(
+            provider.requests().len(),
+            (MAX_REPAIR_ATTEMPTS + 1) as usize,
+            "one initial attempt plus every repair retry, then give up"
+        );
     }
 
     #[tokio::test]

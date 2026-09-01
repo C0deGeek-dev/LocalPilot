@@ -227,6 +227,85 @@ mod tests {
         );
     }
 
+    /// Content that only *discusses* the detectors — a changelog/spec entry
+    /// mentioning the marker words, a doc comment, the detector's own
+    /// match-table source, and a fixture writing marker-shaped text as test
+    /// data — must not itself be flagged. A real leftover marker and a real
+    /// broken link, in the same tree, still are (#155).
+    #[test]
+    fn detector_self_reference_is_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "CHANGELOG.md",
+            "- `localpilot self-review`: leftover `TODO`/`FIXME` markers, broken doc links.\n",
+        );
+        write(
+            root,
+            "docs/12-feature-specs.md",
+            "- a static repo scan — leftover `TODO`/`FIXME`/`XXX`/`HACK` markers,\n\
+             rows (`TODO` status cells, \"pending sign-off\"), broken local doc links.\n",
+        );
+        write(
+            root,
+            "docs/10-decisions.md",
+            "1. Maps `<a href>` to `[text](url)`, per the reducer.\n",
+        );
+        write(
+            root,
+            "src/detectors.rs",
+            "fn marker_in() {\n    (\"FIXME\", 1),\n    (\"TODO\", 2),\n}\n\
+             #[cfg(test)]\nmod tests {\n    fn t() {\n        let s = \"// TODO: fixture\\n\";\n    }\n}\n",
+        );
+        write(
+            root,
+            "src/self_doc.rs",
+            "/// A `TODO`/`FIXME` marker left in a file.\npub fn f() {}\n",
+        );
+        // Real signal that must still surface alongside the self-references above.
+        write(root, "src/real.rs", "// TODO: an actual leftover\n");
+        write(root, "docs/broken.md", "see [gone](./nope.md)\n");
+
+        let report = review(root, &ReviewOptions::default());
+        let self_ref_paths = [
+            "CHANGELOG.md",
+            "docs/12-feature-specs.md",
+            "docs/10-decisions.md",
+            "src/detectors.rs",
+            "src/self_doc.rs",
+        ];
+        for finding in &report.findings {
+            if matches!(
+                finding.kind,
+                FindingKind::Todo | FindingKind::DocDrift | FindingKind::BrokenPlan
+            ) {
+                let path = finding.path.as_deref().unwrap_or_default();
+                assert!(
+                    !self_ref_paths.contains(&path),
+                    "self-reference flagged as a real finding: {finding:?}"
+                );
+            }
+        }
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::Todo && f.path.as_deref() == Some("src/real.rs")),
+            "a real leftover marker must still surface: {:?}",
+            report.findings
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::DocDrift
+                    && f.path.as_deref() == Some("docs/broken.md")),
+            "a real broken link must still surface: {:?}",
+            report.findings
+        );
+    }
+
     /// A prior lesson that names a finding's file annotates and boosts it.
     #[test]
     fn prior_lesson_informs_a_finding() {

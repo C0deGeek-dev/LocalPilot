@@ -6,6 +6,7 @@
 //! individually testable; [`scan`] runs them in one bounded walk.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::Path;
 
 use regex::Regex;
@@ -37,9 +38,14 @@ pub fn scan(
     let mut traits = TraitImplAggregate::default();
     let mut saw_cargo_manifest = false;
 
+    // `hidden(false)` is needed so a real hidden project dir (`.github/` workflows)
+    // is in scope; `.git` itself is VCS internals, not project content, so it is
+    // excluded explicitly regardless — this also skips `.git/modules/*` submodule
+    // mirrors, since the whole `.git` subtree is never descended into.
     let walker = ignore::WalkBuilder::new(root)
         .max_depth(Some(MAX_DIR_DEPTH))
         .hidden(false)
+        .filter_entry(|entry| entry.file_name() != OsStr::new(".git"))
         .build();
     for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -55,7 +61,13 @@ pub fn scan(
         scanned += 1;
         let rel = relative_display(root, path);
 
-        findings.extend(todo_markers(&rel, &text));
+        // A crate's own `tests/` integration files exist to *contain* marker
+        // strings as fixture data (e.g. a literal TODO-style code comment
+        // written to a temp file, to prove a detector finds it) — scanning
+        // them for real markers means the detector finds its own tests.
+        if !in_tests_dir(&rel) {
+            findings.extend(todo_markers(&rel, &text));
+        }
         if is_markdown(path) {
             findings.extend(doc_links(root, path, &rel, &text));
             findings.extend(plan_health(&rel, &text));
@@ -87,10 +99,31 @@ pub fn scan(
     (findings, scanned)
 }
 
+/// A path component named `tests` — Rust's convention for a crate's integration
+/// test files, which exist to hold marker-like fixture strings, not real markers.
+fn in_tests_dir(rel: &str) -> bool {
+    rel.split('/').any(|component| component == "tests")
+}
+
+/// The line a real, file-scope `#[cfg(test)]` attribute starts on, if any. A
+/// fixture *describing* the attribute as a string (e.g. a test that writes
+/// `"...\n#[cfg(test)]\nmod tests {...}"` to a temp file) never appears as its
+/// own exact line once trimmed, so this only finds the attribute in real source.
+/// By this codebase's convention the test module is the last item in the file,
+/// so treating everything from there to EOF as test code is enough — no brace
+/// tracking, which a fixture string's own `{`/`}` characters would throw off.
+fn test_module_start(text: &str) -> Option<usize> {
+    text.lines().position(|line| line.trim() == "#[cfg(test)]")
+}
+
 /// `TODO`/`FIXME`/`XXX`/`HACK` markers. `FIXME` is treated as the most serious.
 fn todo_markers(rel: &str, text: &str) -> Vec<Finding> {
     let mut out = Vec::new();
+    let test_start = test_module_start(text);
     for (index, line) in text.lines().enumerate() {
+        if test_start.is_some_and(|start| index >= start) {
+            continue;
+        }
         let Some((marker, severity)) = marker_in(line) else {
             continue;
         };
@@ -109,20 +142,51 @@ fn todo_markers(rel: &str, text: &str) -> Vec<Finding> {
     out
 }
 
-/// The first recognised marker keyword on a line and its severity. Matched as a
-/// whole word so `todo_list` or `fixmestate` do not trip it.
+/// The first recognised marker keyword sitting at a real comment position on a
+/// line — immediately after a `//`/`///`/`//!` or `#` comment leader — and its
+/// severity. Requiring comment position (rather than a bare word match anywhere
+/// on the line) is what tells a real leftover TODO comment apart from prose
+/// *about* the markers (a changelog entry, a doc comment, a spec listing what
+/// the detector looks for) and from the detector's own match table, none of
+/// which put the word right after a comment leader.
 fn marker_in(line: &str) -> Option<(&'static str, Severity)> {
-    for (marker, severity) in [
+    const MARKERS: [(&str, Severity); 4] = [
         ("FIXME", Severity::Medium),
         ("TODO", Severity::Low),
         ("XXX", Severity::Low),
         ("HACK", Severity::Low),
-    ] {
-        if contains_word(line, marker) {
-            return Some((marker, severity));
+    ];
+    for leader in comment_leader_starts(line) {
+        let after = line[leader..].trim_start_matches(['/', '#', '!', ' ', '\t']);
+        for (marker, severity) in MARKERS {
+            if let Some(rest) = after.strip_prefix(marker) {
+                let next_ok = rest.as_bytes().first().is_none_or(|b| !is_word_byte(*b));
+                if next_ok {
+                    return Some((marker, severity));
+                }
+            }
         }
     }
     None
+}
+
+/// Byte offsets in `line` where a line-comment leader (`//` or `#`) begins.
+fn comment_leader_starts(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            out.push(i);
+            i += 2;
+        } else if bytes[i] == b'#' {
+            out.push(i);
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Whether `word` appears in `line` bounded by non-alphanumeric/underscore
@@ -156,8 +220,23 @@ fn doc_links(root: &Path, file: &Path, rel: &str, text: &str) -> Vec<Finding> {
     };
     let base = file.parent().unwrap_or(root);
     let mut out = Vec::new();
+    let mut in_fence = false;
     for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue; // a fenced code sample isn't a real doc link.
+        }
         for capture in pattern.captures_iter(line) {
+            let Some(whole) = capture.get(0) else {
+                continue; // group 0 always matches in practice; skip defensively.
+            };
+            if inside_inline_code(line, whole.start()) {
+                continue; // e.g. `` `[text](url)` `` explaining link syntax, not a real link.
+            }
             let target = &capture[1];
             if is_external_link(target) {
                 continue;
@@ -183,6 +262,24 @@ fn doc_links(root: &Path, file: &Path, rel: &str, text: &str) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Whether byte offset `pos` on `line` falls inside a span quoted by `delim` —
+/// an odd number of `delim` bytes precede it, so `pos` sits in the segment the
+/// pair quotes rather than the surrounding prose.
+fn inside_quoted_span(line: &str, pos: usize, delim: u8) -> bool {
+    line.as_bytes()[..pos.min(line.len())]
+        .iter()
+        .filter(|&&b| b == delim)
+        .count()
+        % 2
+        == 1
+}
+
+/// Whether byte offset `pos` on `line` falls inside a single-backtick inline
+/// code span — e.g. `` `[text](url)` `` explaining link syntax, not a real link.
+fn inside_inline_code(line: &str, pos: usize) -> bool {
+    inside_quoted_span(line, pos, b'`')
 }
 
 fn is_external_link(target: &str) -> bool {
@@ -212,17 +309,24 @@ fn plan_health(rel: &str, text: &str) -> Vec<Finding> {
                 .at_span(Span::line(line_no)),
             );
         }
-        if trimmed.to_ascii_lowercase().contains("pending sign-off") {
-            out.push(
-                Finding::new(
-                    FindingKind::BrokenPlan,
-                    Severity::Medium,
-                    0.6,
-                    "unresolved 'pending sign-off'".to_string(),
-                )
-                .at_path(rel)
-                .at_span(Span::line(line_no)),
-            );
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(pos) = lower.find("pending sign-off") {
+            // A quoted mention (e.g. a spec citing the phrase as an example of
+            // what this detector looks for) is documentation, not a real
+            // unresolved row — `lower` is byte-for-byte the same length as
+            // `trimmed` (ASCII-only case change), so `pos` applies to both.
+            if !inside_quoted_span(trimmed, pos, b'"') {
+                out.push(
+                    Finding::new(
+                        FindingKind::BrokenPlan,
+                        Severity::Medium,
+                        0.6,
+                        "unresolved 'pending sign-off'".to_string(),
+                    )
+                    .at_path(rel)
+                    .at_span(Span::line(line_no)),
+                );
+            }
         }
     }
     out
@@ -388,11 +492,83 @@ mod tests {
     }
 
     #[test]
+    fn doc_links_skip_inline_code_and_fenced_examples() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.md");
+        // Both examples name a target ("url", "nope.md") that resolves to nothing
+        // — they'd be flagged as broken if read as real links, but one is quoted
+        // as inline code (explaining link syntax) and the other sits in a fenced
+        // sample; neither is a real link a reader would follow.
+        let text = "Example: `[text](url)` is the Markdown link syntax.\n\n\
+             ```\n[also](nope.md)\n```\n";
+        std::fs::write(&file, text).unwrap();
+        let findings = doc_links(dir.path(), &file, "doc.md", text);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn todo_markers_requires_comment_position_not_bare_prose() {
+        // A backtick-quoted mention in prose (a changelog/spec entry describing
+        // the markers) has no comment leader before it — not a real leftover.
+        let prose = "- leftover `TODO`/`FIXME` markers, a decision index lagging...\n";
+        assert!(todo_markers("CHANGELOG.md", prose).is_empty(), "{prose}");
+        // The detector's own match-table literal: no comment leader on the line.
+        let table = "        (\"TODO\", Severity::Low),\n";
+        assert!(todo_markers("detectors.rs", table).is_empty(), "{table}");
+        // A `#`-led comment (shell/markdown heading style) still counts.
+        let hashed = "# TODO: revisit this section\n";
+        assert_eq!(todo_markers("notes.md", hashed).len(), 1);
+    }
+
+    #[test]
+    fn todo_markers_skips_its_own_cfg_test_module() {
+        let text = "// TODO: real leftover\n\
+             pub fn f() {}\n\
+             \n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+             \x20   fn t() {\n\
+             \x20       let s = \"pub fn run() {}\\n// TODO: handle retries\\n\";\n\
+             \x20   }\n\
+             }\n";
+        let findings = todo_markers("src/lib.rs", text);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.unwrap().start_line, 1);
+    }
+
+    #[test]
+    fn scan_skips_git_internals_and_crate_test_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        std::fs::write(root.join(".git/hooks/sample"), "# TODO: sample hook\n").unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("tests/fixture.rs"), "// TODO: fixture marker\n").unwrap();
+        std::fs::write(root.join("real.rs"), "// TODO: a real leftover\n").unwrap();
+
+        let (findings, _scanned) = scan(root, false, false);
+        let todos: Vec<_> = findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Todo)
+            .collect();
+        assert_eq!(todos.len(), 1, "{todos:?}");
+        assert_eq!(todos[0].path.as_deref(), Some("real.rs"));
+    }
+
+    #[test]
     fn plan_health_flags_todo_rows_and_pending_signoff() {
         let text = "| 1 | TODO |\n| 2 | DONE |\nstatus: pending sign-off\n";
         let findings = plan_health("p.md", text);
         assert_eq!(findings.len(), 2);
         assert!(findings.iter().all(|f| f.kind == FindingKind::BrokenPlan));
+    }
+
+    #[test]
+    fn plan_health_skips_pending_signoff_cited_as_a_quoted_example() {
+        // A spec line *naming* the phrase as an example of what this detector
+        // looks for, not a real unresolved row.
+        let text = "rows (`TODO` status cells, \"pending sign-off\"), broken local doc links\n";
+        assert!(plan_health("docs/spec.md", text).is_empty());
     }
 
     #[test]
