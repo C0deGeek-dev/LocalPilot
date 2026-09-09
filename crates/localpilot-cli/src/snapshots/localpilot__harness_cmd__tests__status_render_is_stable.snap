@@ -8,4 +8,5 @@ next step: 2. Implement parser errors
 working tree: clean
 test command: cargo test
 quality gate: fmt (step), test (phase)
+lifecycle: plan current
 provider: local (credential not set)

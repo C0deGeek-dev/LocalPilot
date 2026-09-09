@@ -238,8 +238,19 @@ local-only, and `[research] enabled = false` turns research off entirely (see
 ```sh
 localpilot harness intake       # idea -> brief.md
 localpilot harness plan         # brief.md -> PROGRESS.md
+localpilot harness status       # which lifecycle state this project is in
 localpilot harness feature      # worked, committed steps; resume on quota
 ```
+
+A plan records the revision of the brief it was generated from, so editing
+`brief.md` marks `PROGRESS.md` stale and the harness stops resuming it until you
+replan. Completed steps keep their commits and attempt counts throughout.
+Reformatting a brief — or converting it to CRLF — is not a change to its
+requirements and does not make the plan stale.
+
+A plan created before LocalPilot recorded that revision has no binding, so
+whether it still matches its brief is unknown and it will not run. Bind it once
+with `localpilot harness adopt`, which writes only that line.
 
 Inside full-screen chat you can also resume harness work without leaving the session:
 `/harness-resume` continues plan steps and `/wait-resume` waits for quota and then

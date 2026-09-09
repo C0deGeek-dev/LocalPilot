@@ -5936,19 +5936,21 @@ async fn drive_harness_resume(
             };
             let provider = Some(snapshot.provider_id.as_str());
             let result = match kind {
-                ResumeKind::Wait => {
-                    crate::harness_cmd::wait_resume_with_events(
-                        &root,
-                        &snapshot.model,
-                        provider,
-                        run,
-                        &events_tx,
-                        &cancel,
-                        &mut out,
-                    )
-                    .await
-                }
+                ResumeKind::Wait => crate::harness_cmd::wait_resume_with_events(
+                    &root,
+                    &snapshot.model,
+                    provider,
+                    run,
+                    &events_tx,
+                    &cancel,
+                    &mut out,
+                )
+                .await
+                .map(|_| ()),
                 ResumeKind::Harness => {
+                    // The run's step count is for `wait-resume`'s paused-record
+                    // decision; the full-screen host only presents success or
+                    // failure, so it is mapped away here.
                     crate::harness_cmd::resume_with_events(
                         &root,
                         &snapshot.model,
@@ -5959,6 +5961,7 @@ async fn drive_harness_resume(
                         &mut out,
                     )
                     .await
+                    .map(|_| ())
                 }
             };
             (result, out)

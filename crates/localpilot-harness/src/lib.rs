@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_run;
+mod binding;
 mod brief;
 mod claim;
 mod compaction;
@@ -38,7 +39,9 @@ mod summarizer;
 mod system_prompt;
 mod verify_target;
 mod worker;
+mod workspace_state;
 
+pub use binding::BriefRevision;
 pub use brief::Brief;
 pub use compaction::{
     compact, compact_with_summary, estimate_tokens, CompactionMetadata, CompactionMode,
@@ -101,4 +104,8 @@ pub use localpilot_recovery::ModelHealth;
 pub use worker::{
     decide_step, evaluate_completion, select_next_step, AttemptResult, CompletionDecision,
     CompletionInputs, StepAction, StepDecision, StepLoop, StepTrace,
+};
+pub use workspace_state::{
+    adopt_plan, inspect, resumable, AdoptError, DocumentState, InterruptedRun, NotResumable,
+    OperationLiveness, OperationState, WorkspaceInputs, WorkspaceState,
 };

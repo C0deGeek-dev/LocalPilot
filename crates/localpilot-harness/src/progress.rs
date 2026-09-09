@@ -28,6 +28,12 @@ pub struct Step {
 pub struct Progress {
     pub name: String,
     pub branch: String,
+    /// The brief revision this plan was generated from or adopted against,
+    /// carried as a `Brief:` header line. `None` for a plan written before the
+    /// binding existed, which is a distinct condition from a binding that no
+    /// longer matches: unbound is *unknown*, stale is *known wrong*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_binding: Option<String>,
     pub steps: Vec<Step>,
 }
 
@@ -47,6 +53,42 @@ impl Progress {
             document: DOCUMENT,
             detail: "missing 'Branch:' line".to_string(),
         })?;
+        // Only the header — everything before the first `## ` heading — may carry
+        // the binding, so a step description that happens to contain `Brief:`
+        // cannot be mistaken for one.
+        let header: Vec<&str> = text
+            .lines()
+            .take_while(|line| !line.trim_start().starts_with("## "))
+            .collect();
+        // Two binding lines have no defined meaning, and silently taking the
+        // first would let a hand-edit or a bad merge decide which requirements a
+        // plan claims to satisfy. Every occurrence counts, including an empty
+        // one: the question is how many times the document tries to say what it
+        // is bound to, not how many of those attempts carry a value.
+        let bindings: Vec<&str> = header
+            .iter()
+            .filter_map(|line| line.trim().strip_prefix("Brief:"))
+            .map(str::trim)
+            .collect();
+        if bindings.len() > 1 {
+            return Err(HarnessError::Malformed {
+                document: DOCUMENT,
+                detail: format!(
+                    "{} 'Brief:' lines; a plan records exactly one brief revision",
+                    bindings.len()
+                ),
+            });
+        }
+        // A present-but-empty header is a broken binding, not the absence of
+        // one. Treating it as legacy-unbound would make a damaged document
+        // adoptable, quietly binding a plan whose recorded revision was lost.
+        if bindings.first().is_some_and(|value| value.is_empty()) {
+            return Err(HarnessError::Malformed {
+                document: DOCUMENT,
+                detail: "empty 'Brief:' line; a binding records a brief revision".to_string(),
+            });
+        }
+        let brief_binding = bindings.first().map(|value| (*value).to_string());
 
         let mut steps: Vec<Step> = Vec::new();
         for line in text.lines() {
@@ -78,6 +120,7 @@ impl Progress {
         Ok(Self {
             name,
             branch,
+            brief_binding,
             steps,
         })
     }
@@ -85,10 +128,13 @@ impl Progress {
     /// Render progress back to markdown, losslessly.
     #[must_use]
     pub fn render(&self) -> String {
-        let mut out = format!(
-            "# Progress: {}\nBranch: {}\n\n## Steps\n\n",
-            self.name, self.branch
-        );
+        let mut out = format!("# Progress: {}\nBranch: {}\n", self.name, self.branch);
+        // The binding is written only when present, so a plan that predates it
+        // round-trips byte-identically instead of gaining an empty field.
+        if let Some(binding) = &self.brief_binding {
+            out.push_str(&format!("Brief: {binding}\n"));
+        }
+        out.push_str("\n## Steps\n\n");
         for step in &self.steps {
             let check = if step.done { "x" } else { " " };
             out.push_str(&format!(
@@ -125,6 +171,12 @@ impl Progress {
     #[must_use]
     pub fn step_is_done(&self, number: usize) -> bool {
         self.steps.iter().any(|s| s.number == number && s.done)
+    }
+
+    /// Record the brief revision this plan is bound to, leaving every step and
+    /// all of its completion evidence untouched.
+    pub fn bind_to_brief(&mut self, revision: impl Into<String>) {
+        self.brief_binding = Some(revision.into());
     }
 
     /// Append a new step after the highest existing number, leaving existing

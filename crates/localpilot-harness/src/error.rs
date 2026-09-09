@@ -29,4 +29,9 @@ pub enum HarnessError {
     /// The provider failed or did not produce a usable document after retries.
     #[error("provider error: {0}")]
     Provider(String),
+
+    /// The project's lifecycle state does not permit execution. Carries the
+    /// named reason so a caller can say which one it is.
+    #[error("{0}")]
+    NotResumable(#[from] crate::workspace_state::NotResumable),
 }

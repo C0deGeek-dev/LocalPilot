@@ -1356,6 +1356,14 @@ enum ReviewCommand {
 enum HarnessCommand {
     /// Read-only summary of the harness state (works without a provider).
     Status,
+    /// Declare that the existing PROGRESS.md belongs to the current brief.md.
+    ///
+    /// Only needed for a plan written before plans recorded the brief revision
+    /// they were built from. Such a plan cannot be resumed automatically,
+    /// because nothing records whether the brief changed in the meantime. This
+    /// writes only that binding and leaves every step, commit, and attempt
+    /// count untouched.
+    Adopt,
     /// Turn a rough idea into brief.md.
     Intake {
         /// The idea to develop into a brief.
@@ -1883,6 +1891,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 HarnessCommand::Status => {
                     let mut stdout = io::stdout().lock();
                     harness_cmd::status(&cwd, &mut stdout)?;
+                    stdout.flush()?;
+                }
+                HarnessCommand::Adopt => {
+                    let mut stdout = io::stdout().lock();
+                    harness_cmd::adopt(&cwd, &mut stdout)?;
                     stdout.flush()?;
                 }
                 HarnessCommand::Intake {

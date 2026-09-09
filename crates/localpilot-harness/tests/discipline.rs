@@ -121,10 +121,18 @@ fn run_discipline(task: &DisciplineTask) -> DisciplineScore {
         }
         std::fs::write(path, contents).unwrap();
     }
+    // The executor runs only a plan bound to a readable brief, so the fixture is
+    // a real project rather than a bare step list.
+    const BRIEF: &str = "# Brief: discipline\n\n## Summary\n\nComplete the step.\n\n\
+## Requirements\n\n- The step is completed\n\n## Constraints\n\n- Change only what is needed\n\n\
+## Non-Goals\n\n- Anything unrelated\n\n## Acceptance Criteria\n\n- The expectation holds\n";
+    std::fs::write(root.join("brief.md"), BRIEF).unwrap();
+    let revision =
+        localpilot_harness::BriefRevision::of(&localpilot_harness::Brief::parse(BRIEF).unwrap());
     std::fs::write(
         root.join("PROGRESS.md"),
         format!(
-            "# Progress: discipline\nBranch: feature/discipline\n\n## Steps\n\n- [ ] 1. {}\n",
+            "# Progress: discipline\nBranch: feature/discipline\nBrief: {revision}\n\n## Steps\n\n- [ ] 1. {}\n",
             task.step
         ),
     )

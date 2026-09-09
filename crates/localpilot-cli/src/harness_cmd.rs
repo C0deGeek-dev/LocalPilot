@@ -12,8 +12,8 @@ use indexmap::IndexMap;
 use localpilot_config::{CliOverrides, Config, ConfigPaths, RuleSeverity};
 use localpilot_harness::{
     propose_gate, ratify_gate, resume_one_step_with_events, run_intake, run_plan,
-    summarize_proposal, Brief, CheckOutcome, CheckStatus, Progress, RuleEngine, RuntimeEvent,
-    SessionConfig, SessionRuntime, QUALITY_CHECK_TOOL, QUOTA_PAUSE_KEY,
+    summarize_proposal, Brief, CheckOutcome, CheckStatus, RuleEngine, RuntimeEvent, SessionConfig,
+    SessionRuntime, QUALITY_CHECK_TOOL, QUOTA_PAUSE_KEY,
 };
 use localpilot_llm::{ModelProvider, ProviderRegistry};
 use localpilot_quota::{decide_resume, PausedRun, ResumeContext, ResumeDecision, ResumePolicy};
@@ -119,6 +119,11 @@ pub struct StatusReport {
     pub provider_credential_present: bool,
     /// The ratified quality-gate checks, each as `name (cadence)`.
     pub gate: Vec<String>,
+    /// The lifecycle line: which typed workspace state the project is in, and
+    /// the named reason when that state is a failure. Composed here from the
+    /// typed state rather than re-derived, so status cannot disagree with what
+    /// the execution paths enforce.
+    pub lifecycle: String,
 }
 
 impl StatusReport {
@@ -157,6 +162,7 @@ impl StatusReport {
                 self.gate.join(", ")
             }
         );
+        let _ = writeln!(s, "lifecycle: {}", self.lifecycle);
         let credential = if self.provider_credential_present {
             "set"
         } else {
@@ -179,18 +185,31 @@ pub fn gather_status(root: &Path) -> anyhow::Result<StatusReport> {
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
         .unwrap_or_else(|_| Config::default());
 
-    let progress = std::fs::read_to_string(root.join("PROGRESS.md"))
-        .ok()
-        .and_then(|text| Progress::parse(&text).ok());
-    let (next_step, completed, total) = match &progress {
-        Some(p) => (
-            p.next_incomplete()
+    // One typed inspection, shared with every execution path. The previous
+    // `.ok()` chain here silently turned an unreadable or malformed plan into
+    // "0/0 steps" — the same output a project with no plan at all produces.
+    //
+    // The interruption record comes from the store, because that is where it
+    // lives; without supplying it, status could never report the paused run its
+    // own documentation promises. Liveness stays `Idle`: a one-shot command
+    // cannot know whether some other process is mid-run, and claiming otherwise
+    // would be a guess.
+    let state = localpilot_harness::inspect(localpilot_harness::WorkspaceInputs {
+        root,
+        liveness: localpilot_harness::OperationLiveness::Idle,
+        interrupted: recorded_interruption(root),
+    });
+    let (next_step, completed, total) = match state.documents.progress() {
+        Some(progress) => (
+            progress
+                .next_incomplete()
                 .map(|s| format!("{}. {}", s.number, s.description)),
-            p.completed_count(),
-            p.steps.len(),
+            progress.completed_count(),
+            progress.steps.len(),
         ),
         None => (None, 0, 0),
     };
+    let lifecycle = lifecycle_line(&state);
 
     let default_provider = config.provider.default.clone();
     let provider_credential_present = config.resolve_credential(&default_provider).is_some();
@@ -212,7 +231,134 @@ pub fn gather_status(root: &Path) -> anyhow::Result<StatusReport> {
         default_provider,
         provider_credential_present,
         gate,
+        lifecycle,
     })
+}
+
+/// Delete the paused-run record only if it is still the one this run was
+/// continuing.
+///
+/// A resumed run can hit the quota again and persist a *new* pause. Deleting
+/// unconditionally would erase that fresh record — throwing away the recovery
+/// point for work that just happened — so the stored bytes are compared first.
+/// Returns whether the record was consumed.
+///
+/// # Errors
+/// Returns an error only if the store cannot be read or written.
+fn consume_pause_if_unchanged(store: &Store, original: &[u8]) -> anyhow::Result<bool> {
+    if store.get_cache(QUOTA_PAUSE_KEY)?.as_deref() == Some(original) {
+        store.delete_cache(QUOTA_PAUSE_KEY)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// The persisted interruption record, if this project has one.
+///
+/// A quota-paused run is the only kind that exists today. The record is parsed
+/// rather than merely detected: `wait-resume` refuses a record it cannot read, so
+/// reporting unreadable bytes as a recoverable pause would promise a recovery
+/// that does not exist. A store that cannot be read, or holds something that is
+/// not a `PausedRun`, yields `None` — status is a read-only report and must not
+/// fail because a cache entry is corrupt.
+fn recorded_interruption(root: &Path) -> Option<localpilot_harness::InterruptedRun> {
+    let bytes = Store::open(root)
+        .get_cache(QUOTA_PAUSE_KEY)
+        .ok()
+        .flatten()?;
+    serde_json::from_slice::<PausedRun>(&bytes)
+        .ok()
+        .map(|_| localpilot_harness::InterruptedRun::QuotaPause)
+}
+
+/// Describe a workspace state in one line, naming the error when there is one.
+///
+/// Every arm is explicit: a wildcard here is how a new state silently starts
+/// rendering as something it is not.
+fn lifecycle_line(state: &localpilot_harness::WorkspaceState) -> String {
+    use localpilot_harness::{DocumentState, InterruptedRun, OperationState};
+
+    let documents = match &state.documents {
+        DocumentState::NoBrief => "no brief.md".to_string(),
+        DocumentState::BriefUnreadable(error) => format!("brief.md unreadable: {error}"),
+        DocumentState::BriefMalformed(error) => format!("brief.md malformed: {error}"),
+        DocumentState::BriefOnly { .. } => "brief only (no plan yet)".to_string(),
+        DocumentState::PlanUnreadable { error, .. } => format!("PROGRESS.md unreadable: {error}"),
+        DocumentState::PlanMalformed { error, .. } => format!("PROGRESS.md malformed: {error}"),
+        DocumentState::PlanUnbound { .. } => {
+            "plan not bound to a brief revision (run `localpilot harness adopt` to bind it)"
+                .to_string()
+        }
+        DocumentState::PlanStale {
+            recorded, current, ..
+        } => format!("plan is stale: built against {recorded}, brief.md is now {current}"),
+        DocumentState::PlanBindingUnsupported { recorded, .. } => format!(
+            "plan records a brief binding this build does not understand ({recorded}); it was \
+             written by a different version of LocalPilot"
+        ),
+        DocumentState::PlanReady { .. } => "plan current".to_string(),
+        DocumentState::PlanComplete { .. } => "plan complete".to_string(),
+    };
+    match state.operation {
+        OperationState::Idle => documents,
+        OperationState::Active => format!("{documents}; a harness operation is running"),
+        OperationState::Interrupted(InterruptedRun::QuotaPause) => {
+            format!("{documents}; a quota-paused run is recorded (`harness wait-resume`)")
+        }
+    }
+}
+
+/// Render why a project cannot run its next step, in the caller's terms.
+fn blocked_reason(reason: &localpilot_harness::NotResumable) -> String {
+    use localpilot_harness::NotResumable as R;
+    match reason {
+        R::NoBrief => "brief.md not found; run `localpilot harness intake` first".to_string(),
+        R::BriefBroken { detail } => format!("brief.md cannot be used: {detail}"),
+        R::NoPlan => "PROGRESS.md not found; run `localpilot harness plan` first".to_string(),
+        R::PlanBroken { detail } => format!("PROGRESS.md cannot be used: {detail}"),
+        R::Unbound => "PROGRESS.md records no brief revision, so whether it still matches \
+             brief.md is unknown. Run `localpilot harness adopt` to declare that this plan \
+             belongs to the current brief, or `localpilot harness plan` to replan."
+            .to_string(),
+        R::Stale { recorded, current } => format!(
+            "PROGRESS.md was built against brief revision {recorded}, but brief.md is now \
+             {current}. Replan before resuming; the completed steps and their commits are kept."
+        ),
+        R::BindingUnsupported { recorded } => format!(
+            "PROGRESS.md records a brief binding this build does not understand ({recorded}). It \
+             was written by a different version of LocalPilot; update LocalPilot or replan. This \
+             is not a claim that brief.md changed."
+        ),
+        R::Complete => "every step in PROGRESS.md is already done".to_string(),
+        R::OperationActive => "a harness operation is already running".to_string(),
+    }
+}
+
+/// Bind an existing unbound plan to the current brief.
+///
+/// # Errors
+/// Returns an error when the project is not in the unbound state, or the plan
+/// cannot be written back.
+pub fn adopt(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    let revision = localpilot_harness::adopt_plan(root)?;
+    writeln!(
+        out,
+        "PROGRESS.md is now bound to brief revision {revision}. Steps, commits, and attempt \
+         counts were left unchanged."
+    )?;
+    Ok(())
+}
+
+/// The plan to run, or a human-readable refusal.
+///
+/// Every execution entry point goes through this, so "a stale or unbound plan
+/// cannot run" is enforced once rather than re-checked by each caller.
+fn require_resumable(root: &Path) -> anyhow::Result<()> {
+    let state = localpilot_harness::inspect(localpilot_harness::WorkspaceInputs::at(root));
+    match localpilot_harness::resumable(&state) {
+        Ok(_) => Ok(()),
+        Err(reason) => anyhow::bail!(blocked_reason(&reason)),
+    }
 }
 
 fn cadence_label(cadence: localpilot_config::Cadence) -> &'static str {
@@ -546,7 +692,11 @@ pub async fn plan(root: &Path, model: &str, provider_id: Option<&str>) -> anyhow
     let brief = Brief::parse(&brief_text)?;
     let provider = provider_for(root, provider_id)?;
     let summary = repo_summary(root);
-    let progress = run_plan(provider.as_ref(), model, &brief, &summary).await?;
+    let mut progress = run_plan(provider.as_ref(), model, &brief, &summary).await?;
+    // A plan is bound to the brief it was generated from at the moment it is
+    // written. Without this every new plan would start life unbound, and the
+    // binding would only ever describe plans someone adopted by hand.
+    progress.bind_to_brief(localpilot_harness::BriefRevision::of(&brief).as_str());
     std::fs::write(root.join("PROGRESS.md"), progress.render())?;
     Ok(())
 }
@@ -557,13 +707,42 @@ pub async fn plan(root: &Path, model: &str, provider_id: Option<&str>) -> anyhow
 /// # Errors
 /// Returns an error if the brief or progress files are missing or invalid.
 pub fn feature(root: &Path, description: &str) -> anyhow::Result<()> {
-    let mut brief = Brief::parse(&std::fs::read_to_string(root.join("brief.md"))?)?;
-    brief.add_requirement(description);
-    std::fs::write(root.join("brief.md"), brief.render())?;
+    // One inspection, and the documents that get written are the ones it parsed
+    // — not a second read that could have moved underneath this command.
+    let state = localpilot_harness::inspect(localpilot_harness::WorkspaceInputs::at(root));
+    let (mut brief, mut progress) = match state.documents {
+        localpilot_harness::DocumentState::PlanReady { brief, progress }
+        | localpilot_harness::DocumentState::PlanComplete { brief, progress } => (brief, progress),
+        // Anything else is refused with its own named reason: appending to a
+        // plan whose relationship to the brief is unknown or superseded would
+        // turn that uncertainty into an apparently current plan.
+        ref documents => {
+            let reason = localpilot_harness::resumable(&state).err().map_or_else(
+                || format!("PROGRESS.md is not in a state this command can extend: {documents:?}"),
+                |reason| blocked_reason(&reason),
+            );
+            anyhow::bail!(reason);
+        }
+    };
 
-    let mut progress = Progress::parse(&std::fs::read_to_string(root.join("PROGRESS.md"))?)?;
+    brief.add_requirement(description);
     progress.append_step(format!("Implement: {description}"));
+    // The brief just changed, so the plan's binding moves with it in the same
+    // command; otherwise this would leave behind exactly the silently-stale plan
+    // the binding exists to prevent.
+    progress.bind_to_brief(localpilot_harness::BriefRevision::of(&brief).as_str());
+
+    // Two files, so this is not atomic, and the ordering is chosen for what a
+    // half-completed run leaves behind rather than for convenience. The plan is
+    // written first: if the brief write then fails, the plan records a revision
+    // no brief matches, which reads as *stale* and refuses to run. Writing the
+    // brief first would leave the opposite window — a changed brief with a plan
+    // still bound to the old revision — which is also stale, but only by
+    // accident of the same check. Either way the failure is closed, never a plan
+    // that claims to be current; the plan-first order makes that the direct
+    // consequence of the write that succeeded.
     std::fs::write(root.join("PROGRESS.md"), progress.render())?;
+    std::fs::write(root.join("brief.md"), brief.render())?;
     Ok(())
 }
 
@@ -662,6 +841,29 @@ pub async fn resume(
         out,
     )
     .await
+    .map(|_| ())
+}
+
+/// What a resume run actually did.
+///
+/// A run returns `Ok` for several endings that are not progress: a step blocked
+/// by the quality gate or a session-start rule, a cancelled step, a plan that
+/// was already finished. `wait-resume` must tell those apart from a step that
+/// committed, because the paused-run record it holds is the only way back to the
+/// interrupted work — and deleting it after a run that advanced nothing loses
+/// that for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResumeProgress {
+    /// How many steps committed during this run.
+    pub committed_steps: usize,
+}
+
+impl ResumeProgress {
+    /// Whether the run advanced the plan at all.
+    #[must_use]
+    pub fn advanced(&self) -> bool {
+        self.committed_steps > 0
+    }
 }
 
 /// Runtime settings for a harness resume run.
@@ -689,10 +891,13 @@ pub async fn resume_with_events<A>(
     events: &broadcast::Sender<RuntimeEvent>,
     cancel: &CancellationToken,
     out: &mut dyn Write,
-) -> anyhow::Result<()>
+) -> anyhow::Result<ResumeProgress>
 where
     A: FnMut() -> Box<dyn Approver>,
 {
+    // The lifecycle gate runs before the provider is resolved: a stale or
+    // unbound plan is refused without a network call or a session being opened.
+    require_resumable(root)?;
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
         .unwrap_or_else(|_| Config::default());
     let provider = provider_for(root, provider_id)?;
@@ -713,12 +918,22 @@ where
     // Connect MCP servers once; each step builds a fresh registry over them.
     let mcp = crate::mcp::McpTools::load(&config).await;
 
+    let mut progress_made = ResumeProgress::default();
     const MAX_STEPS: usize = 100;
     for _ in 0..MAX_STEPS {
-        let next_step = std::fs::read_to_string(root.join("PROGRESS.md"))
-            .ok()
-            .and_then(|t| Progress::parse(&t).ok())
-            .and_then(|p| p.next_incomplete().map(|s| s.description.clone()));
+        // Re-inspect each iteration: the step that just ran edits PROGRESS.md,
+        // so the loop's view has to come from disk again. Going through the
+        // shared gate rather than a local `.ok()` chain also means a step that
+        // corrupts the plan stops the run and says so, instead of parsing to
+        // `None` and being announced as "all steps complete".
+        let state = localpilot_harness::inspect(localpilot_harness::WorkspaceInputs::at(root));
+        let next_step = match localpilot_harness::resumable(&state) {
+            Ok(progress) => progress
+                .next_incomplete()
+                .map(|step| step.description.clone()),
+            Err(localpilot_harness::NotResumable::Complete) => None,
+            Err(reason) => anyhow::bail!(blocked_reason(&reason)),
+        };
         if next_step.is_none() {
             writeln!(out, "all steps complete")?;
             // Advisory completion retrospective (best-effort): review the finished
@@ -827,6 +1042,7 @@ where
             write!(out, "{gate}")?;
         }
         if outcome.committed {
+            progress_made.committed_steps += 1;
             writeln!(out, "step {} complete", outcome.step_number)?;
             // A committed step can still carry a reason when the phase-cadence
             // gate ran (plan boundary) and blocked — e.g. a failing dependency
@@ -845,7 +1061,7 @@ where
             break;
         }
     }
-    Ok(())
+    Ok(progress_made)
 }
 
 /// Render the quality-gate outcomes for a step as a bounded, one-line-per-check
@@ -896,6 +1112,7 @@ pub async fn wait_resume(
         out,
     )
     .await
+    .map(|_| ())
 }
 
 /// Continue a quota-paused run through the streaming resume path, if allowed by
@@ -911,17 +1128,21 @@ pub async fn wait_resume_with_events<A>(
     events: &broadcast::Sender<RuntimeEvent>,
     cancel: &CancellationToken,
     out: &mut dyn Write,
-) -> anyhow::Result<()>
+) -> anyhow::Result<ResumeProgress>
 where
     A: FnMut() -> Box<dyn Approver>,
 {
     let store = Store::open(root);
     let Some(bytes) = store.get_cache(QUOTA_PAUSE_KEY)? else {
         writeln!(out, "no paused run")?;
-        return Ok(());
+        return Ok(ResumeProgress::default());
     };
     let paused: PausedRun = serde_json::from_slice(&bytes)
         .map_err(|e| anyhow::anyhow!("invalid paused-run file: {e}"))?;
+    // A pause record does not make a superseded plan runnable: waiting out a
+    // quota window and then executing against a stale plan is the same mistake,
+    // just later.
+    require_resumable(root)?;
 
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
         .unwrap_or_else(|_| Config::default());
@@ -934,7 +1155,7 @@ where
     loop {
         if cancel.is_cancelled() {
             writeln!(out, "wait cancelled")?;
-            return Ok(());
+            return Ok(ResumeProgress::default());
         }
         let now = now_unix();
         let ctx = ResumeContext {
@@ -954,21 +1175,38 @@ where
 
         match decide_resume(&policy, &ctx) {
             ResumeDecision::Resume => {
+                // Re-check immediately before continuing: the wait can last
+                // hours and brief.md can change inside it.
+                require_resumable(root)?;
                 writeln!(out, "resuming paused run at step {}", paused.step_number)?;
-                store.delete_cache(QUOTA_PAUSE_KEY)?;
-                return resume_with_events(root, model, provider_id, run, events, cancel, out)
-                    .await;
+                // The record is consumed AFTER a successful continuation, never
+                // before it. Everything between here and a finished step can
+                // still fail — resolving the provider, building the workspace,
+                // connecting MCP servers, the step itself — and the record is
+                // the only way back to the interrupted work.
+                let outcome =
+                    resume_with_events(root, model, provider_id, run, events, cancel, out).await;
+                // `Ok` alone is not progress. A step blocked by a rule or the
+                // quality gate, a cancelled step, and a plan that was already
+                // finished all return `Ok` — and none of them advanced the work
+                // the record was holding. Consume it only when a step actually
+                // committed; a fresh pause written by this run has different
+                // bytes and is left alone by the comparison.
+                if outcome.as_ref().is_ok_and(ResumeProgress::advanced) {
+                    consume_pause_if_unchanged(&store, &bytes)?;
+                }
+                return outcome;
             }
             ResumeDecision::AskUser => {
                 writeln!(
                     out,
                     "auto_resume is 'ask'; set quota.auto_resume = run|global to continue automatically"
                 )?;
-                return Ok(());
+                return Ok(ResumeProgress::default());
             }
             ResumeDecision::BlockedBy(reason) => {
                 writeln!(out, "cannot resume: {reason}")?;
-                return Ok(());
+                return Ok(ResumeProgress::default());
             }
             ResumeDecision::Wait => {
                 let nap = wait_nap(&paused, &policy, now, WAIT_POLL_CAP_SECS)
@@ -985,7 +1223,7 @@ where
                 tokio::select! {
                     () = cancel.cancelled() => {
                         writeln!(out, "wait cancelled")?;
-                        return Ok(());
+                        return Ok(ResumeProgress::default());
                     }
                     () = tokio::time::sleep(nap) => {}
                 }
@@ -1144,6 +1382,359 @@ mod tests {
         }
     }
 
+    /// A brief and a plan bound to it: the minimum state in which the harness
+    /// will agree to run a step at all.
+    fn runnable_project(root: &Path) {
+        const BRIEF: &str = "# Brief: thing\n\n## Summary\n\nDo the thing.\n\n\
+## Requirements\n\n- It works\n\n## Constraints\n\n- Be small\n\n\
+## Non-Goals\n\n- World peace\n\n## Acceptance Criteria\n\n- A test passes\n";
+        std::fs::write(root.join("brief.md"), BRIEF).unwrap();
+        let revision =
+            localpilot_harness::BriefRevision::of(&Brief::parse(BRIEF).unwrap()).to_string();
+        std::fs::write(
+            root.join("PROGRESS.md"),
+            format!(
+                "# Progress: thing\nBranch: feature/thing\nBrief: {revision}\n\n## Steps\n\n\
+- [ ] 1. Implement it\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Turn a runnable project stale by changing what the brief asks for.
+    fn make_stale(root: &Path) {
+        let brief = std::fs::read_to_string(root.join("brief.md")).unwrap();
+        std::fs::write(
+            root.join("brief.md"),
+            brief.replace("- It works", "- It works, and it is fast"),
+        )
+        .unwrap();
+    }
+
+    fn wait_resume_run() -> ResumeRun<impl FnMut() -> Box<dyn Approver>> {
+        ResumeRun {
+            profile: Profile::Default,
+            interactivity: Interactivity::NonInteractive,
+            trusted: false,
+            approver: || Box::new(ScriptedApprover::new(Vec::new())) as Box<dyn Approver>,
+        }
+    }
+
+    /// A project the resume path will reach: a runnable plan, a configured
+    /// provider so the run gets past provider resolution, and a git repository
+    /// so the session-start rules have something to inspect. No network is
+    /// touched — the provider is constructed, never called.
+    fn resumable_project_with_provider(root: &Path) {
+        std::fs::write(
+            root.join(".localpilot.toml"),
+            "[quota]\nauto_resume = \"run\"\nmax_wait_minutes = 360\n\n\
+[provider]\ndefault = \"local\"\n\n\
+[providers.local]\nkind = \"openai-compatible\"\n\
+base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
+        )
+        .unwrap();
+        runnable_project(root);
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["add", "-A"],
+            vec!["commit", "-m", "initial"],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delegated_run_blocked_at_session_start_keeps_the_paused_run() {
+        // The run reaches the executor and returns `Ok` — the step was refused
+        // by a session-start rule, not by an error. That is exactly the shape
+        // that used to consume the record: a successful call that advanced
+        // nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        resumable_project_with_provider(root);
+        // An unrelated uncommitted change is what the baseline session-start
+        // rule refuses.
+        std::fs::write(root.join("scratch.txt"), "unrelated work\n").unwrap();
+
+        let store = Store::open(root);
+        let now = now_unix();
+        let original = serde_json::to_vec(&paused_at(now, Some(now))).unwrap();
+        store.put_cache(QUOTA_PAUSE_KEY, &original).unwrap();
+
+        let (events_tx, _rx) = broadcast::channel::<RuntimeEvent>(16);
+        let cancel = CancellationToken::new();
+        let mut out: Vec<u8> = Vec::new();
+        let progress = wait_resume_with_events(
+            root,
+            "m",
+            None,
+            wait_resume_run(),
+            &events_tx,
+            &cancel,
+            &mut out,
+        )
+        .await
+        .expect("a blocked step is not an error");
+
+        assert_eq!(
+            progress.committed_steps,
+            0,
+            "nothing advanced: {}",
+            String::from_utf8_lossy(&out)
+        );
+        assert_eq!(
+            store.get_cache(QUOTA_PAUSE_KEY).unwrap().as_deref(),
+            Some(original.as_slice()),
+            "the paused run is byte-identical after a blocked run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_wait_keeps_the_paused_run() {
+        // Cancellation is a stop, not a completion. The record is what the next
+        // attempt resumes from.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        resumable_project_with_provider(root);
+
+        let store = Store::open(root);
+        let now = now_unix();
+        let original = serde_json::to_vec(&paused_at(now, Some(now + 3600))).unwrap();
+        store.put_cache(QUOTA_PAUSE_KEY, &original).unwrap();
+
+        let (events_tx, _rx) = broadcast::channel::<RuntimeEvent>(16);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut out: Vec<u8> = Vec::new();
+        let progress = wait_resume_with_events(
+            root,
+            "m",
+            None,
+            wait_resume_run(),
+            &events_tx,
+            &cancel,
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(progress.committed_steps, 0);
+        assert_eq!(
+            store.get_cache(QUOTA_PAUSE_KEY).unwrap().as_deref(),
+            Some(original.as_slice()),
+            "a cancelled wait consumes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_the_policy_decision_keeps_the_paused_run() {
+        // Everything between the decision to resume and a finished step can
+        // fail. Here the project has no provider configured, so the continuation
+        // fails while resolving one — after the policy said Resume, which is
+        // exactly the window in which the record used to be deleted already.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[quota]\nauto_resume = \"run\"\nmax_wait_minutes = 360\n",
+        )
+        .unwrap();
+        runnable_project(dir.path());
+
+        let store = Store::open(dir.path());
+        let now = now_unix();
+        store
+            .put_cache(
+                QUOTA_PAUSE_KEY,
+                &serde_json::to_vec(&paused_at(now, Some(now))).unwrap(),
+            )
+            .unwrap();
+
+        let (events_tx, _rx) = broadcast::channel::<RuntimeEvent>(16);
+        let cancel = CancellationToken::new();
+        let mut out: Vec<u8> = Vec::new();
+        let result = wait_resume_with_events(
+            dir.path(),
+            "model",
+            None,
+            wait_resume_run(),
+            &events_tx,
+            &cancel,
+            &mut out,
+        )
+        .await;
+
+        assert!(result.is_err(), "no provider is configured");
+        assert!(
+            store.get_cache(QUOTA_PAUSE_KEY).unwrap().is_some(),
+            "the paused run survives a failure after the policy decision"
+        );
+    }
+
+    #[test]
+    fn consuming_a_pause_never_erases_a_newer_one() {
+        // A resumed run can hit the quota again and persist a fresh record.
+        // Deleting unconditionally would throw away the recovery point for work
+        // that just happened.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let now = now_unix();
+        let original = serde_json::to_vec(&paused_at(now, Some(now))).unwrap();
+        let newer = serde_json::to_vec(&paused_at(now + 60, Some(now + 120))).unwrap();
+
+        store.put_cache(QUOTA_PAUSE_KEY, &newer).unwrap();
+        assert!(
+            !consume_pause_if_unchanged(&store, &original).unwrap(),
+            "a different record is not this run's to delete"
+        );
+        assert_eq!(
+            store.get_cache(QUOTA_PAUSE_KEY).unwrap().as_deref(),
+            Some(newer.as_slice())
+        );
+
+        store.put_cache(QUOTA_PAUSE_KEY, &original).unwrap();
+        assert!(consume_pause_if_unchanged(&store, &original).unwrap());
+        assert!(store.get_cache(QUOTA_PAUSE_KEY).unwrap().is_none());
+    }
+
+    #[test]
+    fn status_reports_a_readable_pause_and_stays_silent_about_an_unreadable_one() {
+        // `wait-resume` refuses a record it cannot parse, so status must not
+        // advertise one as recoverable. The two cases are pinned together
+        // because the difference between them is the whole point.
+        let dir = tempfile::tempdir().unwrap();
+        runnable_project(dir.path());
+        let store = Store::open(dir.path());
+        let now = now_unix();
+
+        store
+            .put_cache(
+                QUOTA_PAUSE_KEY,
+                &serde_json::to_vec(&paused_at(now, Some(now))).unwrap(),
+            )
+            .unwrap();
+        let report = gather_status(dir.path()).unwrap();
+        assert!(
+            report.lifecycle.contains("quota-paused"),
+            "{}",
+            report.lifecycle
+        );
+
+        store
+            .put_cache(QUOTA_PAUSE_KEY, b"not json at all")
+            .unwrap();
+        let report = gather_status(dir.path()).unwrap();
+        assert!(
+            !report.lifecycle.contains("quota-paused"),
+            "an unreadable record is not a recoverable run: {}",
+            report.lifecycle
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_resume_refuses_a_stale_plan_and_keeps_the_paused_run() {
+        // The pause record is the only way back to the interrupted work. A
+        // refusal must never be the thing that destroys it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[quota]\nauto_resume = \"run\"\nmax_wait_minutes = 360\n",
+        )
+        .unwrap();
+        runnable_project(dir.path());
+        make_stale(dir.path());
+
+        let store = Store::open(dir.path());
+        let now = now_unix();
+        store
+            .put_cache(
+                QUOTA_PAUSE_KEY,
+                &serde_json::to_vec(&paused_at(now, Some(now))).unwrap(),
+            )
+            .unwrap();
+
+        let (events_tx, _rx) = broadcast::channel::<RuntimeEvent>(16);
+        let cancel = CancellationToken::new();
+        let mut out: Vec<u8> = Vec::new();
+        let error = wait_resume_with_events(
+            dir.path(),
+            "model",
+            None,
+            wait_resume_run(),
+            &events_tx,
+            &cancel,
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Replan"), "{error}");
+        assert!(
+            store.get_cache(QUOTA_PAUSE_KEY).unwrap().is_some(),
+            "the paused run survives the refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_brief_edited_during_the_wait_does_not_consume_the_paused_run() {
+        // The wait can last hours, and the brief can change inside it. The
+        // record is consumed only once every precondition still holds, so a plan
+        // that goes stale mid-wait is refused with the pause intact rather than
+        // deleted on the way to a refusal.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[quota]\nauto_resume = \"run\"\nmax_wait_minutes = 360\n",
+        )
+        .unwrap();
+        runnable_project(dir.path());
+
+        let store = Store::open(dir.path());
+        let now = now_unix();
+        // Eligible two seconds out: the first poll waits, and the edit lands
+        // well before the window elapses.
+        store
+            .put_cache(
+                QUOTA_PAUSE_KEY,
+                &serde_json::to_vec(&paused_at(now, Some(now + 2))).unwrap(),
+            )
+            .unwrap();
+
+        let (events_tx, _rx) = broadcast::channel::<RuntimeEvent>(16);
+        let cancel = CancellationToken::new();
+        let mut out: Vec<u8> = Vec::new();
+        let root = dir.path().to_path_buf();
+        let waiter = wait_resume_with_events(
+            dir.path(),
+            "model",
+            None,
+            wait_resume_run(),
+            &events_tx,
+            &cancel,
+            &mut out,
+        );
+        let editor = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            make_stale(&root);
+        };
+        let (result, ()) = tokio::join!(waiter, editor);
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Replan"), "{error}");
+        assert!(
+            store.get_cache(QUOTA_PAUSE_KEY).unwrap().is_some(),
+            "the paused run survives a mid-wait staleness"
+        );
+    }
+
     #[tokio::test]
     async fn wait_resume_cancellation_during_wait_returns_promptly_without_delegating() {
         // Cancellation DURING the wait (not the pre-loop short-circuit): reach the Wait branch,
@@ -1161,6 +1752,10 @@ mod tests {
             "[quota]\nauto_resume = \"run\"\nmax_wait_minutes = 360\n",
         )
         .unwrap();
+        // A runnable project: waiting out a quota window is refused up front for
+        // a plan that could never run afterwards, so the fixture has to be one
+        // that could. This is scenery for the cancellation path under test.
+        runnable_project(dir.path());
         let store = Store::open(dir.path());
         let now = now_unix();
         // Recent pause (waited ~= 0), eligible an hour out (window not elapsed -> Wait).
@@ -1571,6 +2166,7 @@ mod tests {
             default_provider: "local".to_string(),
             provider_credential_present: false,
             gate: vec!["fmt (step)".to_string(), "test (phase)".to_string()],
+            lifecycle: "plan current".to_string(),
         };
         insta::assert_snapshot!(report.render());
     }

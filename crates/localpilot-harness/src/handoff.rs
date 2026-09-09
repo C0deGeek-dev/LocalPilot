@@ -25,10 +25,9 @@ use localpilot_config::redact::redact;
 use localpilot_core::{collapse_whitespace, SessionId};
 use localpilot_store::{SessionEventKind, Store};
 
-use crate::brief::Brief;
 use crate::decisions::today;
 use crate::error::HarnessError;
-use crate::progress::Progress;
+use crate::workspace_state::NotResumable;
 
 /// The schema tag stamped into every handoff header, so a reader can reject a
 /// shape it does not understand.
@@ -198,31 +197,73 @@ pub fn write_handoff(
     objective: Option<&str>,
     suggested_skills: Vec<String>,
 ) -> Result<HandoffSummary, HarnessError> {
-    let progress = read_optional(&root.join("PROGRESS.md"))
-        .map(|text| Progress::parse(&text))
-        .transpose()?;
-    let brief = read_optional(&root.join("brief.md"))
-        .map(|text| Brief::parse(&text))
-        .transpose()?;
+    // The handoff reads the project through the same inspection every other
+    // path uses, so a handoff cannot describe a plan as the next thing to do
+    // while the harness itself refuses to run it.
+    let inspected =
+        crate::workspace_state::inspect(crate::workspace_state::WorkspaceInputs::at(root));
+    let blocked = crate::workspace_state::resumable(&inspected).err();
+    // Everything below reads from that one inspection. Re-parsing the documents
+    // separately would let a handoff hold two disagreeing snapshots of the same
+    // project — advertising a plan step under a brief the inspection already
+    // found missing — which is the second inference path this contract exists
+    // to remove.
+    let brief = inspected.documents.brief();
+    let progress = inspected.documents.progress();
 
     let state = repo_state(root);
     let repo = brief
-        .as_ref()
         .map(|b| b.name.clone())
         .or_else(|| root.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "workspace".to_string());
 
     let objective = objective
         .map(str::to_string)
-        .or_else(|| brief.as_ref().map(|b| first_line(&b.summary)))
-        .or_else(|| progress.as_ref().map(|p| p.name.clone()))
+        .or_else(|| brief.map(|b| first_line(&b.summary)))
+        .or_else(|| progress.map(|p| p.name.clone()))
         .unwrap_or_else(|| "continue the work".to_string());
 
-    let next_action = progress
-        .as_ref()
-        .and_then(|p| p.next_incomplete())
-        .map(|step| format!("{}. {}", step.number, step.description))
-        .unwrap_or_else(|| "no incomplete plan step recorded".to_string());
+    // Exhaustive: a plan the harness will not run is never the next action, and
+    // every way it can refuse gets its own answer rather than reaching "here is
+    // a step" through a wildcard.
+    let next_action = match &blocked {
+        None => progress
+            .and_then(|p| p.next_incomplete())
+            .map(|step| format!("{}. {}", step.number, step.description))
+            .unwrap_or_else(|| "no incomplete plan step recorded".to_string()),
+        Some(NotResumable::NoBrief) => {
+            "write brief.md before continuing (`localpilot harness intake`)".to_string()
+        }
+        Some(NotResumable::BriefBroken { detail }) => {
+            format!("brief.md must be repaired before continuing: {detail}")
+        }
+        Some(NotResumable::NoPlan) => {
+            "plan the brief before continuing (`localpilot harness plan`)".to_string()
+        }
+        Some(NotResumable::PlanBroken { detail }) => {
+            format!("PROGRESS.md must be repaired before continuing: {detail}")
+        }
+        Some(NotResumable::Unbound) => {
+            "PROGRESS.md is not bound to a brief revision; adopt or replan it before continuing"
+                .to_string()
+        }
+        Some(NotResumable::Stale { .. }) => {
+            "PROGRESS.md was built against an earlier revision of brief.md; replan before \
+             continuing"
+                .to_string()
+        }
+        Some(NotResumable::BindingUnsupported { .. }) => {
+            "PROGRESS.md records a brief binding this build does not understand; update \
+             LocalPilot or replan before continuing"
+                .to_string()
+        }
+        Some(NotResumable::Complete) => {
+            "every planned step is done; review the work or plan the next change".to_string()
+        }
+        Some(NotResumable::OperationActive) => {
+            "a harness operation is already running; let it finish before continuing".to_string()
+        }
+    };
 
     // References: harness documents that actually exist, by path (never copied).
     let references: Vec<String> = ["brief.md", "PROGRESS.md", "DECISIONS.md"]
@@ -233,7 +274,6 @@ pub fn write_handoff(
 
     let committed_steps = committed_steps(store, session);
     let (completed, total) = progress
-        .as_ref()
         .map(|p| (p.completed_count(), p.steps.len()))
         .unwrap_or((0, 0));
 
@@ -600,10 +640,6 @@ pub fn check_handoff(
     Ok((handoff, report))
 }
 
-fn read_optional(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
-}
-
 fn first_line(text: &str) -> String {
     text.lines()
         .map(str::trim)
@@ -617,6 +653,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::brief::Brief;
     use localpilot_core::{Message, Role};
 
     fn sample_header() -> HandoffHeader {
@@ -677,15 +714,27 @@ mod tests {
         assert!(parsed.body.contains("body text"));
     }
 
+    /// A brief, and the plan text bound to it. The harness will not describe a
+    /// plan it would refuse to run, so a fixture about plan content needs a
+    /// project that is actually runnable.
+    fn runnable(root: &std::path::Path, steps: &str) {
+        const BRIEF: &str = "# Brief: demo\n\n## Summary\n\nDo the demo.\n\n\
+## Requirements\n\n- It works\n\n## Constraints\n\n- Be small\n\n\
+## Non-Goals\n\n- Everything else\n\n## Acceptance Criteria\n\n- A test passes\n";
+        std::fs::write(root.join("brief.md"), BRIEF).unwrap();
+        let revision = crate::binding::BriefRevision::of(&Brief::parse(BRIEF).unwrap());
+        std::fs::write(
+            root.join("PROGRESS.md"),
+            format!("# Progress: demo\nBranch: main\nBrief: {revision}\n\n## Steps\n\n{steps}"),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn write_references_documents_by_path_without_duplicating_them() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(
-            root.join("PROGRESS.md"),
-            "# Progress: demo\nBranch: main\n\n## Steps\n\n- [x] 1. first\n- [ ] 2. second\n",
-        )
-        .unwrap();
+        runnable(root, "- [x] 1. first\n- [ ] 2. second\n");
         std::fs::write(
             root.join("DECISIONS.md"),
             "# Decisions: demo\n\n- D001 · 2026-06-17 · a\n  - decision: x\n  - rationale: y\n  - refs: z\n",
@@ -721,11 +770,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         // Plant a secret in the next plan step, which flows into next_action.
-        std::fs::write(
-            root.join("PROGRESS.md"),
-            "# Progress: demo\nBranch: main\n\n## Steps\n\n- [ ] 1. use sk-abcdefghijklmnopqrstuvwxyz0123 to call the api\n",
-        )
-        .unwrap();
+        runnable(
+            root,
+            "- [ ] 1. use sk-abcdefghijklmnopqrstuvwxyz0123 to call the api\n",
+        );
         let store = Store::open(root);
         let session = SessionId::new();
         store
@@ -741,6 +789,32 @@ mod tests {
         assert!(
             text.contains("[REDACTED]"),
             "expected redaction marker: {text}"
+        );
+    }
+
+    #[test]
+    fn a_handoff_reports_the_blocked_reason_rather_than_a_step_it_would_refuse() {
+        // A plan with no brief: the harness will not run it, so pointing the
+        // next agent at "step 2" would hand over a plan the tool itself rejects.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("PROGRESS.md"),
+            "# Progress: demo\nBranch: main\n\n## Steps\n\n- [x] 1. first\n- [ ] 2. second\n",
+        )
+        .unwrap();
+        let store = Store::open(root);
+        let session = SessionId::new();
+        store
+            .append_message(session, &Message::text(Role::User, "hi"))
+            .unwrap();
+
+        let summary = write_handoff(root, &store, session, None, Vec::new()).unwrap();
+        let text = std::fs::read_to_string(&summary.path).unwrap();
+        assert!(text.contains("write brief.md"), "{text}");
+        assert!(
+            !text.contains("2. second"),
+            "a step the harness refuses to run is not the next action: {text}"
         );
     }
 

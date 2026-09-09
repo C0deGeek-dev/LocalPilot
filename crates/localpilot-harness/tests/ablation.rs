@@ -61,10 +61,18 @@ fn run_arm(task: &SweepTask, arm: &AblationArm) -> Scorecard {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join(task.entry), task.base).unwrap();
+    // The executor runs only a plan bound to a readable brief, so the sweep's
+    // scaffolding is a real project rather than a bare step list.
+    const BRIEF: &str = "# Brief: ablation\n\n## Summary\n\nFix the task.\n\n\
+## Requirements\n\n- The task passes\n\n## Constraints\n\n- Change only what is needed\n\n\
+## Non-Goals\n\n- Anything unrelated\n\n## Acceptance Criteria\n\n- The predicate holds\n";
+    std::fs::write(root.join("brief.md"), BRIEF).unwrap();
+    let revision =
+        localpilot_harness::BriefRevision::of(&localpilot_harness::Brief::parse(BRIEF).unwrap());
     std::fs::write(
         root.join("PROGRESS.md"),
         format!(
-            "# Progress: ablation\nBranch: feature/ablation\n\n## Steps\n\n- [ ] 1. {}\n",
+            "# Progress: ablation\nBranch: feature/ablation\nBrief: {revision}\n\n## Steps\n\n- [ ] 1. {}\n",
             task.problem
         ),
     )

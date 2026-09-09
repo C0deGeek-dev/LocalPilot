@@ -237,10 +237,18 @@ fn run_offline(task: &FirstPartyTask) -> Scorecard {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join(&task.entry), &task.base).unwrap();
+    // The executor runs only a plan bound to a readable brief, so the corpus
+    // scaffolding is a real project rather than a bare step list.
+    const BRIEF: &str = "# Brief: corpus\n\n## Summary\n\nFix the task.\n\n\
+## Requirements\n\n- The task passes\n\n## Constraints\n\n- Change only what is needed\n\n\
+## Non-Goals\n\n- Anything unrelated\n\n## Acceptance Criteria\n\n- The suite is green\n";
+    std::fs::write(root.join("brief.md"), BRIEF).unwrap();
+    let revision =
+        localpilot_harness::BriefRevision::of(&localpilot_harness::Brief::parse(BRIEF).unwrap());
     std::fs::write(
         root.join("PROGRESS.md"),
         format!(
-            "# Progress: corpus\nBranch: feature/corpus\n\n## Steps\n\n- [ ] 1. {}\n",
+            "# Progress: corpus\nBranch: feature/corpus\nBrief: {revision}\n\n## Steps\n\n- [ ] 1. {}\n",
             task.problem
         ),
     )

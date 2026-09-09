@@ -106,15 +106,21 @@ pub async fn resume_one_step_with_events(
     events: &broadcast::Sender<RuntimeEvent>,
     cancel: &CancellationToken,
 ) -> Result<ResumeOutcome, HarnessError> {
-    let progress_path = root.join("PROGRESS.md");
-    let mut progress = Progress::parse(&read(&progress_path)?)?;
+    // The gate lives in the executor, not only in the callers. This function is
+    // public, so a library consumer reaching it directly must meet the same
+    // conditions as the CLI and the interactive host: an unbound, stale, or
+    // unreadable plan cannot execute merely because the caller skipped the
+    // check. It also replaces a misleading error — a completed plan used to
+    // report `PROGRESS.md is malformed: no incomplete steps remain`, which is a
+    // claim about the document rather than about the work.
+    let state = crate::workspace_state::inspect(crate::workspace_state::WorkspaceInputs::at(root));
+    let progress = crate::workspace_state::resumable(&state)?;
     let step = progress
         .next_incomplete()
-        .ok_or_else(|| HarnessError::Malformed {
-            document: "PROGRESS.md",
-            detail: "no incomplete steps remain".to_string(),
-        })?
+        .ok_or(crate::workspace_state::NotResumable::Complete)?
         .clone();
+    let progress_path = root.join("PROGRESS.md");
+    let mut progress = progress.clone();
 
     let session_start_ctx = RuleContext {
         uncommitted_unrelated: has_unrelated_uncommitted_changes(root)?,

@@ -145,6 +145,7 @@ Required shape:
 ```markdown
 # Progress: <name>
 Branch: feature/<name>
+Brief: sha256-v1:<64 hex>
 
 ## Steps
 
@@ -160,6 +161,39 @@ Completed steps include metadata:
   - commit: abc1234
   - attempts: 1
 ```
+
+The `Brief:` line is the plan's **binding**: the revision of `brief.md` this plan
+was generated from. A plan means nothing apart from the requirements it was built
+to satisfy, so the harness records which revision that was and refuses to execute
+a plan whose brief has moved since.
+
+The revision is a digest of the *parsed* brief — its name, summary, requirements,
+constraints, non-goals, acceptance criteria, and risks — not of the file's bytes.
+
+Exactly what it is invariant to, since `v1` is frozen: line endings (a file
+converted between LF and CRLF hashes the same), whitespace surrounding a whole
+field or a whole list item, and the markdown around the sections. What it is
+*not* invariant to, beyond a real change of wording: re-wrapping a multi-line
+summary, because the line breaks inside a summary are preserved by the parser and
+carried into the digest. Reflowing a summary paragraph therefore marks its plan
+stale. That is a deliberate narrow claim rather than a promise of general
+reformatting-invariance the format cannot keep.
+
+`sha256-v1` names the *canonicalisation*, not just the hash. `v1` serialises each
+field as a declared byte length followed by its bytes, so no item's content can be
+mistaken for a delimiter, and it is frozen: a future canonicalisation becomes `v2`
+rather than changing what `v1` means. A binding this build cannot interpret — a
+newer version, an unknown algorithm, a hand-edited value — is reported as
+*unsupported*, never as stale. Stale is a claim that the requirements changed;
+unsupported says only that this build cannot compare, which is what lets a newer
+format ship without making existing plans look superseded on an older build.
+
+`harness plan` writes the binding for the plan it generates, and `harness feature`
+moves it when it changes both documents together. A plan written before this
+existed has no `Brief:` line and is **unbound**: whether it still matches its brief
+is unknown, so it cannot be resumed until `harness adopt` records that it does.
+Unbound is not the same as stale — one is unknown, the other is known wrong — and
+neither loses any completed-step evidence.
 
 ### `DECISIONS.md`
 
@@ -287,6 +321,19 @@ Output:
 - appended brief notes
 - appended or inserted progress steps
 
+`feature` is the brief-and-plan migration: it appends the requirement to
+`brief.md`, appends the step to `PROGRESS.md`, and moves the plan's binding to the
+brief it just wrote. It refuses to start from a plan that is already stale or
+unbound, since appending to one would turn an unverified relationship into an
+apparently current one.
+
+It is not atomic — two files cannot be written as one — so the ordering is chosen
+for what an interrupted run leaves behind. The plan is written first, which means
+a failure between the writes leaves a plan bound to a revision no brief matches:
+*stale*, and therefore refused, rather than a plan that claims to be current. Both
+documents are taken from a single inspection, so a concurrent edit cannot be
+folded into the new binding.
+
 ### `localpilot harness gate`
 
 Inspect or ratify the discovered quality gate (no provider needed).
@@ -312,7 +359,44 @@ Read-only summary:
 - dirty state
 - test command
 - ratified quality gate
+- lifecycle state
 - provider config status
+
+The lifecycle line names exactly one state, and a missing document never reads the
+same as a broken one:
+
+| Line | Meaning |
+| --- | --- |
+| `no brief.md` | Nothing described yet |
+| `brief.md unreadable: <error>` | The file is there but could not be read |
+| `brief.md malformed: <error>` | Read, but not a valid brief — the error names what is wrong |
+| `brief only (no plan yet)` | Ready to plan |
+| `PROGRESS.md unreadable: <error>` / `malformed: <error>` | Same distinction for the plan |
+| `plan not bound to a brief revision` | A plan from before the binding existed; run `harness adopt` |
+| `plan is stale: built against <x>, brief.md is now <y>` | The requirements moved; replan |
+| `plan records a brief binding this build does not understand` | Written by a different LocalPilot version; update or replan — **not** a claim that the brief changed |
+| `plan current` | Bound, with work left |
+| `plan complete` | Bound, every step done |
+
+A running harness operation, or a recorded quota-paused run, is appended to the
+same line.
+
+### `localpilot harness adopt`
+
+Declare that the existing `PROGRESS.md` belongs to the current `brief.md`.
+
+Only needed for a plan written before plans recorded their brief revision. Such a
+plan cannot be resumed automatically, because nothing records whether the brief
+changed in the meantime, and running it anyway would present a guess as a fact.
+Adoption is a statement about that one relationship — never inferred from a tool
+approval or a permission profile.
+
+It writes only the `Brief:` line. Steps, their completion marks, their commits,
+and their attempt counts are re-rendered exactly as they were read. A plan that is
+already bound, one that is stale, or one whose binding this build cannot interpret
+is refused: a stale plan needs a replan rather than a relabelling, and overwriting
+a binding whose meaning is unknown would destroy the only evidence of what wrote
+it.
 
 ### `localpilot handoff`
 

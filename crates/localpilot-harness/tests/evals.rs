@@ -53,6 +53,26 @@ struct LiveTaskScore {
     stop_reason: String,
 }
 
+/// A complete brief, and the plan bound to it. The executor runs only a plan
+/// whose brief is readable and whose binding matches, so every fixture here is a
+/// project the harness would really accept.
+const FIXTURE_BRIEF: &str = "# Brief: eval\n\n## Summary\n\nComplete the step.\n\n\
+## Requirements\n\n- The step is completed\n\n## Constraints\n\n- Change only what is needed\n\n\
+## Non-Goals\n\n- Anything unrelated\n\n## Acceptance Criteria\n\n- The expectation holds\n";
+
+fn write_bound_project(root: &std::path::Path, progress: &str) {
+    std::fs::write(root.join("brief.md"), FIXTURE_BRIEF).unwrap();
+    let revision = localpilot_harness::BriefRevision::of(
+        &localpilot_harness::Brief::parse(FIXTURE_BRIEF).unwrap(),
+    );
+    let bound = progress.replacen(
+        "\n\n## Steps",
+        &format!("\nBrief: {revision}\n\n## Steps"),
+        1,
+    );
+    std::fs::write(root.join("PROGRESS.md"), bound).unwrap();
+}
+
 fn git(root: &Path, args: &[&str]) {
     assert!(Command::new("git")
         .args(args)
@@ -139,14 +159,13 @@ fn run_task(task: &GoldenTask) -> (TaskScore, Scorecard) {
         }
         std::fs::write(path, contents).unwrap();
     }
-    std::fs::write(
-        root.join("PROGRESS.md"),
-        format!(
+    write_bound_project(
+        root,
+        &format!(
             "# Progress: eval\nBranch: feature/eval\n\n## Steps\n\n- [ ] 1. {}\n",
             task.step
         ),
-    )
-    .unwrap();
+    );
 
     git(root, &["init"]);
     git(root, &["config", "user.email", "eval@example.com"]);
@@ -425,16 +444,10 @@ fn marker_check_config() -> CheckConfig {
 fn discovered_gate_auto_fixes_and_commits() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(
-        root.join("brief.md"),
-        "# Brief: gate\n\n## Summary\n\nGate.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        root.join("PROGRESS.md"),
+    write_bound_project(
+        root,
         "# Progress: gate\nBranch: feature/gate\n\n## Steps\n\n- [ ] 1. Write out.txt\n",
-    )
-    .unwrap();
+    );
     std::fs::write(
         root.join(".localpilot.toml"),
         "[harness]\nmode = \"agent\"\n",

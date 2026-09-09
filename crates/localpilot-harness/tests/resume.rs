@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use localpilot_config::{AutoFix, Cadence, CheckConfig, RuleSeverity};
 use localpilot_harness::{
-    decide_step, resume_one_step, resume_one_step_with_events, CheckRunner, CompletionInputs,
-    RuleEngine, RuntimeEvent, SessionConfig, SessionRuntime, StepAction, QUALITY_CHECK_TOOL,
-    QUOTA_PAUSE_KEY,
+    decide_step, resume_one_step, resume_one_step_with_events, Brief, BriefRevision, CheckRunner,
+    CompletionInputs, HarnessError, NotResumable, RuleEngine, RuntimeEvent, SessionConfig,
+    SessionRuntime, StepAction, QUALITY_CHECK_TOOL, QUOTA_PAUSE_KEY,
 };
 use localpilot_llm::{FakeProvider, ModelEvent, ProviderError, QuotaInfo};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -51,17 +51,31 @@ fn git_output(root: &Path, args: &[&str]) -> String {
 const PROGRESS: &str =
     "# Progress: greeting\nBranch: feature/greeting\n\n## Steps\n\n- [ ] 1. Create hello.txt\n";
 
+/// A complete brief. The executor refuses to run a plan whose brief is missing
+/// or unparseable, so every fixture here needs a real one.
+const BRIEF: &str = "# Brief: greeting\n\n## Summary\n\nGreet.\n\n\
+## Requirements\n\n- It greets\n\n## Constraints\n\n- Be small\n\n\
+## Non-Goals\n\n- Anything else\n\n## Acceptance Criteria\n\n- hello.txt exists\n";
+
+/// Write the brief and a plan bound to it — the state in which the harness
+/// agrees to execute.
+fn write_bound_project(root: &Path, progress: &str) {
+    std::fs::write(root.join("brief.md"), BRIEF).unwrap();
+    let revision = BriefRevision::of(&Brief::parse(BRIEF).unwrap());
+    let bound = progress.replacen(
+        "\n\n## Steps",
+        &format!("\nBrief: {revision}\n\n## Steps"),
+        1,
+    );
+    std::fs::write(root.join("PROGRESS.md"), bound).unwrap();
+}
+
 #[tokio::test]
 async fn resume_completes_a_step_with_a_commit_and_progress_update() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
 
-    std::fs::write(
-        root.join("brief.md"),
-        "# Brief: greeting\n\n## Summary\n\nGreet.\n",
-    )
-    .unwrap();
-    std::fs::write(root.join("PROGRESS.md"), PROGRESS).unwrap();
+    write_bound_project(root, PROGRESS);
 
     git(root, &["init"]);
     git(root, &["config", "user.email", "test@example.com"]);
@@ -194,12 +208,7 @@ fn commit_count(root: &Path) -> usize {
 fn sample_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(
-        root.join("brief.md"),
-        "# Brief: gate\n\n## Summary\n\nGate.\n",
-    )
-    .unwrap();
-    std::fs::write(root.join("PROGRESS.md"), PROGRESS).unwrap();
+    write_bound_project(root, PROGRESS);
     git(root, &["init"]);
     git(root, &["config", "user.email", "test@example.com"]);
     git(root, &["config", "user.name", "Test"]);
@@ -530,16 +539,10 @@ async fn a_phase_cadence_check_is_skipped_until_the_plan_completes() {
     // step). This pins that phase checks fire at the boundary, not every step.
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(
-        root.join("brief.md"),
-        "# Brief: two\n\n## Summary\n\nTwo.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        root.join("PROGRESS.md"),
+    write_bound_project(
+        root,
         "# Progress: two\nBranch: feature/two\n\n## Steps\n\n- [ ] 1. First\n- [ ] 2. Second\n",
-    )
-    .unwrap();
+    );
     git(root, &["init"]);
     git(root, &["config", "user.email", "test@example.com"]);
     git(root, &["config", "user.name", "Test"]);
@@ -805,4 +808,81 @@ async fn a_replanned_run_is_replayable_from_the_event_log() {
     for pair in events.windows(2) {
         assert_eq!(pair[1].parent_id, Some(pair[0].id));
     }
+}
+
+#[tokio::test]
+async fn the_executor_refuses_an_unbound_plan_even_when_called_directly() {
+    // `resume_one_step` is exported. If the gate lived only in the CLI, a
+    // library caller could execute a plan whose relationship to its brief is
+    // unknown simply by skipping the check — so the gate is in the executor.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("brief.md"), BRIEF).unwrap();
+    std::fs::write(root.join("PROGRESS.md"), PROGRESS).unwrap();
+
+    let mut runtime = runtime(root, Arc::new(FakeProvider::new().text("done")));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let error = resume_one_step(&mut runtime, root, &rules, None, &[], 3)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, HarnessError::NotResumable(NotResumable::Unbound)),
+        "got {error:?}"
+    );
+    // Nothing ran: no step was marked, and the plan is byte-identical.
+    assert_eq!(
+        std::fs::read_to_string(root.join("PROGRESS.md")).unwrap(),
+        PROGRESS
+    );
+}
+
+#[tokio::test]
+async fn the_executor_refuses_a_stale_plan_even_when_called_directly() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_bound_project(root, PROGRESS);
+    // The requirements move after the plan was bound.
+    std::fs::write(
+        root.join("brief.md"),
+        BRIEF.replace("- It greets", "- It greets in two languages"),
+    )
+    .unwrap();
+
+    let mut runtime = runtime(root, Arc::new(FakeProvider::new().text("done")));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let error = resume_one_step(&mut runtime, root, &rules, None, &[], 3)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            HarnessError::NotResumable(NotResumable::Stale { .. })
+        ),
+        "got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_completed_plan_reports_completion_not_a_malformed_document() {
+    // The old executor raised `PROGRESS.md is malformed: no incomplete steps
+    // remain`, which blames the document for the work being finished.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_bound_project(
+        root,
+        "# Progress: greeting\nBranch: feature/greeting\n\n## Steps\n\n- [x] 1. Create hello.txt\n",
+    );
+
+    let mut runtime = runtime(root, Arc::new(FakeProvider::new().text("done")));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let error = resume_one_step(&mut runtime, root, &rules, None, &[], 3)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, HarnessError::NotResumable(NotResumable::Complete)),
+        "got {error:?}"
+    );
 }
