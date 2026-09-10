@@ -154,8 +154,13 @@ if ($mode -eq 'binary') {
             Write-Host "      $tool is on disk at $bin\$tool.exe; run it directly to retry."
             if (($env:PATH -split ';') -notcontains $bin) {
                 Write-Host ""
+                # Not `setx PATH "$env:PATH;..."`: `$env:PATH` is the *merged* machine
+                # and user value, so that command copies every machine entry into the
+                # user variable, and `setx` silently truncates what it writes at 1024
+                # characters.
                 Write-Host "add this directory to PATH:"
-                Write-Host "    setx PATH `"`$env:PATH;$bin`"   (new terminals only)"
+                Write-Host "    `$env:PATH += `";$bin`"   (this terminal)"
+                Write-Host "    [Environment]::SetEnvironmentVariable('PATH', [Environment]::GetEnvironmentVariable('PATH', 'User') + `";$bin`", 'User')   (new terminals)"
             }
         }
 

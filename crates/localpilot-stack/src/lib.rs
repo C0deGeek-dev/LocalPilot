@@ -962,9 +962,20 @@ pub fn path_notice(out: &mut dyn Write) -> anyhow::Result<()> {
         writeln!(out, "\nadd this directory to PATH to use them:")?;
         writeln!(out, "    {}", bin.display())?;
         if cfg!(windows) {
+            // Not `setx PATH "$env:PATH;..."`: `$env:PATH` is the *merged* machine and
+            // user value, so that command copies every machine entry into the user
+            // variable, and `setx` silently truncates what it writes at 1024
+            // characters. Rewrite the user variable alone, and offer the current
+            // session separately, since a persisted change reaches neither an open
+            // terminal nor this one.
             writeln!(
                 out,
-                "    setx PATH \"$env:PATH;{}\"   (PowerShell, new terminals only)",
+                "    $env:PATH += \";{}\"   (PowerShell, this terminal)",
+                bin.display()
+            )?;
+            writeln!(
+                out,
+                "    [Environment]::SetEnvironmentVariable('PATH', [Environment]::GetEnvironmentVariable('PATH', 'User') + \";{}\", 'User')   (PowerShell, new terminals)",
                 bin.display()
             )?;
         } else {
