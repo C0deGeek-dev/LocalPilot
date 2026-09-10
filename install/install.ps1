@@ -55,7 +55,10 @@ if ($mode -eq 'binary') {
     if ($arch -ne 'AMD64') {
         Write-Error "no published build for $arch. Build from source: https://github.com/$repo#from-source"
     }
-    $target = 'x86_64-pc-windows-msvc'
+    # Named `$targetTriple`, not `$target`: PowerShell variables are
+    # case-insensitive, so `$target` is the `[string]$Target` parameter and this
+    # would discard an explicit -Target.
+    $targetTriple = if ($Target) { $Target } else { 'x86_64-pc-windows-msvc' }
 
     $base = if ($Version) {
         "https://github.com/$repo/releases/download/v$($Version.TrimStart('v'))"
@@ -67,7 +70,7 @@ if ($mode -eq 'binary') {
     # back to localpilot for releases cut before localx existed.
     $tool = 'localx'
     $postcmd = @('install', 'all')
-    $archive = "localx-$target.tar.gz"
+    $archive = "localx-$targetTriple.tar.gz"
     $work = Join-Path ([System.IO.Path]::GetTempPath()) ("localx-" + [System.Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $work | Out-Null
     try {
@@ -81,7 +84,7 @@ if ($mode -eq 'binary') {
             Write-Host "note: this release has no localx binary; bootstrapping localpilot instead."
             $tool = 'localpilot'
             $postcmd = @('update', '--all')
-            $archive = "localpilot-$target.tar.gz"
+            $archive = "localpilot-$targetTriple.tar.gz"
             Invoke-WebRequest -Uri "$base/$archive" -OutFile (Join-Path $work $archive)
         }
         Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile (Join-Path $work 'SHA256SUMS')
@@ -102,14 +105,17 @@ if ($mode -eq 'binary') {
         }
 
         tar -xzf (Join-Path $work $archive) -C $work
-        $binary = Get-ChildItem -Path $work -Filter "$tool.exe" -Recurse -File | Select-Object -First 1
-        if (-not $binary) { Write-Error "the archive contained no $tool.exe." }
+        # Named `$binaryFile`, not `$binary`: `$binary` is the `[switch]$Binary`
+        # parameter under PowerShell's case-insensitive variable names, and
+        # assigning a FileInfo to it throws a MetadataError.
+        $binaryFile = Get-ChildItem -Path $work -Filter "$tool.exe" -Recurse -File | Select-Object -First 1
+        if (-not $binaryFile) { Write-Error "the archive contained no $tool.exe." }
 
         # From here the binary owns the install layout. Duplicating the cache and
         # marker rules in PowerShell would be a second implementation to keep in step.
         $bin = Join-Path $env:LOCALAPPDATA 'localx\bin'
         New-Item -ItemType Directory -Path $bin -Force | Out-Null
-        Copy-Item $binary.FullName (Join-Path $bin "$tool.exe") -Force
+        Copy-Item $binaryFile.FullName (Join-Path $bin "$tool.exe") -Force
 
         Write-Host ""
         Write-Host "installing the stack ..."

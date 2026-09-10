@@ -481,6 +481,20 @@ jobs:
       - run: cargo install --path crates/localpilot-cli --locked --root "$RUNNER_TEMP/install-smoke"
       - run: '"$RUNNER_TEMP/install-smoke/bin/localpilot" --help'
 
+  install-script-lint:
+    name: windows installer script lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # install/install.ps1 is never compiled and the install smoke test above
+      # covers the cargo path, so nothing else in CI would notice a broken
+      # installer until a user pipes it into `iex`. This parses it and rejects
+      # the collision class that broke it once (a local `$binary` shadowing the
+      # `[switch]$Binary` parameter).
+      - name: Parse and lint install/install.ps1
+        shell: pwsh
+        run: pwsh -NoProfile -File install/lint-install-script.ps1
+
   doc-drift:
     name: doc drift guards
     runs-on: ubuntu-latest

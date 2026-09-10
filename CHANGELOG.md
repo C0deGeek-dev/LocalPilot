@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The Windows one-line installer works again.** Piping `install/install.ps1`
+  into `iex` failed right after the checksum step with *Cannot convert value
+  "System.IO.FileInfo" to type "System.Management.Automation.SwitchParameter"*,
+  leaving nothing installed. PowerShell variable names are case-insensitive, so
+  the local `$binary` holding the unpacked executable was the `[switch]$Binary`
+  parameter, and assigning a file to it threw. The same collision silently
+  discarded an explicit `-Target` in binary mode. Both locals are renamed, and a
+  new CI job (`install/lint-install-script.ps1`) parses the installer and rejects
+  any assignment to a switch parameter, which nothing previously checked.
+
 - **A source excerpt is no longer a review candidate you can only reject**
   (ADR-0177, amending ADR-0153). `e` on the LocalMind tab's Review section
   writes the standalone lesson that a `/research` excerpt needs before it can be
