@@ -698,11 +698,14 @@ fn run_cargo(t: &StackTool, args: &[String], source: &Source) -> anyhow::Result<
 /// that is the second install location this stack spent a release train
 /// untangling.
 ///
-/// `--locked` applies to `main` builds, where the committed lock file is the
-/// build being asked for. A workspace build deliberately omits it: a working
-/// tree that has just gained a dependency has a lock file that must update, and
-/// refusing to build that is refusing the one thing the development channel is
-/// for.
+/// `--locked` applies to every channel, including the workspace. Dropping it for
+/// a working tree was tried and reverted the same day: without it cargo
+/// re-resolves the dependency graph, and the first thing that resolved was a
+/// transitive crate requiring a newer edition than the repository's pinned
+/// toolchain supports, so four of five tools failed to build against code that
+/// compiles perfectly from its own lock file. A lock file is the build the
+/// working tree describes; a working tree that has just gained a dependency has
+/// already had `cargo build` update it.
 fn source_args(t: &StackTool, source: &Source, root: &Path) -> Vec<String> {
     let mut args = vec!["install".to_string()];
     match source {
@@ -712,13 +715,13 @@ fn source_args(t: &StackTool, source: &Source, root: &Path) -> Vec<String> {
             t.package.to_string(),
             "--branch".to_string(),
             "main".to_string(),
-            "--locked".to_string(),
         ]),
         Source::Workspace(workspace) => args.extend([
             "--path".to_string(),
             dev::crate_dir(workspace, t).display().to_string(),
         ]),
     }
+    args.push("--locked".to_string());
     args.push("--root".to_string());
     args.push(root.display().to_string());
     if !t.features.is_empty() {
@@ -1447,9 +1450,10 @@ mod tests {
                 .to_string()
         );
         assert!(!args.contains(&"--git".to_string()));
-        // A working tree that has just gained a dependency needs its lock file
-        // to update; `--locked` would refuse exactly that build.
-        assert!(!args.contains(&"--locked".to_string()));
+        // Every channel builds from a lock file. Dropping `--locked` here let
+        // cargo re-resolve the graph and pull a crate the repository's pinned
+        // toolchain cannot compile, failing builds that succeed from the lock.
+        assert!(args.contains(&"--locked".to_string()));
     }
 
     #[test]
