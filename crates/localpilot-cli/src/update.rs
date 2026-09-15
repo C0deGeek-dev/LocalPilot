@@ -148,10 +148,14 @@ pub async fn run(
         // has no published tag of its own, so its running version resolves to the
         // base release tag (the describe suffix is dropped); an unparseable
         // version falls back to the newest published release.
+        // `--from-source` names a source build; with no flag the pinned
+        // development workspace decides, so a developer's `localpilot update
+        // --all` rebuilds their own tree rather than reinstalling the release
+        // over it.
         let channel = if from_source {
-            Channel::Prerelease
+            source_channel()
         } else {
-            Channel::Release
+            Channel::resolved()
         };
         let tag = running.as_ref().map(localpilot_stack::tag_for_version);
         // The marker is always built: its identity ("this process is
@@ -163,10 +167,15 @@ pub async fn run(
             tool: "localpilot",
             version: running.clone(),
         };
+        let tag = if channel.builds_from_source() {
+            None
+        } else {
+            tag
+        };
         return localpilot_stack::install(
             &Selection::All,
             tag.as_deref(),
-            channel,
+            &channel,
             Some(&marker),
             out,
         )
@@ -199,7 +208,7 @@ pub async fn run(
                 // Prefer the published binary: it needs no toolchain and takes
                 // seconds. Compiling stays available on request, and is the
                 // automatic fallback when a platform has no published archive.
-                localpilot_stack::source_install(localpilot, true, out)?;
+                localpilot_stack::source_install(localpilot, &source(), true, out)?;
             } else if !localpilot_stack::install_release(
                 localpilot,
                 &tag,
@@ -210,7 +219,7 @@ pub async fn run(
             .await?
             {
                 writeln!(out, "falling back to building from source")?;
-                localpilot_stack::source_install(localpilot, true, out)?;
+                localpilot_stack::source_install(localpilot, &source(), true, out)?;
             }
         }
         Ok(None) => {
@@ -219,6 +228,19 @@ pub async fn run(
         Err(error) => writeln!(out, "update check failed: {error}")?,
     }
     Ok(())
+}
+
+/// Where an explicitly requested source build takes its code from: the pinned
+/// development workspace when there is one, else the repository's `main`.
+fn source() -> localpilot_stack::Source {
+    localpilot_stack::dev::pinned().map_or(localpilot_stack::Source::Main, |workspace| {
+        localpilot_stack::Source::Workspace(workspace)
+    })
+}
+
+/// The same choice as a channel, for the whole-stack path.
+fn source_channel() -> Channel {
+    localpilot_stack::dev::pinned().map_or(Channel::Prerelease, Channel::Workspace)
 }
 
 fn confirm(prompt: &str) -> anyhow::Result<bool> {

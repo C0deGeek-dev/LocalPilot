@@ -204,67 +204,74 @@ if [ -f "$root/.gitmodules" ] && command -v git >/dev/null 2>&1; then
     fi
 fi
 
+# Both binaries are built into one staging root and then published into the
+# managed directory — the same directory the binary installer and every later
+# `localx update` writes to. cargo's own bin directory is deliberately not used:
+# a copy there is a second install that usually wins PATH, which is how an
+# updated stack ends up invisible.
+bin="${XDG_DATA_HOME:-$HOME/.local/share}/localx/bin"
+staging="$root/target/localx-install"
+rm -rf "$staging"
+
 echo "building and installing the localpilot CLI (features: $features) ..."
 if [ -n "$features" ]; then
-    cargo install --path "$root/crates/localpilot-cli" --features "$features" --locked
+    cargo install --path "$root/crates/localpilot-cli" --features "$features" --locked --root "$staging"
 else
-    cargo install --path "$root/crates/localpilot-cli" --locked
+    cargo install --path "$root/crates/localpilot-cli" --locked --root "$staging"
 fi
 
 # Build the umbrella from the same checkout, so `localx` matches the localpilot
 # you just built. It pulls in no TUI, so it needs no features.
-#
-# Build into a staging root, then rename-then-copy the binary into cargo's bin
-# directory rather than letting cargo move it straight onto the live path: if a
-# localx is already running (a re-run of this installer), that move fails on a
-# running image — os error 5 on Windows' mandatory image lock, ETXTBSY on Linux.
-# Displacing the old file first lands the new binary on a free path, the same
-# rename-then-copy the updater uses (LocalHub#79).
 echo "building and installing localx ..."
-# Mirror cargo install's own destination precedence — CARGO_INSTALL_ROOT, then
-# CARGO_HOME, then ~/.cargo — so localx lands beside the localpilot cargo just
-# installed. (A config-file `install.root` is not honoured here; that narrower
-# case keeps the plain `cargo install` behaviour by not being covered.)
-if [ -n "${CARGO_INSTALL_ROOT:-}" ]; then
-    cargo_bin="$CARGO_INSTALL_ROOT/bin"
-else
-    cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-fi
-localx_staging="$root/target/localx-install"
-rm -rf "$localx_staging"
-cargo install --path "$root/crates/localx" --locked --root "$localx_staging"
-mkdir -p "$cargo_bin"
-dest_localx="$cargo_bin/localx"
-built_localx="$localx_staging/bin/localx"
-# Displace the old binary, then copy — with rollback. A displacement that fails
-# is fatal (nothing has moved). A copy that fails restores the displaced binary,
-# so the canonical path is never left empty, and keeps the staged build.
-displaced=
-if [ -e "$dest_localx" ]; then
-    if mv "$dest_localx" "$dest_localx.old"; then
-        displaced=yes
-    else
-        echo "error: could not move the existing localx aside at $dest_localx" >&2
+cargo install --path "$root/crates/localx" --locked --root "$staging"
+
+mkdir -p "$bin"
+# Displace the old binary, then copy — with rollback. cargo's final move fails
+# on a running image (os error 5 on Windows' mandatory image lock, ETXTBSY on
+# Linux); displacing first lands the new binary on a free path, the same
+# rename-then-copy the updater uses (LocalHub#79). A displacement that fails is
+# fatal (nothing has moved). A copy that fails restores the displaced binary, so
+# the canonical path is never left empty, and keeps the staged build.
+publish() {
+    tool="$1"
+    built="$staging/bin/$tool"
+    dest="$bin/$tool"
+    if [ ! -f "$built" ]; then
+        echo "error: the build produced no $tool at $built" >&2
         exit 1
     fi
-fi
-if cp "$built_localx" "$dest_localx"; then
-    if [ -n "$displaced" ]; then
-        rm -f "$dest_localx.old" 2>/dev/null || true
+    displaced=
+    if [ -e "$dest" ]; then
+        if mv "$dest" "$dest.old"; then
+            displaced=yes
+        else
+            echo "error: could not move the existing $tool aside at $dest" >&2
+            exit 1
+        fi
     fi
-    rm -rf "$localx_staging"
-else
-    echo "error: could not install localx to $dest_localx" >&2
-    if [ -n "$displaced" ]; then
-        mv "$dest_localx.old" "$dest_localx" 2>/dev/null || true
+    if cp "$built" "$dest"; then
+        if [ -n "$displaced" ]; then
+            rm -f "$dest.old" 2>/dev/null || true
+        fi
+    else
+        echo "error: could not install $tool to $dest" >&2
+        if [ -n "$displaced" ]; then
+            mv "$dest.old" "$dest" 2>/dev/null || true
+        fi
+        echo "the staged build is kept at $built" >&2
+        exit 1
     fi
-    echo "the staged build is kept at $built_localx" >&2
-    exit 1
-fi
+}
+
+publish localpilot
+publish localx
+rm -rf "$staging"
 
 echo
-echo "installed 'localpilot' and 'localx' from source. verify with:"
-echo "    localpilot doctor"
+echo "installed 'localpilot' and 'localx' from source into $bin. verify with:"
+echo "    localx status"
 echo "install the rest of the stack (localmind, localbox, localbench) and the engine:"
-echo "    localx install        # released binaries"
+echo "    localx install                # released binaries"
 echo "    localx install --prerelease   # or build each from its latest main"
+echo "developing every LocalX repository side by side? build the stack from them:"
+echo "    localx dev use <workspace> && localx update"

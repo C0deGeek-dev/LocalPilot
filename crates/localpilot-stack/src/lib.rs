@@ -11,7 +11,15 @@
 //! layout, download, verify, activate). Both `localpilot` (via `update --all`)
 //! and the `localx` umbrella binary route through here, so there is exactly one
 //! copy of the install loop.
+//!
+//! Every channel publishes into the same directory, `<localx root>/bin`. That is
+//! the whole reason a stack binary found anywhere else on `PATH` can be called a
+//! leftover rather than a legitimate second install, and it is what
+//! [`doctor`] acts on.
 #![forbid(unsafe_code)]
+
+pub mod dev;
+pub mod doctor;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,6 +34,11 @@ use localpilot_dist::{Cache, ReleaseManifest, Version};
 /// the `localmind-cli` package). `manifest` is the per-release index filename —
 /// `manifest.json` for a repo that publishes one binary, or a per-tool name when
 /// two binaries ship from the same repo (`localx` rides LocalPilot's release).
+///
+/// `repo_dir` and `crate_dir` locate the tool inside a development workspace: a
+/// directory holding every LocalX repository side by side, which the development
+/// channel builds from. They are the checkout's layout, not the release's, and
+/// are the only reason that channel does not need a network lookup per tool.
 #[derive(Debug, Clone, Copy)]
 pub struct StackTool {
     pub tool: &'static str,
@@ -33,6 +46,8 @@ pub struct StackTool {
     pub manifest: &'static str,
     pub package: &'static str,
     pub features: &'static [&'static str],
+    pub repo_dir: &'static str,
+    pub crate_dir: &'static str,
 }
 
 /// The tools one release train cuts together, in install order.
@@ -46,6 +61,8 @@ pub const TRAIN: &[StackTool] = &[
         manifest: "manifest.json",
         package: "localpilot",
         features: &["tui"],
+        repo_dir: "LocalPilot",
+        crate_dir: "crates/localpilot-cli",
     },
     StackTool {
         tool: "localmind",
@@ -53,6 +70,8 @@ pub const TRAIN: &[StackTool] = &[
         manifest: "manifest.json",
         package: "localmind-cli",
         features: &[],
+        repo_dir: "LocalMind",
+        crate_dir: "crates/localmind-cli",
     },
     StackTool {
         tool: "localbox",
@@ -60,6 +79,8 @@ pub const TRAIN: &[StackTool] = &[
         manifest: "manifest.json",
         package: "localbox",
         features: &[],
+        repo_dir: "LocalBox",
+        crate_dir: "crates/localbox",
     },
     StackTool {
         tool: "localbench",
@@ -67,6 +88,8 @@ pub const TRAIN: &[StackTool] = &[
         manifest: "manifest.json",
         package: "localbench",
         features: &[],
+        repo_dir: "LocalBench",
+        crate_dir: "crates/localbench",
     },
     StackTool {
         tool: "localx",
@@ -74,6 +97,8 @@ pub const TRAIN: &[StackTool] = &[
         manifest: "manifest-localx.json",
         package: "localx",
         features: &[],
+        repo_dir: "LocalPilot",
+        crate_dir: "crates/localx",
     },
 ];
 
@@ -86,12 +111,44 @@ pub fn tool(name: &str) -> Option<&'static StackTool> {
 /// Where the install comes from.
 ///
 /// `Release` downloads the published, checksum-verified binary (no toolchain).
-/// `Prerelease` builds the newest `main` commit from source with cargo — the
-/// developer channel for testing pushed-but-uncut work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Prerelease` builds the newest pushed `main` commit of each repository.
+/// `Workspace` builds the *working trees* in a local LocalX checkout — the
+/// channel for someone developing the stack, whose code is not pushed yet and
+/// whose next build must contain it.
+///
+/// All three publish into the same managed directory. A channel that installed
+/// somewhere else would make "which copy runs" a question again, and that
+/// question is what [`doctor`] exists to stop asking.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Channel {
     Release,
     Prerelease,
+    Workspace(PathBuf),
+}
+
+impl Channel {
+    /// The channel a command runs on when the user named none: the pinned
+    /// development workspace if there is one, else the release channel.
+    #[must_use]
+    pub fn resolved() -> Self {
+        dev::pinned().map_or(Self::Release, Self::Workspace)
+    }
+
+    /// Whether this channel builds with cargo rather than downloading.
+    #[must_use]
+    pub fn builds_from_source(&self) -> bool {
+        !matches!(self, Self::Release)
+    }
+
+    /// How the channel is named in output.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Prerelease => "prerelease",
+            Self::Workspace(_) => "development",
+        }
+    }
 }
 
 /// Which tools to act on.
@@ -193,7 +250,7 @@ pub fn tag_for_version(version: &Version) -> String {
 pub async fn install(
     selection: &Selection,
     tag: Option<&str>,
-    channel: Channel,
+    channel: &Channel,
     running: Option<&Running>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
@@ -206,16 +263,35 @@ pub async fn install(
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("no published release found to install"))?,
         }),
-        Channel::Prerelease => None,
+        Channel::Prerelease | Channel::Workspace(_) => None,
     };
 
-    if let Some(t) = &resolved_tag {
-        writeln!(out, "installing the stack at {t} ...\n")?;
-    } else {
-        writeln!(
+    match channel {
+        Channel::Release => {
+            let tag = resolved_tag.as_deref().unwrap_or_default();
+            writeln!(out, "installing the stack at {tag} ...\n")?;
+        }
+        Channel::Prerelease => writeln!(
             out,
-            "building the stack from the latest main (prerelease) ...\n"
-        )?;
+            "building the stack from the latest pushed main (prerelease) ...\n"
+        )?,
+        Channel::Workspace(workspace) => {
+            let missing = dev::missing_crates(workspace);
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "{} is no longer a complete LocalX workspace; it is missing: {}\n\
+                     re-pin it with `localx dev use <path>`, or leave development mode \
+                     with `localx dev off`.",
+                    workspace.display(),
+                    missing.join(", ")
+                );
+            }
+            writeln!(
+                out,
+                "building the stack from {} (development) ...\n",
+                workspace.display()
+            )?;
+        }
     }
 
     let mut failed = Vec::new();
@@ -226,7 +302,10 @@ pub async fn install(
                 let tag = resolved_tag.as_deref().unwrap_or_default();
                 install_release(t, tag, is_self, running_version, out).await?
             }
-            Channel::Prerelease => source_install(t, is_self, out)?,
+            Channel::Prerelease => source_install(t, &Source::Main, is_self, out)?,
+            Channel::Workspace(workspace) => {
+                source_install(t, &Source::Workspace(workspace.clone()), is_self, out)?
+            }
         };
         if !ok {
             failed.push(t.tool);
@@ -363,92 +442,101 @@ pub async fn install_release(
     }
 }
 
-/// Build one train tool from its repo's `main` HEAD with cargo.
+/// Where a source build takes its code from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// The newest pushed `main` commit of the tool's own repository.
+    Main,
+    /// The working trees in a local LocalX workspace — uncommitted code
+    /// included, which is the whole point of the development channel.
+    Workspace(PathBuf),
+}
+
+impl Source {
+    /// What the build is being taken from, for the line printed before it.
+    fn describe(&self, t: &StackTool) -> String {
+        match self {
+            Self::Main => format!("{} (main)", t.repo),
+            Self::Workspace(workspace) => dev::crate_dir(workspace, t).display().to_string(),
+        }
+    }
+}
+
+/// Build one train tool with cargo and publish it into the managed directory.
 ///
-/// This is the developer channel: it needs a Rust toolchain and installs into
-/// cargo's own bin directory (`~/.cargo/bin`), the standard home for a
-/// source-built binary — the same path `localpilot`'s from-source update has
-/// always used.
+/// Two things make this longer than a `cargo install` call.
 ///
-/// The one exception is the tool this process *is* (`is_self`): cargo's final
-/// step is a plain move onto the destination, and Windows refuses to overwrite
-/// an executing image no matter who asks (an elevated shell changes nothing —
-/// the lock is mandatory, not an ACL). So the running tool is built into a
-/// staging root that cargo owns entirely, and the built executable is then
-/// swapped in over the running one with the same rename-then-copy the release
-/// channel uses, which Windows does permit. The staging root is removed after a
-/// successful swap and kept — with its path printed — when the swap fails, so
-/// the build is never lost.
+/// The first is where it lands. cargo installs into its own bin directory,
+/// which for this stack is a *second* place binaries can live, and the one that
+/// usually wins `PATH`. Every channel here publishes into `<localx root>/bin`
+/// instead, so "which copy runs" has one answer.
+///
+/// The second is how it lands. cargo's final step is a plain move onto the
+/// destination, and Windows refuses to overwrite an executing image no matter
+/// who asks (an elevated shell changes nothing — the lock is mandatory, not an
+/// ACL). Any tool in the stack may be running during an update, not just the one
+/// doing the updating, so every build goes into a staging root cargo owns
+/// wholesale and is then swapped in with rename-then-copy, which Windows does
+/// permit. The staging root is removed after a successful swap and kept — with
+/// its path printed — when the swap fails, so a build is never lost.
 ///
 /// # Errors
 /// Returns an error only if output cannot be written or cargo cannot be spawned.
-pub fn source_install(t: &StackTool, is_self: bool, out: &mut dyn Write) -> anyhow::Result<bool> {
+pub fn source_install(
+    t: &StackTool,
+    source: &Source,
+    is_self: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<bool> {
     if !cargo_available() {
         writeln!(
             out,
-            "{}: cargo (the Rust toolchain) is required for --prerelease; \
-             install it from https://rustup.rs, or drop --prerelease to use the release channel",
+            "{}: cargo (the Rust toolchain) is required to build from source; \
+             install it from https://rustup.rs, or use the release channel",
             t.tool
         )?;
         return Ok(false);
     }
-
-    let staging = if is_self {
-        source_build_dir(t.tool)
-    } else {
-        None
-    };
-    let Some(staging) = staging else {
-        // A companion tool, or a platform with no per-user data directory: the
-        // classic install straight into cargo's bin directory.
+    let (Some(bin), Some(staging)) = (shared_bin_dir(), source_build_dir(t.tool)) else {
         writeln!(
             out,
-            "{}: building {} from {} (main)…",
-            t.tool, t.package, t.repo
-        )?;
-        let built = run_cargo(t, &source_args(t, None))?;
-        if built {
-            writeln!(
-                out,
-                "{}: installed from main into cargo's bin directory",
-                t.tool
-            )?;
-        } else if let Some(hint) = install_failure_hint(t.tool) {
-            writeln!(out, "{hint}")?;
-        } else {
-            writeln!(out, "{}: cargo install failed", t.tool)?;
-        }
-        return Ok(built);
-    };
-
-    let Ok(running_exe) = std::env::current_exe() else {
-        writeln!(
-            out,
-            "{}: cannot locate the running executable to replace it; \
-             building into cargo's bin directory instead",
+            "{}: no per-user data directory on this platform, so there is nowhere \
+             to publish a build",
             t.tool
         )?;
-        let built = run_cargo(t, &source_args(t, None))?;
-        return Ok(built);
+        return Ok(false);
     };
+
     writeln!(
         out,
-        "{}: building {} from {} (main) into a staging directory, \
-         then replacing the running executable…",
-        t.tool, t.package, t.repo
+        "{}: building {} from {}…",
+        t.tool,
+        t.package,
+        source.describe(t)
     )?;
-    let outcome = stage_and_replace(t.tool, &staging, &running_exe, &mut |root| {
-        run_cargo(t, &source_args(t, Some(root)))
+    let outcome = stage_and_publish(t.tool, &staging, &bin, &mut |root| {
+        run_cargo(t, &source_args(t, source, root), source)
     })?;
-    describe_self_install(t.tool, &running_exe, &outcome, out)?;
-    Ok(matches!(outcome, SelfInstall::Replaced(_)))
+    describe_source_install(t.tool, &bin, &outcome, out)?;
+    if let SourceInstall::Published(path) = &outcome {
+        writeln!(out, "{}: on PATH at {}", t.tool, path.display())?;
+        // Only the tool this process *is* has a running copy elsewhere to
+        // refresh — a legacy `cargo install` copy earlier on PATH. `localx
+        // doctor` removes those; until it has been run, this keeps the update
+        // from being invisible. Gated on identity, not on a parseable version: a
+        // bare-sha build is still the running executable (LocalHub#79).
+        if is_self {
+            refresh_running_copy(t.tool, path, out)?;
+        }
+    }
+    Ok(matches!(outcome, SourceInstall::Published(_)))
 }
 
-/// What a self-install of the running tool ended with. Every variant names its
-/// actual cause; `Retained` is reserved for a build that verifiably exists on
-/// disk, so the "copy it over after exit" advice never points at nothing.
+/// What a source install ended with. Every variant names its actual cause;
+/// `Retained` is reserved for a build that verifiably exists on disk, so the
+/// "copy it over after exit" advice never points at nothing.
 #[derive(Debug)]
-enum SelfInstall {
+enum SourceInstall {
     /// The staging directory could not be prepared; nothing was built.
     StagingFailed(String),
     /// cargo ran and reported failure; nothing was staged.
@@ -456,110 +544,100 @@ enum SelfInstall {
     /// The build succeeded but produced no executable where cargo should have
     /// put it (`<staging>/bin/<tool>`).
     MissingArtifact(PathBuf),
-    /// The build succeeded and the running executable now holds it.
-    Replaced(PathBuf),
-    /// The build succeeded but the running executable could not be replaced;
-    /// the built executable is retained at `built` (verified to exist).
+    /// The build succeeded and the managed copy now holds it.
+    Published(PathBuf),
+    /// The build succeeded but could not be published; the built executable is
+    /// retained at `built` (verified to exist).
     Retained { built: PathBuf, error: String },
 }
 
 /// Build into `staging` (cargo owns it wholesale), then swap the built
-/// executable in over `running_exe` with rename-then-copy. Independent of
-/// cargo — the build step is injected — so the placement policy is testable
-/// without a toolchain.
+/// executable into `bin` with rename-then-copy — the one sequence that works
+/// while the destination is a running image. Independent of cargo — the build
+/// step is injected — so the placement policy is testable without a toolchain.
 ///
 /// # Errors
 /// Propagates a build-step error (cargo could not be spawned); a build that
 /// ran and failed is an outcome, not an error.
-fn stage_and_replace(
+fn stage_and_publish(
     tool: &str,
     staging: &Path,
-    running_exe: &Path,
+    bin: &Path,
     build: &mut dyn FnMut(&Path) -> anyhow::Result<bool>,
-) -> anyhow::Result<SelfInstall> {
+) -> anyhow::Result<SourceInstall> {
     // A fresh staging root every time: a stale artifact must never be mistaken
     // for this build's output.
     let _ = std::fs::remove_dir_all(staging);
     if let Err(error) = std::fs::create_dir_all(staging) {
-        return Ok(SelfInstall::StagingFailed(format!(
+        return Ok(SourceInstall::StagingFailed(format!(
             "could not create {}: {error}",
             staging.display()
         )));
     }
     if !build(staging)? {
         let _ = std::fs::remove_dir_all(staging);
-        return Ok(SelfInstall::BuildFailed);
+        return Ok(SourceInstall::BuildFailed);
     }
     let built = staging
         .join("bin")
         .join(localpilot_dist::executable_name(tool));
     if !built.is_file() {
-        return Ok(SelfInstall::MissingArtifact(built));
+        return Ok(SourceInstall::MissingArtifact(built));
     }
-    let Some(dest_dir) = running_exe.parent() else {
-        return Ok(SelfInstall::Retained {
-            built,
-            error: "the running executable has no parent directory".to_string(),
-        });
-    };
-    Ok(match localpilot_dist::place(dest_dir, tool, &built) {
+    Ok(match localpilot_dist::place(bin, tool, &built) {
         Ok(placed) => {
             // The payload now lives at the destination; the staging copy is
             // redundant. Best effort — a leftover is harmless and rebuilt fresh.
             let _ = std::fs::remove_dir_all(staging);
-            SelfInstall::Replaced(placed)
+            SourceInstall::Published(placed)
         }
-        Err(error) => SelfInstall::Retained {
+        Err(error) => SourceInstall::Retained {
             built,
             error: error.to_string(),
         },
     })
 }
 
-/// Say what happened to a self-install in terms the user can act on. A refused
-/// swap of the running executable is named as exactly that: the file is in use
-/// by this very process, an elevated shell does not change it, and the built
-/// executable is kept so the next step is a copy after exit — never "re-run".
-fn describe_self_install(
+/// Say what happened to a source install in terms the user can act on. A refused
+/// swap is named as exactly that: the destination is in use, an elevated shell
+/// does not change it, and the built executable is kept so the next step is a
+/// copy after exit — never "re-run".
+fn describe_source_install(
     tool: &str,
-    running_exe: &Path,
-    outcome: &SelfInstall,
+    bin: &Path,
+    outcome: &SourceInstall,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
+    let dest = bin.join(localpilot_dist::executable_name(tool));
     match outcome {
-        SelfInstall::StagingFailed(reason) => writeln!(
+        SourceInstall::StagingFailed(reason) => writeln!(
             out,
             "{tool}: could not prepare the staging directory for the build: {reason}"
         ),
-        SelfInstall::BuildFailed => match install_failure_hint(tool) {
+        SourceInstall::BuildFailed => match install_failure_hint(tool) {
             Some(hint) => writeln!(out, "{hint}"),
             None => writeln!(out, "{tool}: cargo install failed"),
         },
-        SelfInstall::MissingArtifact(expected) => writeln!(
+        SourceInstall::MissingArtifact(expected) => writeln!(
             out,
             "{tool}: cargo reported success but produced no executable at {}",
             expected.display()
         ),
-        SelfInstall::Replaced(path) => writeln!(
-            out,
-            "{tool}: replaced the running executable at {} with the build from main \
-             (the previous copy is displaced beside it and swept on the next run)",
-            path.display()
-        ),
-        SelfInstall::Retained { built, error } => {
+        SourceInstall::Published(path) => {
+            writeln!(out, "{tool}: built and installed to {}", path.display())
+        }
+        SourceInstall::Retained { built, error } => {
             writeln!(
                 out,
-                "{tool}: built from main, but could not replace the running executable at {}: {error}",
-                running_exe.display()
+                "{tool}: built, but could not replace {}: {error}",
+                dest.display()
             )?;
             writeln!(out, "  {}", running_image_hint())?;
             writeln!(
                 out,
-                "  the new build is kept at {} — after this process exits, copy it over {} \
-                 (or run `{}` from there).",
+                "  the new build is kept at {} — once nothing is running it, copy it over {}.",
                 built.display(),
-                running_exe.display(),
-                built.display()
+                dest.display()
             )
         }
     }?;
@@ -588,12 +666,22 @@ fn source_build_dir(tool: &str) -> Option<PathBuf> {
 }
 
 /// Run `cargo install` with `args`, reporting only whether it succeeded.
-fn run_cargo(t: &StackTool, args: &[String]) -> anyhow::Result<bool> {
+fn run_cargo(t: &StackTool, args: &[String], source: &Source) -> anyhow::Result<bool> {
     let mut command = std::process::Command::new("cargo");
     // The interactive TUI is unstable on the windows-gnu toolchain; force MSVC
     // when building a tool that links it.
     if cfg!(windows) && t.features.contains(&"tui") {
         command.arg("+stable-x86_64-pc-windows-msvc");
+    }
+    // A workspace build shares the repository's own target directory. `cargo
+    // install` otherwise compiles in a throwaway directory, so every
+    // development rebuild would start from zero — minutes per tool, on the one
+    // channel whose whole point is a fast edit/install loop.
+    if let Source::Workspace(workspace) = source {
+        command.env(
+            "CARGO_TARGET_DIR",
+            workspace.join(t.repo_dir).join("target"),
+        );
     }
     command.args(args);
     let status = command
@@ -603,26 +691,36 @@ fn run_cargo(t: &StackTool, args: &[String]) -> anyhow::Result<bool> {
 }
 
 /// Build the source-install arguments separately from process execution so the
-/// package selection cannot regress unnoticed. With a `root`, cargo installs
-/// into that directory instead of its own bin directory (the self-install
-/// staging path); without one it is the classic `--force` refresh in place.
-fn source_args(t: &StackTool, root: Option<&Path>) -> Vec<String> {
-    let mut args = vec![
-        "install".to_string(),
-        "--git".to_string(),
-        t.repo.to_string(),
-        t.package.to_string(),
-        "--branch".to_string(),
-        "main".to_string(),
-        "--locked".to_string(),
-    ];
-    match root {
-        Some(root) => {
-            args.push("--root".to_string());
-            args.push(root.display().to_string());
-        }
-        None => args.push("--force".to_string()),
+/// package selection cannot regress unnoticed.
+///
+/// `root` is always a staging directory: cargo puts the binary in `<root>/bin`,
+/// and the caller publishes it from there. Never cargo's own bin directory —
+/// that is the second install location this stack spent a release train
+/// untangling.
+///
+/// `--locked` applies to `main` builds, where the committed lock file is the
+/// build being asked for. A workspace build deliberately omits it: a working
+/// tree that has just gained a dependency has a lock file that must update, and
+/// refusing to build that is refusing the one thing the development channel is
+/// for.
+fn source_args(t: &StackTool, source: &Source, root: &Path) -> Vec<String> {
+    let mut args = vec!["install".to_string()];
+    match source {
+        Source::Main => args.extend([
+            "--git".to_string(),
+            t.repo.to_string(),
+            t.package.to_string(),
+            "--branch".to_string(),
+            "main".to_string(),
+            "--locked".to_string(),
+        ]),
+        Source::Workspace(workspace) => args.extend([
+            "--path".to_string(),
+            dev::crate_dir(workspace, t).display().to_string(),
+        ]),
     }
+    args.push("--root".to_string());
+    args.push(root.display().to_string());
     if !t.features.is_empty() {
         args.push("--features".to_string());
         args.push(t.features.join(","));
@@ -878,30 +976,40 @@ fn report(
     tools: &[&StackTool],
     failed: &[&str],
     tag: Option<&str>,
-    channel: Channel,
+    channel: &Channel,
     running_tool: Option<&str>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let where_at = match tag {
-        Some(t) => format!(" at {t}"),
-        None => " from main".to_string(),
+    let where_at = match (tag, channel) {
+        (Some(tag), _) => format!(" at {tag}"),
+        (None, Channel::Workspace(workspace)) => format!(" from {}", workspace.display()),
+        (None, _) => " from main".to_string(),
     };
     if failed.is_empty() {
-        writeln!(out, "\nthe stack is installed{where_at}")?;
+        writeln!(
+            out,
+            "
+the stack is installed{where_at}"
+        )?;
     } else if failed.len() == tools.len() {
         match channel {
             Channel::Release => {
                 writeln!(
                     out,
-                    "\nnothing was installed: no tool published a usable build for this platform."
+                    "
+nothing was installed: no tool published a usable build for this platform."
                 )?;
                 writeln!(
                     out,
                     "try --prerelease to build from source, or check your network."
                 )?;
             }
-            Channel::Prerelease => {
-                writeln!(out, "\nnothing was installed: every source build failed.")?;
+            Channel::Prerelease | Channel::Workspace(_) => {
+                writeln!(
+                    out,
+                    "
+nothing was installed: every source build failed."
+                )?;
             }
         }
         return Ok(());
@@ -910,47 +1018,33 @@ fn report(
         // would be running again. Its own message above names the next step.
         writeln!(
             out,
-            "\ninstalled{where_at}, except: {}. See the message above for the next step.",
+            "
+installed{where_at}, except: {}. See the message above for the next step.",
             failed.join(", ")
         )?;
     } else {
         writeln!(
             out,
-            "\ninstalled{where_at}, except: {}. Re-run to retry.",
+            "
+installed{where_at}, except: {}. Re-run to retry.",
             failed.join(", ")
         )?;
     }
-    // The shared-bin PATH advice only applies to the release channel; a source
-    // build lands in cargo's bin directory instead — except the running tool,
-    // which was swapped in place, so a self-only run has nothing to add.
-    let only_self = running_tool.is_some_and(|r| tools.iter().all(|t| t.tool == r));
-    if channel == Channel::Release {
-        path_notice(out)?;
-    } else if !only_self {
-        writeln!(
-            out,
-            "\nsource-built binaries are in cargo's bin directory; ensure it is on PATH:"
-        )?;
-        writeln!(
-            out,
-            "    ~/.cargo/bin   (or %USERPROFILE%\\.cargo\\bin on Windows)"
-        )?;
-    }
-    Ok(())
+    // Every channel publishes into the managed directory, so the PATH advice is
+    // the same one on all of them.
+    path_notice(out)
 }
 
 /// Tell the user how to reach the executables when the shared bin directory is
 /// not already on `PATH`, and warn when a copy earlier on `PATH` will be run
 /// instead of the one just installed.
 ///
-/// **Release channel only.** On the prerelease channel `cargo install` writes
-/// into cargo's own bin directory *by design* (see [`source_args`], which passes
-/// `--force` and no `--root`), so a copy there is the install, not a stale
-/// shadow — calling this on that channel reports correct state as a defect.
-/// [`report`] gates the call accordingly, and any new caller must do the same or
-/// establish the channel first. A caller that cannot know the channel needs the
-/// stronger test this deliberately does not do: compare the shadowing binary's
-/// *version* against the managed copy, which means executing it.
+/// This used to be release-channel-only advice, because a source build landed in
+/// cargo's bin directory and a copy there *was* the install. Every channel now
+/// publishes into the managed directory (see [`source_args`], which always
+/// stages and never installs in place), so a copy anywhere else is a leftover on
+/// every channel and the warning is unconditional. `localx doctor --fix` is what
+/// removes them.
 pub fn path_notice(out: &mut dyn Write) -> anyhow::Result<()> {
     let Some(bin) = shared_bin_dir() else {
         return Ok(());
@@ -1086,8 +1180,8 @@ fn shadow_notice(
 #[cfg(test)]
 mod tests {
     use super::{
-        report, self_view, shadow_notice, shadowed_before, source_args, stage_and_replace, tool,
-        Channel, Running, SelfInstall, Version, TRAIN,
+        report, self_view, shadow_notice, shadowed_before, source_args, stage_and_publish, tool,
+        Channel, Running, Source, SourceInstall, Version, TRAIN,
     };
     use std::path::{Path, PathBuf};
 
@@ -1297,7 +1391,7 @@ mod tests {
     #[test]
     fn localmind_source_build_uses_the_cli_package_not_the_binary_name() {
         let localmind = tool("localmind").expect("localmind in train");
-        let args = source_args(localmind, None);
+        let args = source_args(localmind, &Source::Main, Path::new("staging-root"));
         // `cargo install <package>` needs the package name, which is not the
         // binary name for localmind.
         assert!(args.contains(&"localmind-cli".to_string()));
@@ -1308,7 +1402,7 @@ mod tests {
     #[test]
     fn localpilot_source_build_carries_its_features() {
         let localpilot = tool("localpilot").expect("localpilot in train");
-        let args = source_args(localpilot, None);
+        let args = source_args(localpilot, &Source::Main, Path::new("staging-root"));
         let features_idx = args
             .iter()
             .position(|a| a == "--features")
@@ -1317,35 +1411,56 @@ mod tests {
     }
 
     #[test]
-    fn a_companion_source_build_still_forces_into_cargos_bin_directory() {
-        // The self-replace route must not leak into the other four tools: with
-        // no staging root the arguments are the classic in-place refresh.
-        let localbox = tool("localbox").expect("localbox in train");
-        let args = source_args(localbox, None);
-        assert!(args.contains(&"--force".to_string()));
-        assert!(!args.contains(&"--root".to_string()));
-    }
-
-    #[test]
-    fn a_self_source_build_targets_a_staging_root_and_never_forces_in_place() {
-        let localx = tool("localx").expect("localx in train");
+    fn every_source_build_stages_and_never_installs_in_place() {
+        // The second install location is the whole defect class: a build that
+        // lands in cargo's bin directory wins PATH over the managed copy and
+        // makes every later update invisible. No channel may install in place,
+        // on any tool.
         let root = Path::new("staging-root");
-        let args = source_args(localx, Some(root));
-        let root_idx = args.iter().position(|a| a == "--root").expect("--root");
-        assert_eq!(args[root_idx + 1], root.display().to_string());
-        assert!(!args.contains(&"--force".to_string()));
-        assert!(args.contains(&"--locked".to_string()));
+        let workspace = Source::Workspace(PathBuf::from("/repos/LocalX"));
+        for t in TRAIN {
+            for source in [&Source::Main, &workspace] {
+                let args = source_args(t, source, root);
+                assert!(!args.contains(&"--force".to_string()), "{}", t.tool);
+                let root_idx = args.iter().position(|a| a == "--root").expect("--root");
+                assert_eq!(args[root_idx + 1], root.display().to_string());
+            }
+        }
     }
 
     #[test]
-    fn a_successful_self_build_replaces_the_running_executable_and_clears_staging() {
+    fn a_workspace_build_compiles_the_local_crate_and_allows_a_lock_update() {
+        let localbox = tool("localbox").expect("localbox in train");
+        let workspace = PathBuf::from("/repos/LocalX");
+        let args = source_args(
+            localbox,
+            &Source::Workspace(workspace.clone()),
+            Path::new("staging-root"),
+        );
+        let path_idx = args.iter().position(|a| a == "--path").expect("--path");
+        assert_eq!(
+            args[path_idx + 1],
+            workspace
+                .join("LocalBox")
+                .join("crates/localbox")
+                .display()
+                .to_string()
+        );
+        assert!(!args.contains(&"--git".to_string()));
+        // A working tree that has just gained a dependency needs its lock file
+        // to update; `--locked` would refuse exactly that build.
+        assert!(!args.contains(&"--locked".to_string()));
+    }
+
+    #[test]
+    fn a_successful_build_publishes_into_the_managed_directory_and_clears_staging() {
         let temp = tempfile::tempdir().expect("temp");
         let staging = temp.path().join("source-build");
-        let running = temp.path().join("bin").join("tool");
-        std::fs::create_dir_all(running.parent().unwrap()).unwrap();
-        std::fs::write(&running, "old").unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(localpilot_dist::executable_name("tool")), "old").unwrap();
 
-        let outcome = stage_and_replace("tool", &staging, &running, &mut |root| {
+        let outcome = stage_and_publish("tool", &staging, &bin, &mut |root| {
             let bin = root.join("bin");
             std::fs::create_dir_all(&bin).unwrap();
             std::fs::write(bin.join(localpilot_dist::executable_name("tool")), "new").unwrap();
@@ -1353,8 +1468,8 @@ mod tests {
         })
         .unwrap();
 
-        let SelfInstall::Replaced(path) = outcome else {
-            panic!("expected a replacement, got {outcome:?}");
+        let SourceInstall::Published(path) = outcome else {
+            panic!("expected a published build, got {outcome:?}");
         };
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
         assert!(
@@ -1367,13 +1482,13 @@ mod tests {
     fn a_refused_swap_keeps_the_built_executable_where_the_message_says() {
         let temp = tempfile::tempdir().expect("temp");
         let staging = temp.path().join("source-build");
-        // A running executable whose parent is a plain file: placement cannot
-        // create the destination directory, so the swap is refused.
+        // A destination directory that is a plain file: placement cannot create
+        // it, so the swap is refused.
         let blocker = temp.path().join("not-a-dir");
         std::fs::write(&blocker, "x").unwrap();
-        let running = blocker.join("tool");
+        let bin = blocker.join("bin");
 
-        let outcome = stage_and_replace("tool", &staging, &running, &mut |root| {
+        let outcome = stage_and_publish("tool", &staging, &bin, &mut |root| {
             let bin = root.join("bin");
             std::fs::create_dir_all(&bin).unwrap();
             std::fs::write(bin.join(localpilot_dist::executable_name("tool")), "new").unwrap();
@@ -1381,7 +1496,7 @@ mod tests {
         })
         .unwrap();
 
-        let SelfInstall::Retained { built, error } = outcome else {
+        let SourceInstall::Retained { built, error } = outcome else {
             panic!("expected the build to be retained, got {outcome:?}");
         };
         assert!(
@@ -1393,42 +1508,46 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_self_build_leaves_nothing_behind() {
+    fn a_failed_build_leaves_nothing_behind() {
         let temp = tempfile::tempdir().expect("temp");
         let staging = temp.path().join("source-build");
-        let running = temp.path().join("tool");
-        std::fs::write(&running, "old").unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let installed = bin.join(localpilot_dist::executable_name("tool"));
+        std::fs::write(&installed, "old").unwrap();
 
-        let outcome = stage_and_replace("tool", &staging, &running, &mut |_| Ok(false)).unwrap();
+        let outcome = stage_and_publish("tool", &staging, &bin, &mut |_| Ok(false)).unwrap();
 
-        assert!(matches!(outcome, SelfInstall::BuildFailed));
+        assert!(matches!(outcome, SourceInstall::BuildFailed));
         assert!(!staging.exists());
-        assert_eq!(std::fs::read_to_string(&running).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "old");
     }
 
     #[test]
     fn a_build_that_cannot_be_spawned_is_an_error_not_a_retained_build() {
         let temp = tempfile::tempdir().expect("temp");
         let staging = temp.path().join("source-build");
-        let running = temp.path().join("tool");
-        std::fs::write(&running, "old").unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let installed = bin.join(localpilot_dist::executable_name("tool"));
+        std::fs::write(&installed, "old").unwrap();
 
-        let result = stage_and_replace("tool", &staging, &running, &mut |_| {
+        let result = stage_and_publish("tool", &staging, &bin, &mut |_| {
             Err(anyhow::anyhow!("could not run cargo: not found"))
         });
 
         let error = result.expect_err("a spawn failure propagates");
         assert!(error.to_string().contains("could not run cargo"));
-        assert_eq!(std::fs::read_to_string(&running).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "old");
     }
 
     #[test]
     fn a_refused_swap_keeps_the_raw_error_authoritative_and_never_claims_a_cause() {
         let mut out = Vec::new();
-        super::describe_self_install(
+        super::describe_source_install(
             "tool",
-            Path::new("/opt/bin/tool"),
-            &SelfInstall::Retained {
+            Path::new("/opt/bin"),
+            &SourceInstall::Retained {
                 built: std::path::PathBuf::from("/data/tool/source-build/bin/tool"),
                 error: "permission denied (os error 13)".to_string(),
             },
@@ -1457,26 +1576,26 @@ mod tests {
         let blocker = temp.path().join("not-a-dir");
         std::fs::write(&blocker, "x").unwrap();
         let staging = blocker.join("source-build");
-        let running = temp.path().join("tool");
-        std::fs::write(&running, "old").unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
         let mut built = false;
 
-        let outcome = stage_and_replace("tool", &staging, &running, &mut |_| {
+        let outcome = stage_and_publish("tool", &staging, &bin, &mut |_| {
             built = true;
             Ok(true)
         })
         .unwrap();
 
-        let SelfInstall::StagingFailed(reason) = outcome else {
+        let SourceInstall::StagingFailed(reason) = outcome else {
             panic!("expected a staging failure, got {outcome:?}");
         };
         assert!(reason.contains("could not create"), "{reason}");
         assert!(!built, "no build runs without a staging directory");
         let mut out = Vec::new();
-        super::describe_self_install(
+        super::describe_source_install(
             "tool",
-            &running,
-            &SelfInstall::StagingFailed(reason),
+            &bin,
+            &SourceInstall::StagingFailed(reason),
             &mut out,
         )
         .unwrap();
@@ -1496,7 +1615,7 @@ mod tests {
             &tools,
             &["localx"],
             None,
-            Channel::Prerelease,
+            &Channel::Prerelease,
             Some("localx"),
             &mut out,
         )
@@ -1510,7 +1629,7 @@ mod tests {
             &tools,
             &["localbox"],
             None,
-            Channel::Prerelease,
+            &Channel::Prerelease,
             Some("localx"),
             &mut out,
         )

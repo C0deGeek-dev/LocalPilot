@@ -5,6 +5,11 @@
 //! llama.cpp engine. The install machinery lives in `localpilot-stack`; this
 //! binary is the thin CLI over it, plus a passthrough so `localx <tool>` runs a
 //! stack tool without hunting for it on `PATH`.
+//!
+//! Someone developing the stack wants the opposite of a release: the code in
+//! their own working tree. `localx dev use <workspace>` pins that workspace and
+//! makes it the default channel, so `localx update` rebuilds the stack from it —
+//! one command, the same one everybody else runs.
 #![forbid(unsafe_code)]
 
 use std::io::Write;
@@ -14,7 +19,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use localpilot_dist::Version;
-use localpilot_stack::{Channel, Running, Selection};
+use localpilot_stack::{dev, doctor, Channel, Running, Selection};
 
 mod powershell;
 
@@ -36,13 +41,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Update the whole stack to the newest release (or `--prerelease` to build
-    /// the latest `main` from source).
+    /// Update the whole stack: the newest release, or the pinned development
+    /// workspace when `localx dev use` has set one.
     Update {
-        /// Build each app from its repo's latest `main` commit instead of the
-        /// newest published release. Needs a Rust toolchain; app tools only.
+        /// Build each app from its repository's latest pushed `main` commit.
+        /// Needs a Rust toolchain; app tools only.
         #[arg(long)]
         prerelease: bool,
+        /// Use the published release even while development mode is on.
+        #[arg(long, conflicts_with = "prerelease")]
+        release: bool,
     },
     /// Install the stack, a single tool, or the engine.
     Install {
@@ -50,20 +58,46 @@ enum Command {
         /// (localpilot, localmind, localbox, localbench, localx).
         #[arg(default_value = "all")]
         target: String,
-        /// Build from the latest `main` instead of the newest release (app tools
-        /// only; needs a Rust toolchain).
+        /// Build from the latest pushed `main` instead of the newest release
+        /// (app tools only; needs a Rust toolchain).
         #[arg(long)]
         prerelease: bool,
+        /// Use the published release even while development mode is on.
+        #[arg(long, conflicts_with = "prerelease")]
+        release: bool,
         /// Install the optional PowerShell `llm*` shortcuts after the selected
         /// stack target. Existing custom profiles are never edited silently.
         #[arg(long)]
         powershell_shortcuts: bool,
+    },
+    /// Build the stack from local repository checkouts instead of releases.
+    Dev {
+        #[command(subcommand)]
+        action: DevAction,
+    },
+    /// Report anything wrong with the install, and fix it on request.
+    Doctor {
+        /// Remove what the report found: duplicate binaries outside the managed
+        /// directory, install residue, and unusable caches.
+        #[arg(long)]
+        fix: bool,
     },
     /// Show the installed version of every stack tool and the engine.
     Status,
     /// Run a stack tool: `localx <tool> [args…]`.
     #[command(external_subcommand)]
     Tool(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum DevAction {
+    /// Pin a LocalX workspace and build from it from now on. With no path, the
+    /// workspace containing the current directory is used.
+    Use { path: Option<PathBuf> },
+    /// Leave development mode; later installs use the published release again.
+    Off,
+    /// Show the pinned workspace, if there is one.
+    Status,
 }
 
 #[tokio::main]
@@ -77,12 +111,26 @@ async fn main() -> ExitCode {
 
     let mut out = std::io::stdout();
     let result = match cli.command {
-        Command::Update { prerelease } => update(channel(prerelease), &mut out).await,
+        Command::Update {
+            prerelease,
+            release,
+        } => update(&channel(prerelease, release), &mut out).await,
         Command::Install {
             target,
             prerelease,
+            release,
             powershell_shortcuts,
-        } => install(&target, channel(prerelease), powershell_shortcuts, &mut out).await,
+        } => {
+            install(
+                &target,
+                &channel(prerelease, release),
+                powershell_shortcuts,
+                &mut out,
+            )
+            .await
+        }
+        Command::Dev { action } => development(&action, &mut out),
+        Command::Doctor { fix } => doctor_command(fix, &mut out),
         Command::Status => status(&mut out),
         Command::Tool(_) => unreachable!("handled above"),
     };
@@ -96,11 +144,18 @@ async fn main() -> ExitCode {
     }
 }
 
-fn channel(prerelease: bool) -> Channel {
-    if prerelease {
-        Channel::Prerelease
-    } else {
-        Channel::Release
+/// Which channel a command runs on: what the flags say, or — when they say
+/// nothing — the pinned development workspace, falling back to the release.
+///
+/// Development mode being the default is the point of pinning it. A developer
+/// should not have to remember a flag to build their own code, and the one
+/// command everybody documents (`localx update`) should do the right thing for
+/// whoever is running it.
+fn channel(prerelease: bool, release: bool) -> Channel {
+    match (prerelease, release) {
+        (true, _) => Channel::Prerelease,
+        (_, true) => Channel::Release,
+        _ => Channel::resolved(),
     }
 }
 
@@ -126,7 +181,7 @@ fn running_marker(version: &str) -> Running {
 
 /// Update every app tool to the newest release (or latest `main`), then refresh
 /// the engine. The full stack in one command.
-async fn update(channel: Channel, out: &mut dyn Write) -> Result<()> {
+async fn update(channel: &Channel, out: &mut dyn Write) -> Result<()> {
     let marker = running_marker(VERSION);
     localpilot_stack::install(&Selection::All, None, channel, Some(&marker), out).await?;
     update_engine(out)?;
@@ -137,7 +192,7 @@ async fn update(channel: Channel, out: &mut dyn Write) -> Result<()> {
 /// Install the whole stack, a single named tool, or just the engine.
 async fn install(
     target: &str,
-    channel: Channel,
+    channel: &Channel,
     powershell_shortcuts: bool,
     out: &mut dyn Write,
 ) -> Result<()> {
@@ -172,12 +227,96 @@ async fn install(
     Ok(())
 }
 
+/// Turn development mode on or off, and say what it is set to.
+///
+/// # Errors
+/// Returns an error when a workspace cannot be found or recorded.
+fn development(action: &DevAction, out: &mut dyn Write) -> Result<()> {
+    match action {
+        DevAction::Use { path } => {
+            let requested = match path {
+                Some(path) => path.clone(),
+                None => {
+                    let here = std::env::current_dir()?;
+                    dev::detect(&here).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no LocalX workspace at or above {}; pass its path: \
+                             `localx dev use <path>`",
+                            here.display()
+                        )
+                    })?
+                }
+            };
+            let workspace = dev::pin(&requested)?;
+            writeln!(out, "development mode on: {}", workspace.display())?;
+            writeln!(
+                out,
+                "`localx update` now builds every tool from that workspace, \
+                 including uncommitted work."
+            )?;
+            writeln!(
+                out,
+                "use `localx update --release` for a one-off release install, \
+                 or `localx dev off` to switch back."
+            )?;
+        }
+        DevAction::Off => {
+            if dev::unpin()? {
+                writeln!(
+                    out,
+                    "development mode off; `localx update` installs the published release again."
+                )?;
+                writeln!(
+                    out,
+                    "the binaries in place are still your development builds until that runs."
+                )?;
+            } else {
+                writeln!(out, "development mode was not on.")?;
+            }
+        }
+        DevAction::Status => match dev::pinned() {
+            Some(workspace) => {
+                writeln!(out, "development mode on: {}", workspace.display())?;
+                let missing = dev::missing_crates(&workspace);
+                if !missing.is_empty() {
+                    writeln!(out, "  incomplete — missing: {}", missing.join(", "))?;
+                }
+            }
+            None => writeln!(
+                out,
+                "development mode off (release channel). Turn it on with `localx dev use <path>`."
+            )?,
+        },
+    }
+    Ok(())
+}
+
+/// Report what is wrong with the install, and fix it when asked.
+///
+/// # Errors
+/// Returns an error only if output cannot be written.
+fn doctor_command(fix: bool, out: &mut dyn Write) -> Result<()> {
+    let Some(report) = doctor::diagnose() else {
+        writeln!(
+            out,
+            "no per-user data directory on this platform, so there is no managed install to check."
+        )?;
+        return Ok(());
+    };
+    doctor::write_report(&report, out)?;
+    if fix && !report.is_clean() {
+        writeln!(out)?;
+        doctor::fix(&report, out)?;
+    }
+    Ok(())
+}
+
 /// Refresh the llama.cpp engine by delegating to the installed `localbox`.
 ///
 /// The engine is upstream binaries owned by LocalBox, not part of the app source
-/// tree, so the `--prerelease` (build-from-main) channel does not apply — the
-/// engine always refreshes its release assets. A failure here is reported but
-/// does not fail the whole run: the app stack is already installed.
+/// tree, so the source channels do not apply — the engine always refreshes its
+/// release assets. A failure here is reported but does not fail the whole run:
+/// the app stack is already installed.
 fn update_engine(out: &mut dyn Write) -> Result<()> {
     let localbox = tool_path("localbox");
     writeln!(out, "\nengine: refreshing llama.cpp via `localbox update`…")?;
@@ -217,20 +356,33 @@ fn status(out: &mut dyn Write) -> Result<()> {
     }
     writeln!(out, "  {:<11} {}", "engine", engine_version())?;
 
+    match dev::pinned() {
+        Some(workspace) => writeln!(
+            out,
+            "\nchannel: development — built from {}",
+            workspace.display()
+        )?,
+        None => writeln!(out, "\nchannel: release")?,
+    }
+
     if let Some(bin) = localpilot_stack::shared_bin_dir() {
         let on_path = std::env::var_os("PATH")
             .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry == bin));
         if !on_path {
-            writeln!(
-                out,
-                "
-note: {} is not on PATH.",
-                bin.display()
-            )?;
+            writeln!(out, "\nnote: {} is not on PATH.", bin.display())?;
         }
     }
     if let Some(note) = localpilot_stack::running_binary_note("localx") {
         writeln!(out, "\n{note}")?;
+    }
+    // One line, not a second copy of the diagnosis: `status` answers "what is
+    // installed", and the moment it starts answering "what is wrong with it"
+    // the two drift apart.
+    if doctor::diagnose().is_some_and(|report| !report.is_clean()) {
+        writeln!(
+            out,
+            "\nthis install has problems `localx doctor` can name (and `--fix` can remove)."
+        )?;
     }
     Ok(())
 }
@@ -434,7 +586,8 @@ fn passthrough(args: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        channel, describe_running_localx, version_from_output, version_token, Channel, Cli, Command,
+        channel, describe_running_localx, version_from_output, version_token, Channel, Cli,
+        Command, DevAction,
     };
     use clap::{CommandFactory, Parser};
 
@@ -528,15 +681,24 @@ mod tests {
     }
 
     #[test]
-    fn prerelease_flag_selects_the_source_channel() {
-        assert_eq!(channel(true), Channel::Prerelease);
-        assert_eq!(channel(false), Channel::Release);
+    fn the_flags_name_the_channel_they_say_they_do() {
+        assert_eq!(channel(true, false), Channel::Prerelease);
+        // `--release` is the escape hatch out of a pinned development
+        // workspace, so it must resolve to the release channel whatever the pin
+        // says.
+        assert_eq!(channel(false, true), Channel::Release);
     }
 
     #[test]
     fn prerelease_parses_on_update_and_install() {
         let cli = Cli::try_parse_from(["localx", "update", "--prerelease"]).unwrap();
-        assert!(matches!(cli.command, Command::Update { prerelease: true }));
+        assert!(matches!(
+            cli.command,
+            Command::Update {
+                prerelease: true,
+                release: false
+            }
+        ));
 
         let cli = Cli::try_parse_from(["localx", "install", "localbox", "--prerelease"]).unwrap();
         assert!(matches!(
@@ -546,6 +708,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn the_two_channel_flags_cannot_be_asked_for_at_once() {
+        assert!(Cli::try_parse_from(["localx", "update", "--prerelease", "--release"]).is_err());
+    }
+
+    #[test]
+    fn dev_use_takes_an_optional_path() {
+        let bare = Cli::try_parse_from(["localx", "dev", "use"]).unwrap();
+        assert!(matches!(
+            bare.command,
+            Command::Dev {
+                action: DevAction::Use { path: None }
+            }
+        ));
+
+        let explicit = Cli::try_parse_from(["localx", "dev", "use", "D:/repos/LocalX"]).unwrap();
+        match explicit.command {
+            Command::Dev {
+                action: DevAction::Use { path: Some(path) },
+            } => assert_eq!(path, std::path::PathBuf::from("D:/repos/LocalX")),
+            _ => panic!("expected dev use with a path"),
+        }
+    }
+
+    #[test]
+    fn doctor_only_removes_anything_when_asked() {
+        let report = Cli::try_parse_from(["localx", "doctor"]).unwrap();
+        assert!(matches!(report.command, Command::Doctor { fix: false }));
+
+        let fix = Cli::try_parse_from(["localx", "doctor", "--fix"]).unwrap();
+        assert!(matches!(fix.command, Command::Doctor { fix: true }));
     }
 
     #[test]

@@ -233,10 +233,19 @@ if (-not $Toolchain -and ($Features -match 'tui') -and (Get-Command rustup -Erro
     }
 }
 
+# Both binaries are built into one staging root and then published into the
+# managed directory - the same directory the binary installer and every later
+# `localx update` writes to. cargo's own bin directory is deliberately not used:
+# a copy there is a second install that usually wins PATH, which is how an
+# updated stack ends up invisible.
+$bin = Join-Path $env:LOCALAPPDATA 'localx\bin'
+$staging = Join-Path $root 'target/localx-install'
+Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
+
 Write-Host "building and installing the localpilot CLI (features: $Features) ..."
 $cargoArgs = @()
 if ($Toolchain) { $cargoArgs += "+$Toolchain" }
-$cargoArgs += @('install', '--path', $cli, '--locked', '--force')
+$cargoArgs += @('install', '--path', $cli, '--locked', '--root', $staging)
 if ($Features) { $cargoArgs += @('--features', $Features) }
 if ($Target) { $cargoArgs += @('--target', $Target) }
 cargo @cargoArgs
@@ -248,56 +257,46 @@ if ($LASTEXITCODE -ne 0) {
 
 # Build the umbrella from the same checkout, so `localx` matches the localpilot
 # you just built. It links no TUI, so it needs no features.
-#
-# Build into a staging root, then rename-then-copy the binary into cargo's bin
-# directory rather than letting cargo move it straight onto the live path: if a
-# localx is already running (a re-run of this installer), that move fails with
-# `os error 5` on Windows' mandatory image lock. Renaming the running file aside
-# first lands the new binary on a free path — the same rename-then-copy the
-# updater uses (LocalHub#79).
 Write-Host "building and installing localx ..."
-$localxStaging = Join-Path $root 'target/localx-install'
-Remove-Item -Recurse -Force $localxStaging -ErrorAction SilentlyContinue
 $localxArgs = @()
 if ($Toolchain) { $localxArgs += "+$Toolchain" }
-$localxArgs += @('install', '--path', (Join-Path $root 'crates/localx'), '--locked', '--root', $localxStaging)
+$localxArgs += @('install', '--path', (Join-Path $root 'crates/localx'), '--locked', '--root', $staging)
 if ($Target) { $localxArgs += @('--target', $Target) }
 cargo @localxArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "cargo install localx failed (exit $LASTEXITCODE). See the build error above."
 }
-# Mirror cargo install's own destination precedence — CARGO_INSTALL_ROOT, then
-# CARGO_HOME, then ~/.cargo — so localx lands beside the localpilot cargo just
-# installed. (A config-file `install.root` is not honoured here; that narrower
-# case keeps the plain `cargo install` behaviour by not being covered.)
-$cargoBin = if ($env:CARGO_INSTALL_ROOT) { Join-Path $env:CARGO_INSTALL_ROOT 'bin' }
-            elseif ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' }
-            else { Join-Path $HOME '.cargo/bin' }
-$builtLocalx = Join-Path $localxStaging 'bin/localx.exe'
-$destLocalx = $null
-if (Test-Path $builtLocalx) {
-    if (-not (Test-Path $cargoBin)) { New-Item -ItemType Directory -Force $cargoBin | Out-Null }
-    $destLocalx = Join-Path $cargoBin 'localx.exe'
-    $asideLocalx = "$destLocalx.old"
-    # Displace the old binary, then copy — with rollback. A running image can be
-    # renamed but not overwritten, so the new binary lands on a free path; if the
-    # copy fails, the displaced binary is restored so the canonical path is never
-    # left empty, and the staged build is kept.
+
+New-Item -ItemType Directory -Path $bin -Force | Out-Null
+# Displace the old binary, then copy - with rollback. A running image can be
+# renamed but not overwritten, so the new binary lands on a free path; if the
+# copy fails, the displaced binary is restored so the canonical path is never
+# left empty, and the staged build is kept (LocalHub#79).
+function Publish-StackTool {
+    param([string]$Tool)
+    $built = Join-Path $staging "bin/$Tool.exe"
+    if (-not (Test-Path $built)) { Write-Error "the build produced no $Tool.exe at $built" }
+    $dest = Join-Path $bin "$Tool.exe"
+    $aside = "$dest.old"
     $displaced = $false
-    if (Test-Path $destLocalx) {
-        Remove-Item -Force $asideLocalx -ErrorAction SilentlyContinue
-        Move-Item -Force $destLocalx $asideLocalx
+    if (Test-Path $dest) {
+        Remove-Item -Force $aside -ErrorAction SilentlyContinue
+        Move-Item -Force $dest $aside
         $displaced = $true
     }
     try {
-        Copy-Item -Force $builtLocalx $destLocalx
+        Copy-Item -Force $built $dest
     } catch {
-        if ($displaced) { Move-Item -Force $asideLocalx $destLocalx }
-        Write-Error "could not install localx to $destLocalx (the staged build is kept at $builtLocalx): $_"
+        if ($displaced) { Move-Item -Force $aside $dest }
+        Write-Error "could not install $Tool to $dest (the staged build is kept at $built): $_"
     }
-    if ($displaced) { Remove-Item -Force $asideLocalx -ErrorAction SilentlyContinue }
-    Remove-Item -Recurse -Force $localxStaging -ErrorAction SilentlyContinue
+    if ($displaced) { Remove-Item -Force $aside -ErrorAction SilentlyContinue }
+    return $dest
 }
+
+Publish-StackTool -Tool 'localpilot' | Out-Null
+$destLocalx = Publish-StackTool -Tool 'localx'
+Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
 
 if ($PowerShellShortcuts) {
     if ([string]::IsNullOrWhiteSpace($destLocalx) -or -not (Test-Path -LiteralPath $destLocalx)) {
@@ -323,8 +322,10 @@ if ($PowerShellShortcuts) {
 }
 
 Write-Host ""
-Write-Host "installed 'localpilot' and 'localx' from source. verify with:"
-Write-Host "    localpilot doctor"
+Write-Host "installed 'localpilot' and 'localx' from source into $bin. verify with:"
+Write-Host "    localx status"
 Write-Host "install the rest of the stack (localmind, localbox, localbench) and the engine:"
 Write-Host "    localx install                 # released binaries"
 Write-Host "    localx install --prerelease    # or build each from its latest main"
+Write-Host "developing every LocalX repository side by side? build the stack from them:"
+Write-Host "    localx dev use <workspace>; localx update"

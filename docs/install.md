@@ -98,14 +98,15 @@ warning: PATH resolves these before the managed copies, so they are what actuall
     localpilot -> C:\Users\you\.cargo\bin\localpilot.exe
 ```
 
-Resolve it either way — put the managed directory ahead of the offender on
-`PATH`, or remove the old copies (`cargo uninstall <tool>` for cargo-installed
-ones).
+`localx doctor` names them and `localx doctor --fix` removes them, asking cargo
+to forget the ones it installed. The manual route is the same either way: put the
+managed directory ahead of the offender on `PATH`, or delete the old copies
+(`cargo uninstall <tool>` for cargo-installed ones).
 
-This warning is for the **release** channel only. `--prerelease` installs by
-building from source with `cargo install`, which writes into cargo's own bin
-directory — there, a copy in `~/.cargo/bin` *is* the install, not something
-shadowing it.
+The warning applies on every channel. Every install route — released binaries, a
+build from `main`, and a build from a local workspace — publishes into the
+managed directory, so a stack binary anywhere else is a leftover rather than a
+second install worth keeping (ADR-0180).
 
 ### Reading a script before you run it
 
@@ -213,12 +214,14 @@ resumes under any provider, and it is redacted on write. Resume it with
 The umbrella command updates or provisions everything in one go:
 
 ```sh
-localx update                # update the whole stack + engine to the newest release
-localx update --prerelease   # build each app from its latest main (developer channel)
+localx update                # update the whole stack + engine on the current channel
+localx update --prerelease   # build each app from its latest pushed main
+localx update --release      # released binaries, even while development mode is on
 localx install               # provision the stack + engine (idempotent)
 localx install localbox      # just one tool; `localx install engine` for the engine
 localx install powershell-shortcuts # optional PowerShell llm* compatibility commands
-localx status                # installed version of every tool and the engine
+localx status                # installed version of every tool, the engine, the channel
+localx doctor                # what is wrong with the install; `--fix` removes it
 localx localbox serve …      # run any stack tool: localx <tool> [args…]
 ```
 
@@ -226,6 +229,28 @@ localx localbox serve …      # run any stack tool: localx <tool> [args…]
 of the newest published release — the way to test work that is pushed but not yet
 cut. It needs a Rust toolchain and covers the app tools only; the engine always
 uses its released binaries.
+
+### Developing the stack
+
+With the LocalX repositories checked out side by side, pin that workspace once
+and the ordinary update command builds from it — your working trees, uncommitted
+work included:
+
+```sh
+localx dev use /path/to/LocalX   # or just `localx dev use` from inside it
+localx update                    # now builds every tool from those checkouts
+localx dev status                # what is pinned
+localx dev off                   # back to released binaries on the next update
+```
+
+The workspace is a directory holding `LocalPilot`, `LocalMind`, `LocalBox` and
+`LocalBench`; `localx dev use` refuses one that is missing any of them and names
+which. Builds reuse each repository's own `target/` directory, so the second
+build of a tool is incremental rather than a fresh compile.
+
+Development builds land in the same managed directory as released ones, so
+nothing about `PATH` changes when you switch channels, and `localx update
+--release` puts the published binaries back.
 
 `localx` updates itself last, and can: the running executable is built into a
 staging directory and swapped in (rename-then-copy, so Windows' lock on a running
@@ -235,12 +260,12 @@ build a cargo checkout produces — still self-replaces (LocalHub#79). If the sw
 is ever refused, the raw error is printed, the build is kept, and the message
 names the file to copy over after `localx` exits; on Windows an access-denied on
 the running file is that image lock, which exiting lifts and an elevated shell
-does not. On the release channel a source-built `localx` earlier on `PATH` (what
-the from-source installer creates in cargo's bin directory) is refreshed
-alongside the managed copy, and `localx status` says which copy is running and
-flags a version mismatch. The from-source installers themselves build `localx`
-into a staging directory and swap it in the same way, so re-running the installer
-over a running `localx` does not hit the image lock either.
+does not. A `localx` left earlier on `PATH` by an older from-source install is
+refreshed alongside the managed copy, and `localx status` says which copy is
+running and flags a version mismatch — `localx doctor --fix` removes it for good.
+The from-source installers themselves build into a staging directory and swap
+both binaries into the managed directory the same way, so re-running the
+installer over a running `localx` does not hit the image lock either.
 
 Per-tool commands stay available for finer control:
 
