@@ -519,7 +519,6 @@ pub fn source_install(
     })?;
     describe_source_install(t.tool, &bin, &outcome, out)?;
     if let SourceInstall::Published(path) = &outcome {
-        writeln!(out, "{}: on PATH at {}", t.tool, path.display())?;
         // Only the tool this process *is* has a running copy elsewhere to
         // refresh — a legacy `cargo install` copy earlier on PATH. `localx
         // doctor` removes those; until it has been run, this keeps the update

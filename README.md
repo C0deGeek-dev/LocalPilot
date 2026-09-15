@@ -74,10 +74,17 @@ llama.cpp engine, at one version. The installer prints the directory to add to
 `localx` is the stack's front door afterwards:
 
 ```sh
-localx update              # update every tool + the engine to the newest release
-localx update --prerelease # or build each app from its latest main (dev channel)
-localx status              # what is installed
+localx update              # update every tool + the engine on the current channel
+localx update --prerelease # or build each app from its latest pushed main
+localx status              # what is installed, and which channel it came from
+localx doctor              # what is wrong with the install; `--fix` removes it
 ```
+
+Developing the stack? With the LocalX repositories checked out side by side,
+`localx dev use <workspace>` makes plain `localx update` build every tool from
+those working trees — uncommitted work included — and `localx dev off` goes back
+to released binaries. Every channel installs into the same managed directory, so
+switching between them changes nothing about `PATH`.
 
 PowerShell users can optionally restore the compact `llm*` compatibility
 commands after installation with `localx install powershell-shortcuts`. The

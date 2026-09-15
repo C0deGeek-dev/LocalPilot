@@ -104,7 +104,11 @@ pub fn diagnose() -> Option<Report> {
         on_path: entries.iter().any(|entry| *entry == bin),
         bin,
         duplicates,
-        strays: strays_in(&dirs),
+        strays: {
+            let mut strays = strays_in(&dirs);
+            strays.extend(cargo_registry_residue());
+            strays
+        },
         // Cached release archives are what the release channel activates from.
         // In development mode nothing activates them — every binary is built —
         // so the whole cache is residue rather than a rollback path.
@@ -195,6 +199,27 @@ fn stray_reason(name: &str) -> Option<&'static str> {
         return Some("a dated backup from an older installer");
     }
     None
+}
+
+/// cargo's own registry files, when an old `cargo install --root <localx root>`
+/// left them in the managed root.
+///
+/// They describe binaries this stack now installs itself, so they are stale the
+/// moment the stack takes over — and they are what makes cargo refuse a later
+/// uninstall as corrupt metadata once the binary they name is gone.
+fn cargo_registry_residue() -> Vec<Stray> {
+    let Some(root) = Cache::default_root("localx") else {
+        return Vec::new();
+    };
+    [".crates.toml", ".crates2.json"]
+        .into_iter()
+        .map(|name| root.join(name))
+        .filter(|path| path.is_file())
+        .map(|path| Stray {
+            path,
+            reason: "cargo's registry from an install into this directory;                      the stack manages these binaries itself",
+        })
+        .collect()
 }
 
 /// Every cached release build of every train tool.
