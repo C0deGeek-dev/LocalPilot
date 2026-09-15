@@ -252,6 +252,15 @@ Development builds land in the same managed directory as released ones, so
 nothing about `PATH` changes when you switch channels, and `localx update
 --release` puts the published binaries back.
 
+`localx status` says what each binary was installed from, because its version
+cannot: three of the five tools stamp their crate version and nothing else, so a
+development build and the release of the same version look identical.
+
+```text
+  localmind   5.0.0 (development build from D:\repos\LocalX)
+  localbox    5.0.0 (release v5.0.0)
+```
+
 `localx` updates itself last, and can: the running executable is built into a
 staging directory and swapped in (rename-then-copy, so Windows' lock on a running
 image is never hit). It recognises itself by the running executable's path, not
