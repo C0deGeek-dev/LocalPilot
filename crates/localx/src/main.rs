@@ -357,7 +357,9 @@ fn status(out: &mut dyn Write) -> Result<()> {
         // four characters. What each was installed from is recorded at install
         // time; without it this row cannot answer "is this my code?".
         match installed::origin(tool.tool) {
-            Some(origin) => writeln!(out, "  {:<11} {shown} ({})", tool.tool, origin.describe())?,
+            // An em dash rather than a second parenthetical: the localx row
+            // already ends in one ("(running)"), and a shadowed row in another.
+            Some(origin) => writeln!(out, "  {:<11} {shown} — {}", tool.tool, origin.describe())?,
             None => writeln!(out, "  {:<11} {shown}", tool.tool)?,
         }
     }
