@@ -217,7 +217,8 @@ fn cargo_registry_residue() -> Vec<Stray> {
         .filter(|path| path.is_file())
         .map(|path| Stray {
             path,
-            reason: "cargo's registry from an install into this directory;                      the stack manages these binaries itself",
+            reason: "cargo's registry from an install into this directory; the stack 
+                     manages these binaries itself",
         })
         .collect()
 }
@@ -424,6 +425,18 @@ pub fn fix(report: &Report, out: &mut dyn Write) -> anyhow::Result<()> {
     for stray in &report.strays {
         match std::fs::remove_file(&stray.path) {
             Ok(()) => writeln!(out, "removed {}", stray.path.display())?,
+            // Residue is usually a binary that was displaced *because* something
+            // was running it, so the common failure here is that the process is
+            // still running. Saying only "access is denied" invites a hunt for a
+            // permissions problem that is not there.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                writeln!(
+                    out,
+                    "kept {} — a process still holds it ({error}); it goes on the next fix \
+                     once nothing is running it.",
+                    stray.path.display()
+                )?;
+            }
             Err(error) => writeln!(out, "could not remove {}: {error}", stray.path.display())?,
         }
     }
