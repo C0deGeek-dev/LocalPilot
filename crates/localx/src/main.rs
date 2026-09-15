@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use localpilot_dist::Version;
-use localpilot_stack::{dev, doctor, Channel, Running, Selection};
+use localpilot_stack::{dev, doctor, installed, Channel, Running, Selection};
 
 mod powershell;
 
@@ -352,7 +352,14 @@ fn status(out: &mut dyn Write) -> Result<()> {
         } else {
             tool_version(tool.tool)
         };
-        writeln!(out, "  {:<11} {}", tool.tool, shown)?;
+        // Three of the five tools stamp their crate version and nothing else, so
+        // a development build and the release of the same version print the same
+        // four characters. What each was installed from is recorded at install
+        // time; without it this row cannot answer "is this my code?".
+        match installed::origin(tool.tool) {
+            Some(origin) => writeln!(out, "  {:<11} {shown} ({})", tool.tool, origin.describe())?,
+            None => writeln!(out, "  {:<11} {shown}", tool.tool)?,
+        }
     }
     writeln!(out, "  {:<11} {}", "engine", engine_version())?;
 

@@ -20,6 +20,7 @@
 
 pub mod dev;
 pub mod doctor;
+pub mod installed;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -414,6 +415,12 @@ pub async fn install_release(
                  gh attestation verify <archive> --repo {}",
                 repo_slug(t.repo)
             )?;
+            installed::record(
+                t.tool,
+                &installed::Origin::Release {
+                    tag: tag.to_string(),
+                },
+            );
             if let Some(path) = activate(&cache, t.tool, running, out)? {
                 writeln!(out, "{}: on PATH at {}", t.tool, path.display())?;
                 // Only the tool this process *is* has a running copy to refresh.
@@ -453,6 +460,16 @@ pub enum Source {
 }
 
 impl Source {
+    /// The same fact as provenance, for the record a later `status` reads.
+    fn recorded(&self) -> installed::Origin {
+        match self {
+            Self::Main => installed::Origin::Prerelease,
+            Self::Workspace(workspace) => installed::Origin::Workspace {
+                path: workspace.clone(),
+            },
+        }
+    }
+
     /// What the build is being taken from, for the line printed before it.
     fn describe(&self, t: &StackTool) -> String {
         match self {
@@ -519,6 +536,7 @@ pub fn source_install(
     })?;
     describe_source_install(t.tool, &bin, &outcome, out)?;
     if let SourceInstall::Published(path) = &outcome {
+        installed::record(t.tool, &source.recorded());
         // Only the tool this process *is* has a running copy elsewhere to
         // refresh — a legacy `cargo install` copy earlier on PATH. `localx
         // doctor` removes those; until it has been run, this keeps the update

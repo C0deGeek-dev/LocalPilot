@@ -26,9 +26,30 @@ fn main() {
     println!("cargo:rustc-env=LOCALX_VERSION={version}");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=LOCALX_VERSION");
-    // Keep the version truthful after a checkout moves (best-effort; missing
-    // paths in a source archive simply mean no retrigger).
+    emit_git_rerun_triggers();
+}
+
+/// Watch the files a commit actually moves, so the embedded version does not go
+/// stale the moment one is made.
+///
+/// Watching `.git/HEAD` alone — which this did — catches a branch switch and
+/// nothing else: committing on the current branch rewrites
+/// `.git/refs/heads/<branch>`, leaving `HEAD` untouched. The stamp then keeps
+/// naming an older commit, which is exactly the question `localx status` is
+/// asked. Mirrors the trigger set `localpilot-cli`'s build script already uses.
+/// Best-effort: missing paths in a source archive simply mean no retrigger.
+fn emit_git_rerun_triggers() {
+    // build.rs runs with the crate manifest directory as the working directory;
+    // the repository's `.git` is two levels up (`<repo>/crates/localx`).
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/packed-refs");
+    if let Ok(head) = std::fs::read_to_string("../../.git/HEAD") {
+        if let Some(reference) = head.strip_prefix("ref:").map(str::trim) {
+            if !reference.is_empty() {
+                println!("cargo:rerun-if-changed=../../.git/{reference}");
+            }
+        }
+    }
 }
 
 /// A stamp that always parses as a version.
