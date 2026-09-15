@@ -91,10 +91,11 @@ pub fn diagnose() -> Option<Report> {
     let running = std::env::current_exe().ok();
 
     let duplicates = duplicates_on_path(&bin, &entries, running.as_deref());
-    let mut dirs: Vec<PathBuf> = duplicates
-        .iter()
-        .filter_map(|duplicate| duplicate.path.parent().map(Path::to_path_buf))
-        .collect();
+    // Residue is looked for in the managed directory and in every `PATH` entry,
+    // not only where a duplicate still sits. A duplicate that was in use gets
+    // renamed rather than deleted, so the directory holding the leftover is
+    // precisely the one that no longer has a duplicate to point at it.
+    let mut dirs: Vec<PathBuf> = entries.clone();
     dirs.push(bin.clone());
     dirs.sort();
     dirs.dedup();
@@ -366,11 +367,32 @@ pub fn fix(report: &Report, out: &mut dyn Write) -> anyhow::Result<()> {
                     ""
                 }
             )?,
-            Err(error) => writeln!(
-                out,
-                "could not remove {}: {error}",
-                duplicate.path.display()
-            )?,
+            // A duplicate that is *running* — an editor's MCP server, a serve
+            // command — cannot be deleted while it holds the image, and waiting
+            // for it is not something this command can do. Renaming it is
+            // permitted where deleting is not, and it is the part that matters:
+            // the name `PATH` resolves is gone immediately, the bytes go on the
+            // next run's residue sweep.
+            Err(error) => match displace(&duplicate.path) {
+                Some(aside) => {
+                    writeln!(
+                        out,
+                        "{} is in use, so it was renamed to {} instead of deleted.",
+                        duplicate.path.display(),
+                        aside.display()
+                    )?;
+                    writeln!(
+                        out,
+                        "  PATH no longer resolves it; the next `localx doctor --fix` sweeps \
+                         the file once nothing holds it."
+                    )?;
+                }
+                None => writeln!(
+                    out,
+                    "could not remove {}: {error}",
+                    duplicate.path.display()
+                )?,
+            },
         }
     }
 
@@ -409,6 +431,22 @@ pub fn fix(report: &Report, out: &mut dyn Write) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rename a file out of the way, returning where it went.
+///
+/// The one operation an operating system still allows on a running executable.
+/// `None` when even that is refused, which is a real failure and is reported as
+/// one.
+fn displace(path: &Path) -> Option<PathBuf> {
+    let aside = path.with_extension(format!(
+        "{}displaced",
+        path.extension()
+            .map(|extension| format!("{}.", extension.to_string_lossy()))
+            .unwrap_or_default()
+    ));
+    let _ = std::fs::remove_file(&aside);
+    std::fs::rename(path, &aside).ok().map(|()| aside)
+}
+
 /// Ask cargo to forget a copy it installed. Whether it *was* a cargo install is
 /// not knowable from the path alone, so failure is ordinary and silent.
 fn cargo_uninstall(duplicate: &Duplicate) -> bool {
@@ -419,10 +457,44 @@ fn cargo_uninstall(duplicate: &Duplicate) -> bool {
     {
         return false;
     }
-    std::process::Command::new("cargo")
+    let Ok(output) = std::process::Command::new("cargo")
         .args(["uninstall", duplicate.package])
         .output()
-        .is_ok_and(|output| output.status.success())
+    else {
+        return false;
+    };
+    if output.status.success() {
+        return true;
+    }
+    // A bare package name can match more than one installed entry — the same
+    // tool installed once from git and once from a path, say — and cargo then
+    // refuses and lists the exact specs. Retrying with those is the difference
+    // between clearing the registry and leaving an entry whose binary this
+    // command is about to delete, which cargo later calls corrupt metadata and
+    // refuses to touch at all.
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    ambiguous_specs(&stderr, duplicate.package)
+        .into_iter()
+        .any(|spec| {
+            std::process::Command::new("cargo")
+                .args(["uninstall", &spec])
+                .output()
+                .is_ok_and(|retry| retry.status.success())
+        })
+}
+
+/// The `package@version` specs cargo lists when a bare name is ambiguous.
+///
+/// Parsed rather than guessed: the versions are cargo's own answer, and the
+/// alternative — reading `.crates.toml` — is reaching into cargo's private
+/// state to do what its own CLI will do when asked precisely.
+fn ambiguous_specs(stderr: &str, package: &str) -> Vec<String> {
+    let prefix = format!("{package}@");
+    stderr
+        .split_whitespace()
+        .filter(|token| token.starts_with(&prefix) && token.len() > prefix.len())
+        .map(|token| token.trim_end_matches(',').to_string())
+        .collect()
 }
 
 fn bytes_as_mb(bytes: u64) -> f64 {
@@ -495,6 +567,49 @@ mod tests {
         assert_eq!(stray_reason("localx.exe"), None);
         assert_eq!(stray_reason("ripgrep.exe.displaced"), None);
         assert_eq!(stray_reason("cargo-nextest.exe"), None);
+    }
+
+    #[test]
+    fn an_ambiguous_uninstall_is_retried_with_the_specs_cargo_named() {
+        // cargo's own wording when a tool was installed twice (from git and
+        // from a path, here). Without the retry the registry keeps an entry
+        // whose binary is then deleted, and cargo refuses every later
+        // uninstall with "corrupt metadata".
+        let stderr = "error: There are multiple `localbox` packages in your project, \
+                      and the specification `localbox` is ambiguous.\n\
+                      Please re-run this command with one of the following \
+                      specifications:\n  localbox@3.3.2\n  localbox@5.0.0\n";
+        assert_eq!(
+            super::ambiguous_specs(stderr, "localbox"),
+            vec!["localbox@3.3.2".to_string(), "localbox@5.0.0".to_string()]
+        );
+        assert!(super::ambiguous_specs(
+            "error: package ID specification `x` did not match any packages",
+            "localbox"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_deleted_is_renamed_to_recognisable_residue() {
+        // The live case: a duplicate held open by a running editor process. The
+        // rename is what removes it from PATH; the sweep takes the bytes later,
+        // which only works if the new name is one `stray_reason` recognises.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(localpilot_dist::executable_name("localpilot"));
+        std::fs::write(&path, "x").unwrap();
+
+        let aside = super::displace(&path).expect("a rename is permitted");
+        assert!(!path.exists());
+        assert!(aside.is_file());
+        let name = aside
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        assert!(stray_reason(&name).is_some(), "{name}");
     }
 
     #[test]
