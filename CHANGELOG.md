@@ -10,7 +10,7 @@ is SemVer-stable; the configuration schema stability policy is in
   five tools stamp their crate version and nothing else, so a development build
   and the published release of the same version printed the same four
   characters. Each install now records its origin and the row reads
-  `5.0.0 (development build from D:\repos\LocalX)`. Advisory — a tool with no
+  `5.0.0 (development build from D:\src\LocalX)`. Advisory — a tool with no
   record prints exactly as before.
 
 - **The stack now installs into one directory, whatever channel you use.**

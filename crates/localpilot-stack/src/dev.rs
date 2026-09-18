@@ -191,8 +191,8 @@ mod tests {
     #[test]
     fn a_verbatim_prefix_is_stripped_for_display() {
         assert_eq!(
-            dunce_like(&PathBuf::from(r"\\?\D:\repos\LocalX")),
-            PathBuf::from(r"D:\repos\LocalX")
+            dunce_like(&PathBuf::from(r"\\?\D:\src\LocalX")),
+            PathBuf::from(r"D:\src\LocalX")
         );
         assert_eq!(
             dunce_like(&PathBuf::from("/repos/LocalX")),

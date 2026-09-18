@@ -257,7 +257,7 @@ cannot: three of the five tools stamp their crate version and nothing else, so a
 development build and the release of the same version look identical.
 
 ```text
-  localmind   5.0.0 (development build from D:\repos\LocalX)
+  localmind   5.0.0 (development build from D:\src\LocalX)
   localbox    5.0.0 (release v5.0.0)
 ```
 
