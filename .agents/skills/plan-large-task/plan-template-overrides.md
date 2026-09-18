@@ -10,8 +10,8 @@ content lands.
 
 ## After the Purpose block
 
-> **Distribution note.** Build plans and work tracking are maintainer-local and
-> must not be committed to the public distribution. The ignored `tasks/`
+> **Repository note.** Build plans and work tracking are maintainer-local and
+> must not be committed to this repository. The ignored `tasks/`
 > directory is available as a local workspace; this repository keeps only its
 > product source, tests, specs, README, and CHANGELOG.
 
