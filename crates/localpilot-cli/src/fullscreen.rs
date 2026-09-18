@@ -17928,7 +17928,7 @@ last_seen = "2026-08-10"
 
     /// A source excerpt only leaves the queue through a reviewer's lesson, and
     /// that write goes through the same permission seam as the other verdicts
-    /// (ADR-0177 amending ADR-0153). After it lands, the candidate is `Edited`
+    /// (ADR-0181 amending ADR-0153). After it lands, the candidate is `Edited`
     /// and carries the reviewer's text — the state the store will promote.
     #[tokio::test]
     async fn an_approved_edit_writes_the_lesson_and_unblocks_promotion() {

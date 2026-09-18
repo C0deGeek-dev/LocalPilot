@@ -2,9 +2,11 @@
 
 This file starts the decision log. Add new records at the top.
 
-## ADR-0177: The Terminal Review Pane Owns The Rewrite That Unblocks An Excerpt
+## ADR-0181: The Terminal Review Pane Owns The Rewrite That Unblocks An Excerpt
 
-**Status:** accepted · **Date:** 2026-08-31. Amends ADR-0153 (terminal LocalMind
+**Status:** accepted · **Date:** 2026-08-31. Recorded first as ADR-0177, a
+number assigned concurrently to the self-review decision below; renumbered so
+both keep a unique number. Amends ADR-0153 (terminal LocalMind
 review writes use the host permission seam), which reserved Edit and Defer for
 LocalMind's standalone review surface. Upholds ADR-0087 (excerpts promote only
 as a reviewer's lesson), ADR-0011 and ADR-0152.
@@ -78,6 +80,278 @@ reason to expect a CLI route from a keyboard-driven pane); relaxing Accept to
 match the engine (it reaches a state with no forward move); prefilling the
 draft with the excerpt (the lesson replaces the source, it does not start from
 it); and putting the lesson text in the approval prompt.
+## ADR-0180: One Install Directory, And A Workspace The Developer Pins
+
+**Status:** accepted · **Date:** 2026-09-15
+
+**Context.** The stack had two install locations. The release channel published
+into the managed directory (`<localx root>/bin`); every source build — the
+`--prerelease` channel and the from-source installers — ran `cargo install`
+without a `--root`, so it landed in cargo's bin directory instead. Both are on
+`PATH` on a developer machine, and cargo's is almost always first.
+
+That made a whole class of failure invisible. `localx update` downloaded,
+verified and installed five binaries, printed success for each, and the shell
+went on resolving the copies in `~/.cargo/bin`. Only the tool doing the updating
+had its stale copy refreshed (`refresh_running_copy`, gated on identity), so the
+other four drifted — measured on this machine at `localmind 3.3.2` resolving
+ahead of a managed `5.0.0`, three releases apart, which is a schema mismatch
+between a CLI and the store it opens. The existing warning named the problem
+correctly and could do nothing about it.
+
+The second gap was what a developer actually wants. Neither channel builds the
+code in front of them: `--prerelease` builds each repository's pushed `main`,
+which by definition does not contain the change being worked on. The real
+workflow — five repositories side by side, edited together, installed together —
+had no command, so it was done by hand with `cargo install --path`, which is
+exactly what put the mismatched copies in cargo's bin directory.
+
+**Decision.**
+
+**One directory, every channel.** `Release`, `Prerelease` and the new
+`Workspace` channel all publish into `<localx root>/bin`. A source build now goes
+into a staging root cargo owns wholesale and is swapped in with the same
+rename-then-copy the release channel uses — for every tool, not only the running
+one, because any tool in the stack may be executing during an update and Windows
+refuses to overwrite a running image. `source_args` therefore always passes
+`--root` and never `--force`; a test asserts that for every tool on every
+channel, because this is the invariant the whole defect class hangs on.
+
+**A pinned workspace is a mode, not a flag.** `localx dev use <path>` records a
+LocalX workspace in `<localx root>/dev.json` and makes it the default channel, so
+`localx update` — the one command everyone documents — rebuilds every tool from
+the developer's own working trees, uncommitted work included. `localx dev off`
+removes the pin. `--release` is the one-off escape hatch out of it, and
+`--prerelease` still means the pushed `main`. A flag that had to be remembered on
+every command would be forgotten on exactly the command that matters, and
+reinstalling the release over a developer's build is silent data loss of the
+thing they were testing.
+
+**The workspace is validated when it is pinned and again when it is used.** A
+directory that does not hold every train repository is refused by name, and a
+pin that has stopped resolving fails the install rather than falling back to the
+release channel — a silent downgrade to "some other code" is the failure this
+decision exists to remove.
+
+**A workspace build shares the repository's target directory.** `cargo install`
+otherwise compiles in a throwaway directory, so every rebuild would start from
+zero on the one channel whose value is a fast edit/install loop.
+
+**Every channel builds from a lock file.** Dropping `--locked` for workspace
+builds was tried first, reasoning that a tree which has just gained a dependency
+needs its lock to move. The first real run disproved it: cargo re-resolved the
+graph, pulled a transitive crate requiring a newer edition than the repositories'
+pinned toolchain supports, and four of five tools failed to build from code that
+compiles perfectly from its own lock. A lock file is the build a working tree
+describes, and a tree that has gained a dependency has already had `cargo build`
+update it.
+
+**Leftovers are a thing the tool removes, not a thing it mentions.** `localx
+doctor` names every stack binary outside the managed directory (and which one
+`PATH` resolves), the install residue (`.displaced`, `.incoming`, `.old`, dated
+pre-install backups — matched only against this stack's own executable names),
+and, in development mode, the cached release builds nothing can select any more.
+`--fix` removes them, asking cargo to forget the ones it installed so its
+registry stays honest, and never removes the executable running the command.
+A duplicate that some *other* process is running cannot be deleted and is
+renamed instead: that is the half that matters, because the name `PATH`
+resolves goes immediately, and the bytes go on the next sweep. Diagnosis and
+repair are separate because the repair deletes executables.
+
+When cargo refuses a bare package name as ambiguous — the same tool installed
+from git and from a path — the specs it prints are retried. Skipping that
+leaves a registry entry whose binary is then deleted, which cargo calls
+corrupt metadata and thereafter refuses to uninstall at all.
+
+**What a binary was built from is recorded, because its version cannot say.**
+Three of the five tools stamp their crate version and nothing else, so a
+development build of `localmind` and the published release of the same version
+print the same four characters — and "is this actually my code?" is the question
+development mode exists to make answerable. Each install writes one line of
+provenance to `<localx root>/installed.json` and `localx status` reads it back.
+The record is advisory: an absent or unreadable entry prints the row exactly as
+before, and nothing depends on it being there.
+
+**Consequences.** The from-source installers no longer write to cargo's bin
+directory; anyone who used them before has a duplicate there that `localx doctor
+--fix` removes. `localx status` gains a channel line and a single pointer to
+`doctor` when the install is not clean — it reports what is installed, not what
+is wrong with it. `localpilot update --all` follows the same pinned channel, so a
+developer cannot half-update their stack by using the other entry point. The
+warning about shadowing copies is now unconditional rather than release-only,
+because after this there is no channel on which a copy elsewhere is legitimate.
+
+## ADR-0179: A Plan Records The Brief Revision It Was Built From, And Unknown Is Its Own State
+
+**Status:** accepted · **Date:** 2026-09-06
+
+**Context.** A harness plan only means something relative to the requirements it
+was generated to satisfy, but nothing recorded which those were. `brief.md` and
+`PROGRESS.md` were two independent documents, so editing the brief left the plan
+looking exactly as valid as before, and `harness resume` would keep executing
+steps derived from requirements that no longer existed. There was no way to say
+"this plan is superseded" because there was nothing to compare.
+
+Every command also answered "what state is this project in?" for itself.
+`gather_status` read only `PROGRESS.md` and discarded both read and parse errors
+through `.ok()`, so a missing plan and a corrupted one produced the same
+`0/0 steps`; the resume loop used the same fallible-to-`None` shape, so a step
+that corrupted the plan ended the run with `all steps complete`.
+
+**Decision.**
+
+**One inspection.** `localpilot-harness::inspect` is the single read-only answer,
+consumed by status, resume, wait-resume, feature, and handoff. It reads at most
+two files, writes nothing, and returns typed states that keep the named error
+that produced them. Missing and malformed are always different states.
+
+**Two axes, not one enum.** Document state and operation state are separate.
+Whether a plan is stale follows from two files; whether something is running now
+cannot be derived from files at all, and persisting it there would leave a
+crashed run permanently "active". The host supplies liveness and any recorded
+interruption; the module composes them.
+
+**The binding lives in the committed document.** `PROGRESS.md` gains a `Brief:`
+header holding the brief's revision as `sha256-v1:<64 hex>`. A sidecar under `.localpilot/` was rejected:
+that directory is git-ignored, so the binding would not travel with the
+repository and every teammate cloning it would see an unbound plan for one that
+is bound on the author's machine. The binding is a fact about the project, so it
+belongs where the project's other facts are. Older readers ignore an unknown
+header line, and an unbound plan renders byte-identically.
+
+**The revision is over the parsed brief, not its bytes.** Byte hashing would call
+a brief changed when an editor rewrites line endings or adds trailing whitespace
+— a false stale on every project shared between Windows and Unix, with no visible
+cause. The invariance is bounded and stated rather than implied: line endings,
+and whitespace around a whole field or item. Line breaks *inside* a summary
+survive parsing and so reach the digest, which means reflowing a summary
+paragraph does move the revision; `v1` is frozen, so that boundary is documented
+and tested rather than left to be discovered. The canonical form tags each field and trims each item, so the revision
+moves exactly when a requirement, constraint, non-goal, acceptance criterion, or
+risk moves. Risks participate: adding a rollback plan changes what the plan was
+built to satisfy.
+
+The recorded value is the full digest, never a truncated prefix wearing the
+algorithm's name, and the tag versions the *canonicalisation* rather than the
+hash, because the canonicalisation is the part that can change. `v1` declares a
+byte length before every field tag and every item, so structure can never be
+confused with content; it is frozen, and a different serialisation is `v2`. The
+rendered document was rejected as the canonical form for the same reason byte
+hashing was: it would tie every plan's validity to a presentation function, so
+adjusting the blank line between two sections would silently stale every plan on
+every machine.
+
+**A binding this build cannot interpret is its own state.** An unknown algorithm
+or version is `PlanBindingUnsupported` — not malformed (the document is fine), not
+stale (that would assert the user's requirements changed, which cannot be known),
+and not current. It fails closed for execution and says the plan came from a
+different LocalPilot. Without this, shipping a `v2` canonicalisation would make
+every `v1` plan look stale on an older build, which is precisely the false report
+this whole decision exists to prevent.
+
+**Unknown is a state, and it fails closed.** A plan written before the binding
+existed is *unbound*, which is neither current nor stale. It cannot be resumed:
+with nothing recorded, there is no way to distinguish a legacy plan that still
+matches its brief from one whose brief was edited before the upgrade, and running
+it would present a guess as a fact. `localpilot harness adopt` is the user's
+explicit statement about that one relationship — never inferred from a tool
+approval, a permission profile, or any other consent. It writes only the binding.
+A stale plan cannot be adopted; a superseded plan needs a replan, not a
+relabelling.
+
+**Evidence is never touched.** Inspection and invalidation are computations, not
+mutations. Staleness changes nothing on disk. Adoption re-renders the plan with
+one header added. Completed steps keep their marks, commits, and attempt counts
+through every path here.
+
+**Consequences.** Editing a brief now blocks `harness resume` and `harness
+wait-resume` on that project until it is replanned, and `harness feature` refuses
+an unadopted legacy plan while naming the command to run. That is a behaviour
+change for existing projects, and a deliberate one: the alternative is executing
+against requirements nobody confirmed. `harness status` gains a lifecycle line
+that names one of eleven document states. The resume loop now stops and reports
+when a step corrupts the plan instead of announcing completion. Handoff reports
+the blocked reason as the next action rather than pointing at a step the harness
+would refuse to run.
+
+## ADR-0178: A Full-File Model Reply Repairs Once Before It Becomes A Typed Error
+
+**Status:** accepted · **Date:** 2026-09-01
+
+**Context.** `self-review propose-patch` asks a model to re-emit an entire
+target file inline as one JSON object and extracts it with the crudest
+possible parser: find the first `{`, find the last `}`, `serde_json::from_str`
+the slice between. A live run against this repo's own `CHANGELOG.md` (~197 KB)
+hit this twice — a weak model and this repo's own configured default both
+failed, the stronger one after streaming ~70 KB into `new_content` before the
+string never closed. There was no retry, no fenced/markdown-wrapped-reply
+recovery, and no way for an operator to tell "the model ran out of room" apart
+from "the model emitted garbage" (#156).
+
+**Decision.**
+
+1. `parse_reply` now reports two distinguishable failure kinds instead of one:
+   `Malformed` (not JSON, or JSON of the wrong shape) and `Truncated` — no
+   closing `}` anywhere in the reply, or `serde_json` classifies its own parse
+   error as `Category::Eof` (it ran out of input before a value closed, most
+   often mid-string on a large file). `Truncated` carries the reply length so
+   an operator can see how far generation actually got.
+2. `generate_proposal` retries a failed parse up to `MAX_REPAIR_ATTEMPTS` (2)
+   times before returning the typed error: it hands the model its own bad
+   reply back plus the parse error and asks for the corrected JSON object,
+   mirroring the bounded repair rung `localpilot-recovery` already uses for
+   tool-call JSON, applied here to this command's own structured-output
+   generation.
+3. Preferring a diff/patch-shaped reply over full-file re-emission (so
+   response size scales with the edit, not the file) is a larger, separate
+   change and is not part of this fix — repair-and-classify closes the crash
+   either way, independent of whether the reply shape changes later.
+
+This turns an unrecoverable `anyhow` error into a bounded, self-correcting
+retry with a legible failure when the budget is exhausted, without committing
+to the diff-reply redesign in the same change.
+
+## ADR-0177: A Self-Review Finding Requires Real Position, Not A Bare Word Match
+
+**Status:** accepted · **Date:** 2026-09-01
+
+**Context.** `self-review`'s text-pattern detectors (`todo_markers`,
+`doc_links`, `plan_health`) walked every file with `.hidden(false)` set — which
+put `.git/` itself in scope, since that flag exists to admit `.github/`
+workflows, not VCS internals — and matched marker/link/phrase substrings
+anywhere on a line with no awareness of comment position, quoting, or a
+crate's own test fixtures. A run against this repo produced 59 findings, and
+every one sampled was the detector matching content *about* itself: prose
+*describing* the markers (a changelog entry, a spec listing what the detector
+looks for), the detector's own match-table literals, its own test fixtures
+that write marker-shaped strings as data, and git's stock sample hooks (#155).
+
+**Decision.**
+
+1. The repo walk excludes `.git` (and, by never descending into it,
+   `.git/modules/*` submodule mirrors) explicitly, regardless of
+   `hidden(false)`.
+2. `todo_markers` requires a marker sit at real comment position — immediately
+   after a `//`/`///`/`//!` or `#` leader — rather than matching the bare word
+   anywhere on the line. This is what tells a real leftover marker apart from
+   prose *about* it and from the detector's own match-table source, neither of
+   which puts the word right after a comment leader.
+3. `todo_markers` also skips a file's own `#[cfg(test)]` module (by this
+   codebase's convention, always the file's last item, so no brace-tracking is
+   needed) and any file under a `tests/` path component — both exist to
+   *contain* marker-shaped fixture strings, not real markers.
+4. `doc_links` skips a match inside a single-backtick inline code span or a
+   fenced code block (e.g. `` `[text](url)` `` explaining link syntax is not a
+   real link); `plan_health`'s "pending sign-off" check skips a match inside a
+   double-quoted span (a spec citing the phrase as an example, not a real
+   unresolved row).
+
+None of these rules is a hand-maintained exclusion list naming specific files
+or crates — each targets the structural property (VCS internals, comment
+position, test scope, quoting) that actually separates a real finding from
+self-reference, so the fix holds as the codebase grows rather than drifting.
+Verified live against this repo post-fix: 0 findings, down from 59, with the
+existing golden-fixture and false-positive-guardrail tests unchanged.
 
 ## ADR-0176: Embedding Ownership Is Exact, Shared, And Reaped By The Process Owner
 

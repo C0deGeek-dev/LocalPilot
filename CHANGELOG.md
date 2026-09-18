@@ -6,6 +6,49 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localx status` says what each binary was installed from.** Three of the
+  five tools stamp their crate version and nothing else, so a development build
+  and the published release of the same version printed the same four
+  characters. Each install now records its origin and the row reads
+  `5.0.0 (development build from D:\repos\LocalX)`. Advisory — a tool with no
+  record prints exactly as before.
+
+- **The stack now installs into one directory, whatever channel you use.**
+  Released binaries went to the managed directory, source builds went to cargo's
+  bin directory, and on a developer machine cargo's is first on `PATH` — so
+  `localx update` could install five verified binaries, report success for each,
+  and leave the shell running the old ones. Only the tool doing the updating had
+  its stale copy refreshed. Every channel now stages its build and publishes it
+  into the managed directory, so a stack binary anywhere else is a leftover
+  (ADR-0180).
+
+- **`localx dev use <workspace>` builds the stack from your own checkouts.**
+  Pin a directory holding the LocalX repositories side by side and `localx
+  update` rebuilds every tool from those working trees — uncommitted work
+  included — instead of downloading a release. `localx dev off` leaves the mode,
+  `localx dev status` says what is pinned, and `localx update --release` is a
+  one-off escape hatch. Builds reuse each repository's own `target/` directory,
+  so a rebuild is incremental. `--prerelease` still means each repository's
+  latest pushed `main`; `localpilot update --all` follows the same pin.
+
+- **`localx doctor` finds what is wrong with an install, and `--fix` removes
+  it.** Stack binaries outside the managed directory (naming the one `PATH`
+  actually resolves), install residue (`.displaced`, `.incoming`, `.old`, dated
+  pre-install backups), and — in development mode — cached release builds
+  nothing can select any more. `--fix` deletes them and asks cargo to forget the
+  ones it installed; it never deletes the executable running the command.
+  `localx status` gains a channel line and one pointer here when the install is
+  not clean.
+
+- **The PATH advice printed after an install no longer tells you to corrupt your
+  PATH.** `localx install` and the installer both printed `setx PATH
+  "$env:PATH;<bin>"`. `$env:PATH` is the machine and user values already merged,
+  so that command copies every machine entry into the user variable, and `setx`
+  silently truncates what it writes at 1024 characters. They now print an append
+  to the user variable alone, plus the assignment that updates the terminal you
+  are already in, which a persisted change never reaches.
+
+
 - **The Windows one-line installer works again.** Piping `install/install.ps1`
   into `iex` failed right after the checksum step with *Cannot convert value
   "System.IO.FileInfo" to type "System.Management.Automation.SwitchParameter"*,
@@ -16,8 +59,9 @@ is SemVer-stable; the configuration schema stability policy is in
   new CI job (`install/lint-install-script.ps1`) parses the installer and rejects
   any assignment to a switch parameter, which nothing previously checked.
 
+
 - **A source excerpt is no longer a review candidate you can only reject**
-  (ADR-0177, amending ADR-0153). `e` on the LocalMind tab's Review section
+  (ADR-0181, amending ADR-0153). `e` on the LocalMind tab's Review section
   writes the standalone lesson that a `/research` excerpt needs before it can be
   accepted or promoted, through the same permission seam as the other verdicts;
   the editor opens over the row and stays available inside the evidence reader,
@@ -47,6 +91,44 @@ is SemVer-stable; the configuration schema stability policy is in
   `a`/`r`/`p` inside it are refused with a reason rather than deciding on a row
   the operator cannot see. ADR-0090's `[stale: …]` and
   `[full source unavailable: …]` markers reach the screen (LocalHub#153).
+
+- **A harness plan now records the brief revision it was built from, and will not
+  run against a brief that has moved.** `PROGRESS.md` gains a `Brief:` header
+  holding `sha256-v1:<64 hex>`, a digest of the parsed `brief.md` under a frozen,
+  versioned canonicalisation; `harness plan` writes it, and
+  `harness feature` moves it when it changes both documents together. Editing the
+  brief makes the plan *stale* and blocks `harness resume` and `harness
+  wait-resume` until it is replanned — completed steps, their commits, and their
+  attempt counts are never touched. The digest is over the parsed document, so
+  converting a file between LF and CRLF, or padding whitespace around a field or
+  a list item, is not a requirements change. Re-wrapping a multi-line summary
+  *is*: the parser preserves those line breaks, so they reach the digest. A binding written
+  by a different LocalPilot version is reported as unsupported rather than stale,
+  so a future canonicalisation cannot make today's plans look superseded.
+
+  A plan written before this existed has no binding and is *unbound*: whether it
+  still matches its brief is unknown, so it does not run until the new
+  `localpilot harness adopt` records that it does. `harness feature` refuses an
+  unadopted plan for the same reason and names the command to run.
+
+- **`harness status` says which lifecycle state a project is in.** A missing
+  `brief.md`, an unreadable one, a malformed one, a missing plan, a malformed
+  plan, an unbound plan, a stale plan, a current plan, and a completed plan are
+  now eleven distinct answers, including a binding this build cannot interpret.
+  Previously a missing *or* invalid `PROGRESS.md` both
+  rendered as `0/0 steps`, so a corrupted plan was indistinguishable from a
+  project that had none. A running harness operation or a recorded quota-paused
+  run is reported alongside.
+
+- **`harness feature` acts on one inspected snapshot and states what a failed
+  write leaves behind.** It updates both documents and moves the binding to the
+  brief it just wrote. The two writes are not atomic: the plan is written first,
+  so an interrupted run leaves a plan bound to a revision no brief matches —
+  read as *stale* and refused — rather than a plan that claims to be current.
+
+- **A step that corrupts `PROGRESS.md` now stops the run instead of being
+  reported as success.** The resume loop read the plan through a silent
+  fallible-to-`None` path, so an unparseable plan produced `all steps complete`.
 
 ## v5.0.0 - 2026-08-30
 
