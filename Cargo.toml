@@ -97,7 +97,7 @@ insta = "=1.47.2"
 # because v4 also requires edition 2024.
 # Shared LocalX eval primitives (scorecard contract, blind judge, ablation,
 # gated check runner, verify detection). Pinned by rev per the exact-pin policy.
-localx-eval-core = { git = "https://github.com/C0deGeek-dev/localx-llama.git", rev = "b3b0c844e5a99e855e94865924e5f6bb4dec6fe6" }
+localx-eval-core = { git = "https://github.com/C0deGeek-dev/localx-llama.git", rev = "e5eac9d03c070d2a62184efb81706c0de7fc0347" }
 keyring = { version = "=3.6.3", default-features = false, features = [
     "windows-native",
 ] }
