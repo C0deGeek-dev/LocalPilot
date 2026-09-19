@@ -11,6 +11,7 @@ use localmind_inference::embedding_lease::{
     StopPreparation,
 };
 use serde::Deserialize;
+use std::fs::File;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -228,6 +229,43 @@ impl LocalBoxEffects {
             home: user_home()?,
         })
     }
+
+    /// Run one `localbox` subcommand to completion, capturing its diagnostics
+    /// through a temporary **file** rather than a pipe.
+    ///
+    /// `Command::output()` cannot be used here, and the reason is not stylistic:
+    /// `localbox embed-serve` starts the embedding server as a *detached* child
+    /// and exits. On Windows that grandchild inherits this process's inheritable
+    /// handles — the pipe write ends included — so the pipes never reach EOF
+    /// even though `localbox` itself is long gone. `output()` reads to EOF, so
+    /// it blocks for as long as the embedding server lives, which is forever:
+    /// LocalPilot froze before printing anything, before opening its store, and
+    /// before drawing the TUI. Redirecting to a file removes the wait entirely —
+    /// a grandchild holding a file handle open costs nobody anything.
+    fn run(&self, subcommand: &str) -> Result<LocalBoxRun, std::io::Error> {
+        let log = std::env::temp_dir().join(format!(
+            "localpilot-{subcommand}-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_nanos())
+                .unwrap_or_default()
+        ));
+        let out = File::create(&log)?;
+        let err = out.try_clone()?;
+        let status = Command::new(&self.executable)
+            .arg(subcommand)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(out))
+            .stderr(Stdio::from(err))
+            .status()?;
+        let diagnostics = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_file(&log);
+        Ok(LocalBoxRun {
+            succeeded: status.success(),
+            diagnostics: diagnostics.trim().to_string(),
+        })
+    }
 }
 
 trait EmbedEffects: Clone {
@@ -237,20 +275,24 @@ trait EmbedEffects: Clone {
     fn defer_stop(&self, endpoint: &str, server_pid: u32) -> Result<(), String>;
 }
 
+/// The outcome of one `localbox` subcommand: whether it succeeded, and whatever
+/// it wrote while failing (the message a user needs to act on).
+struct LocalBoxRun {
+    succeeded: bool,
+    diagnostics: String,
+}
+
 impl EmbedEffects for LocalBoxEffects {
     fn start(&self) -> Result<(), String> {
-        match Command::new(&self.executable).arg("embed-serve").output() {
-            Ok(output) if output.status.success() => Ok(()),
-            Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        match self.run("embed-serve") {
+            Ok(run) if run.succeeded => Ok(()),
+            Ok(run) => Err(run.diagnostics),
             Err(error) => Err(error.to_string()),
         }
     }
 
     fn stop(&self) -> bool {
-        Command::new(&self.executable)
-            .arg("embed-stop")
-            .output()
-            .is_ok_and(|output| output.status.success())
+        self.run("embed-stop").is_ok_and(|run| run.succeeded)
     }
 
     fn runtime_state(&self) -> Option<EmbedRuntimeState> {
@@ -479,5 +521,71 @@ mod tests {
         token.complete(stopped).unwrap();
         assert_eq!(FakeEffects::count(&effects.state.stops), 1);
         assert!(!root.path().join("started-by-localpilot").exists());
+    }
+
+    /// How long the grandchild in the test below outlives the process that
+    /// started it. The assertion window is far shorter, so a runner that waits
+    /// on the grandchild's stdio instead of on its own child fails loudly.
+    #[cfg(unix)]
+    const LINGER: Duration = Duration::from_secs(10);
+
+    /// The freeze this guards against: `localbox embed-serve` starts the
+    /// embedding server *detached* and exits, but the server inherits the
+    /// spawn's stdio. Reading that stdio to EOF — which `Command::output()`
+    /// does — therefore waits on the **server**, not on `localbox`, and the
+    /// server never exits. LocalPilot hung exactly there: nothing printed, no
+    /// store opened, no TUI drawn. The runner must come back as soon as the
+    /// process it started exits, whatever that process left running behind it.
+    ///
+    /// Unix-only because the fixture is: a `#!/bin/sh` script is the one
+    /// portable way to spawn a command that both takes the single argument
+    /// `run` passes and leaves an stdio-inheriting child behind. The defect is
+    /// not Unix-only — the EOF semantics it turns on are the same everywhere.
+    #[cfg(unix)]
+    #[test]
+    fn a_subcommand_that_leaves_a_server_running_returns_when_it_exits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let script = root.path().join("linger.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nsleep {} &\nexit 0\n", LINGER.as_secs()),
+        )
+        .expect("write fixture");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+
+        let effects = LocalBoxEffects {
+            executable: script,
+            home: root.path().to_path_buf(),
+        };
+
+        let started = std::time::Instant::now();
+        let run = effects.run("embed-serve").expect("the subcommand runs");
+        let waited = started.elapsed();
+
+        assert!(run.succeeded, "diagnostics: {}", run.diagnostics);
+        assert!(
+            waited < LINGER,
+            "the runner waited {waited:?} — long enough to have been waiting on \
+             the lingering grandchild rather than on the process it started"
+        );
+    }
+
+    /// A failing subcommand still has to hand back what it wrote: the file the
+    /// runner redirects into is the only place that text exists.
+    #[test]
+    fn a_failing_subcommand_reports_its_own_diagnostics() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let effects = LocalBoxEffects {
+            executable: PathBuf::from("this-localbox-does-not-exist"),
+            home: root.path().to_path_buf(),
+        };
+        assert!(
+            effects.run("embed-serve").is_err(),
+            "a missing localbox is an error, not a silent success"
+        );
+        assert!(!effects.stop(), "stop cannot claim success it did not have");
     }
 }
