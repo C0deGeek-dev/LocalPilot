@@ -204,6 +204,25 @@ impl OpenAiProvider {
             .iter()
             .filter_map(|key| self.default_options.get(*key).and_then(Value::as_u64))
             .max();
+        if let Some(enabled) = self
+            .default_options
+            .get("constrained_decoding")
+            .and_then(Value::as_bool)
+        {
+            self.declaration.capabilities.constrained_decoding = enabled;
+        } else if !self
+            .default_options
+            .get("suppress_thinking")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && !matches!(self.constraint_mode(), ConstraintMode::Grammar)
+        {
+            // ADR-0041: when reasoning is active (thinking is not suppressed),
+            // json_schema and response_format wrappers conflict with the model's
+            // reasoning tokens (<think>) and fail in llama.cpp grammar compilers.
+            // Disable constrained decoding unless explicitly forced or using grammar mode.
+            self.declaration.capabilities.constrained_decoding = false;
+        }
         self
     }
 
@@ -429,11 +448,11 @@ impl ModelProvider for OpenAiProvider {
             .map_err(|_| ProviderError::stream_stalled(self.stall_timeout))??;
         let status = response.status();
         // Degrade gracefully: a server that declares the capability but rejects
-        // the schema constraint (a client error on a constrained request) must
-        // not break the turn. Retry once without the constraint — native
-        // tool-calling — recording the fallback reason. The retry carries no
-        // constraint, so this guard cannot recurse.
-        if status.is_client_error() && request.tool_constraint.is_some() {
+        // the schema constraint (a client error or grammar compile exception 500
+        // on a constrained request) must not break the turn. Retry once without
+        // the constraint — native tool-calling — recording the fallback reason.
+        // The retry carries no constraint, so this guard cannot recurse.
+        if (status.is_client_error() || status.as_u16() == 500) && request.tool_constraint.is_some() {
             tracing::warn!(
                 status = status.as_u16(),
                 model = %request.model,
@@ -1954,5 +1973,32 @@ mod tests {
         let quota = quota_from_headers(&headers);
         assert_eq!(quota.retry_after, None);
         assert_eq!(quota.limit_kind, None);
+    }
+
+    #[test]
+    fn constrained_decoding_option_and_thinking_policy() {
+        // Base local server without options has constrained_decoding = true
+        let provider = OpenAiProvider::new("l", "L", SourceType::LocalServer, "http://127.0.0.1:8080", None);
+        assert!(provider.declaration().capabilities.constrained_decoding);
+
+        // When thinking is active (suppress_thinking not true), constrained_decoding is disabled
+        let with_reasoning = OpenAiProvider::new("l", "L", SourceType::LocalServer, "http://127.0.0.1:8080", None)
+            .with_default_options(IndexMap::new());
+        assert!(!with_reasoning.declaration().capabilities.constrained_decoding);
+
+        // When thinking is suppressed, constrained_decoding stays enabled
+        let mut suppressed_opts = IndexMap::new();
+        suppressed_opts.insert("suppress_thinking".to_string(), json!(true));
+        let suppressed = OpenAiProvider::new("l", "L", SourceType::LocalServer, "http://127.0.0.1:8080", None)
+            .with_default_options(suppressed_opts);
+        assert!(suppressed.declaration().capabilities.constrained_decoding);
+
+        // Explicit constrained_decoding = false disables it even if thinking is suppressed
+        let mut explicit_false = IndexMap::new();
+        explicit_false.insert("suppress_thinking".to_string(), json!(true));
+        explicit_false.insert("constrained_decoding".to_string(), json!(false));
+        let disabled = OpenAiProvider::new("l", "L", SourceType::LocalServer, "http://127.0.0.1:8080", None)
+            .with_default_options(explicit_false);
+        assert!(!disabled.declaration().capabilities.constrained_decoding);
     }
 }

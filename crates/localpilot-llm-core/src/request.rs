@@ -159,20 +159,38 @@ pub fn constraint_for(declaration: &ProviderDeclaration, tools: &[ToolSpec]) -> 
     if !declaration.capabilities.constrained_decoding || tools.is_empty() {
         return None;
     }
+    let mut definitions = serde_json::Map::new();
     let variants: Vec<Value> = tools
         .iter()
         .map(|tool| {
+            let mut schema = tool.input_schema.clone();
+            if let Some(obj) = schema.as_object_mut() {
+                obj.remove("$schema");
+                if let Some(Value::Object(defs)) = obj.remove("definitions") {
+                    definitions.extend(defs);
+                }
+                if let Some(Value::Object(defs)) = obj.remove("$defs") {
+                    definitions.extend(defs);
+                }
+            }
             json!({
                 "type": "object",
                 "properties": {
                     "name": { "const": tool.name },
-                    "arguments": tool.input_schema,
+                    "arguments": schema,
                 },
                 "required": ["name", "arguments"],
             })
         })
         .collect();
-    Some(json!({ "oneOf": variants }))
+
+    let mut root = json!({ "oneOf": variants });
+    if !definitions.is_empty() {
+        let defs_val = Value::Object(definitions);
+        root["definitions"] = defs_val.clone();
+        root["$defs"] = defs_val;
+    }
+    Some(root)
 }
 
 #[cfg(test)]
@@ -224,6 +242,40 @@ mod tests {
             constraint["oneOf"][0]["properties"]["name"]["const"],
             "read_file"
         );
+    }
+
+    #[test]
+    fn nested_definitions_are_hoisted_to_root_in_constraint() {
+        let tools = vec![ToolSpec {
+            name: "multi_edit".to_string(),
+            description: "edit".to_string(),
+            input_schema: json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "definitions": {
+                    "TextEditInput": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": { "type": "string" },
+                            "new_text": { "type": "string" }
+                        }
+                    }
+                },
+                "type": "object",
+                "properties": {
+                    "edits": {
+                        "type": "array",
+                        "items": { "$ref": "#/definitions/TextEditInput" }
+                    }
+                }
+            }),
+        }];
+        let constraint = constraint_for(&declaration(true), &tools).unwrap();
+        assert!(constraint.get("definitions").is_some());
+        assert!(constraint["definitions"].get("TextEditInput").is_some());
+        assert!(constraint.get("$defs").is_some());
+        assert!(constraint["$defs"].get("TextEditInput").is_some());
+        assert!(constraint["oneOf"][0]["properties"]["arguments"].get("definitions").is_none());
+        assert!(constraint["oneOf"][0]["properties"]["arguments"].get("$schema").is_none());
     }
 
     #[test]
