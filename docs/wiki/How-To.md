@@ -242,6 +242,15 @@ localpilot harness status       # which lifecycle state this project is in
 localpilot harness feature      # worked, committed steps; resume on quota
 ```
 
+Inside full-screen chat, `/harness-intake` turns an idea into a brief you review
+before it is saved: discuss it in ordinary messages, then `/harness-brief approve`
+to write it, `reject` to discard it, or `cancel` to walk away. `/harness-brief`
+on its own opens the saved brief for the same kind of conversation, and
+`/harness-brief no-change` leaves it exactly as it is and tells you what the
+project needs next — plan it, resume it, replan a stale one — rather than ending
+in silence. Nothing reaches the project until you approve, and a draft does not
+survive `/agent`, a session change, or the session itself.
+
 A plan records the revision of the brief it was generated from, so editing
 `brief.md` marks `PROGRESS.md` stale and the harness stops resuming it until you
 replan. Completed steps keep their commits and attempt counts throughout.

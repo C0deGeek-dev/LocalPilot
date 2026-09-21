@@ -20,6 +20,7 @@ mod guidance;
 mod handoff;
 mod hooks;
 mod incognito;
+mod intake;
 mod judge;
 mod launch_targets;
 mod lessons;
@@ -58,6 +59,11 @@ pub use handoff::{
 };
 pub use hooks::{ContextContribution, ContextHook, HookFabric};
 pub use incognito::IncognitoLedger;
+pub use intake::{
+    append_intake_record, draft_brief, draft_with_answers, persist_approved, question_for,
+    revise_brief, Approval, BriefDraft, BriefStage, DraftOutcome, GuidanceParams, GuidanceRecord,
+    RetryTarget, StageOutcome,
+};
 pub use judge::{judge_ranking_selftest_live, judge_score_live};
 pub use lessons::{Lesson, Lessons};
 pub use paths_in_play::PathsInPlay;

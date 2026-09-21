@@ -381,6 +381,85 @@ same as a broken one:
 A running harness operation, or a recorded quota-paused run, is appended to the
 same line.
 
+### `/harness-intake` and `/harness-brief`
+
+The interactive way to write a brief, and the only path where a brief is seen
+before it is saved. `localpilot harness intake` still writes `brief.md` in one
+step for scripted use; these commands exist because a brief nobody reviewed is a
+brief nobody agreed to.
+
+`/harness-intake [idea]` starts a conversation. With no argument it asks for the
+idea. Below the guidance threshold it asks the open decisions one at a time, and
+an empty answer delegates that one to the model — the same gate, the same
+questions, and the same audit record as the command line. It then shows a draft.
+
+While a conversation is live, everything you type belongs to it. A plain message
+is a revision instruction; the draft is regenerated and shown again. Nothing has
+been written yet at any point.
+
+`/harness-brief` decides:
+
+| Form | Effect |
+| --- | --- |
+| `/harness-brief` or `show` | Open the saved `brief.md` for review, or redisplay the draft already under review |
+| `no-change` (or `ok`) | The brief stands as it is: writes nothing, ends the conversation, and hands back to lifecycle routing |
+| `approve` | Save the reviewed draft as `brief.md` |
+| `reject` | Discard the draft; an existing brief is untouched |
+| `reset` | Start again from the original idea |
+| `cancel` | Leave; the project is unchanged |
+
+`show` on a saved brief opens it *for review*, not just for display, which is
+what makes an existing brief revisable in ordinary language. The file is not
+touched until an approval.
+
+Approving replaces `brief.md` atomically and appends the same
+`.localpilot/intake.jsonl` record the command line writes. Because approval
+changes the brief's revision, any plan built from the previous one becomes stale
+and stops being resumable until it is replanned — completed steps, their commits
+and their attempt counts are untouched.
+
+A provider error, an unusable reply, an exhausted repair budget, or Ctrl+C does
+**not** end the conversation. What the failed attempt was working from is kept,
+and the next message retries it: an empty message repeats the same attempt, and
+anything else replaces its input — a new idea, or a different revision
+instruction. Only approving, rejecting, `no-change`, cancelling, `/agent`, a
+session change, or starting another conversation ends one.
+
+Model calls run on the operation pump, so the terminal keeps drawing while one is
+in flight and Ctrl+C reaches it. A message typed while the model is working
+belongs to that conversation and is answered once the call finishes. The session
+shows work as running for exactly as long as the call is, however the message
+reached it — typed at the prompt or given on the command line — and goes idle
+again when the draft, the question or the failure is on screen.
+
+Guidance is the configured gate: `[harness.guidance] enabled`, `threshold` and
+`max_questions` decide whether the conversation asks, and the questions, the
+delegation contract for an empty answer, and the audit record are the ones
+`localpilot harness intake` uses. A run that went below the threshold records the
+questions it put in `guidance.questions`, whether they were answered, delegated
+one by one, or delegated up front with `--assume-judgment`; a run that never went
+below it has no such key, because nothing was asked.
+
+Every way out of a conversation that leaves the project in a state worth acting
+on — approved, approved with the audit append failed, and `no-change` — reports
+where the project now stands by asking the same lifecycle gate `localpilot
+harness status` and `harness resume` ask. A ready plan says how to resume it, a
+completed one says it is finished, and a stale, unbound, unreadable or
+unsupported one says what has to happen before it can run. None of these routes
+keeps its own opinion about what a project state means.
+
+Drafts live in the session and nowhere else. Restarting LocalPilot resumes from
+`brief.md` if one was approved, and from nothing if not — an unapproved draft is
+not project truth, and persisting it would create a second one. Leaving with
+`/agent`, or changing session identity with `/new`, `/load`, `/continue`,
+`/fork`, `/clone` or `/incognito`, discards an unapproved draft for the same
+reason.
+
+Approval replaces `brief.md` atomically and then appends the audit record. If the
+record cannot be appended, the brief **is** saved and the message says so: the
+two failures are reported differently because only one of them leaves anything to
+retry.
+
 ### `localpilot harness adopt`
 
 Declare that the existing `PROGRESS.md` belongs to the current `brief.md`.

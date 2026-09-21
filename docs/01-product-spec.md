@@ -363,6 +363,14 @@ rather than entering provider input. The rest:
   honoured. Bare `/agent` and `/harness` switch the session mode in the full-screen
   host — silent label flips (a plain prompt
   in either mode runs an ordinary turn; the footer and settings show the mode).
+- `/harness-intake [idea]` starts a conversation that turns an idea into a
+  reviewed `brief.md`, and
+  `/harness-brief [show|no-change|approve|reject|reset|cancel]` decides what
+  happens to it. While the conversation is live, ordinary messages are revision
+  instructions rather than model turns, including while the model is working.
+  Nothing is written to the project until an explicit approval; a failed attempt
+  is retryable rather than fatal; and an unapproved draft does not survive
+  `/agent`, a session change, or the session itself.
 - `/ingest <action>` manages project-local folder ingestion (`run`, `refresh`,
   `resume`, `preview`, `status`, `review`, and so on). The walking actions
   (`run`, `refresh`, `resume`) show a live progress loader — discovering,

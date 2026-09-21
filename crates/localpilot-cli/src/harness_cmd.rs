@@ -11,9 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use indexmap::IndexMap;
 use localpilot_config::{CliOverrides, Config, ConfigPaths, RuleSeverity};
 use localpilot_harness::{
-    propose_gate, ratify_gate, resume_one_step_with_events, run_intake, run_plan,
-    summarize_proposal, Brief, CheckOutcome, CheckStatus, RuleEngine, RuntimeEvent, SessionConfig,
-    SessionRuntime, QUALITY_CHECK_TOOL, QUOTA_PAUSE_KEY,
+    propose_gate, ratify_gate, resume_one_step_with_events, run_plan, summarize_proposal, Brief,
+    CheckOutcome, CheckStatus, RuleEngine, RuntimeEvent, SessionConfig, SessionRuntime,
+    QUALITY_CHECK_TOOL, QUOTA_PAUSE_KEY,
 };
 use localpilot_llm::{ModelProvider, ProviderRegistry};
 use localpilot_quota::{decide_resume, PausedRun, ResumeContext, ResumeDecision, ResumePolicy};
@@ -309,7 +309,11 @@ fn lifecycle_line(state: &localpilot_harness::WorkspaceState) -> String {
 }
 
 /// Render why a project cannot run its next step, in the caller's terms.
-fn blocked_reason(reason: &localpilot_harness::NotResumable) -> String {
+///
+/// Shared with the full-screen host: a brief conversation that ends tells the
+/// user where the project now stands, and it must say what `harness status`
+/// says rather than keeping a second, shorter table of its own.
+pub(crate) fn blocked_reason(reason: &localpilot_harness::NotResumable) -> String {
     use localpilot_harness::NotResumable as R;
     match reason {
         R::NoBrief => "brief.md not found; run `localpilot harness intake` first".to_string(),
@@ -528,42 +532,36 @@ pub(crate) async fn intake_flow(
     gate: Option<GuidanceGate<'_>>,
     out: &mut dyn Write,
 ) -> anyhow::Result<IntakeOutcome> {
+    use localpilot_harness::{DraftOutcome, GuidanceParams};
+
     let Some(gate) = gate else {
-        let brief = run_intake(provider, model, idea).await?;
-        std::fs::write(root.join("brief.md"), brief.render())?;
-        append_intake_record(
-            root,
-            serde_json::json!({ "idea": idea, "name": brief.name }),
-        )?;
+        let outcome = localpilot_harness::draft_brief(provider, model, idea, None).await?;
+        let DraftOutcome::Drafted(draft) = outcome else {
+            // With no gate there is nothing to be below the threshold of.
+            anyhow::bail!("guidance was not requested but the draft asked for it");
+        };
+        localpilot_harness::persist_approved(root, &draft)?;
         return Ok(IntakeOutcome::BriefWritten);
     };
 
     let threshold = gate.threshold.clamp(0.0, 1.0);
-    let assessment = localpilot_harness::assess_guidance(provider, model, idea).await?;
-    let mut guidance = serde_json::json!({
-        "score": assessment.score,
-        "threshold": threshold,
-        "axes": assessment.axes,
-    });
-
-    if assessment.score >= threshold {
-        let brief = run_intake(provider, model, idea).await?;
-        std::fs::write(root.join("brief.md"), brief.render())?;
-        append_intake_record(
-            root,
-            serde_json::json!({ "idea": idea, "name": brief.name, "guidance": guidance }),
-        )?;
-        return Ok(IntakeOutcome::BriefWritten);
-    }
-
-    let open: Vec<_> = assessment
-        .open_axes()
-        .into_iter()
-        .take(gate.max_questions.max(1))
-        .cloned()
-        .collect();
-    let questions: Vec<String> = open.iter().map(question_for).collect();
-    guidance["questions"] = serde_json::json!(questions);
+    let params = GuidanceParams {
+        threshold,
+        max_questions: gate.max_questions,
+    };
+    let (assessment, open, questions) =
+        match localpilot_harness::draft_brief(provider, model, idea, Some(params)).await? {
+            // At or above the threshold the idea speaks for itself.
+            DraftOutcome::Drafted(draft) => {
+                localpilot_harness::persist_approved(root, &draft)?;
+                return Ok(IntakeOutcome::BriefWritten);
+            }
+            DraftOutcome::NeedsGuidance {
+                assessment,
+                open,
+                questions,
+            } => (*assessment, open, questions),
+        };
 
     match gate.clarification {
         Clarification::Emit => {
@@ -584,20 +582,37 @@ pub(crate) async fn intake_flow(
                          model decide",
             });
             writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
-            append_intake_record(
+            // Through the shared record, not a second hand-written shape: the
+            // reported leg and the drafting legs record the same facts the same
+            // way, so neither can drift from the other.
+            let record = localpilot_harness::GuidanceRecord::reported(
+                assessment.score,
+                threshold,
+                assessment.axes,
+                questions,
+            );
+            localpilot_harness::append_intake_record(
                 root,
-                serde_json::json!({ "idea": idea, "guidance": guidance }),
+                &serde_json::json!({ "idea": idea, "guidance": record.to_json() }),
             )?;
             Ok(IntakeOutcome::NeedsGuidance)
         }
         Clarification::AssumeJudgment => {
-            guidance["assumed_judgment"] = serde_json::json!(true);
-            let brief = run_intake(provider, model, idea).await?;
-            std::fs::write(root.join("brief.md"), brief.render())?;
-            append_intake_record(
-                root,
-                serde_json::json!({ "idea": idea, "name": brief.name, "guidance": guidance }),
-            )?;
+            // `--assume-judgment` delegates without ever asking, so its record
+            // carries no `answers` array — the audit trail keeps that distinct
+            // from a clarification where every answer was delegated.
+            let draft = localpilot_harness::draft_with_answers(
+                provider,
+                model,
+                idea,
+                threshold,
+                assessment,
+                questions,
+                Vec::new(),
+                false,
+            )
+            .await?;
+            localpilot_harness::persist_approved(root, &draft)?;
             Ok(IntakeOutcome::BriefWritten)
         }
         Clarification::Ask(asker) => {
@@ -616,69 +631,15 @@ pub(crate) async fn intake_flow(
                     answers.push((axis.axis.clone(), answer));
                 }
             }
-            guidance["answers"] = serde_json::json!(answers
-                .iter()
-                .map(|(axis, answer)| serde_json::json!({ "axis": axis, "answer": answer }))
-                .collect::<Vec<_>>());
-
-            let (brief_idea, rescored);
-            if answers.is_empty() {
-                // Every question was delegated — same contract as
-                // --assume-judgment, recorded the same way.
-                guidance["assumed_judgment"] = serde_json::json!(true);
-                brief_idea = idea.to_string();
-                rescored = None;
-            } else {
-                let decisions = answers
-                    .iter()
-                    .map(|(axis, answer)| format!("- {axis}: {answer}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                brief_idea = format!("{idea}\n\nDecisions provided by the user:\n{decisions}");
-                // One bounded re-assessment records whether the answers
-                // settled the open axes; it informs the record, it does not
-                // re-gate (no loop).
-                let second =
-                    localpilot_harness::assess_guidance(provider, model, &brief_idea).await?;
-                rescored = Some(second.score);
-            }
-            if let Some(score) = rescored {
-                guidance["rescore"] = serde_json::json!(score);
-            }
-            let brief = run_intake(provider, model, &brief_idea).await?;
-            std::fs::write(root.join("brief.md"), brief.render())?;
-            append_intake_record(
-                root,
-                serde_json::json!({ "idea": idea, "name": brief.name, "guidance": guidance }),
-            )?;
+            // The clarification leg always records its answers, empty or not.
+            let draft = localpilot_harness::draft_with_answers(
+                provider, model, idea, threshold, assessment, questions, answers, true,
+            )
+            .await?;
+            localpilot_harness::persist_approved(root, &draft)?;
             Ok(IntakeOutcome::BriefWritten)
         }
     }
-}
-
-/// The question asked for an open axis: the model's own settling question
-/// when it provided one, otherwise a generic prompt naming the axis.
-fn question_for(axis: &localpilot_harness::DecisionAxis) -> String {
-    if axis.question.trim().is_empty() {
-        format!("What should be decided about: {}?", axis.axis)
-    } else {
-        axis.question.clone()
-    }
-}
-
-/// Append one record to the `.localpilot/intake.jsonl` provenance log.
-fn append_intake_record(root: &Path, record: serde_json::Value) -> anyhow::Result<()> {
-    let intake_dir = root.join(".localpilot");
-    std::fs::create_dir_all(&intake_dir)?;
-    let mut line = serde_json::to_string(&record)?;
-    line.push('\n');
-    use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(intake_dir.join("intake.jsonl"))?;
-    file.write_all(line.as_bytes())?;
-    Ok(())
 }
 
 /// Run planning: `brief.md` becomes `PROGRESS.md`.
@@ -1989,6 +1950,16 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
         assert_eq!(record["guidance"]["answers"].as_array().unwrap().len(), 2);
         assert!((record["guidance"]["rescore"].as_f64().unwrap() - 1.0).abs() < 1e-6);
         assert!(record["guidance"].get("assumed_judgment").is_none());
+        // Regression: the shipped flow recorded the questions on every
+        // below-threshold branch, and the audit trail cannot say what a user was
+        // asked without them.
+        assert_eq!(
+            record["guidance"]["questions"],
+            serde_json::json!([
+                "Which platform must this run on?",
+                "Where is widget state stored?"
+            ])
+        );
     }
 
     #[tokio::test]
@@ -2017,6 +1988,11 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
         let record = last_record(dir.path());
         assert_eq!(record["guidance"]["assumed_judgment"], true);
         assert!(record["guidance"].get("rescore").is_none());
+        assert_eq!(
+            record["guidance"]["questions"].as_array().unwrap().len(),
+            2,
+            "the questions were put, then every one of them was delegated"
+        );
     }
 
     #[tokio::test]
@@ -2043,6 +2019,14 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
         assert!(dir.path().join("brief.md").exists());
         let record = last_record(dir.path());
         assert_eq!(record["guidance"]["assumed_judgment"], true);
+        // Regression: `--assume-judgment` puts no questions to the user, but the
+        // shipped record still carried the ones the gate produced — it is what
+        // the delegation was over.
+        assert_eq!(record["guidance"]["questions"].as_array().unwrap().len(), 2);
+        assert!(
+            record["guidance"].get("answers").is_none(),
+            "never asked, so no answers array: {record}"
+        );
     }
 
     #[tokio::test]

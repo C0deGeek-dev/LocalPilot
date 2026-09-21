@@ -45,6 +45,27 @@ pub enum Profile {
     Unrestricted,
 }
 
+/// What `/harness-brief` was asked to do.
+///
+/// Typed rather than parsed at the call site: a decision about a draft is a
+/// transition, and a transition decided by matching a string somewhere in the
+/// host is one nobody can enumerate later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BriefAction {
+    /// Show the current brief, or the draft under review.
+    Show,
+    /// The brief needs no changes: write nothing and continue.
+    NoChange,
+    /// Save the reviewed draft as `brief.md`.
+    Approve,
+    /// Discard the draft; any existing brief is untouched.
+    Reject,
+    /// Start again from the original idea.
+    Reset,
+    /// Leave the conversation.
+    Cancel,
+}
+
 /// One explicit action in the persisted self-improvement loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelfImproveAction {
@@ -105,6 +126,11 @@ pub enum SlashAction {
     NameSession(String),
     HarnessResume,
     WaitResume,
+    /// Start a conversation that turns an idea into a reviewed `brief.md`.
+    /// `Some(idea)` supplies it up front; `None` asks for it.
+    HarnessIntake(Option<String>),
+    /// Review the existing brief, or act on a draft under review.
+    HarnessBrief(BriefAction),
     /// Switch the active provider/model mid-session, or — with no provider — list
     /// the configured providers and their available models. `model` is only set
     /// when a model id follows the provider id.
@@ -329,6 +355,10 @@ impl SlashAction {
             | Self::Sessions
             | Self::HarnessResume
             | Self::WaitResume
+            // Starting a brief conversation writes nothing: the draft lives in
+            // the session until someone approves it. Approval is classified
+            // separately below, because it does write.
+            | Self::HarnessIntake(_)
             | Self::Knowledge(_)
             | Self::Agents(_)
             | Self::Background(_)
@@ -344,6 +374,19 @@ impl SlashAction {
             | Self::Model { .. }
             | Self::Invalid { .. }
             | Self::Unknown(_) => Persistence::ReadOnly,
+
+            // Reviewing, rejecting, resetting and leaving a brief conversation
+            // all write nothing; approving writes the project.
+            Self::HarnessBrief(action) => match action {
+                BriefAction::Approve => {
+                    Persistence::Persistent("brief.md and the intake record")
+                }
+                BriefAction::Show
+                | BriefAction::NoChange
+                | BriefAction::Reject
+                | BriefAction::Reset
+                | BriefAction::Cancel => Persistence::ReadOnly,
+            },
 
             // Touch the session store only — in-memory under incognito, so these
             // leave nothing on disk there.
@@ -592,7 +635,8 @@ slash_commands! {
         // Interactive full-screen command identities.
         Agent, Harness, Default, Relaxed, Bypass, Unrestricted, Think, Effort,
         Model, Localbox, Selfimprove, New, Fork, Clone, Tree, Sessions, Session, Name,
-        Continue, Clear, Compact, HarnessResume, WaitResume, Ingest, Knowledge,
+        Continue, Clear, Compact, HarnessResume, WaitResume, HarnessIntake, HarnessBrief,
+        Ingest, Knowledge,
         Context, Research, Agents, Skills, Bg, Exit,
         // Full-screen/pair takeover identities: `parse_slash_for(Fullscreen|Pair)`
         // routes them to real actions; their catalog scope stays full-screen/pair-only.
@@ -654,6 +698,18 @@ slash_commands! {
         Continue => fullscreen_only("resume", Optional, Fall, "Continue a previous session"),
         HarnessResume => fullscreen_only("harness-resume", NoArg, Reject, "Resume harness plan work"),
         WaitResume => fullscreen_only("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
+        HarnessIntake => fullscreen_only(
+            "harness-intake",
+            Optional,
+            Fall,
+            "Turn an idea into a reviewed brief",
+        ),
+        HarnessBrief => fullscreen_only(
+            "harness-brief",
+            Optional,
+            Fall,
+            "Review the brief, or approve/reject a draft",
+        ),
         Ingest => fullscreen_only("ingest", Optional, Fall, "Manage workspace ingestion"),
         Knowledge => fullscreen_only("knowledge", Required, Fall, "Query the knowledge base"),
         Context => fullscreen_only("context", Required, Fall, "Build a context bundle"),
@@ -806,6 +862,8 @@ impl SlashAction {
             SlashAction::Clear => C::Clear,
             SlashAction::Compact { .. } => C::Compact,
             SlashAction::HarnessResume => C::HarnessResume,
+            SlashAction::HarnessIntake(_) => C::HarnessIntake,
+            SlashAction::HarnessBrief(_) => C::HarnessBrief,
             SlashAction::WaitResume => C::WaitResume,
             SlashAction::Ingest(_) => C::Ingest,
             SlashAction::Knowledge(_) => C::Knowledge,
@@ -1066,6 +1124,23 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
             }
         }
         C::HarnessResume => no_arg(spelling, name, args, command, SlashAction::HarnessResume),
+        C::HarnessIntake => SlashAction::HarnessIntake(
+            (!args.trim().is_empty()).then(|| args.trim().to_string()),
+        ),
+        C::HarnessBrief => match args.trim() {
+            "" | "show" => SlashAction::HarnessBrief(BriefAction::Show),
+            "ok" | "no-change" => SlashAction::HarnessBrief(BriefAction::NoChange),
+            "approve" => SlashAction::HarnessBrief(BriefAction::Approve),
+            "reject" => SlashAction::HarnessBrief(BriefAction::Reject),
+            "reset" => SlashAction::HarnessBrief(BriefAction::Reset),
+            "cancel" => SlashAction::HarnessBrief(BriefAction::Cancel),
+            other => SlashAction::Invalid {
+                command: name.to_string(),
+                reason: format!(
+                    "unknown action '{other}'; usage: /harness-brief                      [show|no-change|approve|reject|reset|cancel]"
+                ),
+            },
+        },
         C::WaitResume => no_arg(spelling, name, args, command, SlashAction::WaitResume),
         C::Ingest => parse_ingest(args),
         C::Knowledge => {
@@ -1363,7 +1438,7 @@ mod tests {
             from_table, from_enum,
             "SLASH_SPELLINGS identities must equal SlashCommand::ALL"
         );
-        assert_eq!(from_enum.len(), 39, "expected 39 command identities");
+        assert_eq!(from_enum.len(), 41, "expected 41 command identities");
     }
 
     #[test]
@@ -1376,7 +1451,9 @@ mod tests {
         // (a redundant forcing alias of `compact`) and the `wait_resume`/`compact-force`
         // parse-only aliases stay hidden but remain typeable in full-screen.
         // `/localmind` adds the one full-screen-only six-section workspace tab.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 41);
+        // 41→43 adds `harness-intake` and `harness-brief`, the reviewable brief
+        // conversation; the rest of the harness family lands with the router.
+        assert_eq!(specs_for(Host::Fullscreen).len(), 43);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 

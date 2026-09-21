@@ -632,10 +632,81 @@ fn restore_exit_with(exit: ExitDraft, restore: impl FnOnce()) -> RestoredExit {
 /// already-queued prompt. `Agent` and `Harness` both drain to an ordinary model
 /// turn (inline parity); only `Research` reroutes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PromptKind {
+enum PromptTarget {
     Agent,
     Harness,
     Research,
+    /// This prompt belongs to one brief conversation — that exact one, named by
+    /// its generation. Captured at enqueue, so a conversation that starts later
+    /// cannot claim it and one that has ended cannot leak it into an ordinary
+    /// turn.
+    BriefStage(StageGeneration),
+}
+
+/// A brief conversation's identity within this session. Never reused: routing
+/// "to that exact generation" means nothing if two conversations can share a
+/// number.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+struct StageGeneration(u64);
+
+/// The live brief conversation, if any, plus the recent ones' endings.
+///
+/// A prompt whose conversation has ended still deserves a real answer, so the
+/// endings are kept — bounded, because a long session must not accumulate them
+/// without limit.
+struct BriefStageHost {
+    next_generation: u64,
+    live: Option<(StageGeneration, localpilot_harness::BriefStage)>,
+    recent: VecDeque<(StageGeneration, localpilot_harness::StageOutcome)>,
+}
+
+/// How many endings are remembered. Past this, a queued prompt gets the generic
+/// "that conversation has ended" rather than the specific reason — bounded and
+/// rare, rather than the default.
+const REMEMBERED_STAGE_OUTCOMES: usize = 16;
+
+impl BriefStageHost {
+    fn new() -> Self {
+        Self {
+            next_generation: 0,
+            live: None,
+            recent: VecDeque::new(),
+        }
+    }
+
+    /// The generation a prompt submitted right now belongs to.
+    fn live_generation(&self) -> Option<StageGeneration> {
+        self.live.as_ref().map(|(generation, _)| *generation)
+    }
+
+    /// Start a conversation, superseding any live one.
+    fn begin(&mut self, stage: localpilot_harness::BriefStage) -> StageGeneration {
+        if self.live.is_some() {
+            self.end(localpilot_harness::StageOutcome::Superseded);
+        }
+        let generation = StageGeneration(self.next_generation);
+        self.next_generation += 1;
+        self.live = Some((generation, stage));
+        generation
+    }
+
+    /// End the live conversation, remembering why.
+    fn end(&mut self, outcome: localpilot_harness::StageOutcome) {
+        if let Some((generation, _)) = self.live.take() {
+            if self.recent.len() == REMEMBERED_STAGE_OUTCOMES {
+                self.recent.pop_front();
+            }
+            self.recent.push_back((generation, outcome));
+        }
+    }
+
+    /// Why a prompt's conversation is no longer live, when it is known.
+    fn outcome_of(&self, generation: StageGeneration) -> Option<localpilot_harness::StageOutcome> {
+        self.recent
+            .iter()
+            .find(|(recorded, _)| *recorded == generation)
+            .map(|(_, outcome)| *outcome)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -643,7 +714,7 @@ struct QueuedPrompt {
     text: String,
     attachments: Vec<ContentBlock>,
     item_id: ItemId,
-    kind: PromptKind,
+    target: PromptTarget,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -733,6 +804,10 @@ enum PumpedSlash {
     },
     /// `/harness-resume` — resume harness plan steps on an inner runtime.
     HarnessResume,
+    /// `/harness-intake` — start a brief conversation, optionally with the idea.
+    HarnessIntake(Option<String>),
+    /// `/harness-brief` — show the brief, or act on the draft under review.
+    HarnessBrief(localpilot_slash::BriefAction),
     /// `/wait-resume` — wait for quota, then resume, on an inner runtime.
     WaitResume,
 }
@@ -853,6 +928,8 @@ fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
         // stays synchronous.
         SlashAction::Research(Some(topic)) => SlashRoute::Pumped(PumpedSlash::Research { topic }),
         SlashAction::HarnessResume => SlashRoute::Pumped(PumpedSlash::HarnessResume),
+        SlashAction::HarnessIntake(idea) => SlashRoute::Pumped(PumpedSlash::HarnessIntake(idea)),
+        SlashAction::HarnessBrief(action) => SlashRoute::Pumped(PumpedSlash::HarnessBrief(action)),
         SlashAction::WaitResume => SlashRoute::Pumped(PumpedSlash::WaitResume),
         other => SlashRoute::Synchronous(other),
     }
@@ -871,7 +948,7 @@ impl std::fmt::Debug for QueuedPrompt {
                 &format_args!("<{} redacted>", self.attachments.len()),
             )
             .field("item_id", &self.item_id)
-            .field("kind", &self.kind)
+            .field("target", &self.target)
             .finish()
     }
 }
@@ -3150,6 +3227,7 @@ fn prepare_prompt_operation(
     app: &mut AppModel,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
+    brief: &BriefStageHost,
     submitted: SubmittedInput,
     pending: bool,
 ) -> Option<QueuedOperation> {
@@ -3170,18 +3248,24 @@ fn prepare_prompt_operation(
         text: submitted.prompt,
         attachments,
         item_id,
-        // Captured under the mode in force NOW, so a later mode switch cannot
-        // reinterpret this prompt once it sits in the queue.
-        kind: prompt_kind(app.mode()),
+        // Captured under the state in force NOW, so nothing that happens while
+        // this prompt waits in the queue can reinterpret who it belongs to.
+        target: prompt_target(app.mode(), brief),
     }))
 }
 
-/// Map the live operating mode to the kind a submitted prompt is pinned to.
-fn prompt_kind(mode: localpilot_slash::Mode) -> PromptKind {
+/// Decide who a prompt submitted right now belongs to.
+///
+/// A live brief conversation owns it, named by that conversation's exact
+/// generation. Otherwise the operating mode decides, as it always has.
+fn prompt_target(mode: localpilot_slash::Mode, brief: &BriefStageHost) -> PromptTarget {
+    if let Some(generation) = brief.live_generation() {
+        return PromptTarget::BriefStage(generation);
+    }
     match mode {
-        localpilot_slash::Mode::Agent => PromptKind::Agent,
-        localpilot_slash::Mode::Harness => PromptKind::Harness,
-        localpilot_slash::Mode::Research => PromptKind::Research,
+        localpilot_slash::Mode::Agent => PromptTarget::Agent,
+        localpilot_slash::Mode::Harness => PromptTarget::Harness,
+        localpilot_slash::Mode::Research => PromptTarget::Research,
     }
 }
 
@@ -3223,6 +3307,7 @@ async fn execute_fullscreen_slash(
         runtime,
         config,
         cwd,
+        &mut BriefStageHost::new(),
         &incognito_entry,
         &history,
         action,
@@ -3234,17 +3319,22 @@ async fn execute_fullscreen_slash(
 /// (`/localbox`, `/compact`, long-running `/ingest`, research, and resume) are
 /// intercepted by `route_fullscreen_slash` at the idle dispatch site before
 /// reaching here.
+#[allow(clippy::too_many_arguments)] // the synchronous dispatch takes the host's
+                                     // whole surface: model, runtime, configuration, workspace, brief conversation,
+                                     // incognito entry, prompt history, and the action itself.
 async fn execute_fullscreen_slash_action(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
     config: &localpilot_config::Config,
     cwd: &Path,
+    brief_stages: &mut BriefStageHost,
     incognito_entry: &RefCell<Option<crate::incognito::WorkspaceSnapshot>>,
     history: &localpilot_store::PromptHistory,
     action: SlashAction,
 ) -> bool {
     match action {
         SlashAction::Incognito { off } => {
+            end_brief_conversation(app, brief_stages, "incognito");
             handle_incognito_toggle(app, runtime, cwd, incognito_entry, history, off);
         }
         SlashAction::Model {
@@ -3286,12 +3376,14 @@ async fn execute_fullscreen_slash_action(
             ))),
         },
         SlashAction::LoadSession(reference) => {
+            end_brief_conversation(app, brief_stages, "loading another session");
             match crate::session_cmd::resolve_session_ref_in_store(runtime.store(), &reference) {
                 Ok(session) => load_fullscreen_session(app, runtime, session),
                 Err(error) => app.apply_runtime(RuntimeUpdate::Notice(error.to_string())),
             }
         }
         SlashAction::ContinueSession(reference) => {
+            end_brief_conversation(app, brief_stages, "continuing another session");
             let target = match reference {
                 Some(reference) => {
                     crate::session_cmd::resolve_session_ref_in_store(runtime.store(), &reference)
@@ -3328,6 +3420,7 @@ async fn execute_fullscreen_slash_action(
             }
         }
         SlashAction::NewSession => {
+            end_brief_conversation(app, brief_stages, "a new session");
             runtime.start_new_session();
             app.clear_stashed_draft();
             app.clear_conversation();
@@ -3341,6 +3434,7 @@ async fn execute_fullscreen_slash_action(
             )));
         }
         action @ (SlashAction::Fork | SlashAction::CloneSession) => {
+            end_brief_conversation(app, brief_stages, "forking the session");
             let mark_fork = matches!(action, SlashAction::Fork);
             match runtime.fork_session(mark_fork) {
                 Ok(id) => {
@@ -3518,13 +3612,19 @@ async fn execute_fullscreen_slash_action(
         }
         // `/agent` and `/harness` are silent typed mode transitions — exact inline
         // parity (inline `/harness` is `state.mode = Harness` and nothing else; plain
-        // prompts in Agent OR Harness mode take the ordinary model turn). `/agent` is
-        // the advertised exit from research/harness. No notice, no synthetic timeline
-        // item; the footer/settings render the mode, and a queued prompt captures
-        // `PromptKind::Harness`, which drains through the ordinary turn path.
+        // prompts in Agent OR Harness mode take the ordinary model turn). No notice,
+        // no synthetic timeline item; the footer/settings render the mode.
+        //
+        // `/agent` is also the advertised exit from a brief conversation, and a
+        // live conversation outranks the mode when deciding who owns a prompt —
+        // so the exit has to end it. Leaving it live would make `/agent` claim to
+        // leave while every later message still went to the draft.
         SlashAction::SetMode(
             mode @ (localpilot_slash::Mode::Agent | localpilot_slash::Mode::Harness),
         ) => {
+            if matches!(mode, localpilot_slash::Mode::Agent) {
+                end_brief_conversation(app, brief_stages, "/agent");
+            }
             app.set_shared_mode(mode);
         }
         // `SetMode(Research)` is never produced by a spelling (bare `/research` parses to
@@ -3537,9 +3637,15 @@ async fn execute_fullscreen_slash_action(
                 crate::research::research_mode_notice(cwd),
             ));
         }
-        // The harness/wait resume commands are pumped by `route_fullscreen_slash`
-        // upstream, so these arms are unreachable defensive guards (kept explicit, not
-        // a wildcard, so a routing regression surfaces as a notice, not silence).
+        // The harness/wait resume and brief commands are pumped by
+        // `route_fullscreen_slash` upstream, so these arms are unreachable defensive
+        // guards (kept explicit, not a wildcard, so a routing regression surfaces as
+        // a notice, not silence).
+        SlashAction::HarnessIntake(_) | SlashAction::HarnessBrief(_) => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "internal: a brief command reached the synchronous dispatch path".to_string(),
+            ));
+        }
         SlashAction::HarnessResume | SlashAction::WaitResume => {
             app.apply_runtime(RuntimeUpdate::Notice(
                 "internal: harness resume reached the synchronous dispatch path".to_string(),
@@ -4185,6 +4291,18 @@ async fn run_event_loop(
     let mut queue = VecDeque::new();
     let mut mouse_state = MouseState::default();
     let mut paste_burst = PasteBurst::default();
+    // A brief conversation outlives the operation that starts it and dies with
+    // the session — an unapproved draft is not project truth, so nothing here is
+    // persisted and a restart resumes from `brief.md` or from nothing.
+    let mut brief_stages = BriefStageHost::new();
+    let guidance = config
+        .harness
+        .guidance
+        .enabled
+        .then_some(localpilot_harness::GuidanceParams {
+            threshold: config.harness.guidance.threshold,
+            max_questions: config.harness.guidance.max_questions,
+        });
     while !app.exit_requested {
         workspace_index.refresh(app);
         let hit_map = draw_synchronized(terminal, app)?;
@@ -4320,6 +4438,8 @@ async fn run_event_loop(
                                         mouse_state: &mut mouse_state,
                                         paste_burst: &mut paste_burst,
                                         workspace_index: &mut *workspace_index,
+                                        brief_stages: &mut brief_stages,
+                                        guidance,
                                     },
                                     SerialOperation::PumpedSlash(command),
                                     &mut queue,
@@ -4340,6 +4460,7 @@ async fn run_event_loop(
                                     runtime,
                                     config,
                                     cwd,
+                                    &mut brief_stages,
                                     incognito_entry,
                                     history,
                                     action,
@@ -4352,9 +4473,14 @@ async fn run_event_loop(
                         }
                     }
                     AppCommand::Submit(submitted) => {
-                        let Some(operation) =
-                            prepare_prompt_operation(app, history, cwd, submitted, false)
-                        else {
+                        let Some(operation) = prepare_prompt_operation(
+                            app,
+                            history,
+                            cwd,
+                            &brief_stages,
+                            submitted,
+                            false,
+                        ) else {
                             continue;
                         };
                         if drive_operation_chain(
@@ -4369,6 +4495,8 @@ async fn run_event_loop(
                                 mouse_state: &mut mouse_state,
                                 paste_burst: &mut paste_burst,
                                 workspace_index: &mut *workspace_index,
+                                brief_stages: &mut brief_stages,
+                                guidance,
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
@@ -4399,6 +4527,8 @@ async fn run_event_loop(
                                 mouse_state: &mut mouse_state,
                                 paste_burst: &mut paste_burst,
                                 workspace_index: &mut *workspace_index,
+                                brief_stages: &mut brief_stages,
+                                guidance,
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
@@ -4426,6 +4556,8 @@ async fn run_event_loop(
                                 mouse_state: &mut mouse_state,
                                 paste_burst: &mut paste_burst,
                                 workspace_index: &mut *workspace_index,
+                                brief_stages: &mut brief_stages,
+                                guidance,
                             },
                             approval_tx,
                             &mut queue,
@@ -4448,6 +4580,8 @@ async fn run_event_loop(
                                 mouse_state: &mut mouse_state,
                                 paste_burst: &mut paste_burst,
                                 workspace_index: &mut *workspace_index,
+                                brief_stages: &mut brief_stages,
+                                guidance,
                             },
                             approval_tx,
                             intent,
@@ -4539,8 +4673,24 @@ async fn drive_operation_chain(
                 // this prompt sat in the queue cannot reinterpret it. Agent and Harness
                 // both take the ordinary model turn (inline parity); only Research
                 // reroutes — and it must not `begin_work` again (already Busy here).
-                let exit = match prompt.kind {
-                    PromptKind::Research => {
+                let exit = match prompt.target {
+                    PromptTarget::BriefStage(generation) => {
+                        drive_brief_stage_input(
+                            terminal,
+                            app,
+                            runtime,
+                            &mut ctx,
+                            queue,
+                            generation,
+                            &prompt.text,
+                            // `begin_work_before` above already entered Busy
+                            // against this item's anchor.
+                            BeginWork::AlreadyBusy,
+                        )
+                        .await?;
+                        false
+                    }
+                    PromptTarget::Research => {
                         drive_research(
                             terminal,
                             app,
@@ -4552,7 +4702,7 @@ async fn drive_operation_chain(
                         )
                         .await?
                     }
-                    PromptKind::Agent | PromptKind::Harness => {
+                    PromptTarget::Agent | PromptTarget::Harness => {
                         drive_turn(
                             terminal,
                             app,
@@ -4600,6 +4750,14 @@ async fn drive_slash_command(
     authority: &mut PumpedAuthority<'_>,
 ) -> Result<bool> {
     match command {
+        PumpedSlash::HarnessIntake(idea) => {
+            drive_harness_intake(terminal, app, runtime, ctx, queue, idea).await?;
+            Ok(false)
+        }
+        PumpedSlash::HarnessBrief(action) => {
+            drive_harness_brief(terminal, app, runtime, ctx, queue, action).await?;
+            Ok(false)
+        }
         PumpedSlash::LocalBoxAdopt {
             serve,
             allow_untuned,
@@ -5124,6 +5282,8 @@ async fn drive_localbox_models(
             mouse_state: &mut *ctx.mouse_state,
             paste_burst: &mut *ctx.paste_burst,
             workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
         },
         &mut io,
         &cancel,
@@ -5225,6 +5385,8 @@ async fn drive_selfimprove(
             mouse_state: &mut *ctx.mouse_state,
             paste_burst: &mut *ctx.paste_burst,
             workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
         },
         &mut io,
         &cancel,
@@ -5369,6 +5531,8 @@ async fn drive_localbox(
             mouse_state: &mut *ctx.mouse_state,
             paste_burst: &mut *ctx.paste_burst,
             workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
         },
         &mut io,
         &cancel,
@@ -5477,6 +5641,8 @@ async fn drive_compact(
             mouse_state: &mut *ctx.mouse_state,
             paste_burst: &mut *ctx.paste_burst,
             workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
         },
         &mut io,
         &cancel,
@@ -5631,6 +5797,8 @@ async fn drive_ingest(
             mouse_state: &mut *ctx.mouse_state,
             paste_burst: &mut *ctx.paste_burst,
             workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
         },
         &mut io,
         &cancel,
@@ -5754,6 +5922,8 @@ async fn drive_research(
             mouse_state: &mut *ctx.mouse_state,
             paste_burst: &mut *ctx.paste_burst,
             workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
         },
         &mut io,
         &cancel,
@@ -5854,6 +6024,817 @@ fn resume_dispatch_snapshot(runtime: &SessionRuntime) -> ResumeDispatch {
         profile: runtime.permission_engine_handle().profile(),
         trusted: runtime.trusted(),
     }
+}
+
+/// End the live brief conversation because something outside it took over.
+///
+/// The draft is discarded rather than carried across: it belongs to the
+/// conversation that was having it, and a prompt still bound to that
+/// conversation must be told it ended rather than land in whatever replaced it.
+fn end_brief_conversation(app: &mut AppModel, brief_stages: &mut BriefStageHost, cause: &str) {
+    if brief_stages.live_generation().is_none() {
+        return;
+    }
+    brief_stages.end(localpilot_harness::StageOutcome::Cancelled);
+    app.apply_runtime(RuntimeUpdate::Notice(format!(
+        "{cause} left the brief conversation; the unapproved draft was discarded and the \
+         project is unchanged"
+    )));
+}
+
+/// `/harness-intake`: start a brief conversation.
+///
+/// With an idea, it drafts immediately. Without one, it asks — and the next
+/// thing the user types belongs to this conversation, because the generation it
+/// installs is what that prompt captures at enqueue.
+async fn drive_harness_intake(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    idea: Option<String>,
+) -> Result<()> {
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    drive_harness_intake_on(app, runtime, ctx, queue, &mut io, idea).await
+}
+
+/// The command itself, over an INJECTED terminal rather than the process's own.
+///
+/// The split exists so the conversation can be driven in a test exactly as the
+/// host drives it: `drive_fullscreen_operation` is already generic over
+/// [`TerminalIo`], and this was the last concrete `Terminal` between a test and
+/// the real route. Production passes the crossterm bundle its caller built;
+/// nothing else differs between the two.
+async fn drive_harness_intake_on<P, R, D>(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    io: &mut TerminalIo<P, R, D>,
+    idea: Option<String>,
+) -> Result<()>
+where
+    P: FnMut(Duration) -> io::Result<bool>,
+    R: FnMut() -> io::Result<Event>,
+    D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+{
+    use localpilot_harness::BriefStage;
+
+    let generation = ctx.brief_stages.begin(BriefStage::AwaitingIdea);
+    match idea {
+        None => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "what do you want to build? Describe the idea and I will draft a brief for \
+                 review — nothing is written until you approve it."
+                    .to_string(),
+            ));
+        }
+        Some(idea) => {
+            // Reuse the same turn the conversation would take for typed input, so
+            // an idea given on the command line and one typed at the prompt follow
+            // exactly one path.
+            drive_brief_stage_input_on(
+                app,
+                runtime,
+                ctx,
+                queue,
+                io,
+                generation,
+                &idea,
+                BeginWork::Own,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// `/harness-brief`: review the brief, or decide about the draft under review.
+///
+/// The decisions are typed actions rather than words matched out of a message,
+/// because approving a brief writes the project and rejecting one throws work
+/// away; neither should hinge on how a sentence was phrased.
+async fn drive_harness_brief(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    action: localpilot_slash::BriefAction,
+) -> Result<()> {
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    drive_harness_brief_on(app, runtime, ctx, queue, &mut io, action).await
+}
+
+/// `/harness-brief` over an injected terminal. See [`drive_harness_intake_on`]
+/// for why the split exists.
+async fn drive_harness_brief_on<P, R, D>(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    io: &mut TerminalIo<P, R, D>,
+    action: localpilot_slash::BriefAction,
+) -> Result<()>
+where
+    P: FnMut(Duration) -> io::Result<bool>,
+    R: FnMut() -> io::Result<Event>,
+    D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+{
+    use localpilot_harness::{BriefStage, StageOutcome};
+    use localpilot_slash::BriefAction;
+
+    match action {
+        BriefAction::Show => {
+            if let Some((_, BriefStage::Reviewing(draft))) = ctx.brief_stages.live.as_ref() {
+                let draft = draft.clone();
+                present_brief_draft(app, &draft);
+                return Ok(());
+            }
+            // A saved brief opens FOR REVIEW, not just for display: the point of
+            // #165 is that an existing brief can be discussed in ordinary words,
+            // and it cannot be if nothing is holding it.
+            open_saved_brief_for_review(app, ctx);
+        }
+        BriefAction::NoChange => {
+            // A real transition, not a no-op. The brief stands as it is, the
+            // conversation ends without writing, and the next thing the user
+            // types is an ordinary turn again.
+            if ctx.brief_stages.live_generation().is_some() {
+                ctx.brief_stages.end(StageOutcome::Rejected);
+            }
+            app.apply_runtime(RuntimeUpdate::Notice(format!(
+                "brief.md is unchanged.{}",
+                lifecycle_disclosure(ctx.cwd)
+            )));
+        }
+        BriefAction::Approve => {
+            let Some((_, BriefStage::Reviewing(draft))) = ctx.brief_stages.live.as_ref() else {
+                app.apply_runtime(RuntimeUpdate::Warning(
+                    "there is no draft under review to approve".to_string(),
+                ));
+                return Ok(());
+            };
+            let draft = draft.clone();
+            match localpilot_harness::persist_approved(ctx.cwd, &draft) {
+                Ok(()) => {
+                    ctx.brief_stages.end(StageOutcome::Approved);
+                    app.apply_runtime(RuntimeUpdate::Notice(approved_notice(ctx.cwd)));
+                }
+                // Nothing changed, so the draft is still the only copy and the
+                // conversation stays live for another attempt.
+                Err(error @ localpilot_harness::Approval::BriefNotWritten(_)) => {
+                    app.apply_runtime(RuntimeUpdate::Warning(format!(
+                        "{error}. The draft is still here — approve again to retry."
+                    )));
+                }
+                // The brief IS saved; only its provenance is missing. Ending the
+                // conversation is the honest move: telling the user to approve
+                // again would ask them to rewrite a file that is already correct.
+                Err(error @ localpilot_harness::Approval::RecordNotAppended(_)) => {
+                    ctx.brief_stages.end(StageOutcome::Approved);
+                    app.apply_runtime(RuntimeUpdate::Warning(format!(
+                        "{error}. The brief is saved; do not approve again.{}",
+                        lifecycle_disclosure(ctx.cwd)
+                    )));
+                }
+            }
+        }
+        BriefAction::Reject => {
+            ctx.brief_stages.end(StageOutcome::Rejected);
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "draft discarded; the project is unchanged".to_string(),
+            ));
+        }
+        BriefAction::Cancel => {
+            ctx.brief_stages.end(StageOutcome::Cancelled);
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "left the brief conversation; the project is unchanged".to_string(),
+            ));
+        }
+        BriefAction::Reset => {
+            let idea = match ctx.brief_stages.live.as_ref() {
+                Some((_, BriefStage::Reviewing(draft) | BriefStage::Revising(draft))) => {
+                    Some(draft.idea.clone())
+                }
+                Some((_, BriefStage::Clarifying { idea, .. })) => Some(idea.clone()),
+                Some((_, BriefStage::RecoverableFailure { retry, .. })) => match retry {
+                    localpilot_harness::RetryTarget::Draft { idea }
+                    | localpilot_harness::RetryTarget::Clarified { idea, .. } => Some(idea.clone()),
+                    localpilot_harness::RetryTarget::Revision { draft, .. } => {
+                        Some(draft.idea.clone())
+                    }
+                },
+                _ => None,
+            };
+            let Some(idea) = idea else {
+                app.apply_runtime(RuntimeUpdate::Warning(
+                    "there is nothing to start again from".to_string(),
+                ));
+                return Ok(());
+            };
+            let generation = ctx.brief_stages.begin(BriefStage::AwaitingIdea);
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "starting again from the original idea".to_string(),
+            ));
+            drive_brief_stage_input_on(
+                app,
+                runtime,
+                ctx,
+                queue,
+                io,
+                generation,
+                &idea,
+                BeginWork::Own,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Open the saved `brief.md` as a draft under review.
+///
+/// The draft starts as an exact copy of what is on disk, so a conversation that
+/// changes nothing and approves writes the same bytes back. Until approval the
+/// file is untouched — rejecting or cancelling leaves the original in place.
+fn open_saved_brief_for_review(app: &mut AppModel, ctx: &mut SlashContext<'_>) {
+    use localpilot_harness::{BriefStage, DocumentState};
+
+    let state = localpilot_harness::inspect(localpilot_harness::WorkspaceInputs::at(ctx.cwd));
+    let Some(brief) = state.documents.brief() else {
+        let reason = match state.documents {
+            DocumentState::NoBrief => "there is no brief.md yet".to_string(),
+            DocumentState::BriefUnreadable(error) => format!("brief.md is unreadable: {error}"),
+            DocumentState::BriefMalformed(error) => {
+                // A malformed brief is never handed to the model as if it were
+                // valid; the user repairs it, or starts a new one.
+                format!("brief.md is malformed: {error}")
+            }
+            _ => "there is no brief to review".to_string(),
+        };
+        app.apply_runtime(RuntimeUpdate::Warning(format!(
+            "{reason}. Use /harness-intake to write one."
+        )));
+        return;
+    };
+
+    let draft = Box::new(localpilot_harness::BriefDraft {
+        brief: brief.clone(),
+        idea: brief.summary.clone(),
+        model_input: brief.summary.clone(),
+        guidance: localpilot_harness::GuidanceRecord::none(),
+        revisions: 0,
+    });
+    ctx.brief_stages.begin(BriefStage::Reviewing(draft.clone()));
+    present_brief_draft(app, &draft);
+    app.apply_runtime(RuntimeUpdate::Notice(
+        "this is the saved brief. Describe any changes, or /harness-brief no-change to leave \
+         it exactly as it is."
+            .to_string(),
+    ));
+}
+
+/// What approving just did to the project, in the plan's terms.
+fn approved_notice(cwd: &Path) -> String {
+    format!("brief.md saved.{}", lifecycle_disclosure(cwd))
+}
+
+/// Where the project stands now, decided by the shipped lifecycle gate.
+///
+/// Every exit from a brief conversation ends here — approved, approved with the
+/// audit append failed, and left unchanged — so none of them can describe the
+/// project differently from `localpilot harness status`. `resumable` answers,
+/// not a private match on `DocumentState`: subject 01 made it the one execution
+/// gate, and a second table here is how a build ends up with two that disagree.
+/// It also closes the case the short table had no arm for — a plan that is
+/// ready, complete, unbound, unsupported, or unreadable — where the user was
+/// previously told nothing at all about what to do next.
+fn lifecycle_disclosure(cwd: &Path) -> String {
+    let state = localpilot_harness::inspect(localpilot_harness::WorkspaceInputs::at(cwd));
+    match localpilot_harness::resumable(&state) {
+        Ok(_) => " The plan is current — resume it with /harness-resume.".to_string(),
+        Err(reason) => format!(" {}", crate::harness_cmd::blocked_reason(&reason)),
+    }
+}
+
+/// What one turn of input asks the conversation to do.
+///
+/// Separating the decision from the doing is what makes the in-flight states
+/// honest: the host publishes `Generating` or `Revising` before it awaits, so a
+/// prompt submitted while the model works is bound to the conversation that is
+/// working rather than to nothing.
+enum StageAction {
+    /// No model call: the conversation is already where it should be.
+    Stay(localpilot_harness::BriefStage),
+    /// Draft from an idea.
+    Draft { idea: String },
+    /// Draft from an idea and the answers that qualify it.
+    Clarified {
+        idea: String,
+        threshold: f32,
+        assessment: Box<localpilot_harness::GuidanceAssessment>,
+        /// Every question put in this leg, capped as it was asked.
+        questions: Vec<String>,
+        answers: Vec<(String, String)>,
+    },
+    /// Revise the draft under review.
+    Revise {
+        draft: Box<localpilot_harness::BriefDraft>,
+        instruction: String,
+    },
+}
+
+/// Decide what one turn of input does. Pure: no model call, no I/O, no writes.
+fn plan_stage_step(
+    app: &mut AppModel,
+    stage: localpilot_harness::BriefStage,
+    text: &str,
+) -> StageAction {
+    use localpilot_harness::{BriefStage, RetryTarget};
+
+    let trimmed = text.trim();
+    match stage {
+        BriefStage::AwaitingIdea => {
+            if trimmed.is_empty() {
+                app.apply_runtime(RuntimeUpdate::Notice(
+                    "describe the idea you want a brief for, or /agent to leave".to_string(),
+                ));
+                return StageAction::Stay(BriefStage::AwaitingIdea);
+            }
+            StageAction::Draft {
+                idea: trimmed.to_string(),
+            }
+        }
+        BriefStage::Clarifying {
+            idea,
+            threshold,
+            assessment,
+            questions,
+            mut pending,
+            mut answers,
+        } => {
+            if pending.is_empty() {
+                return StageAction::Clarified {
+                    idea,
+                    threshold,
+                    assessment,
+                    questions,
+                    answers,
+                };
+            }
+            let axis = pending.remove(0);
+            // An empty answer delegates that decision to the model, exactly as a
+            // bare Enter does on the command line.
+            if !trimmed.is_empty() {
+                answers.push((axis.axis.clone(), trimmed.to_string()));
+            }
+            if let Some(next) = pending.first() {
+                app.apply_runtime(RuntimeUpdate::Notice(localpilot_harness::question_for(
+                    next,
+                )));
+                return StageAction::Stay(BriefStage::Clarifying {
+                    idea,
+                    threshold,
+                    assessment,
+                    questions,
+                    pending,
+                    answers,
+                });
+            }
+            StageAction::Clarified {
+                idea,
+                threshold,
+                assessment,
+                questions,
+                answers,
+            }
+        }
+        // A model call is in flight. The input belongs to this conversation and
+        // waits for it, rather than starting a second one.
+        BriefStage::Generating | BriefStage::Revising(_) => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "still working on the brief; send it again once this finishes".to_string(),
+            ));
+            StageAction::Stay(stage)
+        }
+        BriefStage::Reviewing(draft) => {
+            if trimmed.is_empty() {
+                present_brief_draft(app, &draft);
+                return StageAction::Stay(BriefStage::Reviewing(draft));
+            }
+            StageAction::Revise {
+                draft,
+                instruction: trimmed.to_string(),
+            }
+        }
+        // A retry runs what failed, and the current message steers it: empty
+        // repeats the attempt verbatim, anything else replaces its input.
+        BriefStage::RecoverableFailure { retry, .. } => match retry {
+            RetryTarget::Draft { idea } => StageAction::Draft {
+                idea: if trimmed.is_empty() {
+                    idea
+                } else {
+                    trimmed.to_string()
+                },
+            },
+            RetryTarget::Clarified {
+                idea,
+                threshold,
+                assessment,
+                questions,
+                answers,
+            } => {
+                if trimmed.is_empty() {
+                    StageAction::Clarified {
+                        idea,
+                        threshold,
+                        assessment,
+                        questions,
+                        answers,
+                    }
+                } else {
+                    // A new idea supersedes the failed one, and earns a fresh
+                    // assessment rather than reusing one it was not made from.
+                    StageAction::Draft {
+                        idea: trimmed.to_string(),
+                    }
+                }
+            }
+            RetryTarget::Revision { draft, instruction } => StageAction::Revise {
+                draft,
+                instruction: if trimmed.is_empty() {
+                    instruction
+                } else {
+                    trimmed.to_string()
+                },
+            },
+        },
+    }
+}
+
+/// The state to publish while an action runs, so the conversation is visibly
+/// working rather than absent.
+fn in_flight_stage(action: &StageAction) -> Option<localpilot_harness::BriefStage> {
+    use localpilot_harness::BriefStage;
+
+    match action {
+        StageAction::Stay(_) => None,
+        StageAction::Draft { .. } | StageAction::Clarified { .. } => Some(BriefStage::Generating),
+        StageAction::Revise { draft, .. } => Some(BriefStage::Revising(draft.clone())),
+    }
+}
+
+/// Advance the brief conversation that owns this input, or tell the input why
+/// its conversation is gone.
+///
+/// The one thing this must never do is hand the text to an ordinary model turn.
+/// A prompt bound to a conversation belongs to that conversation or to nothing;
+/// #164 is explicit that stage input never becomes an ordinary turn, and "the
+/// conversation ended while you were typing" is exactly when a fallthrough would
+/// be most surprising.
+#[allow(clippy::too_many_arguments)]
+async fn drive_brief_stage_input(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    generation: StageGeneration,
+    text: &str,
+    work: BeginWork,
+) -> Result<()> {
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    drive_brief_stage_input_on(app, runtime, ctx, queue, &mut io, generation, text, work).await
+}
+
+/// One message into a brief conversation, over an injected terminal. See
+/// [`drive_harness_intake_on`] for why the split exists.
+///
+/// `work` says who owns the Busy transition, because the two routes in are not
+/// the same. A queued prompt is already Busy — `drive_operation_chain` entered
+/// it against the next item's insertion anchor, which is what keeps the reply
+/// in the right place — so this must not enter it a second time and lose that
+/// anchor. A pumped `/harness-intake <idea>` arrives idle, and a model call
+/// that runs while the host still projects idle is a lie the whole input layer
+/// reads: Ctrl+C, queueing and the working chrome all branch on it.
+///
+/// Either way the step ENDS idle. Every exit below goes through
+/// [`finish_stage_step`], including the ones that never reach the model.
+#[allow(clippy::too_many_arguments)]
+async fn drive_brief_stage_input_on<P, R, D>(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    io: &mut TerminalIo<P, R, D>,
+    generation: StageGeneration,
+    text: &str,
+    work: BeginWork,
+) -> Result<()>
+where
+    P: FnMut(Duration) -> io::Result<bool>,
+    R: FnMut() -> io::Result<Event>,
+    D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+{
+    // True when the host is Busy on this step's behalf and this function owes it
+    // a terminal transition. The queued route is Busy before it gets here.
+    let mut busy = matches!(work, BeginWork::AlreadyBusy);
+
+    if ctx.brief_stages.live_generation() != Some(generation) {
+        // Deterministic close, with the real reason where it is still known.
+        let reason = ctx.brief_stages.outcome_of(generation).map_or_else(
+            || "that brief conversation has ended".to_string(),
+            |outcome| outcome.reason().to_string(),
+        );
+        app.apply_runtime(RuntimeUpdate::Notice(format!(
+            "{reason}; this message was not sent. Start a new brief with /harness-intake or \
+             /harness-brief."
+        )));
+        return finish_stage_step(app, busy);
+    }
+
+    let Some((_, stage)) = ctx.brief_stages.live.take() else {
+        return finish_stage_step(app, busy);
+    };
+    let action = plan_stage_step(app, stage, text);
+    let Some(in_flight) = in_flight_stage(&action) else {
+        let StageAction::Stay(stage) = action else {
+            unreachable!("only `Stay` has no in-flight state");
+        };
+        ctx.brief_stages.live = Some((generation, stage));
+        return finish_stage_step(app, busy);
+    };
+
+    // A model call is about to run, so the host says so. On the queued route it
+    // already does; entering again here would reset the insertion anchor the
+    // caller set.
+    if matches!(work, BeginWork::Own) {
+        app.begin_work();
+        busy = true;
+    }
+
+    // Published BEFORE the await, so input submitted while the model works binds
+    // to this conversation.
+    ctx.brief_stages.live = Some((generation, in_flight));
+    let next = match run_stage_action_on(app, runtime, ctx, queue, io, action).await {
+        Ok(next) => next,
+        // The pump itself failed — a draw error, which tears it down. The
+        // conversation goes with the host, but the work state is projected
+        // state and must not outlive the call that entered it. A bare `?` here
+        // is exactly the exit that skips the transition.
+        Err(error) => {
+            finish_stage_step(app, busy)?;
+            return Err(error);
+        }
+    };
+    ctx.brief_stages.live = Some((generation, next));
+    finish_stage_step(app, busy)
+}
+
+/// End a stage step with the host idle again.
+///
+/// One place, called on every exit, because the failure this prevents is the
+/// silent one: a draft that finishes and leaves the chrome spinning looks like
+/// work still running, and the input layer treats it that way. `Stopped` covers
+/// success, a recoverable failure and a cancellation alike — the conversation's
+/// own state says which of those happened, and the work state only says whether
+/// anything is running.
+fn finish_stage_step(app: &mut AppModel, busy: bool) -> Result<()> {
+    if busy {
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+    }
+    Ok(())
+}
+
+/// Run one model-backed step on the operation pump.
+///
+/// On the pump rather than inline: the terminal keeps drawing, input keeps
+/// queueing against this conversation, and Ctrl+C reaches the call. Cancellation
+/// is a recoverable failure, not an ending — the user stopped this attempt, not
+/// the conversation.
+///
+/// The terminal is injected rather than owned, so a test drives this step the
+/// way the host drives it. See [`drive_harness_intake_on`].
+async fn run_stage_action_on<P, R, D>(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    io: &mut TerminalIo<P, R, D>,
+    action: StageAction,
+) -> Result<localpilot_harness::BriefStage>
+where
+    P: FnMut(Duration) -> io::Result<bool>,
+    R: FnMut() -> io::Result<Event>,
+    D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+{
+    use localpilot_harness::{BriefStage, DraftOutcome, RetryTarget};
+
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    let cancel = CancellationToken::new();
+    let provider = runtime.provider_handle();
+    let model = runtime.active_model().to_string();
+    let guidance = ctx.guidance;
+
+    app.apply_runtime(RuntimeUpdate::Notice(match &action {
+        StageAction::Revise { .. } => "revising the draft...".to_string(),
+        _ => "drafting a brief...".to_string(),
+    }));
+    (io.draw)(app)?;
+
+    // What to run again if this attempt fails or is cancelled.
+    let retry = match &action {
+        StageAction::Stay(_) => unreachable!("a stay has no model call"),
+        StageAction::Draft { idea } => RetryTarget::Draft { idea: idea.clone() },
+        StageAction::Clarified {
+            idea,
+            threshold,
+            assessment,
+            questions,
+            answers,
+        } => RetryTarget::Clarified {
+            idea: idea.clone(),
+            threshold: *threshold,
+            assessment: assessment.clone(),
+            questions: questions.clone(),
+            answers: answers.clone(),
+        },
+        StageAction::Revise { draft, instruction } => RetryTarget::Revision {
+            draft: draft.clone(),
+            instruction: instruction.clone(),
+        },
+    };
+
+    let operation = {
+        let cancel = cancel.clone();
+        async move {
+            let call = async {
+                match action {
+                    StageAction::Stay(_) => unreachable!("a stay has no model call"),
+                    StageAction::Draft { idea } => {
+                        localpilot_harness::draft_brief(provider.as_ref(), &model, &idea, guidance)
+                            .await
+                    }
+                    StageAction::Clarified {
+                        idea,
+                        threshold,
+                        assessment,
+                        questions,
+                        answers,
+                    } => localpilot_harness::draft_with_answers(
+                        provider.as_ref(),
+                        &model,
+                        &idea,
+                        threshold,
+                        *assessment,
+                        questions,
+                        answers,
+                        true,
+                    )
+                    .await
+                    .map(|draft| DraftOutcome::Drafted(Box::new(draft))),
+                    StageAction::Revise { draft, instruction } => localpilot_harness::revise_brief(
+                        provider.as_ref(),
+                        &model,
+                        &draft,
+                        &instruction,
+                    )
+                    .await
+                    .map(|draft| DraftOutcome::Drafted(Box::new(draft))),
+                }
+            };
+            tokio::pin!(call);
+            tokio::select! {
+                result = &mut call => Some(result),
+                // Ctrl+C stops this attempt. The conversation survives it.
+                () = cancel.cancelled() => None,
+            }
+        }
+    };
+
+    let outcome: std::rc::Rc<std::cell::RefCell<Option<_>>> = std::rc::Rc::default();
+    let captured = outcome.clone();
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
+        },
+        io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        move |_app: &mut AppModel, result| {
+            *captured.borrow_mut() = Some(result);
+        },
+    )
+    .await?;
+
+    let result = outcome.borrow_mut().take();
+    Ok(match result {
+        Some(Some(Ok(DraftOutcome::Drafted(draft)))) => {
+            present_brief_draft(app, &draft);
+            BriefStage::Reviewing(draft)
+        }
+        Some(Some(Ok(DraftOutcome::NeedsGuidance {
+            assessment,
+            open,
+            questions,
+        }))) => {
+            if let Some(question) = questions.first() {
+                app.apply_runtime(RuntimeUpdate::Notice(format!(
+                    "the idea leaves {} decision(s) open. {question} (press Enter to let the \
+                     model decide this one)",
+                    open.len()
+                )));
+            }
+            let (idea, threshold) = match &retry {
+                RetryTarget::Draft { idea } => (
+                    idea.clone(),
+                    guidance.map_or(0.0, |gate| gate.threshold.clamp(0.0, 1.0)),
+                ),
+                RetryTarget::Clarified {
+                    idea, threshold, ..
+                } => (idea.clone(), *threshold),
+                RetryTarget::Revision { draft, .. } => (draft.idea.clone(), 0.0),
+            };
+            BriefStage::Clarifying {
+                idea,
+                threshold,
+                assessment,
+                questions,
+                pending: open,
+                answers: Vec::new(),
+            }
+        }
+        Some(Some(Err(error))) => recoverable(app, retry, &error.to_string()),
+        // Cancelled, or the driver returned before the operation produced
+        // anything. Either way the attempt did not finish, and the work stands.
+        Some(None) | None => recoverable(app, retry, "the attempt was cancelled"),
+    })
+}
+
+/// Record a failed attempt without ending the conversation, and say how to
+/// repeat it.
+fn recoverable(
+    app: &mut AppModel,
+    retry: localpilot_harness::RetryTarget,
+    detail: &str,
+) -> localpilot_harness::BriefStage {
+    app.apply_runtime(RuntimeUpdate::Warning(format!(
+        "that attempt failed: {detail}. Your work is kept — send an empty message to try the \
+         same thing again, or a new one to change it."
+    )));
+    localpilot_harness::BriefStage::RecoverableFailure {
+        retry,
+        detail: detail.to_string(),
+    }
+}
+
+/// Show a draft without writing it anywhere.
+fn present_brief_draft(app: &mut AppModel, draft: &localpilot_harness::BriefDraft) {
+    let output = crate::repl::CommandOutput {
+        lines: draft.brief.render().lines().map(str::to_string).collect(),
+        error: None,
+    };
+    present_command_report(app, command_report("brief draft (not yet saved)", output));
+    app.apply_runtime(RuntimeUpdate::Notice(
+        "send changes in your own words, or /harness-brief approve to save it, reject to \
+         discard it, or cancel to leave."
+            .to_string(),
+    ));
 }
 
 /// The synchronous entry both resume commands share: enter `Mode::Harness`, then Busy
@@ -5983,6 +6964,8 @@ async fn drive_harness_resume(
             mouse_state: &mut *ctx.mouse_state,
             paste_burst: &mut *ctx.paste_burst,
             workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
         },
         &mut io,
         &cancel,
@@ -6217,6 +7200,12 @@ struct SlashContext<'a> {
     mouse_state: &'a mut MouseState,
     paste_burst: &'a mut PasteBurst,
     workspace_index: &'a mut WorkspaceFileIndex,
+    /// The live brief conversation and the recent ones' endings.
+    brief_stages: &'a mut BriefStageHost,
+    /// The configured guidance gate, or `None` when it is switched off. Resolved
+    /// once from `[harness.guidance]`, so the conversation gates on exactly the
+    /// numbers `localpilot harness intake` does.
+    guidance: Option<localpilot_harness::GuidanceParams>,
 }
 
 async fn drive_shell(
@@ -6249,6 +7238,8 @@ async fn drive_shell(
             mouse_state: &mut *ctx.mouse_state,
             paste_burst: &mut *ctx.paste_burst,
             workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
         },
         &mut io,
         &cancel,
@@ -6305,6 +7296,7 @@ fn handle_operation_terminal_event(
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     image_capability: &ImageCapabilitySnapshot,
+    brief_stages: &BriefStageHost,
     live: Option<&LiveControls>,
     steer: Option<&SteerQueue>,
     pending_steer_items: &mut VecDeque<ItemId>,
@@ -6370,6 +7362,7 @@ fn handle_operation_terminal_event(
                 history,
                 cwd,
                 image_capability,
+                brief_stages,
                 live,
                 steer.map(|steer| (steer, pending_steer_items)),
             ),
@@ -6416,6 +7409,10 @@ where
         mouse_state,
         paste_burst,
         workspace_index,
+        brief_stages,
+        // The pump's own loop does not consult the gate; the conversation reads
+        // it from its own context.
+        guidance: _,
     } = ctx;
     // A `Bare` operation still binds a receiver so the runtime-event arm and the
     // completion drain stay uniform; its sender is held open, so it simply never
@@ -6488,6 +7485,7 @@ where
                             history,
                             cwd,
                             image_capability,
+                            brief_stages,
                             live,
                             steer,
                             &mut pending_steer_items,
@@ -6559,6 +7557,7 @@ where
                             history,
                             cwd,
                             image_capability,
+                            brief_stages,
                             live,
                             steer,
                             &mut pending_steer_items,
@@ -6645,6 +7644,7 @@ where
                             history,
                             cwd,
                             image_capability,
+                            brief_stages,
                             live,
                             steer,
                             &mut pending_steer_items,
@@ -6862,6 +7862,8 @@ async fn drive_turn(
             mouse_state: &mut *ctx.mouse_state,
             paste_burst: &mut *ctx.paste_burst,
             workspace_index: &mut *ctx.workspace_index,
+            brief_stages: &mut *ctx.brief_stages,
+            guidance: ctx.guidance,
         },
         &mut io,
         &cancel,
@@ -6893,6 +7895,7 @@ fn handle_turn_event_impl(
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     image_capability: &ImageCapabilitySnapshot,
+    brief_stages: &BriefStageHost,
     live: Option<&LiveControls>,
     mut steering: Option<(&SteerQueue, &mut VecDeque<ItemId>)>,
 ) -> bool {
@@ -6944,7 +7947,7 @@ fn handle_turn_event_impl(
                 }
                 AppCommand::Submit(submitted) => {
                     if let Some(operation) =
-                        prepare_prompt_operation(app, history, cwd, submitted, true)
+                        prepare_prompt_operation(app, history, cwd, brief_stages, submitted, true)
                     {
                         queue.push_back(operation);
                     }
@@ -7151,6 +8154,7 @@ fn handle_turn_event(
         history,
         cwd,
         image_capability,
+        &BriefStageHost::new(),
         None,
         None,
     )
@@ -7181,6 +8185,7 @@ fn handle_turn_event_with_steering(
         history,
         cwd,
         image_capability,
+        &BriefStageHost::new(),
         None,
         Some((steer, pending_steer_items)),
     )
@@ -11795,6 +12800,8 @@ mod tests {
             ("resume", "Continue a previous session"),
             ("harness-resume", "Resume harness plan work"),
             ("wait-resume", "Wait for quota, then resume"),
+            ("harness-intake", "Turn an idea into a reviewed brief"),
+            ("harness-brief", "Review the brief, or approve/reject a draft"),
             ("ingest", "Manage workspace ingestion"),
             ("knowledge", "Query the knowledge base"),
             ("context", "Build a context bundle"),
@@ -11827,7 +12834,7 @@ mod tests {
                 "Incognito: save nothing; new files need approval (`/incognito off` to end)",
             ),
         ];
-        assert_eq!(full_screen.len(), 41);
+        assert_eq!(full_screen.len(), 43);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
@@ -13332,6 +14339,7 @@ mod tests {
             &history,
             Path::new("fixture"),
             &image_capability(false),
+            &BriefStageHost::new(),
             Some(&live),
             None,
         ));
@@ -13351,6 +14359,7 @@ mod tests {
             &history,
             Path::new("fixture"),
             &image_capability(false),
+            &BriefStageHost::new(),
             Some(&live),
             None,
         ));
@@ -13369,6 +14378,7 @@ mod tests {
             &history,
             Path::new("fixture"),
             &image_capability(false),
+            &BriefStageHost::new(),
             Some(&live),
             None,
         ));
@@ -14320,6 +15330,7 @@ mod tests {
         mouse_state: &mut MouseState,
         paste_burst: &mut PasteBurst,
         workspace_index: &mut WorkspaceFileIndex,
+        brief_stages: &mut BriefStageHost,
         operation: F,
         on_complete: impl FnOnce(&mut AppModel, T),
     ) -> Result<bool>
@@ -14339,6 +15350,8 @@ mod tests {
                 mouse_state,
                 paste_burst,
                 workspace_index,
+                brief_stages,
+                guidance: None,
             },
             io,
             cancel,
@@ -14372,6 +15385,7 @@ mod tests {
         mouse_state: &mut MouseState,
         paste_burst: &mut PasteBurst,
         workspace_index: &mut WorkspaceFileIndex,
+        brief_stages: &mut BriefStageHost,
         operation: F,
         on_complete: impl FnOnce(&mut AppModel, T),
     ) -> Result<bool>
@@ -14393,6 +15407,8 @@ mod tests {
                 mouse_state,
                 paste_burst,
                 workspace_index,
+                brief_stages,
+                guidance: None,
             },
             io,
             cancel,
@@ -14426,6 +15442,7 @@ mod tests {
         mouse_state: &mut MouseState,
         paste_burst: &mut PasteBurst,
         workspace_index: &mut WorkspaceFileIndex,
+        brief_stages: &mut BriefStageHost,
         operation: F,
         on_complete: impl FnOnce(&mut AppModel, T),
     ) -> Result<bool>
@@ -14445,6 +15462,8 @@ mod tests {
                 mouse_state,
                 paste_burst,
                 workspace_index,
+                brief_stages,
+                guidance: None,
             },
             io,
             cancel,
@@ -14482,6 +15501,7 @@ mod tests {
         mouse_state: &mut MouseState,
         paste_burst: &mut PasteBurst,
         workspace_index: &mut WorkspaceFileIndex,
+        brief_stages: &mut BriefStageHost,
         progress: ProgressLane<'_>,
         operation: F,
         on_complete: impl FnOnce(&mut AppModel, T),
@@ -14502,6 +15522,8 @@ mod tests {
                 mouse_state,
                 paste_burst,
                 workspace_index,
+                brief_stages,
+                guidance: None,
             },
             io,
             cancel,
@@ -14556,6 +15578,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             ProgressLane::Tick(&mut progress_sink),
             complete_after(80),
             move |_app: &mut AppModel, _t: ()| projection_trace.borrow_mut().push("projection"),
@@ -14727,6 +15750,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             ProgressLane::None,
             operation,
             |app: &mut AppModel, summary| apply_compact_result(app, summary, false),
@@ -14782,6 +15806,8 @@ mod tests {
         let out = drive_fullscreen_operation(
             &mut app,
             SlashContext {
+                brief_stages: &mut BriefStageHost::new(),
+                guidance: None,
                 approval_rx: &mut approval_rx,
                 question_rx: &mut question_rx,
                 cwd: Path::new("."),
@@ -14861,6 +15887,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             ProgressLane::None,
             operation,
             |_app: &mut AppModel, _t: ()| {},
@@ -14981,15 +16008,370 @@ mod tests {
         );
     }
 
+    fn axis(name: &str) -> localpilot_harness::DecisionAxis {
+        localpilot_harness::DecisionAxis {
+            axis: name.to_string(),
+            resolved: false,
+            evidence: "not specified".to_string(),
+            question: format!("What about {name}?"),
+        }
+    }
+
+    fn assessment() -> Box<localpilot_harness::GuidanceAssessment> {
+        Box::new(localpilot_harness::GuidanceAssessment {
+            score: 0.0,
+            axes: vec![axis("storage")],
+        })
+    }
+
+    fn test_draft() -> Box<localpilot_harness::BriefDraft> {
+        Box::new(localpilot_harness::BriefDraft {
+            brief: localpilot_harness::Brief::parse(
+                "# Brief: thing\n\n## Summary\n\nDo it.\n\n## Requirements\n\n- It works\n\n\
+## Constraints\n\n- Be small\n\n## Non-Goals\n\n- Else\n\n## Acceptance Criteria\n\n- Passes\n",
+            )
+            .expect("fixture brief parses"),
+            idea: "do it".to_string(),
+            model_input: "do it".to_string(),
+            guidance: localpilot_harness::GuidanceRecord::none(),
+            revisions: 0,
+        })
+    }
+
     #[test]
-    fn queued_prompts_keep_the_mode_they_were_enqueued_under() {
-        // A prompt's kind is captured at ENQUEUE from the mode in force then, so a
-        // later mode switch cannot reinterpret it while it sits in the queue. Covers
-        // all three kinds (Agent and Harness both drain to a turn; Research reroutes).
+    fn an_idea_starts_a_draft_and_an_empty_one_asks_again() {
+        use localpilot_harness::BriefStage;
+
+        let mut app = app();
+        assert!(matches!(
+            plan_stage_step(&mut app, BriefStage::AwaitingIdea, "  build a thing  "),
+            StageAction::Draft { idea } if idea == "build a thing"
+        ));
+        assert!(matches!(
+            plan_stage_step(&mut app, BriefStage::AwaitingIdea, "   "),
+            StageAction::Stay(BriefStage::AwaitingIdea)
+        ));
+    }
+
+    #[test]
+    fn clarification_collects_answers_and_delegates_the_empty_ones() {
+        use localpilot_harness::BriefStage;
+
+        let mut app = app();
+        let stage = BriefStage::Clarifying {
+            idea: "do it".to_string(),
+            threshold: 0.7,
+            assessment: assessment(),
+            questions: vec![
+                "Where is it stored?".to_string(),
+                "Which platform?".to_string(),
+            ],
+            pending: vec![axis("storage"), axis("platform")],
+            answers: Vec::new(),
+        };
+
+        // First answer recorded, second question asked, still clarifying.
+        let next = plan_stage_step(&mut app, stage, "in a file");
+        let StageAction::Stay(BriefStage::Clarifying {
+            pending, answers, ..
+        }) = next
+        else {
+            panic!("expected to keep clarifying");
+        };
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            answers,
+            vec![("storage".to_string(), "in a file".to_string())]
+        );
+
+        // An empty answer delegates that axis and finishes the leg, carrying the
+        // idea, threshold and assessment the record needs.
+        let stage = BriefStage::Clarifying {
+            idea: "do it".to_string(),
+            threshold: 0.7,
+            assessment: assessment(),
+            questions: vec![
+                "Where is it stored?".to_string(),
+                "Which platform?".to_string(),
+            ],
+            pending,
+            answers,
+        };
+        let StageAction::Clarified {
+            idea,
+            threshold,
+            answers,
+            ..
+        } = plan_stage_step(&mut app, stage, "")
+        else {
+            panic!("expected the leg to finish");
+        };
+        assert_eq!(idea, "do it", "the user's idea survives clarification");
+        assert!((threshold - 0.7).abs() < f32::EPSILON);
+        assert_eq!(answers.len(), 1, "the delegated axis records no answer");
+    }
+
+    #[test]
+    fn input_during_a_model_call_waits_for_that_call() {
+        use localpilot_harness::BriefStage;
+
+        let mut app = app();
+        assert!(matches!(
+            plan_stage_step(&mut app, BriefStage::Generating, "another thought"),
+            StageAction::Stay(BriefStage::Generating)
+        ));
+        assert!(matches!(
+            plan_stage_step(&mut app, BriefStage::Revising(test_draft()), "and another"),
+            StageAction::Stay(BriefStage::Revising(_))
+        ));
+    }
+
+    #[test]
+    fn a_message_under_review_is_a_revision_and_an_empty_one_redisplays() {
+        use localpilot_harness::BriefStage;
+
+        let mut app = app();
+        assert!(matches!(
+            plan_stage_step(&mut app, BriefStage::Reviewing(test_draft()), "make it shorter"),
+            StageAction::Revise { instruction, .. } if instruction == "make it shorter"
+        ));
+        assert!(matches!(
+            plan_stage_step(&mut app, BriefStage::Reviewing(test_draft()), ""),
+            StageAction::Stay(BriefStage::Reviewing(_))
+        ));
+    }
+
+    #[test]
+    fn a_recoverable_failure_retries_what_failed_and_the_message_steers_it() {
+        use localpilot_harness::{BriefStage, RetryTarget};
+
+        let mut app = app();
+
+        // Empty repeats the attempt verbatim.
+        let failed_draft = BriefStage::RecoverableFailure {
+            retry: RetryTarget::Draft {
+                idea: "do it".to_string(),
+            },
+            detail: "provider error".to_string(),
+        };
+        assert!(matches!(
+            plan_stage_step(&mut app, failed_draft, ""),
+            StageAction::Draft { idea } if idea == "do it"
+        ));
+
+        // A new message replaces the failed input.
+        let failed_draft = BriefStage::RecoverableFailure {
+            retry: RetryTarget::Draft {
+                idea: "do it".to_string(),
+            },
+            detail: "provider error".to_string(),
+        };
+        assert!(matches!(
+            plan_stage_step(&mut app, failed_draft, "do it differently"),
+            StageAction::Draft { idea } if idea == "do it differently"
+        ));
+
+        // A failed revision keeps its draft and its instruction.
+        let failed_revision = BriefStage::RecoverableFailure {
+            retry: RetryTarget::Revision {
+                draft: test_draft(),
+                instruction: "make it shorter".to_string(),
+            },
+            detail: "malformed reply".to_string(),
+        };
+        assert!(matches!(
+            plan_stage_step(&mut app, failed_revision, ""),
+            StageAction::Revise { instruction, .. } if instruction == "make it shorter"
+        ));
+
+        // A failed clarified draft repeats with everything the record needs.
+        let failed_clarified = BriefStage::RecoverableFailure {
+            retry: RetryTarget::Clarified {
+                idea: "do it".to_string(),
+                threshold: 0.7,
+                assessment: assessment(),
+                questions: vec!["Where is it stored?".to_string()],
+                answers: vec![("storage".to_string(), "in a file".to_string())],
+            },
+            detail: "provider error".to_string(),
+        };
+        assert!(matches!(
+            plan_stage_step(&mut app, failed_clarified, ""),
+            StageAction::Clarified { idea, answers, .. }
+                if idea == "do it" && answers.len() == 1
+        ));
+    }
+
+    #[test]
+    fn a_model_call_publishes_an_in_flight_state_before_it_runs() {
+        // The whole reason `Generating` and `Revising` exist: while the model
+        // works, the conversation is visibly working rather than absent, so input
+        // typed then can be bound to it.
+        use localpilot_harness::BriefStage;
+
+        assert!(matches!(
+            in_flight_stage(&StageAction::Draft {
+                idea: "do it".to_string()
+            }),
+            Some(BriefStage::Generating)
+        ));
+        assert!(matches!(
+            in_flight_stage(&StageAction::Revise {
+                draft: test_draft(),
+                instruction: "shorter".to_string(),
+            }),
+            Some(BriefStage::Revising(_))
+        ));
+        assert!(
+            in_flight_stage(&StageAction::Stay(BriefStage::AwaitingIdea)).is_none(),
+            "a turn with no model call publishes nothing"
+        );
+    }
+
+    #[test]
+    fn approving_a_brief_is_classified_as_writing_the_project() {
+        // The incognito guard refuses persistent actions, so approval has to be
+        // one: it writes brief.md and the intake record.
+        use localpilot_slash::{BriefAction, SlashAction};
+
+        assert!(SlashAction::HarnessBrief(BriefAction::Approve)
+            .persistence()
+            .persistent_target()
+            .is_some());
+        for action in [
+            BriefAction::Show,
+            BriefAction::NoChange,
+            BriefAction::Reject,
+            BriefAction::Reset,
+            BriefAction::Cancel,
+        ] {
+            assert!(
+                SlashAction::HarnessBrief(action)
+                    .persistence()
+                    .persistent_target()
+                    .is_none(),
+                "{action:?} writes nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prompt_typed_before_a_conversation_is_not_claimed_by_it() {
+        // The first queue-order hazard. Text typed while nothing owned input
+        // belongs to the ordinary turn, and a conversation that starts
+        // afterwards does not retroactively claim it.
+        let mut brief_stages = BriefStageHost::new();
+        let before = prompt_target(localpilot_slash::Mode::Agent, &brief_stages);
+        assert_eq!(before, PromptTarget::Agent);
+
+        brief_stages.begin(localpilot_harness::BriefStage::AwaitingIdea);
+        assert_eq!(
+            before,
+            PromptTarget::Agent,
+            "a target already captured cannot change"
+        );
+        assert!(matches!(
+            prompt_target(localpilot_slash::Mode::Agent, &brief_stages),
+            PromptTarget::BriefStage(_)
+        ));
+    }
+
+    #[test]
+    fn a_conversation_generation_is_never_reused() {
+        // "Route only to that exact generation" is worth nothing if two
+        // conversations can share a number.
+        let mut brief_stages = BriefStageHost::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..5 {
+            let generation = brief_stages.begin(localpilot_harness::BriefStage::AwaitingIdea);
+            assert!(seen.insert(generation), "generation {generation:?} reused");
+            brief_stages.end(localpilot_harness::StageOutcome::Cancelled);
+        }
+    }
+
+    #[test]
+    fn starting_a_conversation_supersedes_the_live_one() {
+        let mut brief_stages = BriefStageHost::new();
+        let first = brief_stages.begin(localpilot_harness::BriefStage::AwaitingIdea);
+        let second = brief_stages.begin(localpilot_harness::BriefStage::AwaitingIdea);
+
+        assert_ne!(first, second);
+        assert_eq!(
+            brief_stages.outcome_of(first),
+            Some(localpilot_harness::StageOutcome::Superseded),
+            "the replaced conversation records why it ended"
+        );
+        assert_eq!(brief_stages.live_generation(), Some(second));
+    }
+
+    #[test]
+    fn every_ending_is_remembered_by_its_own_reason() {
+        // The second queue-order hazard: a prompt whose conversation ended must
+        // be told which ending happened, not merely that one did.
+        for outcome in [
+            localpilot_harness::StageOutcome::Approved,
+            localpilot_harness::StageOutcome::Rejected,
+            localpilot_harness::StageOutcome::Cancelled,
+        ] {
+            let mut brief_stages = BriefStageHost::new();
+            let generation = brief_stages.begin(localpilot_harness::BriefStage::AwaitingIdea);
+            brief_stages.end(outcome);
+
+            assert_eq!(brief_stages.live_generation(), None);
+            assert_eq!(brief_stages.outcome_of(generation), Some(outcome));
+        }
+    }
+
+    #[test]
+    fn an_aged_out_generation_degrades_instead_of_growing_the_record() {
+        // The endings are bounded, so a long session cannot accumulate them.
+        // Past the bound a prompt gets the generic close — the one honest use of
+        // absence, and a rare one.
+        let mut brief_stages = BriefStageHost::new();
+        let first = brief_stages.begin(localpilot_harness::BriefStage::AwaitingIdea);
+        brief_stages.end(localpilot_harness::StageOutcome::Cancelled);
+        for _ in 0..REMEMBERED_STAGE_OUTCOMES {
+            brief_stages.begin(localpilot_harness::BriefStage::AwaitingIdea);
+            brief_stages.end(localpilot_harness::StageOutcome::Cancelled);
+        }
+
+        assert_eq!(brief_stages.recent.len(), REMEMBERED_STAGE_OUTCOMES);
+        assert_eq!(
+            brief_stages.outcome_of(first),
+            None,
+            "the oldest ending is forgotten rather than remembered forever"
+        );
+    }
+
+    #[test]
+    fn a_live_conversation_owns_input_whatever_the_mode_says() {
+        // #164: stage input never becomes an ordinary turn. The mode is not
+        // consulted while a conversation is live.
+        let mut brief_stages = BriefStageHost::new();
+        let generation = brief_stages.begin(localpilot_harness::BriefStage::AwaitingIdea);
+        for mode in [
+            localpilot_slash::Mode::Agent,
+            localpilot_slash::Mode::Harness,
+            localpilot_slash::Mode::Research,
+        ] {
+            assert_eq!(
+                prompt_target(mode, &brief_stages),
+                PromptTarget::BriefStage(generation),
+                "{mode:?} does not outrank the live conversation"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_prompts_keep_the_owner_they_were_enqueued_under() {
+        // A prompt's target is captured at ENQUEUE from the state in force then, so
+        // nothing that happens while it waits can reinterpret who it belongs to.
+        // Covers the three mode-derived targets; the brief-conversation target has
+        // its own tests, because it is the one that made this binding necessary.
         for (mode, expected) in [
-            (localpilot_slash::Mode::Agent, PromptKind::Agent),
-            (localpilot_slash::Mode::Harness, PromptKind::Harness),
-            (localpilot_slash::Mode::Research, PromptKind::Research),
+            (localpilot_slash::Mode::Agent, PromptTarget::Agent),
+            (localpilot_slash::Mode::Harness, PromptTarget::Harness),
+            (localpilot_slash::Mode::Research, PromptTarget::Research),
         ] {
             let mut app = app();
             app.begin_work();
@@ -15013,13 +16395,13 @@ mod tests {
                 &steer,
                 &mut pending_steer_items,
             ));
-            // Switch the live mode AFTER the prompt is queued — the captured kind
-            // must not change.
+            // Switch the live mode AFTER the prompt is queued — the captured
+            // target must not change.
             app.set_shared_mode(localpilot_slash::Mode::Agent);
             assert_eq!(
-                queue.front().expect("one queued prompt").prompt().kind,
+                queue.front().expect("one queued prompt").prompt().target,
                 expected,
-                "prompt enqueued under {mode:?} keeps its kind after a mode switch"
+                "prompt enqueued under {mode:?} keeps its target after a mode switch"
             );
         }
     }
@@ -15317,6 +16699,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             ProgressLane::None,
             operation,
             |app: &mut AppModel, result: (anyhow::Result<()>, Vec<u8>)| {
@@ -15419,6 +16802,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             ProgressLane::None,
             std::future::ready(()),
             |app: &mut AppModel, ()| {
@@ -15489,6 +16873,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             ProgressLane::None,
             std::future::ready(()),
             |app: &mut AppModel, ()| {
@@ -15576,6 +16961,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             ProgressLane::None,
             operation,
             |app: &mut AppModel, partial: String| {
@@ -15901,14 +17287,14 @@ mod tests {
                 .any(|entry| entry.name == "Mode and profile" && entry.value.contains("harness")),
             "the settings 'Mode and profile' row reads harness"
         );
-        // The route-derived Harness mode captures `PromptKind::Harness`, which drains to
-        // the ordinary turn (inline parity — same as Agent). Ordinary text/image handling
-        // + drain/persistence are covered by `queued_prompts_keep_the_mode_they_were_enqueued_under`
-        // and the exhaustive `PromptKind::Harness => drive_turn` arm.
+        // With no brief conversation live, the route-derived Harness mode captures
+        // `PromptTarget::Harness`, which drains to the ordinary turn (inline parity
+        // — same as Agent). Ownership binding is covered by
+        // `queued_prompts_keep_the_owner_they_were_enqueued_under`.
         assert_eq!(
-            prompt_kind(app.mode()),
-            PromptKind::Harness,
-            "Harness mode captures PromptKind::Harness"
+            prompt_target(app.mode(), &BriefStageHost::new()),
+            PromptTarget::Harness,
+            "Harness mode with no live conversation captures PromptTarget::Harness"
         );
         // `/agent` exits Harness via the REAL route (not a direct `set_shared_mode`).
         let _ = execute_fullscreen_slash(
@@ -15944,6 +17330,7 @@ mod tests {
             &mut bundle.runtime,
             &config,
             cwd,
+            &mut BriefStageHost::new(),
             &incognito_entry,
             &history,
             SlashAction::SetMode(localpilot_slash::Mode::Research),
@@ -16016,6 +17403,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             std::future::ready(()),
             move |_app: &mut AppModel, _reason: ()| recorder.set(true),
         )
@@ -16067,6 +17455,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             operation,
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -16117,6 +17506,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             std::future::ready(()),
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -16167,6 +17557,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             complete_after(20),
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -16220,6 +17611,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             complete_after(20),
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -16276,6 +17668,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             operation,
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -16315,6 +17708,7 @@ mod tests {
             &history,
             std::path::Path::new("."),
             &image_capability(false),
+            &BriefStageHost::new(),
             None,
             None,
             &mut pending_steer_items,
@@ -16362,6 +17756,7 @@ mod tests {
             &history,
             std::path::Path::new("."),
             &image_capability(false),
+            &BriefStageHost::new(),
             None,
             None,
             &mut pending_steer_items,
@@ -16416,6 +17811,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             complete_after(35),
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -16467,6 +17863,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             complete_after(35),
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -16534,6 +17931,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             complete_after(20),
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -16574,6 +17972,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             std::future::ready(()),
             move |_app: &mut AppModel, _result: ()| recorder.set(true),
         )
@@ -16618,6 +18017,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             operation,
             |_app: &mut AppModel, _result: ()| {},
         )
@@ -16664,6 +18064,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             std::future::ready(()),
             |_app: &mut AppModel, _result: ()| {},
         )
@@ -16710,6 +18111,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             operation,
             |_app: &mut AppModel, _result: ()| {},
         )
@@ -16777,6 +18179,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             std::future::ready(()),
             move |app: &mut AppModel, _t: ()| {
                 let drained = app
@@ -16880,6 +18283,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             complete_after(500),
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -16931,6 +18335,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             std::future::ready(()),
             |_app: &mut AppModel, _result: ()| {},
         )
@@ -16973,6 +18378,7 @@ mod tests {
             &history,
             std::path::Path::new("."),
             &image_capability(false),
+            &BriefStageHost::new(),
             None,
             None,
         ));
@@ -17027,6 +18433,7 @@ mod tests {
             &mut mouse_state,
             &mut paste_burst,
             &mut workspace_index,
+            &mut BriefStageHost::new(),
             operation,
             |_app: &mut AppModel, _reason: ()| {},
         )
@@ -18064,6 +19471,831 @@ last_seen = "2026-08-10"
         assert!(!app.incognito(), "live UI projection left incognito");
         assert!(!bundle.runtime.store().is_ephemeral());
         assert!(incognito_entry.borrow().is_none(), "entry snapshot cleared");
+        bundle.runtime.close();
+    }
+
+    // ------------------------------------------------------------------
+    // The real `/harness-intake` and `/harness-brief` routes, driven over
+    // the operation pump with a fake provider.
+    //
+    // Everything below calls the production functions — the same ones the
+    // host calls — with the terminal injected. The transition table and the
+    // domain calls have their own tests; these cover the seam where they
+    // meet, which is where a brief could reach disk without a decision.
+    // ------------------------------------------------------------------
+
+    /// A guidance reply leaving one decision open, so the gate asks one question.
+    const ROUTE_OPEN_AXIS: &str = r#"{"axes": [
+      {"axis": "storage", "resolved": false, "evidence": "not specified",
+       "question": "Where should greetings be stored?"}
+    ]}"#;
+
+    /// A guidance reply with nothing open, so drafting proceeds.
+    const ROUTE_SETTLED: &str = r#"{"axes": []}"#;
+
+    const ROUTE_BRIEF: &str = "# Brief: greeting\n\n## Summary\n\nGreet the user.\n\n\
+## Requirements\n\n- It greets\n\n## Constraints\n\n- Be small\n\n\
+## Non-Goals\n\n- Anything else\n\n## Acceptance Criteria\n\n- A test passes\n";
+
+    const ROUTE_REVISED: &str = "# Brief: greeting\n\n## Summary\n\nGreet the user.\n\n\
+## Requirements\n\n- It greets\n- It greets in two languages\n\n## Constraints\n\n- Be small\n\n\
+## Non-Goals\n\n- Anything else\n\n## Acceptance Criteria\n\n- A test passes\n";
+
+    /// A session whose provider answers with `scripts`, in order.
+    async fn brief_session(dir: &Path, provider: Arc<FakeProvider>) -> InteractiveSessionBundle {
+        let mut declaration = FakeProvider::new().declaration().clone();
+        declaration.id = "first".to_string();
+        declaration.display_name = "first".to_string();
+        let providers = HashMap::from([(
+            "first".to_string(),
+            provider.clone() as Arc<dyn ModelProvider>,
+        )]);
+        let models = HashMap::from([("first".to_string(), "model-a".to_string())]);
+        let mut config = localpilot_config::Config::default();
+        config.provider.default = "first".to_string();
+        config
+            .providers
+            .insert("first".to_string(), ProviderConfig::default());
+        let setup = InteractiveSessionSetup::for_test(
+            dir.to_path_buf(),
+            config,
+            Profile::Default,
+            ProviderRegistry::from_providers(providers, models, "first"),
+        );
+        setup.build("first", "model-a").await.unwrap()
+    }
+
+    fn scripted(texts: &[&str]) -> Arc<FakeProvider> {
+        let mut declaration = FakeProvider::new().declaration().clone();
+        declaration.id = "first".to_string();
+        declaration.display_name = "first".to_string();
+        let mut provider = FakeProvider::new().with_declaration(declaration);
+        for text in texts {
+            provider = provider.text(text);
+        }
+        Arc::new(provider)
+    }
+
+    /// The host state a brief conversation lives in, so a test can drive the
+    /// real routes turn by turn instead of one call at a time.
+    struct BriefHost {
+        _approval_tx: mpsc::UnboundedSender<ApprovalCall>,
+        approval_rx: mpsc::UnboundedReceiver<ApprovalCall>,
+        _question_tx: mpsc::UnboundedSender<QuestionCall>,
+        question_rx: mpsc::UnboundedReceiver<QuestionCall>,
+        history: localpilot_store::PromptHistory,
+        mouse_state: MouseState,
+        paste_burst: PasteBurst,
+        workspace_index: WorkspaceFileIndex,
+        queue: VecDeque<QueuedOperation>,
+        stages: BriefStageHost,
+        guidance: Option<localpilot_harness::GuidanceParams>,
+        cwd: std::path::PathBuf,
+        /// Whether the host projected active work, sampled on every frame the
+        /// step drew. The only way to see a transition that is supposed to hold
+        /// FOR the duration of a call rather than merely end correctly.
+        work_seen: std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
+    }
+
+    impl BriefHost {
+        fn new(cwd: &Path, guidance: Option<localpilot_harness::GuidanceParams>) -> Self {
+            let (_approval_tx, approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+            let (_question_tx, question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+            Self {
+                _approval_tx,
+                approval_rx,
+                _question_tx,
+                question_rx,
+                history: localpilot_store::PromptHistory::with_store(None),
+                mouse_state: MouseState::default(),
+                paste_burst: PasteBurst::default(),
+                workspace_index: WorkspaceFileIndex::start(cwd.to_path_buf()),
+                queue: VecDeque::new(),
+                stages: BriefStageHost::new(),
+                guidance,
+                cwd: cwd.to_path_buf(),
+                work_seen: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            }
+        }
+
+        /// The injected terminal, which samples the work state as it draws.
+        fn io(&self) -> CharacterizationIo {
+            self.io_failing_at(None)
+        }
+
+        /// The same terminal, with the nth draw failing — the production way a
+        /// pump tears down mid-operation.
+        fn io_failing_at(&self, err_at: Option<usize>) -> CharacterizationIo {
+            let seen = self.work_seen.clone();
+            let drawn = std::rc::Rc::new(std::cell::Cell::new(0usize));
+            TerminalIo {
+                poll: Box::new(|_timeout: Duration| Ok(false)),
+                read: Box::new(|| Ok(Event::FocusGained)),
+                draw: Box::new(move |app: &AppModel| {
+                    seen.borrow_mut().push(app.active_work_activity().is_some());
+                    let n = drawn.get() + 1;
+                    drawn.set(n);
+                    if err_at == Some(n) {
+                        return Err(anyhow::anyhow!("injected draw failure"));
+                    }
+                    Ok(draw_hit_map(app, 80, 24))
+                }),
+                event_driven: false,
+            }
+        }
+
+        /// `/harness-intake <idea>` against a terminal whose nth draw fails.
+        async fn intake_with_failing_draw(
+            &mut self,
+            app: &mut AppModel,
+            runtime: &mut SessionRuntime,
+            idea: &str,
+            err_at: usize,
+        ) -> Result<()> {
+            let mut io = self.io_failing_at(Some(err_at));
+            let Self {
+                approval_rx,
+                question_rx,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+                queue,
+                stages,
+                guidance,
+                cwd,
+                ..
+            } = self;
+            drive_harness_intake_on(
+                app,
+                runtime,
+                &mut SlashContext {
+                    approval_rx,
+                    question_rx,
+                    cwd: cwd.as_path(),
+                    history,
+                    mouse_state,
+                    paste_burst,
+                    workspace_index,
+                    brief_stages: stages,
+                    guidance: *guidance,
+                },
+                queue,
+                &mut io,
+                Some(idea.to_string()),
+            )
+            .await
+        }
+
+        fn drew_while_working(&self) -> bool {
+            self.work_seen.borrow().iter().any(|busy| *busy)
+        }
+
+        fn forget_work_frames(&self) {
+            self.work_seen.borrow_mut().clear();
+        }
+
+        fn live(&self) -> Option<StageGeneration> {
+            self.stages.live_generation()
+        }
+
+        /// `/harness-intake [idea]`.
+        async fn intake(
+            &mut self,
+            app: &mut AppModel,
+            runtime: &mut SessionRuntime,
+            idea: Option<&str>,
+        ) {
+            let mut io = self.io();
+            let Self {
+                approval_rx,
+                question_rx,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+                queue,
+                stages,
+                guidance,
+                cwd,
+                ..
+            } = self;
+            drive_harness_intake_on(
+                app,
+                runtime,
+                &mut SlashContext {
+                    approval_rx,
+                    question_rx,
+                    cwd: cwd.as_path(),
+                    history,
+                    mouse_state,
+                    paste_burst,
+                    workspace_index,
+                    brief_stages: stages,
+                    guidance: *guidance,
+                },
+                queue,
+                &mut io,
+                idea.map(str::to_string),
+            )
+            .await
+            .expect("the intake route runs");
+        }
+
+        /// One message into the conversation that owns `generation`.
+        async fn say_to(
+            &mut self,
+            app: &mut AppModel,
+            runtime: &mut SessionRuntime,
+            generation: StageGeneration,
+            text: &str,
+            work: BeginWork,
+        ) {
+            let mut io = self.io();
+            let Self {
+                approval_rx,
+                question_rx,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+                queue,
+                stages,
+                guidance,
+                cwd,
+                ..
+            } = self;
+            drive_brief_stage_input_on(
+                app,
+                runtime,
+                &mut SlashContext {
+                    approval_rx,
+                    question_rx,
+                    cwd: cwd.as_path(),
+                    history,
+                    mouse_state,
+                    paste_burst,
+                    workspace_index,
+                    brief_stages: stages,
+                    guidance: *guidance,
+                },
+                queue,
+                &mut io,
+                generation,
+                text,
+                work,
+            )
+            .await
+            .expect("the stage input route runs");
+        }
+
+        /// One message into whatever conversation is live, over the route a
+        /// typed message actually takes: enqueued, drained by
+        /// `drive_operation_chain`, and therefore already Busy when it arrives.
+        async fn say(&mut self, app: &mut AppModel, runtime: &mut SessionRuntime, text: &str) {
+            let generation = self.live().expect("a live conversation to speak to");
+            app.begin_work_before(None);
+            self.say_to(app, runtime, generation, text, BeginWork::AlreadyBusy)
+                .await;
+        }
+
+        /// `/harness-brief <action>`.
+        async fn brief(
+            &mut self,
+            app: &mut AppModel,
+            runtime: &mut SessionRuntime,
+            action: localpilot_slash::BriefAction,
+        ) {
+            let mut io = self.io();
+            let Self {
+                approval_rx,
+                question_rx,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+                queue,
+                stages,
+                guidance,
+                cwd,
+                ..
+            } = self;
+            drive_harness_brief_on(
+                app,
+                runtime,
+                &mut SlashContext {
+                    approval_rx,
+                    question_rx,
+                    cwd: cwd.as_path(),
+                    history,
+                    mouse_state,
+                    paste_burst,
+                    workspace_index,
+                    brief_stages: stages,
+                    guidance: *guidance,
+                },
+                queue,
+                &mut io,
+                action,
+            )
+            .await
+            .expect("the brief route runs");
+        }
+    }
+
+    fn last_intake_record(root: &Path) -> serde_json::Value {
+        let log = std::fs::read_to_string(root.join(".localpilot").join("intake.jsonl"))
+            .expect("an intake record was appended");
+        serde_json::from_str(log.lines().last().expect("at least one record"))
+            .expect("the record is JSON")
+    }
+
+    #[tokio::test]
+    async fn the_real_route_clarifies_drafts_revises_and_writes_only_on_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        // assess (one open decision) -> re-assess the answered idea -> draft -> revise.
+        let provider = scripted(&[ROUTE_OPEN_AXIS, ROUTE_SETTLED, ROUTE_BRIEF, ROUTE_REVISED]);
+        let mut bundle = brief_session(cwd, provider.clone()).await;
+        let mut app = app();
+        let mut host = BriefHost::new(
+            cwd,
+            Some(localpilot_harness::GuidanceParams {
+                threshold: 0.7,
+                max_questions: 5,
+            }),
+        );
+
+        host.intake(&mut app, &mut bundle.runtime, Some("greet the user"))
+            .await;
+        assert!(
+            matches!(
+                host.stages.live.as_ref(),
+                Some((_, localpilot_harness::BriefStage::Clarifying { .. }))
+            ),
+            "the configured gate ran and the conversation is collecting answers"
+        );
+        assert!(
+            timeline_has(&app, "Where should greetings be stored?"),
+            "the question the gate produced was actually put to the user"
+        );
+
+        host.say(&mut app, &mut bundle.runtime, "in a file").await;
+        assert!(
+            matches!(
+                host.stages.live.as_ref(),
+                Some((_, localpilot_harness::BriefStage::Reviewing(_)))
+            ),
+            "answering the last question drafts and shows the brief"
+        );
+        assert!(!cwd.join("brief.md").exists(), "a draft writes nothing");
+
+        host.say(
+            &mut app,
+            &mut bundle.runtime,
+            "add a second language to the requirements",
+        )
+        .await;
+        assert!(!cwd.join("brief.md").exists(), "a revision writes nothing");
+
+        host.brief(
+            &mut app,
+            &mut bundle.runtime,
+            localpilot_slash::BriefAction::Approve,
+        )
+        .await;
+        let written = std::fs::read_to_string(cwd.join("brief.md")).expect("brief.md written");
+        assert_eq!(
+            written,
+            localpilot_harness::Brief::parse(ROUTE_REVISED)
+                .unwrap()
+                .render(),
+            "approval writes exactly the draft that was under review"
+        );
+        assert!(
+            host.live().is_none(),
+            "an approved conversation is over, not still holding input"
+        );
+
+        // The audit record is the shipped shape: the user's own idea, the
+        // questions that were put, and the answers that were given.
+        let record = last_intake_record(cwd);
+        assert_eq!(record["idea"], "greet the user");
+        assert_eq!(record["name"], "greeting");
+        assert_eq!(
+            record["guidance"]["questions"],
+            serde_json::json!(["Where should greetings be stored?"])
+        );
+        assert_eq!(
+            record["guidance"]["answers"],
+            serde_json::json!([{"axis": "storage", "answer": "in a file"}])
+        );
+        assert_eq!(
+            provider.requests().len(),
+            4,
+            "assess, re-assess, draft, revise"
+        );
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn rejecting_and_cancelling_leave_the_project_untouched() {
+        for action in [
+            localpilot_slash::BriefAction::Reject,
+            localpilot_slash::BriefAction::Cancel,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path();
+            let provider = scripted(&[ROUTE_BRIEF]);
+            let mut bundle = brief_session(cwd, provider).await;
+            let mut app = app();
+            let mut host = BriefHost::new(cwd, None);
+
+            host.intake(&mut app, &mut bundle.runtime, Some("greet the user"))
+                .await;
+            assert!(matches!(
+                host.stages.live.as_ref(),
+                Some((_, localpilot_harness::BriefStage::Reviewing(_)))
+            ));
+
+            host.brief(&mut app, &mut bundle.runtime, action).await;
+            assert!(
+                !cwd.join("brief.md").exists(),
+                "{action:?} must not write the project"
+            );
+            assert!(
+                !cwd.join(".localpilot").join("intake.jsonl").exists(),
+                "{action:?} appends no audit record either"
+            );
+            assert!(host.live().is_none(), "{action:?} ends the conversation");
+            bundle.runtime.close();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_provider_failure_keeps_the_conversation_and_the_next_message_retries_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let mut declaration = FakeProvider::new().declaration().clone();
+        declaration.id = "first".to_string();
+        declaration.display_name = "first".to_string();
+        // The first drafting call fails at the stream; the retry succeeds.
+        let provider = Arc::new(
+            FakeProvider::new()
+                .with_declaration(declaration)
+                .malformed()
+                .text(ROUTE_BRIEF),
+        );
+        let mut bundle = brief_session(cwd, provider.clone()).await;
+        let mut app = app();
+        let mut host = BriefHost::new(cwd, None);
+
+        host.intake(&mut app, &mut bundle.runtime, Some("greet the user"))
+            .await;
+        let generation = host
+            .live()
+            .expect("a failed attempt does not end the conversation");
+        assert!(
+            matches!(
+                host.stages.live.as_ref(),
+                Some((_, localpilot_harness::BriefStage::RecoverableFailure { .. }))
+            ),
+            "a provider failure is recoverable, not terminal"
+        );
+        assert!(timeline_has(&app, "that attempt failed"));
+
+        // An empty message repeats the attempt that failed, in the same
+        // conversation, with the same idea.
+        host.say(&mut app, &mut bundle.runtime, "").await;
+        assert_eq!(
+            host.live(),
+            Some(generation),
+            "the retry belongs to the conversation that failed, not a new one"
+        );
+        assert!(matches!(
+            host.stages.live.as_ref(),
+            Some((_, localpilot_harness::BriefStage::Reviewing(_)))
+        ));
+        assert!(!cwd.join("brief.md").exists());
+        assert_eq!(
+            provider.requests().len(),
+            2,
+            "the failed call and its retry"
+        );
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn a_message_to_an_ended_conversation_says_why_and_never_becomes_a_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let provider = scripted(&[ROUTE_BRIEF]);
+        let mut bundle = brief_session(cwd, provider.clone()).await;
+        let mut app = app();
+        let mut host = BriefHost::new(cwd, None);
+
+        host.intake(&mut app, &mut bundle.runtime, Some("greet the user"))
+            .await;
+        let generation = host.live().expect("a live conversation");
+        host.brief(
+            &mut app,
+            &mut bundle.runtime,
+            localpilot_slash::BriefAction::Reject,
+        )
+        .await;
+
+        let before = provider.requests().len();
+        app.begin_work_before(None);
+        host.say_to(
+            &mut app,
+            &mut bundle.runtime,
+            generation,
+            "and another thing",
+            BeginWork::AlreadyBusy,
+        )
+        .await;
+        assert!(
+            app.active_work_activity().is_none(),
+            "a message that goes nowhere still has to end the work state it entered"
+        );
+        assert!(
+            timeline_has(&app, "the draft was rejected"),
+            "the message is closed with the real reason, not `the stage is gone`"
+        );
+        assert!(
+            timeline_has(&app, "this message was not sent"),
+            "the user is told their text went nowhere"
+        );
+        assert_eq!(
+            provider.requests().len(),
+            before,
+            "a message for an ended conversation never reaches the model"
+        );
+        assert!(host.queue.is_empty(), "and never becomes a queued turn");
+        bundle.runtime.close();
+    }
+
+    /// `BRIEF` bound into a plan: the same shape every real `PROGRESS.md` has.
+    fn bound_plan(brief_text: &str, steps: &str) -> String {
+        let revision = localpilot_harness::BriefRevision::of(
+            &localpilot_harness::Brief::parse(brief_text).unwrap(),
+        );
+        format!(
+            "# Progress: greeting\nBranch: feature/greeting\nBrief: {revision}\n\n## Steps\n\n\
+             {steps}"
+        )
+    }
+
+    #[tokio::test]
+    async fn no_change_writes_nothing_and_says_where_the_project_stands() {
+        // 02.5: leaving a brief alone returns control to lifecycle routing. Every
+        // state answers, not just the two the first cut had arms for.
+        let cases: Vec<(&str, Option<String>, &str)> = vec![
+            (
+                "a ready plan",
+                Some(bound_plan(ROUTE_BRIEF, "- [ ] 1. Implement it\n")),
+                "resume it with /harness-resume",
+            ),
+            (
+                "a completed plan",
+                Some(bound_plan(
+                    ROUTE_BRIEF,
+                    "- [x] 1. Implement it\n  - commit: abc1234\n",
+                )),
+                "every step in PROGRESS.md is already done",
+            ),
+            (
+                "an unreadable plan",
+                Some("this is not a plan".to_string()),
+                "PROGRESS.md cannot be used",
+            ),
+            ("no plan at all", None, "PROGRESS.md not found"),
+        ];
+
+        for (name, plan, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path();
+            std::fs::write(cwd.join("brief.md"), ROUTE_BRIEF).unwrap();
+            if let Some(plan) = &plan {
+                std::fs::write(cwd.join("PROGRESS.md"), plan).unwrap();
+            }
+            let before = std::fs::read(cwd.join("brief.md")).unwrap();
+
+            let provider = scripted(&[]);
+            let mut bundle = brief_session(cwd, provider.clone()).await;
+            let mut app = app();
+            let mut host = BriefHost::new(cwd, None);
+
+            // The saved brief opens FOR REVIEW, then the user leaves it alone.
+            host.brief(
+                &mut app,
+                &mut bundle.runtime,
+                localpilot_slash::BriefAction::Show,
+            )
+            .await;
+            assert!(
+                matches!(
+                    host.stages.live.as_ref(),
+                    Some((_, localpilot_harness::BriefStage::Reviewing(_)))
+                ),
+                "{name}: an existing brief is held for discussion, not just printed"
+            );
+
+            host.brief(
+                &mut app,
+                &mut bundle.runtime,
+                localpilot_slash::BriefAction::NoChange,
+            )
+            .await;
+            assert!(
+                timeline_has(&app, "brief.md is unchanged."),
+                "{name}: no-change says so"
+            );
+            assert!(
+                timeline_has(&app, expected),
+                "{name}: and says where the project stands ({expected})"
+            );
+            assert_eq!(
+                std::fs::read(cwd.join("brief.md")).unwrap(),
+                before,
+                "{name}: no-change writes nothing"
+            );
+            assert!(
+                !cwd.join(".localpilot").join("intake.jsonl").exists(),
+                "{name}: and appends no audit record"
+            );
+            assert!(host.live().is_none(), "{name}: the conversation is over");
+            assert!(
+                provider.requests().is_empty(),
+                "{name}: no-change never calls the model"
+            );
+            bundle.runtime.close();
+        }
+    }
+
+    #[tokio::test]
+    async fn approving_over_a_bound_plan_discloses_that_the_plan_went_stale() {
+        // Approving a revision changes the brief's revision, which makes the plan
+        // built from the old one stale by construction. The user is told, on both
+        // the clean path and the one where only the audit append failed — because
+        // on both of them `brief.md` has already changed.
+        for block_the_record in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path();
+            std::fs::write(cwd.join("brief.md"), ROUTE_BRIEF).unwrap();
+            std::fs::write(
+                cwd.join("PROGRESS.md"),
+                bound_plan(ROUTE_BRIEF, "- [ ] 1. Implement it\n"),
+            )
+            .unwrap();
+
+            let provider = scripted(&[ROUTE_REVISED]);
+            let mut bundle = brief_session(cwd, provider).await;
+            if block_the_record {
+                // A directory where the log file goes: the append fails, the
+                // atomic brief write does not.
+                std::fs::create_dir_all(cwd.join(".localpilot").join("intake.jsonl")).unwrap();
+            }
+            let mut app = app();
+            let mut host = BriefHost::new(cwd, None);
+
+            host.intake(&mut app, &mut bundle.runtime, Some("greet the user twice"))
+                .await;
+            host.brief(
+                &mut app,
+                &mut bundle.runtime,
+                localpilot_slash::BriefAction::Approve,
+            )
+            .await;
+
+            assert_eq!(
+                std::fs::read_to_string(cwd.join("brief.md")).unwrap(),
+                localpilot_harness::Brief::parse(ROUTE_REVISED)
+                    .unwrap()
+                    .render(),
+                "the approved brief is saved either way"
+            );
+            assert!(
+                timeline_has(&app, "Replan before resuming"),
+                "the plan built from the previous brief is now stale, and saying so is \
+                 the point of the binding (record blocked: {block_the_record})"
+            );
+            if block_the_record {
+                assert!(
+                    timeline_has(&app, "do not approve again"),
+                    "a failed audit append must not invite a second write of a correct file"
+                );
+            }
+            assert!(
+                host.live().is_none(),
+                "an approved brief ends the conversation on both paths"
+            );
+            bundle.runtime.close();
+        }
+    }
+
+    #[tokio::test]
+    async fn both_stage_routes_enter_work_once_and_end_idle() {
+        // The work state is not decoration: Ctrl+C, queueing and the working
+        // chrome all branch on it. A model call that runs while the host
+        // projects idle, and a finished draft that leaves it spinning, are the
+        // same defect seen from the two routes in.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let provider = scripted(&[ROUTE_BRIEF, ROUTE_REVISED]);
+        let mut bundle = brief_session(cwd, provider).await;
+        let mut app = app();
+        let mut host = BriefHost::new(cwd, None);
+
+        // 1. The pumped route: `/harness-intake <idea>` arrives idle and must
+        //    enter Busy itself.
+        assert!(
+            app.active_work_activity().is_none(),
+            "idle before the command"
+        );
+        host.intake(&mut app, &mut bundle.runtime, Some("greet the user"))
+            .await;
+        assert!(
+            host.drew_while_working(),
+            "the model call was projected as active work while it ran"
+        );
+        assert!(
+            app.active_work_activity().is_none(),
+            "and the host is idle again once the draft is shown"
+        );
+
+        // 2. The queued route: already Busy against an insertion anchor, which
+        //    this step must not reset — the reply belongs before the item the
+        //    caller anchored on, not appended after it.
+        host.forget_work_frames();
+        app.apply_runtime(RuntimeUpdate::Notice("ANCHOR".to_string()));
+        let anchor = app
+            .active_timeline()
+            .items()
+            .last()
+            .expect("the anchor item")
+            .id;
+        app.begin_work_before(Some(anchor));
+        let generation = host.live().expect("a live conversation");
+        host.say_to(
+            &mut app,
+            &mut bundle.runtime,
+            generation,
+            "add a second language to the requirements",
+            BeginWork::AlreadyBusy,
+        )
+        .await;
+        assert!(
+            host.drew_while_working(),
+            "the queued route's call is active work too"
+        );
+        assert!(
+            app.active_work_activity().is_none(),
+            "a queued stage prompt must not leave the host Busy after it finishes"
+        );
+
+        let items = app.active_timeline().items();
+        let position = |needle: &str| {
+            items
+                .iter()
+                .position(|item| item.text.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} is in the timeline"))
+        };
+        assert!(
+            position("revising the draft") < position("ANCHOR"),
+            "the step kept the caller's insertion anchor rather than entering work again"
+        );
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn a_torn_down_pump_still_leaves_the_host_idle() {
+        // The pump can fail rather than finish — a draw error takes it down
+        // mid-operation. The conversation dies with the host, but the work state
+        // is projected state, and a `?` that skips its terminal transition
+        // leaves a dead session looking like a running one.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let provider = scripted(&[ROUTE_BRIEF]);
+        let mut bundle = brief_session(cwd, provider).await;
+        let mut app = app();
+        let mut host = BriefHost::new(cwd, None);
+
+        let result = host
+            .intake_with_failing_draw(&mut app, &mut bundle.runtime, "greet the user", 1)
+            .await;
+        assert!(
+            result.is_err(),
+            "the draw failure is reported, not swallowed"
+        );
+        assert!(
+            app.active_work_activity().is_none(),
+            "and the work state does not outlive the call that entered it"
+        );
+        assert!(
+            !cwd.join("brief.md").exists(),
+            "a torn-down pump writes nothing"
+        );
         bundle.runtime.close();
     }
 }

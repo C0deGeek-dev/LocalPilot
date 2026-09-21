@@ -2044,6 +2044,17 @@ impl SessionRuntime {
         &self.config.model
     }
 
+    /// A handle to the active provider.
+    ///
+    /// For callers that need to make a one-off model call outside the session's
+    /// own turn loop — generating a document to show the user, for instance —
+    /// against the same provider the session is pointed at, so an in-session
+    /// `/model` switch is honoured without them tracking it.
+    #[must_use]
+    pub fn provider_handle(&self) -> Arc<dyn ModelProvider> {
+        Arc::clone(&self.provider)
+    }
+
     /// Re-point the session at the configured provider `id`, selecting the
     /// already-built provider from the attached registry. The transcript
     /// (`Vec<Message>`) is provider-neutral and is left untouched, so the

@@ -59,7 +59,6 @@ is SemVer-stable; the configuration schema stability policy is in
   new CI job (`install/lint-install-script.ps1`) parses the installer and rejects
   any assignment to a switch parameter, which nothing previously checked.
 
-
 - **A source excerpt is no longer a review candidate you can only reject**
   (ADR-0181, amending ADR-0153). `e` on the LocalMind tab's Review section
   writes the standalone lesson that a `/research` excerpt needs before it can be
@@ -91,6 +90,38 @@ is SemVer-stable; the configuration schema stability policy is in
   `a`/`r`/`p` inside it are refused with a reason rather than deciding on a row
   the operator cannot see. ADR-0090's `[stale: …]` and
   `[full source unavailable: …]` markers reach the screen (LocalHub#153).
+
+- **A brief can now be read before it becomes the project's.** `/harness-intake`
+  turns an idea into a draft you can discuss, revise and reject, and
+  `/harness-brief approve` is what writes `brief.md` — atomically, exactly as
+  reviewed. Previously the only intake path generated a brief and wrote it in the
+  same step, so the first sight of it was already the source of truth. The
+  guidance gate, its questions, the delegation contract and the
+  `.localpilot/intake.jsonl` record are the shipped ones, reused rather than
+  reimplemented.
+
+  The session shows work as running for as long as a draft or revision is being
+  generated, and goes idle when it is on screen — the same whether the message
+  was typed at the prompt or passed to `/harness-intake` directly.
+
+  A provider error, an unusable reply, or Ctrl+C keeps the conversation alive
+  with your idea, answers and draft intact, and the next message retries the
+  attempt — empty to repeat it, anything else to change its input. Only a
+  decision ends a conversation: approving, rejecting, `no-change`, cancelling,
+  `/agent`, a session change, or starting another one. Unapproved drafts are
+  never persisted, so a restart resumes from `brief.md` or from nothing.
+
+  Approving is classified as writing the project, so an incognito session
+  refuses it rather than quietly saving two files. However a conversation ends —
+  approved, saved but unrecorded, or left unchanged — it reports where the
+  project now stands using the same lifecycle gate `harness status` uses, so a
+  plan that just went stale, or one that is finished, says so instead of nothing.
+
+- **Every submitted prompt now records who it belongs to when it is queued.**
+  A prompt captured while a brief conversation is live belongs to that exact
+  conversation and can never drain into an ordinary model turn — including after
+  the conversation has ended, where it is closed with the real reason instead.
+  A prompt typed before a conversation started is never claimed by it.
 
 - **A harness plan now records the brief revision it was built from, and will not
   run against a brief that has moved.** `PROGRESS.md` gains a `Brief:` header
