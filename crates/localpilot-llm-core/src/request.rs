@@ -274,8 +274,12 @@ mod tests {
         assert!(constraint["definitions"].get("TextEditInput").is_some());
         assert!(constraint.get("$defs").is_some());
         assert!(constraint["$defs"].get("TextEditInput").is_some());
-        assert!(constraint["oneOf"][0]["properties"]["arguments"].get("definitions").is_none());
-        assert!(constraint["oneOf"][0]["properties"]["arguments"].get("$schema").is_none());
+        assert!(constraint["oneOf"][0]["properties"]["arguments"]
+            .get("definitions")
+            .is_none());
+        assert!(constraint["oneOf"][0]["properties"]["arguments"]
+            .get("$schema")
+            .is_none());
     }
 
     #[test]

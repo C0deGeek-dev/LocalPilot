@@ -452,7 +452,8 @@ impl ModelProvider for OpenAiProvider {
         // on a constrained request) must not break the turn. Retry once without
         // the constraint — native tool-calling — recording the fallback reason.
         // The retry carries no constraint, so this guard cannot recurse.
-        if (status.is_client_error() || status.as_u16() == 500) && request.tool_constraint.is_some() {
+        if (status.is_client_error() || status.as_u16() == 500) && request.tool_constraint.is_some()
+        {
             tracing::warn!(
                 status = status.as_u16(),
                 model = %request.model,
@@ -1978,27 +1979,56 @@ mod tests {
     #[test]
     fn constrained_decoding_option_and_thinking_policy() {
         // Base local server without options has constrained_decoding = true
-        let provider = OpenAiProvider::new("l", "L", SourceType::LocalServer, "http://127.0.0.1:8080", None);
+        let provider = OpenAiProvider::new(
+            "l",
+            "L",
+            SourceType::LocalServer,
+            "http://127.0.0.1:8080",
+            None,
+        );
         assert!(provider.declaration().capabilities.constrained_decoding);
 
         // When thinking is active (suppress_thinking not true), constrained_decoding is disabled
-        let with_reasoning = OpenAiProvider::new("l", "L", SourceType::LocalServer, "http://127.0.0.1:8080", None)
-            .with_default_options(IndexMap::new());
-        assert!(!with_reasoning.declaration().capabilities.constrained_decoding);
+        let with_reasoning = OpenAiProvider::new(
+            "l",
+            "L",
+            SourceType::LocalServer,
+            "http://127.0.0.1:8080",
+            None,
+        )
+        .with_default_options(IndexMap::new());
+        assert!(
+            !with_reasoning
+                .declaration()
+                .capabilities
+                .constrained_decoding
+        );
 
         // When thinking is suppressed, constrained_decoding stays enabled
         let mut suppressed_opts = IndexMap::new();
         suppressed_opts.insert("suppress_thinking".to_string(), json!(true));
-        let suppressed = OpenAiProvider::new("l", "L", SourceType::LocalServer, "http://127.0.0.1:8080", None)
-            .with_default_options(suppressed_opts);
+        let suppressed = OpenAiProvider::new(
+            "l",
+            "L",
+            SourceType::LocalServer,
+            "http://127.0.0.1:8080",
+            None,
+        )
+        .with_default_options(suppressed_opts);
         assert!(suppressed.declaration().capabilities.constrained_decoding);
 
         // Explicit constrained_decoding = false disables it even if thinking is suppressed
         let mut explicit_false = IndexMap::new();
         explicit_false.insert("suppress_thinking".to_string(), json!(true));
         explicit_false.insert("constrained_decoding".to_string(), json!(false));
-        let disabled = OpenAiProvider::new("l", "L", SourceType::LocalServer, "http://127.0.0.1:8080", None)
-            .with_default_options(explicit_false);
+        let disabled = OpenAiProvider::new(
+            "l",
+            "L",
+            SourceType::LocalServer,
+            "http://127.0.0.1:8080",
+            None,
+        )
+        .with_default_options(explicit_false);
         assert!(!disabled.declaration().capabilities.constrained_decoding);
     }
 }
