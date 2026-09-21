@@ -2,6 +2,84 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0182: A Brief Is Read Before It Is The Project's, And Only Approval Writes
+
+**Status:** accepted · **Date:** 2026-09-21. Builds on ADR-0179 (a plan records
+the brief revision it was built from). Reuses the guidance gate shipped for
+LocalHub #15 rather than adding a second one.
+
+**Context.** `harness intake` wrote `brief.md` the moment the model produced a
+parseable document. There was no state between "the model replied" and "this is
+the project's brief", so the first time anyone saw a brief it was already the
+source of truth, and the only way to change it was to edit the file or run
+intake again over the top of it. The full-screen host had no intake entry at
+all, so a user inside `localpilot chat` had to leave it and know a separate CLI
+workflow before the visible Harness mode could become operational.
+
+A conversational flow raises three questions the CLI never had to answer: where
+an unapproved draft lives, who a typed message belongs to while one is open, and
+what happens to that message when the conversation ends before it drains.
+
+**Decision.**
+
+**One draft API, host-neutral.** `localpilot_harness::intake` generates and
+validates without touching the project — `draft_brief`, `draft_with_answers`,
+`revise_brief` — and `persist_approved` is the only function that writes. The
+CLI's `intake_flow` drives that same API, so the guidance gate, the clarification
+contract, the bounded repair budget and the `.localpilot/intake.jsonl` record
+have exactly one implementation. A future non-TUI review surface inherits them
+rather than forking them.
+
+**Approval is the write.** The brief is replaced atomically through
+`localpilot_store::atomic_write`, and the audit record is appended separately.
+The two failures are reported differently because they call for different things:
+a brief that was not written can be retried, and a brief that was written but not
+recorded must not be, since approving again would rewrite a file that is already
+correct.
+
+**Stage-local state belongs to the host, keyed by a generation.** An in-session
+conversation is neither document state nor operation state; it lives in the
+full-screen host under a monotonic, never-reused `StageGeneration`. Its live
+positions are named — awaiting an idea, clarifying, generating, reviewing,
+revising, recoverable failure — and its terminal outcomes are a person's decision
+or a newer conversation: approved, rejected, cancelled, superseded. A machine
+failure is not terminal. A provider error, an unusable reply, an exhausted repair
+budget or Ctrl+C keeps the conversation live with the work intact, and the next
+message retries the attempt.
+
+**A prompt binds to its conversation at enqueue, not at drain.** The alternative
+— deciding at drain time whether a stage is live — reinterprets a prompt after
+the fact in both directions: a message typed before any conversation existed gets
+swallowed by one that started later, and a message typed during a revision drains
+after approval and falls through to an ordinary model turn, which is the one
+thing the interactive brief flow must never do. A prompt captures its generation
+when it is queued, routes only to that exact conversation, and when that
+conversation has ended is closed with its real outcome rather than with the
+absence of one.
+
+**Work state is owned explicitly, and ended on every exit.** Two routes reach a
+model call — a pumped command, which arrives idle, and a queued prompt, which
+`drive_operation_chain` has already marked busy against an insertion anchor. The
+route declares which it is; re-entering would clear the anchor and move the reply
+out from under the item it belongs before. Every exit, including the ones that
+make no call and the ones that fail, ends the transition.
+
+**One lifecycle disclosure.** However a conversation ends — approved, saved but
+unrecorded, or left unchanged — it reports where the project now stands through
+`inspect` and `resumable`, the gate ADR-0179 established, rather than a private
+table of document states. A second table is how two surfaces come to disagree
+about the same project.
+
+**Consequences.** An unapproved draft does not survive a restart, `/agent`, or a
+session change, and that is deliberate: it is not project truth, and persisting
+it would create a second source of it. Approving a revision makes a plan built
+from the previous brief stale by construction through ADR-0179's binding — no
+second invalidation path — and completed steps, their commits and their attempt
+counts are untouched. Approving is classified as writing the project, so an
+incognito session refuses it. The full-screen host now carries stage-local state
+it did not have before; it is bounded (one live conversation, a capped ring of
+recent outcomes) and dies with the session.
+
 ## ADR-0181: The Terminal Review Pane Owns The Rewrite That Unblocks An Excerpt
 
 **Status:** accepted · **Date:** 2026-08-31. Recorded first as ADR-0177, a

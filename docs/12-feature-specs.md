@@ -331,6 +331,25 @@ UI:
 - footer shows quota state and reset timer
 - paused sessions show next eligible resume time
 - continuous mode shows that unattended resume is enabled
+- `/harness-intake` and `/harness-brief` run in the full-screen chat host on the
+  operation pump and are the only path where a brief is seen before it is saved.
+  (`localpilot harness intake --clarify=ask` is interactive too, and writes
+  through the same persist API; what it cannot do is show the brief and wait.)
+  `/harness-intake [idea]` opens a conversation: it asks for an idea when none is
+  given, puts the configured guidance gate's open questions one at a time (an
+  empty answer delegates that one), and shows a validated draft. While the
+  conversation is live every typed message belongs to it — a plain message is a
+  revision instruction — and nothing is written. `/harness-brief` decides:
+  `show` opens the saved brief for the same kind of conversation, `approve`
+  writes it atomically and appends the intake record, `reject` and `cancel`
+  discard the draft, `reset` starts again from the original idea, and `no-change`
+  ends without writing. A provider error, an unusable reply, an exhausted repair
+  budget or Ctrl+C keeps the conversation alive with the idea, answers and draft
+  intact; the next message retries the attempt. Every ending reports where the
+  project now stands through the shared lifecycle gate, so an approved revision
+  says that a plan built from the previous brief is stale. Approving is
+  classified as writing the project, so an incognito session refuses it
+  (ADR-0182).
 - `/harness-resume` and `/wait-resume` run in the full-screen chat host on the
   operation pump: each enters Harness mode synchronously (`/agent` exits), snapshots
   the live model/provider/sandbox-profile/trust at dispatch (a `/model` or profile
