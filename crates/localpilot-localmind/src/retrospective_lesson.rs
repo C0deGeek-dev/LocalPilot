@@ -128,6 +128,9 @@ pub struct RetrospectiveLesson {
     /// reusable statement: the queue entry demands a reviewer edit before
     /// promotion.
     requires_edit: bool,
+    /// Facts captured from the run the lesson came out of, attached as the
+    /// candidate's evidence beside its origin reference.
+    facts: Vec<EvidenceRef>,
 }
 
 impl RetrospectiveLesson {
@@ -141,6 +144,7 @@ impl RetrospectiveLesson {
             confidence: None,
             evidence_text: None,
             requires_edit: false,
+            facts: Vec::new(),
         }
     }
 
@@ -159,6 +163,7 @@ impl RetrospectiveLesson {
             confidence: Some(confidence.clamp(0.0, 1.0)),
             evidence_text: None,
             requires_edit: false,
+            facts: Vec::new(),
         }
     }
 
@@ -177,6 +182,7 @@ impl RetrospectiveLesson {
             confidence: None,
             evidence_text: None,
             requires_edit: false,
+            facts: Vec::new(),
         }
     }
 
@@ -185,6 +191,22 @@ impl RetrospectiveLesson {
     #[must_use]
     pub fn with_evidence_text(mut self, evidence_text: impl Into<String>) -> Self {
         self.evidence_text = Some(evidence_text.into());
+        self
+    }
+
+    /// Attach the facts captured from the completed run this lesson came out
+    /// of. The facts become the candidate's evidence; the run's gaps — what was
+    /// *not* recorded — ride in the carried evidence text, where a reviewer
+    /// reads them and nothing can cite them.
+    #[must_use]
+    pub fn with_run_facts(mut self, run: &crate::RunFacts) -> Self {
+        self.facts = run.facts.clone();
+        if let Some(gaps) = run.render_gaps() {
+            self.evidence_text = Some(match self.evidence_text.take() {
+                Some(existing) => format!("{existing}\n\n{gaps}"),
+                None => gaps,
+            });
+        }
         self
     }
 
@@ -252,6 +274,11 @@ pub fn write_retrospective_lesson(
         )
         .redacted(),
     );
+    let candidate = lesson
+        .facts
+        .iter()
+        .cloned()
+        .fold(candidate, CandidateLesson::with_evidence);
     // Carried source evidence rides its own candidate field: review surfaces
     // show it under the lesson, promotion writes only the lesson text
     // (LocalMind D-LM-0029) — the source dump never becomes searchable memory.

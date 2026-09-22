@@ -19,6 +19,7 @@ localmind-search = { path = "../../external/localmind/crates/localmind-search" }
 localmind-store = { path = "../../external/localmind/crates/localmind-store" }
 schemars = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 localpilot-config = { path = "../localpilot-config" }
 localpilot-core = { path = "../localpilot-core" }

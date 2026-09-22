@@ -2,6 +2,74 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0183: A Completed Run's Lessons Carry The Facts Of The Run, And Absence Is Never One
+
+**Status:** accepted · **Date:** 2026-09-23. Builds on ADR-0035 (the completion
+retrospective) and ADR-0037 (its lessons enter LocalMind review). Uses LocalMind
+D-LM-0044 (canonical evidence ids) and D-LM-0051 (bounded, redacted excerpts).
+
+**Context.** The completion retrospective saw `brief.md` and `PROGRESS.md` and
+nothing else. What actually happened during the run — a tool that failed, a
+verifier verdict, an attempt abandoned, a driver steering the session — sat in
+the event log of each step's session, and nothing linked a plan step to those
+sessions: each step opens its own session, the log carries no run id, and a step
+can span several invocations after a pause or a block. A retrospective lesson
+reached review with one label-only evidence reference and no facts behind it,
+and any later analysis that wanted to cite what happened had nothing to cite.
+
+**Decision.**
+
+**A step records the sessions that worked it.** A completed step carries a
+`sessions:` line in `PROGRESS.md`, oldest first. Until it commits, the sessions
+seen so far wait in the project store's cache, outside the working tree, keyed by
+step number and description so a replanned step inherits nothing; the entry is
+cleared only after the progress commit lands. A step completed before this has no
+line, and that reads as unknown, not as "no session".
+
+**Facts are captured before any model reads them.** At completion,
+`capture_run_facts` reads the brief, the plan, and every linked session's log into
+LocalMind `EvidenceRef`s with canonical ids and a locator back to the event they
+came from: the task and its acceptance criteria, each step, its commit, the final
+state, every tool call and its outcome, verifier verdicts, and structured
+corrections. It is read-only, cannot fail, and is bounded: past 40 facts the least
+informative go first — successful calls, then verdicts — and the drop is stated.
+
+**Absence is a gap, never a fact.** A call with no result, a step with no linked
+session, a damaged log line, calls with no verdict, a log that contradicts itself:
+each is a `FactGap`, which is not an `EvidenceRef` and cannot be cited. A call
+whose result never arrived is a fact that it was invoked and a gap about its
+outcome, so "not recorded" can never be read as "failed". The event ledger now
+tells a result that has not arrived yet (`Pending`) from one the log moved past
+without (`Missing`), keeps the first of repeated events, and flags a later result
+that disagrees instead of choosing between them.
+
+**Corrections are structured signals only**: a driver intervention, a
+cancellation, an abandoned attempt, a tool-input repair or refusal, a permission
+decision, a turn that stopped short. No prose is classified as a correction. A
+harness step's user-role messages are prompts the harness wrote and are not
+captured. A permission denial arrives as a failed call whose own output says so,
+not as a separate correction, because no production path records
+`PermissionDecided` yet.
+
+**Redaction comes first.** Labels, excerpts and the content a fact's id is hashed
+from all pass the LocalMind redactor with the project's configured sensitive
+paths. The review queue redacts excerpts again when it stores them (D-LM-0051).
+
+**The lessons carry them.** Each lesson the retrospective offers to review carries
+the run's facts as its evidence beside the origin reference it always had, and the
+run's gaps as its carried evidence text, where a reviewer reads them and nothing
+can cite them. Research and driver-intervention lessons are unchanged.
+
+**Consequences.** Review candidates from a completed run now hold up to 40 facts,
+and a lesson re-offered from a later run replaces the pending row as a revision
+(D-LM-0046) rather than merging into it as a restatement, because its evidence
+changed. The review surfaces do not show a candidate's evidence yet; they show the
+carried text only. Excerpts are bounded and redacted but can still carry local
+paths — a tool's error output names the absolute path it failed on — which is
+acceptable for a local review queue and must be weighed before facts are sent to a
+remote model. `resume_with_events` now resolves its provider and hands the rest to
+`resume_with_provider`, the seam the end-to-end test drives with a scripted model.
+
 ## ADR-0182: A Brief Is Read Before It Is The Project's, And Only Approval Writes
 
 **Status:** accepted · **Date:** 2026-09-21. Builds on ADR-0179 (a plan records

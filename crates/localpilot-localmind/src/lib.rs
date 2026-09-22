@@ -35,6 +35,7 @@ mod research_ingest;
 mod retrospective_lesson;
 mod review_list_tool;
 mod rule_cue;
+mod run_facts;
 mod seed;
 mod skill_drafts_tool;
 mod span_eval;
@@ -104,6 +105,9 @@ pub use research_ingest::{
 pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
 pub use review_list_tool::ReviewList;
 pub use rule_cue::{register_rule_cues, rule_cue_ids, RULE_CUE_TAG};
+pub use run_facts::{
+    capture_run_facts, FactGap, RunFacts, MAX_ACCEPTANCE_FACTS, MAX_LABEL_CHARS, MAX_RUN_FACTS,
+};
 pub use seed::{seed_memory, SeedLesson, SeedPack, SeedReport};
 pub use skill_drafts_tool::SkillDrafts;
 pub use span_eval::{

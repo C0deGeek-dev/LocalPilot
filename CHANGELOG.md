@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A finished harness run's lessons now show what happened during it.** A
+  completion-retrospective lesson used to reach review with nothing behind it
+  but the words "harness completion retrospective". It now carries the facts of
+  the run — the task, each step and its commit, every tool call and whether it
+  failed, verifier verdicts, and corrections such as an abandoned attempt or a
+  driver steering the session — each pointing back to where it was recorded,
+  with secrets redacted. What the run could not record is listed separately and
+  never presented as something that happened. To make that possible, a completed
+  step in `PROGRESS.md` now lists the sessions that worked it on a `sessions:`
+  line. Nothing reaches accepted memory without review (ADR-0183).
+
 - **`localx status` says what each binary was installed from.** Three of the
   five tools stamp their crate version and nothing else, so a development build
   and the published release of the same version printed the same four

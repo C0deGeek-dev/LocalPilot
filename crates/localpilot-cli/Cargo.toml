@@ -136,4 +136,5 @@ localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }
 assert_cmd = { workspace = true }
 crossterm = { workspace = true }
 insta = { workspace = true }
+rusqlite = { workspace = true }
 wiremock = { workspace = true }

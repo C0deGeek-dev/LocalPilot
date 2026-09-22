@@ -848,7 +848,7 @@ pub async fn resume_with_events<A>(
     root: &Path,
     model: &str,
     provider_id: Option<&str>,
-    mut run: ResumeRun<A>,
+    run: ResumeRun<A>,
     events: &broadcast::Sender<RuntimeEvent>,
     cancel: &CancellationToken,
     out: &mut dyn Write,
@@ -859,9 +859,27 @@ where
     // The lifecycle gate runs before the provider is resolved: a stale or
     // unbound plan is refused without a network call or a session being opened.
     require_resumable(root)?;
+    let provider = provider_for(root, provider_id)?;
+    resume_with_provider(root, model, provider, run, events, cancel, out).await
+}
+
+/// [`resume_with_events`] once the provider is resolved: the step loop, and the
+/// completion retrospective when no step is left. Separate so a test can drive
+/// the real loop with a scripted provider instead of a configured endpoint.
+async fn resume_with_provider<A>(
+    root: &Path,
+    model: &str,
+    provider: std::sync::Arc<dyn localpilot_llm::ModelProvider>,
+    mut run: ResumeRun<A>,
+    events: &broadcast::Sender<RuntimeEvent>,
+    cancel: &CancellationToken,
+    out: &mut dyn Write,
+) -> anyhow::Result<ResumeProgress>
+where
+    A: FnMut() -> Box<dyn Approver>,
+{
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
         .unwrap_or_else(|_| Config::default());
-    let provider = provider_for(root, provider_id)?;
     let workspace = crate::session_cmd::workspace_with_read_roots(root, &config)?;
     let rules = RuleEngine::with_baseline(&config.harness.rules);
     let test_command = config.harness.test_command.clone();
@@ -910,17 +928,34 @@ where
                 // human-editable LESSONS.md mirror. Advisory and non-blocking: a
                 // failed enqueue never breaks a finished run (the lesson is still in
                 // LESSONS.md), and a candidate reaches memory only after human review.
+                //
+                // Each lesson carries the facts of the run it came out of — tool
+                // failures, verdicts, corrections, commits, read from the step
+                // sessions' event logs — so review sees what happened, not only
+                // what the retrospective concluded. Capture is read-only and
+                // cannot fail; an unreadable input becomes a stated gap.
+                let facts = if retro.lessons.is_empty() {
+                    localpilot_localmind::RunFacts::default()
+                } else {
+                    localpilot_localmind::capture_run_facts(root, &Store::open(root))
+                };
                 let mut offered = 0usize;
                 for lesson in &retro.lessons {
                     if let Ok(Some(_)) = localpilot_localmind::write_retrospective_lesson(
                         root,
-                        &localpilot_localmind::RetrospectiveLesson::new(lesson.as_str()),
+                        &localpilot_localmind::RetrospectiveLesson::new(lesson.as_str())
+                            .with_run_facts(&facts),
                     ) {
                         offered += 1;
                     }
                 }
                 if offered > 0 {
-                    writeln!(out, "  {offered} lesson(s) offered to LocalMind review")?;
+                    writeln!(
+                        out,
+                        "  {offered} lesson(s) offered to LocalMind review, with {} fact(s) and {} gap(s) from the run",
+                        facts.facts.len(),
+                        facts.gaps.len()
+                    )?;
                 }
             }
             // Advisory whole-repo teardown sweep (best-effort): when opted in, run
@@ -2172,5 +2207,189 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
             active("[providers."),
             "starter config: an active default provider must have an active [providers.*] table"
         );
+    }
+
+    /// The completion caller end to end: a scripted model works the plan's only
+    /// step through the real resume loop, the step commits with its session
+    /// linked, the retrospective runs, and each lesson it offers reaches the
+    /// review queue carrying the facts of the run — read back out of the step
+    /// session's own event log — without touching accepted memory.
+    #[tokio::test]
+    async fn a_completed_run_offers_its_lessons_with_the_facts_of_the_run() {
+        const SECRET: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz123456";
+        const REVIEW: &str = "# Retrospective: thing\n\n\
+## Unmet Acceptance Criteria\n- none\n\n\
+## Lessons\n- Confirm a file exists before reading it in a fresh checkout\n\n\
+## Notes\nnone\n";
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        runnable_project(root);
+        // An isolated LocalMind project store. Written up front so nothing
+        // probes this machine for an inference endpoint on first use.
+        std::fs::write(
+            root.join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )
+        .unwrap();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["add", "-A"],
+            vec!["commit", "-m", "initial"],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+
+        // The step: one read that fails (its path carries a secret, which must
+        // not survive capture), one write that succeeds, then done. After the
+        // step, the retrospective's single call.
+        let provider = FakeProvider::new()
+            .tool_call(
+                "c1",
+                "read_file",
+                serde_json::json!({ "path": format!("creds/{SECRET}.txt") }),
+            )
+            .tool_call(
+                "c2",
+                "write_file",
+                serde_json::json!({ "path": "thing.txt", "content": "done" }),
+            )
+            .text("done")
+            .text(REVIEW);
+        let run = ResumeRun {
+            profile: Profile::Bypass,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            approver: || Box::new(ScriptedApprover::always()) as Box<dyn Approver>,
+        };
+        let (events_tx, _rx) = broadcast::channel::<RuntimeEvent>(64);
+        let cancel = CancellationToken::new();
+        let mut out: Vec<u8> = Vec::new();
+
+        resume_with_provider(
+            root,
+            "m",
+            Arc::new(provider),
+            run,
+            &events_tx,
+            &cancel,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let printed = String::from_utf8_lossy(&out).into_owned();
+
+        // The step committed with its session linked.
+        let progress = localpilot_harness::Progress::parse(
+            &std::fs::read_to_string(root.join("PROGRESS.md")).unwrap(),
+        )
+        .unwrap();
+        let step = &progress.steps[0];
+        assert!(step.done, "{printed}");
+        assert_eq!(step.sessions.len(), 1, "{printed}");
+        let session = step.sessions[0].clone();
+
+        // The lesson reached review carrying the run's facts.
+        let database = root.join(".localmind").join("localmind.sqlite");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let rows: Vec<String> = connection
+            .prepare("SELECT candidate_json FROM review_items WHERE session_id = 'completion-retrospective'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly one retrospective candidate: {printed}"
+        );
+        assert!(
+            !rows[0].contains(SECRET),
+            "the secret never reaches the store"
+        );
+        let candidate: serde_json::Value = serde_json::from_str(&rows[0]).unwrap();
+        assert_eq!(
+            candidate["summary"],
+            "Confirm a file exists before reading it in a fresh checkout"
+        );
+        let evidence = candidate["evidence"].as_array().unwrap();
+        let label = |needle: &str| {
+            evidence
+                .iter()
+                .filter(|fact| fact["label"].as_str().unwrap_or("").starts_with(needle))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // The origin reference the bridge always attached is still there.
+        assert_eq!(label("harness completion retrospective").len(), 1);
+        for expected in [
+            "task: Do the thing.",
+            "acceptance criterion 1: A test passes",
+            "step 1 (done): Implement it",
+            "1 of 1 plan step(s) complete",
+            "`read_file` call `c1` failed",
+            "`write_file` call `c2` succeeded",
+        ] {
+            assert_eq!(
+                label(expected).len(),
+                1,
+                "missing fact {expected}: {evidence:#?}"
+            );
+        }
+        let failure = &label("`read_file` call `c1` failed")[0];
+        assert!(failure["uri"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("localpilot-session:{session}#event:")));
+        assert!(failure["excerpt"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()));
+        // The verifier's verdict on the same call is its own fact, not merged
+        // into the call's.
+        assert_eq!(label("verifier: `read_file` call `c1` failed").len(), 1);
+        // Both calls carry a verdict and the step is linked, so this run has
+        // nothing it cannot say, and no gap is invented to look thorough.
+        assert!(
+            candidate["evidence_text"].is_null(),
+            "{}",
+            candidate["evidence_text"]
+        );
+        assert!(
+            printed.contains("1 lesson(s) offered to LocalMind review, with "),
+            "{printed}"
+        );
+
+        // Accepted memory is untouched.
+        assert!(localpilot_localmind::memory_list_readonly(root)
+            .unwrap()
+            .is_empty());
+
+        // The review output: the original trace beside the facts drawn from it.
+        let store = Store::open(root);
+        let trace = store
+            .read_events(std::str::FromStr::from_str(&session).unwrap())
+            .unwrap();
+        eprintln!("--- session {session} ---");
+        for event in &trace {
+            eprintln!("{}  {:?}", event.id, event.kind);
+        }
+        eprintln!("--- facts ---");
+        for fact in evidence {
+            eprintln!(
+                "{}  [{}]  {}\n    at {}\n    excerpt {}",
+                fact["id"], fact["kind"], fact["label"], fact["uri"], fact["excerpt"]
+            );
+        }
+        eprintln!("--- gaps ---\n{}", candidate["evidence_text"]);
     }
 }

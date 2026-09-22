@@ -1060,6 +1060,18 @@ shape degrades to "no findings" rather than an error. The worker prompt also
 carries a doc-currency cue, so a step that changes observable behaviour,
 configuration, or interfaces updates the matching documentation in the same step.
 
+Each lesson it offers to LocalMind review carries the **facts of the run**
+(ADR-0183): the task and its acceptance criteria, each step, its commit and the
+final state, and — read from the event log of every session a step's `sessions:`
+line names — each tool call and its outcome, verifier verdicts, and structured
+corrections (a driver intervention, a cancellation, an abandoned attempt, a
+tool-input repair or refusal, a turn that stopped short). Every fact has a
+canonical id and a locator back to where it was read, and is redacted and bounded
+before anything sees it. What the run cannot say — a call with no result, a step
+with no linked session, calls with no verifier verdict, a damaged log line — is
+listed separately as gaps, which are never facts and cannot be cited. Capture is
+read-only and cannot fail, and accepted memory is untouched.
+
 ## Completion Teardown Sweep
 
 At the same completion seam, when `[harness] teardown_sweep` is enabled, the
