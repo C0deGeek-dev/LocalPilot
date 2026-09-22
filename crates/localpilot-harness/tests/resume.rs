@@ -886,3 +886,74 @@ async fn a_completed_plan_reports_completion_not_a_malformed_document() {
         "got {error:?}"
     );
 }
+
+#[tokio::test]
+async fn a_step_resumed_after_a_pause_records_both_sessions_that_worked_it() {
+    let dir = sample_repo();
+    let root = dir.path();
+    let rules = RuleEngine::with_baseline(&Default::default());
+
+    // The first session hits a provider limit mid-step and ends the invocation.
+    let paused_provider = Arc::new(FakeProvider::new().script(vec![Err(
+        ProviderError::RateLimit {
+            quota: QuotaInfo {
+                retryable: true,
+                ..QuotaInfo::default()
+            },
+        },
+    )]));
+    let mut paused = runtime(root, paused_provider);
+    let outcome = resume_one_step(&mut paused, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+    assert!(outcome.paused, "{:?}", outcome.blocked_reason);
+    assert!(
+        !std::fs::read_to_string(root.join("PROGRESS.md"))
+            .unwrap()
+            .contains("sessions:"),
+        "a pending step writes nothing into the plan"
+    );
+
+    // A later invocation opens a new session for the same step and finishes it.
+    let finishing_provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "hello.txt", "content": "hello" }),
+            )
+            .text("done"),
+    );
+    let mut finishing = runtime(root, finishing_provider);
+    let outcome = resume_one_step(&mut finishing, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+
+    let progress = localpilot_harness::Progress::parse(
+        &std::fs::read_to_string(root.join("PROGRESS.md")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        progress.steps[0].sessions,
+        vec![
+            paused.session_id().to_string(),
+            finishing.session_id().to_string()
+        ],
+        "both sessions, oldest first — the paused one is where the failure is"
+    );
+    assert!(
+        finishing
+            .store()
+            .get_cache(localpilot_harness::STEP_SESSIONS_KEY)
+            .unwrap()
+            .is_none(),
+        "the pending entry is cleared once the step is committed"
+    );
+    assert!(
+        git_output(root, &["status", "--porcelain", "PROGRESS.md"])
+            .trim()
+            .is_empty(),
+        "the link is committed with the step's progress"
+    );
+}

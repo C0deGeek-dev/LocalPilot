@@ -160,7 +160,17 @@ Completed steps include metadata:
 - [x] 1. Write failing test for parser errors
   - commit: abc1234
   - attempts: 1
+  - sessions: 3f1c…, 9a42…
 ```
+
+`sessions:` lists the sessions that worked the step, oldest first, so what
+happened during it can be read back from the event log after the run. There is
+more than one when the step was paused or blocked and resumed. Until the step
+commits, the sessions seen so far wait in `.localpilot/cache/` rather than in
+this file, so a pending step leaves no uncommitted change behind. A step
+completed before this line existed has none: its sessions are unknown, not
+absent, and nothing reads the missing line as "no session". An older build
+ignores the line and drops it if it rewrites the file.
 
 The `Brief:` line is the plan's **binding**: the revision of `brief.md` this plan
 was generated from. A plan means nothing apart from the requirements it was built

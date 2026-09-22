@@ -21,6 +21,12 @@ pub struct Step {
     pub commit: Option<String>,
     #[serde(default)]
     pub attempts: u32,
+    /// The sessions that worked this step, oldest first, carried as a
+    /// `sessions:` line on a completed step. More than one when the step was
+    /// paused or blocked and resumed. Empty for a step completed before the
+    /// link existed, which is *unknown*, not "no session".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<String>,
 }
 
 /// A parsed `PROGRESS.md`.
@@ -111,6 +117,13 @@ impl Progress {
                                 detail: format!("invalid attempts value '{value}'"),
                             })?;
                         }
+                        "sessions" => last.sessions.extend(
+                            value
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|id| !id.is_empty())
+                                .map(str::to_string),
+                        ),
                         _ => {}
                     }
                 }
@@ -147,6 +160,9 @@ impl Progress {
                 }
                 if step.attempts > 0 {
                     out.push_str(&format!("  - attempts: {}\n", step.attempts));
+                }
+                if !step.sessions.is_empty() {
+                    out.push_str(&format!("  - sessions: {}\n", step.sessions.join(", ")));
                 }
             }
         }
@@ -189,6 +205,7 @@ impl Progress {
             done: false,
             commit: None,
             attempts: 0,
+            sessions: Vec::new(),
         });
         number
     }
@@ -199,6 +216,17 @@ impl Progress {
             step.done = true;
             step.commit = commit;
             step.attempts = attempts;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Record the sessions that worked a step, replacing any recorded before.
+    /// Returns `false` when no step has that number.
+    pub fn record_sessions(&mut self, number: usize, sessions: Vec<String>) -> bool {
+        if let Some(step) = self.steps.iter_mut().find(|s| s.number == number) {
+            step.sessions = sessions;
             true
         } else {
             false
@@ -243,6 +271,7 @@ fn parse_step_line(line: &str) -> Result<Option<Step>, HarnessError> {
         done,
         commit: None,
         attempts: 0,
+        sessions: Vec::new(),
     }))
 }
 
@@ -308,6 +337,45 @@ mod tests {
         // The new step is last and incomplete.
         assert_eq!(progress.steps.last().unwrap().number, 4);
         assert!(!progress.steps.last().unwrap().done);
+    }
+
+    const LINKED: &str = "# Progress: parser errors\nBranch: feature/parser-errors\n\n## Steps\n\n\
+- [x] 1. Write failing test for parser errors\n  - commit: abc1234\n  - attempts: 1\n  - sessions: \
+0b0e6c1e-0000-4000-8000-000000000001, 0b0e6c1e-0000-4000-8000-000000000002\n\
+- [ ] 2. Implement parser errors\n";
+
+    #[test]
+    fn a_step_carries_the_sessions_that_worked_it_in_order() {
+        let progress = Progress::parse(LINKED).unwrap();
+        assert_eq!(
+            progress.steps[0].sessions,
+            vec![
+                "0b0e6c1e-0000-4000-8000-000000000001",
+                "0b0e6c1e-0000-4000-8000-000000000002"
+            ]
+        );
+        assert_eq!(progress.render(), LINKED, "and renders back byte for byte");
+    }
+
+    #[test]
+    fn a_plan_written_before_the_link_round_trips_unchanged() {
+        // No `sessions:` line is invented for a step that never had one: its
+        // sessions are unknown, and the file says nothing rather than "none".
+        let progress = Progress::parse(VALID).unwrap();
+        assert!(progress.steps[0].sessions.is_empty());
+        assert_eq!(progress.render(), VALID);
+    }
+
+    #[test]
+    fn recording_sessions_leaves_commit_and_attempts_alone() {
+        let mut progress = Progress::parse(VALID).unwrap();
+        assert!(progress.mark_complete(2, Some("def5678".to_string()), 2));
+        assert!(progress.record_sessions(2, vec!["s-1".to_string()]));
+        assert!(!progress.record_sessions(99, vec!["s-1".to_string()]));
+        let step = &Progress::parse(&progress.render()).unwrap().steps[1];
+        assert_eq!(step.commit.as_deref(), Some("def5678"));
+        assert_eq!(step.attempts, 2);
+        assert_eq!(step.sessions, vec!["s-1"]);
     }
 
     #[test]

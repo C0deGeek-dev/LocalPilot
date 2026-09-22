@@ -148,6 +148,14 @@ pub async fn resume_one_step_with_events(
         description: step.description.clone(),
     });
     let step_anchor = runtime.last_event_id();
+    // Link this session to the step before any exit path, so a pause or a block
+    // here still leaves the session findable once the step commits later.
+    crate::step_sessions::note(
+        runtime.store(),
+        step.number,
+        &step.description,
+        runtime.session_id(),
+    );
 
     // The anti-sunk-cost loop owns the attempt/replan budget; each pass works the
     // step, runs the step-cadence gate, and turns the findings into a verdict.
@@ -378,9 +386,19 @@ pub async fn resume_one_step_with_events(
 
     // Update and commit progress.
     progress.mark_complete(step.number, hash, step_loop.replans() + 1);
+    progress.record_sessions(
+        step.number,
+        crate::step_sessions::collect(
+            runtime.store(),
+            step.number,
+            &step.description,
+            runtime.session_id(),
+        ),
+    );
     write(&progress_path, &progress.render())?;
     git(root, &["add", "PROGRESS.md"])?;
     git(root, &["commit", "-m", "harness: update progress"])?;
+    crate::step_sessions::clear(runtime.store());
 
     // Phase-cadence quality gate. Steps carry a per-step gate (`StepComplete`);
     // phase-cadence checks — the expensive full-suite / dependency / audit set a

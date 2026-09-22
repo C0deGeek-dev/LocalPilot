@@ -36,6 +36,7 @@ mod retrospective;
 mod rules;
 mod scorecard;
 mod session;
+mod step_sessions;
 mod summarizer;
 mod system_prompt;
 mod verify_target;
@@ -85,6 +86,7 @@ pub use scorecard::{
     build_scorecard, extract_process, single_run_discipline, speed_from_events, RunInputs,
     SchemaValidator,
 };
+pub use step_sessions::STEP_SESSIONS_KEY;
 // The shared eval surface (scorecard contract, discipline metrics, blinded
 // judge, ablation) re-exported so consumers keep one import path.
 pub use localx_eval_core::{
