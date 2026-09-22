@@ -11,10 +11,16 @@
 //! `localpilot-store`): a `ToolFinished` event carries only `is_error`, while
 //! the tool's *output text* arrives as a separate `Message` whose origin is a
 //! tool result. The projection pairs both back to the originating call by id.
+//!
+//! A log can be partial, and can repeat itself. The projection keeps the first
+//! occurrence of a call and of its result, marks a later result that disagrees
+//! as a conflict rather than silently taking either, and tells a call whose
+//! result simply has not arrived yet (`Pending`) from one the log moved past
+//! without ever resulting (`Missing`).
 
 use std::collections::HashMap;
 
-use localpilot_core::{ContentBlock, Role};
+use localpilot_core::{ContentBlock, EventId, Role, ToolOutcome};
 use localpilot_store::{SessionEvent, SessionEventKind};
 
 /// The recorded result status of a tool call within a log slice.
@@ -24,8 +30,13 @@ pub enum CallOutcome {
     Ok,
     /// A tool result reported an error.
     Error,
-    /// No result for the call appears in this slice.
+    /// No result appears, and the slice ends while the call's turn is still
+    /// open — the result may simply not have been written yet.
     Pending,
+    /// No result appears, although the slice carries on past the call: its
+    /// turn ended, the session closed, or the run was cancelled. The outcome is
+    /// unknown, and is not a failure.
+    Missing,
 }
 
 /// The permission decision recorded for a call.
@@ -62,6 +73,17 @@ pub struct CallRecord {
     /// The verifier's verdict for this call, if one was recorded (`"verified"`,
     /// `"unverified"`, `"failed"`). `None` until a verifier runs.
     pub verdict: Option<String>,
+    /// The finer outcome a `ToolFinished` event recorded — whether a failing
+    /// tool could not run at all or ran and reported failure. `None` when the
+    /// log predates the distinction or carries no `ToolFinished` for the call.
+    pub refinement: Option<ToolOutcome>,
+    /// The event that invoked the call, so a reader can find it in the log.
+    pub invoked_event: EventId,
+    /// The event that first delivered the call's result, when one did.
+    pub result_event: Option<EventId>,
+    /// A later result for the same call disagreed with the first. The log
+    /// contradicts itself about this call, so its outcome is not settled.
+    pub conflicting_result: bool,
     /// Event ordinal at which the call was invoked, used to order later claims.
     invoked_at: usize,
     /// The tool's output text, retained only to detect grounded claims.
@@ -85,34 +107,66 @@ impl EvidenceLedger {
         // Assistant text blocks, as (event ordinal, lowercased text), used after
         // the walk to decide which calls a later claim grounded itself in.
         let mut claims: Vec<(usize, String)> = Vec::new();
+        // Ordinals at which the log moved past any call still open: a turn
+        // ended, the session closed, or the run was cancelled.
+        let mut closings: Vec<usize> = Vec::new();
 
         for (ordinal, event) in events.iter().enumerate() {
             match &event.kind {
                 SessionEventKind::Message { message, .. } => {
-                    Self::ingest_message(message, ordinal, &mut records, &mut index, &mut claims);
+                    Self::ingest_message(
+                        message,
+                        event.id,
+                        ordinal,
+                        &mut records,
+                        &mut index,
+                        &mut claims,
+                    );
                 }
-                SessionEventKind::ToolFinished { id, is_error, .. } => {
+                SessionEventKind::ToolFinished {
+                    id,
+                    is_error,
+                    outcome,
+                    ..
+                } => {
                     if let Some(&pos) = index.get(id.as_str()) {
-                        if records[pos].outcome == CallOutcome::Pending {
-                            records[pos].outcome = outcome_of(*is_error);
+                        let record = &mut records[pos];
+                        settle(record, outcome_of(*is_error), event.id);
+                        if record.refinement.is_none() {
+                            record.refinement = *outcome;
                         }
                     }
                 }
                 SessionEventKind::PermissionDecided { tool, decision, .. } => {
-                    if let Some(record) = records
-                        .iter_mut()
-                        .rev()
-                        .find(|r| r.name == *tool && r.permission == PermissionVerdict::Unrecorded)
-                    {
+                    // The event names a tool, not a call. A decision precedes its
+                    // call's result, so it belongs to the earliest call of that
+                    // tool still awaiting both — which is right for a batch of
+                    // same-tool calls as well as for one call at a time.
+                    if let Some(record) = records.iter_mut().find(|r| {
+                        r.name == *tool
+                            && r.permission == PermissionVerdict::Unrecorded
+                            && r.outcome == CallOutcome::Pending
+                    }) {
                         record.permission = PermissionVerdict::Decided(decision.clone());
                     }
                 }
+                SessionEventKind::TurnEnded { .. }
+                | SessionEventKind::SessionClosed
+                | SessionEventKind::Cancelled => closings.push(ordinal),
                 SessionEventKind::ToolVerified { id, verdict } => {
                     if let Some(&pos) = index.get(id.as_str()) {
                         records[pos].verdict = Some(verdict.clone());
                     }
                 }
                 _ => {}
+            }
+        }
+
+        for record in &mut records {
+            if record.outcome == CallOutcome::Pending
+                && closings.iter().any(|&closed| closed > record.invoked_at)
+            {
+                record.outcome = CallOutcome::Missing;
             }
         }
 
@@ -123,6 +177,7 @@ impl EvidenceLedger {
     /// Fold one transcript message into the in-progress projection.
     fn ingest_message(
         message: &localpilot_core::Message,
+        event: EventId,
         ordinal: usize,
         records: &mut Vec<CallRecord>,
         index: &mut HashMap<String, usize>,
@@ -132,6 +187,11 @@ impl EvidenceLedger {
             match block {
                 ContentBlock::ToolUse(call) if message.role == Role::Assistant => {
                     let id = call.id.as_str().to_string();
+                    // A repeated invocation (a replayed or re-appended event) is
+                    // the same call, not a second one.
+                    if index.contains_key(&id) {
+                        continue;
+                    }
                     index.insert(id.clone(), records.len());
                     records.push(CallRecord {
                         id,
@@ -142,6 +202,10 @@ impl EvidenceLedger {
                         outcome: CallOutcome::Pending,
                         claim_referenced: false,
                         verdict: None,
+                        refinement: None,
+                        invoked_event: event,
+                        result_event: None,
+                        conflicting_result: false,
                         invoked_at: ordinal,
                         output: String::new(),
                     });
@@ -151,8 +215,12 @@ impl EvidenceLedger {
                 }
                 ContentBlock::ToolResult(result) => {
                     if let Some(&pos) = index.get(result.id.as_str()) {
-                        records[pos].outcome = outcome_of(result.is_error());
-                        records[pos].output = result.output.clone();
+                        let record = &mut records[pos];
+                        settle(record, outcome_of(result.is_error()), event);
+                        // The first delivered output is the one the model saw.
+                        if record.output.is_empty() {
+                            record.output = result.output.clone();
+                        }
                     }
                 }
                 _ => {}
@@ -185,6 +253,27 @@ impl EvidenceLedger {
     #[must_use]
     pub fn used(&self, tool: &str) -> bool {
         self.records.iter().any(|r| r.name == tool)
+    }
+}
+
+impl CallRecord {
+    /// The first output delivered for the call, empty when none was. Unbounded
+    /// and unredacted: a caller that stores or shows it must bound and redact
+    /// it first.
+    #[must_use]
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+}
+
+/// Record `outcome` as the call's result if it has none yet; otherwise note a
+/// disagreement rather than choosing between the two.
+fn settle(record: &mut CallRecord, outcome: CallOutcome, event: EventId) {
+    if record.outcome == CallOutcome::Pending {
+        record.outcome = outcome;
+        record.result_event = Some(event);
+    } else if record.outcome != outcome {
+        record.conflicting_result = true;
     }
 }
 
@@ -396,6 +485,128 @@ mod tests {
         ];
         let ledger = EvidenceLedger::project(&events);
         assert_eq!(ledger.calls()[0].verdict.as_deref(), Some("verified"));
+    }
+
+    fn turn_ended() -> SessionEvent {
+        event(SessionEventKind::TurnEnded {
+            stop: "done".to_string(),
+            detail: None,
+        })
+    }
+
+    #[test]
+    fn a_call_the_log_moved_past_without_a_result_is_missing_not_pending() {
+        let open = vec![assistant(vec![call_block(
+            "c1",
+            "run_shell",
+            serde_json::json!({}),
+        )])];
+        assert_eq!(
+            EvidenceLedger::project(&open).calls()[0].outcome,
+            CallOutcome::Pending,
+            "the log ends mid-turn: the result may not have been written yet"
+        );
+
+        let mut closed = open;
+        closed.push(turn_ended());
+        assert_eq!(
+            EvidenceLedger::project(&closed).calls()[0].outcome,
+            CallOutcome::Missing,
+            "the turn ended and no result ever arrived"
+        );
+    }
+
+    #[test]
+    fn a_repeated_invocation_and_result_is_one_call() {
+        let call = assistant(vec![call_block(
+            "c1",
+            "search",
+            serde_json::json!({ "q": "x" }),
+        )]);
+        let result = tool_result("c1", "found", false);
+        let events = vec![call.clone(), result.clone(), call, result];
+
+        let ledger = EvidenceLedger::project(&events);
+
+        assert_eq!(ledger.calls().len(), 1);
+        let record = &ledger.calls()[0];
+        assert_eq!(record.outcome, CallOutcome::Ok);
+        assert!(
+            !record.conflicting_result,
+            "a repeat that agrees is no conflict"
+        );
+        assert_eq!(record.invoked_event, events[0].id);
+        assert_eq!(record.result_event, Some(events[1].id));
+    }
+
+    #[test]
+    fn a_result_that_contradicts_the_first_is_flagged_not_chosen() {
+        let events = vec![
+            assistant(vec![call_block("c1", "write_file", serde_json::json!({}))]),
+            tool_result("c1", "written", false),
+            tool_result("c1", "disk full", true),
+        ];
+
+        let ledger = EvidenceLedger::project(&events);
+        let record = &ledger.calls()[0];
+
+        assert_eq!(record.outcome, CallOutcome::Ok, "the first result stands");
+        assert_eq!(record.output(), "written");
+        assert!(record.conflicting_result);
+    }
+
+    #[test]
+    fn the_finished_event_refines_a_failure() {
+        let events = vec![
+            assistant(vec![call_block("c1", "run_shell", serde_json::json!({}))]),
+            tool_result("c1", "exit status 1", true),
+            event(SessionEventKind::ToolFinished {
+                id: "c1".to_string(),
+                name: "run_shell".to_string(),
+                is_error: true,
+                outcome: Some(ToolOutcome::ReportedFailure),
+            }),
+        ];
+
+        let ledger = EvidenceLedger::project(&events);
+        let record = &ledger.calls()[0];
+
+        assert_eq!(record.outcome, CallOutcome::Error);
+        assert_eq!(record.refinement, Some(ToolOutcome::ReportedFailure));
+        assert!(!record.conflicting_result);
+    }
+
+    #[test]
+    fn a_permission_decision_binds_to_the_earliest_waiting_call_of_its_tool() {
+        let events = vec![
+            assistant(vec![
+                call_block("c1", "write_file", serde_json::json!({ "path": "a" })),
+                call_block("c2", "write_file", serde_json::json!({ "path": "b" })),
+            ]),
+            event(SessionEventKind::PermissionDecided {
+                tool: "write_file".to_string(),
+                decision: "allowed".to_string(),
+                detail: String::new(),
+            }),
+            tool_result("c1", "ok", false),
+            event(SessionEventKind::PermissionDecided {
+                tool: "write_file".to_string(),
+                decision: "denied".to_string(),
+                detail: String::new(),
+            }),
+            tool_result("c2", "permission denied for write_file", true),
+        ];
+
+        let calls = EvidenceLedger::project(&events).calls().to_vec();
+
+        assert_eq!(
+            calls[0].permission,
+            PermissionVerdict::Decided("allowed".to_string())
+        );
+        assert_eq!(
+            calls[1].permission,
+            PermissionVerdict::Decided("denied".to_string())
+        );
     }
 
     #[test]
