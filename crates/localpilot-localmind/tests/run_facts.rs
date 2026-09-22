@@ -179,6 +179,8 @@ fn a_failure_carries_its_redacted_input_and_output_and_a_success_carries_neither
     assert_eq!(failed.len(), 1);
     let excerpt = failed[0].excerpt.as_deref().unwrap();
     assert!(excerpt.contains("rejected") && excerpt.contains("deploy --token"));
+    // The event store already redacts this pattern on write, so this holds
+    // before capture runs; the next test shows capture's own pass.
     let everything = serde_json::to_string(&run.facts).unwrap();
     assert!(
         !everything.contains(SECRET),
@@ -187,6 +189,62 @@ fn a_failure_carries_its_redacted_input_and_output_and_a_success_carries_neither
     assert_eq!(
         labelled(&run, "`read_file` call `c2` succeeded")[0].excerpt,
         None
+    );
+}
+
+#[test]
+fn capture_redacts_what_the_event_store_does_not_know_to() {
+    let session = SessionId::new();
+    let dir = project(&[session]);
+    // A path the project configured as sensitive. The event store's redactor
+    // knows nothing of LocalMind configuration, so it survives into the log.
+    std::fs::write(
+        dir.path().join(".localmind.toml"),
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\
+excluded_paths = [\"internal/acquisition\"]\n",
+    )
+    .unwrap();
+    let store = Store::open(dir.path());
+    let log = Log {
+        store: &store,
+        session,
+    };
+    log.step_started();
+    log.call(
+        "c1",
+        "read_file",
+        json!({ "path": "internal/acquisition/terms.md" }),
+    );
+    log.result(
+        "c1",
+        "internal/acquisition/terms.md: permission denied",
+        true,
+    );
+    let logged = std::fs::read_to_string(
+        store
+            .root()
+            .join("sessions")
+            .join(format!("{session}.events.jsonl")),
+    )
+    .unwrap();
+    assert!(
+        logged.contains("internal/acquisition"),
+        "precondition: the log itself still carries the path"
+    );
+
+    let run = capture(&dir);
+
+    let everything = serde_json::to_string(&run.facts).unwrap();
+    assert!(!everything.contains("internal/acquisition"), "{everything}");
+    let failed = labelled(&run, "`read_file` call `c1` failed");
+    assert!(failed[0]
+        .excerpt
+        .as_deref()
+        .unwrap()
+        .contains("[REDACTED:sensitive_path]"));
+    assert!(
+        failed[0].identity_is_intact(),
+        "the id is taken over the redacted content"
     );
 }
 
