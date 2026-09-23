@@ -263,9 +263,13 @@ impl PermissionEngine {
                 } else {
                     base_decision(request)
                 };
-                untrusted_floor(decision, request.trusted)
+                untrusted_floor(decision, request.trusted, request.interactivity)
             }
-            Profile::Default => untrusted_floor(base_decision(request), request.trusted),
+            Profile::Default => untrusted_floor(
+                base_decision(request),
+                request.trusted,
+                request.interactivity,
+            ),
         }
     }
 }
@@ -362,13 +366,16 @@ fn incognito_floor(decision: Decision, interactivity: Interactivity) -> Decision
 }
 
 /// An untrusted workspace raises an `Allow` to `Ask` so the first action prompts
-/// the user (the workspace-trust prompt). A `Deny` stays denied.
-fn untrusted_floor(decision: Decision, trusted: bool) -> Decision {
+/// the user (the workspace-trust prompt). A `Deny` stays denied. A
+/// non-interactive run has nobody to ask, so there the floor is a `Deny` —
+/// the same split every other gate makes through [`ask_or_deny`]
+/// (LocalHub#191).
+fn untrusted_floor(decision: Decision, trusted: bool, interactivity: Interactivity) -> Decision {
     if trusted {
         decision
     } else {
         match decision {
-            Decision::Allow => Decision::Ask,
+            Decision::Allow => ask_or_deny(interactivity),
             other => other,
         }
     }
@@ -829,6 +836,64 @@ mod tests {
         // A non-listed tool still follows the table.
         request.tool = "write_file".to_string();
         assert_eq!(e.decide(&request), Decision::Ask);
+    }
+
+    #[test]
+    fn a_non_interactive_request_is_never_asked() {
+        // Nobody can answer a prompt in a headless run, so the engine must
+        // decide: every profile, trust state, effect and allowlist state
+        // (LocalHub#191).
+        let mut effects = vec![Effect::Network];
+        for inside_workspace in [true, false] {
+            for secret_like in [true, false] {
+                effects.push(Effect::ReadPath {
+                    inside_workspace,
+                    secret_like,
+                });
+                for overwrite in [true, false] {
+                    effects.push(Effect::WritePath {
+                        inside_workspace,
+                        overwrite,
+                        secret_like,
+                    });
+                }
+            }
+        }
+        for class in [
+            CommandClass::ReadOnly,
+            CommandClass::ProjectWrite,
+            CommandClass::ExternalWrite,
+            CommandClass::Network,
+            CommandClass::Destructive,
+            CommandClass::Privileged,
+            CommandClass::Unknown,
+        ] {
+            effects.push(Effect::RunCommand(class));
+        }
+        for profile in [
+            Profile::Default,
+            Profile::Relaxed,
+            Profile::Bypass,
+            Profile::Unrestricted,
+        ] {
+            for allow in [vec![], vec!["t".to_string()]] {
+                let e = PermissionEngine::new(profile, allow);
+                for incognito in [false, true] {
+                    let e = e.clone().with_incognito(incognito);
+                    for trusted in [true, false] {
+                        for effect in &effects {
+                            let mut request = req(*effect, Interactivity::NonInteractive, trusted);
+                            request.tool = "t".to_string();
+                            assert_ne!(
+                                e.decide(&request),
+                                Decision::Ask,
+                                "{profile:?} trusted={trusted} incognito={incognito} {effect:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
