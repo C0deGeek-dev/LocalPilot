@@ -1,0 +1,20 @@
+[package]
+name = "localpilot-mesh"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The pair-programming mailbox protocol, natively: LocalPilot's participant implementation."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+localpilot-store = { path = "../localpilot-store" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

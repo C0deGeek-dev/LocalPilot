@@ -1900,6 +1900,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot-mesh"
+version = "5.0.0"
+dependencies = [
+ "localpilot-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.9",
+ "time",
+]
+
+[[package]]
 name = "localpilot-patchgen"
 version = "5.0.0"
 dependencies = [
