@@ -352,6 +352,35 @@ async fn write_file_in_workspace_and_denied_outside() {
 }
 
 #[tokio::test]
+async fn writing_a_file_never_touches_a_neighbour_named_like_its_temp() {
+    // The edit tools once staged every write in a fixed `<file>.tmp`, which
+    // overwrote and then deleted a real file of that name.
+    let (dir, ws) = workspace_with(&[("report.txt.tmp", "the user's own file")]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    for body in ["first", "second"] {
+        let out = dispatch(
+            &registry,
+            "write_file",
+            json!({ "path": "report.txt", "content": body, "overwrite": true }),
+            &c,
+            &default_engine(),
+            &ScriptedApprover::always(),
+        )
+        .await;
+        assert!(!out.is_error(), "{}", out.output);
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("report.txt.tmp")).unwrap(),
+        "the user's own file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("report.txt")).unwrap(),
+        "second"
+    );
+}
+
+#[tokio::test]
 async fn write_file_refuses_an_oversized_payload_and_steers_to_split() {
     let (dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();

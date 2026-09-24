@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Editing a file no longer destroys a neighbour named like its temp.** The
+  edit tools and the store staged every write in a fixed `<file>.tmp` beside
+  the target, so editing `foo` overwrote and then deleted a real `foo.tmp` in
+  the workspace. Writes now go through one shared primitive: an exclusively
+  created, uniquely named temporary file that is flushed to disk before the
+  rename, with the rename retried on a Windows sharing violation. Log appends
+  are flushed too. Two writers of one path no longer share a temporary file.
+
 - **A finished harness run's lessons now show what happened during it.** A
   completion-retrospective lesson used to reach review with nothing behind it
   but the words "harness completion retrospective". It now carries the facts of

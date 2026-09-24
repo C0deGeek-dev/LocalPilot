@@ -229,18 +229,11 @@ fn lf(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
+/// Write a workspace file through the store's atomic primitive: an exclusively
+/// created temporary name, flushed before the rename. The tool's own fixed
+/// `<file>.tmp` used to overwrite and then delete a real file of that name.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ToolError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ToolError::Failed(e.to_string()))?;
-    }
-    let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).map_err(|e| ToolError::Failed(e.to_string()))?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        ToolError::Failed(e.to_string())
-    })
+    localpilot_store::atomic_write(path, bytes).map_err(|e| ToolError::Failed(e.to_string()))
 }
 
 // --- edit matching (shared by edit_file / multi_edit / apply_patch) ----------

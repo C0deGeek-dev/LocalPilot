@@ -1,38 +1,57 @@
 //! File-write primitives: atomic whole-file writes and guarded line appends.
 //!
-//! Whole files are written to a sibling temporary file and then renamed over
-//! the target ([`atomic_write`]). A crash mid-write leaves the temporary file
-//! behind and the canonical file untouched, so an interrupted write can never
-//! produce a half-written, corrupt record.
+//! Whole files are written to a sibling temporary file, flushed to disk, and
+//! then renamed over the target ([`atomic_write`]). A crash mid-write leaves
+//! the temporary file behind and the canonical file untouched, so an
+//! interrupted write can never produce a half-written, corrupt record.
+//!
+//! The temporary file has a name of its own, created exclusively: a fixed
+//! `<file>.tmp` would overwrite and then delete an unrelated file of that name
+//! beside the target, and would let two writers of one path trample each
+//! other's half-written data.
 //!
 //! Line-delimited logs grow through [`append_line`] instead: appending one
 //! record does not rewrite (and therefore cannot re-corrupt or perpetuate) the
 //! records already on disk, and a torn tail left by a crash is sealed off with
 //! a newline before the next record so damage never bleeds into new entries.
 
+use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::error::StoreError;
 
-/// Write `bytes` to `path` atomically (temp-then-rename), creating parent
+/// Distinguishes this process's temporary files from each other.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// How many unique names to try before giving up on a temporary file.
+const TEMP_ATTEMPTS: u32 = 100;
+/// Windows refuses a rename while another process holds the target open (a
+/// reader, or a concurrent replace): a transient sharing violation. Retry it
+/// this many times, this far apart, before failing.
+const RENAME_ATTEMPTS: u32 = 40;
+const RENAME_PAUSE: Duration = Duration::from_millis(50);
+
+/// Write `bytes` to `path` atomically (temp, flush, rename), creating parent
 /// directories as needed.
 ///
 /// # Errors
-/// Returns [`StoreError::Io`] if a directory, write, or rename operation fails.
+/// Returns [`StoreError::Io`] if a directory, write, flush or rename fails.
+/// The temporary file is removed on every failure.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|e| StoreError::io(parent, e))?;
-        }
+    ensure_parent(path)?;
+    let (tmp, mut file) = create_temp_sibling(path)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(StoreError::io(&tmp, e));
     }
-
-    let tmp = temp_sibling(path);
-    fs::write(&tmp, bytes).map_err(|e| StoreError::io(&tmp, e))?;
     // `rename` replaces an existing destination atomically on all tier-1
     // platforms, so readers see either the old file or the complete new one.
-    fs::rename(&tmp, path).map_err(|e| {
+    rename_retrying(&tmp, path).map_err(|e| {
         // Best-effort cleanup; the error below is the one that matters.
         let _ = fs::remove_file(&tmp);
         StoreError::io(path, e)
@@ -40,7 +59,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 }
 
 /// Append one newline-terminated record to a line-delimited log, creating
-/// parent directories as needed.
+/// parent directories as needed, and flush it to disk.
 ///
 /// If the file's current tail is an unterminated line (a torn write from a
 /// crash or power loss), a newline is inserted first so the damaged line stays
@@ -51,14 +70,10 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 /// JSON never contains one).
 ///
 /// # Errors
-/// Returns [`StoreError::Io`] if a directory, open, or write operation fails.
+/// Returns [`StoreError::Io`] if a directory, open, write or flush fails.
 pub fn append_line(path: &Path, line: &str) -> Result<(), StoreError> {
     debug_assert!(!line.contains('\n'), "a log record must be a single line");
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|e| StoreError::io(parent, e))?;
-        }
-    }
+    ensure_parent(path)?;
 
     let seal_torn_tail = match fs::metadata(path) {
         Ok(meta) if meta.len() > 0 => !ends_with_newline(path)?,
@@ -78,7 +93,17 @@ pub fn append_line(path: &Path, line: &str) -> Result<(), StoreError> {
         .open(path)
         .map_err(|e| StoreError::io(path, e))?;
     file.write_all(buf.as_bytes())
+        .and_then(|()| file.sync_all())
         .map_err(|e| StoreError::io(path, e))
+}
+
+fn ensure_parent(path: &Path) -> Result<(), StoreError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| StoreError::io(parent, e))?;
+        }
+    }
+    Ok(())
 }
 
 fn ends_with_newline(path: &Path) -> Result<bool, StoreError> {
@@ -92,15 +117,60 @@ fn ends_with_newline(path: &Path) -> Result<bool, StoreError> {
     Ok(byte[0] == b'\n')
 }
 
-fn temp_sibling(path: &Path) -> std::path::PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    path.with_file_name(name)
+/// A new, exclusively created temporary file beside `path`, named
+/// `.<file>.<pid>.<n>.tmp`. `create_new` fails rather than truncate anything
+/// already there, so an existing file is never touched.
+fn create_temp_sibling(path: &Path) -> Result<(PathBuf, fs::File), StoreError> {
+    let base = path.file_name().unwrap_or_default();
+    let mut last = io::Error::new(io::ErrorKind::AlreadyExists, "no free temporary name");
+    for _ in 0..TEMP_ATTEMPTS {
+        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut name = OsString::from(".");
+        name.push(base);
+        name.push(format!(".{}.{n}.tmp", std::process::id()));
+        let tmp = path.with_file_name(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = e,
+            Err(e) => return Err(StoreError::io(&tmp, e)),
+        }
+    }
+    Err(StoreError::io(path, last))
+}
+
+fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match fs::rename(from, to) {
+            Err(e)
+                if cfg!(windows)
+                    && e.kind() == io::ErrorKind::PermissionDenied
+                    && attempt < RENAME_ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(RENAME_PAUSE);
+            }
+            other => return other,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every leftover temporary file in `dir`.
+    fn temps(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
 
     #[test]
     fn write_then_read_roundtrips_and_leaves_no_temp() {
@@ -108,7 +178,7 @@ mod tests {
         let path = dir.path().join("nested").join("file.txt");
         atomic_write(&path, b"hello").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-        assert!(!temp_sibling(&path).exists());
+        assert!(temps(path.parent().unwrap()).is_empty());
     }
 
     #[test]
@@ -118,6 +188,49 @@ mod tests {
         atomic_write(&path, b"first").unwrap();
         atomic_write(&path, b"second").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    #[test]
+    fn a_neighbouring_file_named_like_a_temp_is_never_touched() {
+        // A real `<file>.tmp` next to the target used to be overwritten and
+        // then renamed away by every write of `<file>`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.txt");
+        let neighbour = dir.path().join("report.txt.tmp");
+        std::fs::write(&neighbour, b"the user's own file").unwrap();
+        atomic_write(&path, b"first").unwrap();
+        atomic_write(&path, b"second").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&neighbour).unwrap(),
+            "the user's own file"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    #[test]
+    fn concurrent_writers_of_one_path_never_share_a_temp_or_tear_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.json");
+        let bodies: Vec<Vec<u8>> = (0..8u8).map(|i| vec![b'a' + i; 64 * 1024]).collect();
+        std::thread::scope(|s| {
+            for body in &bodies {
+                let path = &path;
+                s.spawn(move || {
+                    for _ in 0..20 {
+                        atomic_write(path, body).unwrap();
+                    }
+                });
+            }
+        });
+        let got = std::fs::read(&path).unwrap();
+        assert!(
+            bodies.contains(&got),
+            "the target holds exactly one writer's whole body"
+        );
+        assert!(
+            temps(dir.path()).is_empty(),
+            "no temporary file is left behind"
+        );
     }
 
     #[test]
@@ -158,12 +271,19 @@ mod tests {
 
     #[test]
     fn stray_temp_file_does_not_corrupt_the_canonical_file() {
-        // Simulate a crash after writing the temp file but before the rename:
-        // the canonical file must still read back its committed contents.
+        // Simulate a crash after writing a temp file but before the rename:
+        // the canonical file must still read back its committed contents, and
+        // the next write must not trip over the leftover.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.txt");
         atomic_write(&path, b"committed").unwrap();
-        std::fs::write(temp_sibling(&path), b"garbage-partial").unwrap();
+        let stray = dir
+            .path()
+            .join(format!(".file.txt.{}.0.tmp", std::process::id()));
+        std::fs::write(&stray, b"garbage-partial").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "committed");
+        atomic_write(&path, b"next").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "next");
+        assert_eq!(std::fs::read(&stray).unwrap(), b"garbage-partial");
     }
 }
