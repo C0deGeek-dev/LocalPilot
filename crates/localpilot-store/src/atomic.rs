@@ -142,15 +142,21 @@ fn create_temp_sibling(path: &Path) -> Result<(PathBuf, fs::File), StoreError> {
     Err(StoreError::io(path, last))
 }
 
+/// `ERROR_SHARING_VIOLATION`: Windows reports a destination held open without
+/// delete sharing either as this or as access denied.
+const SHARING_VIOLATION: i32 = 32;
+
+fn is_transient_rename_error(e: &io::Error) -> bool {
+    cfg!(windows)
+        && (e.kind() == io::ErrorKind::PermissionDenied
+            || e.raw_os_error() == Some(SHARING_VIOLATION))
+}
+
 fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
     let mut attempt = 1;
     loop {
         match fs::rename(from, to) {
-            Err(e)
-                if cfg!(windows)
-                    && e.kind() == io::ErrorKind::PermissionDenied
-                    && attempt < RENAME_ATTEMPTS =>
-            {
+            Err(e) if is_transient_rename_error(&e) && attempt < RENAME_ATTEMPTS => {
                 attempt += 1;
                 std::thread::sleep(RENAME_PAUSE);
             }
@@ -230,6 +236,66 @@ mod tests {
         assert!(
             temps(dir.path()).is_empty(),
             "no temporary file is left behind"
+        );
+    }
+
+    /// Hold `path` open with no sharing at all, the way another process's
+    /// reader or writer can on Windows, until `release` elapses.
+    #[cfg(windows)]
+    fn hold_exclusively(path: &Path, release: std::time::Duration) -> std::thread::JoinHandle<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(release);
+            drop(file);
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_destination_held_briefly_is_replaced_once_it_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held.json");
+        atomic_write(&path, b"old").unwrap();
+        let holder = hold_exclusively(&path, Duration::from_millis(400));
+        atomic_write(&path, b"new").unwrap();
+        holder.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(temps(dir.path()).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_destination_held_past_the_retry_bound_fails_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held.json");
+        atomic_write(&path, b"old").unwrap();
+        let window = RENAME_PAUSE * RENAME_ATTEMPTS + Duration::from_secs(2);
+        let holder = hold_exclusively(&path, window);
+        let started = std::time::Instant::now();
+        let result = atomic_write(&path, b"new");
+        let took = started.elapsed();
+        holder.join().unwrap();
+        assert!(
+            result.is_err(),
+            "a destination that stays held must fail, not hang"
+        );
+        assert!(
+            took < window,
+            "the failure is bounded by the retry budget: {took:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"old",
+            "the old target is intact"
+        );
+        assert!(
+            temps(dir.path()).is_empty(),
+            "the temporary file is removed"
         );
     }
 
