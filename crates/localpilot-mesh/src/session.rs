@@ -29,7 +29,17 @@ pub fn check_protocol(record: &Map<String, Value>, what: &str) -> Result<(), Mes
             )));
         }
     }
-    if let Some(Value::Array(required)) = record.get("requires") {
+    let required = match record.get("requires") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(list)) => Some(list),
+        // A malformed claim is not "no requirement": fail closed.
+        Some(other) => {
+            return Err(MeshError::Corrupt(format!(
+                "{what} has a malformed `requires` ({other}); it must be a list of feature names"
+            )))
+        }
+    };
+    if let Some(required) = required {
         let unknown: Vec<String> = required
             .iter()
             .map(|f| f.as_str().map_or_else(|| f.to_string(), str::to_owned))
@@ -54,7 +64,10 @@ pub fn pointer(mb: &Mailbox) -> Result<Option<Pointer>, MeshError> {
     let Some(raw) = fsio::read_bytes(&mb.active_v1())? else {
         return Ok(None);
     };
-    let text = String::from_utf8_lossy(&raw);
+    // Mailbox content is UTF-8 (spec L-4); a pointer that is not is corrupt,
+    // never repaired into something that might match.
+    let text = std::str::from_utf8(&raw)
+        .map_err(|e| MeshError::Corrupt(format!("active.json is not valid UTF-8 ({e})")))?;
     if let Some(rest) = text.strip_prefix(SENTINEL_PREFIX) {
         let sid = rest.split(':').next().unwrap_or_default().trim().to_owned();
         if let Some(p) = fsio::read_json::<Pointer>(&mb.active_v2(), "active.v2.json")? {
@@ -125,6 +138,13 @@ pub fn active(mb: &Mailbox) -> Result<Option<Session>, MeshError> {
     check_protocol(&record, &format!("session {}", p.session_id))?;
     let session: Session = serde_json::from_value(Value::Object(record))
         .map_err(|e| MeshError::Corrupt(format!("{shown} is not a session record ({e})")))?;
+    // Schema 2 names its participants; only schema 1 is implicitly the
+    // historic pair. Guessing would give the session the wrong identities.
+    if session.schema() == 2 && session.participants.as_ref().is_none_or(Vec::is_empty) {
+        return Err(MeshError::Corrupt(format!(
+            "{shown} is a schema-2 session with no participants"
+        )));
+    }
     Ok(Some(session))
 }
 
@@ -253,6 +273,80 @@ mod tests {
                 .is_some(),
             "a newer minor is accepted"
         );
+    }
+
+    #[test]
+    fn a_malformed_requires_is_refused_not_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in [
+            json!("x-test.feature"),
+            json!({"x-test.feature": true}),
+            json!(7),
+        ] {
+            let p = dir.path().join("codex.jsonl");
+            fs::write(
+                &p,
+                format!(
+                    "{}
+",
+                    json!({"seq": 1, "requires": bad})
+                ),
+            )
+            .unwrap();
+            assert!(
+                matches!(crate::jsonl::records(&p), Err(MeshError::Corrupt(_))),
+                "{bad}"
+            );
+        }
+        let p = dir.path().join("ok.jsonl");
+        fs::write(
+            &p,
+            "{\"seq\":1,\"requires\":[]}
+",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::jsonl::records(&p).unwrap().len(),
+            1,
+            "an empty list requires nothing"
+        );
+    }
+
+    #[test]
+    fn a_sentinel_that_is_not_utf8_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mb = Mailbox::at(dir.path());
+        let mut raw = format!("{SENTINEL_PREFIX}{SID}: x").into_bytes();
+        raw.push(0xFF);
+        fs::create_dir_all(mb.base()).unwrap();
+        fs::write(mb.active_v1(), raw).unwrap();
+        write(
+            &mb.active_v2(),
+            &json!({"session_id": SID, "status": "active", "schema": 2}).to_string(),
+        );
+        assert!(matches!(active(&mb), Err(MeshError::Corrupt(ref m)) if m.contains("UTF-8")));
+    }
+
+    #[test]
+    fn a_schema_two_session_without_participants_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mb = Mailbox::at(dir.path());
+        write(&mb.active_v1(), &format!("{SENTINEL_PREFIX}{SID}: x"));
+        write(
+            &mb.active_v2(),
+            &json!({"session_id": SID, "status": "active", "schema": 2}).to_string(),
+        );
+        let rec = mb.session_dir(SID).join(SESSION_V2);
+        for body in [
+            json!({"session_id": SID, "status": "active", "schema": 2}),
+            json!({"session_id": SID, "status": "active", "schema": 2, "participants": []}),
+        ] {
+            write(&rec, &body.to_string());
+            assert!(
+                matches!(active(&mb), Err(MeshError::Corrupt(ref m)) if m.contains("no participants")),
+                "{body}"
+            );
+        }
     }
 
     #[test]
