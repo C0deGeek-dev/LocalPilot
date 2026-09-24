@@ -138,6 +138,19 @@ pub fn active(mb: &Mailbox) -> Result<Option<Session>, MeshError> {
     check_protocol(&record, &format!("session {}", p.session_id))?;
     let session: Session = serde_json::from_value(Value::Object(record))
         .map_err(|e| MeshError::Corrupt(format!("{shown} is not a session record ({e})")))?;
+    // The record must be the schema its file and pointer say it is: a
+    // `session.v2.json` without `schema: 2` would otherwise read as schema 1
+    // and slip past the participant check below, and a `session.json`
+    // claiming schema 2 is not one an older build can operate.
+    let expected = if p.schema == Some(2) { 2 } else { 1 };
+    if session.schema.unwrap_or(1) != expected {
+        return Err(MeshError::Corrupt(format!(
+            "{shown} records schema {} but is a schema-{expected} session file",
+            session
+                .schema
+                .map_or_else(|| "none".to_owned(), |s| s.to_string())
+        )));
+    }
     // Schema 2 names its participants; only schema 1 is implicitly the
     // historic pair. Guessing would give the session the wrong identities.
     if session.schema() == 2 && session.participants.as_ref().is_none_or(Vec::is_empty) {
@@ -347,6 +360,38 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn a_session_record_must_be_the_schema_its_file_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let mb = Mailbox::at(dir.path());
+        write(&mb.active_v1(), &format!("{SENTINEL_PREFIX}{SID}: x"));
+        write(
+            &mb.active_v2(),
+            &json!({"session_id": SID, "status": "active", "schema": 2}).to_string(),
+        );
+        let v2 = mb.session_dir(SID).join(SESSION_V2);
+        for body in [
+            json!({"session_id": SID, "status": "active"}),
+            json!({"session_id": SID, "status": "active", "participants": ["claude", "localpilot"]}),
+            json!({"session_id": SID, "status": "active", "schema": 1, "participants": ["claude", "codex"]}),
+        ] {
+            write(&v2, &body.to_string());
+            assert!(
+                matches!(active(&mb), Err(MeshError::Corrupt(ref m)) if m.contains("is a schema-2 session file")),
+                "{body}"
+            );
+        }
+        // A schema-1 file claiming schema 2.
+        let dir = tempfile::tempdir().unwrap();
+        let mb = schema1(
+            dir.path(),
+            json!({"schema": 2, "participants": ["claude", "codex"]}),
+        );
+        assert!(
+            matches!(active(&mb), Err(MeshError::Corrupt(ref m)) if m.contains("is a schema-1 session file"))
+        );
     }
 
     #[test]
