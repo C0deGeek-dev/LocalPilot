@@ -62,18 +62,24 @@ pub fn records(path: &Path) -> Result<Vec<Map<String, Value>>, MeshError> {
 
 /// The 1-based numbers of a journal's invalid lines (spec J-7).
 ///
+/// Reporting damage reads every line, so a valid record that needs a
+/// protocol this build lacks is refused here too rather than counted as
+/// either valid or invalid (spec V-3).
+///
 /// # Errors
-/// I/O errors.
+/// I/O errors; [`MeshError::Unsupported`] as for [`records`].
 pub fn invalid_lines(path: &Path) -> Result<Vec<usize>, MeshError> {
     let Some(bytes) = fsio::read_bytes(path)? else {
         return Ok(Vec::new());
     };
-    Ok(split_lines(&bytes)
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| object(l.as_deref()).is_none())
-        .map(|(i, _)| i + 1)
-        .collect())
+    let mut out = Vec::new();
+    for (i, line) in split_lines(&bytes).iter().enumerate() {
+        match object(line.as_deref()) {
+            Some(m) => check_protocol(&m, "a journal record")?,
+            None => out.push(i + 1),
+        }
+    }
+    Ok(out)
 }
 
 /// One record as a journal line, without its terminator: compact JSON with
@@ -170,6 +176,10 @@ mod tests {
         let p = dir.path().join("codex.jsonl");
         std::fs::write(&p, "{\"seq\":1,\"protocol\":\"2.0\"}\n").unwrap();
         assert!(matches!(records(&p), Err(MeshError::Unsupported(_))));
+        assert!(
+            matches!(invalid_lines(&p), Err(MeshError::Unsupported(_))),
+            "reporting damage does not skip past a record it cannot read"
+        );
     }
 
     #[test]

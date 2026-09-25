@@ -21,10 +21,11 @@
 //! - [`records`]: typed records that keep unknown keys (V-1, V-1a).
 //! - [`session`]: resolving the active session and its protocol version
 //!   (S-7, V-3).
+//! - [`ops`]: the participant operations, returning what a command line
+//!   prints; `localpilot mesh` exposes them.
 //!
-//! Library only for now: nothing in LocalPilot calls it yet. The participant
-//! operations and the `localpilot mesh` command that exposes them come next,
-//! and are held to the same conformance suite.
+//! The suite this crate is held to is vendored in `conformance/`; a test in
+//! the `localpilot` crate runs it against `localpilot mesh`.
 #![forbid(unsafe_code)]
 
 mod error;
@@ -32,12 +33,14 @@ pub mod fsio;
 pub mod jsonl;
 pub mod layout;
 pub mod lock;
+pub mod ops;
 pub mod records;
 pub mod session;
 mod timefmt;
 
 pub use error::MeshError;
 pub use layout::Mailbox;
+pub use ops::{Mesh, Out};
 pub use timefmt::{parse_utc, utc_now};
 
 /// The protocol version this crate implements (spec V-2).

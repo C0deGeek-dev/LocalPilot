@@ -1640,6 +1640,7 @@ dependencies = [
  "base64",
  "clap",
  "crossterm",
+ "dunce",
  "futures",
  "ignore",
  "image",
@@ -1655,6 +1656,7 @@ dependencies = [
  "localpilot-llm",
  "localpilot-localmind",
  "localpilot-mcp",
+ "localpilot-mesh",
  "localpilot-patchgen",
  "localpilot-quota",
  "localpilot-recovery",
@@ -1906,9 +1908,11 @@ dependencies = [
  "localpilot-store",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.9",
  "time",
+ "uuid",
 ]
 
 [[package]]

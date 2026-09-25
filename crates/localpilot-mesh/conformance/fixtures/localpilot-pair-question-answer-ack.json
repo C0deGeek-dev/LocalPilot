@@ -1,0 +1,2118 @@
+{
+ "id": "localpilot-pair-question-answer-ack",
+ "profiles": [
+  "localpilot-pair"
+ ],
+ "layers": [
+  "cli",
+  "state"
+ ],
+ "setup": {
+  "vcs": "git"
+ },
+ "provenance": {
+  "build": "3dbfd6cba536:pair.py",
+  "sha12": "5924bf530f35",
+  "note": "captured from the reference and reviewed; never regenerate with a build under test"
+ },
+ "steps": [
+  {
+   "cmd": [
+    "start",
+    "--role",
+    "claude",
+    "--with",
+    "localpilot",
+    "--task",
+    "fixture task"
+   ],
+   "rc": 0,
+   "stdout": "STARTED session=<SID> role=driver peer=localpilot work=fixture-task\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "localpilot": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/localpilot.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/localpilot.json": {
+     "role": "localpilot",
+     "status": "not_joined",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ]
+     },
+     "delivery": "print",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "schema": 2,
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "localpilot"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "join",
+    "--role",
+    "localpilot",
+    "--timeout",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "JOINED session=<SID> role=navigator peer=claude work=fixture-task\nANCHOR=<REPO> source=flag\nTASK:\nfixture task\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "localpilot": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/localpilot.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/localpilot.json": {
+     "role": "localpilot",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/localpilot.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "localpilot:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "localpilot:1",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/localpilot.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "localpilot",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "localpilot:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "localpilot:1",
+     "route_trace": [
+      "localpilot"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "localpilot": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "schema": 2,
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "localpilot"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "claude",
+    "--timeout",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "PEER localpilot #1 HELLO [fixture-task#1]\njoined; navigator ready\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "localpilot": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/localpilot.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/localpilot.json": {
+     "role": "localpilot",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/localpilot.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "localpilot:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "localpilot:1",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/localpilot.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "localpilot",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "localpilot:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "localpilot:1",
+     "route_trace": [
+      "localpilot"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "localpilot": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "schema": 2,
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "localpilot"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "QUESTION",
+    "--body",
+    "which way?",
+    "--expect-reply",
+    "--ack-through",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "localpilot": {
+       "peer_seq": 1,
+       "delivered_seq": 1,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/localpilot.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/localpilot.json": {
+     "role": "localpilot",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "QUESTION",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "which way?",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "claude:1",
+      "to": [
+       "localpilot"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/localpilot.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "localpilot:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "localpilot:1",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "QUESTION",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "which way?",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "claude:1",
+     "to": [
+      "localpilot"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:1",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/localpilot.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "localpilot",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "localpilot:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "localpilot:1",
+     "route_trace": [
+      "localpilot"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": {
+      "claude:1": {
+       "from": "claude",
+       "kind": "QUESTION",
+       "since": "<TS>",
+       "pending": [
+        "localpilot"
+       ],
+       "answered_by": []
+      }
+     },
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "localpilot": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "schema": 2,
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "localpilot"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "localpilot",
+    "--timeout",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "PEER claude #1 QUESTION [fixture-task#1] REPLY_REQUIRED\nwhich way?\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "localpilot": {
+       "peer_seq": 1,
+       "delivered_seq": 1,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/localpilot.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/localpilot.json": {
+     "role": "localpilot",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "QUESTION",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "which way?",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "claude:1",
+      "to": [
+       "localpilot"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/localpilot.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "localpilot:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "localpilot:1",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "QUESTION",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "which way?",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "claude:1",
+     "to": [
+      "localpilot"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:1",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/localpilot.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "localpilot",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "localpilot:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "localpilot:1",
+     "route_trace": [
+      "localpilot"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": {
+      "claude:1": {
+       "from": "claude",
+       "kind": "QUESTION",
+       "since": "<TS>",
+       "pending": [
+        "localpilot"
+       ],
+       "answered_by": []
+      }
+     },
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "localpilot": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "schema": 2,
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "localpilot"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "localpilot",
+    "--kind",
+    "ANSWER",
+    "--body",
+    "left",
+    "--ack-through",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "localpilot": {
+       "peer_seq": 1,
+       "delivered_seq": 1,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/localpilot.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 1,
+       "delivered_seq": 1,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/localpilot.json": {
+     "role": "localpilot",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "QUESTION",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "which way?",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "claude:1",
+      "to": [
+       "localpilot"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/localpilot.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "localpilot:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "localpilot:1",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "ANSWER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "left",
+      "owner": "claude",
+      "msg_id": "localpilot:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "localpilot:2",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "QUESTION",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "which way?",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "claude:1",
+     "to": [
+      "localpilot"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:1",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/localpilot.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "localpilot",
+     "kind": "ANSWER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "left",
+     "owner": "claude",
+     "msg_id": "localpilot:2",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "localpilot:2",
+     "route_trace": [
+      "localpilot"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": {
+      "claude:1": {
+       "from": "claude",
+       "kind": "QUESTION",
+       "since": "<TS>",
+       "pending": [
+        "localpilot"
+       ],
+       "answered_by": []
+      }
+     },
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "localpilot": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "schema": 2,
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "localpilot"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "claude",
+    "--timeout",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "PEER localpilot #2 ANSWER [fixture-task#1]\nleft\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "localpilot": {
+       "peer_seq": 1,
+       "delivered_seq": 2,
+       "delivered_counts": {
+        "2": 1
+       }
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/localpilot.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 1,
+       "delivered_seq": 1,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/localpilot.json": {
+     "role": "localpilot",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "QUESTION",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "which way?",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "claude:1",
+      "to": [
+       "localpilot"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/localpilot.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "localpilot:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "localpilot:1",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "ANSWER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "left",
+      "owner": "claude",
+      "msg_id": "localpilot:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "localpilot:2",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "QUESTION",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "which way?",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "claude:1",
+     "to": [
+      "localpilot"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:1",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/localpilot.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "localpilot",
+     "kind": "ANSWER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "left",
+     "owner": "claude",
+     "msg_id": "localpilot:2",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "localpilot:2",
+     "route_trace": [
+      "localpilot"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": {
+      "claude:1": {
+       "from": "claude",
+       "kind": "QUESTION",
+       "since": "<TS>",
+       "pending": [
+        "localpilot"
+       ],
+       "answered_by": []
+      }
+     },
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "localpilot": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "schema": 2,
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "localpilot"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "ack",
+    "--role",
+    "claude",
+    "--through",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "ACKED localpilot:2\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "localpilot": {
+       "peer_seq": 2,
+       "delivered_seq": 2,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/localpilot.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 1,
+       "delivered_seq": 1,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/localpilot.json": {
+     "role": "localpilot",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "QUESTION",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "which way?",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "claude:1",
+      "to": [
+       "localpilot"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/localpilot.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "localpilot:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "localpilot:1",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "ANSWER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "left",
+      "owner": "claude",
+      "msg_id": "localpilot:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "localpilot:2",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "QUESTION",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "which way?",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "claude:1",
+     "to": [
+      "localpilot"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:1",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/localpilot.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "localpilot",
+     "kind": "ANSWER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "left",
+     "owner": "claude",
+     "msg_id": "localpilot:2",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "localpilot:2",
+     "route_trace": [
+      "localpilot"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": {
+      "claude:1": {
+       "from": "claude",
+       "kind": "QUESTION",
+       "since": "<TS>",
+       "pending": [
+        "localpilot"
+       ],
+       "answered_by": []
+      }
+     },
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "localpilot": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "schema": 2,
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "localpilot"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "status"
+   ],
+   "rc": 0,
+   "stdout": "SESSION <SID> status=active phase=huddle driver=claude owner=claude work=fixture-task#1\nclaude: ready updated=<TS> resume_at=-\nlocalpilot: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,localpilot:ack\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "localpilot": {
+       "peer_seq": 2,
+       "delivered_seq": 2,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/localpilot.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 1,
+       "delivered_seq": 1,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/localpilot.json": {
+     "role": "localpilot",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "QUESTION",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "which way?",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "claude:1",
+      "to": [
+       "localpilot"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/localpilot.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.0",
+      "msg_id": "localpilot:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "localpilot:1",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "localpilot",
+      "kind": "ANSWER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "left",
+      "owner": "claude",
+      "msg_id": "localpilot:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "localpilot:2",
+      "route_trace": [
+       "localpilot"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "QUESTION",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "which way?",
+     "owner": "claude",
+     "protocol": "1.0",
+     "msg_id": "claude:1",
+     "to": [
+      "localpilot"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:1",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/localpilot.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "localpilot",
+     "kind": "ANSWER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "left",
+     "owner": "claude",
+     "msg_id": "localpilot:2",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "localpilot:2",
+     "route_trace": [
+      "localpilot"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": {
+      "claude:1": {
+       "from": "claude",
+       "kind": "QUESTION",
+       "since": "<TS>",
+       "pending": [
+        "localpilot"
+       ],
+       "answered_by": []
+      }
+     },
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "localpilot": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "schema": 2,
+     "participants": [
+      "claude",
+      "localpilot"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "localpilot"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  }
+ ],
+ "final_state": {
+  "active.json": {
+   "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+  },
+  "active.v2.json": {
+   "session_id": "<SID>",
+   "driver": "claude",
+   "status": "active",
+   "updated_at": "<TS>",
+   "participants": [
+    "claude",
+    "localpilot"
+   ],
+   "schema": 2
+  },
+  "sessions/<SID>/cursor/claude.json": {
+   "from": {
+    "localpilot": {
+     "peer_seq": 2,
+     "delivered_seq": 2,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
+  },
+  "sessions/<SID>/cursor/localpilot.json": {
+   "from": {
+    "claude": {
+     "peer_seq": 1,
+     "delivered_seq": 1,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
+  },
+  "sessions/<SID>/health/claude.json": {
+   "role": "claude",
+   "status": "ready",
+   "generation": 1,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/health/localpilot.json": {
+   "role": "localpilot",
+   "status": "ready",
+   "generation": 2,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/journal/claude.jsonl": [
+   {
+    "seq": 1,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "QUESTION",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": true,
+    "body": "which way?",
+    "owner": "claude",
+    "protocol": "1.0",
+    "msg_id": "claude:1",
+    "to": [
+     "localpilot"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:1",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   }
+  ],
+  "sessions/<SID>/journal/localpilot.jsonl": [
+   {
+    "seq": 1,
+    "at": "<TS>",
+    "role": "localpilot",
+    "kind": "HELLO",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "joined; navigator ready",
+    "owner": "claude",
+    "protocol": "1.0",
+    "msg_id": "localpilot:1",
+    "to": [
+     "claude"
+    ],
+    "reply_to": null,
+    "broadcast": true,
+    "thread_id": "localpilot:1",
+    "route_trace": [
+     "localpilot"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 2,
+    "at": "<TS>",
+    "role": "localpilot",
+    "kind": "ANSWER",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "left",
+    "owner": "claude",
+    "msg_id": "localpilot:2",
+    "to": [
+     "claude"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "localpilot:2",
+    "route_trace": [
+     "localpilot"
+    ],
+    "ttl": null,
+    "forward": false
+   }
+  ],
+  "sessions/<SID>/latest/claude.json": {
+   "seq": 1,
+   "at": "<TS>",
+   "role": "claude",
+   "kind": "QUESTION",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "expect_reply": true,
+   "body": "which way?",
+   "owner": "claude",
+   "protocol": "1.0",
+   "msg_id": "claude:1",
+   "to": [
+    "localpilot"
+   ],
+   "reply_to": null,
+   "broadcast": false,
+   "thread_id": "claude:1",
+   "route_trace": [
+    "claude"
+   ],
+   "ttl": null,
+   "forward": false
+  },
+  "sessions/<SID>/latest/localpilot.json": {
+   "seq": 2,
+   "at": "<TS>",
+   "role": "localpilot",
+   "kind": "ANSWER",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "expect_reply": false,
+   "body": "left",
+   "owner": "claude",
+   "msg_id": "localpilot:2",
+   "to": [
+    "claude"
+   ],
+   "reply_to": null,
+   "broadcast": false,
+   "thread_id": "localpilot:2",
+   "route_trace": [
+    "localpilot"
+   ],
+   "ttl": null,
+   "forward": false
+  },
+  "sessions/<SID>/session.v2.json": {
+   "session_id": "<SID>",
+   "task": "fixture task",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "driver": "claude",
+   "owner": "claude",
+   "ownership_epoch": 1,
+   "status": "active",
+   "phase": "huddle",
+   "waiting": {
+    "claude:1": {
+     "from": "claude",
+     "kind": "QUESTION",
+     "since": "<TS>",
+     "pending": [
+      "localpilot"
+     ],
+     "answered_by": []
+    }
+   },
+   "handoff": null,
+   "vcs": "git",
+   "base_head": "<SHA>",
+   "base_status": [],
+   "companions": [],
+   "absent_companions": [],
+   "caps": {
+    "claude": [
+     "ack"
+    ],
+    "localpilot": [
+     "ack"
+    ]
+   },
+   "delivery": "ack",
+   "protocol": "1.0",
+   "created_at": "<TS>",
+   "updated_at": "<TS>",
+   "schema": 2,
+   "participants": [
+    "claude",
+    "localpilot"
+   ],
+   "authority": {
+    "required_reviewers": [
+     "localpilot"
+    ],
+    "advisers": []
+   },
+   "pauses": {}
+  },
+  "vcs.json": {
+   "vcs": "git",
+   "recorded_at": "<TS>"
+  }
+ }
+}

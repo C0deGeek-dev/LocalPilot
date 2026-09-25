@@ -1,0 +1,581 @@
+{
+ "id": "journal-raw-unicode-separator-from-an-older-build",
+ "profiles": [
+  "two-party",
+  "journal"
+ ],
+ "layers": [
+  "cli",
+  "state"
+ ],
+ "setup": {
+  "vcs": "git"
+ },
+ "provenance": {
+  "build": "44892a1ba4f2:pair.py",
+  "sha12": "5e9cbc53fd91",
+  "note": "captured from the reference and reviewed; never regenerate with a build under test"
+ },
+ "steps": [
+  {
+   "cmd": [
+    "start",
+    "--role",
+    "claude",
+    "--task",
+    "fixture task"
+   ],
+   "rc": 0,
+   "stdout": "STARTED session=<SID> role=driver peer=codex work=fixture-task\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "not_joined",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ]
+     },
+     "delivery": "print",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "join",
+    "--role",
+    "codex",
+    "--timeout",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "JOINED session=<SID> role=navigator peer=claude work=fixture-task\nANCHOR=<REPO> source=flag\nTASK:\nfixture task\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.0"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.0"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "raw": {
+    "op": "append_bytes",
+    "path": "sessions/<SID>/journal/codex.jsonl",
+    "data": "{\"seq\":2,\"at\":\"2026-01-01T00:00:00Z\",\"role\":\"codex\",\"kind\":\"NOTE\",\"work_unit\":\"fixture-task\",\"unit_id\":null,\"expect_reply\":false,\"body\":\"one two\"}\n"
+   }
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "claude",
+    "--timeout",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "PEER codex #1 HELLO [fixture-task#1]\njoined; navigator ready\n\nPEER codex #2 NOTE [fixture-task]\none two\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1,
+      "2": 1
+     },
+     "delivered_seq": 2
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.0"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": null,
+      "expect_reply": false,
+      "body": "one two"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.0"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   },
+   "legacy": {
+    "rc": 0,
+    "stdout": "PEER codex #1 HELLO [fixture-task#1]\njoined; navigator ready\n",
+    "stderr": ""
+   }
+  },
+  {
+   "cmd": [
+    "status"
+   ],
+   "rc": 0,
+   "stdout": "SESSION <SID> status=active phase=huddle driver=claude owner=claude work=fixture-task#1\nclaude: ready updated=<TS> resume_at=-\ncodex: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,codex:ack unacked claude=#1..#2\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1,
+      "2": 1
+     },
+     "delivered_seq": 2
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.0"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": null,
+      "expect_reply": false,
+      "body": "one two"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.0"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.0",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   },
+   "legacy": {
+    "rc": 0,
+    "stdout": "SESSION <SID> status=active phase=huddle driver=claude owner=claude work=fixture-task#1\nclaude: ready updated=<TS> resume_at=-\ncodex: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,codex:ack unacked claude=#1..#1\nANCHOR=<REPO> source=flag\n",
+    "stderr": ""
+   }
+  }
+ ],
+ "final_state": {
+  "active.json": {
+   "session_id": "<SID>",
+   "driver": "claude",
+   "status": "active",
+   "updated_at": "<TS>"
+  },
+  "sessions/<SID>/cursor/claude.json": {
+   "peer_seq": 0,
+   "peer_health_generation": 0,
+   "resume_seen": null,
+   "stale_wait_seq": null,
+   "delivered_counts": {
+    "1": 1,
+    "2": 1
+   },
+   "delivered_seq": 2
+  },
+  "sessions/<SID>/cursor/codex.json": {
+   "peer_seq": 0,
+   "peer_health_generation": 0,
+   "resume_seen": null,
+   "stale_wait_seq": null
+  },
+  "sessions/<SID>/health/claude.json": {
+   "role": "claude",
+   "status": "ready",
+   "generation": 1,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/health/codex.json": {
+   "role": "codex",
+   "status": "ready",
+   "generation": 2,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/journal/codex.jsonl": [
+   {
+    "seq": 1,
+    "at": "<TS>",
+    "role": "codex",
+    "kind": "HELLO",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "joined; navigator ready",
+    "protocol": "1.0"
+   },
+   {
+    "seq": 2,
+    "at": "<TS>",
+    "role": "codex",
+    "kind": "NOTE",
+    "work_unit": "fixture-task",
+    "unit_id": null,
+    "expect_reply": false,
+    "body": "one two"
+   }
+  ],
+  "sessions/<SID>/latest/codex.json": {
+   "seq": 1,
+   "at": "<TS>",
+   "role": "codex",
+   "kind": "HELLO",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "expect_reply": false,
+   "body": "joined; navigator ready",
+   "protocol": "1.0"
+  },
+  "sessions/<SID>/session.json": {
+   "session_id": "<SID>",
+   "task": "fixture task",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "driver": "claude",
+   "navigator": "codex",
+   "owner": "claude",
+   "ownership_epoch": 1,
+   "status": "active",
+   "phase": "huddle",
+   "waiting": null,
+   "pause": null,
+   "handoff": null,
+   "vcs": "git",
+   "base_head": "<SHA>",
+   "base_status": [],
+   "companions": [],
+   "absent_companions": [],
+   "caps": {
+    "claude": [
+     "ack"
+    ],
+    "codex": [
+     "ack"
+    ]
+   },
+   "delivery": "ack",
+   "protocol": "1.0",
+   "created_at": "<TS>",
+   "updated_at": "<TS>"
+  },
+  "vcs.json": {
+   "vcs": "git",
+   "recorded_at": "<TS>"
+  }
+ },
+ "legacy_build": "7df679e:pair.py"
+}

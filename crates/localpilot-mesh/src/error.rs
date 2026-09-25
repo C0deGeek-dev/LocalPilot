@@ -22,6 +22,10 @@ pub enum MeshError {
     #[error("{0}; nothing was changed")]
     Unsupported(String),
 
+    /// The command was refused by a protocol rule; nothing was changed.
+    #[error("{0}")]
+    Refused(String),
+
     /// A lock stayed held past its deadline (spec L-5).
     #[error("mailbox lock busy: {0}")]
     LockBusy(String),

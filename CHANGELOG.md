@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **LocalPilot can pair with Claude Code and Codex.** `localpilot mesh` takes
+  part in a session of the c0degeek `pair-programming` skill: it joins, reads
+  and acknowledges mail, posts (including directed replies, forwards and
+  escalations in three-way sessions), reports health, hands work over, closes a
+  unit on its reviewers' agreement, and registers a delivery endpoint. It works
+  on the skill's own file mailbox under the same locks, so there is one mailbox
+  whichever tool writes. It supports sessions in a Git working tree with no
+  companion repositories, and for those it passes every mandatory fixture of
+  the protocol's conformance suite for the participant profile; a test runs
+  that suite on every build. Sessions started without version control and
+  sessions that declare companion repositories are not supported yet: the
+  operations that need them refuse and change nothing, and the suite does not
+  cover them.
+
 - **Editing a file no longer destroys a neighbour named like its temp.** The
   edit tools and the store staged every write in a fixed `<file>.tmp` beside
   the target, so editing `foo` overwrote and then deleted a real `foo.tmp` in

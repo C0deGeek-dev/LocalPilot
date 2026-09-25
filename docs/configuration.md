@@ -230,6 +230,45 @@ cap, timeout, abort, peer/provider failure, protocol error, budget limit, no
 progress, or driver failure returns a nonzero status. The command does not apply
 or commit the agreed candidate automatically.
 
+### Pairing with Claude Code and Codex (`localpilot mesh`)
+
+`localpilot mesh` lets LocalPilot take part in a pair-programming session that
+Claude Code or Codex started with the c0degeek `pair-programming` skill. That
+skill keeps a file mailbox (`.pair-programming/`) in the shared working tree,
+and `localpilot mesh` reads and writes the same files under the same locks as
+the skill's own `pair.py`. There is no second mailbox and no server.
+
+LocalPilot takes part as a participant: it joins a session, reads its mail,
+posts, acknowledges, reports its health, hands a unit of work over or accepts
+one, closes a unit it owns on its reviewers' agreement, and registers a
+delivery endpoint. Starting, parking, resuming and retiring sessions stay with
+`pair.py`; those operations exit `2` with a pointer to it.
+
+```powershell
+localpilot mesh --repo . join --role localpilot --timeout 60
+localpilot mesh --repo . watch --role localpilot --timeout 600
+localpilot mesh --repo . post --role localpilot --kind ANSWER --reply-to codex:4 --body-file answer.md
+localpilot mesh --repo . status
+```
+
+The arguments follow `pair.py`, so the same conformance suite checks both
+implementations; the suite LocalPilot runs is vendored in
+`crates/localpilot-mesh/conformance`. The anchor tree is `--repo`, then
+`PAIR_REPO`, then the current directory.
+
+| Exit status | Meaning |
+|---|---|
+| `0` | Success. |
+| `1` | A refusal (the reason is on stderr), or a `watch`/`join` that timed out. |
+| `2` | A usage error, or an operation only a full implementation provides. |
+| `4` | `guard-write` denied the write (`WRITE_DENIED` on stderr). |
+| `5` | A delivery request was refused (`REFUSED <code>` on stderr). |
+
+Supported sessions are those in a Git working tree with no companion
+repositories; the conformance suite covers exactly those. Not yet supported:
+sessions started with `--no-vcs`, and sessions that declare companion
+repositories. Operations that need them refuse and change nothing.
+
 ## Project context files
 
 Beyond `.localpilot.toml`, a project may carry free-text **instruction files**

@@ -57,6 +57,7 @@ arboard = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
 clap.workspace = true
+dunce.workspace = true
 crossterm = { workspace = true, optional = true }
 futures.workspace = true
 indexmap.workspace = true
@@ -126,6 +127,7 @@ localpilot-slash = { path = "../localpilot-slash", optional = true }
 localpilot-server = { path = "../localpilot-server" }
 localpilot-skills = { path = "../localpilot-skills" }
 localpilot-store = { path = "../localpilot-store" }
+localpilot-mesh = { path = "../localpilot-mesh" }
 # The pure task-graph crate: the `swarm run` entrypoint seeds a plan from a file
 # (objective, mode, per-node model) and hands it to the swarm driver.
 localpilot-taskgraph = { path = "../localpilot-taskgraph" }

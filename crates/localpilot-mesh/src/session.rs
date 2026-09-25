@@ -110,6 +110,20 @@ pub fn pointer(mb: &Mailbox) -> Result<Option<Pointer>, MeshError> {
 /// [`MeshError::Corrupt`] for a pointer whose record is missing or ambiguous
 /// (spec L-8), [`MeshError::Unsupported`] per [`check_protocol`].
 pub fn active(mb: &Mailbox) -> Result<Option<Session>, MeshError> {
+    let Some(record) = active_record(mb)? else {
+        return Ok(None);
+    };
+    serde_json::from_value(Value::Object(record))
+        .map(Some)
+        .map_err(|e| MeshError::Corrupt(format!("the session record is not a session ({e})")))
+}
+
+/// The active session record as read, after the same checks as [`active`]:
+/// for operations that must rewrite it with every key it holds.
+///
+/// # Errors
+/// As [`active`].
+pub fn active_record(mb: &Mailbox) -> Result<Option<Map<String, Value>>, MeshError> {
     let Some(p) = pointer(mb)? else {
         return Ok(None);
     };
@@ -136,7 +150,7 @@ pub fn active(mb: &Mailbox) -> Result<Option<Session>, MeshError> {
         )));
     };
     check_protocol(&record, &format!("session {}", p.session_id))?;
-    let session: Session = serde_json::from_value(Value::Object(record))
+    let session: Session = serde_json::from_value(Value::Object(record.clone()))
         .map_err(|e| MeshError::Corrupt(format!("{shown} is not a session record ({e})")))?;
     // The record must be the schema its file and pointer say it is: a
     // `session.v2.json` without `schema: 2` would otherwise read as schema 1
@@ -158,7 +172,7 @@ pub fn active(mb: &Mailbox) -> Result<Option<Session>, MeshError> {
             "{shown} is a schema-2 session with no participants"
         )));
     }
-    Ok(Some(session))
+    Ok(Some(record))
 }
 
 /// Session ids are generated (`YYYYMMDDTHHMMSSZ-<hex>`); anything path-like is

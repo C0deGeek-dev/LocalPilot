@@ -1,0 +1,129 @@
+{
+ "id": "two-party-golden",
+ "profiles": [
+  "two-party"
+ ],
+ "layers": [
+  "cli"
+ ],
+ "setup": {
+  "vcs": "git"
+ },
+ "provenance": {
+  "build": "3592209:skills/pair-programming/scripts/pair.py",
+  "sha12": "901c4dcb85d6",
+  "note": "captured once from the last build before N-party sessions; never regenerate with the new build"
+ },
+ "steps": [
+  {
+   "cmd": [
+    "start",
+    "--role",
+    "claude",
+    "--task",
+    "golden two-party task"
+   ],
+   "rc": 0,
+   "stdout": "STARTED session=<SID> role=driver peer=codex work=golden-two-party-task\nANCHOR=<REPO> source=flag\n",
+   "stderr": ""
+  },
+  {
+   "cmd": [
+    "join",
+    "--role",
+    "codex",
+    "--timeout",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "JOINED session=<SID> role=navigator peer=claude work=golden-two-party-task\nANCHOR=<REPO> source=flag\nTASK:\ngolden two-party task\n",
+   "stderr": ""
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "claude",
+    "--timeout",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "PEER codex #1 HELLO [golden-two-party-task#1]\njoined; navigator ready\n",
+   "stderr": ""
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "QUESTION",
+    "--body",
+    "which way?",
+    "--expect-reply",
+    "--ack-through",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": ""
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "codex",
+    "--timeout",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "PEER claude #1 QUESTION [golden-two-party-task#1] REPLY_REQUIRED\nwhich way?\n",
+   "stderr": ""
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "codex",
+    "--kind",
+    "ANSWER",
+    "--body",
+    "left",
+    "--ack-through",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": ""
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "claude",
+    "--timeout",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "PEER codex #2 ANSWER [golden-two-party-task#1]\nleft\n",
+   "stderr": ""
+  },
+  {
+   "cmd": [
+    "status"
+   ],
+   "rc": 0,
+   "stdout": "SESSION <SID> status=active phase=huddle driver=claude owner=claude work=golden-two-party-task#1\nclaude: ready updated=<TS> resume_at=-\ncodex: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,codex:ack unacked claude=#2..#2\nANCHOR=<REPO> source=flag\n",
+   "stderr": ""
+  },
+  {
+   "cmd": [
+    "transcript"
+   ],
+   "rc": 0,
+   "stdout": "## <TS> claude #1 QUESTION [golden-two-party-task#1]\nwhich way?\n\n## <TS> codex #1 HELLO [golden-two-party-task#1]\njoined; navigator ready\n\n## <TS> codex #2 ANSWER [golden-two-party-task#1]\nleft\n\n",
+   "stderr": "",
+   "compare": "entries"
+  }
+ ]
+}

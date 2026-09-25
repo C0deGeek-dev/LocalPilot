@@ -39,6 +39,7 @@ mod login_cmd;
 mod mcp;
 mod mcp_env;
 mod memory_cmd;
+mod mesh_cmd;
 mod models_cmd;
 mod output;
 mod outward_cmd;
@@ -583,6 +584,10 @@ enum Command {
         #[command(subcommand)]
         command: ProjectSkillsCommand,
     },
+    /// Take part in a pair-programming mailbox shared with Claude Code and
+    /// Codex, as a participant: join, read, post, acknowledge, report health.
+    /// Arguments follow the reference `pair.py`; see `localpilot mesh --help`.
+    Mesh(mesh_cmd::MeshArgs),
     /// Write a cross-context handoff, or check one before resuming work.
     Handoff {
         #[command(subcommand)]
@@ -2475,6 +2480,9 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             if outcome.had_failure {
                 exit_code = std::process::ExitCode::FAILURE;
             }
+        }
+        Command::Mesh(args) => {
+            exit_code = mesh_cmd::run(args);
         }
         Command::Handoff { command } => {
             let cwd = std::env::current_dir()?;
