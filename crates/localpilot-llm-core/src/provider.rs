@@ -120,4 +120,17 @@ pub trait ModelProvider: Send + Sync {
     /// Returns a [`ProviderError`] if the request cannot be started; per-event
     /// failures surface as `Err` items within the returned stream.
     async fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ProviderError>;
+
+    /// Whether this provider's server has refused an output constraint
+    /// (`ModelRequest::tool_constraint`) and it now sends requests without one.
+    ///
+    /// A provider that falls back silently would otherwise hand a caller an
+    /// unconstrained reply it believes was constrained. Read it before and after
+    /// a constrained request: a change means the reply is definitely
+    /// unconstrained. `false` for a provider that never drops a constraint —
+    /// which says nothing about whether the server honoured one, so a caller
+    /// validates every reply either way.
+    fn constraint_refused(&self) -> bool {
+        false
+    }
 }

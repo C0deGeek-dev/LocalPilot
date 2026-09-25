@@ -422,6 +422,10 @@ impl ModelProvider for OpenAiProvider {
         &self.declaration
     }
 
+    fn constraint_refused(&self) -> bool {
+        self.constrained_rejected.load(Ordering::Relaxed)
+    }
+
     async fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
         let mut builder = self
             .client

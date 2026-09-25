@@ -27,6 +27,10 @@ pub struct FakeProvider {
     scripts: Mutex<VecDeque<Script>>,
     open_failures: Mutex<u32>,
     requests: Mutex<Vec<ModelRequest>>,
+    /// Refuse any output constraint, the way a server that rejects a schema
+    /// does: the scripted reply is still served, and the refusal is reported.
+    refuse_constraints: bool,
+    constraint_refused: std::sync::atomic::AtomicBool,
 }
 
 impl FakeProvider {
@@ -38,7 +42,32 @@ impl FakeProvider {
             scripts: Mutex::new(VecDeque::new()),
             open_failures: Mutex::new(0),
             requests: Mutex::new(Vec::new()),
+            refuse_constraints: false,
+            constraint_refused: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Declare a context window, for callers that size their requests by it.
+    #[must_use]
+    pub fn declaring_context_tokens(mut self, tokens: u64) -> Self {
+        self.declaration.max_context_tokens = Some(tokens);
+        self
+    }
+
+    /// Declare constrained-decoding support, so a caller attempts constraints.
+    #[must_use]
+    pub fn declaring_constrained_decoding(mut self) -> Self {
+        self.declaration.capabilities.constrained_decoding = true;
+        self
+    }
+
+    /// Refuse output constraints: a request carrying one is answered from the
+    /// script as if sent without it, and [`ModelProvider::constraint_refused`]
+    /// reports the refusal from then on.
+    #[must_use]
+    pub fn refusing_constraints(mut self) -> Self {
+        self.refuse_constraints = true;
+        self
     }
 
     /// Make the next `count` calls to [`ModelProvider::stream`] fail with a
@@ -126,7 +155,16 @@ impl ModelProvider for FakeProvider {
         &self.declaration
     }
 
+    fn constraint_refused(&self) -> bool {
+        self.constraint_refused
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
+        if self.refuse_constraints && request.tool_constraint.is_some() {
+            self.constraint_refused
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Ok(mut requests) = self.requests.lock() {
             requests.push(request);
         }
