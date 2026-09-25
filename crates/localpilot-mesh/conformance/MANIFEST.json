@@ -1,10 +1,10 @@
 {
  "source_repo": "c0degeek-ai",
  "source_path": "skills/pair-programming/conformance",
- "source_commit": "c75414443c0e8265604afce5e7002bf010fc670e",
+ "source_commit": "38f67862775f2be534d177684ca8da87fc1260ee",
  "files": {
-  "run.py": "609bf672a2b6b33fa916d119927cb6bb79b09aaa9058b8c4eac1fc93c85fc8db",
-  "README.md": "1a16921f390ffcd48021bab44ee72599557fb52df216aa9d47459fe465c95abd",
+  "run.py": "f1c12c6ca0a957631bef0a9ccc320efe3f433d3f73355a70952a5c7fe9b953c0",
+  "README.md": "d71295aa0caecba022d82fa2fff5aa2e08449583f70a41798912934aa8dbf020",
   "participant.json": "ad4b484707890fe105512a52d40fbc4b02d9042047c3725ba78f08b7b0dd067e",
   "fixtures/crash-leftover-temp-file-is-ignored.json": "aa47e41976eb54274b0c95f9c328033fa35d0711741b064ac3a34b258c14bef5",
   "fixtures/crash-post-before-its-session-update.json": "512ee3451f9a56fe24708ebba0f95d5e4707a2c4970701024939b61816249eae",

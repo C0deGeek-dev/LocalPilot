@@ -372,8 +372,8 @@ def obs_check(st: dict, rc: int, out: str, err: str) -> list:
     pick = lambda t, pre: sorted(l for l in t.splitlines() if l.startswith(pre))
     if op in ("endpoint", "accept", "record-push") and pick(st["stdout"], OBS_LINES) != pick(out, OBS_LINES):
         bad.append(f"plumbing lines differ\n--- expected\n{st['stdout']}--- got\n{out}")
-    # A status that refused may have printed some lines first; what it
-    # printed before refusing is not part of the contract.
+    # A status that refused may have printed some lines first; that stdout
+    # is not part of the contract. Its exit code and refusal lines are, below.
     if op == "status" and st["rc"] == 0:
         need = {l for l in st["stdout"].splitlines() if l.startswith(STATUS_LINES) or HEALTH_LINE.match(l)}
         missing = sorted(need - set(out.splitlines()))

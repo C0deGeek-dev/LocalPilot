@@ -164,6 +164,13 @@ jobs:
         name: 'linux — tests: localpilot-mcp'
         timeout-minutes: 6
         run: capped cargo nextest run -p localpilot-mcp --test-threads 2
+      # The pair-programming mailbox participant: file locks, atomic replace and
+      # journal appends shared with other writers, so Linux behaviour matters.
+      # Its conformance suite runs in the `localpilot` step (it drives the binary).
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-mesh'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-mesh --test-threads 2
       - if: runner.os == 'Linux'
         name: 'linux — tests: localpilot-patchgen'
         timeout-minutes: 6

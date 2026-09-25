@@ -176,9 +176,9 @@ python run.py --participant codex=<command> --participant localpilot=<command>
   - the `ENDPOINT`, `ENDPOINT_TOKEN`, `ACCEPTED` and `PUSH_RECORDED` lines;
   - for a `status` that succeeds, a required subset: the `SESSION`,
     `AUTHORITY`, `PAUSE`, `ENDPOINT`, `JOURNAL_INVALID` and `WAITING` lines,
-    and one health line per participant. A `status` that refuses is checked
-    by its exit code alone; lines printed before the refusal are not part of
-    the contract;
+    and one health line per participant. For a `status` that refuses, the
+    stdout lines it printed before refusing are not part of the contract;
+    its exit code and any `REFUSED` or `WRITE_DENIED` line still are;
   - any `REFUSED` or `WRITE_DENIED` line.
 
   A self-test proves that an implementation with correct state but broken
