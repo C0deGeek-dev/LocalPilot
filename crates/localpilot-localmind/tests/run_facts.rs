@@ -609,3 +609,57 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+#[test]
+fn a_ratified_check_run_is_a_fact_that_says_what_it_was_and_whether_it_counted() {
+    let session = SessionId::new();
+    let dir = project(&[session]);
+    let store = Store::open(dir.path());
+    let log = Log {
+        store: &store,
+        session,
+    };
+    log.step_started();
+    for (status, detail) in [
+        ("failed", "exit 101\n1 test failed: users::create"),
+        ("denied", "the gate refused the command"),
+        ("passed", ""),
+    ] {
+        log.push(SessionEventKind::CheckRan {
+            name: "test".to_string(),
+            cadence: "step".to_string(),
+            command_digest: "sha256:0011".to_string(),
+            status: status.to_string(),
+            detail: detail.to_string(),
+        });
+    }
+
+    let run = capture(&dir);
+
+    let failed = labelled(&run, "ratified check `test` failed (step)")[0];
+    assert_eq!(failed.kind, EvidenceKind::TestOutput);
+    assert_eq!(
+        failed.observation(),
+        Some(localmind_core::Observation::Failure)
+    );
+    assert_eq!(failed.signature(), Some("check:test:sha256:0011"));
+    assert_eq!(
+        failed
+            .metadata
+            .get(localpilot_localmind::RATIFIED_CHECK_KEY)
+            .map(String::as_str),
+        Some("test")
+    );
+    assert!(failed.excerpt.as_deref().unwrap().contains("users::create"));
+    let passed = labelled(&run, "ratified check `test` passed (step)")[0];
+    assert_eq!(
+        passed.observation(),
+        Some(localmind_core::Observation::Success)
+    );
+    assert_eq!(passed.excerpt, None);
+    // A check that could not run says nothing about the code either way.
+    assert_eq!(
+        labelled(&run, "ratified check `test` denied")[0].observation(),
+        None
+    );
+}

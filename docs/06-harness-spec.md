@@ -1103,6 +1103,22 @@ accepted memory without review, the analysis is skipped when learning is off for
 the project, and like the retrospective it never fails a finished run. The facts
 go only to the provider the run was already configured to use.
 
+A lesson that reaches review is then classified for testing (ADR-0185), without a
+model and without running anything:
+
+| Classification | When | What is kept |
+|---|---|---|
+| `NotExecutable` | testing it would take a real-world action; it states a preference or someone's intent; it is about style no ratified check verifies (a style lesson is only ever judged by a ratified style check) | a `NotExecutable` result with its reason on the candidate; ordinary review continues |
+| `Logic` | the hindsight cites a recorded failure that a different change turned into a pass of the same attempt | a frozen assignment replaying the recorded observations |
+| `Replay` | it cites a ratified check that failed in a committed step | a frozen assignment on the step's fail/fix commits — and, when the code has moved on, the same fix taken back out of the current revision |
+| `UpliftOnly` | none of the above | the record, with why |
+
+Assignments are kept under `.localpilot/lab/assignments/`, one per candidate. An
+oracle must predate the fix and be untouched by it, and may not restate the
+lesson; it is hashed when the assignment is frozen. Every ratified gate-check run
+is recorded in the step's event log (`CheckRan`), which is what lets a finished
+run show the project's own check failing and then passing.
+
 ## Completion Teardown Sweep
 
 At the same completion seam, when `[harness] teardown_sweep` is enabled, the

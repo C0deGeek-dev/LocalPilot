@@ -289,7 +289,7 @@ impl RetrospectiveLesson {
 
     /// A stable, content-addressed candidate id, so re-offering the same lesson does not
     /// mint a second id (the review queue also dedups by canonical summary hash).
-    fn id(&self) -> String {
+    pub(crate) fn id(&self) -> String {
         format!(
             "{}-{}",
             self.origin.id_prefix(),

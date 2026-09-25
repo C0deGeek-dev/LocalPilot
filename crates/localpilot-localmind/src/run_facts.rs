@@ -43,6 +43,11 @@ pub const MAX_RUN_FACTS: usize = 40;
 /// Most acceptance criteria captured as individual facts.
 pub const MAX_ACCEPTANCE_FACTS: usize = 8;
 
+/// Metadata key naming the ratified check a fact records a run of. The fact's
+/// signature pairs the name with the command digest, so a changed command is a
+/// different attempt.
+pub const RATIFIED_CHECK_KEY: &str = "ratified_check";
+
 /// Character ceiling on a fact's label. The label names the fact; what was
 /// observed rides in the bounded excerpt.
 pub const MAX_LABEL_CHARS: usize = 160;
@@ -558,9 +563,51 @@ impl Capture {
         }
     }
 
-    /// A structured correction, recovery, or early stop — or nothing.
+    /// A structured correction, recovery, early stop, or ratified check run —
+    /// or nothing.
     fn signal(&mut self, source: &str, session: &str, event: &SessionEvent) {
         let locator = format!("{source}#event:{}", event.id);
+        if let SessionEventKind::CheckRan {
+            name,
+            cadence,
+            command_digest,
+            status,
+            detail,
+        } = &event.kind
+        {
+            let failed = status != "passed";
+            let content = format!(
+                "{session}
+{name}
+{command_digest}
+{status}
+{detail}"
+            );
+            self.fact(
+                Tier::Signal,
+                EvidenceKind::TestOutput,
+                &format!("ratified check `{name}` {status} ({cadence})"),
+                source,
+                locator,
+                &content,
+                (failed && !detail.is_empty()).then_some(detail.as_str()),
+            );
+            // Only a pass or a real failure says anything about the code; a
+            // check that could not run says nothing either way.
+            let observation = match status.as_str() {
+                "passed" => Some(Observation::Success),
+                "failed" => Some(Observation::Failure),
+                _ => None,
+            };
+            if let Some(observation) = observation {
+                self.mark_last(observation, Some(&format!("check:{name}:{command_digest}")));
+            }
+            if let Some((_, fact)) = self.facts.last_mut() {
+                fact.metadata
+                    .insert(RATIFIED_CHECK_KEY.to_string(), name.clone());
+            }
+            return;
+        }
         let recovery = || EvidenceKind::RecoveryEvent;
         let (kind, label, excerpt): (EvidenceKind, String, Option<String>) = match &event.kind {
             SessionEventKind::DriverIntervention {

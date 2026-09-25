@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Each lesson from a finished run now says whether and how it can be tested.**
+  After a lesson reaches review, it is classified: a preference, someone's
+  intent, an unsafe action, or style no ratified check can verify is marked not
+  testable, with the reason shown in review. Otherwise a test is built only from
+  what the run itself recorded or the project's own ratified checks — never from
+  the lesson's wording — and kept frozen under `.localpilot/lab/assignments/`.
+  Ratified quality-gate runs are now recorded in the step's event log, so a
+  check that failed and then passed is part of the run's record. Nothing is
+  executed yet (ADR-0185).
 - **A finished harness run now earns its lessons instead of listing them.** The
   completion retrospective used to turn every lesson the model suggested into a
   `LESSONS.md` entry and a review item. Lessons now come from a hindsight

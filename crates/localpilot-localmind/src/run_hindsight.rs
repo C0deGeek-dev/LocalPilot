@@ -19,7 +19,7 @@ use localmind_core::HindsightOutcome;
 use localmind_inference::{ChatMessage, ConstraintDisposition};
 use localmind_store::{
     DistillInput, DistillPlan, DistillReply, DistillRequest, DistillStep, Distillation, Distiller,
-    InputGap, ProjectConfig,
+    InputGap, ProjectConfig, ReviewQueue,
 };
 use localpilot_core::{Message, Role};
 use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest};
@@ -37,6 +37,9 @@ pub struct HindsightOffer {
     pub enqueued: Option<String>,
     /// The lesson to mirror into `LESSONS.md` — set only for a `Candidate`.
     pub lesson: Option<String>,
+    /// Whether and how the lesson can be tested, for a lesson that reached
+    /// review. `None` for an abstention or a review-only record.
+    pub lab: Option<crate::LabClassification>,
 }
 
 /// Distil `run` with `provider`. Never fails: an unreachable model or a reply
@@ -126,17 +129,83 @@ pub async fn offer_run_hindsight(
     let lesson = (distillation.outcome == HindsightOutcome::Candidate)
         .then(|| distillation.draft.proposed_lesson.clone())
         .flatten();
-    let enqueued =
-        match RetrospectiveLesson::from_hindsight(&distillation, run, run_name, record_abstentions)
-        {
-            Some(record) => write_retrospective_lesson(project_root, &record)?,
-            None => None,
-        };
+    let record =
+        RetrospectiveLesson::from_hindsight(&distillation, run, run_name, record_abstentions);
+    let enqueued = match &record {
+        Some(record) => write_retrospective_lesson(project_root, record)?,
+        None => None,
+    };
+    let lab = match (&lesson, &record) {
+        (Some(_), Some(record)) => classify_queued(project_root, &record.id())?,
+        _ => None,
+    };
     Ok(HindsightOffer {
         distillation,
         enqueued,
         lesson,
+        lab,
     })
+}
+
+/// Classify the lesson queued as `item_id` for the lab, keep the frozen record
+/// for the runs that come later, and — when no honest test exists — put that
+/// result on the candidate so review shows it.
+///
+/// Reads the stored candidate, not the one handed to the queue: the identity
+/// every assignment binds to is the identity of what review holds.
+fn classify_queued(
+    project_root: &Path,
+    item_id: &str,
+) -> Result<Option<crate::LabClassification>, LearningError> {
+    let queue = ReviewQueue::open_project(project_root)
+        .map_err(|e| LearningError::Review(e.to_string()))?;
+    let Some(item) = queue
+        .get(&localmind_core::ReviewItemId::new(item_id))
+        .map_err(|e| LearningError::Review(e.to_string()))?
+    else {
+        // Merged into a near-duplicate under another id; that row keeps its
+        // own classification.
+        return Ok(None);
+    };
+    let checks = localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(project_root),
+        &localpilot_config::CliOverrides::default(),
+    )
+    .map(|config| config.harness.checks)
+    .unwrap_or_default();
+    let progress = std::fs::read_to_string(project_root.join("PROGRESS.md"))
+        .ok()
+        .and_then(|text| localpilot_harness::Progress::parse(&text).ok());
+    let context = crate::LabContext {
+        root: project_root,
+        progress: progress.as_ref(),
+        checks: &checks,
+    };
+    let classification = crate::classify_for_lab(&item.candidate, &context);
+
+    let store = localpilot_store::Store::open(project_root);
+    crate::lab_eligibility::write_record(store.root(), &classification)
+        .map_err(|e| LearningError::Review(format!("could not keep the lab record: {e}")))?;
+    let produced_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        });
+    if let Some(evidence) = crate::lab_eligibility::not_executable_evidence(
+        &classification,
+        &crate::lab_eligibility::current_revision(project_root),
+        produced_at,
+    ) {
+        // A restatement carrying a new result: the queue merges the result into
+        // the pending row rather than creating a second one.
+        queue
+            .enqueue_candidates(
+                &item.session_id,
+                &[item.candidate.with_experiment(evidence)],
+            )
+            .map_err(|e| LearningError::Review(e.to_string()))?;
+    }
+    Ok(Some(classification))
 }
 
 /// One request over the provider, and an honest account of the constraint.

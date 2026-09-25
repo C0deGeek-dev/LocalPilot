@@ -923,7 +923,20 @@ async fn offer_completion_hindsight(
                 out,
                 "hindsight: lesson {state} with {} fact(s) ({calls}): {lesson}",
                 facts.facts.len()
-            )
+            )?;
+            if let Some(lab) = &offer.lab {
+                let detail = if lab.assignments.is_empty() {
+                    lab.reasons
+                        .iter()
+                        .map(|reason| format!("{reason:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                } else {
+                    format!("{} assignment(s) frozen", lab.assignments.len())
+                };
+                writeln!(out, "  lab: {:?} — {detail}", lab.eligibility)?;
+            }
+            Ok(())
         }
         (None, queued) => {
             let why = offer
@@ -2523,6 +2536,14 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
 
         let lessons = std::fs::read_to_string(root.join("LESSONS.md")).unwrap();
         assert!(lessons.contains(LESSON), "the earned lesson is mirrored");
+        // The lab classified the lesson from the real completion step and kept
+        // its record for the runs that come later.
+        assert!(printed.contains("  lab: "), "{printed}");
+        let lab_records =
+            std::fs::read_dir(root.join(".localpilot").join("lab").join("assignments"))
+                .unwrap()
+                .count();
+        assert_eq!(lab_records, 1);
         assert!(
             printed.contains("hindsight: lesson offered to LocalMind review"),
             "{printed}"

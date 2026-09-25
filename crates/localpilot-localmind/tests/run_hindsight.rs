@@ -468,3 +468,68 @@ async fn a_lesson_over_a_damaged_log_is_kept_for_review_not_queued_as_a_lesson()
         "the proposal is kept for a person to judge"
     );
 }
+
+#[tokio::test]
+async fn an_earned_lesson_is_classified_and_its_frozen_assignment_is_kept() {
+    let dir = finished_run(LEARNING);
+    let root = dir.path();
+    let run = capture_run_facts(root, &Store::open(root));
+    let provider = one_pass(&[&draft(&run, Some(LESSON))]);
+
+    let offer = offer(root, &provider, &run).await;
+
+    let lab = offer
+        .lab
+        .expect("a lesson that reached review is classified");
+    assert_eq!(
+        lab.eligibility,
+        localpilot_localmind::Eligibility::Logic,
+        "{lab:?}"
+    );
+    let record = root
+        .join(".localpilot")
+        .join("lab")
+        .join("assignments")
+        .join(format!("{}.json", lab.candidate_identity));
+    let kept: localpilot_localmind::LabClassification =
+        serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!(kept, lab, "the record is the frozen form");
+    let queued = queued(root);
+    assert_eq!(
+        queued[0].candidate.get("experiments"),
+        None,
+        "an executable lesson carries no result until it has run"
+    );
+}
+
+#[tokio::test]
+async fn a_lesson_no_test_can_judge_says_why_in_review_and_keeps_its_review_path() {
+    let dir = finished_run(LEARNING);
+    let root = dir.path();
+    let run = capture_run_facts(root, &Store::open(root));
+    let preference = "Prefer writing migrations as plain SQL files in this repository";
+    let provider = one_pass(&[&draft(&run, Some(preference))]);
+
+    let offer = offer(root, &provider, &run).await;
+
+    let lab = offer.lab.unwrap();
+    assert_eq!(
+        lab.eligibility,
+        localpilot_localmind::Eligibility::NotExecutable
+    );
+    let queued = queued(root);
+    assert_eq!(queued.len(), 1, "the result merged into the pending row");
+    assert_eq!(queued[0].summary, preference);
+    let experiments = queued[0].candidate["experiments"].as_array().unwrap();
+    assert_eq!(experiments.len(), 1);
+    assert_eq!(experiments[0]["verdict"], "NotExecutable");
+    assert_eq!(experiments[0]["reasons"], serde_json::json!(["Preference"]));
+    assert_eq!(
+        experiments[0]["inputs"]["candidate_identity"],
+        lab.candidate_identity
+    );
+    assert_eq!(
+        queued[0].candidate["suggested_action"], "PromoteToMemory",
+        "the ordinary review path is unchanged"
+    );
+}

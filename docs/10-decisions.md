@@ -2,6 +2,67 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0185: A Lesson Is Tested Only By An Oracle It Did Not Write
+
+**Status:** accepted · **Date:** 2026-09-25. Builds on ADR-0184 (completion
+hindsight) and ADR-0183 (the facts of a run). Uses LocalMind D-LM-0048 (lab
+assignments) and D-LM-0053 (assignment source and reason codes). Reuses the
+ratified checks of ADR-0009 as oracles; runs none of them.
+
+**Context.** A lesson that reaches review is plausible, not tested, and the
+easiest test to build is the one the lesson describes — which proves nothing.
+The run already holds better material: what it recorded failing and then
+passing, and the project's own ratified checks. But the harness ran those checks
+without recording their outcomes, so a finished run could not say that the
+project's own test failed before a step's commit and passed after it.
+
+**Decision.**
+
+**Ratified check runs are recorded.** Every run of a ratified gate check writes a
+`CheckRan` event — name, cadence, a digest of the program and arguments, status,
+bounded sanitized detail. Fact capture turns it into a failure or success with the
+check and its command as the signature. Older logs have none and read unchanged.
+
+**A lesson is classified before anything is built.** Testing it would take a
+real-world action, it states a preference or someone's intent, or it is about
+style no ratified check can verify: each is `NotExecutable` with its reason code,
+and the lesson keeps its ordinary review path. Otherwise it is `Logic` when the
+hindsight cites a recorded failure that a different change then turned into a
+pass of the same attempt, `Replay` when it cites a ratified check that failed in a
+committed step, and `UpliftOnly` when neither exists — checkable in principle,
+with no trusted source in this run.
+
+**Assignments come only from trusted sources.** A recorded trajectory replays the
+run's own observations, with the recorded pass as the oracle. A fail/fix pair
+takes the step's parent as the fixture and the ratified check as the oracle; when
+the code has moved on since, a controlled mutation takes the same fix back out of
+the current revision. Human-curated fixtures are not a source yet.
+
+**The oracle is independent and frozen here.** It must predate the fix and be
+untouched by it: a fix that changed a test file, or test code inside a source
+file, cannot be judged by those tests. It may not merely restate the lesson — an
+oracle carrying most of the lesson's content words, or five of its words in a
+row, is refused. A style lesson is judged only by a ratified style check — a
+test command passing says nothing about indentation. A check must still be
+ratified with the command it ran. The
+oracle's content — the check's command and the test files at its revision — is
+hashed into the assignment, whose identity then fixes it; an edit made later is a
+different oracle and says so. Reading history is read-only: `rev-parse`, `diff`,
+`ls-tree`.
+
+**Wired at completion.** After hindsight queues a lesson, the completion step
+classifies the stored candidate. A `NotExecutable` result goes onto the candidate
+as lab evidence review can show; executable assignments are kept frozen under
+`.localpilot/lab/assignments/`, one record per candidate identity, for the runs
+that come later. Nothing is executed and no model is called.
+
+**Consequences.** Every lesson from a finished run now carries a testability
+verdict. The markers are short English lists and conservative by design: a
+lesson phrased around them is classified by its sources, never coerced into a
+test by them. Most lessons will be `UpliftOnly` until a run records a check failing
+and then passing. Whether an oracle actually discriminates — fails at the base,
+passes at the fix — is not decided here; the Logic and Replay runs establish it.
+
 ## ADR-0184: A Finished Run Earns Its Lessons Through Evidence-Linked Hindsight, Decided Without The Model
 
 **Status:** accepted · **Date:** 2026-09-25. Builds on ADR-0183 (the facts of a
