@@ -14,6 +14,10 @@
 //! record does not rewrite (and therefore cannot re-corrupt or perpetuate) the
 //! records already on disk, and a torn tail left by a crash is sealed off with
 //! a newline before the next record so damage never bleeds into new entries.
+//! [`append_line_durable`] additionally forces the record to disk before
+//! returning, for a log another process relies on the moment the append
+//! reports success; it costs a device flush per record, so the high-volume
+//! session logs do not use it.
 
 use std::ffi::OsString;
 use std::fs;
@@ -59,7 +63,8 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 }
 
 /// Append one newline-terminated record to a line-delimited log, creating
-/// parent directories as needed, and flush it to disk.
+/// parent directories as needed. The record is handed to the operating system
+/// in one write; it is not forced to disk (see [`append_line_durable`]).
 ///
 /// If the file's current tail is an unterminated line (a torn write from a
 /// crash or power loss), a newline is inserted first so the damaged line stays
@@ -70,8 +75,21 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 /// JSON never contains one).
 ///
 /// # Errors
-/// Returns [`StoreError::Io`] if a directory, open, write or flush fails.
+/// Returns [`StoreError::Io`] if a directory, open or write fails.
 pub fn append_line(path: &Path, line: &str) -> Result<(), StoreError> {
+    append(path, line, false)
+}
+
+/// [`append_line`], then flush the record to disk before returning, so a
+/// success means the record survives a crash or power loss.
+///
+/// # Errors
+/// Returns [`StoreError::Io`] if a directory, open, write or flush fails.
+pub fn append_line_durable(path: &Path, line: &str) -> Result<(), StoreError> {
+    append(path, line, true)
+}
+
+fn append(path: &Path, line: &str, durable: bool) -> Result<(), StoreError> {
     debug_assert!(!line.contains('\n'), "a log record must be a single line");
     ensure_parent(path)?;
 
@@ -93,7 +111,7 @@ pub fn append_line(path: &Path, line: &str) -> Result<(), StoreError> {
         .open(path)
         .map_err(|e| StoreError::io(path, e))?;
     file.write_all(buf.as_bytes())
-        .and_then(|()| file.sync_all())
+        .and_then(|()| if durable { file.sync_all() } else { Ok(()) })
         .map_err(|e| StoreError::io(path, e))
 }
 
@@ -309,6 +327,24 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "{\"a\":1}\n{\"b\":2}\n"
         );
+    }
+
+    #[test]
+    fn the_durable_append_writes_the_same_bytes_and_seals_a_torn_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plain, durable) = (dir.path().join("p.jsonl"), dir.path().join("d.jsonl"));
+        for p in [&plain, &durable] {
+            std::fs::write(p, "{\"a\":1}\n{\"torn").unwrap();
+        }
+        append_line(&plain, "{\"b\":2}").unwrap();
+        append_line_durable(&durable, "{\"b\":2}").unwrap();
+        assert_eq!(
+            std::fs::read(&plain).unwrap(),
+            std::fs::read(&durable).unwrap()
+        );
+        assert!(std::fs::read_to_string(&durable)
+            .unwrap()
+            .ends_with("{\"torn\n{\"b\":2}\n"));
     }
 
     #[test]

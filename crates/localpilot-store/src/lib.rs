@@ -25,7 +25,7 @@ use localpilot_config::redact::redact;
 use localpilot_core::{ContentBlock, EventId, Message, SessionId};
 use serde::{Deserialize, Serialize};
 
-pub use atomic::{append_line, atomic_write};
+pub use atomic::{append_line, append_line_durable, atomic_write};
 pub use error::StoreError;
 pub use events::{
     origin_for, transcript_from_events, MemoryUsed, MessageOrigin, OpenReason, SessionEvent,

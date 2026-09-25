@@ -113,7 +113,7 @@ fn escape_line_breaks(s: &str) -> String {
 /// Serialization or the store's I/O error.
 pub fn append(path: &Path, record: &Map<String, Value>) -> Result<(), MeshError> {
     let line = encode(record)?;
-    localpilot_store::append_line(path, &line)?;
+    localpilot_store::append_line_durable(path, &line)?;
     Ok(())
 }
 
