@@ -16,10 +16,13 @@ is SemVer-stable; the configuration schema stability policy is in
   companion repositories, and for those it passes every mandatory fixture of
   the protocol's conformance suite for the participant profile; a test runs
   that suite on every build, along with a soak in which LocalPilot and the
-  skill's own `pair.py` write one live mailbox at the same time. Sessions started without version control and
-  sessions that declare companion repositories are not supported yet: the
-  operations that need them refuse and change nothing, and the suite does not
-  cover them.
+  skill's own `pair.py` write one live mailbox at the same time. If
+  LocalPilot's writer ever misbehaves, `[mesh] writer = "delegate"` hands
+  every operation to `pair.py` instead (`delegate_command`, a list of
+  arguments), with no fallback to the native writer. Sessions started without
+  version control and sessions that declare companion repositories are not
+  supported yet: the operations that need them refuse and change nothing, and
+  the suite does not cover them.
 
 - **Editing a file no longer destroys a neighbour named like its temp.** The
   edit tools and the store staged every write in a fixed `<file>.tmp` beside

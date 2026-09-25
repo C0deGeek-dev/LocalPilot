@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use localpilot_config::{
-    load, AutoFix, Cadence, CliOverrides, ConfigPaths, LookupPolicy, McpEnvEntry, TimelineDensity,
+    load, AutoFix, Cadence, CliOverrides, ConfigPaths, LookupPolicy, McpEnvEntry, MeshWriter,
+    TimelineDensity,
 };
 use proptest::prelude::*;
 
@@ -26,6 +27,8 @@ const ENV_KEYS: &[&str] = &[
     "OPENAI_MODEL",
     "LOCALPILOT_PROVIDER__DEFAULT",
     "LOCALPILOT_MCP__SERVERS__FILES__ENV__FROM_ENV_LAYER",
+    "LOCALPILOT_MESH__WRITER",
+    "LOCALPILOT_MESH__DELEGATE_COMMAND",
 ];
 
 struct TestEnv {
@@ -167,6 +170,57 @@ fn terminal_preferences_keep_compatible_defaults_and_round_trip() -> TestResult 
         let encoded = serde_json::to_value(&comfortable)?;
         let decoded = serde_json::from_value(encoded)?;
         assert_eq!(comfortable, decoded);
+        Ok(())
+    })
+}
+
+#[test]
+fn the_mesh_writer_defaults_to_native_and_takes_an_exact_delegate_argv() -> TestResult {
+    isolated(|jail| {
+        let empty = write(jail, "empty.toml", "")?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(empty),
+        };
+        let defaulted = load(&paths, &CliOverrides::default())?;
+        assert_eq!(defaulted.mesh.writer, MeshWriter::Native);
+        assert!(defaulted.mesh.delegate_command.is_empty());
+
+        let project = write(
+            jail,
+            "project.toml",
+            "[mesh]\nwriter = \"delegate\"\ndelegate_command = [\"python\", \"C:/Program Files/pair tools/pair.py\"]\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        assert_eq!(cfg.mesh.writer, MeshWriter::Delegate);
+        assert_eq!(
+            cfg.mesh.delegate_command,
+            ["python", "C:/Program Files/pair tools/pair.py"],
+            "each argument is kept exactly, spaces included"
+        );
+
+        // The environment layer takes the same array, so one terminal can
+        // switch without editing a file.
+        jail.set_env("LOCALPILOT_MESH__WRITER", "delegate");
+        jail.set_env(
+            "LOCALPILOT_MESH__DELEGATE_COMMAND",
+            "[\"py\", \"-3\", \"D:/a dir/pair.py\"]",
+        );
+        let empty = write(jail, "empty2.toml", "")?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(empty),
+        };
+        let from_env = load(&paths, &CliOverrides::default())?;
+        assert_eq!(from_env.mesh.writer, MeshWriter::Delegate);
+        assert_eq!(
+            from_env.mesh.delegate_command,
+            ["py", "-3", "D:/a dir/pair.py"]
+        );
         Ok(())
     })
 }

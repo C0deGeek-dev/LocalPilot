@@ -9,6 +9,13 @@
 //! Exit codes: 0 success; 1 a refusal or a watch that timed out; 2 a usage
 //! error or an operation outside the participant profile; 4 a denied write
 //! (`guard-write`); 5 a refused delivery-plumbing request.
+//!
+//! `[mesh] writer = "delegate"` (user config or environment only; a project's
+//! `.localpilot.toml` cannot set it) is the rollback: every participant operation
+//! is handed, arguments unchanged, to `delegate_command` (normally the
+//! reference `pair.py`), and its exit code is returned. There is no fallback
+//! to the native writer when the delegate is missing or fails to start: the
+//! switch exists because the native writer is distrusted.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -219,12 +226,81 @@ pub(crate) fn run(args: MeshArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // The writer, and above all the delegate's command line, come from the
+    // user's own config and environment only. A repository's
+    // `.localpilot.toml` is not trusted to choose a program this command runs:
+    // otherwise `localpilot mesh status` in a cloned repository could execute
+    // whatever that repository names.
+    let paths = localpilot_config::ConfigPaths {
+        user: localpilot_config::user_config_path(),
+        project: None,
+    };
+    let config = match localpilot_config::load(&paths, &localpilot_config::CliOverrides::default())
+    {
+        Ok(c) => c.mesh,
+        Err(e) => {
+            // Never guess the writer: a delegate configured in a broken file
+            // must not quietly become the native writer.
+            eprintln!("localpilot mesh: cannot load configuration: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if config.writer == localpilot_config::MeshWriter::Delegate {
+        // Parsed above only to keep the delegate to participant operations.
+        drop(op);
+        return delegate(&config.delegate_command, &anchor, &args.rest);
+    }
     let mesh = Mesh::at(&anchor, source);
     match dispatch(&mesh, op) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("{e} [anchor={} source={source}]", anchor.display());
             ExitCode::from(1)
+        }
+    }
+}
+
+/// The command line a delegate runs: its argv exactly as configured, then
+/// `--repo <anchor>`, then the operation's arguments verbatim.
+fn delegate_argv(command: &[String], anchor: &Path, rest: &[OsString]) -> Option<Vec<OsString>> {
+    let (program, lead) = command.split_first()?;
+    if program.is_empty() {
+        return None;
+    }
+    let mut argv: Vec<OsString> = vec![program.into()];
+    argv.extend(lead.iter().map(OsString::from));
+    argv.push("--repo".into());
+    argv.push(anchor.as_os_str().to_owned());
+    argv.extend(rest.iter().cloned());
+    Some(argv)
+}
+
+/// Run the operation on the delegate, with this process's stdio, and return
+/// its exit code.
+fn delegate(command: &[String], anchor: &Path, rest: &[OsString]) -> ExitCode {
+    let Some(argv) = delegate_argv(command, anchor, rest) else {
+        eprintln!(
+            "localpilot mesh: [mesh] writer is \"delegate\" but delegate_command is empty; \
+             set it to the delegate's argv, for example [\"python\", \"<path>/pair.py\"]"
+        );
+        return ExitCode::from(2);
+    };
+    match std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+    {
+        Ok(status) => ExitCode::from(
+            status
+                .code()
+                .and_then(|c| u8::try_from(c).ok())
+                .unwrap_or(1),
+        ),
+        Err(e) => {
+            eprintln!(
+                "localpilot mesh: cannot start the delegate {:?} ([mesh] delegate_command): {e}",
+                argv[0]
+            );
+            ExitCode::from(2)
         }
     }
 }
@@ -453,6 +529,36 @@ mod tests {
             })
         ));
         assert!(matches!(parse(&["status"]).unwrap(), Op::Status));
+    }
+
+    #[test]
+    fn the_delegate_gets_its_argv_exactly_then_the_anchor_then_the_operation() {
+        let cmd = vec![
+            "py".to_owned(),
+            "-3".to_owned(),
+            "C:/Program Files/p/pair.py".to_owned(),
+        ];
+        let rest: Vec<OsString> = ["post", "--body", "a b"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let argv = delegate_argv(&cmd, Path::new("D:/anchor with space"), &rest).unwrap();
+        let want: Vec<OsString> = [
+            "py",
+            "-3",
+            "C:/Program Files/p/pair.py",
+            "--repo",
+            "D:/anchor with space",
+            "post",
+            "--body",
+            "a b",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(argv, want);
+        assert!(delegate_argv(&[], Path::new("x"), &rest).is_none());
+        assert!(delegate_argv(&[String::new()], Path::new("x"), &rest).is_none());
     }
 
     #[test]

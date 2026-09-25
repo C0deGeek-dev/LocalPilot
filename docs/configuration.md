@@ -267,6 +267,33 @@ run, and a long one nightly on Linux and Windows. The anchor tree is `--repo`, t
 | `4` | `guard-write` denied the write (`WRITE_DENIED` on stderr). |
 | `5` | A delivery request was refused (`REFUSED <code>` on stderr). |
 
+#### Switching the writer
+
+If the native writer misbehaves, hand every operation to the skill's own
+`pair.py` instead, with no change to how the command is called:
+
+```toml
+[mesh]
+writer = "delegate"
+delegate_command = ["python", "C:/Users/me/.claude/skills/pair-programming/scripts/pair.py"]
+```
+
+Or for one terminal only, with the same array in the environment:
+`LOCALPILOT_MESH__WRITER=delegate` and
+`LOCALPILOT_MESH__DELEGATE_COMMAND='["python", "C:/…/pair.py"]'`.
+
+`[mesh]` is read from your user config and the environment only. A
+project's `.localpilot.toml` cannot set it, so a cloned repository cannot make
+`localpilot mesh` run a program of its choosing.
+
+`delegate_command` is the program and its arguments as a list. Each entry is
+passed exactly, spaces included, with no shell. `localpilot mesh` adds
+`--repo <anchor>` and then the operation's own arguments, and exits with the
+delegate's exit code. Operations only a full implementation provides still
+exit `2`. An empty `delegate_command`, or one that cannot start, exits `2`,
+and a configuration that fails to load exits `1`: neither falls back to the
+native writer.
+
 Supported sessions are those in a Git working tree with no companion
 repositories; the conformance suite covers exactly those. Not yet supported:
 sessions started with `--no-vcs`, and sessions that declare companion
@@ -410,6 +437,17 @@ array, and all diagnostics (the format hint, the store-resolution and empty-stat
 lines) go to stderr.
 
 ## Reference
+
+### `[mesh]`
+
+Which implementation `localpilot mesh` uses to write the pair-programming
+mailbox. User config and environment only: this table is ignored in a
+project's `.localpilot.toml`. See [Switching the writer](#switching-the-writer).
+
+| Key | Type | Default | Description |
+|---|---|---:|---|
+| `writer` | `native` \| `delegate` | `native` | `native` is LocalPilot's own implementation. `delegate` hands every participant operation to `delegate_command`. |
+| `delegate_command` | array of strings | `[]` | The delegate's argv: program, then arguments, each passed exactly (no shell). Required when `writer = "delegate"`. |
 
 ### `[terminal]`
 

@@ -28,6 +28,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+# Importing the runner must not leave `__pycache__` beside it: in a vendored
+# copy that is an unlisted file, and the manifest check reports it as drift.
+sys.dont_write_bytecode = True
 import run  # noqa: E402  (the runner's containment and reference lookup)
 
 CMD_TIMEOUT = 120  # seconds; --cmd-timeout overrides

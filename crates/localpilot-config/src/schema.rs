@@ -35,6 +35,7 @@ pub struct Config {
     pub research: ResearchConfig,
     pub discovery: DiscoveryConfig,
     pub terminal: TerminalConfig,
+    pub mesh: MeshConfig,
 }
 
 impl Default for Config {
@@ -59,8 +60,32 @@ impl Default for Config {
             research: ResearchConfig::default(),
             discovery: DiscoveryConfig::default(),
             terminal: TerminalConfig::default(),
+            mesh: MeshConfig::default(),
         }
     }
+}
+
+/// `localpilot mesh`: which implementation writes the pair-programming
+/// mailbox. The delegate is the rollback when the native writer is distrusted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MeshConfig {
+    pub writer: MeshWriter,
+    /// The delegate as an argv: program, then its arguments, each passed
+    /// exactly as given (no shell, no splitting), for example
+    /// `["python", "C:/Program Files/pair/pair.py"]`.
+    pub delegate_command: Vec<String>,
+}
+
+/// The mailbox writer `localpilot mesh` uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshWriter {
+    /// LocalPilot's own implementation.
+    #[default]
+    Native,
+    /// Hand every operation to `delegate_command` (the reference `pair.py`).
+    Delegate,
 }
 
 /// Full-screen terminal presentation preferences.

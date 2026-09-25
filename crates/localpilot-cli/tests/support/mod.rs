@@ -67,6 +67,9 @@ pub fn tool(py: &[String], script: &str) -> Command {
         .current_dir(suite())
         .env("PYTHONIOENCODING", "utf-8")
         // No `__pycache__` in the vendored copy: its manifest would call it drift.
-        .env("PYTHONDONTWRITEBYTECODE", "1");
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        // The native writer, whatever the developer's own config selects; a
+        // test that wants the delegate sets this again after.
+        .env("LOCALPILOT_MESH__WRITER", "native");
     c
 }
