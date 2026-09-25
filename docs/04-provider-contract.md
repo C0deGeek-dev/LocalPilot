@@ -209,6 +209,14 @@ If a server accepts neither encoding, the client error caches the rejection and
 the constraint is dropped for the session — native tool-calling, the floor. An
 unknown `constraint_mode` value falls back to `response_format`.
 
+A provider that drops a constraint this way reports it through
+`ModelProvider::constraint_refused()`, so a caller asking for structured output
+can tell a reply that was definitely sent unconstrained from one that was only
+asked to be constrained. A provider that never drops a constraint answers
+`false`, which is not a claim that the server honoured one: a server can accept a
+schema, ignore it, and still answer. Callers validate every reply regardless
+(ADR-0184).
+
 ### Vision (image input)
 
 Whether a provider accepts image (vision) input is a **resolved capability**, not

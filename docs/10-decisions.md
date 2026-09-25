@@ -2,6 +2,81 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0184: A Finished Run Earns Its Lessons Through Evidence-Linked Hindsight, Decided Without The Model
+
+**Status:** accepted · **Date:** 2026-09-25. Builds on ADR-0183 (the facts of a
+run) and ADR-0035/ADR-0037 (the completion retrospective and its review-gated
+lessons). Uses LocalMind D-LM-0052 (the distiller and the abstention check),
+D-LM-0045 (the hindsight contract) and D-LM-0047 (constraints are attempted,
+never trusted).
+
+**Context.** The completion retrospective asked the model for free-text lessons
+from the brief and the plan alone, and every bullet it returned went to
+`LESSONS.md` and the review queue. ADR-0183 made the run's facts available, but
+the lessons were still written without them: nothing cited what happened, and
+nothing stopped a correct account of a one-off from becoming a durable rule.
+Measured on six frozen cases, two local models of different capability each did
+exactly that on the same cases — with perfect citation discipline, so no
+evidence check could see it, and the stronger model did it more often.
+
+**Decision.**
+
+**Hindsight owns the lessons; the retrospective keeps its report.** The
+retrospective still reports unmet acceptance criteria and notes, and no longer
+asks for or records lessons. A lesson from a finished run comes only from the
+hindsight analysis, and only when it survives validation and the abstention
+check. `LESSONS.md` mirrors exactly those lessons.
+
+**LocalMind owns the contract; the harness model drives it.** The distiller —
+prompts, validation, the single repair pass, the fallback, the choice between
+one request and two staged ones — lives in LocalMind and does no I/O. The
+completion step drives it with the provider the run already used, so a model is
+there whenever the harness ran and nothing new leaves the machine that the run
+did not already send to that provider. The staged strategy is chosen when the
+provider declares a context under 16 384 tokens; model names never branch it.
+
+**A refused constraint is visible.** `ModelProvider::constraint_refused()` lets
+the OpenAI-compatible provider report that its server rejected an output schema
+and it is now sending requests without one. The distiller records that as a
+transport refusal, which is free, stops asking for a schema, and keeps the one
+repair pass for a reply that actually broke the contract. Every reply is
+validated either way. The schema is attempted whenever the provider declares
+constrained decoding, with no per-model probe first: because validation is
+unconditional, a server that ignores the schema costs latency and never
+correctness, and the probe would cost extra calls to save that. Safe, sometimes a
+little slower, by choice.
+
+**Abstention is decided without the model.** No cause is `UnknownCause`; a cause
+with no proposal is `NoLesson`; so is a proposal that opens with "retry"/"try
+again" or with checking the environment, and a draft whose cited failures each
+happened once and either went away on an identical retry that was the next
+thing to succeed, or are blamed on the environment by a cited correction. A
+would-be lesson over an incomplete record — damaged log lines or a missing result
+in a session it cites, or a run-level gap such as a step with no linked session —
+is kept as `NeedsReview` rather than queued as a lesson; a call no verifier looked
+at does not count. To
+make that checkable, a captured fact now says whether it was a failure, a
+success or a correction, and carries a signature — the tool and a hash of its
+redacted arguments — so the same attempt is recognisable. The model's own
+suggested outcome is recorded and never consulted.
+
+**What reaches review.** A lesson is a candidate carrying its draft and facts. An
+analysis that could not run or broke its contract twice is a review-only record
+carrying the facts, so a person sees what could not be distilled. An abstention
+queues nothing — unless the project sets `[review] record_abstentions = true` in
+`.localmind.toml`, in which case it too is a review-only record. A review-only
+record requires an edit before promotion. A candidate carrying hindsight has a
+verifiable id on every piece of its evidence, the origin reference included,
+and is checked against it before it is queued.
+
+**Consequences.** Completion now makes one to three more model calls: one for a
+capable endpoint, two for a small one, plus at most one repair. Fewer lessons
+reach review, by design. A project with learning off makes none of those calls.
+`resume_with_events` resolves its provider and hands the rest to
+`resume_with_provider`, which the end-to-end tests drive with a scripted model.
+The tests prove the contract and the control flow, not the quality of any model;
+a live run on a local model remains opportunistic evidence.
+
 ## ADR-0183: A Completed Run's Lessons Carry The Facts Of The Run, And Absence Is Never One
 
 **Status:** accepted · **Date:** 2026-09-23. Builds on ADR-0035 (the completion

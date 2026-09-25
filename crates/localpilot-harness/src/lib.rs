@@ -80,7 +80,9 @@ pub use quality::{
     QUALITY_CHECK_TOOL,
 };
 pub use resume::{resume_one_step, resume_one_step_with_events, ResumeOutcome, QUOTA_PAUSE_KEY};
-pub use retrospective::{run_and_record, run_retrospective, Retrospective, RETROSPECTIVE_PROMPT};
+pub use retrospective::{
+    append_lessons, run_and_record, run_retrospective, Retrospective, RETROSPECTIVE_PROMPT,
+};
 pub use rules::{trigger_for_cadence, Rule, RuleContext, RuleEngine, RuleVerdict, Trigger};
 pub use scorecard::{
     build_scorecard, extract_process, single_run_discipline, speed_from_events, RunInputs,

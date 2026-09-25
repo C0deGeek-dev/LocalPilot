@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A finished harness run now earns its lessons instead of listing them.** The
+  completion retrospective used to turn every lesson the model suggested into a
+  `LESSONS.md` entry and a review item. Lessons now come from a hindsight
+  analysis over the facts of the run: the same model drafts what happened and
+  why, citing the recorded facts, and a lesson reaches review only if it holds up
+  — a failure that happened once and went away on its own, a proposal to "try
+  again", or one to "check the environment first" is not a lesson. The
+  retrospective still reports unmet acceptance criteria. When the analysis cannot
+  run, a review-only record keeps the facts for a person to look at; to see
+  abstentions in review too, set `[review] record_abstentions = true` in
+  `.localmind.toml` (ADR-0184).
+
 - **LocalPilot can pair with Claude Code and Codex.** `localpilot mesh` takes
   part in a session of the c0degeek `pair-programming` skill: it joins, reads
   and acknowledges mail, posts (including directed replies, forwards and

@@ -29,7 +29,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
 
-use localmind_core::{EvidenceKind, EvidenceRef};
+use localmind_core::{EvidenceKind, EvidenceRef, Observation};
 use localmind_store::{ProjectConfig, Redactor};
 use localpilot_core::{SessionId, ToolOutcome};
 use localpilot_harness::{Brief, BriefRevision, CallOutcome, EvidenceLedger, Progress};
@@ -103,6 +103,33 @@ pub enum FactGap {
 }
 
 impl FactGap {
+    /// Whether, and where, this gap leaves the record incomplete. A lesson may
+    /// not rest on a record with pieces missing where it looks; a call no
+    /// verifier examined, or a fact dropped to stay within the bound, leaves the
+    /// record whole.
+    #[must_use]
+    pub fn incompleteness(&self) -> Option<localmind_store::Incompleteness> {
+        use localmind_store::Incompleteness;
+        let session = |session: &str| {
+            Some(Incompleteness::Source(format!(
+                "localpilot-session:{session}"
+            )))
+        };
+        match self {
+            Self::BriefUnreadable
+            | Self::ProgressUnreadable
+            | Self::StepNotLinked { .. }
+            | Self::SessionIdInvalid { .. } => Some(Incompleteness::Run),
+            Self::SessionUnreadable { session: id, .. }
+            | Self::SessionEmpty { session: id, .. }
+            | Self::SessionPartlyUnreadable { session: id, .. }
+            | Self::SessionWithoutStep { session: id, .. }
+            | Self::ResultNotRecorded { session: id, .. }
+            | Self::ConflictingResult { session: id, .. } => session(id),
+            Self::NoVerifierVerdict { .. } | Self::Truncated { .. } => None,
+        }
+    }
+
     /// One line a reviewer, or a drafting model, can read.
     #[must_use]
     pub fn describe(&self) -> String {
@@ -305,6 +332,19 @@ impl Capture {
         self.facts.push((tier, fact));
     }
 
+    /// Say what the fact just added observed, and what it repeats, so the
+    /// abstention check can tell a one-off from a pattern without reading
+    /// prose.
+    fn mark_last(&mut self, observation: Observation, signature: Option<&str>) {
+        if let Some((tier, fact)) = self.facts.pop() {
+            let mut fact = fact.with_observation(observation);
+            if let Some(signature) = signature {
+                fact = fact.with_signature(signature);
+            }
+            self.facts.push((tier, fact));
+        }
+    }
+
     fn intent(&mut self, run: &str, brief: &Brief) {
         self.fact(
             Tier::Frame,
@@ -425,6 +465,11 @@ impl Capture {
         for call in calls {
             let locator = format!("{source}#event:{}", call.invoked_event);
             let input = serde_json::to_string(&call.input).unwrap_or_default();
+            // The same tool with the same (redacted) arguments is the same
+            // attempt, whichever call id the model gave it.
+            let digest = sha256(&self.redact(&input));
+            let digest = digest.strip_prefix("sha256:").unwrap_or(&digest);
+            let signature = format!("{}:{}", call.name, digest.get(..16).unwrap_or(digest));
             let content = format!(
                 "{}\n{}\n{:?}\n{:?}\n{input}\n{}",
                 call.name,
@@ -444,15 +489,18 @@ impl Capture {
                 ""
             };
             match call.outcome {
-                CallOutcome::Ok => self.fact(
-                    Tier::Routine,
-                    EvidenceKind::ToolEvent,
-                    &format!("`{}` call `{}` succeeded{conflict}", call.name, call.id),
-                    source,
-                    locator,
-                    &content,
-                    None,
-                ),
+                CallOutcome::Ok => {
+                    self.fact(
+                        Tier::Routine,
+                        EvidenceKind::ToolEvent,
+                        &format!("`{}` call `{}` succeeded{conflict}", call.name, call.id),
+                        source,
+                        locator,
+                        &content,
+                        None,
+                    );
+                    self.mark_last(Observation::Success, Some(&signature));
+                }
                 CallOutcome::Error => {
                     let how = match call.refinement {
                         Some(ToolOutcome::ReportedFailure) => " (it ran and reported failure)",
@@ -468,6 +516,7 @@ impl Capture {
                         &content,
                         Some(&format!("input: {input}\noutput: {}", call.output())),
                     );
+                    self.mark_last(Observation::Failure, Some(&signature));
                 }
                 CallOutcome::Pending | CallOutcome::Missing => {
                     self.gaps.push(FactGap::ResultNotRecorded {
@@ -576,6 +625,12 @@ impl Capture {
             _ => return,
         };
         let content = format!("{session}\n{label}\n{}", excerpt.as_deref().unwrap_or(""));
+        // A driver steering or anyone stopping the run corrected it from
+        // outside; a repair or a turn stopping short is the run itself.
+        let corrected = matches!(
+            event.kind,
+            SessionEventKind::DriverIntervention { .. } | SessionEventKind::Cancelled
+        );
         self.fact(
             Tier::Signal,
             kind,
@@ -585,6 +640,9 @@ impl Capture {
             &content,
             excerpt.as_deref(),
         );
+        if corrected {
+            self.mark_last(Observation::Correction, None);
+        }
     }
 
     /// Deduplicate by id, keep within [`MAX_RUN_FACTS`] by priority, and return

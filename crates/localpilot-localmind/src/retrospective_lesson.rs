@@ -17,10 +17,11 @@
 use std::path::Path;
 
 use localmind_core::{
-    CandidateLesson, Confidence, EvidenceKind, EvidenceRef, LessonCategory, LessonId,
-    SessionId as LearningSessionId, SuggestedAction,
+    CandidateLesson, Confidence, EvidenceKind, EvidenceRef, HindsightDraft, HindsightOutcome,
+    LessonCategory, LessonId, SessionId as LearningSessionId, SuggestedAction,
 };
-use localmind_store::ReviewQueue;
+use localmind_inference::ConstraintDisposition;
+use localmind_store::{Distillation, ReviewQueue};
 
 use crate::error::LearningError;
 
@@ -131,6 +132,12 @@ pub struct RetrospectiveLesson {
     /// Facts captured from the run the lesson came out of, attached as the
     /// candidate's evidence beside its origin reference.
     facts: Vec<EvidenceRef>,
+    /// The evidence-linked hindsight the lesson came out of. Its hypotheses cite
+    /// the facts above by id.
+    hindsight: Option<HindsightDraft>,
+    /// Not a lesson: a record of an analysis that could not, or chose not to,
+    /// propose one. Queued so a person can see it, and never promotable as is.
+    review_only: bool,
 }
 
 impl RetrospectiveLesson {
@@ -145,6 +152,8 @@ impl RetrospectiveLesson {
             evidence_text: None,
             requires_edit: false,
             facts: Vec::new(),
+            hindsight: None,
+            review_only: false,
         }
     }
 
@@ -164,6 +173,8 @@ impl RetrospectiveLesson {
             evidence_text: None,
             requires_edit: false,
             facts: Vec::new(),
+            hindsight: None,
+            review_only: false,
         }
     }
 
@@ -183,6 +194,8 @@ impl RetrospectiveLesson {
             evidence_text: None,
             requires_edit: false,
             facts: Vec::new(),
+            hindsight: None,
+            review_only: false,
         }
     }
 
@@ -208,6 +221,56 @@ impl RetrospectiveLesson {
             });
         }
         self
+    }
+
+    /// What a finished run's hindsight earns in review, or `None` when it earns
+    /// nothing.
+    ///
+    /// A `Candidate` becomes a lesson whose text is the draft's proposed lesson.
+    /// `NeedsReview` and `Malformed` become review-only records, so a person sees
+    /// what could not be distilled. `UnknownCause` and `NoLesson` are successful
+    /// outcomes and queue nothing — unless the project asked to record them, in
+    /// which case they too become review-only records. Every record carries the
+    /// run's facts, the draft, and — in the carried text — the gaps and how the
+    /// analysis went.
+    #[must_use]
+    pub fn from_hindsight(
+        distillation: &Distillation,
+        run: &crate::RunFacts,
+        run_name: &str,
+        record_abstentions: bool,
+    ) -> Option<Self> {
+        let reasons = distillation
+            .reasons
+            .iter()
+            .map(localmind_store::OutcomeReason::describe)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let (text, review_only) = match distillation.outcome {
+            HindsightOutcome::Candidate => (distillation.draft.proposed_lesson.clone()?, false),
+            HindsightOutcome::NeedsReview | HindsightOutcome::Malformed => (
+                format!("Hindsight on `{run_name}` needs review: {reasons}"),
+                true,
+            ),
+            HindsightOutcome::UnknownCause | HindsightOutcome::NoLesson => {
+                if !record_abstentions {
+                    return None;
+                }
+                (
+                    format!("Hindsight on `{run_name}` found no lesson: {reasons}"),
+                    true,
+                )
+            }
+        };
+        let mut lesson = Self::new(text).with_run_facts(run);
+        let account = describe_distillation(distillation, &reasons);
+        lesson.evidence_text = Some(match lesson.evidence_text.take() {
+            Some(gaps) => format!("{account}\n\n{gaps}"),
+            None => account,
+        });
+        lesson.hindsight = Some(distillation.draft.clone());
+        lesson.review_only = review_only;
+        Some(lesson)
     }
 
     /// Mark the lesson text as a source excerpt that a reviewer must distil
@@ -257,28 +320,61 @@ pub fn write_retrospective_lesson(
     let confidence = Confidence::new(lesson.confidence.unwrap_or(RETROSPECTIVE_CONFIDENCE))
         .map_err(|e| LearningError::Review(e.to_string()))?;
     let id = lesson.id();
+    let action = if lesson.review_only {
+        SuggestedAction::KeepForSession
+    } else {
+        SuggestedAction::PromoteToMemory
+    };
+    let detail = lesson
+        .evidence_note
+        .clone()
+        .unwrap_or_else(|| lesson.origin.evidence_detail().to_string());
+    let kind = EvidenceKind::Other(lesson.origin.evidence_kind().to_string());
+    // A candidate carrying hindsight is checked against its whole evidence set,
+    // and every fact in it must carry a verifiable id — the origin reference
+    // included. Without hindsight the origin stays the label it always was.
+    let origin = if lesson.hindsight.is_some() {
+        EvidenceRef::identified(
+            kind,
+            detail,
+            format!("localpilot:{}", lesson.origin.session()),
+            "localpilot:completion",
+            format!("fnv:{}", fnv_hex(lesson.text.trim().as_bytes())),
+        )
+        .redacted()
+    } else {
+        EvidenceRef::new(kind, detail).redacted()
+    };
     let candidate = CandidateLesson::new(
         LessonId::new(id.clone()),
         lesson.text.trim().to_string(),
         LessonCategory::Process,
         confidence,
-        SuggestedAction::PromoteToMemory,
+        action,
     )
-    .with_evidence(
-        EvidenceRef::new(
-            EvidenceKind::Other(lesson.origin.evidence_kind().to_string()),
-            lesson
-                .evidence_note
-                .clone()
-                .unwrap_or_else(|| lesson.origin.evidence_detail().to_string()),
-        )
-        .redacted(),
-    );
+    .with_evidence(origin);
     let candidate = lesson
         .facts
         .iter()
         .cloned()
         .fold(candidate, CandidateLesson::with_evidence);
+    let candidate = match &lesson.hindsight {
+        Some(draft) => {
+            let candidate = candidate.with_hindsight(draft.clone());
+            candidate.validate_hindsight().map_err(|violations| {
+                LearningError::Review(format!(
+                    "hindsight does not fit its own evidence: {}",
+                    violations
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ))
+            })?;
+            candidate
+        }
+        None => candidate,
+    };
     // Carried source evidence rides its own candidate field: review surfaces
     // show it under the lesson, promotion writes only the lesson text
     // (LocalMind D-LM-0029) — the source dump never becomes searchable memory.
@@ -286,7 +382,7 @@ pub fn write_retrospective_lesson(
         Some(evidence_text) => candidate.with_evidence_text(evidence_text.clone()),
         None => candidate,
     };
-    let candidate = if lesson.requires_edit {
+    let candidate = if lesson.requires_edit || lesson.review_only {
         candidate.requiring_edit_before_promotion()
     } else {
         candidate
@@ -303,6 +399,46 @@ pub fn write_retrospective_lesson(
     // `inserted == 0` means the queue deduped this lesson against an existing pending
     // candidate (same canonical-hash summary): a no-op, not a second entry.
     Ok((inserted > 0).then_some(id))
+}
+
+/// How a distillation went, for the reviewer: the outcome and why, how many
+/// model calls it took, whether the repair pass was spent, and what became of
+/// any output constraint.
+fn describe_distillation(distillation: &Distillation, reasons: &str) -> String {
+    let trace = &distillation.trace;
+    let mut out = format!(
+        "Hindsight: {:?} — {} model call(s)",
+        distillation.outcome, trace.model_calls
+    );
+    if trace.repair_spent {
+        out.push_str(", one repair");
+    }
+    if trace.fallback {
+        out.push_str(", no usable analysis (the draft holds only the run's intent and end state)");
+    }
+    let refused = trace
+        .dispositions
+        .iter()
+        .any(|disposition| *disposition == ConstraintDisposition::RefusedByTransport);
+    let requested = trace
+        .dispositions
+        .iter()
+        .any(|disposition| *disposition == ConstraintDisposition::Requested);
+    if refused {
+        out.push_str(", the server refused the output schema");
+    } else if requested {
+        out.push_str(", an output schema was requested (the reply was validated regardless)");
+    }
+    if trace.excerpts_dropped > 0 {
+        out.push_str(&format!(
+            ", {} excerpt(s) left out to fit the context",
+            trace.excerpts_dropped
+        ));
+    }
+    if !reasons.is_empty() {
+        out.push_str(&format!(".\nWhy: {reasons}"));
+    }
+    out
 }
 
 #[cfg(test)]

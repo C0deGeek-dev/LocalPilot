@@ -226,7 +226,7 @@ Like `brief.md` and `PROGRESS.md`, this file is authoritative and user-editable
 
 ### `LESSONS.md`
 
-Append-only log of durable lessons the completion retrospective captures at the
+Append-only log of durable lessons the completion hindsight analysis earns at the
 end of a run (see §Completion Retrospective). Each entry is a dated single line:
 
 ```markdown
@@ -237,8 +237,8 @@ end of a run (see §Completion Retrospective). Each entry is a dated single line
 
 Like the other runtime documents it is authoritative and user-editable (ADR-0003),
 sited at the project root, and round-trips losslessly. It is created on the first
-lesson and is never required for a clean run. The retrospective only appends to
-it — it does not commit it; the user reviews and commits the artifact.
+lesson and is never required for a clean run. The harness only appends to it — it
+does not commit it; the user reviews and commits the artifact.
 
 ## Commands
 
@@ -1049,28 +1049,59 @@ For each step:
 When a resume run reaches a plan with no incomplete step left, the harness runs
 one bounded, **advisory** review over the brief and the completed plan (ADR-0035).
 It surfaces which acceptance criteria are still unmet, scope drift from the brief,
-and tests that pin implementation detail instead of observable behaviour, and it
-appends any durable lessons to `LESSONS.md`.
+and tests that pin implementation detail instead of observable behaviour. It
+proposes no lessons; those come from the hindsight analysis below.
 
-It is advisory by construction: it reports findings and records lessons — it never
-blocks completion, edits shipped code, or commits. It runs once, after the final
+It is advisory by construction: it reports findings — it never blocks completion,
+edits shipped code, or commits. It runs once, after the final
 step is already committed, and it is best-effort: a provider or quota error at that
 point is swallowed so a finished run is never broken, and a reply in the wrong
 shape degrades to "no findings" rather than an error. The worker prompt also
 carries a doc-currency cue, so a step that changes observable behaviour,
 configuration, or interfaces updates the matching documentation in the same step.
 
-Each lesson it offers to LocalMind review carries the **facts of the run**
-(ADR-0183): the task and its acceptance criteria, each step, its commit and the
-final state, and — read from the event log of every session a step's `sessions:`
-line names — each tool call and its outcome, verifier verdicts, and structured
-corrections (a driver intervention, a cancellation, an abandoned attempt, a
-tool-input repair or refusal, a turn that stopped short). Every fact has a
-canonical id and a locator back to where it was read, and is redacted and bounded
-before anything sees it. What the run cannot say — a call with no result, a step
-with no linked session, calls with no verifier verdict, a damaged log line — is
-listed separately as gaps, which are never facts and cannot be cited. Capture is
-read-only and cannot fail, and accepted memory is untouched.
+### Completion hindsight
+
+Beside the retrospective, the harness analyses the run in hindsight (ADR-0184).
+It first captures the **facts of the run** (ADR-0183): the task and its
+acceptance criteria, each step, its commit and the final state, and — read from
+the event log of every session a step's `sessions:` line names — each tool call
+and its outcome, verifier verdicts, and structured corrections (a driver
+intervention, a cancellation, an abandoned attempt, a tool-input repair or
+refusal, a turn that stopped short). Every fact has a canonical id and a locator
+back to where it was read, and is redacted and bounded before anything sees it.
+What the run cannot say — a call with no result, a step with no linked session,
+calls with no verifier verdict, a damaged log line — is listed separately as
+gaps, which are never facts and cannot be cited.
+
+The same model the run used then drafts what was intended, what happened, the
+causes the facts support (citing them by id), and whether a change follows that
+is worth keeping. LocalMind's contract governs the exchange: every reply is
+validated, at most one repair is spent on a reply that broke the contract, and a
+model that cannot be reached or keeps failing yields the facts and no invented
+cause. A capable endpoint gets one request; one declaring a small context gets
+two single-purpose requests. When the provider declares constrained decoding the
+output schema is attempted, and a server that refuses it is reported as such
+rather than silently treated as constrained.
+
+Whether the draft earns a lesson is decided afterwards, without the model: no
+cause is *unknown cause*; a cause with nothing reusable is *no lesson*; so is a
+proposal that amounts to "try again" or "check the environment first", and a
+failure that happened once and either went away on an identical retry or is
+blamed on the environment by a correction. A lesson that rests on an incomplete
+record — damaged log lines or a missing result where it looks, or a step with no
+linked session — is not trusted as a lesson either. What reaches review:
+
+| Outcome | Review queue | `LESSONS.md` |
+|---|---|---|
+| a lesson | a candidate carrying the draft and the facts | the lesson is appended |
+| could not be analysed, broke its contract twice, or rests on an incomplete record | a review-only record carrying the facts | nothing |
+| unknown cause, or no lesson | nothing — or a review-only record when `.localmind.toml` sets `[review] record_abstentions = true` | nothing |
+
+A review-only record cannot be promoted without an edit. Nothing reaches
+accepted memory without review, the analysis is skipped when learning is off for
+the project, and like the retrospective it never fails a finished run. The facts
+go only to the provider the run was already configured to use.
 
 ## Completion Teardown Sweep
 
