@@ -3587,6 +3587,100 @@ fn render_screen_reader_dialog(
     Vec::new()
 }
 
+/// The bordered question dialog takes this share of the frame width, between
+/// the two bounds below, so a wide terminal gets room to show the question.
+const QUESTION_DIALOG_WIDTH_PERCENT: u32 = 70;
+const QUESTION_DIALOG_MIN_WIDTH: u16 = 44;
+const QUESTION_DIALOG_MAX_WIDTH: u16 = 100;
+const QUESTION_DIALOG_SCREEN_READER_WIDTH: u16 = 72;
+/// Rows the question may wrap over before the rest is elided.
+const QUESTION_MAX_ROWS: usize = 6;
+/// Continuation rows an option's description may wrap over.
+const OPTION_DESCRIPTION_MAX_ROWS: usize = 2;
+/// Narrower than this, a description stays inline instead of indenting under its label.
+const OPTION_DESCRIPTION_MIN_WIDTH: u16 = 12;
+
+fn question_dialog_width(frame_width: u16, screen_reader: bool) -> u16 {
+    let available = frame_width.saturating_sub(4);
+    if screen_reader {
+        return available.min(QUESTION_DIALOG_SCREEN_READER_WIDTH);
+    }
+    let share = u32::from(frame_width) * QUESTION_DIALOG_WIDTH_PERCENT / 100;
+    u16::try_from(share)
+        .unwrap_or(u16::MAX)
+        .clamp(QUESTION_DIALOG_MIN_WIDTH, QUESTION_DIALOG_MAX_WIDTH)
+        .min(available)
+}
+
+/// Word-wraps `text` into at most `max_rows` rows; when it needs more, the last
+/// row carries the rest of the text elided with `…`.
+fn wrap_elided(text: &str, width: u16, max_rows: usize) -> Vec<String> {
+    let rows = crate::text::wrap_words(text, width);
+    let max_rows = max_rows.max(1);
+    if rows.len() <= max_rows {
+        return rows
+            .iter()
+            .map(|row| text[row.start_byte..row.end_byte].to_string())
+            .collect();
+    }
+    let mut shown = rows[..max_rows - 1]
+        .iter()
+        .map(|row| text[row.start_byte..row.end_byte].to_string())
+        .collect::<Vec<_>>();
+    let rest = text[rows[max_rows - 1].start_byte..]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    shown.push(truncate_end(&format!("{rest} …"), width));
+    shown
+}
+
+/// The rows of one numbered option: the label row, then the description either
+/// inline (when both fit one row) or word-wrapped under the label.
+fn question_option_lines(
+    prefix: &str,
+    label: &str,
+    description: Option<&str>,
+    width: u16,
+    description_role: ratatui::style::Style,
+) -> Vec<Line<'static>> {
+    let label_row = format!("{prefix}{label}");
+    let Some(description) = description else {
+        return vec![Line::raw(truncate_end(&label_row, width))];
+    };
+    let inline = format!("{label_row} — {description}");
+    let prefix_width = u16::try_from(UnicodeWidthStr::width(prefix)).unwrap_or(u16::MAX);
+    let description_width = width.saturating_sub(prefix_width);
+    let fits_inline = UnicodeWidthStr::width(inline.as_str()) <= usize::from(width)
+        && !description.contains('\n');
+    if fits_inline || description_width < OPTION_DESCRIPTION_MIN_WIDTH {
+        let label_row = truncate_end(&label_row, width);
+        let rest = width.saturating_sub(
+            u16::try_from(UnicodeWidthStr::width(label_row.as_str())).unwrap_or(u16::MAX),
+        );
+        return vec![Line::from(vec![
+            Span::raw(label_row),
+            Span::styled(
+                truncate_end(&format!(" — {description}"), rest),
+                description_role,
+            ),
+        ])];
+    }
+    let indent = " ".repeat(usize::from(prefix_width));
+    let mut lines = vec![Line::raw(truncate_end(&label_row, width))];
+    lines.extend(
+        wrap_elided(description, description_width, OPTION_DESCRIPTION_MAX_ROWS)
+            .into_iter()
+            .map(|row| {
+                Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(row, description_role),
+                ])
+            }),
+    );
+    lines
+}
+
 fn render_question_dialog(
     frame: &mut Frame<'_>,
     frame_area: Rect,
@@ -3594,12 +3688,10 @@ fn render_question_dialog(
     question: QuestionView<'_>,
     screen_reader: bool,
 ) -> Vec<QuestionHit> {
-    let width = frame_area
-        .width
-        .saturating_sub(4)
-        .min(if screen_reader { 72 } else { 44 });
+    let width = question_dialog_width(frame_area.width, screen_reader);
     let horizontal_chrome = if screen_reader { 0 } else { 4 };
     let projected_content_width = width.saturating_sub(horizontal_chrome);
+    let theme = theme(app);
     // A collaboration question can be aborted (Ctrl+C) as well as dismissed (Esc),
     // including while editing the Other field. Lead with BOTH controls so each survives
     // width truncation. Single chat keeps its copy byte-identical.
@@ -3647,14 +3739,63 @@ fn render_question_dialog(
     } else {
         Vec::new()
     };
-    let extra_other_rows = u16::try_from(other_rows.len().saturating_sub(1)).unwrap_or(u16::MAX);
-    let fixed_rows = if screen_reader { 3 } else { 6 };
-    let requested_height = u16::try_from(question.options.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(fixed_rows)
-        .saturating_add(footer_rows)
-        .saturating_add(extra_other_rows);
-    let height = frame_area.height.saturating_sub(2).min(requested_height);
+    // Every numbered option as the rows it draws; the Other row is appended below.
+    let option_lines = question
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let marker = if question.selected == index {
+                "❯"
+            } else {
+                " "
+            };
+            let selection_mark = if question.multi_select {
+                if question.checked.get(index).copied().unwrap_or(false) {
+                    "[x] "
+                } else {
+                    "[ ] "
+                }
+            } else {
+                ""
+            };
+            let description_role = if question.selected == index {
+                theme.ui(UiRole::Focus)
+            } else {
+                theme.ui(UiRole::Muted)
+            };
+            question_option_lines(
+                &format!("{marker} {}. {selection_mark}", index + 1),
+                &option.label,
+                option.description.as_deref(),
+                projected_content_width,
+                description_role,
+            )
+        })
+        .collect::<Vec<_>>();
+    let other_height = if question.editing_other {
+        other_rows.len().max(1)
+    } else {
+        1
+    };
+    let item_heights = option_lines
+        .iter()
+        .map(Vec::len)
+        .chain(std::iter::once(other_height))
+        .collect::<Vec<_>>();
+    let question_rows_wanted = crate::text::wrap_words(question.question, projected_content_width)
+        .len()
+        .min(QUESTION_MAX_ROWS);
+    // Heading, plus the border and the rule under the heading when framed.
+    let chrome_rows = if screen_reader { 1 } else { 4 };
+    let requested_height = item_heights
+        .iter()
+        .sum::<usize>()
+        .saturating_add(chrome_rows + question_rows_wanted + usize::from(footer_rows));
+    let height = frame_area
+        .height
+        .saturating_sub(2)
+        .min(u16::try_from(requested_height).unwrap_or(u16::MAX));
     let minimum_height = if screen_reader { 6 } else { 9 };
     if width < 20 || height < minimum_height {
         return Vec::new();
@@ -3665,7 +3806,6 @@ fn render_question_dialog(
         width,
         height,
     );
-    let theme = theme(app);
     frame.render_widget(Clear, area);
     let inner = if screen_reader {
         frame.render_widget(Block::default().style(theme.ui(UiRole::Background)), area);
@@ -3706,26 +3846,69 @@ fn render_question_dialog(
         );
     }
     let question_y = inner.y.saturating_add(if screen_reader { 1 } else { 2 });
+    let footer_y = inner.bottom().saturating_sub(footer_rows);
+    // Leave at least one row for the choices when the frame is short.
+    let question_budget = usize::from(footer_y.saturating_sub(question_y)).saturating_sub(1);
+    let question_lines = wrap_elided(
+        question.question,
+        content_width,
+        QUESTION_MAX_ROWS.min(question_budget),
+    );
+    let question_height = u16::try_from(question_lines.len()).unwrap_or(u16::MAX);
     frame.render_widget(
-        Paragraph::new(truncate_end(question.question, content_width))
-            .style(theme.ui(UiRole::Foreground)),
-        Rect::new(left, question_y, content_width, 1),
+        Paragraph::new(
+            question_lines
+                .into_iter()
+                .map(Line::raw)
+                .collect::<Vec<_>>(),
+        )
+        .style(theme.ui(UiRole::Foreground)),
+        Rect::new(left, question_y, content_width, question_height),
     );
 
-    let options_y = question_y.saturating_add(1);
-    let footer_y = inner.bottom().saturating_sub(footer_rows);
+    let options_y = question_y.saturating_add(question_height);
+    let viewport = usize::from(footer_y.saturating_sub(options_y));
+    let item_heights = item_heights
+        .into_iter()
+        .map(|rows| rows.min(viewport).max(1))
+        .collect::<Vec<_>>();
+    // Scroll the choices just far enough that the selected one is fully visible.
+    let selected = question.selected.min(question.options.len());
+    let mut first = 0;
+    while first < selected && item_heights[first..=selected].iter().sum::<usize>() > viewport {
+        first += 1;
+    }
+    let total_rows = item_heights.iter().sum::<usize>();
+    if !screen_reader && total_rows > viewport {
+        let scrollbar = ScrollbarGeometry::calculate(
+            Rect::new(
+                left.saturating_add(content_width),
+                options_y,
+                1,
+                u16::try_from(viewport).unwrap_or(u16::MAX),
+            ),
+            // Scrolling by whole items can leave a spare row at the bottom, so the
+            // rows above can exceed the furthest a row-exact view would scroll.
+            item_heights[..first]
+                .iter()
+                .sum::<usize>()
+                .min(total_rows - viewport),
+            total_rows,
+            viewport,
+        );
+        draw_scrollbar(frame, scrollbar, app);
+    }
+
     let mut hits = Vec::new();
-    for index in 0..=question.options.len() {
-        let y = options_y.saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+    let mut y = options_y;
+    for index in first..=question.options.len() {
         if y >= footer_y {
             break;
         }
+        let rows_left = footer_y.saturating_sub(y);
         let selected = question.selected == index;
-        let marker = if selected { "❯" } else { " " };
         if index == question.options.len() && question.editing_other {
-            let viewport_rows = usize::from(footer_y.saturating_sub(y))
-                .min(other_rows.len())
-                .max(1);
+            let viewport_rows = usize::from(rows_left).min(other_rows.len()).max(1);
             let viewport_height = u16::try_from(viewport_rows).unwrap_or(u16::MAX);
             let (cursor_row, cursor_column) = crate::editor::text_row_and_column(
                 question.other,
@@ -3783,42 +3966,37 @@ fn render_question_dialog(
                     )
                     .min(answer_area.bottom().saturating_sub(1)),
             ));
+            y = y.saturating_add(viewport_height);
             continue;
         }
-        let label = if let Some(option) = question.options.get(index) {
-            option.label.as_str()
-        } else {
-            "Other (type your answer)"
-        };
-        let selection_mark = if index < question.options.len() && question.multi_select {
-            if question.checked.get(index).copied().unwrap_or(false) {
-                "[x] "
-            } else {
-                "[ ] "
-            }
-        } else {
-            ""
-        };
-        let description = question
-            .options
-            .get(index)
-            .and_then(|option| option.description.as_deref())
-            .map_or(String::new(), |description| format!(" — {description}"));
-        let shown = format!(
-            "{marker} {}. {selection_mark}{label}{description}",
-            index + 1
-        );
+        let lines = option_lines.get(index).cloned().unwrap_or_else(|| {
+            let marker = if selected { "❯" } else { " " };
+            vec![Line::raw(truncate_end(
+                &format!("{marker} {}. Other (type your answer)", index + 1),
+                content_width,
+            ))]
+        });
+        let drawn = u16::try_from(lines.len())
+            .unwrap_or(u16::MAX)
+            .min(rows_left);
         let role = if selected {
             UiRole::Focus
         } else {
             UiRole::Foreground
         };
-        let hit = Rect::new(left, y, content_width, 1);
+        let hit = Rect::new(left, y, content_width, drawn);
         frame.render_widget(
-            Paragraph::new(truncate_end(&shown, content_width)).style(theme.ui(role)),
+            Paragraph::new(
+                lines
+                    .into_iter()
+                    .take(usize::from(drawn))
+                    .collect::<Vec<_>>(),
+            )
+            .style(theme.ui(role)),
             hit,
         );
         hits.push(QuestionHit { index, area: hit });
+        y = y.saturating_add(drawn);
     }
     let footer = if screen_reader {
         footer.clone()
@@ -5714,11 +5892,12 @@ mod tests {
         assert!(rendered.contains("2. Blue"));
         assert!(rendered.contains("cool tone"));
         assert!(rendered.contains("3. Other (type your answer)"));
-        assert!(rendered.contains("↑/↓ to select · enter to confirm · esc …"));
+        assert!(rendered.contains("↑/↓ to select · enter to confirm · esc to cancel"));
         let hits = hits.expect("hit map");
         assert_eq!(hits.question_rows.len(), 3);
         assert_eq!(hits.question_rows[2].index, 2);
-        assert_eq!(hits.question_rows[0].area.width, 40);
+        // 70% of 120 columns, less the border and its gutters.
+        assert_eq!(hits.question_rows[0].area.width, 84 - 4);
 
         app.capabilities.screen_reader = true;
         terminal
@@ -5760,6 +5939,185 @@ mod tests {
         assert!(resolved.contains("User selected: Red"));
         assert!(!resolved.contains("● Asked user"));
         assert!(!resolved.contains("└ User selected"));
+    }
+
+    fn question_with(
+        question: &str,
+        options: impl IntoIterator<Item = (&'static str, Option<&'static str>)>,
+    ) -> AppModel {
+        let mut app = model();
+        app.request_question(
+            Some("Merge".to_string()),
+            question,
+            options
+                .into_iter()
+                .map(|(label, description)| crate::QuestionOption {
+                    label: label.to_string(),
+                    description: description.map(str::to_string),
+                })
+                .collect::<Vec<_>>(),
+            false,
+            1,
+            1,
+        );
+        app
+    }
+
+    fn draw_question(app: &AppModel, width: u16, height: u16) -> (String, HitMap) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let mut hits = None;
+        terminal
+            .draw(|frame| hits = Some(render(frame, app)))
+            .expect("draw question");
+        (terminal.backend().to_string(), hits.expect("hit map"))
+    }
+
+    /// Rendered rows as plain strings, one per terminal row.
+    fn screen_rows(rendered: &str) -> Vec<String> {
+        rendered
+            .lines()
+            .map(|row| row.trim_matches('"').to_string())
+            .collect()
+    }
+
+    const LONG_QUESTION: &str = "The merge picker needs a double-checked default before \
+        the archive is rewritten, so choose which entries it may fold together and which \
+        must stay separate until someone reviews them.";
+
+    #[test]
+    fn a_wide_frame_widens_the_question_dialog_and_wraps_the_question_in_full() {
+        let app = question_with(
+            LONG_QUESTION,
+            [
+                (
+                    "Everything except caps",
+                    Some("The backend folds every entry but the capped ones"),
+                ),
+                ("Archive only", None),
+            ],
+        );
+        let (rendered, hits) = draw_question(&app, 170, 40);
+        let flat = screen_rows(&rendered)
+            .iter()
+            .map(|row| {
+                row.trim_matches(|c: char| c == ' ' || c == '│')
+                    .trim()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains(LONG_QUESTION),
+            "question should be shown whole: {rendered}"
+        );
+        assert!(
+            !rendered.contains('…'),
+            "nothing should be elided: {rendered}"
+        );
+        assert!(rendered.contains("The backend folds every entry but the capped ones"));
+        assert_eq!(hits.question_rows[0].area.width, 100 - 4);
+    }
+
+    #[test]
+    fn a_narrow_frame_keeps_the_old_width_and_a_tiny_one_still_bails_out() {
+        let app = question_with(LONG_QUESTION, [("Yes", None), ("No", None)]);
+        let (_, hits) = draw_question(&app, 48, 30);
+        assert_eq!(hits.question_rows[0].area.width, 44 - 4);
+
+        let (rendered, hits) = draw_question(&app, 22, 30);
+        assert!(hits.question_rows.is_empty());
+        assert!(!rendered.contains("1. Yes"));
+    }
+
+    #[test]
+    fn a_long_question_is_capped_and_elided() {
+        let question = "word ".repeat(200);
+        let app = question_with(question.trim_end(), [("Yes", None)]);
+        let (rendered, hits) = draw_question(&app, 80, 40);
+        let question_rows = screen_rows(&rendered)
+            .into_iter()
+            .filter(|row| row.contains("word"))
+            .collect::<Vec<_>>();
+        assert_eq!(question_rows.len(), QUESTION_MAX_ROWS);
+        assert!(question_rows.last().is_some_and(|row| row.contains('…')));
+        assert!(rendered.contains("1. Yes"));
+        assert_eq!(hits.question_rows.len(), 2);
+    }
+
+    #[test]
+    fn a_long_description_wraps_under_a_readable_label_and_its_hit_covers_every_row() {
+        let app = question_with(
+            "Which entries may the merge fold together?",
+            [
+                (
+                    "Everything except caps",
+                    Some("The backend folds every archived entry together, except the ones a cap still holds open for review"),
+                ),
+                ("Archive only", Some("As today")),
+            ],
+        );
+        let (rendered, hits) = draw_question(&app, 80, 30);
+        let rows = screen_rows(&rendered);
+        let label_row = rows
+            .iter()
+            .position(|row| row.contains("❯ 1. Everything except caps"))
+            .expect("label row");
+        assert!(
+            !rows[label_row].contains('—'),
+            "long description leaves the label row"
+        );
+        assert!(rows[label_row + 1].contains("     The backend folds"));
+        assert!(rendered.contains("2. Archive only — As today"));
+
+        let first = hits.question_rows[0];
+        assert_eq!(first.index, 0);
+        assert_eq!(first.area.height, 3);
+        let second = hits.question_rows[1];
+        assert_eq!(second.area.y, first.area.bottom());
+        assert_eq!(second.area.height, 1);
+    }
+
+    #[test]
+    fn options_that_overflow_scroll_to_the_selection_instead_of_being_dropped() {
+        let description: &'static str =
+            "A description long enough that it has to wrap onto its own continuation rows";
+        let mut app = question_with(
+            "Pick one",
+            [
+                ("Alpha", Some(description)),
+                ("Bravo", Some(description)),
+                ("Charlie", Some(description)),
+                ("Delta", Some(description)),
+                ("Echo", Some(description)),
+            ],
+        );
+        let (rendered, hits) = draw_question(&app, 80, 16);
+        assert!(rendered.contains("❯ 1. Alpha"));
+        assert!(!rendered.contains("6. Other"));
+        assert!(rendered.contains('█'), "overflow needs a visible scrollbar");
+        assert!(hits.question_rows.iter().all(|hit| hit.index < 5));
+
+        app.select_question_option(5);
+        let (rendered, hits) = draw_question(&app, 80, 16);
+        assert!(rendered.contains("❯ 6. Other (type your answer)"));
+        assert!(!rendered.contains("1. Alpha"));
+        assert!(rendered.contains("↑/↓ to select"), "footer stays visible");
+        assert!(
+            !screen_rows(&rendered)
+                .iter()
+                .any(|row| row.contains("↑/↓ to select") && row.contains('█')),
+            "the scrollbar stays above the footer"
+        );
+        let last = hits.question_rows.last().expect("visible hits");
+        assert_eq!(last.index, 5);
+        let footer_row = screen_rows(&rendered)
+            .iter()
+            .position(|row| row.contains("↑/↓ to select"))
+            .expect("footer row");
+        for pair in hits.question_rows.windows(2) {
+            assert_eq!(pair[0].area.bottom(), pair[1].area.y, "hits never overlap");
+        }
+        assert!(usize::from(last.area.bottom()) <= footer_row);
     }
 
     #[test]
