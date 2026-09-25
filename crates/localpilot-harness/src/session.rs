@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use indexmap::IndexMap;
 use localpilot_config::redact::redact;
-use localpilot_config::{CheckConfig, RuleSeverity};
+use localpilot_config::{Cadence, CheckConfig, RuleSeverity};
 use localpilot_core::{
     ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolOutcome, ToolResult,
     ToolUseId, RESEARCH_RESULT_ORIGIN, RESEARCH_TOPIC_ORIGIN,
@@ -2272,7 +2272,7 @@ impl SessionRuntime {
     /// take, so a check never bypasses a permission decision. Returns one outcome
     /// per matching check, in declaration order.
     pub async fn run_gate_checks(
-        &self,
+        &mut self,
         checks: &[CheckConfig],
         trigger: Trigger,
         root: &Path,
@@ -2281,6 +2281,25 @@ impl SessionRuntime {
         for check in checks {
             if trigger_for_cadence(check.cadence) == trigger {
                 let outcome = self.run_check(check, root).await;
+                // The durable record that the project's own check failed or
+                // passed here — what a finished run's facts read back.
+                self.record_event(SessionEventKind::CheckRan {
+                    name: outcome.name.clone(),
+                    cadence: match check.cadence {
+                        Cadence::Step => "step",
+                        Cadence::Phase => "phase",
+                    }
+                    .to_string(),
+                    command_digest: check_command_digest(check),
+                    status: match outcome.status {
+                        CheckStatus::Passed => "passed",
+                        CheckStatus::Failed => "failed",
+                        CheckStatus::Denied => "denied",
+                        CheckStatus::Errored => "errored",
+                    }
+                    .to_string(),
+                    detail: outcome.detail.clone(),
+                });
                 outcomes.push(outcome);
             }
         }
@@ -4704,6 +4723,24 @@ fn quota_reset_label(quota: &QuotaInfo) -> String {
     } else {
         "rate limited".to_string()
     }
+}
+
+/// A stable digest of a check's program and arguments, so the same command is
+/// recognisable across runs and a changed one is not mistaken for it.
+#[must_use]
+pub fn check_command_digest(check: &CheckConfig) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in std::iter::once(&check.program).chain(check.args.iter()) {
+        hasher.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::from("sha256:");
+    for byte in digest.iter().take(16) {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
 }
 
 #[cfg(test)]

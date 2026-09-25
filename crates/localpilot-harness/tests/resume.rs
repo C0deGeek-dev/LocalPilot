@@ -957,3 +957,51 @@ async fn a_step_resumed_after_a_pause_records_both_sessions_that_worked_it() {
         "the link is committed with the step's progress"
     );
 }
+
+#[tokio::test]
+async fn each_ratified_check_run_is_recorded_so_a_fail_then_pass_can_be_read_back() {
+    let dir = sample_repo();
+    let root = dir.path();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .text("done")
+            .tool_call("c1", "write_file", write_marker_call())
+            .text("fixed"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let rules = RuleEngine::with_baseline(&Default::default());
+
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[marker_check()], 3)
+        .await
+        .unwrap();
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+
+    let runs: Vec<(String, String, String)> = rt
+        .store()
+        .read_events(rt.session_id())
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            localpilot_store::SessionEventKind::CheckRan {
+                name,
+                status,
+                command_digest,
+                ..
+            } => Some((name, status, command_digest)),
+            _ => None,
+        })
+        .collect();
+    let statuses: Vec<&str> = runs.iter().map(|(_, status, _)| status.as_str()).collect();
+    assert_eq!(
+        statuses,
+        vec!["failed", "passed"],
+        "the project's own check, before and after the change"
+    );
+    assert!(runs.iter().all(|(name, _, _)| name == "marker"));
+    assert!(
+        runs.iter()
+            .all(|(_, _, digest)| *digest
+                == localpilot_harness::check_command_digest(&marker_check())),
+        "the same command, recognisable across runs"
+    );
+}

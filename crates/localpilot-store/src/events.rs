@@ -188,6 +188,24 @@ pub enum SessionEventKind {
         from: EventId,
     },
     Cancelled,
+    /// A ratified quality-gate check ran at a step or phase boundary. The
+    /// status is a plain label (`passed`, `failed`, `denied`, `errored`) so the
+    /// store keeps no dependency on the check crate. It is the durable record
+    /// that the project's own check failed before a change and passed after
+    /// it. Additive: absent from logs written before it existed.
+    CheckRan {
+        name: String,
+        /// `step` or `phase`.
+        cadence: String,
+        /// Digest of the check's program and arguments, so a changed command
+        /// is a different check.
+        command_digest: String,
+        status: String,
+        /// Bounded, sanitized detail — the exit code and captured output.
+        /// Empty on a clean pass.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        detail: String,
+    },
     /// The verdict a verifier reached for a tool call, bound to the call id.
     /// The verdict is a plain label (the verifier's enum serialized) so the
     /// store keeps no dependency on the verifier crate. This is the durable,
