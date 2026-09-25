@@ -224,12 +224,17 @@ fn a_repository_cannot_choose_the_program_mesh_runs() {
         ),
     )
     .unwrap();
+    // A fresh, empty user config directory: the developer's own config must
+    // not decide this test either way.
+    let user_config = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_localpilot"))
         .arg("mesh")
         .arg("--repo")
         .arg(&f.anchor)
         .arg("status")
         .current_dir(&f.anchor)
+        .env("APPDATA", user_config.path())
+        .env("XDG_CONFIG_HOME", user_config.path())
         .env_remove("PAIR_REPO")
         .env_remove("LOCALPILOT_MESH__WRITER")
         .env_remove("LOCALPILOT_MESH__DELEGATE_COMMAND")
