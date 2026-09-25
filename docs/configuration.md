@@ -253,7 +253,10 @@ localpilot mesh --repo . status
 
 The arguments follow `pair.py`, so the same conformance suite checks both
 implementations; the suite LocalPilot runs is vendored in
-`crates/localpilot-mesh/conformance`. The anchor tree is `--repo`, then
+`crates/localpilot-mesh/conformance`. Its mixed-writer soak also runs
+`pair.py` and `localpilot mesh` against one live mailbox at the same time and
+checks that nothing is lost, duplicated or torn: a short run in every test
+run, and a long one nightly on Linux and Windows. The anchor tree is `--repo`, then
 `PAIR_REPO`, then the current directory.
 
 | Exit status | Meaning |

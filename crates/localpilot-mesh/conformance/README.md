@@ -184,9 +184,31 @@ python run.py --participant codex=<command> --participant localpilot=<command>
   A self-test proves that an implementation with correct state but broken
   output fails.
 
+## Mixed-writer soak
+
+`python soak.py --impl-b "<command>"` runs two implementations against one live
+mailbox at once (the reference is `--impl-a` and, by default, `--impl-b`).
+Two sessions run in turn, a two-party pair and a three-party session. Each role
+has two posters and two readers, one of each per implementation, so each role's
+journal, latest record and cursor are written by both builds under the shared
+locks. The three-party session also registers an endpoint and accepts and
+records pushes through either build, and `status` runs throughout.
+
+A bounded `mailbox lock busy` is retried a few times and reported
+(`busy=`, `retried=`); any command that still fails fails the run. An oracle
+then checks every journal: no invalid line, a newline-terminated tail,
+contiguous sequence numbers, and `latest` naming the last record. It also
+checks that every successful post is present exactly once, that every message
+was delivered to each recipient and acknowledged, that cursors stay within the
+journals, and that receipts are unique. The result is `SOAK ok ...`, or
+`SOAK FAIL <check>: <detail>` with exit 1. `--posts` sets the posts per poster
+per session (default 200); `--seed` fixes the random choices, not the
+interleaving. A self-test proves that a writer which reports success without
+writing fails the soak.
+
 ## Vendoring
 
-`python vendor.py <dest>` copies the runner, README, `participant.json`,
+`python vendor.py <dest>` copies the runner, the soak, README, `participant.json`,
 fixtures and a pinned, test-only copy of the reference implementation
 (`reference/pair.py`, which the runner uses when present; `--reference`
 overrides it) into another repository with `MANIFEST.json` (the source commit and

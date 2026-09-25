@@ -15,7 +15,8 @@ is SemVer-stable; the configuration schema stability policy is in
   whichever tool writes. It supports sessions in a Git working tree with no
   companion repositories, and for those it passes every mandatory fixture of
   the protocol's conformance suite for the participant profile; a test runs
-  that suite on every build. Sessions started without version control and
+  that suite on every build, along with a soak in which LocalPilot and the
+  skill's own `pair.py` write one live mailbox at the same time. Sessions started without version control and
   sessions that declare companion repositories are not supported yet: the
   operations that need them refuse and change nothing, and the suite does not
   cover them.

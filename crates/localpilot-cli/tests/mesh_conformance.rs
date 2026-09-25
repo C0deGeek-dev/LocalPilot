@@ -8,60 +8,21 @@
 //! elsewhere, so a developer machine without Python still runs the rest.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod support;
 
-fn suite() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("localpilot-mesh")
-        .join("conformance")
-}
-
-/// A command that runs Python 3.9 or newer, as program plus leading args.
-fn python() -> Option<Vec<String>> {
-    let mut candidates: Vec<Vec<String>> = Vec::new();
-    if let Ok(p) = std::env::var("LOCALPILOT_CONFORMANCE_PYTHON") {
-        if !p.trim().is_empty() {
-            candidates.push(vec![p]);
-        }
-    }
-    candidates.push(vec!["python3".into()]);
-    candidates.push(vec!["python".into()]);
-    candidates.push(vec!["py".into(), "-3".into()]);
-    candidates.into_iter().find(|c| {
-        Command::new(&c[0])
-            .args(&c[1..])
-            .args(["-c", "import sys; sys.exit(sys.version_info < (3, 9))"])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
-}
+use support::{native, python_or_skip, suite, tool};
 
 #[test]
 fn the_participant_passes_every_mandatory_fixture() {
-    let Some(py) = python() else {
-        let msg = "no Python 3.9+ found (set LOCALPILOT_CONFORMANCE_PYTHON); the mesh conformance suite did not run";
-        assert!(std::env::var("CI").as_deref() != Ok("true"), "{msg}");
-        eprintln!("NOTICE: {msg}");
+    let Some(py) = python_or_skip("the mesh conformance suite") else {
         return;
     };
-    let exe = env!("CARGO_BIN_EXE_localpilot");
-    // The runner splits each participant command on whitespace.
-    assert!(
-        !exe.chars().any(char::is_whitespace),
-        "the test binary path has whitespace, which the runner cannot pass: {exe}"
-    );
-    let native = format!("{exe} mesh");
-    let out = Command::new(&py[0])
-        .args(&py[1..])
-        .arg(suite().join("run.py"))
+    let native = native();
+    let out = tool(&py, "run.py")
         .arg("--participant")
         .arg(format!("codex={native}"))
         .arg("--participant")
         .arg(format!("localpilot={native}"))
-        .current_dir(suite())
-        .env("PYTHONIOENCODING", "utf-8")
         .output()
         .expect("run the conformance runner");
     let stdout = String::from_utf8_lossy(&out.stdout);

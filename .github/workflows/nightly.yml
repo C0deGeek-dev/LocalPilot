@@ -40,6 +40,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  mesh-soak:
+    # The pair-programming mailbox with two writers at once: the reference
+    # implementation and `localpilot mesh`, many interleaved operations on one
+    # live mailbox. A short run is in every test run; this is the long one.
+    name: mesh soak (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.82"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p localpilot --test mesh_soak -- --ignored --nocapture
+        env:
+          LOCALPILOT_SOAK_POSTS: "200"
+
   fuzz:
     name: fuzz (SSE decoders)
     runs-on: ubuntu-latest
