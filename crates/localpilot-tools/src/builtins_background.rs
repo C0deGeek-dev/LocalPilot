@@ -700,9 +700,12 @@ mod tests {
             StartOutcome::Running { id, .. } => id,
             StartOutcome::ExitedEarly { .. } => panic!("the loop must stay up"),
         };
-        // Let the workload prove it is running before it is stopped.
+        // Let the workload prove it is running before it is stopped. The wait
+        // bounds a cold start of two nested PowerShells, which a loaded Windows
+        // runner can stretch well past five seconds; it is not what this test
+        // measures, so it is generous.
         let mut ticked = false;
-        for _ in 0..100 {
+        for _ in 0..600 {
             if marker.exists() && std::fs::metadata(&marker).unwrap().len() > 0 {
                 ticked = true;
                 break;

@@ -815,7 +815,10 @@ mod tests {
         });
 
         let mut invocation = Box::pin(RunShell.invoke(input, &ctx));
-        tokio::time::timeout(Duration::from_secs(5), async {
+        // Generous: this waits for a cold PowerShell to start, which is not
+        // what the test measures and can take several seconds on a loaded
+        // Windows runner.
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 tokio::select! {
                     result = &mut invocation => {
