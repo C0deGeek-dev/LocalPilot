@@ -501,7 +501,7 @@ impl Builder<'_> {
             base_revision: base.clone(),
             fix_revision: fix.clone(),
         };
-        if let Some(touched) = oracle_touched(root, &base, &fix) {
+        if let Some(touched) = oracle_touched(root, &base, &fix, check) {
             self.reject(
                 pair,
                 VerdictReason::OracleChangedByFix,
@@ -595,7 +595,7 @@ impl Builder<'_> {
         initial_state: String,
         source: AssignmentSource,
     ) -> Option<LessonAssignment> {
-        let Some(test_surface) = test_surface(self.context.root, oracle_revision) else {
+        let Some(content_hash) = oracle_hash(self.context.root, check, oracle_revision) else {
             self.reject(
                 source,
                 VerdictReason::FixtureUnavailable,
@@ -611,7 +611,7 @@ impl Builder<'_> {
             task_evidence: vec![failure.id.clone()],
             oracle: OracleRef {
                 locator: format!("ratified-check:{name}@{oracle_revision}"),
-                content_hash: sha256_hex(&format!("{digest}\n{oracle_revision}\n{test_surface}")),
+                content_hash,
                 origin: OracleOrigin::Preexisting,
             },
             fixture,
@@ -893,12 +893,16 @@ pub(crate) fn is_test_path(path: &str) -> bool {
         || file.contains(".spec.")
 }
 
-/// Whether the fix touched what judges it: a test file, or test code inside a
-/// source file (an added or removed test attribute or test module). `Some`
-/// names what was touched.
-fn oracle_touched(root: &Path, base: &str, fix: &str) -> Option<String> {
+/// Whether the fix touched what judges it: a test file, a file the check's
+/// command names (its own script), or test code inside a source file (an added
+/// or removed test attribute or test module). `Some` names what was touched.
+fn oracle_touched(root: &Path, base: &str, fix: &str, check: &CheckConfig) -> Option<String> {
     let names = git(root, &["diff", "--name-only", base, fix])?;
-    let tests: Vec<&str> = names.lines().filter(|path| is_test_path(path)).collect();
+    let named = command_paths(check);
+    let tests: Vec<&str> = names
+        .lines()
+        .filter(|path| is_test_path(path) || named.iter().any(|named| covers(named, path)))
+        .collect();
     if !tests.is_empty() {
         return Some(tests.join(", "));
     }
@@ -922,6 +926,75 @@ const TEST_CODE_MARKERS: &[&str] = &[
     "def test_",
     "@Test",
 ];
+
+/// The frozen content identity of a ratified check at `revision`: its command
+/// digest, the revision, the test files there, and every file or directory the
+/// command itself names (a `check.sh`, a `tests/` argument). Freezing and
+/// re-checking use this one function, so they cannot drift apart. `None` when
+/// the revision's tree cannot be read.
+pub(crate) fn oracle_hash(root: &Path, check: &CheckConfig, revision: &str) -> Option<String> {
+    let tests = test_surface(root, revision)?;
+    let named = command_surface(root, check, revision)?;
+    Some(sha256_hex(&format!(
+        "{}\n{revision}\n{tests}\n{named}",
+        check_command_digest(check)
+    )))
+}
+
+/// Where the check's own implementation may live in the repository: the
+/// program itself, and any argument that is a script (`sh check.sh`,
+/// `cmd /C verify.cmd`, `python tools/check.py`). Data a check reads is not its
+/// implementation — the fix may legitimately change it. `./` and `\` are
+/// normalised; anything not tracked simply matches nothing.
+fn command_paths(check: &CheckConfig) -> Vec<String> {
+    let normalise = |part: &String| part.replace('\\', "/").trim_start_matches("./").to_string();
+    std::iter::once(normalise(&check.program))
+        .chain(
+            check
+                .args
+                .iter()
+                .map(normalise)
+                .filter(|part| is_script(part)),
+        )
+        .filter(|part| !part.is_empty() && !part.starts_with('-') && !part.contains(".."))
+        .collect()
+}
+
+/// Whether `path` names a script by its extension.
+fn is_script(path: &str) -> bool {
+    const SCRIPT_EXTENSIONS: &[&str] = &[
+        "sh", "bash", "zsh", "cmd", "bat", "ps1", "py", "js", "mjs", "cjs", "ts", "rb", "pl",
+    ];
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| SCRIPT_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+/// Whether `named` is `path` or a directory containing it.
+fn covers(named: &str, path: &str) -> bool {
+    path == named || path.starts_with(&format!("{named}/"))
+}
+
+/// The tracked files and directories the command names, as `path type id`
+/// lines, sorted.
+fn command_surface(root: &Path, check: &CheckConfig, revision: &str) -> Option<String> {
+    let mut entries = Vec::new();
+    for path in command_paths(check) {
+        let listing = git(root, &["ls-tree", revision, "--", &path])?;
+        for line in listing.lines() {
+            if let Some((meta, name)) = line.split_once('\t') {
+                if name == path {
+                    let mut parts = meta.split_whitespace().skip(1);
+                    if let (Some(kind), Some(id)) = (parts.next(), parts.next()) {
+                        entries.push(format!("{name} {kind} {id}"));
+                    }
+                }
+            }
+        }
+    }
+    entries.sort();
+    entries.dedup();
+    Some(entries.join("\n"))
+}
 
 /// The test files at `revision`, as `path blob` lines, sorted: what the oracle
 /// reads, fixed by content.

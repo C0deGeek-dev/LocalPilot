@@ -198,7 +198,13 @@ pub async fn replay(
             writeln!(out, "Cancelled; nothing further ran.")?;
             break;
         }
-        let outcome = run_replay(root, plan, engine, interactivity, cancel).await;
+        let outcome = match run_replay(root, plan, engine, interactivity, cancel).await {
+            Ok(outcome) => outcome,
+            Err(refusal) => {
+                writeln!(out, "Nothing ran: {refusal}")?;
+                break;
+            }
+        };
         writeln!(
             out,
             "{}: Replay {:?}{}",

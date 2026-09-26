@@ -98,6 +98,10 @@ fn scripts() -> Vec<(&'static str, String)> {
         ),
         ("slow.sh", "sleep 3\ngrep -qx fixed state.txt\n".to_string()),
         (
+            "suicide.sh",
+            "grep -qx fixed state.txt || kill -9 $$\n".to_string(),
+        ),
+        (
             "flood.cmd",
             "@echo off\r\ntype big.txt\r\nfindstr /b /c:fixed state.txt\r\n".to_string(),
         ),
@@ -265,7 +269,9 @@ async fn replay_with(
 ) -> (CandidateLesson, ReplayOutcome) {
     let (candidate, assignment) = frozen(project, mutation);
     let plan = plan_replay(project.root(), &candidate, &assignment, timeout).unwrap();
-    let outcome = run_replay(project.root(), &plan, engine, interactivity, cancel).await;
+    let outcome = run_replay(project.root(), &plan, engine, interactivity, cancel)
+        .await
+        .unwrap();
     (candidate, outcome)
 }
 
@@ -336,7 +342,8 @@ async fn a_fail_fix_pair_replays_to_valid_and_leaves_nothing_behind() {
         Interactivity::NonInteractive,
         &CancelSignal::new(),
     )
-    .await;
+    .await
+    .unwrap();
 
     let evidence = &outcome.evidence;
     assert_eq!(
@@ -915,4 +922,256 @@ fn a_worktrees_directory_linked_elsewhere_is_refused() {
             .is_none(),
         "nothing was created through the link"
     );
+}
+
+/// Make `link` a directory link to `target`: a junction on Windows, a symlink
+/// elsewhere.
+fn link_dir(link: &Path, target: &Path) {
+    #[cfg(windows)]
+    {
+        let made = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[tokio::test]
+async fn a_checks_script_edited_after_freezing_does_not_change_what_runs() {
+    let project = scripted("slow");
+    let (candidate, assignment) = frozen(&project, false);
+    // A later commit makes the script pass whatever the state. The arms run at
+    // the frozen revisions, whose content git cannot change, so the script
+    // that judges them is the one that was frozen.
+    commit(
+        project.root(),
+        &[
+            ("slow.cmd", "@echo off\r\nexit /b 0\r\n"),
+            ("slow.sh", "exit 0\n"),
+        ],
+        "make the check pass regardless",
+    );
+
+    let plan = plan_replay(
+        project.root(),
+        &candidate,
+        &assignment,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let outcome = run_replay(
+        project.root(),
+        &plan,
+        &bypass(),
+        Interactivity::NonInteractive,
+        &CancelSignal::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.evidence.verdict, LabVerdict::Valid);
+    assert!(
+        !outcome.receipt.arms[0].passed,
+        "the frozen script still fails"
+    );
+}
+
+#[test]
+fn a_fix_that_also_edits_the_checks_script_cannot_be_judged_by_it() {
+    let (program, args) = script_check("slow");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["config", "core.autocrlf", "false"]);
+    let config = config_text(true, program, &args);
+    let mut files: Vec<(&str, String)> = scripts();
+    files.push((".localpilot.toml", config.clone()));
+    files.push(("state.txt", "broken\n".to_string()));
+    let borrowed: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+    commit(root, &borrowed, "base");
+    let fix = commit(
+        root,
+        &[
+            ("state.txt", "fixed\n"),
+            ("slow.cmd", "@echo off\r\nexit /b 0\r\n"),
+            ("slow.sh", "exit 0\n"),
+        ],
+        "fix, and loosen the check",
+    );
+    let check = toml::from_str::<Config>(&config).unwrap().harness.checks[0].clone();
+    let project = Project {
+        dir,
+        fix,
+        check: check.clone(),
+    };
+    let candidate = candidate(&check);
+    let progress = progress(&project.fix);
+    let lab = classify_for_lab(
+        &candidate,
+        &LabContext {
+            root: project.root(),
+            progress: Some(&progress),
+            checks: std::slice::from_ref(&check),
+        },
+    );
+    assert!(lab
+        .assignments
+        .iter()
+        .all(|a| !matches!(a.source, Some(AssignmentSource::FailFixPair { .. }))));
+    assert!(
+        lab.rejected
+            .iter()
+            .any(|rejected| rejected.reason == VerdictReason::OracleChangedByFix),
+        "{lab:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_id_is_unique_to_its_process_and_moment() {
+    let project = project(false);
+    let (_, first) = replay(&project, false).await;
+    let (_, second) = replay(&project, false).await;
+    let pid = format!("{:x}", std::process::id());
+    assert!(
+        first.receipt.run_id.ends_with(&pid),
+        "{}",
+        first.receipt.run_id
+    );
+    assert_ne!(first.receipt.run_id, second.receipt.run_id);
+    assert_ne!(first.receipt_path, second.receipt_path);
+    assert!(first.receipt_path.unwrap().is_file() && second.receipt_path.unwrap().is_file());
+}
+
+#[tokio::test]
+async fn replay_runs_one_at_a_time_and_a_killed_runs_lock_goes_stale() {
+    let project = project(false);
+    let (candidate, assignment) = frozen(&project, false);
+    let plan = plan_replay(
+        project.root(),
+        &candidate,
+        &assignment,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let lock = project
+        .root()
+        .join(".localpilot")
+        .join("lab")
+        .join("replay.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, "4242 0\n").unwrap();
+
+    let busy = run_replay(
+        project.root(),
+        &plan,
+        &bypass(),
+        Interactivity::NonInteractive,
+        &CancelSignal::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(busy, ReplayRefusal::Busy(_)), "{busy:?}");
+    assert!(lock.is_file(), "a live run's lock is left alone");
+
+    // Nobody has refreshed it for minutes: a killed run's.
+    std::fs::File::options()
+        .write(true)
+        .open(&lock)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(600))
+        .unwrap();
+    let outcome = run_replay(
+        project.root(),
+        &plan,
+        &bypass(),
+        Interactivity::NonInteractive,
+        &CancelSignal::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.evidence.verdict, LabVerdict::Valid);
+    assert!(!lock.exists(), "released when the run ends");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_check_killed_by_a_signal_is_not_a_failing_check() {
+    let project = project_with("sh", &["suicide.sh".to_string()], true, false);
+    let (candidate, outcome) = replay(&project, false).await;
+    assert_eq!(outcome.receipt.arms[0].end, "exited by signal");
+    assert_eq!(outcome.evidence.verdict, LabVerdict::InvalidExperiment);
+    assert_eq!(
+        outcome.evidence.reasons,
+        vec![VerdictReason::Other("InfrastructureFailure".to_string())]
+    );
+    outcome.evidence.validate(&candidate).unwrap();
+}
+
+#[tokio::test]
+async fn a_receipts_directory_linked_elsewhere_is_neither_swept_nor_written() {
+    let project = project(false);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let old = elsewhere.path().join("someone-elses.json");
+    std::fs::write(&old, "{}").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(40 * 86_400))
+        .unwrap();
+    let lab = project.root().join(".localpilot").join("lab");
+    std::fs::create_dir_all(&lab).unwrap();
+    link_dir(&lab.join("runs"), elsewhere.path());
+
+    let (_, outcome) = replay(&project, false).await;
+
+    assert!(old.exists(), "a file outside the project is never swept");
+    assert!(outcome.receipt.swept_receipts.is_empty());
+    assert_eq!(outcome.receipt_path, None);
+    assert_eq!(
+        std::fs::read_dir(elsewhere.path()).unwrap().count(),
+        1,
+        "nothing was written through the link"
+    );
+    assert!(outcome
+        .evidence
+        .limitations
+        .iter()
+        .any(|l| l.contains("could not be written")));
+}
+
+#[tokio::test]
+async fn a_worktrees_directory_linked_elsewhere_is_not_swept() {
+    let project = project(false);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let foreign = elsewhere.path().join("lab-not-ours");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("keep.txt"), "x").unwrap();
+    let dot = project.root().join(".localpilot");
+    std::fs::create_dir_all(&dot).unwrap();
+    link_dir(&dot.join("worktrees"), elsewhere.path());
+
+    let (_, outcome) = replay(&project, false).await;
+
+    assert!(
+        foreign.join("keep.txt").is_file(),
+        "outside the repository: untouched"
+    );
+    assert!(
+        outcome.receipt.swept_worktrees[0].contains("outside the repository"),
+        "{:?}",
+        outcome.receipt.swept_worktrees
+    );
+    assert_eq!(outcome.evidence.verdict, LabVerdict::InvalidExperiment);
 }

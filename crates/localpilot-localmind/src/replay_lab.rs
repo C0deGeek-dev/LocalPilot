@@ -46,7 +46,7 @@ use localpilot_patchgen::{sweep_worktrees, Worktree};
 use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, PermissionRequest};
 use serde::{Deserialize, Serialize};
 
-use crate::lab_eligibility::{git, is_test_path, sha256_hex, short, test_surface};
+use crate::lab_eligibility::{git, is_test_path, sha256_hex, short};
 
 /// Every Replay worktree's name starts with this, and only those are swept.
 pub const REPLAY_WORKTREE_PREFIX: &str = "lab-";
@@ -155,6 +155,10 @@ pub enum ReplayRefusal {
         reasons: Vec<VerdictReason>,
         detail: String,
     },
+    /// Another Replay run is in progress in this project. Runs are serial:
+    /// each one sweeps what a killed run left, which must never be a live
+    /// run's worktree.
+    Busy(String),
 }
 
 impl std::fmt::Display for ReplayRefusal {
@@ -172,6 +176,7 @@ impl std::fmt::Display for ReplayRefusal {
                 "the assignment was frozen for an earlier version of the lesson"
             ),
             Self::Unsound { detail, .. } => write!(f, "the assignment no longer holds: {detail}"),
+            Self::Busy(detail) => write!(f, "another Replay run is in progress: {detail}"),
         }
     }
 }
@@ -312,16 +317,12 @@ pub fn plan_replay(
         .rsplit('@')
         .next()
         .unwrap_or_default();
-    let oracle_hash = test_surface(root, oracle_revision).map(|surface| {
-        sha256_hex(&format!(
-            "{}\n{oracle_revision}\n{surface}",
-            assignment.verifier.version
-        ))
-    });
+    let oracle_hash = crate::lab_eligibility::oracle_hash(root, &check, oracle_revision);
     if oracle_hash.as_deref() != Some(assignment.oracle.content_hash.as_str()) {
         return Err(unsound(
             VerdictReason::OracleMutable,
-            "the oracle's command or test files are not what was frozen".to_string(),
+            "the oracle's command, its scripts or its test files are not what was frozen"
+                .to_string(),
         ));
     }
     if fixture_hash(root, &arms).as_deref() != Some(assignment.fixture.content_hash.as_str()) {
@@ -499,13 +500,9 @@ pub async fn run_replay(
     engine: &PermissionEngine,
     interactivity: Interactivity,
     cancel: &CancelSignal,
-) -> ReplayOutcome {
-    let started_at = unix_now();
-    let run_id = format!(
-        "{}{}-{started_at}",
-        REPLAY_WORKTREE_PREFIX,
-        &hex_of(&plan.assignment.identity())[..8]
-    );
+) -> Result<ReplayOutcome, ReplayRefusal> {
+    let _lock = ReplayLock::acquire(root)?;
+    let run_id = run_id(&plan.assignment.identity());
 
     // What an earlier, killed run left behind, and receipts past retention.
     let swept_worktrees: Vec<String> = sweep_worktrees(root, REPLAY_WORKTREE_PREFIX)
@@ -597,10 +594,143 @@ pub async fn run_replay(
             .limitations
             .push("the main checkout changed while the run was in progress".to_string());
     }
-    ReplayOutcome {
+    if receipt_path.is_none() {
+        evidence.limitations.push(
+            "the receipt could not be written inside the project; nothing was kept".to_string(),
+        );
+    }
+    Ok(ReplayOutcome {
         evidence,
         receipt,
         receipt_path,
+    })
+}
+
+/// A run's id: the assignment, the millisecond it started, and the process —
+/// so two runs never share worktree names or a receipt path.
+fn run_id(assignment_identity: &str) -> String {
+    let millis = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    format!(
+        "{REPLAY_WORKTREE_PREFIX}{}-{}-{:x}",
+        &hex_of(assignment_identity)[..8],
+        base36(millis),
+        std::process::id()
+    )
+}
+
+fn base36(mut value: u128) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    loop {
+        out.push(DIGITS[usize::try_from(value % 36).unwrap_or(0)]);
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// How often a running Replay refreshes its lock, and how old a lock may get
+/// before it is taken as a killed run's.
+const LOCK_HEARTBEAT: Duration = Duration::from_secs(15);
+const LOCK_STALE: Duration = Duration::from_secs(90);
+
+/// Serialises Replay runs in one project. The lock file is refreshed while the
+/// run is alive, so a lock nobody refreshes — a killed run's — goes stale and
+/// is taken over; a live one never does.
+struct ReplayLock {
+    path: PathBuf,
+    heartbeat: tokio::task::JoinHandle<()>,
+}
+
+impl ReplayLock {
+    fn acquire(root: &Path) -> Result<Self, ReplayRefusal> {
+        let path = root.join(".localpilot").join("lab").join("replay.lock");
+        if !resolves_inside(root, &path) {
+            return Err(ReplayRefusal::Untrusted(
+                ".localpilot/lab resolves outside the repository".to_string(),
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| ReplayRefusal::Busy(format!("cannot create the lock: {error}")))?;
+        }
+        for attempt in 0..2 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write as _;
+                    let _ = writeln!(file, "{} {}", std::process::id(), unix_now());
+                    let beat = path.clone();
+                    let heartbeat = tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(LOCK_HEARTBEAT).await;
+                            let _ = std::fs::OpenOptions::new()
+                                .write(true)
+                                .open(&beat)
+                                .and_then(|file| file.set_modified(SystemTime::now()));
+                        }
+                    });
+                    return Ok(Self { path, heartbeat });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                        .is_some_and(|age| age > LOCK_STALE);
+                    if !stale {
+                        let holder = std::fs::read_to_string(&path).unwrap_or_default();
+                        return Err(ReplayRefusal::Busy(format!(
+                            "{} is held ({})",
+                            path.display(),
+                            holder.trim()
+                        )));
+                    }
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(error) => {
+                    return Err(ReplayRefusal::Busy(format!(
+                        "cannot take {}: {error}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        Err(ReplayRefusal::Busy(format!("{} is held", path.display())))
+    }
+}
+
+impl Drop for ReplayLock {
+    fn drop(&mut self) {
+        self.heartbeat.abort();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether `path` — or, if it does not exist yet, its nearest existing
+/// ancestor — resolves inside the repository at `root`. A link anywhere on the
+/// way that points elsewhere fails this.
+fn resolves_inside(root: &Path, path: &Path) -> bool {
+    let Ok(real_root) = dunce::canonicalize(root) else {
+        return false;
+    };
+    let mut probe = path;
+    loop {
+        if let Ok(real) = dunce::canonicalize(probe) {
+            return real.starts_with(&real_root);
+        }
+        match probe.parent() {
+            Some(parent) => probe = parent,
+            None => return false,
+        }
     }
 }
 
@@ -721,7 +851,10 @@ fn judge(
             Some(VerdictReason::BudgetExceeded)
         } else if arm.end.starts_with("not run: path too long") {
             Some(other(PATH_TOO_LONG))
-        } else if arm.end.starts_with("not ") || arm.end.starts_with("failed") || !arm.pipes_closed
+        } else if arm.end.starts_with("not ")
+            || arm.end.starts_with("failed")
+            || arm.end == "exited by signal"
+            || !arm.pipes_closed
         {
             Some(other(INFRASTRUCTURE_FAILURE))
         } else {
@@ -931,6 +1064,9 @@ fn runs_dir(root: &Path) -> PathBuf {
 
 fn write_receipt(root: &Path, receipt: &ReplayReceipt) -> Option<PathBuf> {
     let dir = runs_dir(root);
+    if !resolves_inside(root, &dir) {
+        return None;
+    }
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{}.json", receipt.run_id));
     let json = serde_json::to_string_pretty(receipt).ok()?;
@@ -964,6 +1100,11 @@ fn log_ref(root: &Path, path: &Path, receipt: &ReplayReceipt) -> LogRef {
 /// strictly inside the runs directory are ever considered.
 fn sweep_receipts(root: &Path) -> Vec<String> {
     let dir = runs_dir(root);
+    // A runs directory that is a link elsewhere would turn the sweep loose on
+    // somebody else's files: sweep only what really lies inside the project.
+    if !dir.is_dir() || !resolves_inside(root, &dir) {
+        return Vec::new();
+    }
     let Ok(dir) = dunce::canonicalize(&dir) else {
         return Vec::new();
     };

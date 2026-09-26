@@ -317,6 +317,27 @@ pub fn check_path_budget(repo_root: &Path, dir: &Path, revision: &str) -> Result
 #[must_use]
 pub fn sweep_worktrees(repo_root: &Path, prefix: &str) -> Vec<(PathBuf, Result<(), PatchError>)> {
     let base = worktrees_root(repo_root);
+    if !base.is_dir() {
+        return Vec::new();
+    }
+    // A worktrees directory that is a link to somewhere else is not ours to
+    // clear: refuse it rather than remove directories outside the repository.
+    let (Ok(real_base), Ok(real_root)) = (
+        std::fs::canonicalize(&base),
+        std::fs::canonicalize(repo_root),
+    ) else {
+        return Vec::new();
+    };
+    if !real_base.starts_with(&real_root) {
+        return vec![(
+            base.clone(),
+            Err(PatchError::OutsideWorktree(format!(
+                "{} resolves to {}, outside the repository; nothing was swept",
+                base.display(),
+                real_base.display()
+            ))),
+        )];
+    }
     let Ok(entries) = std::fs::read_dir(&base) else {
         return Vec::new();
     };
@@ -324,7 +345,14 @@ pub fn sweep_worktrees(repo_root: &Path, prefix: &str) -> Vec<(PathBuf, Result<(
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
-            path.is_dir()
+            // A link named like a worktree is skipped: only real directories
+            // inside the worktrees root are removed.
+            let is_link = std::fs::symlink_metadata(path)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(true);
+            !is_link
+                && path.is_dir()
+                && std::fs::canonicalize(path).is_ok_and(|real| real.starts_with(&real_base))
                 && path
                     .file_name()
                     .and_then(|name| name.to_str())

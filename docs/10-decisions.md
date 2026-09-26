@@ -50,8 +50,13 @@ reaps a timed-out check's tree too.
 
 **The assignment is re-checked before anything runs.**
 - The check must still be ratified with the command digest it ran with.
-- The oracle's hash (command digest, revision, the test files there) and the
-  fixture's hash must be what they were when frozen.
+- The oracle's hash (command digest, revision, the test files there, and the
+  check's own scripts — the program when it is a repository file, and any
+  script it is given) and the fixture's hash must be what they were when frozen.
+  A fix that also edited the check's scripts is refused at freezing
+  (`OracleChangedByFix`), as a fix that edited the tests already was. Every arm
+  runs at a frozen commit, so an edit made after freezing never reaches what
+  runs.
 - A mismatch is recorded on the lesson as `Invalid` (`OracleMutable`,
   `FixtureUnavailable`), and nothing runs.
 
@@ -70,8 +75,13 @@ reaps a timed-out check's tree too.
 **Cleanup is part of the result.**
 - Each worktree is removed and the removal checked. A failure is
   `InvalidExperiment` (`CleanupFailed`), and the record says what remains.
-- A worktree left by a process that was killed mid-run is removed when the next
-  run starts.
+- Runs are serial within a project. A lock under `.localpilot/lab/` is
+  refreshed while a run is alive; a second run is refused, and a killed run's
+  lock goes stale and is taken over. Only then does a run remove the worktree a
+  killed run left, so it can never remove a live run's.
+- Neither sweep follows a link out of the repository: an aliased worktrees or
+  receipts directory is refused and reported, and nothing is written through
+  it.
 - The main checkout is compared before and after.
 - Receipts are written under `.localpilot/lab/runs/` and swept by age through
   LocalMind's location-bound plan.
@@ -84,7 +94,7 @@ reaps a timed-out check's tree too.
 | `Invalid` / `NoDiscriminatingVerifier` | it passes both, fails both, or the reverse |
 | `Invalid` / `OracleMutable` | the check or its tests changed since freezing, or the run edited a test file |
 | `Invalid` / `FixtureUnavailable` | a revision is gone or the fixture hash differs |
-| `InvalidExperiment` | `PermissionDenied`, `BudgetExceeded` (timeout), `Cancelled`, `InfrastructureFailure` (a missing program, a worktree that could not be made, something the check started still running after it ended), `PathTooLong`, `CleanupFailed`, `SourceMutated` |
+| `InvalidExperiment` | `PermissionDenied`, `BudgetExceeded` (timeout), `Cancelled`, `InfrastructureFailure` (a missing program, a check ended by a signal, a worktree that could not be made, something the check started still running after it ended), `PathTooLong`, `CleanupFailed`, `SourceMutated` |
 
 Never `Supported`, `Contradicted` or `Inconclusive`: Replay replays a known
 repair, so it proves the fixture and its oracle, not the lesson.
