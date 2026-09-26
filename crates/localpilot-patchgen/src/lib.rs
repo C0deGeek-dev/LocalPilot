@@ -29,6 +29,9 @@ mod provenance;
 
 pub use error::PatchError;
 pub use gate::ApprovalToken;
+pub use git::{
+    check_path_budget, sweep_worktrees, worktrees_root, Worktree, MAX_WORKTREE_NAME, WORKTREES_DIR,
+};
 pub use outward::{
     discard as discard_outward_draft, list as list_outward_drafts,
     record_event as record_outward_event, DraftRequest, EmitPhase, OutwardDraft, OutwardError,

@@ -1140,6 +1140,29 @@ The result goes onto the lesson in review. It says the assignment holds together
 and nothing about whether the lesson helps: a scripted actor makes the same moves
 either way.
 
+`Replay` assignments run only when asked (ADR-0187), with `localpilot lab
+replay`, and only in a project whose committed `.localpilot.toml` sets
+`[lab] replay = true`.
+- **Re-checked first.** The check must still be ratified with the command it ran,
+  and the frozen oracle and fixture must hash as they did.
+- **Preview and confirmation.** A preview lists the arms, the command, the
+  environment allowlist, the budget, and that a worktree is not a sandbox.
+  Nothing runs until the person confirms.
+- **The arms.** Each runs in its own worktree under `.localpilot/worktrees/`,
+  detached at the exact revision. A controlled mutation reverts the step's fix in
+  its failing arm. The ratified check runs without its fixer, through the
+  permission gate, with a timeout, bounded output, cancellation that reaps the
+  whole process tree, and `CARGO_TARGET_DIR` at the shared `.localpilot/lab/target`.
+- **After the run.** Each worktree is removed and the removal checked, and a
+  worktree left by a killed run is removed at the next start. The receipt is kept
+  under `.localpilot/lab/runs/`, and the result goes onto the lesson in review.
+
+| Result | When |
+|---|---|
+| `Valid` | the check fails without the fix and passes with it |
+| `Invalid` | it does not discriminate; the check, its tests or the fixture changed; the run edited a test file |
+| `InvalidExperiment` | denied, timed out, cancelled, could not start, left something running, could not be cleaned up — never a finding about the lesson |
+
 ## Completion Teardown Sweep
 
 At the same completion seam, when `[harness] teardown_sweep` is enabled, the

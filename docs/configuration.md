@@ -449,6 +449,20 @@ project's `.localpilot.toml`. See [Switching the writer](#switching-the-writer).
 | `writer` | `native` \| `delegate` | `native` | `native` is LocalPilot's own implementation. `delegate` hands every participant operation to `delegate_command`. |
 | `delegate_command` | array of strings | `[]` | The delegate's argv: program, then arguments, each passed exactly (no shell). Required when `writer = "delegate"`. |
 
+### `[lab]`
+
+The lesson lab's opt-in tiers. Logic validation needs no setting: it replays
+what a run recorded and starts nothing.
+
+| Key | Type | Default | Description |
+|---|---|---:|---|
+| `replay` | bool | `false` | Allow `localpilot lab replay` to run a lesson's ratified check on the commits it came from, in temporary worktrees. Honoured only from the project's **committed** `.localpilot.toml` — the same boundary that ratifies a check — and ignored when the working copy differs. Every run is previewed and needs its own confirmation (`--yes` runs headless under the permission engine's headless rules). |
+
+```toml
+[lab]
+replay = true
+```
+
 ### `[terminal]`
 
 Full-screen timeline presentation preferences. An absent block preserves the

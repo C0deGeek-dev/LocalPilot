@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot lab replay` checks a lesson against the project's own tests.**
+  When a lesson came from a step whose ratified check failed and then passed,
+  Replay runs that check on the step's parent and on its commit, each in a
+  temporary worktree, and records whether the check really tells the two apart.
+  It is off unless the project's committed `.localpilot.toml` sets
+  `[lab] replay = true`. Every run shows exactly what will run and waits for a
+  confirmation. Worktrees are removed afterwards, including after a cancel.
+  `localpilot lab list` shows each lesson's lab results. Quality-gate checks that
+  time out are now stopped together with everything they started (ADR-0187).
 - **A lesson built from a run's own fail → change → pass is now checked at
   once.** When a finished run's lesson rests on an attempt that failed, a
   change, and the same attempt passing, the completion step replays that

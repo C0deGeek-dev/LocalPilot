@@ -103,6 +103,7 @@ localpilot-agents = { path = "../localpilot-agents" }
 localpilot-dist = { path = "../localpilot-dist" }
 localpilot-stack = { path = "../localpilot-stack" }
 localpilot-localmind = { path = "../localpilot-localmind" }
+localmind-core = { path = "../../external/localmind/crates/localmind-core" }
 localmind-inference = { path = "../../external/localmind/crates/localmind-inference" }
 localpilot-mcp = { path = "../localpilot-mcp" }
 localpilot-patchgen = { path = "../localpilot-patchgen" }
@@ -136,6 +137,7 @@ localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
+localmind-store = { path = "../../external/localmind/crates/localmind-store" }
 crossterm = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }

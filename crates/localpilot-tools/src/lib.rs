@@ -34,7 +34,7 @@ pub use builtins::{
 };
 pub use builtins_ask::{AskUser, ASK_USER};
 pub use builtins_background::{BackgroundProcesses, ProcStatus, RunBackground};
-pub use builtins_shell::RunShell;
+pub use builtins_shell::{kill_process_tree, RunShell};
 pub use builtins_swarm::{Swarm, SWARM};
 pub use catalog::{
     fingerprint, Catalog, CatalogDelta, CatalogEntry, DeprecationOverlay, ToolSource,

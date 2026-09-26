@@ -32,6 +32,7 @@ mod ingest_progress;
 mod interactive_session;
 #[cfg(feature = "tui")]
 mod key_input;
+mod lab_cmd;
 mod learning_cmd;
 mod localbox;
 mod logging;
@@ -588,6 +589,16 @@ enum Command {
     /// Codex, as a participant: join, read, post, acknowledge, report health.
     /// Arguments follow the reference `pair.py`; see `localpilot mesh --help`.
     Mesh(mesh_cmd::MeshArgs),
+    /// The lesson lab: what lessons from finished runs can be tested, and the
+    /// explicit Replay tier (off unless the project's committed
+    /// .localpilot.toml sets `[lab] replay = true`).
+    Lab {
+        /// The project root. Defaults to the current directory.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+        #[command(subcommand)]
+        command: LabCommand,
+    },
     /// Write a cross-context handoff, or check one before resuming work.
     Handoff {
         #[command(subcommand)]
@@ -1075,6 +1086,26 @@ enum MemoryCommand {
         /// Write HTML instead of JSON.
         #[arg(long)]
         html: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LabCommand {
+    /// List the lessons the lab classified and the results each carries.
+    List,
+    /// Run lessons' Replay assignments: the ratified check on the commits they
+    /// came from, in temporary worktrees. Shows what will run first and runs
+    /// only once confirmed. Ctrl+C cancels and cleans up.
+    Replay {
+        /// A candidate identity, or a prefix of one. All lessons when omitted.
+        candidate: Option<String>,
+        /// Run without asking, after showing the preview. Headless: the
+        /// permission engine's headless rules apply, as for gate checks.
+        #[arg(long)]
+        yes: bool,
+        /// Seconds each run may take before it is stopped.
+        #[arg(long, default_value_t = 900)]
+        timeout_secs: u64,
     },
 }
 
@@ -2483,6 +2514,52 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         }
         Command::Mesh(args) => {
             exit_code = mesh_cmd::run(args);
+        }
+        Command::Lab { workspace, command } => {
+            let root = match workspace {
+                Some(path) => path,
+                None => std::env::current_dir()?,
+            };
+            let mut stdout = io::stdout().lock();
+            match command {
+                LabCommand::List => lab_cmd::list(&root, &mut stdout)?,
+                LabCommand::Replay {
+                    candidate,
+                    yes,
+                    timeout_secs,
+                } => {
+                    let cancel = localpilot_harness::CancelSignal::new();
+                    let on_interrupt = {
+                        let cancel = cancel.clone();
+                        tokio::spawn(async move {
+                            if tokio::signal::ctrl_c().await.is_ok() {
+                                cancel.cancel();
+                            }
+                        })
+                    };
+                    let stdin = io::stdin();
+                    let mut input = stdin.lock();
+                    let confirmation = if yes {
+                        lab_cmd::Confirmation::Yes
+                    } else if io::IsTerminal::is_terminal(&io::stdin()) {
+                        lab_cmd::Confirmation::Prompt(&mut input)
+                    } else {
+                        lab_cmd::Confirmation::Unavailable
+                    };
+                    let engine = lab_cmd::engine(&root)?;
+                    lab_cmd::replay(
+                        &root,
+                        candidate.as_deref(),
+                        confirmation,
+                        std::time::Duration::from_secs(timeout_secs),
+                        &engine,
+                        &cancel,
+                        &mut stdout,
+                    )
+                    .await?;
+                    on_interrupt.abort();
+                }
+            }
         }
         Command::Handoff { command } => {
             let cwd = std::env::current_dir()?;

@@ -613,7 +613,7 @@ impl Tool for RunShell {
 /// child leads its own process group (set at spawn), so a negative pid signals
 /// the whole group even after the leader exits. Best-effort: an unreapable
 /// process is the OS's to report, never surfaced as a tool error.
-pub(crate) async fn kill_process_tree(pid: u32) {
+pub async fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {
         let _ = tokio::process::Command::new("taskkill")

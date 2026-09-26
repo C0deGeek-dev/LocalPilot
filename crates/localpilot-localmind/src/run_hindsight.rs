@@ -250,6 +250,53 @@ async fn classify_queued(
     Ok((Some(classification), logic))
 }
 
+/// The lesson in review whose content identity is `identity`, with the session
+/// it was queued under. `None` when no row holds it — it was decided, or
+/// revised into a different lesson.
+///
+/// # Errors
+/// [`LearningError::Review`] when the queue cannot be read.
+pub fn lab_candidate(
+    project_root: &Path,
+    identity: &str,
+) -> Result<Option<(localmind_core::SessionId, localmind_core::CandidateLesson)>, LearningError> {
+    let queue = ReviewQueue::open_project(project_root)
+        .map_err(|e| LearningError::Review(e.to_string()))?;
+    Ok(queue
+        .list()
+        .map_err(|e| LearningError::Review(e.to_string()))?
+        .into_iter()
+        .find(|item| item.candidate.content_identity() == identity)
+        .map(|item| (item.session_id, item.candidate)))
+}
+
+/// Put a lab result on the lesson in review it is bound to. The queue merges
+/// it into the existing row; a result the lesson already holds for the same
+/// inputs and verdict is not added twice. `false` when no row holds the lesson.
+///
+/// # Errors
+/// [`LearningError::Review`] when the queue cannot be read or written.
+pub fn attach_lab_evidence(
+    project_root: &Path,
+    evidence: localmind_core::ExperimentEvidence,
+) -> Result<bool, LearningError> {
+    let Some((session, candidate)) =
+        lab_candidate(project_root, &evidence.inputs.candidate_identity)?
+    else {
+        return Ok(false);
+    };
+    let held = candidate.experiments.iter().any(|existing| {
+        existing.identity() == evidence.identity() && existing.verdict == evidence.verdict
+    });
+    if !held {
+        ReviewQueue::open_project(project_root)
+            .map_err(|e| LearningError::Review(e.to_string()))?
+            .enqueue_candidates(&session, &[candidate.with_experiment(evidence)])
+            .map_err(|e| LearningError::Review(e.to_string()))?;
+    }
+    Ok(true)
+}
+
 /// One request over the provider, and an honest account of the constraint.
 async fn send(provider: &dyn ModelProvider, model: &str, request: DistillRequest) -> DistillReply {
     let refused_before = provider.constraint_refused();

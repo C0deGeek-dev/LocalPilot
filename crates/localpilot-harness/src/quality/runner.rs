@@ -6,6 +6,11 @@
 //! when allowed. There is no path that skips the decision — the shared
 //! execution core asks the gate before every spawn, including fixers and
 //! re-runs. Output is bounded and redacted before it becomes a finding.
+//!
+//! A command that outlives its timeout or is cancelled is reaped as a whole
+//! tree with [`kill_process_tree`] — the same reap the shell tool uses — before
+//! the shared core kills the child itself, so a test runner's own children do
+//! not outlive it.
 
 use std::future::Future;
 use std::path::Path;
@@ -16,9 +21,12 @@ use localpilot_config::{AutoFix, CheckConfig, RuleSeverity};
 use localpilot_sandbox::{
     classify, Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionRequest,
 };
+use localpilot_tools::kill_process_tree;
 use localx_eval_core::check::{CheckCommand, CheckSpec, CommandGate};
 
-pub use localx_eval_core::check::{CheckOutcome, CheckSeverity, CheckStatus};
+pub use localx_eval_core::check::{
+    CancelSignal, CheckOutcome, CheckSeverity, CheckStatus, CommandEnd, CommandRun, EnvPolicy,
+};
 
 /// The tool identity quality-gate checks present to the permission engine. A
 /// distinct name (not `run_shell`) means a ratification allowlist can authorize
@@ -30,6 +38,8 @@ pub struct CheckRunner<'a> {
     gate: PermissionGate<'a>,
     root: &'a Path,
     timeout: Option<Duration>,
+    env: EnvPolicy,
+    cancel: Option<CancelSignal>,
 }
 
 impl<'a> CheckRunner<'a> {
@@ -52,6 +62,8 @@ impl<'a> CheckRunner<'a> {
             },
             root,
             timeout: None,
+            env: EnvPolicy::Inherit,
+            cancel: None,
         }
     }
 
@@ -62,14 +74,48 @@ impl<'a> CheckRunner<'a> {
         self
     }
 
+    /// The environment the checks see; the host's whole environment unless set.
+    #[must_use]
+    pub fn with_env(mut self, env: EnvPolicy) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// Stop a running check, and start no further one, once `cancel` fires.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: CancelSignal) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
     /// Run a check; when it fails and `auto_fix` allows it, run the fixer and
     /// re-run the check once. Every command goes through the permission engine.
     pub async fn run(&self, check: &CheckConfig) -> CheckOutcome {
-        let mut runner = localx_eval_core::check::CheckRunner::new(&self.gate, self.root);
+        self.core().run(&to_spec(check)).await
+    }
+
+    /// Run only the check's own command, never its fixer, and report exactly
+    /// how it ended: exit, timeout, cancellation, not started, or refused.
+    /// For callers that judge the check rather than repair the tree.
+    pub async fn execute(&self, check: &CheckConfig) -> CommandRun {
+        self.core()
+            .execute(&CheckCommand::new(
+                check.program.clone(),
+                check.args.clone(),
+            ))
+            .await
+    }
+
+    fn core(&self) -> localx_eval_core::check::CheckRunner<'_, PermissionGate<'a>> {
+        let mut runner = localx_eval_core::check::CheckRunner::new(&self.gate, self.root)
+            .with_env(self.env.clone());
         if let Some(timeout) = self.timeout {
             runner = runner.with_timeout(timeout);
         }
-        runner.run(&to_spec(check)).await
+        if let Some(cancel) = &self.cancel {
+            runner = runner.with_cancel(cancel.clone());
+        }
+        runner
     }
 }
 
@@ -103,6 +149,10 @@ impl CommandGate for PermissionGate<'_> {
 
     fn sanitize(&self, text: String) -> String {
         redact::redact(&text)
+    }
+
+    fn reap(&self, pid: u32) -> impl Future<Output = ()> {
+        kill_process_tree(pid)
     }
 }
 

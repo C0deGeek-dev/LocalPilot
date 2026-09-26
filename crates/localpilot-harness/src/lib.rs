@@ -75,9 +75,9 @@ pub use project_analysis::{
 };
 pub use project_instructions::{register_project_instructions_context, ProjectInstructionsContext};
 pub use quality::{
-    program_on_path, propose_gate, ratify_gate, render_check, summarize_proposal, CheckOutcome,
-    CheckRunner, CheckSeverity, CheckStatus, GateRatification, ProposedCheck, ToolchainProfile,
-    QUALITY_CHECK_TOOL,
+    program_on_path, propose_gate, ratify_gate, render_check, summarize_proposal, CancelSignal,
+    CheckOutcome, CheckRunner, CheckSeverity, CheckStatus, CommandEnd, CommandRun, EnvPolicy,
+    GateRatification, ProposedCheck, ToolchainProfile, QUALITY_CHECK_TOOL,
 };
 pub use resume::{resume_one_step, resume_one_step_with_events, ResumeOutcome, QUOTA_PAUSE_KEY};
 pub use retrospective::{

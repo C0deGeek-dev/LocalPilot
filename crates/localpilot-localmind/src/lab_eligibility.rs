@@ -122,6 +122,24 @@ pub fn write_record(
     Ok(path)
 }
 
+/// Every classification kept under `localpilot_dir`, sorted by candidate
+/// identity. A record that does not parse is skipped: it is the lab's own
+/// output, and one damaged file must not hide the rest.
+#[must_use]
+pub fn read_records(localpilot_dir: &Path) -> Vec<LabClassification> {
+    let Ok(entries) = std::fs::read_dir(localpilot_dir.join(LAB_ASSIGNMENTS_DIR)) else {
+        return Vec::new();
+    };
+    let mut records: Vec<LabClassification> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str(&text).ok())
+        .collect();
+    records.sort_by(|a, b| a.candidate_identity.cmp(&b.candidate_identity));
+    records
+}
+
 /// The `NotExecutable` result a classification carries onto its candidate, so
 /// review shows why no test exists. `None` for every other eligibility.
 #[must_use]
@@ -858,7 +876,7 @@ fn content_words(text: &str) -> Vec<String> {
 }
 
 /// Paths that are tests by name or place.
-fn is_test_path(path: &str) -> bool {
+pub(crate) fn is_test_path(path: &str) -> bool {
     let path = path.replace('\\', "/").to_lowercase();
     let file = path.rsplit('/').next().unwrap_or(&path);
     path.starts_with("tests/")
@@ -907,7 +925,7 @@ const TEST_CODE_MARKERS: &[&str] = &[
 
 /// The test files at `revision`, as `path blob` lines, sorted: what the oracle
 /// reads, fixed by content.
-fn test_surface(root: &Path, revision: &str) -> Option<String> {
+pub(crate) fn test_surface(root: &Path, revision: &str) -> Option<String> {
     let listing = git(root, &["ls-tree", "-r", revision])?;
     let mut entries: Vec<String> = listing
         .lines()
@@ -922,7 +940,7 @@ fn test_surface(root: &Path, revision: &str) -> Option<String> {
 }
 
 /// Run a read-only git query in `root`. `None` on any failure.
-fn git(root: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(root)
@@ -936,7 +954,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
     })
 }
 
-fn short(revision: &str) -> &str {
+pub(crate) fn short(revision: &str) -> &str {
     revision.get(..10).unwrap_or(revision)
 }
 
@@ -946,7 +964,7 @@ fn bounded(text: &str) -> String {
         .collect()
 }
 
-fn sha256_hex(text: &str) -> String {
+pub(crate) fn sha256_hex(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
     let mut hex = String::from("sha256:");
     for byte in digest {

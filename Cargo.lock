@@ -1646,7 +1646,9 @@ dependencies = [
  "image",
  "indexmap",
  "insta",
+ "localmind-core",
  "localmind-inference",
+ "localmind-store",
  "localpilot-agents",
  "localpilot-config",
  "localpilot-contextcheck",
@@ -1860,6 +1862,7 @@ name = "localpilot-localmind"
 version = "5.0.0"
 dependencies = [
  "async-trait",
+ "dunce",
  "futures",
  "ignore",
  "localmind-codegraph",
@@ -1872,6 +1875,7 @@ dependencies = [
  "localpilot-core",
  "localpilot-harness",
  "localpilot-llm",
+ "localpilot-patchgen",
  "localpilot-recovery",
  "localpilot-sandbox",
  "localpilot-store",

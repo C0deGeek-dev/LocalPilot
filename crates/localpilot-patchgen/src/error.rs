@@ -37,6 +37,22 @@ pub enum PatchError {
     #[error("invalid branch name: {0}")]
     InvalidBranch(String),
 
+    /// A worktree directory is too deep for the repository's longest tracked
+    /// path on this platform.
+    #[error(
+        "path too long: the worktree at {} is {dir_chars} characters and the longest tracked \
+         path is {longest_tracked}, {total} in all against a limit of {limit}; move the \
+         repository to a shorter path or enable core.longpaths",
+        dir.display()
+    )]
+    PathTooLong {
+        dir: PathBuf,
+        dir_chars: usize,
+        longest_tracked: usize,
+        total: usize,
+        limit: usize,
+    },
+
     /// The approval token does not match this patch — promotion refused.
     #[error("approval token does not authorize this patch")]
     TokenMismatch,

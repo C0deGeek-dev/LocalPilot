@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+dunce = { workspace = true }
 futures = { workspace = true }
 ignore = { workspace = true }
 localmind-codegraph = { path = "../../external/localmind/crates/localmind-codegraph" }
@@ -27,6 +28,7 @@ localpilot-config = { path = "../localpilot-config" }
 localpilot-core = { path = "../localpilot-core" }
 localpilot-harness = { path = "../localpilot-harness" }
 localpilot-llm = { path = "../localpilot-llm" }
+localpilot-patchgen = { path = "../localpilot-patchgen" }
 localpilot-recovery = { path = "../localpilot-recovery" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-store = { path = "../localpilot-store" }

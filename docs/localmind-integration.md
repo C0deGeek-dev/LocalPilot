@@ -221,6 +221,7 @@ truth this table mirrors.
 | Headless harness (`harness run`) | Yes — each step |
 | RPC / ACP serve loop | Yes — on session end |
 | `localpilot learning closeout` | Yes — explicit, on demand |
+| `localpilot lab replay` | No — runs a lesson's ratified check on its commits and records the result on the lesson already in review; opt-in per project and confirmed per run (ADR-0187) |
 | One-shot `localpilot print` | No — read-only, never closes out (ADR-0018) |
 | Bare `ask` / other one-shot prompts | No — unless an explicit `learning closeout` is run |
 

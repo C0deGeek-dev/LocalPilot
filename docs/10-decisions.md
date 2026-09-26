@@ -2,6 +2,103 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0187: Replay Runs A Lesson's Ratified Check On Its Own Commits, Only When Asked
+
+**Status:** accepted · **Date:** 2026-09-26. Builds on ADR-0185 (frozen
+assignments) and ADR-0186 (Logic). Reuses ADR-0009's ratified checks, their
+permission gate and ratification as the trust boundary. Uses LocalMind
+D-LM-0048 (tiers and verdicts) and D-LM-0050 (lab-output retention).
+
+**Context.** ADR-0185 freezes `Replay` assignments from two trusted sources: a
+committed step's fail/fix pair judged by a ratified check, and a controlled
+mutation that takes that step's fix back out of the current code. Whether that
+check actually tells the broken state from the fixed one had not been
+established, and establishing it means running the project's own command on
+real commits. The shared check runner could not do that safely. It killed only
+the direct child on a timeout, had no cancellation, read all output into memory
+before truncating, and passed the whole host environment through. And a leaked
+worktree after one build is gigabytes, not a stray directory.
+
+**Decision.**
+
+**The shared runner gains what Replay needs, for every caller.**
+`localx-eval-core`'s check runner, extended additively:
+- a cancellation signal;
+- a gate `reap(pid)` hook, which LocalPilot fills with the shell tool's own
+  `kill_process_tree`, so a stopped command's whole tree goes before the child
+  itself;
+- output read as it arrives into a bounded buffer and kept on a timeout or
+  cancel;
+- an environment policy;
+- a single-command `execute` that reports exactly how a command ended.
+
+`CheckStatus` and `CheckOutcome` are unchanged. The ordinary quality gate now
+reaps a timed-out check's tree too.
+
+**Replay is opt-in per project, and per run.**
+- `[lab] replay = true` must be in the project's **committed** `.localpilot.toml`
+  — the file that makes a check ratified. It is read from `HEAD`, and a working
+  copy that differs is refused.
+- `localpilot lab replay` shows exactly what will run first: the arms and
+  revisions, the command, the environment, the budget, and a plain statement that
+  a worktree is not a sandbox and the check may reach the network.
+- It runs only once confirmed. At a prompt, the confirmation answers an `Ask` for
+  exactly the previewed command and nothing else. With `--yes` the run is headless
+  and the engine's headless rules apply, as for gate checks. A `Deny` is never
+  overridden.
+- Replay never runs automatically.
+
+**The assignment is re-checked before anything runs.**
+- The check must still be ratified with the command digest it ran with.
+- The oracle's hash (command digest, revision, the test files there) and the
+  fixture's hash must be what they were when frozen.
+- A mismatch is recorded on the lesson as `Invalid` (`OracleMutable`,
+  `FixtureUnavailable`), and nothing runs.
+
+**Each arm gets its own worktree.**
+- The worktree is `patchgen`'s, detached at the exact revision, under the in-repo
+  `.localpilot/worktrees/`. A system temporary directory is too deep on Windows.
+- Names are bounded, and a root too deep for the repository's longest tracked path
+  fails with an error that names path length.
+- The mutation arm reverts the fix inside its worktree.
+- The ratified check runs without its fixer, with an environment allowlist, and
+  with `CARGO_TARGET_DIR` pointed at one shared `.localpilot/lab/target`: warm
+  after the first run, and never the project's own `target/`.
+- Tracked files the check changes are listed. A changed test file is
+  `Invalid(OracleMutable)`.
+
+**Cleanup is part of the result.**
+- Each worktree is removed and the removal checked. A failure is
+  `InvalidExperiment` (`CleanupFailed`), and the record says what remains.
+- A worktree left by a process that was killed mid-run is removed when the next
+  run starts.
+- The main checkout is compared before and after.
+- Receipts are written under `.localpilot/lab/runs/` and swept by age through
+  LocalMind's location-bound plan.
+
+**Verdicts.**
+
+| Verdict | When |
+|---|---|
+| `Valid` | the check fails on the broken arm and passes on the fixed one |
+| `Invalid` / `NoDiscriminatingVerifier` | it passes both, fails both, or the reverse |
+| `Invalid` / `OracleMutable` | the check or its tests changed since freezing, or the run edited a test file |
+| `Invalid` / `FixtureUnavailable` | a revision is gone or the fixture hash differs |
+| `InvalidExperiment` | `PermissionDenied`, `BudgetExceeded` (timeout), `Cancelled`, `InfrastructureFailure` (a missing program, a worktree that could not be made, something the check started still running after it ended), `PathTooLong`, `CleanupFailed`, `SourceMutated` |
+
+Never `Supported`, `Contradicted` or `Inconclusive`: Replay replays a known
+repair, so it proves the fixture and its oracle, not the lesson.
+
+**Consequences.**
+- A frozen fail/fix assignment can now show that its oracle discriminates, on the
+  user's own machine, with every run shown and confirmed first.
+- The localx-llama pin moves in LocalBox, LocalBench and LocalPilot together.
+- The shared lab build directory is not swept by age: it is a build cache, and
+  removing it costs only warmth.
+- On Windows a tree reap follows parent links (`taskkill /T`), so a process whose
+  parent already exited is not reached. The runner reports it as still holding the
+  output, and Replay records `InfrastructureFailure` rather than a clean result.
+
 ## ADR-0186: A Recorded Trajectory Is Replayed Against Virtual Tools, And Proves Only Its Own Soundness
 
 **Status:** accepted · **Date:** 2026-09-26. Builds on ADR-0185 (frozen

@@ -32,6 +32,7 @@ mod pack;
 mod primer;
 mod remember_tool;
 mod repair_signal;
+mod replay_lab;
 mod research_chat;
 mod research_ingest;
 mod retrospective_lesson;
@@ -80,7 +81,8 @@ pub use inspector::{
 };
 pub use knowledge_tool::KnowledgeSearch;
 pub use lab_eligibility::{
-    classify as classify_for_lab, Eligibility, LabClassification, LabContext, RejectedAssignment,
+    classify as classify_for_lab, read_records as read_lab_records, Eligibility, LabClassification,
+    LabContext, RejectedAssignment,
 };
 pub use layered::{expand_layer, fetch_layer, Expansion, FetchedBody};
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
@@ -107,6 +109,12 @@ pub use remember_tool::Remember;
 pub use repair_signal::{
     enqueue_repair_signals, repair_lesson_candidate, repair_signals_from_events, RepairSignal,
 };
+pub use replay_lab::{
+    plan_replay, preview as replay_preview, run_replay, ArmReceipt, ReplayArm, ReplayOutcome,
+    ReplayPlan, ReplayReceipt, ReplayRefusal, CLEANUP_FAILED, DEFAULT_ARM_TIMEOUT, EXPECT_FAIL_ARM,
+    EXPECT_PASS_ARM, LAB_RUNS_DIR, LAB_TARGET_DIR, PATH_TOO_LONG, PERMISSION_DENIED,
+    REPLAY_WORKTREE_PREFIX, SOURCE_MUTATED,
+};
 pub use research_chat::ResearchChat;
 pub use research_ingest::{
     doc_index_counts, doc_index_summary, ingest_research_docs, DocFileSummary, DocIndexSummary,
@@ -119,7 +127,10 @@ pub use run_facts::{
     capture_run_facts, FactGap, RunFacts, MAX_ACCEPTANCE_FACTS, MAX_LABEL_CHARS, MAX_RUN_FACTS,
     RATIFIED_CHECK_KEY,
 };
-pub use run_hindsight::{distil_run, distil_run_with, offer_run_hindsight, HindsightOffer};
+pub use run_hindsight::{
+    attach_lab_evidence, distil_run, distil_run_with, lab_candidate, offer_run_hindsight,
+    HindsightOffer,
+};
 pub use seed::{seed_memory, SeedLesson, SeedPack, SeedReport};
 pub use skill_drafts_tool::SkillDrafts;
 pub use span_eval::{

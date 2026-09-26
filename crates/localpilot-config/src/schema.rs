@@ -36,6 +36,7 @@ pub struct Config {
     pub discovery: DiscoveryConfig,
     pub terminal: TerminalConfig,
     pub mesh: MeshConfig,
+    pub lab: LabConfig,
 }
 
 impl Default for Config {
@@ -61,6 +62,7 @@ impl Default for Config {
             discovery: DiscoveryConfig::default(),
             terminal: TerminalConfig::default(),
             mesh: MeshConfig::default(),
+            lab: LabConfig::default(),
         }
     }
 }
@@ -86,6 +88,19 @@ pub enum MeshWriter {
     Native,
     /// Hand every operation to `delegate_command` (the reference `pair.py`).
     Delegate,
+}
+
+/// The lesson lab's opt-in tiers. Logic validation needs no setting: it
+/// replays what a run recorded and starts nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LabConfig {
+    /// Allow `localpilot lab replay`: run a lesson's ratified check on the
+    /// commits it came from, in a temporary worktree. Off by default, and
+    /// honoured only from the project's committed `.localpilot.toml` — the
+    /// same boundary that makes a check ratified. Every run still needs its
+    /// own confirmation.
+    pub replay: bool,
 }
 
 /// Full-screen terminal presentation preferences.
