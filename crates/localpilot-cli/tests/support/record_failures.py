@@ -9,25 +9,26 @@ them when the suite fails. A command that succeeds leaves nothing, and exit
 codes and output pass through unchanged.
 
 Two forms:
-  record_failures.py --native <program> <args...>
-      runs a native implementation as a child process;
   record_failures.py <args...>
       used as the runner's --reference: runs the pair.py named by
       LOCALPILOT_CONFORMANCE_REFERENCE in this process, as `python pair.py`
-      would.
+      would. This is the form the conformance test uses.
+  record_failures.py --native <program> <args...>
+      runs a native implementation as a child process. It costs a process per
+      command, which is too slow for the whole suite; it is kept for chasing a
+      failure in a single fixture.
 """
 import os
 import runpy
-import subprocess
 import sys
-import time
-import traceback
 
 
 def record(argv, rc, text):
     where = os.environ.get("LOCALPILOT_CONFORMANCE_FAILURES")
     if not where:
         return
+    import time
+
     name = f"{time.time_ns()}-{os.getpid()}.txt"
     try:
         with open(os.path.join(where, name), "w", encoding="utf-8") as f:
@@ -37,6 +38,8 @@ def record(argv, rc, text):
 
 
 def native(argv):
+    import subprocess
+
     p = subprocess.run(argv, stderr=subprocess.PIPE)
     sys.stderr.buffer.write(p.stderr)
     sys.stderr.flush()
@@ -57,6 +60,8 @@ def reference(args):
             record(argv, rc, str(e.code))
         raise
     except BaseException:
+        import traceback
+
         record(argv, 1, traceback.format_exc())
         raise
 

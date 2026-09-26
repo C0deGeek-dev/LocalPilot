@@ -8,9 +8,11 @@
 //! elsewhere, so a developer machine without Python still runs the rest.
 //!
 //! The runner discards what a fixture's parallel commands print, so a command
-//! that fails there leaves only its exit code. Every command therefore runs
-//! through `support/record_failures.py`, which keeps a failing command's exit
-//! code and error text; the assertion prints them.
+//! that fails there leaves only its exit code. The reference implementation
+//! therefore runs through `support/record_failures.py`, in the runner's own
+//! Python process, which keeps a failing command's exit code and error text;
+//! the assertion prints them. `localpilot mesh` is not wrapped: a second
+//! process per command pushed the suite past the per-test ceiling on Windows.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
@@ -55,7 +57,7 @@ fn the_participant_passes_every_mandatory_fixture() {
         "the recorder's path has whitespace, which the suite's tools cannot pass: {recorder}"
     );
     let failures_dir = tempfile::tempdir().expect("a directory for failing commands");
-    let native = format!("{} {recorder} --native {}", py.join(" "), native());
+    let native = native();
     let out = tool(&py, "run.py")
         .arg("--reference")
         .arg(&recorder)
