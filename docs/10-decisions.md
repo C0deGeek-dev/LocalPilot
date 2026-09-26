@@ -2,6 +2,84 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0186: A Recorded Trajectory Is Replayed Against Virtual Tools, And Proves Only Its Own Soundness
+
+**Status:** accepted · **Date:** 2026-09-26. Builds on ADR-0185 (frozen
+assignments) and ADR-0184 (completion hindsight). Uses LocalMind D-LM-0048 (the
+experiment contract and which tier may emit which verdict).
+
+**Context.** ADR-0185 freezes a `Logic` assignment whenever a run recorded an
+attempt failing, a different change, and the same attempt passing. Nothing yet
+checks that such an assignment holds together: that its oracle is still the
+recorded pass it names, that its trajectory replays to its recorded outcomes,
+and that the pass really depends on the change. The check has to run without a
+model, without a shell and without the project's executables. And it cannot be
+read as evidence that the lesson helps. The actor that replays a trajectory is a
+script, and a script makes the same moves whether or not the lesson exists.
+
+**Decision.**
+
+**The trajectory becomes a small virtual world.** Each recorded action becomes a
+virtual tool that answers as the run recorded it, from the redacted, bounded
+facts capture kept. The attempt answers with its recorded failure until every
+recorded change has been made, in order, and then with its recorded pass. A
+change made before the one it follows is refused and changes nothing. An action
+the run never recorded is a tool error.
+
+**The harness runs it.** The ordinary `SessionRuntime` drives the world with a
+scripted actor, from a fresh temporary root per run. Its tool registry holds only
+the virtual tools and no built-ins, so no shell, file write or project executable
+can start. The virtual tools declare no effects, so nothing reaches the
+permission engine; were one to, the least-privilege profile would ask and a
+headless approver refuse.
+
+**Two arms.** *Without the change*, the actor retries the attempt up to the retry
+limit, three. It must see only the recorded failure, and the harness's own
+same-failure breaker flags the repeat. *With the change*, the actor makes the
+recorded changes and must reach the recorded pass. Both logs are read back
+through the evidence ledger, the projection real runs are judged with. It checks
+order, tool errors, retries, the recovery and the final verification.
+
+**The oracle and fixture are checked before either arm.** The caller passes the
+run's facts as captured now, and the frozen oracle must still be among them with
+its frozen content. The frozen fixture must be exactly the trajectory's facts.
+Anything else is `Invalid` before anything runs.
+
+**Verdicts, with reasons.**
+
+| Verdict | When |
+|---|---|
+| `Valid` | both arms behaved as recorded |
+| `Invalid` / `OracleMutable` | the recorded pass has changed or gone, or the oracle has no frozen content |
+| `Invalid` / `FixtureUnavailable` | a trajectory fact is gone from the record, or the fixture hash is not the trajectory |
+| `Invalid` / `OracleNotIndependent` | the oracle was written from the lesson |
+| `Invalid` / `NoDiscriminatingVerifier` | the attempt passes without the change |
+| `Invalid` / `NotReplayable` | the trajectory does not replay to its recorded outcomes, or a required observation never appears |
+| `InvalidExperiment` | the run was cancelled (`Cancelled`), breached its tool budget (`BudgetExceeded`), or failed on its own (`InfrastructureFailure`): a root that cannot be made, a runtime that stopped by itself, a log that does not settle every call. An assignment frozen for an earlier version of the lesson (`StaleAssignment`) or from another source (`NotALogicAssignment`) is not run |
+
+`NotExecutable` stays eligibility's. `Supported`, `Contradicted` and
+`Inconclusive` are never emitted; LocalMind's contract refuses them for this tier.
+Every result states that limit in its limitations.
+
+**Reproducible.** The result is bound to the candidate, the assignment, the
+revision, the runtime version, the retry limit and tool budget, the virtual
+tools and the verifier. Arm timing is reported beside that binding, not in it.
+No arm log is kept, and no output text leaves the run: observations are the
+assignment's own redacted strings.
+
+**Run at completion.** Right after classification, the completion step runs Logic
+over every recorded-trajectory assignment. It checks against the facts it just
+captured and puts each result on the lesson in review, merged into the pending
+row. It costs no model call. A rerun over the same inputs that reached the same
+verdict is not stored twice. `run_logic(candidate, assignment, recorded, options)`
+is the entry point for later paired runs.
+
+**Consequences.** A `Valid` Logic result says the assignment, its oracle and its
+fixture hold together and replay deterministically — and nothing about whether
+the lesson helps. That needs an uplift run with a real actor. A changed lesson
+leaves its result stale through the contract's existing check. A changed record
+makes a rerun `Invalid`. Replay assignments wait for their own runner.
+
 ## ADR-0185: A Lesson Is Tested Only By An Oracle It Did Not Write
 
 **Status:** accepted · **Date:** 2026-09-25. Builds on ADR-0184 (completion

@@ -40,6 +40,10 @@ pub struct HindsightOffer {
     /// Whether and how the lesson can be tested, for a lesson that reached
     /// review. `None` for an abstention or a review-only record.
     pub lab: Option<crate::LabClassification>,
+    /// The Logic results attached to the lesson in review: one per recorded
+    /// trajectory assignment, run at completion. Empty for any other
+    /// classification.
+    pub logic: Vec<localmind_core::ExperimentEvidence>,
 }
 
 /// Distil `run` with `provider`. Never fails: an unreachable model or a reply
@@ -135,28 +139,37 @@ pub async fn offer_run_hindsight(
         Some(record) => write_retrospective_lesson(project_root, record)?,
         None => None,
     };
-    let lab = match (&lesson, &record) {
-        (Some(_), Some(record)) => classify_queued(project_root, &record.id())?,
-        _ => None,
+    let (lab, logic) = match (&lesson, &record) {
+        (Some(_), Some(record)) => classify_queued(project_root, &record.id(), run).await?,
+        _ => (None, Vec::new()),
     };
     Ok(HindsightOffer {
         distillation,
         enqueued,
         lesson,
         lab,
+        logic,
     })
 }
 
 /// Classify the lesson queued as `item_id` for the lab, keep the frozen record
-/// for the runs that come later, and — when no honest test exists — put that
-/// result on the candidate so review shows it.
+/// for the runs that come later, run the Logic tier over every recorded
+/// trajectory assignment, and put what the lab concluded — a Logic result, or
+/// why no honest test exists — on the candidate so review shows it.
 ///
 /// Reads the stored candidate, not the one handed to the queue: the identity
 /// every assignment binds to is the identity of what review holds.
-fn classify_queued(
+async fn classify_queued(
     project_root: &Path,
     item_id: &str,
-) -> Result<Option<crate::LabClassification>, LearningError> {
+    run: &RunFacts,
+) -> Result<
+    (
+        Option<crate::LabClassification>,
+        Vec<localmind_core::ExperimentEvidence>,
+    ),
+    LearningError,
+> {
     let queue = ReviewQueue::open_project(project_root)
         .map_err(|e| LearningError::Review(e.to_string()))?;
     let Some(item) = queue
@@ -165,7 +178,7 @@ fn classify_queued(
     else {
         // Merged into a near-duplicate under another id; that row keeps its
         // own classification.
-        return Ok(None);
+        return Ok((None, Vec::new()));
     };
     let checks = localpilot_config::load(
         &localpilot_config::ConfigPaths::standard(project_root),
@@ -191,21 +204,50 @@ fn classify_queued(
         .map_or(0, |elapsed| {
             i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
         });
-    if let Some(evidence) = crate::lab_eligibility::not_executable_evidence(
-        &classification,
-        &crate::lab_eligibility::current_revision(project_root),
-        produced_at,
-    ) {
-        // A restatement carrying a new result: the queue merges the result into
-        // the pending row rather than creating a second one.
+    let revision = crate::lab_eligibility::current_revision(project_root);
+    let mut results: Vec<localmind_core::ExperimentEvidence> =
+        crate::lab_eligibility::not_executable_evidence(&classification, &revision, produced_at)
+            .into_iter()
+            .collect();
+    // Logic is automatic: it only replays what the run recorded, so it costs
+    // no model call and starts nothing. Its oracle is checked against the facts
+    // this completion captured.
+    let options = crate::LogicOptions {
+        source_revision: revision,
+        ..crate::LogicOptions::default()
+    };
+    let mut logic = Vec::new();
+    for assignment in classification.assignments.iter().filter(|assignment| {
+        matches!(
+            assignment.source,
+            Some(localmind_core::AssignmentSource::RecordedTrajectory { .. })
+        )
+    }) {
+        logic.push(crate::run_logic(&item.candidate, assignment, &run.facts, &options).await);
+    }
+    results.extend(logic.iter().cloned());
+    // A rerun over the same inputs that reached the same verdict differs only
+    // in timing; the lesson already holds it.
+    results.retain(|result| {
+        !item
+            .candidate
+            .experiments
+            .iter()
+            .any(|held| held.identity() == result.identity() && held.verdict == result.verdict)
+    });
+    if !results.is_empty() {
+        // A restatement carrying new results: the queue merges them into the
+        // pending row rather than creating a second one.
+        let candidate = results
+            .into_iter()
+            .fold(item.candidate, |candidate, result| {
+                candidate.with_experiment(result)
+            });
         queue
-            .enqueue_candidates(
-                &item.session_id,
-                &[item.candidate.with_experiment(evidence)],
-            )
+            .enqueue_candidates(&item.session_id, &[candidate])
             .map_err(|e| LearningError::Review(e.to_string()))?;
     }
-    Ok(Some(classification))
+    Ok((Some(classification), logic))
 }
 
 /// One request over the provider, and an honest account of the constraint.

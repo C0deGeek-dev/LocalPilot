@@ -1109,7 +1109,7 @@ model and without running anything:
 | Classification | When | What is kept |
 |---|---|---|
 | `NotExecutable` | testing it would take a real-world action; it states a preference or someone's intent; it is about style no ratified check verifies (a style lesson is only ever judged by a ratified style check) | a `NotExecutable` result with its reason on the candidate; ordinary review continues |
-| `Logic` | the hindsight cites a recorded failure that a different change turned into a pass of the same attempt | a frozen assignment replaying the recorded observations |
+| `Logic` | the hindsight cites a recorded failure that a different change turned into a pass of the same attempt | a frozen assignment replaying the recorded observations, run at once (below) |
 | `Replay` | it cites a ratified check that failed in a committed step | a frozen assignment on the step's fail/fix commits — and, when the code has moved on, the same fix taken back out of the current revision |
 | `UpliftOnly` | none of the above | the record, with why |
 
@@ -1118,6 +1118,27 @@ oracle must predate the fix and be untouched by it, and may not restate the
 lesson; it is hashed when the assignment is frozen. Every ratified gate-check run
 is recorded in the step's event log (`CheckRan`), which is what lets a finished
 run show the project's own check failing and then passing.
+
+A `Logic` assignment is then run straight away (ADR-0186). The recorded
+trajectory becomes a small world of virtual tools: the attempt answers with its
+recorded failure until the recorded changes have been made, in order, then with
+its recorded pass. The ordinary session runtime drives it with a scripted actor,
+from a fresh temporary root, with no built-in tools registered — no shell, file
+write, project executable or model. One arm retries the attempt three times
+without the change and must see only the failure. The other makes the change and
+must reach the pass. Both logs are read back through the evidence ledger. Before
+either arm, the oracle is checked against the facts the completion just
+captured.
+
+| Result | When |
+|---|---|
+| `Valid` | both arms behaved as recorded |
+| `Invalid` | the recorded pass changed or is gone (`OracleMutable`); a trajectory fact is gone (`FixtureUnavailable`); the oracle came from the lesson (`OracleNotIndependent`); the attempt passes without the change (`NoDiscriminatingVerifier`); the replay misses a recorded outcome (`NotReplayable`) |
+| `InvalidExperiment` | cancelled, over its tool budget, or the lab's own run failed — never a finding about the lesson |
+
+The result goes onto the lesson in review. It says the assignment holds together
+and nothing about whether the lesson helps: a scripted actor makes the same moves
+either way.
 
 ## Completion Teardown Sweep
 

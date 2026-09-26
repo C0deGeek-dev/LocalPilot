@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A lesson built from a run's own fail → change → pass is now checked at
+  once.** When a finished run's lesson rests on an attempt that failed, a
+  change, and the same attempt passing, the completion step replays that
+  trajectory against virtual tools — no shell, no project commands, no model —
+  and puts the result on the lesson in review. `Valid` means the test built for
+  the lesson holds together: without the change the attempt still fails, with
+  it the attempt passes, and the recorded outcome it relies on is unchanged.
+  `Invalid` names what is wrong with it. It does not say the lesson helps
+  (ADR-0186).
 - **Each lesson from a finished run now says whether and how it can be tested.**
   After a lesson reaches review, it is classified: a preference, someone's
   intent, an unsafe action, or style no ratified check can verify is marked not

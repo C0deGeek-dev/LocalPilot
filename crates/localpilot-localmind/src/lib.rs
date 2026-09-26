@@ -25,6 +25,7 @@ mod knowledge_tool;
 mod lab_eligibility;
 mod layered;
 mod layered_tool;
+mod logic_lab;
 mod memory_search_tool;
 mod ops;
 mod pack;
@@ -83,6 +84,10 @@ pub use lab_eligibility::{
 };
 pub use layered::{expand_layer, fetch_layer, Expansion, FetchedBody};
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
+pub use logic_lab::{
+    run_logic, LogicOptions, INFRASTRUCTURE_FAILURE, LOGIC_RETRY_LIMIT, NOT_A_LOGIC_ASSIGNMENT,
+    REPEAT_FLAGGED, STALE_ASSIGNMENT, WITHOUT_CHANGE_ARM, WITH_CHANGE_ARM,
+};
 pub use memory_search_tool::MemorySearch;
 pub use ops::{
     audit, audit_readonly, clear_stale, cluster_by_similarity, configured_embedding_endpoint,

@@ -1872,6 +1872,7 @@ dependencies = [
  "localpilot-core",
  "localpilot-harness",
  "localpilot-llm",
+ "localpilot-recovery",
  "localpilot-sandbox",
  "localpilot-store",
  "localpilot-tools",
@@ -1884,6 +1885,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.9",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
 ]

@@ -936,6 +936,19 @@ async fn offer_completion_hindsight(
                 };
                 writeln!(out, "  lab: {:?} — {detail}", lab.eligibility)?;
             }
+            for result in &offer.logic {
+                let reasons = result
+                    .reasons
+                    .iter()
+                    .map(|reason| format!("{reason:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if reasons.is_empty() {
+                    writeln!(out, "  logic: {:?}", result.verdict)?;
+                } else {
+                    writeln!(out, "  logic: {:?} — {reasons}", result.verdict)?;
+                }
+            }
             Ok(())
         }
         (None, queued) => {
@@ -2411,21 +2424,20 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
         }
     }
 
-    /// The step: one read that fails (its path carries a secret, which must
-    /// not survive capture), one write that succeeds, then done; then the
+    /// The step: a read that fails because its file does not exist yet (its
+    /// path carries a secret, which must not survive capture), a write that
+    /// creates the file, and the same read succeeding, then done; then the
     /// retrospective's single call.
     fn scripted_step() -> FakeProvider {
+        let path = format!("creds/{SECRET}.txt");
         FakeProvider::new()
-            .tool_call(
-                "c1",
-                "read_file",
-                serde_json::json!({ "path": format!("creds/{SECRET}.txt") }),
-            )
+            .tool_call("c1", "read_file", serde_json::json!({ "path": path }))
             .tool_call(
                 "c2",
                 "write_file",
-                serde_json::json!({ "path": "thing.txt", "content": "done" }),
+                serde_json::json!({ "path": path, "content": "done" }),
             )
+            .tool_call("c3", "read_file", serde_json::json!({ "path": path }))
             .text("done")
             .text(REVIEW)
     }
@@ -2538,12 +2550,23 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
         assert!(lessons.contains(LESSON), "the earned lesson is mirrored");
         // The lab classified the lesson from the real completion step and kept
         // its record for the runs that come later.
-        assert!(printed.contains("  lab: "), "{printed}");
+        assert!(printed.contains("  lab: Logic"), "{printed}");
         let lab_records =
             std::fs::read_dir(root.join(".localpilot").join("lab").join("assignments"))
                 .unwrap()
                 .count();
         assert_eq!(lab_records, 1);
+        // Logic ran at completion over the step's recorded fail → write → pass,
+        // with virtual tools only, and its result is on the lesson in review.
+        assert!(printed.contains("  logic: Valid"), "{printed}");
+        let experiments = candidate["experiments"].as_array().unwrap();
+        assert_eq!(experiments.len(), 1, "{candidate}");
+        assert_eq!(experiments[0]["tier"], "Logic");
+        assert_eq!(experiments[0]["verdict"], "Valid");
+        assert_eq!(
+            experiments[0]["inputs"]["tool_versions"],
+            serde_json::json!({ "read_file": "virtual/1", "write_file": "virtual/1" })
+        );
         assert!(
             printed.contains("hindsight: lesson offered to LocalMind review"),
             "{printed}"

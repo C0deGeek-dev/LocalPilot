@@ -25,6 +25,11 @@ const LESSON: &str = "Write the schema migration before the test that reads its 
 /// A finished one-step run: the tests failed on a missing table, a migration
 /// was written, the same tests passed.
 fn finished_run(learning: &str) -> tempfile::TempDir {
+    finished_run_failing_with(learning, "no such table: users")
+}
+
+/// [`finished_run`] with the failing test run's output given.
+fn finished_run_failing_with(learning: &str, failure: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join("brief.md"), BRIEF).unwrap();
@@ -52,7 +57,7 @@ fn finished_run(learning: &str) -> tempfile::TempDir {
             "c1",
             "run_shell",
             json!({ "command": "cargo test users" }),
-            "no such table: users",
+            failure,
             true,
         ),
         (
@@ -236,7 +241,14 @@ async fn the_same_run_offered_twice_is_one_pending_row() {
         second.enqueued.is_none(),
         "a restatement merges into the pending row"
     );
-    assert_eq!(queued(root).len(), 1);
+    let queued = queued(root);
+    assert_eq!(queued.len(), 1);
+    // Logic ran both times and agreed; the lesson holds the result once.
+    assert_eq!(first.logic[0].identity(), second.logic[0].identity());
+    assert_eq!(
+        queued[0].candidate["experiments"].as_array().unwrap().len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -494,12 +506,71 @@ async fn an_earned_lesson_is_classified_and_its_frozen_assignment_is_kept() {
     let kept: localpilot_localmind::LabClassification =
         serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
     assert_eq!(kept, lab, "the record is the frozen form");
-    let queued = queued(root);
+    // Logic ran at completion, over the run's own recorded trajectory, and its
+    // result is on the lesson in review.
+    assert_eq!(offer.logic.len(), 1);
+    let logic = &offer.logic[0];
+    assert_eq!(logic.tier, localmind_core::EvidenceTier::Logic);
     assert_eq!(
-        queued[0].candidate.get("experiments"),
-        None,
-        "an executable lesson carries no result until it has run"
+        logic.verdict,
+        localmind_core::LabVerdict::Valid,
+        "{logic:?}"
     );
+    assert_eq!(
+        logic.inputs.assignment_identity.as_deref(),
+        Some(lab.assignments[0].identity().as_str())
+    );
+    let queued = queued(root);
+    assert_eq!(queued.len(), 1, "the result merged into the pending row");
+    let stored: localmind_core::CandidateLesson =
+        serde_json::from_value(queued[0].candidate.clone()).unwrap();
+    assert_eq!(stored.experiments, vec![logic.clone()]);
+    logic
+        .validate(&stored)
+        .expect("the stored result is bound to the stored lesson");
+    assert_eq!(
+        queued[0].candidate["suggested_action"], "PromoteToMemory",
+        "a Valid Logic result changes nothing about review"
+    );
+}
+
+#[tokio::test]
+async fn nothing_the_logic_run_stores_carries_what_capture_redacted() {
+    // The failing run printed a path the project marked sensitive. The event
+    // store does not know LocalMind's configuration, so the log keeps it.
+    let learning = "[learning]
+enabled = true
+allowed_scopes = [\"project\"]
+excluded_paths = [\"internal/acquisition\"]
+";
+    let dir = finished_run_failing_with(
+        learning,
+        "internal/acquisition/schema.sql: no such table: users",
+    );
+    let root = dir.path();
+    let logged: String = std::fs::read_dir(root.join(".localpilot").join("sessions"))
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    assert!(
+        logged.contains("internal/acquisition"),
+        "precondition: the raw log carries the path"
+    );
+    let run = capture_run_facts(root, &Store::open(root));
+    let provider = one_pass(&[&draft(&run, Some(LESSON))]);
+
+    let offer = offer(root, &provider, &run).await;
+
+    assert_eq!(offer.logic.len(), 1);
+    assert_eq!(offer.logic[0].verdict, localmind_core::LabVerdict::Valid);
+    let queued = queued(root);
+    let stored = queued[0].candidate.to_string();
+    assert!(
+        stored.contains("\"experiments\""),
+        "the Logic result is in review: {stored}"
+    );
+    assert!(!stored.contains("internal/acquisition"), "{stored}");
+    assert_eq!(queued[0].summary, LESSON);
 }
 
 #[tokio::test]
