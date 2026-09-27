@@ -1,11 +1,11 @@
 {
  "source_repo": "c0degeek-ai",
  "source_path": "skills/pair-programming/conformance",
- "source_commit": "7b744d25b81afbf3a771677b36b4fb93cb6dc818",
+ "source_commit": "861cb8314b4e9e3fd55e2feb5167432111f28fdd",
  "files": {
   "run.py": "2d62107fc82bdc2145f9f6667f4ea946c06a8627c33f98db79e2c970e9bab61d",
   "soak.py": "429b2fd410e86166dea45988a6e56693a8323405c086a35b2da3138a3728179a",
-  "scan_cases.py": "d4dcdfd6a00ee3df1265ac3262f2e41c9839c94fc10460b2ab84baf5891d2e00",
+  "scan_cases.py": "f6fe55f6b718cfe8b1c8f8016d18a7c51ea7193a66f65f9a1c40a41a56c86bf7",
   "README.md": "efecde49ac6d574495b5e43021701c2142077dd6ebeef928f932100cddc82e52",
   "participant.json": "4d614fc0201d0a60e495c8acdfda0079a8d4fecea941edd4ec4ccb371cfc0e77",
   "fixtures/companion-guard-write-scope.json": "9a99600dc653b7bb0bb86f8c58264224745a49390d6af4b84d45f658fc8115a2",

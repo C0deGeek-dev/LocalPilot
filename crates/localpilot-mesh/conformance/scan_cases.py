@@ -117,18 +117,38 @@ CASES = {
     "unlistable-dir": (unlistable_dir, not WINDOWS and not ROOT_USER),
     # Windows forbids a newline in a file name.
     "newline-in-name": (newline_in_name, not WINDOWS),
-    # POSIX names are bytes; Windows names are UTF-16 and cannot hold these.
-    "undecodable-names": (undecodable_names, not WINDOWS),
+    # Only where the filesystem stores names as raw bytes: Windows names are
+    # UTF-16, and macOS (APFS) refuses a name that is not valid UTF-8.
+    "undecodable-names": (undecodable_names, None),
 }
 
 
+def _byte_names_allowed() -> bool:
+    """Whether this machine's temp filesystem accepts a name that is not
+    valid UTF-8. Probed rather than assumed from the platform."""
+    if WINDOWS:
+        return False
+    d = tempfile.mkdtemp(prefix="pair-scan-probe-")
+    try:
+        with open(os.path.join(os.fsencode(d), b"probe\xff"), "wb"):
+            pass
+        return True
+    except OSError:
+        return False
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def available() -> list:
-    return [name for name, (_, ok) in CASES.items() if ok]
+    """The cases this machine can build. A case marked None is decided by a
+    probe."""
+    return [name for name, (_, ok) in CASES.items()
+            if ok or (ok is None and name == "undecodable-names" and _byte_names_allowed())]
 
 
 def build(name: str, base: Path) -> None:
-    fn, ok = CASES[name]
-    if not ok:
+    fn, _ = CASES[name]
+    if name not in available():
         raise SystemExit(f"case {name} cannot be built on this platform")
     (base / "tree").mkdir(parents=True)
     (base / "outside").mkdir(parents=True)
