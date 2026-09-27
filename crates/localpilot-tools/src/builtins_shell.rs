@@ -793,6 +793,13 @@ mod tests {
         };
         let started = dir.path().join("started.txt");
         let leaked = dir.path().join("leaked.txt");
+        // How long the fixture waits before its grandchild writes. It must be
+        // well past the reaper's worst case: on a loaded Windows runner a
+        // cold, detached `taskkill /T` alone has taken more than the 3 s this
+        // used to allow (LocalHub#198). `ping -n N` waits about N-1 seconds.
+        const DELAY_SECS: u64 = 10;
+        #[cfg(windows)]
+        const DELAY_PINGS: u64 = DELAY_SECS + 1;
 
         #[cfg(windows)]
         let input = json!({
@@ -802,7 +809,7 @@ mod tests {
                 "-NonInteractive",
                 "-Command",
                 format!(
-                    "Set-Content -LiteralPath '{}' -Value ready; ping.exe -n 4 127.0.0.1 | Out-Null; Set-Content -LiteralPath '{}' -Value leaked",
+                    "Set-Content -LiteralPath '{}' -Value ready; ping.exe -n {DELAY_PINGS} 127.0.0.1 | Out-Null; Set-Content -LiteralPath '{}' -Value leaked",
                     started.display().to_string().replace('\'', "''"),
                     leaked.display().to_string().replace('\'', "''")
                 )
@@ -815,7 +822,7 @@ mod tests {
             "args": [
                 "-c",
                 format!(
-                    "printf ready > '{}'; sleep 3; printf leaked > '{}'",
+                    "printf ready > '{}'; sleep {DELAY_SECS}; printf leaked > '{}'",
                     started.display(),
                     leaked.display()
                 )
@@ -845,7 +852,7 @@ mod tests {
         .expect("fixture command should publish its started marker");
 
         drop(invocation);
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        tokio::time::sleep(Duration::from_secs(DELAY_SECS + 2)).await;
         assert!(
             !leaked.exists(),
             "a dropped run_shell future must reap the delayed process tree"
