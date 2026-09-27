@@ -1253,6 +1253,7 @@ pub(crate) fn ui_profile(profile: Profile) -> UiProfile {
     match profile {
         Profile::Default => UiProfile::Default,
         Profile::Relaxed => UiProfile::Relaxed,
+        Profile::ReadOnly => UiProfile::ReadOnly,
         Profile::Bypass => UiProfile::Bypass,
         Profile::Unrestricted => UiProfile::Unrestricted,
     }
@@ -1262,6 +1263,7 @@ pub(crate) fn sandbox_profile(profile: UiProfile) -> Profile {
     match profile {
         UiProfile::Default => Profile::Default,
         UiProfile::Relaxed => Profile::Relaxed,
+        UiProfile::ReadOnly => Profile::ReadOnly,
         UiProfile::Bypass => Profile::Bypass,
         UiProfile::Unrestricted => Profile::Unrestricted,
     }

@@ -65,6 +65,44 @@ pub struct DoctorReport {
     /// default report is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hygiene: Option<localpilot_contextcheck::ContextReport>,
+    /// The configured permission profile and the user's exact command list;
+    /// `None` when the configuration did not load.
+    pub permissions: Option<PermissionsStatus>,
+}
+
+/// The permission settings `doctor` reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PermissionsStatus {
+    /// The configured profile (`[permissions] profile`), before any launch flag.
+    pub profile: String,
+    /// Each `[[permissions.allow_commands]]` entry as `program prefix-args…`.
+    /// An entry admits every call that starts with it.
+    pub allow_commands: Vec<String>,
+}
+
+fn permissions_status(config: &localpilot_config::Config) -> PermissionsStatus {
+    let profile = match config.permissions.profile {
+        localpilot_config::PermissionProfile::Default => "default",
+        localpilot_config::PermissionProfile::Relaxed => "relaxed",
+        localpilot_config::PermissionProfile::Readonly => "readonly",
+        localpilot_config::PermissionProfile::Bypass => "bypass",
+        localpilot_config::PermissionProfile::Unrestricted => "unrestricted",
+    };
+    let allow_commands = config
+        .permissions
+        .allow_commands
+        .iter()
+        .map(|entry| {
+            std::iter::once(entry.program.as_str())
+                .chain(entry.args_prefix.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    PermissionsStatus {
+        profile: profile.to_string(),
+        allow_commands,
+    }
 }
 
 /// The state of the research-report → doc-index bridge for the cwd project.
@@ -364,6 +402,7 @@ pub fn report() -> DoctorReport {
         workspace_trust,
         workspace_trust_store,
         hygiene: None,
+        permissions: resolved_config().as_ref().map(permissions_status),
     }
 }
 
@@ -652,6 +691,28 @@ pub fn render(report: &DoctorReport) -> String {
         );
     }
     let _ = writeln!(s, "capabilities: {}", report.capabilities.join(", "));
+    let _ = writeln!(s);
+
+    match &report.permissions {
+        Some(permissions) => {
+            let _ = writeln!(s, "permissions:");
+            let _ = writeln!(s, "  profile: {}", permissions.profile);
+            if permissions.allow_commands.is_empty() {
+                let _ = writeln!(s, "  allow_commands: none");
+            } else {
+                let _ = writeln!(
+                    s,
+                    "  allow_commands (each admits any arguments after its prefix):"
+                );
+                for entry in &permissions.allow_commands {
+                    let _ = writeln!(s, "    {entry} ...");
+                }
+            }
+        }
+        None => {
+            let _ = writeln!(s, "permissions: unknown (the configuration did not load)");
+        }
+    }
     let _ = writeln!(s);
 
     // Doctor now evaluates trust immediately, so the line is state-accurate.
@@ -1190,6 +1251,12 @@ mod tests {
                 }),
             },
             hygiene: None,
+            permissions: Some(PermissionsStatus {
+                profile: "readonly".to_string(),
+                allow_commands: vec![
+                    "python /abs/skills/pair-programming/scripts/pair.py".to_string()
+                ],
+            }),
         }
     }
 

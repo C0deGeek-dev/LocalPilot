@@ -352,6 +352,15 @@ pub trait Tool: Send + Sync {
         String::new()
     }
 
+    /// The structured program and arguments this call runs directly, when it
+    /// runs one. It is matched against the user's exact command list, so a
+    /// tool returns it only for a direct invocation — never for a free-text
+    /// command line, which a shell would parse differently from any match.
+    fn exact_command(&self, input: &Value) -> Option<localpilot_sandbox::ExactCommand> {
+        let _ = input;
+        None
+    }
+
     /// Execute the tool. Only called after every effect has been authorized.
     ///
     /// # Errors

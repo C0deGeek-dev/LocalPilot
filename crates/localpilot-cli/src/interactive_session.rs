@@ -519,7 +519,8 @@ impl InteractiveSessionSetup {
         let mut runtime = SessionRuntime::new(
             provider,
             tools,
-            PermissionEngine::new(self.profile, Vec::new()),
+            PermissionEngine::new(self.profile, Vec::new())
+                .with_allowed_commands(crate::session_cmd::allowed_commands(&self.config)),
             Box::new(TuiApprover::new(approval_tx.clone())),
             // Incognito keeps nothing on disk: the store is in-memory.
             if self.incognito {

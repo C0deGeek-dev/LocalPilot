@@ -11,24 +11,55 @@ use localpilot_config::{CliOverrides, ConfigPaths, StorageConfig};
 use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
-use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
+use localpilot_sandbox::{
+    AllowedCommand, Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace,
+};
 use localpilot_store::{RetentionPolicy, Store};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+/// Every `--permission` value. A flag outside this list is a usage error: an
+/// unknown name that quietly became `default` would let a launch meant to be
+/// `readonly` write, on any build that predates that profile.
+pub const PERMISSION_PROFILES: [&str; 5] =
+    ["default", "relaxed", "readonly", "bypass", "unrestricted"];
+
+/// The clap parser every `--permission` flag uses.
+#[must_use]
+pub fn permission_value_parser() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(PERMISSION_PROFILES)
+}
+
 /// Map the `--permission` / `--bypass` flags to a permission profile. `--bypass`
-/// wins, and neither `bypass` nor `unrestricted` is ever the default.
+/// wins, and neither `bypass` nor `unrestricted` is ever the default. The flag
+/// is validated by [`permission_value_parser`]; a name that still gets here
+/// unrecognised fails closed, to `readonly`.
 #[must_use]
 pub fn resolve_profile(permission: Option<&str>, bypass: bool) -> Profile {
     if bypass {
         return Profile::Bypass;
     }
     match permission {
+        None | Some("default") => Profile::Default,
         Some("relaxed") => Profile::Relaxed,
         Some("bypass") => Profile::Bypass,
         Some("unrestricted") => Profile::Unrestricted,
-        _ => Profile::Default,
+        Some(_) => Profile::ReadOnly,
     }
+}
+
+/// The user's exact command list, for the permission engine.
+#[must_use]
+pub fn allowed_commands(config: &localpilot_config::Config) -> Vec<AllowedCommand> {
+    config
+        .permissions
+        .allow_commands
+        .iter()
+        .map(|entry| AllowedCommand {
+            program: entry.program.clone(),
+            args_prefix: entry.args_prefix.clone(),
+        })
+        .collect()
 }
 
 /// Map the configured `[permissions] profile` to a permission profile. The default
@@ -51,6 +82,7 @@ pub fn resolve_profile_from_config(config: &localpilot_config::Config) -> Profil
     match config.permissions.profile {
         localpilot_config::PermissionProfile::Default => Profile::Default,
         localpilot_config::PermissionProfile::Relaxed => Profile::Relaxed,
+        localpilot_config::PermissionProfile::Readonly => Profile::ReadOnly,
         localpilot_config::PermissionProfile::Bypass => Profile::Bypass,
         localpilot_config::PermissionProfile::Unrestricted => Profile::Unrestricted,
     }
@@ -215,7 +247,7 @@ pub async fn build_runtime(
     let mut runtime = SessionRuntime::new(
         provider,
         registry,
-        PermissionEngine::new(profile, Vec::new()),
+        PermissionEngine::new(profile, Vec::new()).with_allowed_commands(allowed_commands(&config)),
         Box::new(ScriptedApprover::new(Vec::new())),
         Store::open(cwd),
         workspace_with_read_roots(cwd, &config)?,
@@ -714,6 +746,17 @@ mod tests {
         assert_eq!(resolve_profile(None, true), Profile::Bypass);
         assert_eq!(resolve_profile(Some("relaxed"), true), Profile::Bypass);
         assert_eq!(resolve_profile(Some("bypass"), false), Profile::Bypass);
+        assert_eq!(resolve_profile(Some("readonly"), false), Profile::ReadOnly);
+        // Every accepted name maps to its own profile; a name that slipped
+        // past validation fails closed, never to `default`.
+        for name in PERMISSION_PROFILES {
+            assert_eq!(profile_name(resolve_profile(Some(name), false)), name);
+        }
+        assert_eq!(resolve_profile(Some("read-only"), false), Profile::ReadOnly);
+    }
+
+    fn profile_name(profile: Profile) -> &'static str {
+        crate::server_cmd::profile_label(profile)
     }
 
     #[test]
@@ -727,6 +770,8 @@ mod tests {
         assert_eq!(resolve_profile_from_config(&config), Profile::Relaxed);
         config.permissions.profile = localpilot_config::PermissionProfile::Bypass;
         assert_eq!(resolve_profile_from_config(&config), Profile::Bypass);
+        config.permissions.profile = localpilot_config::PermissionProfile::Readonly;
+        assert_eq!(resolve_profile_from_config(&config), Profile::ReadOnly);
         config.permissions.profile = localpilot_config::PermissionProfile::Unrestricted;
         assert_eq!(resolve_profile_from_config(&config), Profile::Unrestricted);
     }

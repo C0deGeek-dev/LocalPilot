@@ -25,10 +25,10 @@ pub use load::{
     project_config_path, prompt_history_path, user_config_path, CliOverrides, ConfigPaths,
 };
 pub use schema::{
-    AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,
-    DiscoveryConfig, DocsConfig, GuidanceConfig, HarnessConfig, HistoryConfig, HistoryPersistence,
-    IngestConfig, IngestMode, LabConfig, LookupPolicy, McpConfig, McpEnvEntry, McpEnvObject,
-    McpServerConfig, MemoryConfig, MeshConfig, MeshWriter, Mode, PermissionProfile,
+    AllowCommand, AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config,
+    ContextConfig, DiscoveryConfig, DocsConfig, GuidanceConfig, HarnessConfig, HistoryConfig,
+    HistoryPersistence, IngestConfig, IngestMode, LabConfig, LookupPolicy, McpConfig, McpEnvEntry,
+    McpEnvObject, McpServerConfig, MemoryConfig, MeshConfig, MeshWriter, Mode, PermissionProfile,
     PermissionsConfig, ProviderAuth, ProviderConfig, ProviderSelection, QuotaAutoResume,
     QuotaConfig, RenderMode, RepairMode, ResearchConfig, ResearchMcpConfig, ResearchMcpTool,
     ResearchRenderConfig, ResearchWebConfig, ResolvedRails, RuleSeverity, SelfImprovementConfig,

@@ -230,6 +230,7 @@ fn report() -> DoctorReport {
             }),
         },
         hygiene: None,
+        permissions: None,
     }
 }
 

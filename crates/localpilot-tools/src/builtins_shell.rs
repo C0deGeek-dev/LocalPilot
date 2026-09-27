@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use localpilot_sandbox::{classify, is_secret_like, CommandClass, Effect};
+use localpilot_sandbox::{classify, is_secret_like, CommandClass, Effect, ExactCommand};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -463,6 +463,15 @@ impl Tool for RunShell {
     }
     fn description(&self) -> &'static str {
         "Run a shell command or direct program invocation with a timeout."
+    }
+    fn exact_command(&self, input: &Value) -> Option<ExactCommand> {
+        let input = parse_input(input)
+            .and_then(normalize_run_shell_input)
+            .ok()?;
+        match input.execution {
+            RunShellExecution::Direct { program, args } => Some(ExactCommand { program, args }),
+            RunShellExecution::Shell { .. } => None,
+        }
     }
     fn schema(&self) -> Value {
         schema_for::<RunShellInput>()

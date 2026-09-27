@@ -41,6 +41,8 @@ impl Mode {
 pub enum Profile {
     Default,
     Relaxed,
+    /// Launched with `--permission readonly`; no slash command switches to it.
+    ReadOnly,
     Bypass,
     Unrestricted,
 }
@@ -88,6 +90,7 @@ impl Profile {
         match self {
             Profile::Default => "default",
             Profile::Relaxed => "relaxed",
+            Profile::ReadOnly => "readonly",
             Profile::Bypass => "BYPASS",
             Profile::Unrestricted => "UNRESTRICTED",
         }
@@ -841,6 +844,8 @@ impl SlashAction {
             SlashAction::SetMode(Mode::Agent) => C::Agent,
             SlashAction::SetMode(Mode::Harness) => C::Harness,
             SlashAction::SetMode(Mode::Research) => return None,
+            // No slash command switches into `readonly`: it is a launch mode.
+            SlashAction::SetProfile(Profile::ReadOnly) => return None,
             SlashAction::SetProfile(Profile::Default) => C::Default,
             SlashAction::SetProfile(Profile::Relaxed) => C::Relaxed,
             SlashAction::SetProfile(Profile::Bypass) => C::Bypass,

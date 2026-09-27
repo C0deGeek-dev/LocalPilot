@@ -103,5 +103,11 @@ expression: render_json(&fixture())
       "user_only": 1,
       "skipped": 0
     }
+  },
+  "permissions": {
+    "profile": "readonly",
+    "allow_commands": [
+      "python /abs/skills/pair-programming/scripts/pair.py"
+    ]
   }
 }

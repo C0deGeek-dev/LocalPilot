@@ -1090,7 +1090,6 @@ where
             root,
             Arc::clone(&provider),
             workspace.clone(),
-            run.profile,
             run.interactivity,
             run.trusted,
             model,
@@ -1106,7 +1105,7 @@ where
             rails.turn_timeout_secs,
             compaction_mode(config.compaction.mode),
             localpilot_harness::SummarizerTuning::from_config(&config.compaction),
-            gate_allowance.clone(),
+            harness_engine(run.profile, gate_allowance.clone(), &config),
             config.harness.rules.clone(),
             config.harness.claim_gate.is_enabled(),
             &config.tools,
@@ -1376,12 +1375,23 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// The permission engine for a harness step: the run's profile, the quality
+/// gate's tool allowlist, and the user's exact command list, so a vetted
+/// command runs in a harness step exactly as it does under `print`.
+fn harness_engine(
+    profile: Profile,
+    allowlist: Vec<String>,
+    config: &localpilot_config::Config,
+) -> PermissionEngine {
+    PermissionEngine::new(profile, allowlist)
+        .with_allowed_commands(crate::session_cmd::allowed_commands(config))
+}
+
 #[allow(clippy::too_many_arguments)] // a runtime genuinely composes these collaborators
 fn build_runtime(
     root: &Path,
     provider: Arc<dyn ModelProvider>,
     workspace: Workspace,
-    profile: Profile,
     interactivity: Interactivity,
     trusted: bool,
     model: &str,
@@ -1393,7 +1403,7 @@ fn build_runtime(
     turn_timeout_secs: Option<u64>,
     compaction_mode: localpilot_harness::CompactionMode,
     summarizer_tuning: localpilot_harness::SummarizerTuning,
-    allowlist: Vec<String>,
+    engine: PermissionEngine,
     rules: IndexMap<String, RuleSeverity>,
     enforce_claim_gate: bool,
     tools: &localpilot_config::ToolsConfig,
@@ -1404,7 +1414,7 @@ fn build_runtime(
     let mut runtime = SessionRuntime::new(
         provider,
         registry,
-        PermissionEngine::new(profile, allowlist),
+        engine,
         approver,
         Store::open(root),
         workspace,
@@ -1463,6 +1473,56 @@ fn repo_summary(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_harness_step_gets_the_command_list_and_keeps_the_tool_allowlist() {
+        use localpilot_sandbox::{CommandClass, Decision, Effect, ExactCommand, PermissionRequest};
+        let mut config = localpilot_config::Config::default();
+        config.permissions.allow_commands = vec![localpilot_config::AllowCommand {
+            program: "python".to_string(),
+            args_prefix: vec!["/abs/pair.py".to_string()],
+        }];
+        let vetted = ExactCommand {
+            program: "python".to_string(),
+            args: vec!["/abs/pair.py".to_string(), "status".to_string()],
+        };
+        let request = |tool: &str, effect| PermissionRequest {
+            tool: tool.to_string(),
+            effect,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            detail: String::new(),
+        };
+
+        let readonly = harness_engine(Profile::ReadOnly, Vec::new(), &config);
+        let command = request("run_shell", Effect::RunCommand(CommandClass::Unknown));
+        assert_eq!(
+            readonly.decide_command(&command, Some(&vetted)),
+            Decision::Allow
+        );
+        assert_eq!(readonly.decide_command(&command, None), Decision::Deny);
+
+        // The quality gate's tool allowlist still relaxes what it relaxed.
+        let relaxed = harness_engine(Profile::Relaxed, vec!["gate_tool".to_string()], &config);
+        let write = Effect::WritePath {
+            inside_workspace: true,
+            overwrite: true,
+            secret_like: false,
+        };
+        let network = Effect::RunCommand(CommandClass::Network);
+        assert_eq!(
+            relaxed.decide(&request("gate_tool", network)),
+            Decision::Allow
+        );
+        assert_eq!(
+            relaxed.decide(&request("other_tool", network)),
+            Decision::Deny
+        );
+        assert_eq!(
+            relaxed.decide(&request("gate_tool", write)),
+            Decision::Allow
+        );
+    }
     use localpilot_llm::FakeProvider;
 
     fn paused_at(paused: u64, eligible: Option<u64>) -> PausedRun {

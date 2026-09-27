@@ -3,7 +3,7 @@
 use localpilot_config::redact::redact;
 use localpilot_core::{ToolCall, ToolOutcome, ToolResult};
 use localpilot_sandbox::{
-    Approver, Decision, Effect, PermissionEngine, PermissionRequest, Profile,
+    Approver, Decision, Effect, ExactCommand, PermissionEngine, PermissionRequest, Profile,
 };
 use serde_json::Value;
 
@@ -307,6 +307,13 @@ impl ToolRegistry {
         // The tool supplies its own approval detail — it knows its schema; the
         // registry does not guess at input keys. Display-only, never decisive.
         let detail = tool.approval_detail(&call.input);
+        // A direct command on the user's exact list: the entry is the user's
+        // advance confirmation of it, so its command effect skips the
+        // force-confirm above once the engine (floors included) allows it.
+        let command = tool.exact_command(&call.input);
+        let vetted = command
+            .as_ref()
+            .is_some_and(|command| engine.allows_command(command));
         for effect in &effects {
             let request = PermissionRequest {
                 tool: tool.name().to_string(),
@@ -315,8 +322,9 @@ impl ToolRegistry {
                 trusted: ctx.trusted,
                 detail: detail.clone(),
             };
-            let allowed = match engine.decide(&request) {
-                Decision::Allow if force_confirm => approver.approve(&request).await,
+            let confirmed = vetted && matches!(effect, Effect::RunCommand(_));
+            let allowed = match engine.decide_command(&request, command.as_ref()) {
+                Decision::Allow if force_confirm && !confirmed => approver.approve(&request).await,
                 Decision::Allow => true,
                 Decision::Ask
                     if intent == DispatchIntent::UserShell
@@ -331,7 +339,7 @@ impl ToolRegistry {
                 return ToolDispatchResult::plain(unusable_result(
                     tool.name(),
                     &call.id,
-                    &denial_message(tool.name(), &request),
+                    &denial_message(tool.name(), &request, engine, command.as_ref()),
                     ctx,
                 ));
             }
@@ -395,8 +403,50 @@ fn unusable_result(
 /// The model-visible text for a denied tool call. An out-of-workspace path
 /// denial names the target and every way the user can grant the access, so it
 /// is an actionable answer instead of a dead end.
-fn denial_message(tool: &str, request: &PermissionRequest) -> String {
+fn denial_message(
+    tool: &str,
+    request: &PermissionRequest,
+    engine: &PermissionEngine,
+    command: Option<&ExactCommand>,
+) -> String {
     let mut message = format!("permission denied for {tool}");
+    let vetted = command.filter(|command| engine.allows_command(command));
+    if let (Some(command), Effect::RunCommand(_)) = (vetted, request.effect) {
+        // The grant exists; say what stopped it, so nobody adds it again.
+        let reason = if !request.trusted {
+            "the workspace is not trusted (see `localpilot trust`)"
+        } else if engine.incognito() {
+            "an incognito session never runs a command that may leave files behind \
+             without a confirmation"
+        } else {
+            "the approval was declined"
+        };
+        message.push_str(&format!(
+            ": `{}` is in permissions.allow_commands, but {reason}.",
+            command.program
+        ));
+        return message;
+    }
+    if engine.profile() == Profile::ReadOnly {
+        match request.effect {
+            Effect::WritePath { .. } => {
+                message.push_str(": the readonly profile denies every write.");
+            }
+            Effect::RunCommand(_) => match command {
+                Some(command) => message.push_str(&format!(
+                    ": `{}` is not in permissions.allow_commands, and the readonly profile \
+                     denies every command above read-only.",
+                    command.program
+                )),
+                None => message.push_str(
+                    ": the readonly profile denies every command above read-only, and a \
+                     free-text `command` never matches permissions.allow_commands (use \
+                     `program` with `args`).",
+                ),
+            },
+            _ => {}
+        }
+    }
     if request.effect.is_outside_workspace() {
         if !request.detail.is_empty() {
             message.push_str(&format!(" ({})", request.detail));

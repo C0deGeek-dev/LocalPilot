@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A `readonly` permission profile and exact command grants.** `--permission
+  readonly` (or `[permissions] profile = "readonly"`) reads as `default` and
+  denies every write and every command above read-only, with no prompt that
+  could approve one. `[[permissions.allow_commands]]` entries, each a
+  `program` plus an `args_prefix`, admit a structured `run_shell` call whose
+  program matches exactly and whose arguments start with the prefix, in
+  `default`, `relaxed` and `readonly`, headless included. The untrusted-
+  workspace and incognito floors still apply. Entries are read from the user
+  config and the environment only; a project `.localpilot.toml` that sets
+  them is refused. `localpilot doctor` lists the profile and the entries.
+  Every `--permission` flag now rejects an unknown profile name (exit 2)
+  instead of treating it as `default` (LocalHub#190).
 - **`localpilot lab replay` checks a lesson against the project's own tests.**
   When a lesson came from a step whose ratified check failed and then passed,
   Replay runs that check on the step's parent and on its commit, each in a

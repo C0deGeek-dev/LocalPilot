@@ -1449,6 +1449,24 @@ pub struct PermissionsConfig {
     /// listed directory that does not exist is reported and skipped at
     /// startup, never silently widened or ignored.
     pub extra_read_roots: Vec<String>,
+    /// Direct commands the user has vetted, each an exact program plus a
+    /// leading-argument prefix. A matching `run_shell` call (structured
+    /// `program` + `args`, never a free-text `command`) passes the command gate
+    /// in every prompting profile, `readonly` included. An entry grants every
+    /// call that starts with it, whatever follows, so name a script's absolute
+    /// path in `args_prefix`. Read from the user config and the environment
+    /// only: a project `.localpilot.toml` that sets it is refused, so a
+    /// repository can never vet its own commands.
+    pub allow_commands: Vec<AllowCommand>,
+}
+
+/// One `[[permissions.allow_commands]]` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllowCommand {
+    pub program: String,
+    #[serde(default)]
+    pub args_prefix: Vec<String>,
 }
 
 /// Permission profile. `Bypass` and `Unrestricted` are never the default.
@@ -1458,6 +1476,9 @@ pub enum PermissionProfile {
     #[default]
     Default,
     Relaxed,
+    /// Denies every write and every command above read-only; reads as in
+    /// `default`.
+    Readonly,
     Bypass,
     /// Approves everything, including out-of-workspace paths, with no
     /// prompts. The user explicitly accepts full responsibility.
@@ -1638,6 +1659,38 @@ mod tests {
         let config: PermissionsConfig = serde_json::from_value(json!({})).unwrap();
         assert_eq!(config.profile, PermissionProfile::Default);
         assert!(config.extra_read_roots.is_empty());
+        assert!(config.allow_commands.is_empty());
+    }
+
+    #[test]
+    fn permissions_parse_the_readonly_profile_and_allow_commands() {
+        let config: PermissionsConfig = serde_json::from_value(json!({
+            "profile": "readonly",
+            "allow_commands": [
+                { "program": "python", "args_prefix": ["D:/tools/pair.py"] },
+                { "program": "git" },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(config.profile, PermissionProfile::Readonly);
+        assert_eq!(
+            config.allow_commands,
+            [
+                AllowCommand {
+                    program: "python".to_string(),
+                    args_prefix: vec!["D:/tools/pair.py".to_string()],
+                },
+                AllowCommand {
+                    program: "git".to_string(),
+                    args_prefix: Vec::new(),
+                },
+            ]
+        );
+        // A misspelt key must not silently widen or drop an entry.
+        assert!(serde_json::from_value::<PermissionsConfig>(json!({
+            "allow_commands": [{ "program": "python", "args": ["x"] }],
+        }))
+        .is_err());
     }
 
     #[test]

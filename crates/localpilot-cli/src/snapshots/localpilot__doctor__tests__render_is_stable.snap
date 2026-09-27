@@ -33,6 +33,11 @@ memory store: /work/.localmind
 research docs: 2 report(s) on disk; report ingestion disabled ([research] ingest_report = false); doc index: 0 chunk(s), 0 with embeddings
 capabilities: doctor-json, models-json
 
+permissions:
+  profile: readonly
+  allow_commands (each admits any arguments after its prefix):
+    python /abs/skills/pair-programming/scripts/pair.py ...
+
 workspace trust: could not be evaluated
   evaluation failed; run `localpilot trust status` for the error
 

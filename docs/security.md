@@ -18,6 +18,9 @@ are not a side channel.
   behavior.
 - **relaxed** — a user-defined allowlist auto-approves common safe actions; the
   rest still prompt.
+- **readonly** — reads as in `default`; every write and every command above
+  read-only is denied, with no prompt that could approve it. Only an exact
+  `[permissions] allow_commands` entry (user config only) admits a command.
 - **bypass** — a launch mode that approves everything with no prompts. It must be
   set explicitly, is never the default, and is always shown in the footer/status.
   Bypass does **not** disable redaction, logging, or the workspace boundary.

@@ -209,7 +209,7 @@ The pair-specific CLI flags are:
 | `--model-a <MODEL>` | Model for peer A; that provider's configured model when omitted. |
 | `--provider-b <PROVIDER>` | Provider for peer B; the configured default provider when omitted. |
 | `--model-b <MODEL>` | Model for peer B; that provider's configured model when omitted. |
-| `--permission <PROFILE>` | One profile shared by both sessions: `default`, `relaxed`, `bypass`, or `unrestricted`; default `default`. |
+| `--permission <PROFILE>` | One profile shared by both sessions: `default`, `relaxed`, `readonly`, `bypass`, or `unrestricted`; default `default`. Any other value is a usage error. |
 | `--bypass` | Explicit shorthand for `--permission bypass`. |
 | `--max-rounds <N>` | Positive collaboration-round cap; default `3`. |
 | `--slot-timeout <SECONDS>` | Positive wall-clock limit for one peer slot; default `600`. |
@@ -661,8 +661,19 @@ engine.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `profile` | `default` \| `relaxed` \| `bypass` \| `unrestricted` | `default` | Permission profile. `bypass` and `unrestricted` are never the default and are always surfaced. `unrestricted` approves everything — out-of-workspace paths included — with no prompts; the user accepts full responsibility |
+| `profile` | `default` \| `relaxed` \| `readonly` \| `bypass` \| `unrestricted` | `default` | Permission profile. `bypass` and `unrestricted` are never the default and are always surfaced. `unrestricted` approves everything — out-of-workspace paths included — with no prompts; the user accepts full responsibility. `readonly` denies every write and every command above read-only, with no prompt |
 | `extra_read_roots` | array of string | `[]` | Absolute directories granted standing **read** scope in addition to the workspace, in every profile including non-interactive runs. Writes keep the workspace boundary; secret-like reads keep their gate. A missing directory is reported and skipped at startup |
+| `allow_commands` | array of `{ program, args_prefix }` | `[]` | **User config and environment only**; a project file that sets it is refused. A structured `run_shell` call (`program` + `args`, never a free-text `command`) whose program equals `program` and whose arguments start with `args_prefix` passes the command gate in `default`, `relaxed` and `readonly`, and runs headless. Exact string match. An entry admits every call that starts with it, so name a script's absolute path in `args_prefix`. The untrusted-workspace and incognito floors still apply. `localpilot doctor` lists the entries |
+
+```toml
+# User config only: lets a readonly pair navigator run the mailbox script.
+[permissions]
+profile = "readonly"
+
+[[permissions.allow_commands]]
+program = "python"
+args_prefix = ["D:/repos/c0degeek-ai/skills/pair-programming/scripts/pair.py"]
+```
 
 ### `[quota]`
 

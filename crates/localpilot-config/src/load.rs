@@ -62,6 +62,7 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
     }
     if let Some(project) = &paths.project {
         if project.is_file() {
+            refuse_user_only_keys(project)?;
             figment = figment.merge(Toml::file(project));
         }
     }
@@ -82,6 +83,24 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
     // invalid only once every layer has been applied (see `validate_mcp_env`).
     validate_mcp_env(&config.mcp)?;
     Ok(config)
+}
+
+/// Keys a project file must never set: they grant the agent more than the
+/// user's own settings do, and a repository must not be able to grant itself
+/// anything. Refused loudly rather than ignored, so the author sees why.
+const USER_ONLY_KEYS: [&str; 1] = ["permissions.allow_commands"];
+
+fn refuse_user_only_keys(project: &Path) -> Result<(), ConfigError> {
+    let layer = Figment::from(Toml::file(project));
+    for key in USER_ONLY_KEYS {
+        if layer.find_value(key).is_ok() {
+            return Err(ConfigError::UserOnly {
+                path: project.display().to_string(),
+                key,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Validate every `[mcp.servers.<name>.env]` entry.
@@ -437,6 +456,49 @@ mod tests {
             auto_fix: AutoFix::No,
             severity: None,
         }
+    }
+
+    #[test]
+    fn allow_commands_come_from_the_user_config_and_never_from_the_project() {
+        // Bug it prevents: a repository granting its own agent a vetted
+        // command by shipping one in `.localpilot.toml`.
+        let dir = tempfile::tempdir().unwrap();
+        let entry = "[[permissions.allow_commands]]
+program = \"python\"
+args_prefix = [\"/abs/pair.py\"]
+";
+        let user = dir.path().join("user.toml");
+        std::fs::write(&user, entry).unwrap();
+        let project = dir.path().join(".localpilot.toml");
+
+        std::fs::write(
+            &project,
+            "[permissions]
+profile = \"readonly\"
+",
+        )
+        .unwrap();
+        let paths = ConfigPaths {
+            user: Some(user.clone()),
+            project: Some(project.clone()),
+        };
+        let config = load(&paths, &CliOverrides::default()).unwrap();
+        assert_eq!(config.permissions.profile, PermissionProfile::Readonly);
+        assert_eq!(config.permissions.allow_commands.len(), 1);
+        assert_eq!(config.permissions.allow_commands[0].program, "python");
+
+        std::fs::write(&project, entry).unwrap();
+        let err = load(&paths, &CliOverrides::default()).expect_err("project grant refused");
+        assert!(
+            matches!(
+                err,
+                ConfigError::UserOnly {
+                    key: "permissions.allow_commands",
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 
     #[test]

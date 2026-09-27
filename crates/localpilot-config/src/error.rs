@@ -26,4 +26,8 @@ pub enum ConfigError {
     /// server and variable but never echoes a configured value.
     #[error("invalid MCP server environment: {0}")]
     InvalidMcpEnv(String),
+
+    /// A project file set a key only the user may set.
+    #[error("{path} sets `{key}`, which only the user config or the environment may set")]
+    UserOnly { path: String, key: &'static str },
 }

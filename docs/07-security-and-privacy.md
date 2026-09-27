@@ -327,6 +327,11 @@ deliberately. Profiles apply in both agent mode and harness mode.
   secret-like reads) require approval. This is the out-of-box behavior.
 - `relaxed`: a user-defined allowlist auto-approves common safe actions; the rest
   still prompt.
+- `readonly`: reads exactly as `default`; every write, and every command above
+  the read-only class, is denied outright. Nobody can approve one: not an
+  interactive prompt, not a trusted workspace. It is for a session that must
+  never change the tree it is looking at, such as a pair-programming navigator.
+  Only an entry in `[permissions] allow_commands` lifts its command gate.
 - `bypass`: a launch mode that approves everything with no prompts, equivalent to
   running fully localpilot. The single exception is an out-of-workspace path,
   which prompts (see the boundary rule below).
@@ -371,6 +376,27 @@ Rules:
   startup and skipped, never silently widened. A denied out-of-workspace
   access names this key, the interactive prompt, and `--permission
   unrestricted` in its error, so the denial is actionable (ADR-0070).
+- **Exact command grants: `[permissions] allow_commands`.** Each entry names a
+  program and an argument prefix. A `run_shell` call given as a structured
+  `program` with `args`, whose program equals the entry's and whose arguments
+  start with the entry's prefix, passes the command gate in `default`,
+  `relaxed` and `readonly`. Matching is exact string equality: no path
+  normalisation, no case folding, and a free-text `command` never matches,
+  because a shell parses it. An entry admits every call that starts with it,
+  whatever arguments follow, so a bare `python` entry would admit every
+  script: name the script's absolute path in `args_prefix`. The grant lifts
+  only the command gate. The untrusted-workspace floor and the incognito floor
+  still apply after it. Because the entry is the user's advance confirmation,
+  a matched call skips the confirmation the registry otherwise forces for an
+  irreversible tool such as `run_shell`, so it runs headless. The key is read
+  from the user config and the environment only: a project `.localpilot.toml`
+  that sets it is refused, because a repository must never vet its own
+  commands. `bypass` and `unrestricted` already allow every command and are
+  unaffected.
+- **An unknown profile name is an error.** Every `--permission` flag accepts
+  only `default`, `relaxed`, `readonly`, `bypass` and `unrestricted`; any
+  other value is a usage error (exit 2). A name that silently became
+  `default` would let a launch meant to be `readonly` write.
 - **The containment root and the spawn working directory are distinct
   spellings of the same directory.** The sandbox canonicalizes the workspace
   root to a verbatim extended-length path (`\\?\…` on Windows); that verbatim

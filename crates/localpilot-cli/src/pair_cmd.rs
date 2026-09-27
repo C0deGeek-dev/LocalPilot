@@ -39,8 +39,9 @@ pub(crate) struct PairArgs {
     /// Model for peer B; defaults to that provider's configured model.
     #[arg(long, value_name = "MODEL")]
     model_b: Option<String>,
-    /// Permission profile shared by both agents (default | relaxed | bypass | unrestricted).
-    #[arg(long, value_name = "PROFILE")]
+    /// Permission profile shared by both agents (default | relaxed | readonly | bypass |
+    /// unrestricted).
+    #[arg(long, value_name = "PROFILE", value_parser = crate::session_cmd::permission_value_parser())]
     permission: Option<String>,
     /// Shorthand for `--permission bypass`. Must be set explicitly.
     #[arg(long)]

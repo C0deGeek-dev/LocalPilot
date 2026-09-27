@@ -2301,3 +2301,234 @@ async fn delegation_without_a_host_is_a_success_with_direct_guidance() {
         result.output
     );
 }
+
+fn readonly_engine(allowed: Vec<localpilot_sandbox::AllowedCommand>) -> PermissionEngine {
+    PermissionEngine::new(Profile::ReadOnly, Vec::new()).with_allowed_commands(allowed)
+}
+
+/// `cargo --version`: a real program every test machine has, harmless to run,
+/// and classified above read-only, so only the exact list can admit it.
+fn cargo_version() -> (serde_json::Value, localpilot_sandbox::AllowedCommand) {
+    let args = vec!["--version".to_string()];
+    assert_ne!(
+        localpilot_sandbox::classify("cargo", &args),
+        localpilot_sandbox::CommandClass::ReadOnly,
+        "the fixture must need the exact list to run"
+    );
+    (
+        json!({ "program": "cargo", "args": args }),
+        localpilot_sandbox::AllowedCommand {
+            program: "cargo".to_string(),
+            args_prefix: args,
+        },
+    )
+}
+
+#[tokio::test]
+async fn readonly_denies_every_measured_write_path_even_when_the_user_would_approve() {
+    // Bug it prevents: a pair navigator writing into a tree it does not own.
+    // These are the write paths measured against every profile in LocalHub#190.
+    let (dir, ws) = workspace_with(&[("f.txt", "alpha\n"), ("obsolete.txt", "x\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let (_, cargo_entry) = cargo_version();
+    let calls = [
+        ("write_file", json!({ "path": "new.txt", "content": "x" })),
+        ("write_file", json!({ "path": "f.txt", "content": "x" })),
+        (
+            "edit_file",
+            json!({ "path": "f.txt", "old_text": "alpha", "new_text": "beta" }),
+        ),
+        (
+            "replace_in_file",
+            json!({ "path": "f.txt", "find": "alpha", "replace": "ALPHA" }),
+        ),
+        (
+            "apply_patch",
+            json!({ "operations": [{ "action": "delete", "path": "obsolete.txt" }] }),
+        ),
+        ("run_shell", json!({ "command": "echo x > out.txt" })),
+        (
+            "run_shell",
+            json!({ "program": "git", "args": ["commit", "-am", "x"] }),
+        ),
+        (
+            "run_shell",
+            json!({ "program": "python", "args": ["-c", "open('out.txt','w')"] }),
+        ),
+        // The vetted program, but as free text or with a chained command: a
+        // free-text `command` never matches the list.
+        ("run_shell", json!({ "command": "cargo --version" })),
+        (
+            "run_shell",
+            json!({ "command": "cargo --version && echo x > out.txt" }),
+        ),
+    ];
+    for interactivity in [Interactivity::Interactive, Interactivity::NonInteractive] {
+        let c = ctx(&ws, interactivity, true);
+        for (tool, input) in &calls {
+            let result = dispatch(
+                &registry,
+                tool,
+                input.clone(),
+                &c,
+                &readonly_engine(vec![cargo_entry.clone()]),
+                &ScriptedApprover::always(),
+            )
+            .await;
+            assert!(result.is_error(), "{tool} {input} ran: {}", result.output);
+            assert!(
+                result.output.contains("permission denied"),
+                "{}",
+                result.output
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        "alpha\n"
+    );
+    assert!(dir.path().join("obsolete.txt").exists());
+    assert!(!dir.path().join("new.txt").exists());
+    assert!(!dir.path().join("out.txt").exists());
+}
+
+#[tokio::test]
+async fn readonly_names_the_command_list_when_it_denies_a_direct_command() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let (input, _) = cargo_version();
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        input,
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &readonly_engine(Vec::new()),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(result.is_error());
+    assert!(
+        result
+            .output
+            .contains("`cargo` is not in permissions.allow_commands, and the readonly profile denies every command above read-only."),
+        "{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn a_vetted_command_runs_headless_under_readonly_with_no_approver() {
+    // The entry is the user's advance confirmation: the irreversible-tool
+    // confirmation must not turn it back into a headless denial.
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let (input, entry) = cargo_version();
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        input,
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &readonly_engine(vec![entry]),
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(!result.is_error(), "{}", result.output);
+    assert!(result.output.contains("cargo"), "{}", result.output);
+}
+
+#[tokio::test]
+async fn a_vetted_command_keeps_the_untrusted_and_incognito_floors() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let (input, entry) = cargo_version();
+
+    // Untrusted and interactive: the user is asked, and a refusal stands.
+    let asked = dispatch(
+        &registry,
+        "run_shell",
+        input.clone(),
+        &ctx(&ws, Interactivity::Interactive, false),
+        &readonly_engine(vec![entry.clone()]),
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(asked.is_error(), "{}", asked.output);
+    // The grant exists, so the message names what stopped it instead of
+    // steering the user to add the grant again.
+    assert!(
+        asked
+            .output
+            .contains("`cargo` is in permissions.allow_commands, but the workspace is not trusted"),
+        "{}",
+        asked.output
+    );
+
+    // Untrusted and headless: nobody can be asked, so it is denied.
+    let headless = dispatch(
+        &registry,
+        "run_shell",
+        input.clone(),
+        &ctx(&ws, Interactivity::NonInteractive, false),
+        &readonly_engine(vec![entry.clone()]),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(headless.is_error(), "{}", headless.output);
+    assert!(
+        headless
+            .output
+            .contains("is in permissions.allow_commands, but the workspace is not trusted"),
+        "{}",
+        headless.output
+    );
+
+    // Incognito and headless: denied even in a trusted workspace.
+    let incognito = dispatch(
+        &registry,
+        "run_shell",
+        input,
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &readonly_engine(vec![entry]).with_incognito(true),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(incognito.is_error(), "{}", incognito.output);
+    assert!(
+        incognito
+            .output
+            .contains("is in permissions.allow_commands, but an incognito session"),
+        "{}",
+        incognito.output
+    );
+    assert!(
+        !incognito.output.contains("is not in"),
+        "{}",
+        incognito.output
+    );
+}
+
+#[tokio::test]
+async fn an_unvetted_irreversible_call_still_goes_to_the_approver() {
+    // `echo` is read-only, so the engine allows it; `run_shell` is
+    // irreversible, so the registry still asks, and the refusal stands.
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let (_, entry) = cargo_version();
+    let engine =
+        PermissionEngine::new(Profile::Default, Vec::new()).with_allowed_commands(vec![entry]);
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "command": "echo hello" }),
+        &ctx(&ws, Interactivity::Interactive, true),
+        &engine,
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(result.is_error(), "{}", result.output);
+    assert!(
+        result.output.contains("permission denied"),
+        "{}",
+        result.output
+    );
+}

@@ -23,6 +23,12 @@ pub enum Decision {
 pub enum Profile {
     /// Least privilege; risky actions require approval.
     Default,
+    /// Reads as in `default`; every write, and every command above
+    /// `read-only`, is denied outright — interactive or not, trusted or not.
+    /// Only an entry in the user's exact command list can lift the command
+    /// gate (see [`AllowedCommand`]). For a session that must never change the
+    /// tree it is looking at.
+    ReadOnly,
     /// A user allowlist auto-approves common safe actions; the rest still prompt.
     Relaxed,
     /// A launch mode that approves everything with no prompts. Never the
@@ -164,11 +170,42 @@ pub struct PermissionRequest {
     pub detail: String,
 }
 
+/// One entry of the user's exact command list: a program and the leading
+/// arguments a direct invocation must start with. Matching is exact string
+/// equality — no path normalisation, no case folding, no shell parsing. An
+/// entry grants every invocation that *starts with* it, whatever arguments
+/// follow the prefix, so a bare `python` entry would grant every script: name
+/// the script's absolute path in the prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedCommand {
+    pub program: String,
+    pub args_prefix: Vec<String>,
+}
+
+impl AllowedCommand {
+    /// Whether a direct invocation matches this entry.
+    #[must_use]
+    pub fn matches(&self, command: &ExactCommand) -> bool {
+        command.program == self.program && command.args.starts_with(&self.args_prefix)
+    }
+}
+
+/// A structured command a tool is about to run directly: a program and its
+/// arguments, never a free-text command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
 /// The configurable permission engine.
 #[derive(Debug, Clone)]
 pub struct PermissionEngine {
     profile: Profile,
     allowlist: Vec<String>,
+    /// The user's exact command list. A session property like `incognito`: a
+    /// profile swap keeps it.
+    allowed_commands: Vec<AllowedCommand>,
     /// The incognito floor: every effect that may leave a new file behind asks
     /// (interactive) or is denied (headless), whatever the profile says. It is
     /// a session property, not a profile, so a mid-session profile swap must
@@ -183,8 +220,27 @@ impl PermissionEngine {
         Self {
             profile,
             allowlist,
+            allowed_commands: Vec::new(),
             incognito: false,
         }
+    }
+
+    /// The same engine with the user's exact command list.
+    #[must_use]
+    pub fn with_allowed_commands(mut self, allowed_commands: Vec<AllowedCommand>) -> Self {
+        self.allowed_commands = allowed_commands;
+        self
+    }
+
+    /// Whether `command` matches an entry of the exact command list. Never
+    /// true for a profile that already allows every command.
+    #[must_use]
+    pub fn allows_command(&self, command: &ExactCommand) -> bool {
+        !matches!(self.profile, Profile::Bypass | Profile::Unrestricted)
+            && self
+                .allowed_commands
+                .iter()
+                .any(|entry| entry.matches(command))
     }
 
     /// The same engine with the incognito floor switched on or off.
@@ -202,6 +258,7 @@ impl PermissionEngine {
         Self {
             profile,
             allowlist,
+            allowed_commands: self.allowed_commands.clone(),
             incognito: self.incognito,
         }
     }
@@ -221,7 +278,25 @@ impl PermissionEngine {
     /// Decide whether an effect may proceed.
     #[must_use]
     pub fn decide(&self, request: &PermissionRequest) -> Decision {
-        let decision = self.profile_decision(request);
+        self.decide_command(request, None)
+    }
+
+    /// Decide an effect of a tool call that runs `command` directly. A command
+    /// on the exact list replaces only the command-class decision: the
+    /// untrusted floor and the incognito floor still apply after it.
+    #[must_use]
+    pub fn decide_command(
+        &self,
+        request: &PermissionRequest,
+        command: Option<&ExactCommand>,
+    ) -> Decision {
+        let vetted = matches!(request.effect, Effect::RunCommand(_))
+            && command.is_some_and(|command| self.allows_command(command));
+        let decision = if vetted {
+            untrusted_floor(Decision::Allow, request.trusted, request.interactivity)
+        } else {
+            self.profile_decision(request)
+        };
         if self.incognito && request.effect.may_create_files() {
             incognito_floor(decision, request.interactivity)
         } else {
@@ -270,6 +345,11 @@ impl PermissionEngine {
                 request.trusted,
                 request.interactivity,
             ),
+            Profile::ReadOnly => untrusted_floor(
+                read_only_decision(request),
+                request.trusted,
+                request.interactivity,
+            ),
         }
     }
 }
@@ -293,6 +373,17 @@ fn allowlist_may_relax(effect: Effect) -> bool {
             ..
         } => inside_workspace && !secret_like,
         Effect::Network => true,
+    }
+}
+
+/// The `readonly` profile: no write of any kind and no command above
+/// `read-only`, with nobody able to approve one; everything else as `default`.
+fn read_only_decision(request: &PermissionRequest) -> Decision {
+    match request.effect {
+        Effect::WritePath { .. } => Decision::Deny,
+        Effect::RunCommand(CommandClass::ReadOnly) => Decision::Allow,
+        Effect::RunCommand(_) => Decision::Deny,
+        Effect::ReadPath { .. } | Effect::Network => base_decision(request),
     }
 }
 
@@ -967,6 +1058,202 @@ mod tests {
         );
         outside.tool = "read_file".to_string();
         assert_eq!(e.decide(&outside), Decision::Ask);
+    }
+
+    const INTERACTIVITIES: [Interactivity; 2] =
+        [Interactivity::Interactive, Interactivity::NonInteractive];
+
+    fn every_effect() -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for inside_workspace in [true, false] {
+            for secret_like in [true, false] {
+                effects.push(Effect::ReadPath {
+                    inside_workspace,
+                    secret_like,
+                });
+                for overwrite in [true, false] {
+                    effects.push(Effect::WritePath {
+                        inside_workspace,
+                        overwrite,
+                        secret_like,
+                    });
+                }
+            }
+        }
+        for class in [
+            CommandClass::ReadOnly,
+            CommandClass::ProjectWrite,
+            CommandClass::ExternalWrite,
+            CommandClass::Network,
+            CommandClass::Destructive,
+            CommandClass::Privileged,
+            CommandClass::Unknown,
+        ] {
+            effects.push(Effect::RunCommand(class));
+        }
+        effects.push(Effect::Network);
+        effects
+    }
+
+    #[test]
+    fn readonly_denies_every_write_and_every_command_above_read_only_and_reads_as_default() {
+        // Bug it prevents: a navigator that must never edit the tree it does
+        // not own being one approval, or one trusted folder, away from a write.
+        let readonly = engine(Profile::ReadOnly);
+        let default = engine(Profile::Default);
+        for effect in every_effect() {
+            for interactivity in INTERACTIVITIES {
+                for trusted in [true, false] {
+                    let request = req(effect, interactivity, trusted);
+                    let got = readonly.decide(&request);
+                    let denied = matches!(effect, Effect::WritePath { .. })
+                        || matches!(effect, Effect::RunCommand(class) if class != CommandClass::ReadOnly);
+                    let expected = if denied {
+                        Decision::Deny
+                    } else {
+                        default.decide(&request)
+                    };
+                    assert_eq!(got, expected, "{effect:?} {interactivity:?} {trusted}");
+                }
+            }
+        }
+    }
+
+    fn pair_py() -> AllowedCommand {
+        AllowedCommand {
+            program: "python".to_string(),
+            args_prefix: vec!["/abs/pair.py".to_string()],
+        }
+    }
+
+    fn command(program: &str, args: &[&str]) -> ExactCommand {
+        ExactCommand {
+            program: program.to_string(),
+            args: args.iter().map(|a| (*a).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn an_allow_entry_matches_its_exact_program_and_argument_prefix_only() {
+        let entry = pair_py();
+        assert!(entry.matches(&command("python", &["/abs/pair.py"])));
+        assert!(entry.matches(&command(
+            "python",
+            &["/abs/pair.py", "post", "--role", "codex"]
+        )));
+        for other in [
+            command("python", &[]),
+            command("python", &["/abs/other.py"]),
+            command("python", &["-c", "/abs/pair.py"]),
+            command("python3", &["/abs/pair.py"]),
+            command("Python", &["/abs/pair.py"]),
+            command("python.exe", &["/abs/pair.py"]),
+            command("python", &["/ABS/pair.py"]),
+            command("python", &[r"\abs\pair.py"]),
+            command("python", &["/abs/../abs/pair.py"]),
+            command("python", &["/abs/pair.py; rm -rf x"]),
+        ] {
+            assert!(!entry.matches(&other), "{other:?}");
+        }
+        // An empty prefix admits every call of the program, as documented.
+        let bare = AllowedCommand {
+            program: "git".to_string(),
+            args_prefix: Vec::new(),
+        };
+        assert!(bare.matches(&command("git", &["commit", "-am", "x"])));
+    }
+
+    #[test]
+    fn a_matched_command_lifts_only_the_command_gate_and_keeps_the_trust_floor() {
+        // Bug it prevents: a user-level entry running silently in an untrusted
+        // checkout, headless included, because the match skipped the floor.
+        let matched = command("python", &["/abs/pair.py", "status"]);
+        let unmatched = command("python", &["/abs/evil.py"]);
+        for profile in [Profile::Default, Profile::Relaxed, Profile::ReadOnly] {
+            let e = PermissionEngine::new(profile, vec!["run_shell".to_string()])
+                .with_allowed_commands(vec![pair_py()]);
+            for interactivity in INTERACTIVITIES {
+                for trusted in [true, false] {
+                    let request = req(
+                        Effect::RunCommand(CommandClass::Unknown),
+                        interactivity,
+                        trusted,
+                    );
+                    let expected = if trusted {
+                        Decision::Allow
+                    } else {
+                        ask_or_deny(interactivity)
+                    };
+                    let what = format!("{profile:?} {interactivity:?} trusted={trusted}");
+                    assert_eq!(
+                        e.decide_command(&request, Some(&matched)),
+                        expected,
+                        "{what}"
+                    );
+                    // Unmatched and absent commands keep the profile's answer.
+                    assert_eq!(
+                        e.decide_command(&request, Some(&unmatched)),
+                        e.decide(&request),
+                        "{what}"
+                    );
+                    assert_eq!(e.decide_command(&request, None), e.decide(&request));
+                }
+            }
+            // A match never touches a non-command effect of the same call.
+            let write = req(
+                Effect::WritePath {
+                    inside_workspace: true,
+                    overwrite: true,
+                    secret_like: false,
+                },
+                Interactivity::NonInteractive,
+                true,
+            );
+            assert_eq!(
+                e.decide_command(&write, Some(&matched)),
+                e.decide(&write),
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_incognito_floor_still_applies_to_a_matched_command() {
+        let e = engine(Profile::ReadOnly)
+            .with_allowed_commands(vec![pair_py()])
+            .with_incognito(true);
+        let request = req(
+            Effect::RunCommand(CommandClass::Unknown),
+            Interactivity::NonInteractive,
+            true,
+        );
+        assert_eq!(
+            e.decide_command(&request, Some(&command("python", &["/abs/pair.py"]))),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn the_command_list_leaves_bypass_and_unrestricted_unchanged_and_survives_a_profile_swap() {
+        let matched = command("python", &["/abs/pair.py"]);
+        for profile in [Profile::Bypass, Profile::Unrestricted] {
+            let with = engine(profile).with_allowed_commands(vec![pair_py()]);
+            assert!(!with.allows_command(&matched), "{profile:?}");
+            for effect in every_effect() {
+                for interactivity in INTERACTIVITIES {
+                    let request = req(effect, interactivity, true);
+                    assert_eq!(
+                        with.decide_command(&request, Some(&matched)),
+                        engine(profile).decide(&request),
+                        "{profile:?} {effect:?}"
+                    );
+                }
+            }
+        }
+        let swapped = engine(Profile::Default)
+            .with_allowed_commands(vec![pair_py()])
+            .with_profile(Profile::ReadOnly, Vec::new());
+        assert!(swapped.allows_command(&matched));
     }
 
     #[test]

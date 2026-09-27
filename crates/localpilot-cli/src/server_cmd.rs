@@ -264,7 +264,8 @@ impl SessionSetup {
         let mut runtime = SessionRuntime::new(
             provider.clone(),
             registry,
-            PermissionEngine::new(self.profile, Vec::new()),
+            PermissionEngine::new(self.profile, Vec::new())
+                .with_allowed_commands(crate::session_cmd::allowed_commands(&self.config)),
             approver,
             Store::open(&self.cwd),
             crate::session_cmd::workspace_with_read_roots(&self.cwd, &self.config)?,
@@ -318,6 +319,7 @@ pub(crate) fn profile_label(profile: Profile) -> &'static str {
     match profile {
         Profile::Default => "default",
         Profile::Relaxed => "relaxed",
+        Profile::ReadOnly => "readonly",
         Profile::Bypass => "bypass",
         Profile::Unrestricted => "unrestricted",
     }

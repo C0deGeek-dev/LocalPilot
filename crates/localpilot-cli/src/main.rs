@@ -111,8 +111,8 @@ enum SwarmCommand {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -360,8 +360,8 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -375,8 +375,8 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -399,8 +399,8 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -449,8 +449,8 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -492,8 +492,8 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -523,8 +523,8 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -942,8 +942,8 @@ enum McpCommand {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -1023,8 +1023,8 @@ enum SessionCommand {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -1453,8 +1453,8 @@ enum HarnessCommand {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -1468,8 +1468,8 @@ enum HarnessCommand {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass | unrestricted).
-        #[arg(long)]
+        /// Permission profile (default | relaxed | readonly | bypass | unrestricted).
+        #[arg(long, value_parser = session_cmd::permission_value_parser())]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
@@ -2741,6 +2741,67 @@ async fn ask(prompt: &str, model: &str, provider_id: Option<&str>) -> anyhow::Re
 mod tests {
     use super::*;
     use localpilot_localmind::StoreRoot;
+
+    /// Every subcommand path (`["print"]`, `["session", "resume"]`, …) that
+    /// takes `--permission`.
+    fn permission_surfaces(
+        command: &clap::Command,
+        path: &mut Vec<String>,
+        out: &mut Vec<Vec<String>>,
+    ) {
+        if command
+            .get_arguments()
+            .any(|arg| arg.get_id() == "permission")
+        {
+            out.push(path.clone());
+        }
+        for sub in command.get_subcommands() {
+            path.push(sub.get_name().to_string());
+            permission_surfaces(sub, path, out);
+            path.pop();
+        }
+    }
+
+    #[test]
+    fn every_permission_flag_refuses_an_unknown_profile_name() {
+        // Bug it prevents: `--permission readonly` on a surface (or a build)
+        // that does not know the name silently running as `default`, which
+        // writes. An unknown name must be a usage error everywhere.
+        use clap::CommandFactory as _;
+        let mut surfaces = Vec::new();
+        permission_surfaces(&Cli::command(), &mut Vec::new(), &mut surfaces);
+        // Ten in every build; `chat` and `pair` add two more with the `tui` feature.
+        assert!(surfaces.len() >= 10, "found only {surfaces:?}");
+        for path in &surfaces {
+            let mut argv = vec!["localpilot".to_string()];
+            argv.extend(path.iter().cloned());
+            let mut bad = argv.clone();
+            bad.extend(["--permission".to_string(), "read-only".to_string()]);
+            let err = Cli::try_parse_from(&bad).expect_err(&format!("{path:?} accepted read-only"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::InvalidValue,
+                "{path:?}: {err}"
+            );
+            // The same flag with a known name, alone or beside `--bypass`,
+            // gets past value validation (other required arguments may still
+            // be missing; that is not this test's concern).
+            for flags in [
+                &["--permission", "readonly"][..],
+                &["--permission", "readonly", "--bypass"],
+            ] {
+                let mut good = argv.clone();
+                good.extend(flags.iter().map(|flag| (*flag).to_string()));
+                if let Err(err) = Cli::try_parse_from(&good) {
+                    assert_ne!(
+                        err.kind(),
+                        clap::error::ErrorKind::InvalidValue,
+                        "{path:?}: {err}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn trust_command_syntax_parses() {
