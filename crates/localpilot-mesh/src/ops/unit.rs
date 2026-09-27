@@ -15,6 +15,7 @@ use super::{
 use crate::error::MeshError;
 use crate::jsonl;
 use crate::timefmt::utc_now;
+use crate::tree;
 
 /// Kinds that take a position the owner must not close over.
 const DECISION_KINDS: &[&str] = &["VERDICT", "STOP", "ESCALATE", "CHALLENGE"];
@@ -70,7 +71,53 @@ fn resolve_head(repo: &Path) -> Result<String, MeshError> {
     Err(unobserved("git cannot resolve HEAD"))
 }
 
-fn snap(repo: &Path) -> Result<Snap, MeshError> {
+/// How a tree is owned: through Git, or through a content digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Vcs {
+    Git,
+    None,
+}
+
+fn vcs_of(v: Option<&str>) -> Vcs {
+    if v == Some("none") {
+        Vcs::None
+    } else {
+        Vcs::Git
+    }
+}
+
+/// The state a boundary is pinned to, and, without version control, the rows
+/// its digest was taken over (so a manifest is written from the same scan).
+fn snap_rows(repo: &Path, vcs: Vcs) -> Result<(Snap, Option<Vec<tree::Row>>), MeshError> {
+    match vcs {
+        Vcs::Git => Ok((snap_git(repo)?, None)),
+        Vcs::None => {
+            let rows = tree::scan(repo)?;
+            let head = tree::tree_digest(&rows);
+            Ok((
+                Snap {
+                    head,
+                    status: Vec::new(),
+                },
+                Some(rows),
+            ))
+        }
+    }
+}
+
+fn snap(repo: &Path, vcs: Vcs) -> Result<Snap, MeshError> {
+    Ok(snap_rows(repo, vcs)?.0)
+}
+
+/// The commit, or without version control the tree's content digest.
+fn head_of(repo: &Path, vcs: Vcs) -> Result<String, MeshError> {
+    match vcs {
+        Vcs::Git => resolve_head(repo),
+        Vcs::None => Ok(tree::tree_digest(&tree::scan(repo)?)),
+    }
+}
+
+fn snap_git(repo: &Path) -> Result<Snap, MeshError> {
     let head = resolve_head(repo)?;
     let (rc, status) = git(repo, &["status", "--porcelain=v1", "--untracked-files=all"])?;
     if rc != Some(0) {
@@ -80,6 +127,14 @@ fn snap(repo: &Path) -> Result<Snap, MeshError> {
         head,
         status: status.lines().map(str::to_owned).collect(),
     })
+}
+
+/// The session's frozen companion list.
+fn companions(s: &Obj) -> Vec<Obj> {
+    s.get("companions")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|x| x.as_object().cloned()).collect())
+        .unwrap_or_default()
 }
 
 fn first_line(m: &Obj) -> &str {
@@ -197,19 +252,24 @@ impl Mesh {
         &self.anchor
     }
 
-    /// Companion trees and sessions without version control need content
-    /// digests this participant does not compute yet; refuse rather than pin
-    /// a boundary that leaves them out.
-    fn refuse_unpinnable(&self, s: &Obj) -> Result<(), MeshError> {
-        if s.get("companions")
-            .and_then(Value::as_array)
-            .is_some_and(|c| !c.is_empty())
-        {
-            return Err(MeshError::Unsupported(
-                "this session declares companion repositories; LocalPilot's participant does not pin companions yet".into(),
-            ));
-        }
-        self.refuse_no_vcs(s)
+    /// The anchor's backend: the session's own record, else the mailbox's.
+    fn anchor_vcs(&self, s: &Obj) -> Result<Vcs, MeshError> {
+        Ok(if self.no_vcs(s)? { Vcs::None } else { Vcs::Git })
+    }
+
+    /// Each declared companion's pin, `{name, head, status}`, as an offer
+    /// records it.
+    fn companion_pins(s: &Obj) -> Result<Vec<Value>, MeshError> {
+        companions(s)
+            .iter()
+            .map(|c| {
+                let q = snap(
+                    Path::new(str_of(c, "root").unwrap_or_default()),
+                    vcs_of(str_of(c, "vcs")),
+                )?;
+                Ok(json!({"name": c.get("name"), "head": q.head, "status": q.status}))
+            })
+            .collect()
     }
 
     fn journal_rows(&self, s: &Obj, role: &str) -> Result<Vec<Obj>, MeshError> {
@@ -365,13 +425,42 @@ impl Mesh {
         if q.starts_with(&repo) {
             return Ok(Out::code(0));
         }
-        if s.get("companions")
-            .and_then(Value::as_array)
-            .is_some_and(|c| !c.is_empty())
-        {
-            return Err(MeshError::Unsupported(
-                "this session declares companion repositories; LocalPilot's participant does not check companion write scopes yet".into(),
-            ));
+        // The session's frozen companion list, never the declaration file:
+        // editing `.pair-companion.json` mid-session cannot widen the scope.
+        for c in companions(&s) {
+            let root = resolve_lexically(Path::new(str_of(&c, "root").unwrap_or_default()));
+            let Ok(inner) = q.strip_prefix(&root) else {
+                continue;
+            };
+            let parts: Vec<std::ffi::OsString> = inner
+                .components()
+                .map(|p| p.as_os_str().to_owned())
+                .collect();
+            let rel = parts
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            // Matched in the reference's encoding, so an undecodable name is
+            // never taken for a U+FFFD in a write glob.
+            let raw_rel = parts
+                .iter()
+                .map(|p| tree::ref_bytes(p))
+                .collect::<Vec<_>>()
+                .join(&b'/');
+            let write = strings(c.get("write"));
+            if tree::glob_match_raw(&write, &raw_rel) {
+                return Ok(Out::code(0));
+            }
+            return Ok(Out {
+                code: 4,
+                stdout: String::new(),
+                stderr: format!(
+                    "WRITE_DENIED reason=outside-companion-scope companion={} path={rel}\n  declared write scope: {}\n",
+                    str_of(&c, "name").unwrap_or_default(),
+                    write.join(", ")
+                ),
+            });
         }
         Ok(Out {
             code: 4,
@@ -417,13 +506,15 @@ impl Mesh {
                 }
             };
             handoff_authority(&s, &to)?;
-            self.refuse_unpinnable(&s)?;
-            let q = snap(self.repo())?;
+            // Companions are pinned with the anchor: the incoming owner
+            // accepts a state, and a moved companion is a changed state.
+            let q = snap(self.repo(), self.anchor_vcs(&s)?)?;
+            let cq = Self::companion_pins(&s)?;
             let epoch = num_at(&s, "ownership_epoch") + 1;
             s.insert(
                 "handoff".into(),
                 json!({"epoch": epoch, "from": role, "to": to, "head": q.head, "status": q.status,
-                       "companions": [], "offered_at": utc_now()}),
+                       "companions": cq, "offered_at": utc_now()}),
             );
             s.insert("updated_at".into(), json!(utc_now()));
             self.save(&s)?;
@@ -463,12 +554,37 @@ impl Mesh {
             if o.is_empty() || str_of(&o, "to") != Some(role) {
                 return Err(refused("no handoff offered to this role"));
             }
-            self.refuse_unpinnable(&s)?;
-            let q = snap(self.repo())?;
+            let q = snap(self.repo(), self.anchor_vcs(&s)?)?;
             if str_of(&o, "head") != Some(q.head.as_str()) || strings(o.get("status")) != q.status {
                 return Err(refused(
                     "working tree changed since handoff offer; user must resolve ownership",
                 ));
+            }
+            let offered: Vec<Obj> = o
+                .get("companions")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|x| x.as_object().cloned()).collect())
+                .unwrap_or_default();
+            for c in companions(&s) {
+                let name = str_of(&c, "name").unwrap_or_default();
+                // A companion the offer did not pin means the offer predates
+                // it: refuse rather than accept a state nobody offered.
+                let Some(was) = offered.iter().find(|x| str_of(x, "name") == Some(name)) else {
+                    return Err(refused(format!(
+                        "companion {name} was not pinned by this handoff offer; re-offer before accepting"
+                    )));
+                };
+                let live = snap(
+                    Path::new(str_of(&c, "root").unwrap_or_default()),
+                    vcs_of(str_of(&c, "vcs")),
+                )?;
+                if str_of(was, "head") != Some(live.head.as_str())
+                    || strings(was.get("status")) != live.status
+                {
+                    return Err(refused(format!(
+                        "companion {name} changed since handoff offer; user must resolve ownership"
+                    )));
+                }
             }
             let old = str_of(&s, "owner").unwrap_or_default().to_owned();
             if schema(&s) == 2 {
@@ -556,11 +672,33 @@ impl Mesh {
         let adv = a.advisers.clone().unwrap_or_else(|| advisers.join(","));
         let auth = declare_authority(&participants(&s), &owner, &adv)?;
         self.peer_agreed(&s, role)?;
-        self.refuse_unpinnable(&s)?;
-        // Observe the tree before anything changes: a failed probe leaves the
-        // unit open exactly as it was.
-        let closed_head = resolve_head(self.repo())?;
-        let base = snap(self.repo())?;
+        // Observe every tree before anything changes: a failed probe leaves
+        // the unit open exactly as it was.
+        let vcs = self.anchor_vcs(&s)?;
+        let closed_head = head_of(self.repo(), vcs)?;
+        let (base, rows) = snap_rows(self.repo(), vcs)?;
+        let mut rebased = Vec::new();
+        let mut crows = Vec::new();
+        for (i, c) in companions(&s).iter().enumerate() {
+            // The declaration stays frozen: only these keys carry over, and the
+            // boundary is re-pinned. A config edited mid-session never widens
+            // the write scope here.
+            let mut kept = Obj::new();
+            for k in ["name", "spec", "root", "vcs", "mkey", "write", "why"] {
+                kept.insert(k.into(), c.get(k).cloned().unwrap_or(Value::Null));
+            }
+            let (q, r) = snap_rows(
+                Path::new(str_of(c, "root").unwrap_or_default()),
+                vcs_of(str_of(c, "vcs")),
+            )?;
+            kept.insert("head".into(), json!(q.head));
+            kept.insert("status".into(), json!(q.status));
+            if let Some(r) = r {
+                let key = str_of(c, "mkey").map_or_else(|| format!("c{i}"), str::to_owned);
+                crows.push((key, r));
+            }
+            rebased.push(Value::Object(kept));
+        }
         let now = utc_now();
         let mut done: Vec<Value> = s
             .get("units")
@@ -598,7 +736,17 @@ impl Mesh {
         let q = base;
         s.insert("base_head".into(), json!(q.head));
         s.insert("base_status".into(), json!(q.status));
-        s.insert("companions".into(), json!([]));
+        s.insert("companions".into(), Value::Array(rebased));
+        // The new unit's base manifests, from the very rows its digests were
+        // taken over; the finished unit keeps its own for a later audit.
+        let unit = str_of(&s, "unit_id").unwrap_or("base").to_owned();
+        let sd = self.mb.session_dir(sid(&s));
+        if let Some(rows) = rows {
+            tree::write_manifest(&tree::manifest_path(&sd, "anchor", &unit), &rows)?;
+        }
+        for (key, r) in &crows {
+            tree::write_manifest(&tree::manifest_path(&sd, key, &unit), r)?;
+        }
         let mut floor = Obj::new();
         for r in participants(&s) {
             let seq = self
@@ -624,11 +772,27 @@ impl Mesh {
     }
 }
 
-/// `path` made absolute and free of `.` and `..`, following no links, the
-/// way a path is compared against the session's tree.
+/// Where `p` really is: its longest existing ancestor with every link
+/// resolved, then the parts that do not exist yet, the way the reference's
+/// `Path.resolve()` answers. A new file under a link to a sibling tree
+/// therefore resolves into that sibling, not into the session's tree.
 fn resolve_lexically(p: &Path) -> PathBuf {
-    if let Ok(c) = dunce_canonical(p) {
-        return c;
+    for anc in p.ancestors() {
+        let Ok(real) = dunce_canonical(anc) else {
+            continue;
+        };
+        let mut out = real;
+        let rest = p.strip_prefix(anc).unwrap_or_else(|_| Path::new(""));
+        for c in rest.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        return out;
     }
     let mut out = PathBuf::new();
     for c in p.components() {
@@ -689,12 +853,145 @@ mod tests {
         matches!(r, Err(MeshError::Refused(ref m)) if m.starts_with("cannot observe the working tree"))
     }
 
+    /// A directory link: a junction on Windows (no privilege needed), a
+    /// symlink elsewhere.
+    fn dir_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            let ok = Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            assert!(ok, "mklink /J {} {}", link.display(), target.display());
+        }
+        #[cfg(not(windows))]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    fn set_companions(rec: &Path, companions: Value) {
+        let mut s: Obj = serde_json::from_str(&std::fs::read_to_string(rec).unwrap()).unwrap();
+        s.insert("companions".into(), companions);
+        std::fs::write(rec, Value::Object(s).to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_new_file_behind_a_link_is_judged_where_the_link_leads() {
+        // The reference resolves the longest existing ancestor, links
+        // included, then appends the parts that do not exist yet. A new file
+        // under a link out of the tree is therefore outside it.
+        let dir = tempfile::tempdir().unwrap();
+        let (anchor, outside, plans) = (
+            dir.path().join("anchor"),
+            dir.path().join("outside"),
+            dir.path().join("plans"),
+        );
+        for d in [&anchor, &outside, &plans.join("records")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let rec = session(&anchor, false);
+        set_companions(
+            &rec,
+            json!([{"name": "plans", "root": dunce_canonical(&plans).unwrap(), "vcs": "git",
+                    "mkey": "c0", "write": ["records/*.md"], "why": "records"}]),
+        );
+        dir_link(&anchor.join("link"), &outside);
+        dir_link(&plans.join("records").join("away"), &outside);
+        let mesh = Mesh::at(&dunce_canonical(&anchor).unwrap(), "flag");
+        let guard = |p: PathBuf| mesh.guard_write("claude", Some(&p)).unwrap();
+
+        assert_eq!(
+            guard(anchor.join("src").join("new.txt")).code,
+            0,
+            "inside the anchor"
+        );
+        let out = guard(anchor.join("link").join("new.txt"));
+        assert_eq!(out.code, 4, "through the anchor's link: {}", out.stderr);
+        assert!(
+            out.stderr.contains("outside-session-scope"),
+            "{}",
+            out.stderr
+        );
+
+        assert_eq!(
+            guard(plans.join("records").join("b.md")).code,
+            0,
+            "in the scope"
+        );
+        let out = guard(plans.join("records").join("away").join("c.md"));
+        assert_eq!(out.code, 4, "through the companion's link: {}", out.stderr);
+        assert!(
+            out.stderr.contains("outside-session-scope"),
+            "{}",
+            out.stderr
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_glob_holding_a_replacement_character_never_admits_an_undecodable_name() {
+        // The reference sees byte 0xFF in a name as the surrogate U+DCFF, which
+        // `records/a\u{FFFD}.md` does not match; a lossy path would.
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (anchor, plans) = (dir.path().join("anchor"), dir.path().join("plans"));
+        std::fs::create_dir_all(&anchor).unwrap();
+        std::fs::create_dir_all(plans.join("records")).unwrap();
+        let rec = session(&anchor, false);
+        set_companions(
+            &rec,
+            json!([{"name": "plans", "root": dunce_canonical(&plans).unwrap(), "vcs": "git",
+                    "mkey": "c0", "write": ["records/a\u{FFFD}.md"], "why": "records"}]),
+        );
+        let mesh = Mesh::at(&dunce_canonical(&anchor).unwrap(), "flag");
+        let odd = plans
+            .join("records")
+            .join(std::ffi::OsStr::from_bytes(b"a\xff.md"));
+        let out = mesh.guard_write("claude", Some(&odd)).unwrap();
+        assert_eq!(out.code, 4, "{}", out.stderr);
+        assert!(
+            out.stderr.contains("outside-companion-scope"),
+            "{}",
+            out.stderr
+        );
+
+        set_companions(
+            &rec,
+            json!([{"name": "plans", "root": dunce_canonical(&plans).unwrap(), "vcs": "git",
+                    "mkey": "c0", "write": ["records/a?.md"], "why": "records"}]),
+        );
+        assert_eq!(
+            mesh.guard_write("claude", Some(&odd)).unwrap().code,
+            0,
+            "a wildcard admits it"
+        );
+    }
+
+    #[test]
+    fn the_sessions_recorded_backend_wins_over_the_mailbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = session(dir.path(), false);
+        std::fs::write(
+            dir.path().join(".pair-programming").join("vcs.json"),
+            "{\"vcs\": \"none\"}\n",
+        )
+        .unwrap();
+        let mesh = Mesh::at(dir.path(), "flag");
+        let mut s: Obj = serde_json::from_str(&std::fs::read_to_string(&rec).unwrap()).unwrap();
+        assert!(mesh.no_vcs(&s).unwrap(), "no record: the mailbox decides");
+        s.insert("vcs".into(), json!("git"));
+        assert!(!mesh.no_vcs(&s).unwrap(), "a recorded git wins");
+        s.insert("vcs".into(), json!("none"));
+        assert!(mesh.no_vcs(&s).unwrap());
+    }
+
     #[test]
     fn a_tree_git_cannot_observe_pins_no_boundary() {
         // Not a Git working tree: every probe fails, and nothing may be read
         // as a clean, unborn tree.
         let dir = tempfile::tempdir().unwrap();
-        assert!(snap(dir.path()).is_err());
+        assert!(snap(dir.path(), Vcs::Git).is_err());
         let rec = session(dir.path(), false);
         let before = std::fs::read(&rec).unwrap();
         let mesh = Mesh::at(dir.path(), "flag");
@@ -728,7 +1025,7 @@ mod tests {
         if !ok {
             return; // no git here; the failure path above still ran
         }
-        let q = snap(dir.path()).unwrap();
+        let q = snap(dir.path(), Vcs::Git).unwrap();
         assert_eq!(q.head, "UNBORN");
         assert!(q.status.is_empty());
     }

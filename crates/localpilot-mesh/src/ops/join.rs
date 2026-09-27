@@ -19,18 +19,42 @@ use crate::timefmt::{parse_utc, utc_now};
 const VCS_FILE: &str = "vcs.json";
 
 impl Mesh {
-    /// Refuse a session anchored without version control: its review
-    /// boundary is a content digest this implementation does not compute yet.
-    pub(crate) fn refuse_no_vcs(&self, s: &Obj) -> Result<(), MeshError> {
-        let stored: Option<Obj> = self.read_obj(&self.mb.base().join(VCS_FILE))?;
-        let none = str_of(s, "vcs") == Some("none")
-            || stored.as_ref().and_then(|m| str_of(m, "vcs")) == Some("none");
-        if none {
-            return Err(MeshError::Unsupported(
-                "this session has no version control; LocalPilot's participant does not support content-digest sessions yet".into(),
-            ));
+    /// Whether the anchor is owned through a content digest rather than Git:
+    /// the session's record says so, or the mailbox was started that way.
+    pub(crate) fn no_vcs(&self, s: &Obj) -> Result<bool, MeshError> {
+        // The session's own record decides whenever it says anything; the
+        // mailbox's is only the fallback for a session that predates it.
+        if let Some(v) = str_of(s, "vcs").filter(|v| !v.is_empty()) {
+            return Ok(v == "none");
         }
-        Ok(())
+        let stored: Option<Obj> = self.read_obj(&self.mb.base().join(VCS_FILE))?;
+        Ok(stored.as_ref().and_then(|m| str_of(m, "vcs")) == Some("none"))
+    }
+
+    /// The block `join` prints for a no-VCS session: which root, how many
+    /// files it holds, and what `.pairignore` excludes, so both terminals learn
+    /// the boundary.
+    fn vcs_lines(&self, s: &Obj) -> Result<Vec<String>, MeshError> {
+        if !self.no_vcs(s)? {
+            return Ok(Vec::new());
+        }
+        let pats = crate::tree::pairignore(&self.anchor)?;
+        let count = crate::tree::scan(&self.anchor)?.len();
+        let ignore = if pats.is_empty() {
+            format!("(none; add {} to exclude paths)", crate::tree::PAIRIGNORE)
+        } else {
+            pats.join(", ")
+        };
+        Ok(vec![
+            format!(
+                "VCS none root={} files={count} base={}",
+                self.anchor.display(),
+                str_of(s, "base_head").unwrap_or("None")
+            ),
+            "  ownership is anchored to a sha256 content digest of this directory, not to Git HEAD;".into(),
+            "  there is no history, so the review set is a manifest delta against the unit base".into(),
+            format!("  ignore: {ignore}"),
+        ])
     }
 
     /// `join`: wait for a session that names `role`, record readiness,
@@ -80,7 +104,6 @@ impl Mesh {
                     participants(&s).join(", ")
                 )));
             }
-            self.refuse_no_vcs(&s)?;
             let was = str_of(&self.health_of(&s, role)?, "status").map(str::to_owned);
             if pauses(&s).contains_key(role) {
                 clear_pause(&mut s, role);
@@ -144,6 +167,11 @@ impl Mesh {
         };
         o.push_str(&self.anchor_line());
         o.push('\n');
+        // Before the task: the boundary is part of what the joiner is told.
+        for l in self.vcs_lines(&s)? {
+            o.push_str(&l);
+            o.push('\n');
+        }
         for c in objects(s.get("companions")) {
             o.push_str(&companion_line(&c));
             o.push('\n');
@@ -245,7 +273,7 @@ impl Mesh {
             str_of(&s, "driver").unwrap_or_default(),
             str_of(&s, "owner").unwrap_or_default()
         ));
-        if str_of(&s, "vcs") == Some("none") {
+        if self.no_vcs(&s)? {
             line(format!(
                 "VCS none base={}",
                 str_of(&s, "base_head").unwrap_or("None")

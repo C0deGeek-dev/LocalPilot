@@ -19,6 +19,9 @@
   "watch"
  ],
  "mandatory": [
+  "companion-guard-write-scope",
+  "companion-handoff-pins-and-refuses-a-moved-companion",
+  "companion-next-unit-rebases",
   "crash-leftover-temp-file-is-ignored",
   "crash-post-before-its-session-update",
   "crash-sentinel-without-pointer-for-an-active-session-is-refused",
@@ -58,6 +61,9 @@
   "n-party-per-participant-pause",
   "n-party-review-needs-every-reviewer",
   "n-party-start-join-broadcast-hello",
+  "no-vcs-handoff-refused-after-a-change",
+  "no-vcs-join-post-handoff-complete",
+  "no-vcs-next-unit-rebases-manifest",
   "read-absent-cursor-means-nothing-read-yet",
   "read-garbage-cursor-is-refused",
   "read-garbage-pointer-is-refused",

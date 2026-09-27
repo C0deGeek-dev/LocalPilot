@@ -376,7 +376,7 @@ def main(argv=None) -> int:
             s.session(parts, a.posts)
     finally:
         if not a.keep:
-            shutil.rmtree(root, ignore_errors=True)
+            run.remove_tree(root)
     elapsed = time.monotonic() - began
     if s.errors:
         print(f"SOAK FAIL seed={seed} " + s.errors[0])

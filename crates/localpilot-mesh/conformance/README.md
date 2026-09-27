@@ -45,11 +45,23 @@ command line.
 }
 ```
 
+`setup` builds the trees before the first step:
+
+- `vcs`: `git` (the default) or `none`. Start a no-VCS session with
+  `start ... --no-vcs`.
+- `files`: `{path: text}` written into the anchor (relative POSIX paths that
+  stay inside it). In a Git anchor they are committed.
+- `companions`: `[{name, vcs, files, write, why}]`. Each becomes a sibling
+  tree, a Git repository or a plain directory, in its own contained temp
+  directory. The anchor's `.pair-companion.json` declares them.
+
 A step is exactly one of:
 
 - `{"cmd": [...], "rc": 0, "stdout": "...", "stderr": "...", "state": {...}}`:
   run a public command. The runner alone sets `--repo <fixture root>`, and
-  replaces `<SID>` in an argument with the active session's id. It
+  replaces `<SID>` in an argument with the active session's id, and `<REPO>`
+  and `<COMP:name>` with the fixture's trees (for a path such as
+  `guard-write --path`). It
   refuses a step that does not start with a subcommand, and any argument that is
   `--repo` or a prefix argparse would expand to it (for example `--rep=`), even
   as another option's value. `compare` may be:
@@ -72,6 +84,9 @@ A step is exactly one of:
   `path` is relative to `.pair-programming/`, and `<SID>` stands for the active
   session's id. `"expect_refused": true` asserts that the runner refuses the
   step.
+  `write_tree` (with `tree`: `anchor` or a companion's name, `path`, `data`)
+  changes a work file, as a person editing the tree would. Its path is
+  relative to that tree and may not enter the mailbox or `.git`.
 - `{"parallel": [[...], ...], "invariants": [...], "journal_counts": {...}}`:
   run the commands at once and check only invariants, never exact output. The
   invariants are:
@@ -104,6 +119,16 @@ a fixed date, so it is the same on every run. Line endings compare as `\n`.
 In the STATE layer the session the pointer names is `<SID>`; any other
 session in the mailbox is `<SID-2>`, `<SID-3>`, ordered by its `created_at`
 and work unit, so two sessions never merge under one key.
+A companion's root is `<COMP:name>` and their shared temp directory is
+`<COMP-PARENT>`. A path printed under any of these placeholders compares in
+POSIX form. No-VCS digests (`T:` and 12 hex digits) are content-derived and
+always compared exactly. That is why a fixture's companions need a Git
+anchor: `.pair-companion.json` names their absolute temp paths, and in a
+no-VCS anchor it would be part of the digested content.
+
+Setup refuses paths into `.git` (at any depth) or into the anchor's mailbox
+before writing anything, refuses a companion name used twice, and removes
+whatever it built if it fails partway.
 
 ### Containment
 
@@ -184,6 +209,32 @@ python run.py --participant codex=<command> --participant localpilot=<command>
   A self-test proves that an implementation with correct state but broken
   output fails.
 
+## Scanner boundary cases
+
+A no-VCS session is owned through a content digest of its files, and that
+digest is a boundary only if the scan records links without following them,
+fails on anything it cannot read, and prunes exactly what `.pairignore` says.
+The fixture format cannot build links or unreadable paths without weakening
+its own containment, so `scan_cases.py` holds those cases:
+
+```sh
+python scan_cases.py list              # the cases this platform can build
+python scan_cases.py build CASE DIR    # CASE's tree under DIR/tree (and DIR/outside)
+python scan_cases.py expect CASE DIR   # the reference's outcome on it, as JSON
+python scan_cases.py check             # the reference against every case
+```
+
+The cases are: a plain tree; the mailbox and `.git` skipped (a nested
+`.pair-programming` is not the mailbox); `.pairignore` pruning (`build/**`,
+`out/` and a literal prune whole subtrees; `foo/*` never reaches
+`foo/bar/x`); a link to an outside directory (a junction on Windows), which
+is one `l` row and is never descended; and, on POSIX, an unreadable file, an
+unlistable directory, and a file name holding a newline. Another
+implementation builds each case, scans `DIR/tree` itself, and compares its
+rows and digest (or the path it refused on) with `expect` on the same tree.
+A self-test proves that a scanner which follows links or skips unreadable
+paths fails.
+
 ## Mixed-writer soak
 
 `python soak.py --impl-b "<command>"` runs two implementations against one live
@@ -208,7 +259,7 @@ writing fails the soak.
 
 ## Vendoring
 
-`python vendor.py <dest>` copies the runner, the soak, README, `participant.json`,
+`python vendor.py <dest>` copies the runner, the soak, the scanner cases, README, `participant.json`,
 fixtures and a pinned, test-only copy of the reference implementation
 (`reference/pair.py`, which the runner uses when present; `--reference`
 overrides it) into another repository with `MANIFEST.json` (the source commit and

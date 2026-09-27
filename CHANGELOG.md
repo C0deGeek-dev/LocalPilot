@@ -51,17 +51,18 @@ is SemVer-stable; the configuration schema stability policy is in
   escalations in three-way sessions), reports health, hands work over, closes a
   unit on its reviewers' agreement, and registers a delivery endpoint. It works
   on the skill's own file mailbox under the same locks, so there is one mailbox
-  whichever tool writes. It supports sessions in a Git working tree with no
-  companion repositories, and for those it passes every mandatory fixture of
-  the protocol's conformance suite for the participant profile; a test runs
-  that suite on every build, along with a soak in which LocalPilot and the
-  skill's own `pair.py` write one live mailbox at the same time. If
+  whichever tool writes. That includes sessions without version control,
+  owned through a content digest of the tree (`.pairignore` respected, links
+  recorded and never followed, an unreadable file an error rather than a
+  guess), and sessions with companion repositories, whose write scopes
+  `guard-write --path` enforces and whose state a handoff pins. It passes every
+  mandatory fixture of the protocol's conformance suite for the participant
+  profile, and its tree scan matches the reference's on shared boundary cases.
+  A test runs the suite on every build, along with a soak in which LocalPilot
+  and the skill's own `pair.py` write one live mailbox at the same time. If
   LocalPilot's writer ever misbehaves, `[mesh] writer = "delegate"` hands
   every operation to `pair.py` instead (`delegate_command`, a list of
-  arguments), with no fallback to the native writer. Sessions started without
-  version control and sessions that declare companion repositories are not
-  supported yet: the operations that need them refuse and change nothing, and
-  the suite does not cover them.
+  arguments), with no fallback to the native writer.
 
 - **Editing a file no longer destroys a neighbour named like its temp.** The
   edit tools and the store staged every write in a fixed `<file>.tmp` beside

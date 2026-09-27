@@ -23,6 +23,8 @@
 //!   (S-7, V-3).
 //! - [`ops`]: the participant operations, returning what a command line
 //!   prints; `localpilot mesh` exposes them.
+//! - [`tree`]: a no-VCS tree's scan, manifest and content digest, and the
+//!   globs of `.pairignore` and companion write scopes.
 //!
 //! The suite this crate is held to is vendored in `conformance/`; a test in
 //! the `localpilot` crate runs it against `localpilot mesh`.
@@ -37,6 +39,7 @@ pub mod ops;
 pub mod records;
 pub mod session;
 mod timefmt;
+pub mod tree;
 
 pub use error::MeshError;
 pub use layout::Mailbox;

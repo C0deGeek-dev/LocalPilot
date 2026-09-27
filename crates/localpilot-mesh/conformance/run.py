@@ -39,6 +39,12 @@ TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 UNIT_SUFFIX = re.compile(r"\b(\d+)-[0-9a-f]{8}\b")
 SHOWN_UNIT = re.compile(r"#(\d+)-[0-9a-f]{8}")
 SHA = re.compile(r"\b[0-9a-f]{40}\b")
+# A path printed after a tree placeholder compares in POSIX form.
+PLACED_PATH = re.compile(r"(<(?:REPO|COMP-PARENT|COMP:[a-z][a-z0-9-]*)>)(\\[^\s;,]*)")
+# Per fixture: companion roots to show as `<COMP:name>`. Set by
+# `apply_setup`, cleared after the fixture. No-VCS digests (`T:`) are never
+# normalised: they are content-derived and exact.
+_COMPANIONS: list = []
 HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
 # The impls key for steps that name no role (status, transcript): in
 # participant mode they run on the implementation under test.
@@ -58,8 +64,14 @@ STEP_ENV = {"PAIR_ENDPOINT_TOKEN"}
 def normalise_text(text: str, root: Path) -> str:
     """Replace what differs between runs of the same build: the fixture root,
     session ids, times, unit id suffixes and commit ids. Nothing else."""
+    for path, label in _COMPANIONS:
+        for form in {str(path), str(path).replace("\\", "/"), path.as_posix()}:
+            text = text.replace(form, label)
     for form in {str(root), str(root).replace("\\", "/"), root.as_posix()}:
         text = text.replace(form, "<REPO>")
+    # A path under a normalised tree prints with the platform's separator;
+    # compare it in POSIX form so a capture holds on every OS.
+    text = PLACED_PATH.sub(lambda m: m.group(1) + m.group(2).replace("\\", "/"), text)
     text = SID.sub("<SID>", text)
     text = TS.sub("<TS>", text)
     text = SHOWN_UNIT.sub(r"#\1", text)
@@ -170,6 +182,23 @@ def snapshot(root: Path) -> dict:
 
 # --- containment --------------------------------------------------------------
 
+def remove_tree(p: Path) -> None:
+    """Delete a scratch tree completely. Git writes its objects read-only, and
+    on Windows a read-only file cannot be unlinked, so a plain
+    `rmtree(ignore_errors=True)` left every Git fixture root behind. Clear the
+    flag and retry; never follow a link out of the tree."""
+    def retry(func, path, _exc):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except OSError:
+            pass
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(p, onexc=retry)
+    else:
+        shutil.rmtree(p, onerror=retry)
+
+
 def _inside(child: Path, parent: Path) -> bool:
     try:
         child.relative_to(parent)
@@ -189,10 +218,10 @@ def _is_link(p: Path) -> bool:
     return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
 
-def confine(root: Path, rel: str) -> Path:
+def confine(root: Path, rel: str, base: Path | None = None) -> Path:
     """The absolute path of a `raw` step's target, or Refused. Checked before
-    any I/O: only a relative path inside the fixture's mailbox, reached without
-    crossing a symlink, junction or other reparse point."""
+    any I/O: only a relative path inside the fixture's mailbox (or `base`),
+    reached without crossing a symlink, junction or other reparse point."""
     if not rel or "\0" in rel:
         raise Refused("RAW_PATH_REFUSED empty or NUL path")
     if rel.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", rel) or rel.startswith("\\\\"):
@@ -200,7 +229,7 @@ def confine(root: Path, rel: str) -> Path:
     parts = re.split(r"[\\/]+", rel)
     if ".." in parts:
         raise Refused(f"RAW_PATH_REFUSED parent segment in {rel!r}")
-    base = root / MAILBOX
+    base = base if base is not None else root / MAILBOX
     cur = base
     for part in [p for p in parts if p not in ("", ".")]:
         if _is_link(cur):
@@ -212,6 +241,26 @@ def confine(root: Path, rel: str) -> Path:
     if not _inside(Path(os.path.realpath(cur.parent)), real_base):
         raise Refused(f"RAW_PATH_REFUSED {rel!r} resolves outside the mailbox")
     return cur
+
+
+def tree_write(root: Path, op: dict) -> None:
+    """`write_tree`: change a work file in the anchor or a declared companion,
+    as a person editing the tree would. Never the mailbox and never `.git`."""
+    tree = op.get("tree", "anchor")
+    if tree == "anchor":
+        base = root
+    else:
+        found = [path for path, label in _COMPANIONS if label == f"<COMP:{tree}>"]
+        if not found:
+            raise Refused(f"RAW_PATH_REFUSED no companion named {tree!r}")
+        base = found[0]
+    rel = op.get("path", "")
+    why = tree_path_problem(rel, anchor=tree == "anchor")
+    if why:
+        raise Refused(f"RAW_PATH_REFUSED write_tree path {rel!r} {why}")
+    target = confine(root, rel, base)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(op.get("data", "").encode("utf-8"))
 
 
 def raw_step(root: Path, op: dict) -> None:
@@ -272,12 +321,12 @@ def new_root(vcs: str) -> Path:
     root = Path(tempfile.mkdtemp(prefix="pair-conformance-")).resolve()
     here = Path.cwd().resolve()
     if _inside(root, here):
-        shutil.rmtree(root, ignore_errors=True)
+        remove_tree(root)
         raise Refused(f"ROOT_REFUSED {root} is inside the invoking directory")
     probe = subprocess.run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
                            capture_output=True, text=True)
     if probe.returncode == 0:
-        shutil.rmtree(root, ignore_errors=True)
+        remove_tree(root)
         raise Refused(f"ROOT_REFUSED {root} is inside a git work tree")
     if vcs == "git":
         env = dict(os.environ, GIT_AUTHOR_DATE=GIT_DATE, GIT_COMMITTER_DATE=GIT_DATE)
@@ -288,6 +337,140 @@ def new_root(vcs: str) -> Path:
         subprocess.run(["git", "-C", str(root), "add", "README.md"], check=True)
         subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True, env=env)
     return root
+
+
+SETUP_KEYS = {"vcs", "files", "companions"}
+COMPANION_KEYS = {"name", "vcs", "files", "write", "why"}
+NAME = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+SHORT_NAME = re.compile(r"~\d")
+
+
+def tree_path_problem(rel: str, anchor: bool) -> str | None:
+    """Why a work-file path is not allowed, or None. Checked on every segment,
+    not just the first, and in the forms a filesystem treats as equal: the
+    comparison ignores case and trailing dots and spaces (Windows), and 8.3
+    short names (`PAIR-P~1`) are refused outright, so no spelling of `.git` or
+    the mailbox gets through."""
+    if not rel or "\0" in rel:
+        return "is empty"
+    if rel.startswith(("/", "\\")) or ":" in rel:
+        return "must be relative, with no drive or stream"
+    parts = re.split(r"[\\/]", rel)
+    for seg in parts:
+        if seg in ("", ".", ".."):
+            return "has an empty, '.' or '..' segment"
+        if SHORT_NAME.search(seg):
+            return "has a short-name (8.3) segment"
+        canon = seg.rstrip(". ").casefold()
+        if canon == ".git":
+            return "reaches into .git"
+    if anchor and parts[0].rstrip(". ").casefold() == MAILBOX:
+        return "reaches into the mailbox"
+    return None
+
+
+def _check_files(files: dict, anchor: bool) -> None:
+    """Refuse a setup path before anything is written: relative paths that
+    stay inside their tree, never into `.git` (at any depth, in any spelling)
+    and never into the anchor's mailbox. Mailbox state comes only from
+    commands and the guarded `raw` steps."""
+    for rel in (files or {}):
+        why = tree_path_problem(rel, anchor)
+        if why:
+            raise Refused(f"SETUP_REFUSED file path {rel!r} {why}")
+
+
+def _write_files(base: Path, files: dict) -> None:
+    """Plain files for a setup tree, already checked by `_check_files`."""
+    for rel, text in (files or {}).items():
+        parts = rel.split("/")
+        target = base.joinpath(*parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8", newline="\n")
+
+
+def _commit_all(tree: Path, message: str) -> None:
+    env = dict(os.environ, GIT_AUTHOR_DATE=GIT_DATE, GIT_COMMITTER_DATE=GIT_DATE)
+    # Setup bytes are committed exactly as written, whatever the machine's
+    # line-ending settings, so the base is the same everywhere.
+    git = ["git", "-c", "core.autocrlf=false", "-C", str(tree)]
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", message, "--allow-empty"], check=True, env=env)
+
+
+def apply_setup(root: Path, setup: dict) -> list:
+    """Build what `setup` asks for around a fresh root; return what to delete.
+
+    `files` are written into the anchor. Each of `companions` becomes a sibling
+    tree in its own contained temp directory, a Git repository or a plain one,
+    and `.pair-companion.json` in the anchor declares them. The anchor's new
+    files are committed when it is a Git repository."""
+    bad = set(setup) - SETUP_KEYS
+    if bad:
+        raise Refused(f"SETUP_REFUSED unknown setup key(s) {sorted(bad)}")
+    comps = setup.get("companions") or []
+    # Everything is validated before anything is built.
+    _check_files(setup.get("files"), anchor=True)
+    for c in comps:
+        bad = set(c) - COMPANION_KEYS
+        if bad or not NAME.match(c.get("name", "")) or c.get("vcs", "git") not in ("git", "none"):
+            raise Refused(f"SETUP_REFUSED companion {c!r}")
+        _check_files(c.get("files"), anchor=False)
+    names = [c["name"] for c in comps]
+    if len(set(names)) != len(names):
+        raise Refused(f"SETUP_REFUSED a companion name is used twice: {names}")
+    if comps and setup.get("vcs", "git") == "none":
+        # `.pair-companion.json` names the companions' absolute temp paths and
+        # is part of a no-VCS anchor's content, so its digest would differ on
+        # every run; exact digests are what these fixtures check.
+        raise Refused("SETUP_REFUSED companions need a Git anchor in a fixture")
+    cleanup = []
+    try:
+        _build(root, setup, comps, cleanup)
+    except BaseException:
+        for d in cleanup:
+            remove_tree(d)
+        clear_setup()
+        raise
+    return cleanup
+
+
+def _build(root: Path, setup: dict, comps: list, cleanup: list) -> None:
+    _write_files(root, setup.get("files"))
+    decl = []
+    if comps:
+        parent = Path(tempfile.mkdtemp(prefix="pair-conformance-comp-")).resolve()
+        cleanup.append(parent)
+        if _inside(parent, Path.cwd().resolve()) or _inside(parent, root) or _inside(root, parent):
+            raise Refused(f"SETUP_REFUSED companion root {parent} is not contained")
+        for c in comps:
+            name = c["name"]
+            tree = parent / name
+            tree.mkdir()
+            probe = subprocess.run(["git", "-C", str(tree), "rev-parse", "--is-inside-work-tree"],
+                                   capture_output=True, text=True)
+            if probe.returncode == 0:
+                raise Refused(f"SETUP_REFUSED companion {tree} is inside a git work tree")
+            _write_files(tree, c.get("files"))
+            if c.get("vcs", "git") == "git":
+                subprocess.run(["git", "init", "-q", str(tree)], check=True)
+                for k, v in (("user.email", "pair@example.invalid"), ("user.name", "pair-test")):
+                    subprocess.run(["git", "-C", str(tree), "config", k, v], check=True)
+                _commit_all(tree, "companion base")
+            _COMPANIONS.append((tree, f"<COMP:{name}>"))
+            decl.append({"name": name, "repo": str(tree), "write": c.get("write") or [], "why": c.get("why") or ""})
+        # After every companion root, so the longer paths are replaced first.
+        _COMPANIONS.append((parent, "<COMP-PARENT>"))
+        (root / ".pair-companion.json").write_text(json.dumps({"companions": decl}, indent=1) + "\n",
+                                                   encoding="utf-8", newline="\n")
+    if (setup.get("files") or comps) and setup.get("vcs", "git") == "git":
+        _commit_all(root, "fixture setup")
+
+
+def clear_setup() -> None:
+    _COMPANIONS.clear()
 
 
 # --- running ------------------------------------------------------------------
@@ -324,6 +507,11 @@ def invoke(impls: dict, root: Path, cmd: list, env: dict | None = None):
     # `<SID>` in an argument stands for the active session's id, as in raw paths.
     if any("<SID>" in x for x in cmd):
         cmd = [resolve_session_path(root, x) for x in cmd]
+    # `<REPO>` and `<COMP:name>` stand for the fixture's trees, for arguments
+    # that name a path (guard-write --path).
+    cmd = [x.replace("<REPO>", str(root)) for x in cmd]
+    for path, label in _COMPANIONS:
+        cmd = [x.replace(label, str(path)) for x in cmd]
     return subprocess.run(argv_for(impls, root, cmd), text=True, encoding="utf-8", errors="replace",
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           env=child_env(env), timeout=STEP_TIMEOUT)
@@ -505,15 +693,26 @@ def run_fixture(fx: dict, impls: dict, capture: bool = False, obs: bool = False)
     layers = set(fx["layers"])
     fails = []
     vars_ = {}
-    root = new_root(fx.get("setup", {}).get("vcs", "git"))
+    setup = fx.get("setup", {})
+    root = new_root(setup.get("vcs", "git"))
+    cleanup = []
     try:
+        try:
+            cleanup = apply_setup(root, setup)
+        except Refused as e:
+            return [str(e)]
+        except (OSError, subprocess.CalledProcessError) as e:
+            return [f"SETUP_FAILED {type(e).__name__}: {e}"]
         for i, st in enumerate(fx["steps"]):
             where = f"step {i}"
             if "raw" in st:
                 op = dict(st["raw"])
                 try:
-                    op["path"] = resolve_session_path(root, op.get("path", ""))
-                    raw_step(root, op)
+                    if op.get("op") == "write_tree":
+                        tree_write(root, op)
+                    else:
+                        op["path"] = resolve_session_path(root, op.get("path", ""))
+                        raw_step(root, op)
                 except Refused as e:
                     if st.get("expect_refused"):
                         continue
@@ -576,7 +775,10 @@ def run_fixture(fx: dict, impls: dict, capture: bool = False, obs: bool = False)
                 diff = sorted(k for k in set(exp) | set(got) if exp.get(k) != got.get(k))
                 fails.append(f"final state differs in {diff}")
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        remove_tree(root)
+        for d in cleanup:
+            remove_tree(d)
+        clear_setup()
     return fails
 
 

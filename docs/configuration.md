@@ -294,10 +294,13 @@ exit `2`. An empty `delegate_command`, or one that cannot start, exits `2`,
 and a configuration that fails to load exits `1`: neither falls back to the
 native writer.
 
-Supported sessions are those in a Git working tree with no companion
-repositories; the conformance suite covers exactly those. Not yet supported:
-sessions started with `--no-vcs`, and sessions that declare companion
-repositories. Operations that need them refuse and change nothing.
+Every session kind the skill starts is supported. A session started with
+`--no-vcs` is owned through a content digest of the tree: `.pairignore`
+excludes paths, links are recorded and never followed, and a file that
+cannot be read fails the operation instead of being skipped. A session with
+companion repositories is held to their declared write scopes
+(`guard-write --path`), and a handoff pins every companion's state as well as
+the anchor's.
 
 ## Project context files
 
