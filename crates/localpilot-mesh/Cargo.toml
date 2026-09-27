@@ -16,6 +16,7 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 uuid = { workspace = true }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-store = { path = "../localpilot-store" }
 
 [dev-dependencies]

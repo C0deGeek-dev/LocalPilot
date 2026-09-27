@@ -280,6 +280,10 @@ impl ToolRegistry {
             ));
         };
 
+        // One reading of the session's write authority governs the whole call.
+        let resolved = engine.resolved();
+        let engine = &resolved;
+
         let effects = match tool.effects(&call.input, ctx) {
             Ok(effects) => effects,
             Err(err) => {
@@ -410,6 +414,19 @@ fn denial_message(
     command: Option<&ExactCommand>,
 ) -> String {
     let mut message = format!("permission denied for {tool}");
+    if let Some(reason) = engine.lease_denial() {
+        if matches!(
+            request.effect,
+            Effect::WritePath { .. } | Effect::RunCommand(_)
+        ) && command.is_none_or(|command| !engine.allows_command(command))
+        {
+            message.push_str(&format!(
+                ": this session does not let this participant write ({reason}), so it runs \
+                 as readonly."
+            ));
+            return message;
+        }
+    }
     let vetted = command.filter(|command| engine.allows_command(command));
     if let (Some(command), Effect::RunCommand(_)) = (vetted, request.effect) {
         // The grant exists; say what stopped it, so nobody adds it again.

@@ -198,6 +198,23 @@ pub struct ExactCommand {
     pub args: Vec<String>,
 }
 
+/// Whether a session's authority lets this engine's role write right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseState {
+    /// The role owns the tree: the profile decides as usual.
+    Owner,
+    /// The role may not write; the reason is shown in a denial.
+    Denied(String),
+}
+
+/// A live source of write authority, re-read at every permission decision.
+/// An implementation must be fail-closed: anything it cannot establish is
+/// [`LeaseState::Denied`], never an error or a panic.
+pub trait Lease: Send + Sync + std::fmt::Debug {
+    /// The authority as of now.
+    fn current(&self) -> LeaseState;
+}
+
 /// The configurable permission engine.
 #[derive(Debug, Clone)]
 pub struct PermissionEngine {
@@ -211,6 +228,11 @@ pub struct PermissionEngine {
     /// a session property, not a profile, so a mid-session profile swap must
     /// carry it — see [`PermissionEngine::with_profile`].
     incognito: bool,
+    /// The write authority, when the session has one. A session property: a
+    /// profile swap keeps it, so `/bypass` cannot lift it.
+    lease: Option<std::sync::Arc<dyn Lease>>,
+    /// Set on a [`PermissionEngine::resolved`] engine whose lease was denied.
+    lease_denial: Option<String>,
 }
 
 impl PermissionEngine {
@@ -222,7 +244,42 @@ impl PermissionEngine {
             allowlist,
             allowed_commands: Vec::new(),
             incognito: false,
+            lease: None,
+            lease_denial: None,
         }
+    }
+
+    /// The same engine governed by a write-authority lease.
+    #[must_use]
+    pub fn with_lease(mut self, lease: std::sync::Arc<dyn Lease>) -> Self {
+        self.lease = Some(lease);
+        self
+    }
+
+    /// This engine with its lease read once: `readonly` becomes the profile
+    /// when the lease is denied, and the lease itself is dropped, so every
+    /// decision made through the result sees the same authority. A caller
+    /// deciding the several effects of one tool call resolves once and uses
+    /// the result for all of them.
+    #[must_use]
+    pub fn resolved(&self) -> Self {
+        let Some(lease) = &self.lease else {
+            return self.clone();
+        };
+        let mut engine = self.clone();
+        engine.lease = None;
+        if let LeaseState::Denied(reason) = lease.current() {
+            engine.profile = Profile::ReadOnly;
+            engine.lease_denial = Some(reason);
+        }
+        engine
+    }
+
+    /// Why the lease denied writing, on a resolved engine whose lease was
+    /// denied.
+    #[must_use]
+    pub fn lease_denial(&self) -> Option<&str> {
+        self.lease_denial.as_deref()
     }
 
     /// The same engine with the user's exact command list.
@@ -236,6 +293,9 @@ impl PermissionEngine {
     /// true for a profile that already allows every command.
     #[must_use]
     pub fn allows_command(&self, command: &ExactCommand) -> bool {
+        if self.lease.is_some() {
+            return self.resolved().allows_command(command);
+        }
         !matches!(self.profile, Profile::Bypass | Profile::Unrestricted)
             && self
                 .allowed_commands
@@ -260,6 +320,8 @@ impl PermissionEngine {
             allowlist,
             allowed_commands: self.allowed_commands.clone(),
             incognito: self.incognito,
+            lease: self.lease.clone(),
+            lease_denial: self.lease_denial.clone(),
         }
     }
 
@@ -290,6 +352,9 @@ impl PermissionEngine {
         request: &PermissionRequest,
         command: Option<&ExactCommand>,
     ) -> Decision {
+        if self.lease.is_some() {
+            return self.resolved().decide_command(request, command);
+        }
         let vetted = matches!(request.effect, Effect::RunCommand(_))
             && command.is_some_and(|command| self.allows_command(command));
         let decision = if vetted {
@@ -1254,6 +1319,147 @@ mod tests {
             .with_allowed_commands(vec![pair_py()])
             .with_profile(Profile::ReadOnly, Vec::new());
         assert!(swapped.allows_command(&matched));
+    }
+
+    /// A lease whose state a test sets, counting how often it is read.
+    #[derive(Debug)]
+    struct TestLease {
+        state: std::sync::Mutex<LeaseState>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TestLease {
+        fn new(state: LeaseState) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                state: std::sync::Mutex::new(state),
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+        fn set(&self, state: LeaseState) {
+            *self.state.lock().unwrap() = state;
+        }
+    }
+
+    impl Lease for TestLease {
+        fn current(&self) -> LeaseState {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.state.lock().unwrap().clone()
+        }
+    }
+
+    const ALL_PROFILES: [Profile; 5] = [
+        Profile::Default,
+        Profile::Relaxed,
+        Profile::ReadOnly,
+        Profile::Bypass,
+        Profile::Unrestricted,
+    ];
+
+    fn configured(profile: Profile) -> PermissionEngine {
+        PermissionEngine::new(profile, vec!["run_shell".to_string()])
+            .with_allowed_commands(vec![pair_py()])
+    }
+
+    #[test]
+    fn an_owner_lease_changes_no_decision_in_any_profile() {
+        let lease = TestLease::new(LeaseState::Owner);
+        let listed = command("python", &["/abs/pair.py"]);
+        for profile in ALL_PROFILES {
+            let with = configured(profile).with_lease(lease.clone());
+            let without = configured(profile);
+            for effect in every_effect() {
+                for interactivity in INTERACTIVITIES {
+                    for trusted in [true, false] {
+                        let request = req(effect, interactivity, trusted);
+                        for command in [None, Some(&listed)] {
+                            assert_eq!(
+                                with.decide_command(&request, command),
+                                without.decide_command(&request, command),
+                                "{profile:?} {effect:?} {interactivity:?} {trusted} {command:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_denied_lease_makes_readonly_the_effective_profile_even_under_bypass_and_unrestricted() {
+        // Bug it prevents: a navigator launched with `bypass` writing because
+        // the profile, not the session's authority, decided.
+        let lease = TestLease::new(LeaseState::Denied("owner=claude".to_string()));
+        let listed = command("python", &["/abs/pair.py"]);
+        let readonly = configured(Profile::ReadOnly);
+        for profile in ALL_PROFILES {
+            let with = configured(profile).with_lease(lease.clone());
+            // The listed command matches even though bypass and unrestricted
+            // never consult the list on their own.
+            assert!(with.allows_command(&listed), "{profile:?}");
+            let resolved = with.resolved();
+            assert_eq!(resolved.profile(), Profile::ReadOnly);
+            assert_eq!(resolved.lease_denial(), Some("owner=claude"));
+            for effect in every_effect() {
+                for interactivity in INTERACTIVITIES {
+                    for trusted in [true, false] {
+                        let request = req(effect, interactivity, trusted);
+                        for command in [None, Some(&listed)] {
+                            assert_eq!(
+                                with.decide_command(&request, command),
+                                readonly.decide_command(&request, command),
+                                "{profile:?} {effect:?} {interactivity:?} {trusted} {command:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // The floors still apply: incognito denies even the listed command.
+        let incognito = configured(Profile::Bypass)
+            .with_lease(lease.clone())
+            .with_incognito(true);
+        let request = req(
+            Effect::RunCommand(CommandClass::Unknown),
+            Interactivity::NonInteractive,
+            true,
+        );
+        assert_eq!(
+            incognito.decide_command(&request, Some(&listed)),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn the_lease_is_read_live_once_per_resolution_and_survives_a_profile_swap() {
+        let lease = TestLease::new(LeaseState::Owner);
+        let engine = configured(Profile::Bypass).with_lease(lease.clone());
+        let write = req(
+            Effect::WritePath {
+                inside_workspace: true,
+                overwrite: false,
+                secret_like: false,
+            },
+            Interactivity::NonInteractive,
+            true,
+        );
+        assert_eq!(engine.decide(&write), Decision::Allow);
+        // Revocation takes effect at the very next decision.
+        lease.set(LeaseState::Denied("handoff pending".to_string()));
+        assert_eq!(engine.decide(&write), Decision::Deny);
+        // A resolved engine carries one reading for a whole tool call.
+        let before = lease.reads.load(std::sync::atomic::Ordering::SeqCst);
+        let resolved = engine.resolved();
+        lease.set(LeaseState::Owner);
+        assert_eq!(resolved.decide(&write), Decision::Deny);
+        assert_eq!(resolved.decide(&write), Decision::Deny);
+        assert_eq!(
+            lease.reads.load(std::sync::atomic::Ordering::SeqCst),
+            before + 1
+        );
+        // A live profile swap keeps the lease.
+        lease.set(LeaseState::Denied("paused".to_string()));
+        let swapped = engine.with_profile(Profile::Unrestricted, Vec::new());
+        assert_eq!(swapped.decide(&write), Decision::Deny);
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub use command::{classify, classify_posix, classify_windows, CommandClass};
 pub use error::SandboxError;
 pub use path::Workspace;
 pub use permission::{
-    AllowedCommand, Approver, Decision, Effect, ExactCommand, Interactivity, PermissionEngine,
-    PermissionEngineHandle, PermissionRequest, Profile, ScriptedApprover,
+    AllowedCommand, Approver, Decision, Effect, ExactCommand, Interactivity, Lease, LeaseState,
+    PermissionEngine, PermissionEngineHandle, PermissionRequest, Profile, ScriptedApprover,
 };
 pub use secret_path::is_secret_like;

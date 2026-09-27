@@ -2532,3 +2532,144 @@ async fn an_unvetted_irreversible_call_still_goes_to_the_approver() {
         result.output
     );
 }
+
+#[derive(Debug)]
+struct FixedLease(localpilot_sandbox::LeaseState);
+
+impl localpilot_sandbox::Lease for FixedLease {
+    fn current(&self) -> localpilot_sandbox::LeaseState {
+        self.0.clone()
+    }
+}
+
+fn leased(profile: Profile, state: localpilot_sandbox::LeaseState) -> PermissionEngine {
+    let (_, entry) = cargo_version();
+    PermissionEngine::new(profile, Vec::new())
+        .with_allowed_commands(vec![entry])
+        .with_lease(std::sync::Arc::new(FixedLease(state)))
+}
+
+fn not_owner() -> localpilot_sandbox::LeaseState {
+    localpilot_sandbox::LeaseState::Denied("owner=claude".to_string())
+}
+
+#[tokio::test]
+async fn a_denied_lease_runs_only_the_listed_command_whatever_the_launch_profile() {
+    // Bug it prevents: a navigator launched with bypass or unrestricted
+    // either writing (the profile decided) or losing its vetted mailbox
+    // command (the list was never consulted under those profiles).
+    let (dir, ws) = workspace_with(&[("f.txt", "alpha\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let (listed, _) = cargo_version();
+    for profile in [
+        Profile::Default,
+        Profile::Relaxed,
+        Profile::Bypass,
+        Profile::Unrestricted,
+    ] {
+        let engine = leased(profile, not_owner());
+        let ran = dispatch(
+            &registry,
+            "run_shell",
+            listed.clone(),
+            &ctx(&ws, Interactivity::NonInteractive, true),
+            &engine,
+            &ScriptedApprover::new(Vec::new()),
+        )
+        .await;
+        assert!(!ran.is_error(), "{profile:?}: {}", ran.output);
+
+        let untrusted = dispatch(
+            &registry,
+            "run_shell",
+            listed.clone(),
+            &ctx(&ws, Interactivity::NonInteractive, false),
+            &engine,
+            &ScriptedApprover::always(),
+        )
+        .await;
+        assert!(untrusted.is_error(), "{profile:?}: {}", untrusted.output);
+
+        for (tool, input) in [
+            ("write_file", json!({ "path": "f.txt", "content": "x" })),
+            (
+                "apply_patch",
+                json!({ "operations": [{ "action": "create", "path": "n.txt", "content": "x" }] }),
+            ),
+            ("run_shell", json!({ "command": "echo x > out.txt" })),
+            (
+                "run_shell",
+                json!({ "program": "git", "args": ["commit", "-am", "x"] }),
+            ),
+        ] {
+            let result = dispatch(
+                &registry,
+                tool,
+                input.clone(),
+                &ctx(&ws, Interactivity::Interactive, true),
+                &engine,
+                &ScriptedApprover::always(),
+            )
+            .await;
+            assert!(
+                result.is_error(),
+                "{profile:?} {tool} {input}: {}",
+                result.output
+            );
+            assert!(
+                result
+                    .output
+                    .contains("does not let this participant write (owner=claude)"),
+                "{}",
+                result.output
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        "alpha\n"
+    );
+    assert!(!dir.path().join("n.txt").exists());
+    assert!(!dir.path().join("out.txt").exists());
+}
+
+#[tokio::test]
+async fn an_owner_lease_leaves_where_a_write_may_land_to_the_profile() {
+    // The lease is authority, not containment: an out-of-workspace write is
+    // decided exactly as it is without a lease, in every profile.
+    let outside = tempfile::tempdir().unwrap();
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let owner = localpilot_sandbox::LeaseState::Owner;
+    for profile in [
+        Profile::Default,
+        Profile::Relaxed,
+        Profile::ReadOnly,
+        Profile::Bypass,
+        Profile::Unrestricted,
+    ] {
+        for interactivity in [Interactivity::Interactive, Interactivity::NonInteractive] {
+            let mut outcomes = Vec::new();
+            for engine in [
+                leased(profile, owner.clone()),
+                PermissionEngine::new(profile, Vec::new()),
+            ] {
+                let target = outside.path().join(format!(
+                    "{profile:?}-{interactivity:?}-{}.txt",
+                    outcomes.len()
+                ));
+                let result = dispatch(
+                    &registry,
+                    "write_file",
+                    json!({ "path": target.to_string_lossy(), "content": "x" }),
+                    &ctx(&ws, interactivity, true),
+                    &engine,
+                    &ScriptedApprover::new(vec![false]),
+                )
+                .await;
+                outcomes.push((result.is_error(), target.exists()));
+            }
+            assert_eq!(outcomes[0], outcomes[1], "{profile:?} {interactivity:?}");
+        }
+    }
+}

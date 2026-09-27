@@ -397,17 +397,11 @@ impl Mesh {
     /// A refusal from [`Mesh::require`]; a path in a companion tree.
     pub fn guard_write(&self, role: &str, path: Option<&Path>) -> Result<Out, MeshError> {
         let s = self.require(role, true)?;
-        let handoff = s.get("handoff").is_some_and(|h| !h.is_null());
-        if str_of(&s, "status") != Some("active") || str_of(&s, "owner") != Some(role) || handoff {
+        if let Some(line) = write_denied(&s, role) {
             return Ok(Out {
                 code: 4,
                 stdout: String::new(),
-                stderr: format!(
-                    "WRITE_DENIED status={} owner={} handoff={}\n",
-                    str_of(&s, "status").unwrap_or("None"),
-                    str_of(&s, "owner").unwrap_or("None"),
-                    if handoff { "yes" } else { "no" }
-                ),
+                stderr: format!("{line}\n"),
             });
         }
         let Some(p) = path else {
@@ -815,6 +809,22 @@ fn dunce_canonical(p: &Path) -> std::io::Result<PathBuf> {
         Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
         _ => c,
     })
+}
+
+/// Spec U-2 on one session record: `None` when `role` may write the tree,
+/// else the `WRITE_DENIED` line saying why. `guard-write` and the write lease
+/// both decide through this, each on a single read of the record.
+pub(crate) fn write_denied(s: &Obj, role: &str) -> Option<String> {
+    let handoff = s.get("handoff").is_some_and(|h| !h.is_null());
+    if str_of(s, "status") == Some("active") && str_of(s, "owner") == Some(role) && !handoff {
+        return None;
+    }
+    Some(format!(
+        "WRITE_DENIED status={} owner={} handoff={}",
+        str_of(s, "status").unwrap_or("None"),
+        str_of(s, "owner").unwrap_or("None"),
+        if handoff { "yes" } else { "no" }
+    ))
 }
 
 #[cfg(test)]

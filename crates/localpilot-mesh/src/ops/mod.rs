@@ -8,6 +8,7 @@
 
 mod delivery;
 mod join;
+mod lease;
 mod post;
 mod read;
 mod render;
@@ -26,6 +27,7 @@ use crate::session;
 use crate::timefmt::utc_now;
 
 pub use delivery::{EndpointArgs, ENDPOINT_TOKEN_ENV, PUSH_OUTCOMES};
+pub use lease::SessionLease;
 pub use post::PostArgs;
 pub use read::WatchArgs;
 pub use render::unit_label;

@@ -1913,6 +1913,7 @@ dependencies = [
 name = "localpilot-mesh"
 version = "5.0.0"
 dependencies = [
+ "localpilot-sandbox",
  "localpilot-store",
  "serde",
  "serde_json",
