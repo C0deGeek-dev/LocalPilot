@@ -453,60 +453,9 @@ fn emit(out: &Out) -> u8 {
     out.code
 }
 
-/// The anchor tree and how it was chosen: `--repo`, then `PAIR_REPO`, then
-/// the current directory; then the Git top level above it, or else the
-/// nearest directory holding a mailbox.
+/// The anchor tree, as `localpilot mesh` and `doctor` both resolve it.
 pub(crate) fn resolve_anchor(repo: Option<&Path>) -> Result<(PathBuf, &'static str), String> {
-    let (start, source) = if let Some(r) = repo {
-        (r.to_path_buf(), "flag")
-    } else if let Some(env) = std::env::var_os("PAIR_REPO").filter(|v| !v.is_empty()) {
-        let p = PathBuf::from(&env);
-        if !p.is_dir() {
-            return Err(format!(
-                "PAIR_REPO={} is not a directory; fix or unset it (no fallback to the current directory)",
-                p.display()
-            ));
-        }
-        (p, "env")
-    } else {
-        let cwd = std::env::current_dir().map_err(|e| format!("no current directory: {e}"))?;
-        (cwd, "cwd")
-    };
-    let start = dunce::canonicalize(&start)
-        .map_err(|e| format!("cannot resolve {}: {e}", start.display()))?;
-    if let Some(top) = git_toplevel(&start) {
-        return Ok((top, source));
-    }
-    for dir in start.ancestors() {
-        if dir.join(localpilot_mesh::layout::MAILBOX_DIR).is_dir() {
-            return Ok((dir.to_path_buf(), source));
-        }
-    }
-    if source == "env" {
-        return Err(format!(
-            "PAIR_REPO={} has no pair mailbox; fix or unset it (no fallback to the current directory)",
-            start.display()
-        ));
-    }
-    Err(format!(
-        "no Git repository and no pair mailbox at {}; point --repo at the session's working tree",
-        start.display()
-    ))
-}
-
-fn git_toplevel(dir: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let top = String::from_utf8(out.stdout).ok()?;
-    dunce::canonicalize(top.trim()).ok()
+    localpilot_mesh::anchor::resolve(repo)
 }
 
 #[cfg(test)]

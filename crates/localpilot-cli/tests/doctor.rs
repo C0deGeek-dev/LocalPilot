@@ -232,6 +232,14 @@ fn report() -> DoctorReport {
         hygiene: None,
         permissions: None,
         skill_maintenance: doctor::SkillMaintenance::default(),
+        mesh: doctor::MeshStatus {
+            writer: "native".to_string(),
+            engine_available: true,
+            anchor: Some("<workspace>".to_string()),
+            mailbox: "none".to_string(),
+            not_ready_reason: Some("no active pair session".to_string()),
+            ..doctor::MeshStatus::default()
+        },
     }
 }
 

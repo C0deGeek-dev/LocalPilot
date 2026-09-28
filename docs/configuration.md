@@ -301,6 +301,10 @@ model answers; if the tree moved during the review, the engine posts a
 `run` needs a schema-2 session (started with `--with`) under acknowledged
 delivery, and the native writer.
 
+`localpilot doctor` shows, in its `mesh` section, the writer, the anchor tree
+`mesh` would use, its active session, and whether the engine can join it as
+`localpilot` (and if not, why). It reads the mailbox and writes nothing.
+
 | Exit status | Meaning |
 |---|---|
 | `0` | Stopped cleanly: a `STOP`, or `--once` after one delivery. |

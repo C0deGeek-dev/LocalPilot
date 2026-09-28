@@ -1924,6 +1924,7 @@ dependencies = [
 name = "localpilot-mesh"
 version = "5.0.0"
 dependencies = [
+ "dunce",
  "localpilot-sandbox",
  "localpilot-store",
  "serde",

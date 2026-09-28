@@ -121,5 +121,21 @@ expression: render_json(&fixture())
       "pair-programming: /home/u/.localpilot/skills/pair-programming [global (.localpilot)] over /home/u/.agents/skills/pair-programming [global (.agents)]"
     ],
     "recovery_pending": []
+  },
+  "mesh": {
+    "writer": "native",
+    "engine_available": true,
+    "anchor": "/work",
+    "mailbox": "session",
+    "session": {
+      "id": "20260101T000000Z-abcdef12",
+      "schema": 2,
+      "participants": [
+        "claude",
+        "localpilot"
+      ],
+      "delivery": "ack"
+    },
+    "ready_as_localpilot": true
   }
 }

@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`doctor` says whether LocalPilot can pair here.** A new `mesh` section
+  shows the mesh writer, the anchor tree, the active pair session, and
+  whether `localpilot mesh run` can join it as `localpilot`, with the reason
+  when it cannot. It only reads the mailbox.
 - **Installed skills can be updated, and say when they are behind.**
   `localpilot skills update [NAME | --all] [-g]` (and `/skills update`)
   refreshes each owning source and replaces every changed package of a

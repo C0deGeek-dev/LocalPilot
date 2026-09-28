@@ -29,6 +29,15 @@ use crate::error::MeshError;
 use crate::jsonl;
 use crate::layout::MAILBOX_DIR;
 
+/// The active session as `doctor` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub schema: i64,
+    pub participants: Vec<String>,
+    pub delivery: String,
+}
+
 /// What a model is asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
@@ -190,6 +199,21 @@ impl Mesh {
             round: 0,
             files: Vec::new(),
             expect: expect(false),
+        }))
+    }
+
+    /// The active session, read and never written: `None` when there is
+    /// none.
+    ///
+    /// # Errors
+    /// An unreadable, corrupt or refused pointer or session record, kept
+    /// apart from "no session" so a caller can say which.
+    pub fn session_summary(&self) -> Result<Option<SessionSummary>, MeshError> {
+        Ok(self.active()?.map(|s| SessionSummary {
+            id: sid(&s).to_owned(),
+            schema: schema(&s),
+            participants: super::participants(&s),
+            delivery: super::delivery(&s).to_owned(),
         }))
     }
 

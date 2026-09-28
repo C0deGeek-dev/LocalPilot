@@ -72,6 +72,124 @@ pub struct DoctorReport {
     /// missing their directory, shadowing another definition, or waiting on
     /// recovery from an interrupted change (LocalHub#189).
     pub skill_maintenance: SkillMaintenance,
+    /// Whether LocalPilot can take part in the pair session of the tree
+    /// `localpilot mesh` would use. Read only; nothing is created.
+    pub mesh: MeshStatus,
+}
+
+/// The pair-programming mailbox as `doctor` sees it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MeshStatus {
+    /// `native`, `delegate`, or `unknown` when the configuration does not
+    /// load; from the user config and environment only.
+    pub writer: String,
+    /// Why the configuration does not load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub delegate_command: Vec<String>,
+    /// `localpilot mesh run` can run (the native writer is selected).
+    pub engine_available: bool,
+    /// The anchor tree `localpilot mesh` would use.
+    pub anchor: Option<String>,
+    /// Why no anchor tree resolves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_error: Option<String>,
+    /// `none`, `session`, or `unreadable: <error>`.
+    pub mailbox: String,
+    pub session: Option<MeshSession>,
+    /// The engine would join this session as `localpilot`.
+    pub ready_as_localpilot: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_ready_reason: Option<String>,
+}
+
+/// The active pair session, summarised.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MeshSession {
+    pub id: String,
+    pub schema: i64,
+    pub participants: Vec<String>,
+    pub delivery: String,
+}
+
+fn mesh_status() -> MeshStatus {
+    let paths = ConfigPaths {
+        user: localpilot_config::user_config_path(),
+        project: None,
+    };
+    let anchor = localpilot_mesh::anchor::resolve(None).map(|(a, _)| a);
+    match localpilot_config::load(&paths, &CliOverrides::default()) {
+        Ok(config) => {
+            let mesh = config.mesh;
+            let delegate = (mesh.writer == localpilot_config::MeshWriter::Delegate)
+                .then_some(mesh.delegate_command);
+            gather_mesh(anchor, delegate)
+        }
+        Err(e) => with_unreadable_config(gather_mesh(anchor, None), &e.to_string()),
+    }
+}
+
+/// `m` for a configuration that does not load: `mesh` itself refuses to run
+/// then, so no writer is assumed and the engine is not ready.
+fn with_unreadable_config(mut m: MeshStatus, error: &str) -> MeshStatus {
+    m.writer = "unknown".into();
+    m.config_error = Some(error.to_owned());
+    m.engine_available = false;
+    m.ready_as_localpilot = false;
+    m.not_ready_reason = Some(format!("the configuration does not load: {error}"));
+    m
+}
+
+/// The mesh status for `anchor` under the given writer (`Some(argv)` for the
+/// delegate). Reads only.
+fn gather_mesh(anchor: Result<PathBuf, String>, delegate: Option<Vec<String>>) -> MeshStatus {
+    let mut m = MeshStatus {
+        writer: if delegate.is_some() {
+            "delegate"
+        } else {
+            "native"
+        }
+        .into(),
+        engine_available: delegate.is_none(),
+        delegate_command: delegate.unwrap_or_default(),
+        anchor: anchor.as_ref().ok().map(|a| a.display().to_string()),
+        anchor_error: anchor.as_ref().err().cloned(),
+        mailbox: "none".into(),
+        ..MeshStatus::default()
+    };
+    let Ok(anchor) = anchor else {
+        m.not_ready_reason = Some("no anchor tree resolves".into());
+        return m;
+    };
+    let mesh = localpilot_mesh::Mesh::at(&anchor, "doctor");
+    match mesh.session_summary() {
+        Ok(None) => m.not_ready_reason = Some("no active pair session".into()),
+        Err(e) => {
+            m.mailbox = format!("unreadable: {e}");
+            m.not_ready_reason = Some("the mailbox cannot be read".into());
+        }
+        Ok(Some(s)) => {
+            m.mailbox = "session".into();
+            m.session = Some(MeshSession {
+                id: s.id,
+                schema: s.schema,
+                participants: s.participants,
+                delivery: s.delivery,
+            });
+            if !m.engine_available {
+                // `mesh run` refuses under the delegate writer, whatever the
+                // session is.
+                m.not_ready_reason = Some("the delegate writer is selected".into());
+            } else {
+                match mesh.engine_ready("localpilot") {
+                    Ok(_) => m.ready_as_localpilot = true,
+                    Err(e) => m.not_ready_reason = Some(e.to_string()),
+                }
+            }
+        }
+    }
+    m
 }
 
 /// What `doctor` reports about keeping installed skills current. Each entry
@@ -469,6 +587,7 @@ pub fn report() -> DoctorReport {
         capabilities: capabilities(),
         skills: skills_doctor(workspace_trust),
         skill_maintenance: skill_maintenance(workspace_trust),
+        mesh: mesh_status(),
         workspace_trust,
         workspace_trust_store,
         hygiene: None,
@@ -884,11 +1003,79 @@ pub fn render(report: &DoctorReport) -> String {
     }
     let _ = writeln!(s);
 
+    render_mesh(&mut s, &report.mesh);
+
     if let Some(context) = &report.hygiene {
         render_hygiene(&mut s, context);
     }
 
     s
+}
+
+fn render_mesh(s: &mut String, m: &MeshStatus) {
+    use std::fmt::Write as _;
+    let _ = writeln!(s, "mesh (pair programming):");
+    if let Some(error) = &m.config_error {
+        let _ = writeln!(
+            s,
+            "  writer: unknown (the configuration does not load: {error})"
+        );
+    } else if m.delegate_command.is_empty() {
+        let _ = writeln!(s, "  writer: {}", m.writer);
+    } else {
+        let _ = writeln!(
+            s,
+            "  writer: {} ({})",
+            m.writer,
+            m.delegate_command.join(" ")
+        );
+    }
+    let engine = if m.engine_available {
+        "available (localpilot mesh run)"
+    } else if m.config_error.is_some() {
+        "unavailable: the configuration does not load"
+    } else {
+        "unavailable under the delegate writer"
+    };
+    let _ = writeln!(s, "  engine: {engine}");
+    match (&m.anchor, &m.anchor_error) {
+        (Some(anchor), _) => {
+            let _ = writeln!(s, "  anchor: {anchor}");
+        }
+        (None, Some(why)) => {
+            let _ = writeln!(s, "  anchor: none ({why})");
+        }
+        (None, None) => {
+            let _ = writeln!(s, "  anchor: none");
+        }
+    }
+    match &m.session {
+        Some(session) => {
+            let _ = writeln!(
+                s,
+                "  session: {} (schema {}, participants {}, delivery {})",
+                session.id,
+                session.schema,
+                session.participants.join(","),
+                session.delivery
+            );
+        }
+        None => {
+            let _ = writeln!(s, "  mailbox: {}", m.mailbox);
+        }
+    }
+    match (&m.ready_as_localpilot, &m.not_ready_reason) {
+        (true, _) => {
+            let _ = writeln!(s, "  engine can join as localpilot: yes");
+        }
+        (false, Some(why)) => {
+            let _ = writeln!(s, "  engine can join as localpilot: no ({why})");
+        }
+        (false, None) => {
+            let _ = writeln!(s, "  engine can join as localpilot: no");
+        }
+    }
+    let _ = writeln!(s);
 }
 
 /// Append the context-hygiene section: per-layer token weights and any advisory
@@ -1345,6 +1532,23 @@ mod tests {
                 }),
             },
             hygiene: None,
+            mesh: MeshStatus {
+                writer: "native".into(),
+                config_error: None,
+                delegate_command: Vec::new(),
+                engine_available: true,
+                anchor: Some("/work".into()),
+                anchor_error: None,
+                mailbox: "session".into(),
+                session: Some(MeshSession {
+                    id: "20260101T000000Z-abcdef12".into(),
+                    schema: 2,
+                    participants: vec!["claude".into(), "localpilot".into()],
+                    delivery: "ack".into(),
+                }),
+                ready_as_localpilot: true,
+                not_ready_reason: None,
+            },
             skill_maintenance: SkillMaintenance {
                 stale: vec!["pair-programming (global, 88094affae -> 1b2c3d4e5f)".to_string()],
                 missing: vec!["old-skill (project)".to_string()],
@@ -1360,6 +1564,179 @@ mod tests {
                 ],
             }),
         }
+    }
+
+    const MESH_SID: &str = "20260101T000000Z-abcdef12";
+
+    /// A mailbox under `dir` whose active session has this shape.
+    fn mailbox(dir: &Path, schema: i64, participants: &[&str], delivery: &str) {
+        let mb = dir.join(".pair-programming");
+        let sd = mb.join("sessions").join(MESH_SID);
+        std::fs::create_dir_all(sd.join("journal")).unwrap();
+        let rec = serde_json::json!({"session_id": MESH_SID, "status": "active", "owner": "claude",
+            "driver": "claude", "unit_id": "1-a", "work_unit": "w", "protocol": "1.0",
+            "delivery": delivery, "schema": schema, "participants": participants});
+        if schema == 2 {
+            std::fs::write(sd.join("session.v2.json"), rec.to_string()).unwrap();
+            std::fs::write(
+                mb.join("active.json"),
+                format!("N-PARTY SESSION {MESH_SID}: see active.v2.json.\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                mb.join("active.v2.json"),
+                serde_json::json!({"session_id": MESH_SID, "status": "active", "schema": 2,
+                    "participants": participants})
+                .to_string(),
+            )
+            .unwrap();
+        } else {
+            let mut rec = rec;
+            rec.as_object_mut().unwrap().remove("schema");
+            rec.as_object_mut().unwrap().remove("participants");
+            std::fs::write(sd.join("session.json"), rec.to_string()).unwrap();
+            std::fs::write(
+                mb.join("active.json"),
+                serde_json::json!({"session_id": MESH_SID, "status": "active"}).to_string(),
+            )
+            .unwrap();
+        }
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                out.push(e.path().display().to_string());
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn mesh_readiness_says_whether_the_engine_can_join_and_writes_nothing() {
+        let empty = tempfile::tempdir().unwrap();
+        let m = gather_mesh(Ok(empty.path().to_path_buf()), None);
+        assert_eq!(m.mailbox, "none");
+        assert!(!m.ready_as_localpilot);
+        assert_eq!(
+            m.not_ready_reason.as_deref(),
+            Some("no active pair session")
+        );
+        assert!(listing(empty.path()).is_empty(), "doctor created files");
+
+        let ready = tempfile::tempdir().unwrap();
+        mailbox(ready.path(), 2, &["claude", "localpilot"], "ack");
+        let before = listing(ready.path());
+        let m = gather_mesh(Ok(ready.path().to_path_buf()), None);
+        assert!(m.ready_as_localpilot, "{m:?}");
+        assert_eq!(
+            m.session.as_ref().unwrap().participants,
+            ["claude", "localpilot"]
+        );
+        assert_eq!(
+            listing(ready.path()),
+            before,
+            "doctor wrote into the mailbox"
+        );
+
+        // The delegate writer refuses `mesh run` whatever the session is.
+        let m = gather_mesh(
+            Ok(ready.path().to_path_buf()),
+            Some(vec!["python".into(), "pair.py".into()]),
+        );
+        assert!(!m.ready_as_localpilot);
+        assert!(!m.engine_available);
+        assert_eq!(
+            m.not_ready_reason.as_deref(),
+            Some("the delegate writer is selected")
+        );
+
+        let schema1 = tempfile::tempdir().unwrap();
+        mailbox(schema1.path(), 1, &[], "ack");
+        let m = gather_mesh(Ok(schema1.path().to_path_buf()), None);
+        assert!(!m.ready_as_localpilot);
+        assert!(
+            m.not_ready_reason
+                .as_deref()
+                .unwrap()
+                .contains("role not in active session"),
+            "{m:?}"
+        );
+
+        let without = tempfile::tempdir().unwrap();
+        mailbox(without.path(), 2, &["claude", "codex"], "ack");
+        let m = gather_mesh(Ok(without.path().to_path_buf()), None);
+        assert!(
+            m.not_ready_reason
+                .as_deref()
+                .unwrap()
+                .contains("role not in active session"),
+            "{m:?}"
+        );
+
+        let print = tempfile::tempdir().unwrap();
+        mailbox(print.path(), 2, &["claude", "localpilot"], "print");
+        let m = gather_mesh(Ok(print.path().to_path_buf()), None);
+        assert!(
+            m.not_ready_reason
+                .as_deref()
+                .unwrap()
+                .contains("acknowledged delivery"),
+            "{m:?}"
+        );
+
+        let corrupt = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(corrupt.path().join(".pair-programming")).unwrap();
+        std::fs::write(
+            corrupt.path().join(".pair-programming").join("active.json"),
+            "{ not json",
+        )
+        .unwrap();
+        let m = gather_mesh(Ok(corrupt.path().to_path_buf()), None);
+        assert!(m.mailbox.starts_with("unreadable: "), "{m:?}");
+        assert_eq!(
+            m.not_ready_reason.as_deref(),
+            Some("the mailbox cannot be read")
+        );
+
+        let m = gather_mesh(Err("no Git repository".into()), None);
+        assert_eq!(m.anchor_error.as_deref(), Some("no Git repository"));
+
+        // A configuration that does not load: no native writer is assumed,
+        // even over a session the engine could otherwise join.
+        let before = listing(ready.path());
+        let m = with_unreadable_config(
+            gather_mesh(Ok(ready.path().to_path_buf()), None),
+            "bad [mesh] writer",
+        );
+        assert!(!m.ready_as_localpilot && !m.engine_available);
+        assert_eq!(m.writer, "unknown");
+        let reason = m.not_ready_reason.clone().unwrap();
+        assert!(reason.contains("bad [mesh] writer"), "{reason}");
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            json.contains("\"config_error\":\"bad [mesh] writer\""),
+            "{json}"
+        );
+        let mut text = String::new();
+        render_mesh(&mut text, &m);
+        assert!(
+            text.contains("writer: unknown (the configuration does not load: bad [mesh] writer)"),
+            "{text}"
+        );
+        assert!(text.contains("engine can join as localpilot: no"), "{text}");
+        assert!(
+            text.contains("engine: unavailable: the configuration does not load"),
+            "{text}"
+        );
+        assert!(!text.contains("delegate"), "{text}");
+        assert_eq!(listing(ready.path()), before);
     }
 
     #[test]

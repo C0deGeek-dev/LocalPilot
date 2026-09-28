@@ -30,6 +30,7 @@
 //! the `localpilot` crate runs it against `localpilot mesh`.
 #![forbid(unsafe_code)]
 
+pub mod anchor;
 mod error;
 pub mod fsio;
 pub mod jsonl;

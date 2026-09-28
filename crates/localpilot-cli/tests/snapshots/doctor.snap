@@ -38,3 +38,10 @@ skills:
   discoverable packages: 3
   user-only packages (hidden): 0
   project overlay hidden (workspace trust could not be evaluated)
+
+mesh (pair programming):
+  writer: native
+  engine: available (localpilot mesh run)
+  anchor: <workspace>
+  mailbox: none
+  engine can join as localpilot: no (no active pair session)

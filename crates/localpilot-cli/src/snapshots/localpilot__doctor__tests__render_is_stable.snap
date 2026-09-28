@@ -49,3 +49,10 @@ skills:
   missing installs (update reinstalls, delete forgets): old-skill (project)
   shadowed: pair-programming: /home/u/.localpilot/skills/pair-programming [global (.localpilot)] over /home/u/.agents/skills/pair-programming [global (.agents)]
   project overlay hidden (workspace trust could not be evaluated)
+
+mesh (pair programming):
+  writer: native
+  engine: available (localpilot mesh run)
+  anchor: /work
+  session: 20260101T000000Z-abcdef12 (schema 2, participants claude,localpilot, delivery ack)
+  engine can join as localpilot: yes
