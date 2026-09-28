@@ -42,7 +42,9 @@ is SemVer-stable; the configuration schema stability policy is in
   model's JSON answer and writes the verdict header itself. It escalates
   rather than post an invalid answer, and acknowledges a message only after
   answering it. The model runs `readonly` under the session's write lease,
-  so it can never change the tree it reviews.
+  so it can never change the tree it reviews. The reviewing model is shown
+  the session's task and judges the change against it, not only against
+  the change's own tests.
 - **A `readonly` permission profile and exact command grants.** `--permission
   readonly` (or `[permissions] profile = "readonly"`) reads as `default` and
   denies every write and every command above read-only, with no prompt that

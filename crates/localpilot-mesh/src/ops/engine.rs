@@ -55,6 +55,8 @@ pub struct Request {
     pub kind: String,
     pub from: String,
     pub body: String,
+    /// The session's task, which a review judges the change against.
+    pub task: String,
     /// This participant's verdict round in the unit, for the header.
     pub round: i64,
     /// For a review: the verified manifest, anchor-relative paths.
@@ -160,6 +162,7 @@ impl Mesh {
             .unwrap_or(false);
         let from = str_of(m, "role").unwrap_or_default().to_owned();
         let body = str_of(m, "body").unwrap_or_default().to_owned();
+        let task = str_of(s, "task").unwrap_or_default().to_owned();
         let expect = |reviewer: bool| Expect {
             session_id: sid(s).to_owned(),
             unit_id: unit.clone(),
@@ -184,6 +187,7 @@ impl Mesh {
                     kind,
                     from,
                     body,
+                    task,
                     round,
                     files,
                     expect: expect(true),
@@ -216,6 +220,7 @@ impl Mesh {
             kind,
             from,
             body,
+            task,
             round: 0,
             files: Vec::new(),
             expect: expect(false),
@@ -1064,6 +1069,7 @@ mod tests {
             },
             from: "claude".into(),
             body: String::new(),
+            task: String::new(),
             round: 2,
             files: vec!["a.txt".into()],
             expect: Expect {

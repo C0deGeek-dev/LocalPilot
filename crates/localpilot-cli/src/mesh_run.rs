@@ -626,14 +626,16 @@ fn tree_listing(anchor: &Path) -> String {
     }
 }
 
-/// What the model is shown: the message, for a review the diff of the
-/// verified files, and the one answer shape it may give.
+/// What the model is shown: the session's task, the message, for a review
+/// the diff of the verified files, and the one answer shape it may give.
 fn brief(anchor: &Path, role: &str, request: &Request, feedback: Option<&str>) -> String {
     let mut out = format!(
         "You are {role}, a participant in a pair-programming session on the repository at {}. \
          You may read files and run read-only commands; you cannot change anything.\n\n\
+         The session's task:\n<<<\n{}\n>>>\n\n\
          {} sent {} {}:\n<<<\n{}\n>>>\n",
         anchor.display(),
+        bounded(&request.task, BODY_BUDGET),
         request.from,
         request.kind,
         request.msg_id,
@@ -642,7 +644,7 @@ fn brief(anchor: &Path, role: &str, request: &Request, feedback: Option<&str>) -
     let shape = match request.need {
         Need::Review => {
             out.push_str(&format!(
-                "\nYou are a required reviewer. The engine has verified the request's fingerprints; the files under review are: {}.\n\nTheir diff against HEAD:\n```diff\n{}\n```\n",
+                "\nYou are a required reviewer. The engine has verified the request's fingerprints; the files under review are: {}.\n\nTheir diff against HEAD:\n```diff\n{}\n```\n\nJudge the change against the task as written, not only against its own tests: anything the task requires that the change does not do is a blocking finding, even when no test covers it.\n",
                 request.files.join(", "),
                 review_diff(anchor, &request.files)
             ));
@@ -699,6 +701,7 @@ mod tests {
             kind: "REVIEW_REQUEST".into(),
             from: "claude".into(),
             body: "please".into(),
+            task: "make a.txt say hi".into(),
             round: 1,
             files: vec!["a.txt".into()],
             expect: Expect {
@@ -779,12 +782,16 @@ mod tests {
             Some("the body is empty"),
         );
         assert!(b.contains("claude sent REVIEW_REQUEST claude:3"));
+        assert!(b.contains("The session's task:\n<<<\nmake a.txt say hi\n>>>"));
+        assert!(b.contains("Judge the change against the task as written"));
         assert!(b.contains("\"decision\": \"AGREE\" or \"REVISE\""));
         assert!(b.contains("Do not write the verdict header"));
         assert!(b.contains("refused: the body is empty"));
         let r = brief(dir.path(), "localpilot", &request(Need::Reply), None);
         assert!(r.contains("\"DESIGN_AGREED\""));
         assert!(!r.contains("verdict header"));
+        assert!(r.contains("make a.txt say hi"));
+        assert!(!r.contains("Judge the change"));
         assert!(bounded(&"x".repeat(10), 4).ends_with("[... cut at 4 characters]"));
     }
 }
