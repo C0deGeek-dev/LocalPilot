@@ -13,7 +13,11 @@ session another thread exercises the delivery facts (endpoint, accept,
 record-push) across both, and `status` runs throughout.
 
 A bounded "mailbox lock busy" is retried a few times and counted; an operation
-that still fails, or fails any other way, fails the run.
+that still fails, or fails any other way, fails the run. A post can report
+"busy" after its message is already in the journal (the append is durable and
+a later step timed out on a lock), so a busy post is retried only when its
+token is not yet in the poster's journal; otherwise it counts as posted
+(`landed_busy`), as a careful client would treat it.
 
 Afterwards an oracle checks the mailbox: no invalid journal line, contiguous
 sequence numbers, every successful post present exactly once, every message
@@ -40,6 +44,12 @@ FACT_ROUNDS = 3          # accept + record-push rounds each three-party session 
 FACT_DRAIN_TRIES = 200   # 50 ms looks after the posters finish before giving up on them
 PEER = re.compile(r"^PEER ([a-z]+) #(\d+) ", re.M)
 TOKEN = re.compile(r"soak:[a-z]+:s\d+:[A-Z]+:\d+")
+
+
+def token_landed(token: str, messages: list) -> bool:
+    """Whether a message carrying exactly `token` is among `messages`: the
+    whole token, never a prefix (`...:1` is not `...:10`)."""
+    return any(token in TOKEN.findall(str(m.get("body") or "")) for m in messages)
 ODD = ["", " caf\u00e9", " line\u2028sep", " para\u2029sep", " \u0085nel", " emoji \U0001F600"]
 
 
@@ -52,6 +62,7 @@ class Soak:
         self.lock = threading.Lock()
         self.ops = 0
         self.busy = 0
+        self.landed_busy = 0
         self.retries = 0
         self.errors: list = []
         self.posts_total = 0
@@ -60,7 +71,11 @@ class Soak:
 
     # --- commands --------------------------------------------------------------
 
-    def call(self, impl: str, args: list, env: dict | None = None) -> subprocess.CompletedProcess:
+    def call(self, impl: str, args: list, env: dict | None = None,
+             landed=None) -> subprocess.CompletedProcess:
+        """Run one command, retrying a bounded "busy". `landed`, for a post, says
+        whether the message is already in the journal: a busy post that landed
+        is not retried (that would post it twice) and counts as a success."""
         e = run.child_env(env)
         for attempt in range(BUSY_RETRIES + 1):
             try:
@@ -72,6 +87,13 @@ class Soak:
                 # never a silently shorter run.
                 p = subprocess.CompletedProcess(args, 124, "", f"{type(x).__name__}: {x}")
             busy = p.returncode != 0 and BUSY in p.stderr
+            if busy and landed is not None and landed():
+                with self.lock:
+                    self.ops += 1
+                    self.busy += 1
+                    self.landed_busy += 1
+                p = subprocess.CompletedProcess(p.args, 0, p.stdout, p.stderr)
+                break
             with self.lock:
                 self.ops += 1
                 self.busy += busy
@@ -158,7 +180,17 @@ class Soak:
                 args += ["--kind", self.rnd.choice(["NOTE", "QUESTION", "ANSWER"])]
                 if pick > 0.8:
                     args.append("--expect-reply")
-            self.record_post(token, role, self.call(impl, args).returncode)
+            self.record_post(token, role, self.call(impl, args, landed=self.landed(token, role)).returncode)
+
+    def landed(self, token: str, role: str):
+        """Whether a post carrying `token` is already in `role`'s journal."""
+        def check() -> bool:
+            try:
+                sd = self.session_dir()
+            except (OSError, ValueError, KeyError):
+                return False
+            return token_landed(token, self.journal(sd, role))
+        return check
 
     def record_post(self, token: str, role: str, rc: int) -> None:
         if rc:
@@ -212,7 +244,8 @@ class Soak:
         # posts the posters make.
         token = f"soak:claude:s{self.session_no}:FACTS:0"
         self.record_post(token, "claude", self.call(other(), ["post", "--role", "claude", "--kind", "NOTE",
-                                                              "--to", "localpilot", "--body", token]).returncode)
+                                                              "--to", "localpilot", "--body", token],
+                                                    landed=self.landed(token, "claude")).returncode)
         rounds = tries = 0
         # After the posters finish, keep going only until the required rounds
         # are done or a bounded number of looks: a run with nothing to accept
@@ -401,7 +434,8 @@ def main(argv=None) -> int:
         for e in s.errors[1:20]:
             print("  " + e)
         return 1
-    print(f"SOAK ok seed={seed} ops={s.ops} posts={s.posts_total} busy={s.busy} retried={s.retries} elapsed={elapsed:.0f}s"
+    print(f"SOAK ok seed={seed} ops={s.ops} posts={s.posts_total} busy={s.busy} retried={s.retries} "
+          f"landed_busy={s.landed_busy} elapsed={elapsed:.0f}s"
           + (f" kept={root}" if a.keep else ""))
     return 0
 

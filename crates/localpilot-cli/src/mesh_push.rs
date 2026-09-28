@@ -313,8 +313,12 @@ mod tests {
             let t0 = Instant::now();
             send(&mesh, vec![job(&l, "s-silent", "claude", i)], within).await;
             let took = t0.elapsed();
+            // The deadline bounds only the push I/O; recording the outcome
+            // is file I/O on top (P-4), which a loaded CI runner can stretch
+            // past a second. A push that outlived its deadline would never
+            // return from this silent endpoint, so the bound still catches it.
             assert!(
-                took < within + Duration::from_secs(2),
+                took < within + Duration::from_secs(10),
                 "round {i} took {took:?}"
             );
             assert_eq!(in_flight_count("s-silent"), 0, "round {i}");
