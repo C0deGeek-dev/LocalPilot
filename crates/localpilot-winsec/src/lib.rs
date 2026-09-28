@@ -19,7 +19,15 @@
 mod ffi;
 
 #[cfg(windows)]
-pub use pipes::{current_user_sid, owner_only_pipe, owner_only_sddl, pipe_dacl};
+pub use pipes::{current_user_sid, owner_only_pipe, pipe_dacl};
+
+/// The SDDL of a protected DACL whose only entry grants `sid` full access: no
+/// inherited entries, no Everyone, no anonymous, no SYSTEM. Plain text, so it
+/// builds (and is tested) on every platform.
+#[must_use]
+pub fn owner_only_sddl(sid: &str) -> String {
+    format!("D:P(A;;GA;;;{sid})")
+}
 
 #[cfg(windows)]
 mod pipes {
@@ -27,14 +35,7 @@ mod pipes {
 
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
-    use crate::ffi;
-
-    /// The SDDL of a protected DACL whose only entry grants `sid` full
-    /// access: no inherited entries, no Everyone, no anonymous, no SYSTEM.
-    #[must_use]
-    pub fn owner_only_sddl(sid: &str) -> String {
-        format!("D:P(A;;GA;;;{sid})")
-    }
+    use crate::{ffi, owner_only_sddl};
 
     /// The current process user's SID, in string form (`S-1-5-21-...`).
     ///
@@ -151,5 +152,15 @@ mod tests {
             dacl.matches("(A;").count() > 1 || dacl.contains(";WD)") || dacl.contains(";AN)"),
             "the default DACL admitted only one principal: {dacl}"
         );
+    }
+}
+
+#[cfg(test)]
+mod portable_tests {
+    #[test]
+    fn the_descriptor_is_protected_and_names_only_the_owner() {
+        let sddl = super::owner_only_sddl("S-1-5-21-1-2-3-1001");
+        assert_eq!(sddl, "D:P(A;;GA;;;S-1-5-21-1-2-3-1001)");
+        assert_eq!(sddl.matches("(A;").count(), 1);
     }
 }
