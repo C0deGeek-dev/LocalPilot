@@ -158,6 +158,32 @@ pub(crate) fn create_pipe(
     }
 }
 
+/// `sddl` as the system writes it back: the canonical text, with well-known
+/// SIDs abbreviated (for example the built-in Administrator as `LA`).
+pub(crate) fn canonical_sddl(sddl: &str) -> io::Result<String> {
+    dacl_text(&SecurityDescriptor::from_sddl(sddl)?)
+}
+
+/// A descriptor's DACL as SDDL.
+fn dacl_text(sd: &SecurityDescriptor) -> io::Result<String> {
+    let mut s: *mut u16 = ptr::null_mut();
+    // SAFETY: `sd` is a valid descriptor this module owns; on success `s`
+    // receives a LocalAlloc'd string, owned from here by `LocalWide`.
+    if unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            sd.0,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut s,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(LocalWide(s).to_string_lossy())
+}
+
 pub(crate) fn dacl_sddl(server: &NamedPipeServer) -> io::Result<String> {
     let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: the handle is the live pipe's and outlives the call; only the
@@ -179,21 +205,5 @@ pub(crate) fn dacl_sddl(server: &NamedPipeServer) -> io::Result<String> {
             i32::try_from(rc).unwrap_or(i32::MAX),
         ));
     }
-    let sd = SecurityDescriptor(sd);
-    let mut s: *mut u16 = ptr::null_mut();
-    // SAFETY: `sd` is the descriptor just returned; on success `s` receives
-    // a LocalAlloc'd string, owned from here by `LocalWide`.
-    if unsafe {
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            sd.0,
-            SDDL_REVISION_1,
-            DACL_SECURITY_INFORMATION,
-            &mut s,
-            ptr::null_mut(),
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(LocalWide(s).to_string_lossy())
+    dacl_text(&SecurityDescriptor(sd))
 }

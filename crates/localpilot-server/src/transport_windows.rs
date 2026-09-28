@@ -179,7 +179,9 @@ mod tests {
 
     /// Protected, one allow entry, and it is the current user's.
     fn assert_owner_only(server: &NamedPipeServer) {
-        let sid = localpilot_winsec::current_user_sid().unwrap();
+        // The owner as Windows prints it: the SID, or an alias such as `LA`
+        // for the built-in Administrator a CI runner uses.
+        let sid = localpilot_winsec::owner_trustee().unwrap();
         let dacl = localpilot_winsec::pipe_dacl(server).unwrap();
         assert!(dacl.starts_with("D:P"), "{dacl}");
         assert_eq!(dacl.matches("(A;").count(), 1, "{dacl}");

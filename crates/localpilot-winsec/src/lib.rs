@@ -19,7 +19,7 @@
 mod ffi;
 
 #[cfg(windows)]
-pub use pipes::{current_user_sid, owner_only_pipe, pipe_dacl};
+pub use pipes::{canonical_sddl, current_user_sid, owner_only_pipe, owner_trustee, pipe_dacl};
 
 /// The SDDL of a protected DACL whose only entry grants `sid` full access: no
 /// inherited entries, no Everyone, no anonymous, no SYSTEM. Plain text, so it
@@ -68,6 +68,31 @@ mod pipes {
     pub fn pipe_dacl(server: &NamedPipeServer) -> io::Result<String> {
         ffi::dacl_sddl(server)
     }
+
+    /// `sddl` as the system writes it back: canonical, with well-known SIDs
+    /// abbreviated (the built-in Administrator prints as `LA`, for example).
+    ///
+    /// # Errors
+    /// `sddl` is not a valid security descriptor.
+    pub fn canonical_sddl(sddl: &str) -> io::Result<String> {
+        ffi::canonical_sddl(sddl)
+    }
+
+    /// The current user as the system names it in a DACL's text: its SID
+    /// string, or the alias Windows prints for a well-known account. Compare
+    /// against this, not the raw SID, when reading [`pipe_dacl`].
+    ///
+    /// # Errors
+    /// As [`current_user_sid`] and [`canonical_sddl`].
+    pub fn owner_trustee() -> io::Result<String> {
+        let text = ffi::canonical_sddl(&owner_only_sddl(&ffi::current_user_sid()?))?;
+        Ok(text
+            .rsplit(";;;")
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(')')
+            .to_owned())
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -106,6 +131,22 @@ mod tests {
     }
 
     #[test]
+    fn the_owner_trustee_is_the_sid_or_its_alias() {
+        // A well-known account (the built-in Administrator a CI runner uses)
+        // prints as an alias such as `LA`; anyone else as the SID string.
+        let sid = current_user_sid().unwrap();
+        let trustee = owner_trustee().unwrap();
+        let alias = trustee.len() == 2 && trustee.chars().all(|c| c.is_ascii_uppercase());
+        assert!(trustee == sid || alias, "{trustee} for {sid}");
+        // The built-in Administrator's SID, whoever runs this, prints as LA.
+        let domain = sid.rsplit_once('-').map(|(d, _)| d).unwrap();
+        if domain.starts_with("S-1-5-21-") {
+            let admin = canonical_sddl(&owner_only_sddl(&format!("{domain}-500"))).unwrap();
+            assert!(admin.ends_with(";;;LA)"), "{admin}");
+        }
+    }
+
+    #[test]
     fn the_sid_is_the_users_string_sid() {
         let sid = current_user_sid().unwrap();
         assert!(sid.starts_with("S-1-"), "{sid}");
@@ -113,7 +154,8 @@ mod tests {
 
     #[tokio::test]
     async fn every_instance_admits_only_the_owner_and_the_owner_can_connect() {
-        let sid = current_user_sid().unwrap();
+        // The owner as Windows prints it: the SID, or an alias such as `LA`.
+        let sid = owner_trustee().unwrap();
         let name = unique("owner");
         let first = owner_only_pipe(ServerOptions::new().first_pipe_instance(true), &name).unwrap();
         let dacl = pipe_dacl(&first).unwrap();
