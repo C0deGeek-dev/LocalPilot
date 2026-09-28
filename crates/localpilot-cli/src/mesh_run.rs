@@ -295,6 +295,11 @@ fn post_owner(mesh: &Mesh, role: &str, args: &PostArgs, task: &OwnerTask) -> Res
             println!("SKIPPED round {}: {why}", task.round);
             Ok(())
         }
+        // Posted; only its bookkeeping is incomplete (spec M-7). Never re-sent.
+        Err(e @ MeshError::PostedIncomplete { .. }) => {
+            println!("{e}");
+            Ok(())
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -434,6 +439,10 @@ fn post(
         }
         Err(MeshError::Refused(why)) if why.starts_with("STALE") => {
             println!("SKIPPED {ack}: {why}");
+        }
+        // Posted; only its bookkeeping is incomplete (spec M-7). Never re-sent.
+        Err(e @ MeshError::PostedIncomplete { .. }) => {
+            println!("{e}");
         }
         Err(e) => return Err(e.into()),
     }

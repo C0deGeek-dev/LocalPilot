@@ -273,6 +273,12 @@ pub(crate) async fn run(args: MeshArgs) -> ExitCode {
     crate::mesh_push::push_all(&mesh).await;
     match result {
         Ok(code) => ExitCode::from(code),
+        // Spec M-7: the message is posted; exit 6 tells the caller not to
+        // post it again.
+        Err(e @ MeshError::PostedIncomplete { .. }) => {
+            eprintln!("{e}");
+            ExitCode::from(6)
+        }
         Err(e) => {
             eprintln!("{e} [anchor={} source={source}]", anchor.display());
             ExitCode::from(1)

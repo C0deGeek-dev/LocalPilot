@@ -99,6 +99,19 @@ pub const HEALTH: &[&str] = &[
     "offline",
 ];
 pub(crate) const DOWN: &[&str] = &["rate_limited", "paused", "offline"];
+/// How long a post waits for the state lock after its durable append (spec
+/// M-7): past the stale-lock age.
+pub const AFTER_APPEND_WAIT: std::time::Duration = std::time::Duration::from_secs(65);
+
+/// [`AFTER_APPEND_WAIT`], or `PAIR_TEST_AFTER_APPEND_WAIT_S` in tests.
+fn after_append_wait() -> std::time::Duration {
+    std::env::var("PAIR_TEST_AFTER_APPEND_WAIT_S")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .and_then(|s| std::time::Duration::try_from_secs_f64(s).ok())
+        .unwrap_or(AFTER_APPEND_WAIT)
+}
+
 /// The longest body a post may carry (spec M-4).
 pub const MAX_BODY: usize = 12_000;
 
@@ -258,6 +271,17 @@ impl Mesh {
 
     fn state_lock(&self) -> Result<Lock, MeshError> {
         Lock::acquire(&self.mb.state_lock())
+    }
+
+    /// The state lock for a post's bookkeeping after its durable append:
+    /// waits past the stale-lock age, so a dead holder's lock is reaped
+    /// first (spec M-7).
+    fn state_lock_after_append(&self) -> Result<Lock, MeshError> {
+        Lock::acquire_within(
+            &self.mb.state_lock(),
+            after_append_wait(),
+            crate::lock::STALE,
+        )
     }
 }
 

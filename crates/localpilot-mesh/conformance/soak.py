@@ -63,6 +63,7 @@ class Soak:
         self.ops = 0
         self.busy = 0
         self.landed_busy = 0
+        self.incomplete = 0
         self.retries = 0
         self.errors: list = []
         self.posts_total = 0
@@ -86,6 +87,13 @@ class Soak:
                 # A command that hangs or cannot start is a failed operation,
                 # never a silently shorter run.
                 p = subprocess.CompletedProcess(args, 124, "", f"{type(x).__name__}: {x}")
+            if p.returncode == 6 and "POSTED_INCOMPLETE" in p.stderr:
+                # Spec M-7: posted, bookkeeping incomplete. Never retried.
+                with self.lock:
+                    self.ops += 1
+                    self.incomplete += 1
+                p = subprocess.CompletedProcess(p.args, 0, p.stdout, p.stderr)
+                break
             busy = p.returncode != 0 and BUSY in p.stderr
             if busy and landed is not None and landed():
                 with self.lock:
@@ -435,7 +443,7 @@ def main(argv=None) -> int:
             print("  " + e)
         return 1
     print(f"SOAK ok seed={seed} ops={s.ops} posts={s.posts_total} busy={s.busy} retried={s.retries} "
-          f"landed_busy={s.landed_busy} elapsed={elapsed:.0f}s"
+          f"landed_busy={s.landed_busy} incomplete={s.incomplete} elapsed={elapsed:.0f}s"
           + (f" kept={root}" if a.keep else ""))
     return 0
 

@@ -1697,6 +1697,52 @@ async fn mesh_wait_is_woken_by_a_post_and_prints_what_watch_prints() {
 }
 
 #[tokio::test]
+async fn mesh_wait_finds_mail_by_its_own_poll_when_no_wake_comes() {
+    // Nothing depends on a push: with pushing off, the listening waiter
+    // still finds the mail on its next look at the mailbox.
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    f.reference(&["watch", "--role", "claude", "--timeout", "1"]);
+    f.reference(&["ack", "--role", "claude", "--through", "localpilot:1"]);
+    let child = f
+        .waiter(&["--role", "claude", "--poll", "2", "--timeout", "60"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    until("claude's endpoint", || {
+        f.endpoint_record("claude")
+            .is_some_and(|e| e["active"] == true)
+    })
+    .await;
+    let posted = f.reference_out(
+        &[
+            "post",
+            "--role",
+            "localpilot",
+            "--kind",
+            "NOTE",
+            "--body",
+            "unannounced",
+        ],
+        &[("PAIR_NO_PUSH", "1")],
+    );
+    assert!(posted.status.success(), "{}", text(&posted));
+    let out = finish(child, 20)
+        .await
+        .expect("mesh wait never found the mail");
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("unannounced"),
+        "{}",
+        text(&out)
+    );
+}
+
+#[tokio::test]
 async fn mesh_wait_times_out_silently_and_retires_its_endpoint() {
     let server = server().await;
     let Some(f) = Fixture::new(&server) else {
@@ -2351,4 +2397,118 @@ async fn a_two_party_mcp_verdict_validates_reply_to_but_posts_without_it() {
         .as_str()
         .unwrap()
         .starts_with("AGREE round=1 blocking=0 important=0"));
+}
+
+/// `localpilot mesh post` as localpilot, with extra environment.
+fn native_post(f: &Fixture, body: &str, env: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_localpilot"));
+    cmd.arg("mesh")
+        .arg("--repo")
+        .arg(&f.anchor)
+        .args([
+            "post",
+            "--role",
+            "localpilot",
+            "--kind",
+            "NOTE",
+            "--to",
+            "claude",
+            "--body",
+            body,
+        ])
+        .env_remove("PAIR_REPO")
+        .env("APPDATA", &f.config)
+        .env("XDG_CONFIG_HOME", &f.config)
+        .env("LOCALPILOT_MESH__WRITER", "native");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
+/// Hold the mailbox's state lock (the protocol's lock file) for `secs`.
+fn hold_state_lock(f: &Fixture, secs: u64) -> std::thread::JoinHandle<()> {
+    let lock = f.anchor.join(".pair-programming").join(".state.lock");
+    std::fs::write(&lock, format!("{} test\n", std::process::id())).unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        let _ = std::fs::remove_file(lock);
+    })
+}
+
+#[tokio::test]
+async fn a_native_post_waits_out_a_state_lock_held_past_ten_seconds() {
+    // Spec M-7: after the append the old 10 s bound would report "busy".
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    let release = hold_state_lock(&f, 12);
+    let out = native_post(&f, "still here", &[]);
+    release.join().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("busy"), "{}", text(&out));
+    assert!(f
+        .journal("localpilot")
+        .iter()
+        .any(|m| m["body"] == "still here"));
+}
+
+#[tokio::test]
+async fn a_native_post_whose_lock_stays_held_after_the_append_reports_posted_incomplete() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    let release = hold_state_lock(&f, 4);
+    let out = native_post(
+        &f,
+        "landed anyway",
+        &[("PAIR_TEST_AFTER_APPEND_WAIT_S", "1")],
+    );
+    release.join().unwrap();
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("POSTED_INCOMPLETE msg_id=localpilot:"),
+        "{err}"
+    );
+    assert!(err.contains("Do not post it again"), "{err}");
+    assert!(!err.contains("mailbox lock busy"), "{err}");
+    assert!(f
+        .journal("localpilot")
+        .iter()
+        .any(|m| m["body"] == "landed anyway"));
+}
+
+#[tokio::test]
+async fn a_native_post_whose_latest_write_fails_reports_posted_incomplete() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    let latest = f
+        .session_file()
+        .parent()
+        .unwrap()
+        .join("latest")
+        .join("localpilot.json");
+    assert!(latest.exists(), "join wrote localpilot's latest record");
+    let freeze = Frozen::new(&latest);
+    let out = native_post(&f, "second", &[]);
+    drop(freeze);
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("POSTED_INCOMPLETE") && err.contains("latest record"),
+        "{err}"
+    );
+    assert!(!err.contains("busy"), "{err}");
+    assert!(f
+        .journal("localpilot")
+        .iter()
+        .any(|m| m["body"] == "second"));
 }

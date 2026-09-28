@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, hashlib, hmac, json, os, re, secrets, socket, subprocess, sys, tempfile, threading, time, uuid
+import argparse, contextlib, hashlib, hmac, json, os, re, secrets, socket, subprocess, sys, tempfile, threading, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -966,9 +966,9 @@ def vcs_lines(repo,s,count=None):
             "  ignore: "+(", ".join(pats) if pats else f"(none; add {PAIRIGNORE} to exclude paths)")]
 
 class Lock:
-    def __init__(self,p): self.p=p; self.fd=None
+    def __init__(self,p,wait=10): self.p=p; self.fd=None; self.wait=wait
     def __enter__(self):
-        end=time.monotonic()+10; self.p.parent.mkdir(parents=True,exist_ok=True); reaped=False
+        end=time.monotonic()+self.wait; self.p.parent.mkdir(parents=True,exist_ok=True); reaped=False
         while True:
             try:
                 self.fd=os.open(self.p,os.O_CREAT|os.O_EXCL|os.O_WRONLY); os.write(self.fd,f"{os.getpid()} {now()}\n".encode()); return self
@@ -1159,7 +1159,10 @@ class MB:
         # the same number, and on Windows interleave their appends into a torn
         # line. Found by a concurrency stress run; a per-role lock, not the
         # state lock, so the peer's posts are never serialised behind this one.
-        with Lock(p.with_suffix(".lock")):
+        # Entered before the role lock, so it also covers the lock's release:
+        # once the append has landed, even that failing is POSTED_INCOMPLETE.
+        appended={}
+        with appended_guard(appended,"the role lock could not be released"), Lock(p.with_suffix(".lock")):
             # The next seq follows whichever is higher: `latest`, or the journal's
             # own last record. `latest` is written after the append, so a crash
             # between the two left it one behind, and the next post reused the
@@ -1185,8 +1188,13 @@ class MB:
             # In the journal now, so owed its wakes even if a later step fails
             # (P-3). Only queued: `push_all` dials once the command holds no lock.
             PUSHES.append((self,s,m))
-            atomic(self.latest(s,role),m)
-        with Lock(self.lock):
+            mid=m.get("msg_id") or f"{role}:{seq}"
+            appended["mid"]=mid
+            # The append above is the post's durability point: nothing after
+            # it may report a retryable failure (spec M-7).
+            with posted_guard(mid,"the latest record could not be written"):
+                atomic(self.latest(s,role),m)
+        with posted_guard(mid,"the session update did not complete"), Lock(self.lock,wait=after_append_wait()):
             fresh=self.active()
             if fresh and fresh["session_id"]==s["session_id"]:
                 # The inverse drift the session-first ordering can produce:
@@ -1224,6 +1232,49 @@ class MB:
                         fresh["waiting"]=wm or None
                 fresh["updated_at"]=now(); self.save(fresh)
         return m
+
+# How long a post waits for the state lock after its durable append: past the
+# stale-lock age (60 s), so a dead holder's lock is always reaped first.
+AFTER_APPEND_WAIT=65
+
+def after_append_wait():
+    """The after-append lock bound; PAIR_TEST_AFTER_APPEND_WAIT_S shortens it in tests."""
+    try: return float(os.environ.get("PAIR_TEST_AFTER_APPEND_WAIT_S",AFTER_APPEND_WAIT))
+    except ValueError: return AFTER_APPEND_WAIT
+
+@contextlib.contextmanager
+def posted_guard(mid,what):
+    """Turn any failure after a post's durable append into POSTED_INCOMPLETE
+    (exit 6): the message stands, and the caller must not post it again. The
+    report never contains the retryable "busy" wording."""
+    try:
+        yield
+    except SystemExit as ex:
+        if ex.code==6: raise
+        posted_incomplete(mid,what,ex)
+    except OSError as ex:
+        posted_incomplete(mid,what,ex)
+
+@contextlib.contextmanager
+def appended_guard(box,what):
+    """posted_guard for a block that may fail before or after its append:
+    only once `box["mid"]` is set (the append landed) does a failure become
+    POSTED_INCOMPLETE. Before that it passes through unchanged."""
+    try:
+        yield
+    except SystemExit as ex:
+        if "mid" not in box or ex.code==6: raise
+        posted_incomplete(box["mid"],what,ex)
+    except OSError as ex:
+        if "mid" not in box: raise
+        posted_incomplete(box["mid"],what,ex)
+
+def posted_incomplete(mid,what,ex):
+    text=str(ex.code if isinstance(ex,SystemExit) else ex)
+    cause="the state lock stayed held" if "lock busy" in text else f"{what} ({type(ex).__name__})"
+    print(f"POSTED_INCOMPLETE msg_id={mid} cause={cause}: the message is posted; "
+          "its bookkeeping did not complete. Do not post it again.",file=sys.stderr)
+    raise SystemExit(6)
 
 def require(mb,role,allow_paused=False):
     s=mb.active()

@@ -6,6 +6,26 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A post that landed is never reported as failed.** Once `localpilot mesh`
+  has appended a message, it waits up to 65 seconds for the session's state
+  lock instead of 10. If anything after the append still fails, it exits `6`
+  with `POSTED_INCOMPLETE msg_id=<id> cause=<cause>` on stderr: the message is
+  posted and must not be posted again. It never reports such a post as
+  "mailbox lock busy", which invited a duplicate. `mesh run` treats it as
+  posted and carries on.
+- **`localpilot mesh mcp --role <r>`: the pair mailbox as MCP tools.** A
+  stdio MCP server for Claude Code or Codex with six tools: `status`, `peek`,
+  `ack`, `post`, `handoff` and `verdict`. The role is fixed when the server
+  starts, so a client can only act as that participant. `verdict` writes the
+  header from the findings and is refused unless it answers the owner's
+  current review request with a manifest that still holds. No tool waits for
+  mail.
+- **`localpilot mesh wait`: a waiter that wakes on a post.** A host runs it in
+  place of `pair.py watch`. It registers the role's delivery endpoint, prints
+  exactly what `watch` prints when mail arrives, and retires the endpoint on
+  the way out; if it cannot hold the endpoint it falls back to polling.
+  `--nudge-only [--after sender:N]` reports new mail without reading it, for a
+  notifier. `--exit-with-parent` stops it cleanly when its parent exits.
 - **`localpilot mesh run --listen`: LocalPilot wakes when a peer posts.** The
   engine registers its own delivery endpoint (an owner-only named pipe on
   Windows, a socket in a private directory on Unix), keeps the token in

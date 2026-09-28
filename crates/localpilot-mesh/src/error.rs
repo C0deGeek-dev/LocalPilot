@@ -34,6 +34,12 @@ pub enum MeshError {
     #[error("mailbox serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    /// A post's message is in the journal, but a step after its durable
+    /// append failed (spec M-7). The message stands: never post it again.
+    /// The text never contains the retryable "busy" wording.
+    #[error("POSTED_INCOMPLETE msg_id={msg_id} cause={cause}: the message is posted; its bookkeeping did not complete. Do not post it again.")]
+    PostedIncomplete { msg_id: String, cause: String },
+
     /// A storage primitive failed.
     #[error(transparent)]
     Store(#[from] localpilot_store::StoreError),

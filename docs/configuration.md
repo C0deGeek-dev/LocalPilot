@@ -270,6 +270,12 @@ run, and a long one nightly on Linux and Windows. The anchor tree is `--repo`, t
 | `2` | A usage error, or an operation only a full implementation provides. |
 | `4` | `guard-write` denied the write (`WRITE_DENIED` on stderr). |
 | `5` | A delivery request was refused (`REFUSED <code>` on stderr). |
+| `6` | The message is posted, but its bookkeeping did not complete (`POSTED_INCOMPLETE msg_id=<id> cause=<cause>` on stderr). Do not post it again. |
+
+A post is durable once its message is appended to the journal. After that
+point the post waits up to 65 seconds for the session's state lock, and any
+later failure exits `6`, never `1` with "mailbox lock busy": a retry would
+post the message twice.
 
 Posting wakes the recipients that are listening. After any operation that
 appended a message, and once it holds no lock, `localpilot mesh` sends one
@@ -373,6 +379,65 @@ of finding the mail on its next look:
 | `1` | An error, or no session named the role within `--timeout`. |
 | `2` | A usage error, or the delegate writer is selected. |
 | `4` | The session cannot host the engine (the reason is on stderr). |
+
+#### Waiting for mail (`localpilot mesh wait`)
+
+`localpilot mesh wait` is a one-shot waiter that a host (Claude Code or
+Codex) runs in the background in place of `pair.py watch`:
+
+```powershell
+localpilot mesh --repo . wait --role claude --timeout 3600
+```
+
+It registers the role's delivery endpoint from its own process, looks at the
+mailbox once, and then sleeps until a peer's post wakes it, or until the next
+look every `--poll` seconds (30 by default). When mail arrives it prints
+exactly what `watch` prints and exits `0`; at `--timeout` it exits `1`,
+silent. It retires the endpoint on the way out. If it cannot hold the
+endpoint, because another live process holds it or a crashed waiter's lease
+has not yet run out, it says so on stderr and polls like `watch`.
+
+- `--ack-through` acknowledges first, as `watch --ack-through` does.
+- `--nudge-only` reads nothing: it moves no cursor, writes no receipt, and
+  exits `0` with one line, `NUDGE sender:N[,sender:N]`, once there is
+  unacknowledged mail for the role. With `--after sender:N[,sender:N]`, only
+  mail newer than those points ends the wait. This is for a notifier that
+  must not read the mail itself.
+- `--exit-with-parent` stops the waiter, retiring the endpoint, when its
+  stdin reaches end of file. A parent that runs it with a pipe it never
+  writes gets it stopped whenever the parent exits, even when it is killed.
+
+Every look is bound to the session the waiter started in, so a session
+switched meanwhile never hands it another session's mail.
+
+#### The mailbox as MCP tools (`localpilot mesh mcp`)
+
+`localpilot mesh mcp --role <r>` serves the mailbox over stdio MCP for a host
+that would rather call tools than run commands. Register it in your user
+configuration, never in a project file a clone could change:
+
+```powershell
+claude mcp add --scope user pair-mesh -- localpilot mesh mcp --role claude
+codex mcp add pair-mesh -- localpilot mesh mcp --role codex
+```
+
+The server's tools are `status`, `peek`, `ack`, `post`, `handoff` and
+`verdict`. Each is one call to the same operation `localpilot mesh <op>` runs,
+and returns what that command would print. The role is fixed when the server
+starts and is never a tool argument, so a client can only act as that
+participant.
+
+- `peek` presents mail under acknowledged delivery but does not acknowledge
+  it; it is shown again, marked `REDELIVERED`, until `ack` or a post's
+  `ack_through` acknowledges it.
+- `verdict` answers the open `REVIEW_REQUEST`. The header (decision, round,
+  blocking and important counts) is written from the findings. It is refused
+  unless `reply_to` is the owner's latest request in the unit, the caller is
+  a required reviewer that has not answered it yet, and its fingerprint
+  manifest still holds.
+
+No tool waits for mail, so a tool call never holds a host's turn open. Wait
+with `localpilot mesh wait` in a background task.
 
 #### Switching the writer
 

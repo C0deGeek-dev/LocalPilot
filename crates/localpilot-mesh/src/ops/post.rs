@@ -98,6 +98,27 @@ fn check_recipients(s: &Obj, role: &str, named: &[String]) -> Result<(), MeshErr
     Ok(())
 }
 
+/// A failure after a post's durable append, as POSTED_INCOMPLETE (spec M-7).
+/// A lock that stayed held is named without the retryable "busy" wording.
+fn incomplete(m: &Obj, role: &str, what: &str, e: &MeshError) -> MeshError {
+    let msg_id = str_of(m, "msg_id").map_or_else(
+        || {
+            format!(
+                "{role}:{}",
+                m.get("seq").and_then(Value::as_i64).unwrap_or(0)
+            )
+        },
+        str::to_owned,
+    );
+    let cause = match e {
+        MeshError::LockBusy(_) => "the state lock stayed held".to_owned(),
+        MeshError::Io { .. } => format!("{what} (io error)"),
+        MeshError::Refused(_) => format!("{what} (refused)"),
+        _ => format!("{what} (error)"),
+    };
+    MeshError::PostedIncomplete { msg_id, cause }
+}
+
 impl Mesh {
     /// Recipients and lineage for a post, validated on snapshot `s`. Schema 1
     /// is the historic pair: its peer is implicit and directed-mail flags are
@@ -392,10 +413,14 @@ impl Mesh {
             // fails (P-3). Only queued here: the caller dials once the
             // command holds no lock.
             self.queue_push(&s, &m);
-            crate::fsio::write_json(&self.mb.latest(sid(&s), role), &m)?;
+            // The append is the durability point (spec M-7): from here no
+            // failure may look retryable.
+            crate::fsio::write_json(&self.mb.latest(sid(&s), role), &m)
+                .map_err(|e| incomplete(&m, role, "the latest record could not be written", &e))?;
             m
         };
-        self.after_post(&s, role, &m, entry_pause.is_some(), a.expect_reply)?;
+        self.after_post(&s, role, &m, entry_pause.is_some(), a.expect_reply)
+            .map_err(|e| incomplete(&m, role, "the session update did not complete", &e))?;
         Ok(m)
     }
 
@@ -409,7 +434,7 @@ impl Mesh {
         had_pause: bool,
         expect: bool,
     ) -> Result<(), MeshError> {
-        let _g = self.state_lock()?;
+        let _g = self.state_lock_after_append()?;
         let Some(mut fresh) = self.active()? else {
             return Ok(());
         };
