@@ -13,6 +13,12 @@
 //! Python process, which keeps a failing command's exit code and error text;
 //! the assertion prints them. `localpilot mesh` is not wrapped: a second
 //! process per command pushed the suite past the per-test ceiling on Windows.
+//!
+//! The mandatory list runs in shards, one test each, so no test nears the
+//! five-minute ceiling on a slow runner and nextest runs them side by side.
+//! The shards partition the list by position; a separate test checks that
+//! the vendored fixtures are exactly the mandatory list, so none can fall
+//! between shards.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
@@ -42,11 +48,82 @@ fn failed_commands(dir: &Path) -> String {
     )
 }
 
+/// How many shards the mandatory list is run in.
+const SHARDS: usize = 4;
+
+/// The vendored mandatory list, in its own order.
+fn mandatory() -> Vec<String> {
+    let listed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(suite().join("participant.json")).expect("participant.json"),
+    )
+    .expect("participant.json is JSON");
+    let ids: Vec<String> = listed["mandatory"]
+        .as_array()
+        .expect("participant.json lists mandatory fixtures")
+        .iter()
+        .map(|v| v.as_str().expect("fixture ids are strings").to_owned())
+        .collect();
+    assert!(!ids.is_empty(), "the mandatory list is empty");
+    ids
+}
+
 #[test]
-fn the_participant_passes_every_mandatory_fixture() {
+fn the_vendored_fixtures_are_exactly_the_mandatory_list() {
+    let mut on_disk: Vec<String> = std::fs::read_dir(suite().join("fixtures"))
+        .expect("the vendored fixtures")
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".json").map(str::to_owned)
+        })
+        .collect();
+    on_disk.sort();
+    let mut listed = mandatory();
+    listed.sort();
+    assert_eq!(
+        on_disk, listed,
+        "a vendored fixture is not mandatory, or a mandatory one is missing"
+    );
+}
+
+#[test]
+fn shard_1_of_4() {
+    run_shard(0);
+}
+
+#[test]
+fn shard_2_of_4() {
+    run_shard(1);
+}
+
+#[test]
+fn shard_3_of_4() {
+    run_shard(2);
+}
+
+#[test]
+fn shard_4_of_4() {
+    run_shard(3);
+}
+
+/// Run every mandatory fixture whose position is `shard` modulo [`SHARDS`].
+fn run_shard(shard: usize) {
     let Some(py) = python_or_skip("the mesh conformance suite") else {
         return;
     };
+    let ids: Vec<String> = mandatory()
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| i % SHARDS == shard)
+        .map(|(_, id)| id)
+        .collect();
+    let fixtures: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            let p = suite().join("fixtures").join(format!("{id}.json"));
+            dunce::simplified(&p).display().to_string()
+        })
+        .collect();
     let recorder = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("support")
@@ -70,6 +147,7 @@ fn the_participant_passes_every_mandatory_fixture() {
             "LOCALPILOT_CONFORMANCE_REFERENCE",
             suite().join("reference").join("pair.py"),
         )
+        .args(&fixtures)
         .output()
         .expect("run the conformance runner");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -94,19 +172,12 @@ fn the_participant_passes_every_mandatory_fixture() {
         .unwrap_or_default();
     // The expected count comes from the vendored mandatory list, not from the
     // runner's own report, so a runner that selects fewer fixtures fails here.
-    let listed: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(suite().join("participant.json")).expect("participant.json"),
-    )
-    .expect("participant.json is JSON");
-    let mandatory = listed["mandatory"]
-        .as_array()
-        .expect("participant.json lists mandatory fixtures")
-        .len();
-    assert!(mandatory > 0, "the mandatory list is empty");
+    let n = ids.len();
+    assert!(n > 0, "shard {shard} is empty");
     assert_eq!(
         summary,
-        format!("SELECTED {mandatory} / TOTAL {mandatory} / SKIPPED 0 / FAILED 0"),
-        "every mandatory fixture must run and pass"
+        format!("SELECTED {n} / TOTAL {n} / SKIPPED 0 / FAILED 0"),
+        "every mandatory fixture in shard {shard} must run and pass"
     );
     assert!(
         !stdout.contains("MANDATORY_NOT_RUN"),
