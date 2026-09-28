@@ -305,6 +305,28 @@ model answers; if the tree moved during the review, the engine posts a
 `run` needs a schema-2 session (started with `--with`) under acknowledged
 delivery, and the native writer.
 
+With `--own`, LocalPilot also does the owner's work when a unit is handed to
+it:
+
+- It accepts the handoff through the protocol operation, which refuses if
+  the tree moved since the offer.
+- It has the model implement the task in a turn that may write only while
+  the session says LocalPilot owns the tree. That turn runs with `bypass`
+  so the model can run tests headless. File tools keep the workspace
+  boundary; shell commands are not contained.
+- It builds the review request itself. The manifest covers everything
+  committed since the unit's base plus everything uncommitted, and the
+  engine fingerprints each path.
+- It answers `REVISE` findings in further rounds, and escalates after three
+  rounds or after a round that changes nothing.
+- It closes the unit only when every required reviewer has agreed.
+
+Without `--own`, a handoff offered to LocalPilot is declined with a note.
+`--own` needs a Git anchor; a session without version control is refused
+before any model work. A required reviewer's `ESCALATE` on the open request,
+or its `STOP`, ends the owner's run. After a hand-away and back, only
+requests and verdicts from the current ownership count.
+
 `localpilot doctor` shows, in its `mesh` section, the writer, the anchor tree
 `mesh` would use, its active session, and whether the engine can join it as
 `localpilot` (and if not, why). It reads the mailbox and writes nothing.

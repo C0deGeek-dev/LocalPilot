@@ -23,7 +23,6 @@ use sha2::{Digest, Sha256};
 
 use super::post::{Expect, PostArgs};
 use super::read::Delivery;
-use super::unit::git;
 use super::{authority, schema, sid, str_of, Mesh, Obj, MAX_BODY};
 use crate::error::MeshError;
 use crate::jsonl;
@@ -82,6 +81,9 @@ pub enum Step {
     Notice(String),
     /// A `STOP`: acknowledge it, then stop the loop.
     Stop { msg_id: String, reason: String },
+    /// A handoff offered to this participant, which runs as an owner:
+    /// accept it (the operation re-checks the tree), then acknowledge.
+    Accept { msg_id: String },
 }
 
 /// The kinds a reply may take.
@@ -100,6 +102,20 @@ impl Mesh {
     /// A refusal reading the session, or a session that is not schema 2
     /// (the engine replies by `msg_id`, which only schema 2 has).
     pub fn plan(&self, role: &str, delivery: &Delivery) -> Result<Vec<Step>, MeshError> {
+        self.plan_as(role, delivery, false)
+    }
+
+    /// [`Mesh::plan`] for a participant that may also take ownership: a
+    /// handoff offered to it is accepted rather than declined.
+    ///
+    /// # Errors
+    /// As [`Mesh::plan`].
+    pub fn plan_as(
+        &self,
+        role: &str,
+        delivery: &Delivery,
+        owns: bool,
+    ) -> Result<Vec<Step>, MeshError> {
         let messages = match delivery {
             Delivery::Notice(line) => return Ok(vec![Step::Notice(line.clone())]),
             Delivery::Mail { messages, .. } => messages,
@@ -112,12 +128,12 @@ impl Mesh {
         }
         let mut steps = Vec::new();
         for d in messages {
-            steps.push(self.step_for(&s, role, &d.record)?);
+            steps.push(self.step_for(&s, role, &d.record, owns)?);
         }
         Ok(steps)
     }
 
-    fn step_for(&self, s: &Obj, role: &str, m: &Obj) -> Result<Step, MeshError> {
+    fn step_for(&self, s: &Obj, role: &str, m: &Obj, owns: bool) -> Result<Step, MeshError> {
         let msg_id = str_of(m, "msg_id").unwrap_or_default().to_owned();
         let kind = str_of(m, "kind").unwrap_or_default().to_owned();
         let ack = |why: &str| Step::Ack {
@@ -148,6 +164,7 @@ impl Mesh {
             session_id: sid(s).to_owned(),
             unit_id: unit.clone(),
             reviewer,
+            owner: false,
         };
         if kind == "REVIEW_REQUEST" {
             let (owner, required, _) = authority(s);
@@ -175,6 +192,9 @@ impl Mesh {
         }
         if !expects_reply {
             return Ok(ack("no reply owed"));
+        }
+        if kind == "HANDOFF_OFFER" && owns {
+            return Ok(Step::Accept { msg_id });
         }
         if kind == "HANDOFF_OFFER" {
             return Ok(Step::Post {
@@ -295,7 +315,8 @@ impl Mesh {
         let changed = if no_vcs {
             Vec::new()
         } else {
-            changed_paths(root)?
+            // The same definition the owner's request is built from.
+            self.changed_in_unit(s)?
         };
         let mut problems = Vec::new();
         for (path, want) in &manifest {
@@ -431,48 +452,6 @@ pub fn parse_manifest(body: &str) -> Result<Vec<(String, String)>, Vec<String>> 
     } else {
         Err(problems)
     }
-}
-
-/// Every changed or untracked path under the anchor, anchor-relative, the
-/// mailbox excluded.
-fn changed_paths(root: &Path) -> Result<Vec<String>, MeshError> {
-    let (rc, prefix) = git(root, &["rev-parse", "--show-prefix"])?;
-    if rc != Some(0) {
-        return Err(super::refused(
-            "cannot observe the working tree: git rev-parse failed",
-        ));
-    }
-    let (rc, out) = git(
-        root,
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--",
-            ".",
-        ],
-    )?;
-    if rc != Some(0) {
-        return Err(super::refused(
-            "cannot observe the working tree: git status failed",
-        ));
-    }
-    let mut paths = Vec::new();
-    let mut fields = out.split('\0').filter(|f| !f.is_empty());
-    while let Some(entry) = fields.next() {
-        let (xy, path) = entry.split_at(entry.len().min(3));
-        if xy.starts_with('R') || xy.starts_with('C') {
-            let _source = fields.next();
-        }
-        let rel = path.strip_prefix(prefix.trim()).unwrap_or(path);
-        if !rel.starts_with(&format!("{MAILBOX_DIR}/")) {
-            paths.push(rel.to_owned());
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
 }
 
 fn revise_for(problems: &[String], round: i64, msg_id: &str) -> PostArgs {
@@ -799,7 +778,8 @@ mod tests {
             Expect {
                 session_id: SID.into(),
                 unit_id: Some(UNIT.into()),
-                reviewer: true
+                reviewer: true,
+                owner: false,
             }
         );
         // The fingerprint ignores carriage returns.
@@ -940,6 +920,45 @@ mod tests {
     }
 
     #[test]
+    fn a_request_that_leaves_out_a_committed_change_is_revised() {
+        // The unit's change is everything committed since its base plus the
+        // dirty tree, the same definition the owner builds requests from.
+        let (_d, root) = fixture();
+        let head = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        edit_session(&root, "base_head", json!(head.trim()));
+        std::fs::write(root.join("c.txt"), "committed\n").unwrap();
+        git(&root, &["add", "c.txt"]);
+        git(&root, &["commit", "-qm", "work"]);
+        std::fs::write(root.join("a.txt"), "changed\n").unwrap();
+        let text = revise_body(
+            &root,
+            &format!("Fingerprints:\na.txt={}\n", fp(&root, "a.txt")),
+        );
+        assert!(
+            text.contains("c.txt: changed, but not in the manifest"),
+            "{text}"
+        );
+        let body = format!(
+            "Fingerprints:\na.txt={}\nc.txt={}\n",
+            fp(&root, "a.txt"),
+            fp(&root, "c.txt")
+        );
+        assert!(matches!(
+            one(mesh(&root).plan("localpilot", &review(&body)).unwrap()),
+            Step::Judge(_)
+        ));
+    }
+
+    #[test]
     fn only_a_required_reviewer_in_the_current_unit_reviews() {
         let (_d, root) = fixture();
         let body = "Fingerprints:\n";
@@ -1051,6 +1070,7 @@ mod tests {
                 session_id: SID.into(),
                 unit_id: Some(UNIT.into()),
                 reviewer: need == Need::Review,
+                owner: false,
             },
         }
     }
@@ -1178,6 +1198,7 @@ mod tests {
             session_id: SID.into(),
             unit_id: Some(UNIT.into()),
             reviewer: true,
+            owner: false,
         };
         let args = PostArgs {
             kind: "ANSWER".into(),

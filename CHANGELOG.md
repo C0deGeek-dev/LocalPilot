@@ -6,12 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot mesh run --own`: LocalPilot can own a unit of pair work.**
+  When a unit is handed to it, it accepts, has the model implement the task
+  under the session's write lease, builds and fingerprints the review
+  request itself from everything that changed in the unit, answers `REVISE`
+  findings in further rounds, and closes the unit only on every required
+  reviewer's agreement. A reviewer now also checks changes committed during
+  the unit, not only the uncommitted tree. Model turns print one trace line
+  per tool call.
 - **Agents can inspect local images during a vision task.** The new
   `read_image` tool opens PNG, JPEG, WebP and GIF files through the usual
   file-read permission gate and sends pixels to the active vision model.
   Re-reading a changed screenshot sees its current contents. Text-only models
   and unsupported or oversized files receive clear errors (LocalHub#199).
-
 - **`doctor` says whether LocalPilot can pair here.** A new `mesh` section
   shows the mesh writer, the anchor tree, the active pair session, and
   whether `localpilot mesh run` can join it as `localpilot`, with the reason

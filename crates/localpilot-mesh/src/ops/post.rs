@@ -37,6 +37,8 @@ pub struct Expect {
     pub unit_id: Option<String>,
     /// The poster must be a required reviewer and not the owner.
     pub reviewer: bool,
+    /// The poster must own the unit, with no handoff pending.
+    pub owner: bool,
 }
 
 impl Expect {
@@ -46,6 +48,12 @@ impl Expect {
         }
         if str_of(s, "unit_id") != self.unit_id.as_deref() {
             return Err(refused("STALE the work unit changed"));
+        }
+        if self.owner {
+            let handoff = s.get("handoff").is_some_and(|h| !h.is_null());
+            if str_of(s, "owner") != Some(role) || handoff {
+                return Err(refused("STALE no longer the owner"));
+            }
         }
         if self.reviewer {
             let (owner, required, _) = super::authority(s);

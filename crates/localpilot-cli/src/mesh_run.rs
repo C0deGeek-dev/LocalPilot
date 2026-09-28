@@ -8,6 +8,12 @@
 //! so it cannot change the tree it is reviewing. Its answer must be one JSON
 //! object the engine validates; after a second invalid answer the engine
 //! escalates instead of posting it.
+//!
+//! With `--own` it also takes a unit over when one is handed to it. It
+//! accepts the handoff through the protocol operation, has the model
+//! implement the task in a turn that may write only while the session says
+//! it owns the tree, builds and fingerprints the review request itself, and
+//! closes the unit only when every required reviewer has agreed.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -16,6 +22,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use localpilot_mesh::ops::engine::{escalation, parse_answer, validate, Need, Request, Step};
+use localpilot_mesh::ops::owner::{OwnerState, OwnerTask};
 use localpilot_mesh::ops::{Expect, PostArgs, SessionLease};
 use localpilot_mesh::{Mesh, MeshError};
 use localpilot_sandbox::Profile;
@@ -32,6 +39,8 @@ const LEASE_TTL: Duration = Duration::from_secs(30 * 60);
 const BODY_BUDGET: usize = 8_000;
 /// The most of the reviewed diff put in front of the model.
 const DIFF_BUDGET: usize = 30_000;
+/// Rounds an owner may spend on one unit before it escalates.
+const OWNER_ROUNDS: i64 = 3;
 
 #[derive(Debug, Parser)]
 #[command(name = "localpilot mesh run", no_binary_name = true)]
@@ -48,6 +57,10 @@ struct RunCli {
     /// Handle one delivery, then exit.
     #[arg(long)]
     once: bool,
+    /// Take a unit over when it is handed to this participant, and do the
+    /// owner's work: implement, request review, close on agreement.
+    #[arg(long)]
+    own: bool,
     /// Seconds to wait for a session that names the role; 0 waits for ever.
     #[arg(long, default_value_t = 60)]
     timeout: u64,
@@ -151,23 +164,147 @@ async fn engine(mesh: &Mesh, cli: &RunCli, judge: &mut dyn Judge) -> Result<(), 
     }
     print!("{}", joined.stdout);
     let sid = mesh.engine_ready(&cli.role)?;
+    if cli.own {
+        mesh.owner_supported(&cli.role)?;
+    }
     println!("ENGINE role={} session={sid}", cli.role);
     loop {
-        match mesh.receive(&cli.role, 900, Some(&sid))? {
-            None if cli.once => return Ok(()),
-            None => tokio::time::sleep(poll).await,
-            Some(delivery) => {
-                for step in mesh.plan(&cli.role, &delivery)? {
-                    if !execute(mesh, &cli.role, step, judge).await? {
-                        return Ok(());
-                    }
-                }
-                if cli.once {
+        let delivered = mesh.receive(&cli.role, 900, Some(&sid))?;
+        if let Some(delivery) = &delivered {
+            for step in mesh.plan_as(&cli.role, delivery, cli.own)? {
+                if !execute(mesh, &cli.role, step, judge).await? {
                     return Ok(());
                 }
             }
         }
+        if cli.own && !owner_step(mesh, &cli.role, judge).await? {
+            return Ok(());
+        }
+        if cli.once {
+            return Ok(());
+        }
+        if delivered.is_none() {
+            tokio::time::sleep(poll).await;
+        }
     }
+}
+
+/// What an owner does between deliveries; `false` when the engine must stop
+/// (the unit closed, or the owner escalated).
+async fn owner_step(mesh: &Mesh, role: &str, judge: &mut dyn Judge) -> Result<bool, Failure> {
+    match mesh.owner_state(role)? {
+        OwnerState::NotOwner | OwnerState::Waiting(_) => Ok(true),
+        OwnerState::Escalated(why) => {
+            println!("STOPPED as owner: {why}");
+            Ok(false)
+        }
+        OwnerState::Agreed(request) => match mesh.complete(role) {
+            Ok(out) => {
+                print!("{}", out.stdout);
+                println!("CLOSED on every reviewer's agreement with {request}");
+                Ok(false)
+            }
+            // The protocol's own sign-off check has the last word.
+            Err(MeshError::Refused(why)) => {
+                println!("NOT_CLOSED {request}: {why}");
+                Ok(true)
+            }
+            Err(e) => Err(e.into()),
+        },
+        OwnerState::Implement(task) => {
+            if task.round > OWNER_ROUNDS {
+                let args = owner_escalation(
+                    mesh,
+                    role,
+                    &format!("no agreement after {OWNER_ROUNDS} review rounds"),
+                )?;
+                post_owner(mesh, role, &args, &task)?;
+                return Ok(false);
+            }
+            let args = ownership(mesh, role, judge, &task).await?;
+            let escalated = args.kind == "ESCALATE";
+            post_owner(mesh, role, &args, &task)?;
+            Ok(!escalated)
+        }
+    }
+}
+
+fn post_owner(mesh: &Mesh, role: &str, args: &PostArgs, task: &OwnerTask) -> Result<(), Failure> {
+    match mesh.post_guarded(role, args, &task.expect) {
+        Ok(m) => {
+            let id = m.get("msg_id").and_then(|v| v.as_str()).unwrap_or_default();
+            println!("POSTED {} {id} round={}", args.kind, task.round);
+            Ok(())
+        }
+        Err(MeshError::Refused(why)) if why.starts_with("STALE") => {
+            println!("SKIPPED round {}: {why}", task.round);
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The owner's round as a post: the model implements; the engine builds the
+/// request from the tree. A refused answer or request is fed back once, then
+/// escalated.
+async fn ownership(
+    mesh: &Mesh,
+    role: &str,
+    judge: &mut dyn Judge,
+    task: &OwnerTask,
+) -> Result<PostArgs, Failure> {
+    let mut feedback: Option<String> = None;
+    for _ in 0..2 {
+        let answer = judge
+            .implement(task, feedback.as_deref())
+            .await
+            .map_err(|e| format!("the model turn failed: {e}"))
+            .and_then(|text| parse_answer(&text));
+        let why = match answer {
+            Ok(a) if a.kind == "ESCALATE" && !a.body.trim().is_empty() => {
+                return owner_escalation(mesh, role, a.body.trim());
+            }
+            Ok(a) if a.kind == "REVIEW_REQUEST" && !a.body.trim().is_empty() => {
+                match mesh.review_request(role, &a.body)? {
+                    Ok(args) => return Ok(args),
+                    Err(why) => why,
+                }
+            }
+            Ok(a) => format!(
+                "answer with kind REVIEW_REQUEST (or ESCALATE) and a non-empty body, not {}",
+                a.kind
+            ),
+            Err(why) => why,
+        };
+        feedback = Some(why);
+    }
+    owner_escalation(
+        mesh,
+        role,
+        &format!(
+            "could not produce a reviewable change: {}",
+            feedback.as_deref().unwrap_or("no answer")
+        ),
+    )
+}
+
+fn owner_escalation(mesh: &Mesh, role: &str, why: &str) -> Result<PostArgs, Failure> {
+    let reviewers = mesh
+        .session_summary()?
+        .map(|s| {
+            s.participants
+                .into_iter()
+                .filter(|p| p != role)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    Ok(PostArgs {
+        kind: "ESCALATE".into(),
+        body: format!("{role} (the owner) stops here: {why}. A person or another participant needs to take this unit on."),
+        to: Some(reviewers),
+        ..PostArgs::default()
+    })
 }
 
 /// Carry out one step; `false` when the engine must stop.
@@ -189,6 +326,27 @@ async fn execute(
             return Ok(false);
         }
         Step::Post { args, expect, ack } => post(mesh, role, &args, &expect, &ack)?,
+        Step::Accept { msg_id } => match mesh.handoff_accept(role) {
+            Ok(out) => {
+                print!("{}", out.stdout);
+                mesh.ack(role, &msg_id)?;
+                println!("ACCEPTED {msg_id}");
+            }
+            // The operation refuses a tree that moved since the offer: say
+            // so, never force it.
+            Err(MeshError::Refused(why)) => {
+                let note = PostArgs {
+                    kind: "NOTE".into(),
+                    body: format!("{role} could not accept this handoff: {why}"),
+                    reply_to: Some(msg_id.clone()),
+                    ..PostArgs::default()
+                };
+                mesh.post(role, &note)?;
+                mesh.ack(role, &msg_id)?;
+                println!("NOT_ACCEPTED {msg_id}: {why}");
+            }
+            Err(e) => return Err(e.into()),
+        },
         Step::Judge(request) => {
             let mut args = judgement(judge, &request).await;
             // The tree may have moved while the model judged it: a verdict
@@ -253,6 +411,14 @@ pub(crate) trait Judge: Send {
     /// The model's final text for `request`; `feedback` says why its last
     /// answer was refused.
     async fn judge(&mut self, request: &Request, feedback: Option<&str>) -> anyhow::Result<String>;
+
+    /// The model's final text after implementing `task` as the owner;
+    /// `feedback` says why its last answer or request was refused.
+    async fn implement(
+        &mut self,
+        task: &OwnerTask,
+        feedback: Option<&str>,
+    ) -> anyhow::Result<String>;
 }
 
 struct ModelJudge {
@@ -287,13 +453,147 @@ impl Judge for ModelJudge {
                 .with_allowed_commands(Vec::new())
                 .with_lease(Arc::clone(&lease)),
         );
-        let (events, _keep) = broadcast::channel(1024);
+        let (events, rx) = broadcast::channel(1024);
+        let tracer = tokio::spawn(trace(rx));
         let cancel = CancellationToken::new();
         let prompt = brief(&self.anchor, &self.role, request, feedback);
         let stop = runtime.run_turn(&prompt, &events, &cancel).await;
+        drop(events);
+        // The runtime may hold a sender of its own; never wait on it for long.
+        let _ = tokio::time::timeout(Duration::from_millis(500), tracer).await;
+        println!("  TURN ended {stop:?}");
         runtime
             .current_turn_assistant_text()
             .ok_or_else(|| anyhow::anyhow!("the turn ended ({stop:?}) without an answer"))
+    }
+
+    async fn implement(
+        &mut self,
+        task: &OwnerTask,
+        feedback: Option<&str>,
+    ) -> anyhow::Result<String> {
+        // `bypass` so the owner can run its tests headless (every shell call
+        // otherwise waits for a confirmation nobody can give). The session's
+        // lease still decides: the moment this participant stops owning the
+        // tree, every write and command above read-only is denied. File
+        // tools keep the workspace boundary; shell commands are not
+        // contained (see the docs). No standing grants and no MCP servers.
+        let mut runtime = crate::session_cmd::build_runtime_with_store(
+            &self.anchor,
+            &self.model,
+            self.provider.as_deref(),
+            Profile::Bypass,
+            true,
+            Store::ephemeral(),
+            false,
+        )
+        .await?;
+        let handle = runtime.permission_engine_handle();
+        let lease = SessionLease::acquire(self.mesh.clone(), &self.role, LEASE_TTL);
+        handle.set(
+            handle
+                .snapshot()
+                .with_allowed_commands(Vec::new())
+                .with_lease(Arc::clone(&lease)),
+        );
+        let (events, rx) = broadcast::channel(1024);
+        let tracer = tokio::spawn(trace(rx));
+        let cancel = CancellationToken::new();
+        let prompt = owner_brief(&self.anchor, &self.role, task, feedback);
+        let stop = runtime.run_turn(&prompt, &events, &cancel).await;
+        drop(events);
+        // The runtime may hold a sender of its own; never wait on it for long.
+        let _ = tokio::time::timeout(Duration::from_millis(500), tracer).await;
+        println!("  TURN ended {stop:?}");
+        runtime
+            .current_turn_assistant_text()
+            .ok_or_else(|| anyhow::anyhow!("the turn ended ({stop:?}) without an answer"))
+    }
+}
+
+/// What the owner's model is shown: the task, the recent conversation, any
+/// findings to answer, and the one answer shape it may give.
+fn owner_brief(anchor: &Path, role: &str, task: &OwnerTask, feedback: Option<&str>) -> String {
+    let mut out = format!(
+        "You are {role}, the owner of the current work unit in a pair-programming session on \
+         the repository at {}. Do the work yourself: create and edit files in this repository \
+         and run commands, such as its tests, to check it. Never touch the .pair-programming \
+         directory; the engine sends and receives every protocol message.\n\nTask:\n{}\n",
+        anchor.display(),
+        bounded(&task.task, BODY_BUDGET)
+    );
+    // Local models invent absolute paths from other machines; name the
+    // working directory and what is in it.
+    out.push_str(&format!(
+        "
+Your working directory is the repository root, {}. Use paths relative to it (for          example `slug.py`), never an absolute path from anywhere else. It contains: {}.
+",
+        anchor.display(),
+        tree_listing(anchor)
+    ));
+    if !task.context.is_empty() {
+        out.push_str("\nRecent messages to you:\n");
+        for line in &task.context {
+            out.push_str(&format!("- {line}\n"));
+        }
+    }
+    if !task.findings.is_empty() {
+        out.push_str(&format!(
+            "\nThis is round {}. Your reviewers asked for changes; address every finding:\n",
+            task.round
+        ));
+        for f in &task.findings {
+            out.push_str(&format!("{}\n", bounded(f, BODY_BUDGET)));
+        }
+    }
+    out.push_str(
+        "\nWhen the work is done and checked, reply with exactly one JSON object, and nothing \
+         after it:\n{\"kind\": \"REVIEW_REQUEST\", \"body\": \"what you changed and how you checked it\"}\n\
+         Do not list files or fingerprints; the engine adds them from the tree. If you cannot do \
+         the task, reply {\"kind\": \"ESCALATE\", \"body\": \"why\"} instead.\n",
+    );
+    if let Some(why) = feedback {
+        out.push_str(&format!(
+            "\nYour previous answer was refused: {why}. Fix that, then answer again with one valid JSON object.\n"
+        ));
+    }
+    out
+}
+
+/// One line per tool call and warning of a model turn, so a run can be read
+/// back: which tools the model used, what failed, and why a turn stopped.
+async fn trace(mut rx: broadcast::Receiver<localpilot_harness::RuntimeEvent>) {
+    use localpilot_harness::RuntimeEvent;
+    loop {
+        match rx.recv().await {
+            Ok(RuntimeEvent::ToolFinished {
+                name,
+                is_error,
+                output,
+                duration_ms,
+                ..
+            }) => {
+                let first: String = output
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(160)
+                    .collect();
+                let status = if is_error { "error" } else { "ok" };
+                println!("  TOOL {name} {status} {duration_ms}ms {first}");
+            }
+            Ok(RuntimeEvent::ToolStarted { name, detail, .. }) => {
+                let detail: String = detail.chars().take(160).collect();
+                println!("  CALL {name} {detail}");
+            }
+            Ok(RuntimeEvent::Warning(w)) => {
+                let w: String = w.chars().take(300).collect();
+                println!("  WARN {w}");
+            }
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
     }
 }
 
@@ -303,6 +603,27 @@ fn bounded(text: &str, budget: usize) -> String {
     }
     let head: String = text.chars().take(budget).collect();
     format!("{head}\n[... cut at {budget} characters]")
+}
+
+/// The repository's files (tracked and untracked, the mailbox excluded),
+/// bounded, for an owner's brief.
+fn tree_listing(anchor: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(anchor)
+        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let files: Vec<&str> = out
+        .lines()
+        .filter(|l| !l.starts_with(".pair-programming/"))
+        .collect();
+    match files.len() {
+        0 => "no files yet".to_owned(),
+        n if n > 60 => format!("{}, and {} more", files[..60].join(", "), n - 60),
+        _ => files.join(", "),
+    }
 }
 
 /// What the model is shown: the message, for a review the diff of the
@@ -384,6 +705,7 @@ mod tests {
                 session_id: "s".into(),
                 unit_id: Some("1-a".into()),
                 reviewer: need == Need::Review,
+                owner: false,
             },
         }
     }
@@ -393,6 +715,15 @@ mod tests {
     #[async_trait::async_trait]
     impl Judge for Scripted {
         async fn judge(&mut self, _r: &Request, feedback: Option<&str>) -> anyhow::Result<String> {
+            self.1.push(feedback.map(str::to_owned));
+            self.0.remove(0)
+        }
+
+        async fn implement(
+            &mut self,
+            _t: &OwnerTask,
+            feedback: Option<&str>,
+        ) -> anyhow::Result<String> {
             self.1.push(feedback.map(str::to_owned));
             self.0.remove(0)
         }

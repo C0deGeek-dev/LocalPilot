@@ -10,6 +10,7 @@ mod delivery;
 pub mod engine;
 mod join;
 mod lease;
+pub mod owner;
 mod post;
 mod read;
 mod render;

@@ -150,13 +150,17 @@ impl Fixture {
     }
 
     fn session_file(&self) -> PathBuf {
-        let mb = self.anchor.join(".pair-programming");
-        let p: Value =
-            serde_json::from_str(&std::fs::read_to_string(mb.join("active.v2.json")).unwrap())
-                .unwrap();
-        mb.join("sessions")
-            .join(p["session_id"].as_str().unwrap())
-            .join("session.v2.json")
+        // The newest schema-2 session, read by its directory: a closed
+        // session has no active pointer any more.
+        let sessions = self.anchor.join(".pair-programming").join("sessions");
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&sessions)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.join("session.v2.json").exists())
+            .collect();
+        dirs.sort();
+        dirs.pop().unwrap().join("session.v2.json")
     }
 
     fn journal(&self, role: &str) -> Vec<Value> {
@@ -637,4 +641,393 @@ async fn a_command_the_user_vetted_still_cannot_run_in_a_review_turn() {
         "{second}"
     );
     assert_eq!(f.posted("VERDICT").len(), 1);
+}
+
+// --- the owner path (`--own`) ---------------------------------------------------
+
+const DONE: &str = r#"Done. {"kind": "REVIEW_REQUEST", "body": "added b.txt and checked it"}"#;
+
+/// A model that writes `b.txt` with `content`, then asks for review.
+async fn mount_owner_turn(server: &MockServer, content: &str, priority: u8) {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(calls_tool(
+            "write_file",
+            &json!({"path": "b.txt", "content": content}),
+        ))
+        .up_to_n_times(1)
+        .with_priority(priority)
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .up_to_n_times(1)
+        .with_priority(priority + 1)
+        .mount(server)
+        .await;
+}
+
+fn session_status(f: &Fixture) -> String {
+    let s: Value =
+        serde_json::from_str(&std::fs::read_to_string(f.session_file()).unwrap()).unwrap();
+    s["status"].as_str().unwrap_or_default().to_owned()
+}
+
+fn verdict(f: &Fixture, request: &str, body: &str) {
+    f.reference(&[
+        "post",
+        "--role",
+        "claude",
+        "--kind",
+        "VERDICT",
+        "--reply-to",
+        request,
+        "--body",
+        body,
+    ]);
+}
+
+#[tokio::test]
+async fn an_owner_accepts_implements_asks_for_review_and_closes_on_agreement() {
+    let server = server().await;
+    mount_owner_turn(&server, "beta\n", 1).await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("ACCEPTED claude:"), "{}", text(&out));
+    let requests = f.posted("REVIEW_REQUEST");
+    assert_eq!(requests.len(), 1, "{}", text(&out));
+    let body = requests[0]["body"].as_str().unwrap();
+    let want = format!(
+        "added b.txt and checked it\n\nFingerprints:\nb.txt={}",
+        f.fingerprint("b.txt")
+    );
+    assert_eq!(body, want);
+    assert_eq!(requests[0]["to"], json!(["claude"]));
+
+    // Waiting on the reviewer: another run posts nothing.
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(f.posted("REVIEW_REQUEST").len(), 1, "{}", text(&out));
+
+    let id = requests[0]["msg_id"].as_str().unwrap().to_owned();
+    verdict(&f, &id, "AGREE round=1 blocking=0 important=0\nfine");
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("CLOSED on every reviewer's agreement"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(session_status(&f), "completed");
+}
+
+#[tokio::test]
+async fn a_revise_verdict_gets_a_second_round_with_its_findings() {
+    let server = server().await;
+    mount_owner_turn(&server, "beta\n", 1).await;
+    mount_owner_turn(&server, "beta, fixed\n", 3).await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    let first = f.posted("REVIEW_REQUEST")[0]["msg_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    verdict(
+        &f,
+        &first,
+        "REVISE round=1 blocking=1 important=0\n- b.txt [blocking] say fixed",
+    );
+
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("round=2"), "{}", text(&out));
+    assert_eq!(f.posted("REVIEW_REQUEST").len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join("b.txt")).unwrap(),
+        "beta, fixed\n"
+    );
+    // The model was shown the findings.
+    let requests = server.received_requests().await.unwrap();
+    let last = String::from_utf8_lossy(&requests.last().unwrap().body).into_owned();
+    assert!(last.contains("say fixed"), "{last}");
+}
+
+#[tokio::test]
+async fn an_owner_that_changes_nothing_escalates_after_one_retry() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    let esc = f.posted("ESCALATE");
+    assert_eq!(esc.len(), 1, "{}", text(&out));
+    assert!(
+        esc[0]["body"].as_str().unwrap().contains("nothing changed"),
+        "{}",
+        esc[0]["body"]
+    );
+    // The model saw why its first answer was refused.
+    let requests = server.received_requests().await.unwrap();
+    let second = String::from_utf8_lossy(&requests[1].body).into_owned();
+    assert!(second.contains("nothing changed in the unit"), "{second}");
+}
+
+#[tokio::test]
+async fn without_own_a_handoff_is_declined_and_nothing_is_written() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&[]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(f.posted("NOTE").len(), 1, "{}", text(&out));
+    assert!(f.posted("HANDOFF_ACCEPT").is_empty());
+}
+
+#[tokio::test]
+async fn a_handoff_whose_tree_moved_is_not_accepted() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    std::fs::write(f.anchor.join("a.txt"), "moved after the offer\n").unwrap();
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("NOT_ACCEPTED"), "{}", text(&out));
+    assert!(f.posted("HANDOFF_ACCEPT").is_empty());
+    let notes = f.posted("NOTE");
+    assert!(
+        notes[0]["body"]
+            .as_str()
+            .unwrap()
+            .contains("could not accept this handoff"),
+        "{notes:?}"
+    );
+}
+
+/// A model that, while it works, loses the tree: the session's owner moves
+/// back before its write lands.
+struct LosesTheTree(PathBuf);
+
+impl Respond for LosesTheTree {
+    fn respond(&self, _: &MockRequest) -> ResponseTemplate {
+        let mut s: Value =
+            serde_json::from_str(&std::fs::read_to_string(&self.0).unwrap()).unwrap();
+        s["owner"] = json!("claude");
+        s["ownership_epoch"] = json!(s["ownership_epoch"].as_i64().unwrap_or(0) + 1);
+        std::fs::write(&self.0, s.to_string()).unwrap();
+        calls_tool("write_file", &json!({"path": "b.txt", "content": "late\n"}))
+    }
+}
+
+#[tokio::test]
+async fn an_owner_that_loses_the_tree_mid_turn_writes_nothing_more_and_posts_nothing() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(LosesTheTree(f.session_file()))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .mount(&server)
+        .await;
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        !f.anchor.join("b.txt").exists(),
+        "a write landed after the lease was lost"
+    );
+    assert!(f.posted("REVIEW_REQUEST").is_empty(), "{}", text(&out));
+    let requests = server.received_requests().await.unwrap();
+    let second = String::from_utf8_lossy(&requests[1].body).into_owned();
+    assert!(
+        second.contains("does not let this participant write"),
+        "{second}"
+    );
+}
+
+#[tokio::test]
+async fn a_reviewer_escalation_stops_the_owner() {
+    let server = server().await;
+    mount_owner_turn(&server, "beta\n", 1).await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    let id = f.posted("REVIEW_REQUEST")[0]["msg_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.reference(&[
+        "post",
+        "--role",
+        "claude",
+        "--kind",
+        "ESCALATE",
+        "--reply-to",
+        &id,
+        "--body",
+        "needs a person",
+    ]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("STOPPED as owner: claude ESCALATE"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(f.posted("REVIEW_REQUEST").len(), 1);
+}
+
+#[tokio::test]
+async fn own_is_refused_in_a_session_without_version_control() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let Some(py) = python_or_skip("the mesh run tests") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let anchor = dir.path().join("plain");
+    std::fs::create_dir_all(&anchor).unwrap();
+    std::fs::write(anchor.join("a.txt"), "alpha\n").unwrap();
+    let st = Command::new(&py[0])
+        .args(&py[1..])
+        .arg(suite().join("reference").join("pair.py"))
+        .arg("--repo")
+        .arg(&anchor)
+        .args([
+            "start",
+            "--role",
+            "claude",
+            "--with",
+            "localpilot",
+            "--no-vcs",
+            "--task",
+            "t",
+        ])
+        .env_remove("PAIR_REPO")
+        .env("PYTHONIOENCODING", "utf-8")
+        .output()
+        .unwrap();
+    assert!(st.status.success(), "{st:?}");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_localpilot"));
+    cmd.arg("mesh")
+        .arg("--repo")
+        .arg(&anchor)
+        .args([
+            "run",
+            "--role",
+            "localpilot",
+            "--model",
+            "m",
+            "--once",
+            "--own",
+            "--timeout",
+            "30",
+        ])
+        .env_remove("PAIR_REPO")
+        .env("LOCALPILOT_MESH__WRITER", "native");
+    let out = tokio::task::spawn_blocking(move || cmd.output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
+    assert!(
+        text(&out).contains("--own needs a Git anchor"),
+        "{}",
+        text(&out)
+    );
+}
+
+#[tokio::test]
+async fn a_stop_already_acknowledged_still_stops_a_restarted_owner() {
+    // Bug it prevents: a restarted --own run finding no unread STOP and
+    // starting to write again.
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    // The STOP comes after localpilot owns the unit and before any request.
+    // (One posted before the accept is below claude's new verdict floor and
+    // no longer stands, spec U-4.)
+    f.reference(&["join", "--role", "localpilot"]);
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    f.reference(&["handoff-accept", "--role", "localpilot"]);
+    f.reference(&[
+        "post",
+        "--role",
+        "claude",
+        "--kind",
+        "STOP",
+        "--to",
+        "localpilot",
+        "--body",
+        "halt",
+    ]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("STOPPED by claude:"), "{}", text(&out));
+    // Restarted: the STOP is acknowledged, but it still stands.
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("STOPPED as owner: claude STOP"),
+        "{}",
+        text(&out)
+    );
+    assert!(!f.anchor.join("b.txt").exists());
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
 }
