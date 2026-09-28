@@ -418,6 +418,30 @@ impl Mesh {
         Ok((d > a).then_some((a + 1, d)))
     }
 
+    /// [`Mesh::ack`], only while `expect_sid` is still the active session:
+    /// decided under the state lock, so an acknowledgement can never land in
+    /// a session that replaced the one the caller started in.
+    ///
+    /// # Errors
+    /// `SESSION_SWITCHED`, or a refusal from the acknowledgement itself.
+    pub fn ack_in(
+        &self,
+        role: &str,
+        through: &str,
+        expect_sid: &str,
+    ) -> Result<super::Out, MeshError> {
+        let _g = self.state_lock()?;
+        let s = self.require(role, true)?;
+        if sid(&s) != expect_sid {
+            return Err(refused(format!(
+                "SESSION_SWITCHED expected={expect_sid} active={}",
+                sid(&s)
+            )));
+        }
+        let line = self.apply_ack(&s, role, through)?;
+        Ok(super::Out::ok(format!("{line}\n")))
+    }
+
     /// `ack`: acknowledge mail through the given point.
     ///
     /// # Errors
@@ -795,6 +819,59 @@ impl Mesh {
 }
 
 impl Mesh {
+    /// The id of the session `role` takes part in.
+    ///
+    /// # Errors
+    /// A refusal from [`Mesh::require`].
+    pub fn session_for(&self, role: &str) -> Result<String, MeshError> {
+        Ok(sid(&self.require(role, true)?).to_owned())
+    }
+
+    /// For each other participant, the newest message it wrote that is
+    /// addressed to `role` and that `role` has not acknowledged: what a
+    /// notifier nudges about. Delivered or not, it counts until acknowledged.
+    /// Read only: no cursor moves.
+    ///
+    /// # Errors
+    /// A refusal from [`Mesh::require`]; unreadable mailbox state.
+    pub fn unacknowledged_heads(
+        &self,
+        role: &str,
+        expect_sid: &str,
+    ) -> Result<Vec<(String, i64)>, MeshError> {
+        let s = self.require(role, true)?;
+        if sid(&s) != expect_sid {
+            return Err(refused(format!(
+                "SESSION_SWITCHED expected={expect_sid} active={}",
+                sid(&s)
+            )));
+        }
+        let raw = self.cursor_of(&s, role)?;
+        let v2 = schema(&s) == 2;
+        let cursor = if v2 { v2_cursor(&s, role, &raw) } else { raw };
+        let mut heads = Vec::new();
+        for sender in others(&s, role) {
+            let acked = if v2 {
+                obj_of(cursor.get("from"))
+                    .get(&sender)
+                    .and_then(Value::as_object)
+                    .map_or(0, |st| num_at(st, "peer_seq"))
+            } else {
+                num_at(&cursor, "peer_seq")
+            };
+            let newest = self
+                .journal_after(&s, &sender, acked)?
+                .iter()
+                .filter(|m| super::delivery::addressed_to(m, role))
+                .map(seq_of)
+                .max();
+            if let Some(n) = newest {
+                heads.push((sender, n));
+            }
+        }
+        Ok(heads)
+    }
+
     /// One look for `role`, as `peek` takes it, returned instead of printed:
     /// the same cursor moves, committed before this returns. `None` when
     /// there is nothing to deliver.

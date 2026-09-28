@@ -174,6 +174,42 @@ impl Fixture {
         cmd
     }
 
+    /// `localpilot mesh wait` as a command.
+    fn waiter(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_localpilot"));
+        cmd.arg("mesh")
+            .arg("--repo")
+            .arg(&self.anchor)
+            .arg("wait")
+            .args(args)
+            .current_dir(&self.anchor)
+            .env_remove("PAIR_REPO")
+            .env_remove("PAIR_ENDPOINT_TOKEN")
+            .env("APPDATA", &self.config)
+            .env("XDG_CONFIG_HOME", &self.config)
+            .env("LOCALPILOT_MESH__WRITER", "native");
+        cmd
+    }
+
+    /// Every cursor file in the session, for "nothing moved" checks.
+    fn cursors(&self) -> Vec<(String, String)> {
+        let dir = self.session_file().parent().unwrap().join("cursor");
+        let mut out: Vec<(String, String)> = std::fs::read_dir(dir)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| {
+                        (
+                            e.file_name().to_string_lossy().into_owned(),
+                            std::fs::read_to_string(e.path()).unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
     /// The reference's output without asserting success.
     fn reference_out(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         let mut cmd = Command::new(&self.py[0]);
@@ -1536,4 +1572,385 @@ async fn a_renewal_that_waits_on_the_lock_past_the_lease_does_not_reclaim_it() {
         ep["generation"], held_at,
         "the lease was reclaimed after it ran out: {ep}"
     );
+}
+
+/// Run a background command and wait up to `secs` for it to exit.
+async fn finish(mut child: std::process::Child, secs: u64) -> Option<Output> {
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..secs * 10 {
+            if child.try_wait().unwrap().is_some() {
+                return Some(child.wait_with_output().unwrap());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = child.kill();
+        None
+    })
+    .await
+    .unwrap()
+}
+
+/// Session ids and times vary between two fixtures; nothing else may.
+fn comparable(text: &str) -> String {
+    // Line endings compare as `\n`, as the conformance suite compares them.
+    let text = &text.replace("\r\n", "\n");
+    let sid = regex_lite(text, r"\d{8}T\d{6}Z-[0-9a-f]{8}", "<SID>");
+    regex_lite(&sid, r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", "<TS>")
+}
+
+/// A tiny pattern replacement for the two shapes above (no regex crate here).
+fn regex_lite(text: &str, pattern: &str, with: &str) -> String {
+    // Only the two fixed shapes are ever used; match them by structure.
+    let shape: Vec<char> = if pattern.starts_with(r"\d{8}T") {
+        "DDDDDDDDTDDDDDDZ-hhhhhhhh".chars().collect()
+    } else {
+        "DDDD-DD-DDTDD:DD:DDZ".chars().collect()
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let fits = |at: usize| {
+        shape.iter().enumerate().all(|(i, s)| {
+            chars.get(at + i).is_some_and(|c| match s {
+                'D' => c.is_ascii_digit(),
+                'h' => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+                other => c == other,
+            })
+        })
+    };
+    let (mut out, mut i) = (String::new(), 0);
+    while i < chars.len() {
+        if fits(i) {
+            out.push_str(with);
+            i += shape.len();
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn mesh_wait_is_woken_by_a_post_and_prints_what_watch_prints() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    let Some(g) = Fixture::new(&server) else {
+        return;
+    };
+    for fx in [&f, &g] {
+        fx.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+        fx.reference(&["watch", "--role", "claude", "--timeout", "1"]);
+        fx.reference(&["ack", "--role", "claude", "--through", "localpilot:1"]);
+    }
+    // Poll once an hour: a prompt return can only come from the wake.
+    let child = f
+        .waiter(&["--role", "claude", "--poll", "3600", "--timeout", "60"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    until("claude's endpoint", || {
+        f.endpoint_record("claude")
+            .is_some_and(|e| e["active"] == true)
+    })
+    .await;
+    let t0 = std::time::Instant::now();
+    f.reference(&[
+        "post",
+        "--role",
+        "localpilot",
+        "--kind",
+        "NOTE",
+        "--body",
+        "for claude",
+    ]);
+    let out = finish(child, 20).await.expect("mesh wait did not return");
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(15),
+        "took {:?}",
+        t0.elapsed()
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        f.endpoint_record("claude").unwrap()["active"],
+        false,
+        "endpoint not retired"
+    );
+    // The same mail through the reference's own watch, in a twin session.
+    g.reference(&[
+        "post",
+        "--role",
+        "localpilot",
+        "--kind",
+        "NOTE",
+        "--body",
+        "for claude",
+    ]);
+    let watched = g.reference(&["watch", "--role", "claude", "--timeout", "5"]);
+    let fwd = |s: &str| s.replace(&f.anchor.display().to_string(), "<REPO>");
+    let gwd = |s: &str| s.replace(&g.anchor.display().to_string(), "<REPO>");
+    assert_eq!(
+        comparable(&fwd(&String::from_utf8_lossy(&out.stdout))),
+        comparable(&gwd(&watched))
+    );
+}
+
+#[tokio::test]
+async fn mesh_wait_times_out_silently_and_retires_its_endpoint() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    f.reference(&["watch", "--role", "claude", "--timeout", "1"]);
+    f.reference(&["ack", "--role", "claude", "--through", "localpilot:1"]);
+    let out = f
+        .waiter(&["--role", "claude", "--timeout", "2"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(out.stdout.is_empty(), "{}", text(&out));
+    assert_eq!(f.endpoint_record("claude").unwrap()["active"], false);
+}
+
+#[tokio::test]
+async fn nudge_only_reports_newer_mail_past_its_baseline_and_moves_nothing() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    f.reference(&["watch", "--role", "claude", "--timeout", "1"]);
+    f.reference(&["ack", "--role", "claude", "--through", "localpilot:1"]);
+    f.reference(&[
+        "post",
+        "--role",
+        "localpilot",
+        "--kind",
+        "NOTE",
+        "--body",
+        "one",
+    ]);
+    f.reference(&[
+        "post",
+        "--role",
+        "localpilot",
+        "--kind",
+        "NOTE",
+        "--body",
+        "two",
+    ]);
+    let newest = f.journal("localpilot").last().unwrap()["seq"]
+        .as_i64()
+        .unwrap();
+    let before = f.cursors();
+    // No baseline: the existing backlog is nudged once.
+    let out = f
+        .waiter(&["--role", "claude", "--nudge-only", "--timeout", "5"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("NUDGE localpilot:{newest}")
+    );
+    // With the backlog as the baseline it waits, and times out.
+    let after = format!("localpilot:{newest}");
+    let out = f
+        .waiter(&[
+            "--role",
+            "claude",
+            "--nudge-only",
+            "--after",
+            &after,
+            "--timeout",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    // A newer message wakes it at once, behind the same backlog.
+    let child = f
+        .waiter(&[
+            "--role",
+            "claude",
+            "--nudge-only",
+            "--after",
+            &after,
+            "--poll",
+            "3600",
+            "--timeout",
+            "60",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    until("claude's endpoint", || {
+        f.endpoint_record("claude")
+            .is_some_and(|e| e["active"] == true)
+    })
+    .await;
+    f.reference(&[
+        "post",
+        "--role",
+        "localpilot",
+        "--kind",
+        "NOTE",
+        "--body",
+        "three",
+    ]);
+    let out = finish(child, 20).await.expect("the nudge did not come");
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("NUDGE localpilot:{}", newest + 1)
+    );
+    // Read only: no cursor moved and no receipt was written.
+    assert_eq!(f.cursors(), before);
+    assert!(f.facts("receipts", "claude").is_empty());
+}
+
+#[tokio::test]
+async fn mesh_wait_falls_back_to_polling_when_it_cannot_hold_the_endpoint() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    f.reference(&["watch", "--role", "claude", "--timeout", "1"]);
+    f.reference(&["ack", "--role", "claude", "--through", "localpilot:1"]);
+    // Someone else holds claude's endpoint, live.
+    f.reference(&[
+        "endpoint",
+        "--role",
+        "claude",
+        "--register",
+        "--transport",
+        "pipe",
+        "--address",
+        r"\\.\pipe\other",
+    ]);
+    f.reference(&[
+        "post",
+        "--role",
+        "localpilot",
+        "--kind",
+        "NOTE",
+        "--body",
+        "for claude",
+    ]);
+    let out = f
+        .waiter(&["--role", "claude", "--poll", "0.2", "--timeout", "10"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("WARN not listening"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("for claude"),
+        "{}",
+        text(&out)
+    );
+    // The other holder's endpoint is untouched.
+    assert_eq!(
+        f.endpoint_record("claude").unwrap()["address"],
+        r"\\.\pipe\other"
+    );
+}
+
+#[tokio::test]
+async fn a_waiter_stops_when_another_session_becomes_active_and_moves_nothing_there() {
+    // The session is replaced while the waiter sleeps. Its next look must
+    // refuse, deliver nothing and nudge about nothing from the new session,
+    // and leave the new session's mail unread. (A post in the new session
+    // does not push to the old session's endpoint, so the poll is the look.)
+    let server = server().await;
+    for nudge_only in [false, true] {
+        let Some(f) = Fixture::new(&server) else {
+            return;
+        };
+        f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+        f.reference(&["watch", "--role", "claude", "--timeout", "1"]);
+        f.reference(&["ack", "--role", "claude", "--through", "localpilot:1"]);
+        // The next look comes 8 s after the first: the whole switch (park,
+        // start, join, post) lands between two looks, so the waiter meets a
+        // different active session, not a gap with none.
+        let mut args = vec!["--role", "claude", "--poll", "8", "--timeout", "30"];
+        if nudge_only {
+            args.push("--nudge-only");
+        }
+        let child = f
+            .waiter(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        until("claude's endpoint", || {
+            f.endpoint_record("claude")
+                .is_some_and(|e| e["active"] == true)
+        })
+        .await;
+        f.reference(&["park", "--role", "claude", "--reason", "switch"]);
+        f.reference(&[
+            "start",
+            "--role",
+            "claude",
+            "--with",
+            "localpilot",
+            "--task",
+            "another",
+        ]);
+        f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+        f.reference(&[
+            "post",
+            "--role",
+            "localpilot",
+            "--kind",
+            "NOTE",
+            "--body",
+            "new session mail",
+        ]);
+        let out = finish(child, 20).await.expect("the waiter did not stop");
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "nudge_only={nudge_only}: {}",
+            text(&out)
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "nudge_only={nudge_only}: {}",
+            text(&out)
+        );
+        // The new session's mail is still there for its own reader.
+        let peeked = f.reference(&["peek", "--role", "claude"]);
+        assert!(
+            peeked.contains("new session mail"),
+            "nudge_only={nudge_only}: {peeked}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn nudge_only_refuses_an_acknowledgement() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    let out = f
+        .waiter(&[
+            "--role",
+            "claude",
+            "--nudge-only",
+            "--ack-through",
+            "localpilot:1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
 }

@@ -44,6 +44,7 @@ mod mesh_cmd;
 mod mesh_listen;
 mod mesh_push;
 mod mesh_run;
+mod mesh_wait;
 mod models_cmd;
 mod output;
 mod outward_cmd;
@@ -2534,6 +2535,8 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         Command::Mesh(args) => {
             exit_code = if mesh_run::is_run(&args) {
                 mesh_run::run(args).await
+            } else if mesh_wait::is_wait(&args) {
+                mesh_wait::run(args).await
             } else {
                 mesh_cmd::run(args).await
             };

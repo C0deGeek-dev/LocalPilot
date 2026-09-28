@@ -1,5 +1,8 @@
 //! `mesh run --listen`: LocalPilot's own push endpoint (spec §8b, P-5..P-7).
 //!
+//! Its status lines go to stderr, so a waiter's stdout stays exactly what
+//! `watch` prints.
+//!
 //! The engine registers a delivery endpoint from its own process and keeps
 //! the token in memory only: it is never printed, put in the environment or
 //! passed on a command line. A listener takes one wake per connection,
@@ -95,6 +98,18 @@ impl Listening {
         sid: &str,
         wake: Arc<Notify>,
     ) -> Result<Self, String> {
+        Self::start_with(mesh, role, sid, wake, true).await
+    }
+
+    /// [`Listening::start`], choosing whether a valid wake also records a
+    /// receipt (`accepts`). A read-only waiter takes wakes as a signal only.
+    pub(crate) async fn start_with(
+        mesh: &Mesh,
+        role: &str,
+        sid: &str,
+        wake: Arc<Notify>,
+        accepts: bool,
+    ) -> Result<Self, String> {
         let (transport, address, bound, dir) = bind().map_err(|e| format!("cannot listen: {e}"))?;
         let ttl = lease_ttl();
         let before = tokio::time::Instant::now();
@@ -122,10 +137,13 @@ impl Listening {
         let held = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let serve = tokio::spawn(serve(
             bound,
-            mesh.clone(),
-            role.to_owned(),
-            lease.clone(),
-            wake,
+            Answerer {
+                mesh: mesh.clone(),
+                role: role.to_owned(),
+                lease: lease.clone(),
+                wake,
+                accepts,
+            },
             cancel.clone(),
         ));
         let renew = tokio::spawn(renew(
@@ -138,7 +156,7 @@ impl Listening {
             cancel.clone(),
             lease_end(before, ttl),
         ));
-        println!("LISTENING role={role} transport={transport} generation={generation}");
+        eprintln!("LISTENING role={role} transport={transport} generation={generation}");
         Ok(Self {
             role: role.to_owned(),
             lease,
@@ -200,7 +218,7 @@ async fn renew(
         // rather than risk registering over an expired record.
         if tokio::time::Instant::now() + renew_guard(ttl) >= ends {
             held.store(false, std::sync::atomic::Ordering::SeqCst);
-            println!("LISTEN_STOPPED role={role}: the lease ran out before it could be renewed");
+            eprintln!("LISTEN_STOPPED role={role}: the lease ran out before it could be renewed");
             cancel.cancel();
             return;
         }
@@ -225,24 +243,36 @@ async fn renew(
             // back; stop listening and let the engine poll.
             Ok(Ok(Err(out))) => {
                 held.store(false, std::sync::atomic::Ordering::SeqCst);
-                println!("LISTEN_STOPPED role={role}: {}", out.stderr.trim());
+                eprintln!("LISTEN_STOPPED role={role}: {}", out.stderr.trim());
                 cancel.cancel();
                 return;
             }
-            Ok(Err(e)) => println!("WARN lease renewal failed, retrying: {e}"),
-            Err(e) => println!("WARN lease renewal failed, retrying: {e}"),
+            Ok(Err(e)) => eprintln!("WARN lease renewal failed, retrying: {e}"),
+            Err(e) => eprintln!("WARN lease renewal failed, retrying: {e}"),
         }
     }
 }
 
-/// Answer one connection: read one wake, check it, accept, reply.
-async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
-    mut conn: S,
+/// What each connection needs to answer a wake.
+#[derive(Clone)]
+struct Answerer {
     mesh: Mesh,
     role: String,
     lease: Arc<RwLock<Lease>>,
     wake: Arc<Notify>,
-) {
+    /// Whether a valid wake also records a receipt.
+    accepts: bool,
+}
+
+/// Answer one connection: read one wake, check it, accept, reply.
+async fn answer<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, a: Answerer) {
+    let Answerer {
+        mesh,
+        role,
+        lease,
+        wake,
+        accepts,
+    } = a;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let read = tokio::time::timeout(REQUEST_DEADLINE, async {
@@ -267,11 +297,13 @@ async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
             // The receipt is this endpoint's claim to have the message; a
             // refused accept (say, a message not addressed here) still leaves
             // a valid wake, which only ever says "look".
-            let (mesh, role) = (mesh.clone(), role.clone());
-            let _ = tokio::task::spawn_blocking(move || {
-                mesh.accept_with(&role, &w.msg_id, l.generation, &l.token)
-            })
-            .await;
+            if accepts {
+                let (mesh, role) = (mesh.clone(), role.clone());
+                let _ = tokio::task::spawn_blocking(move || {
+                    mesh.accept_with(&role, &w.msg_id, l.generation, &l.token)
+                })
+                .await;
+            }
             wake.notify_one();
             b"{\"ok\":true}\n".to_vec()
         }
@@ -383,14 +415,7 @@ fn bind() -> std::io::Result<(&'static str, String, Bound, Option<tempfile::Temp
 }
 
 #[cfg(windows)]
-async fn serve(
-    (name, mut server): Bound,
-    mesh: Mesh,
-    role: String,
-    lease: Arc<RwLock<Lease>>,
-    wake: Arc<Notify>,
-    cancel: CancellationToken,
-) {
+async fn serve((name, mut server): Bound, a: Answerer, cancel: CancellationToken) {
     use tokio::net::windows::named_pipe::ServerOptions;
     loop {
         tokio::select! {
@@ -402,25 +427,12 @@ async fn serve(
             return;
         };
         let conn = std::mem::replace(&mut server, next);
-        tokio::spawn(answer(
-            conn,
-            mesh.clone(),
-            role.clone(),
-            lease.clone(),
-            wake.clone(),
-        ));
+        tokio::spawn(answer(conn, a.clone()));
     }
 }
 
 #[cfg(unix)]
-async fn serve(
-    listener: Bound,
-    mesh: Mesh,
-    role: String,
-    lease: Arc<RwLock<Lease>>,
-    wake: Arc<Notify>,
-    cancel: CancellationToken,
-) {
+async fn serve(listener: Bound, a: Answerer, cancel: CancellationToken) {
     // The peer's uid must be the uid that owns our private socket directory.
     let own = std::fs::metadata(
         listener
@@ -444,13 +456,7 @@ async fn serve(
         if own.is_none() || peer != own {
             continue; // dropped: not our user, or not checkable
         }
-        tokio::spawn(answer(
-            conn,
-            mesh.clone(),
-            role.clone(),
-            lease.clone(),
-            wake.clone(),
-        ));
+        tokio::spawn(answer(conn, a.clone()));
     }
 }
 
