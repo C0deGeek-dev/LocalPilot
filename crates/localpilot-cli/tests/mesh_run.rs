@@ -2006,3 +2006,349 @@ async fn a_waiter_tied_to_its_parent_retires_its_endpoint_when_the_pipe_closes()
         "the endpoint was not retired"
     );
 }
+
+/// A `localpilot mesh mcp --role <r>` server driven over stdio.
+struct McpClient {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+    next: i64,
+}
+
+impl McpClient {
+    fn start(f: &Fixture, role: &str) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_localpilot"))
+            .arg("mesh")
+            .arg("--repo")
+            .arg(&f.anchor)
+            .args(["mcp", "--role", role])
+            .current_dir(&f.anchor)
+            .env_remove("PAIR_REPO")
+            .env("APPDATA", &f.config)
+            .env("XDG_CONFIG_HOME", &f.config)
+            .env("LOCALPILOT_MESH__WRITER", "native")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        Self {
+            child,
+            stdin,
+            stdout,
+            next: 1,
+        }
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        use std::io::{BufRead, Write};
+        let id = self.next;
+        self.next += 1;
+        let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(self.stdin, "{msg}").unwrap();
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        self.stdout.read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], id, "{reply}");
+        reply
+    }
+
+    fn tool(&mut self, name: &str, args: Value) -> Value {
+        self.request("tools/call", json!({"name": name, "arguments": args}))["result"].clone()
+    }
+}
+
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn tool_text(r: &Value) -> String {
+    r["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn cursor_of(f: &Fixture, role: &str) -> Value {
+    let p = f
+        .session_file()
+        .parent()
+        .unwrap()
+        .join("cursor")
+        .join(format!("{role}.json"));
+    serde_json::from_str(&std::fs::read_to_string(p).unwrap_or_else(|_| "{}".into())).unwrap()
+}
+
+#[tokio::test]
+async fn the_mcp_server_speaks_the_protocol_and_lists_six_role_free_tools() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    let mut c = McpClient::start(&f, "claude");
+    let init = c.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t"}}),
+    );
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert!(init["result"]["capabilities"]["tools"].is_object());
+    let tools = c.request("tools/list", json!({}));
+    let names: Vec<String> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        names,
+        ["status", "peek", "ack", "post", "handoff", "verdict"]
+    );
+    assert_eq!(
+        c.request("nope/nothing", json!({}))["error"]["code"],
+        -32601
+    );
+    // status is what `localpilot mesh status` prints.
+    let status = tool_text(&c.tool("status", json!({})));
+    let cli = Command::new(env!("CARGO_BIN_EXE_localpilot"))
+        .arg("mesh")
+        .arg("--repo")
+        .arg(&f.anchor)
+        .arg("status")
+        .env("LOCALPILOT_MESH__WRITER", "native")
+        .env("APPDATA", &f.config)
+        .env("XDG_CONFIG_HOME", &f.config)
+        .output()
+        .unwrap();
+    let norm = |s: &str| s.replace("\r\n", "\n");
+    assert_eq!(norm(&status), norm(&String::from_utf8_lossy(&cli.stdout)));
+}
+
+#[tokio::test]
+async fn mcp_peek_presents_mail_without_acknowledging_it_and_ack_does() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    let mut c = McpClient::start(&f, "claude");
+    let first = tool_text(&c.tool("peek", json!({})));
+    assert!(first.contains("HELLO"), "{first}");
+    f.reference(&[
+        "post",
+        "--role",
+        "localpilot",
+        "--kind",
+        "NOTE",
+        "--to",
+        "claude",
+        "--body",
+        "hello via mcp",
+    ]);
+    let seen = tool_text(&c.tool("peek", json!({})));
+    assert!(seen.contains("hello via mcp"), "{seen}");
+    let cur = cursor_of(&f, "claude");
+    let lp = &cur["from"]["localpilot"];
+    assert_eq!(lp["delivered_seq"], 2, "{cur}");
+    assert_eq!(lp["peer_seq"], 0, "peek must not acknowledge: {cur}");
+    let again = tool_text(&c.tool("peek", json!({})));
+    assert!(again.contains("REDELIVERED"), "{again}");
+    let acked = c.tool("ack", json!({"through": "localpilot:2"}));
+    assert_eq!(acked["isError"], false, "{acked}");
+    assert_eq!(cursor_of(&f, "claude")["from"]["localpilot"]["peer_seq"], 2);
+}
+
+#[tokio::test]
+async fn mcp_post_writes_as_its_role_and_pushes_and_refuses_a_verdict() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    // An endpoint nothing listens on: the push is attempted and recorded.
+    let (transport, address) = if cfg!(windows) {
+        ("pipe", r"\\.\pipe\lp-mcp-nobody")
+    } else {
+        ("unix", "/tmp/lp-mcp-nobody.sock")
+    };
+    f.reference(&[
+        "endpoint",
+        "--role",
+        "localpilot",
+        "--register",
+        "--transport",
+        transport,
+        "--address",
+        address,
+    ]);
+    let mut c = McpClient::start(&f, "claude");
+    let r = c.tool(
+        "post",
+        json!({"kind": "NOTE", "body": "from the mcp tool", "to": "localpilot"}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    let last = f.journal("claude").last().unwrap().clone();
+    assert_eq!(
+        (last["role"].clone(), last["body"].clone()),
+        (json!("claude"), json!("from the mcp tool"))
+    );
+    let pushes = f.facts("pushes", "claude");
+    assert!(
+        pushes.iter().any(|p| p["msg_id"] == last["msg_id"]),
+        "{pushes:?}"
+    );
+    let v = c.tool(
+        "post",
+        json!({"kind": "VERDICT", "body": "AGREE round=1 blocking=0 important=0"}),
+    );
+    assert_eq!(v["isError"], true, "{v}");
+    assert!(tool_text(&v).contains("verdict"), "{v}");
+}
+
+#[tokio::test]
+async fn the_mcp_verdict_answers_only_the_open_review_through_the_engines_rules() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
+    let old = f.request_review(&format!("a.txt={}", f.fingerprint("a.txt")));
+    let asked = f.request_review(&format!("a.txt={}", f.fingerprint("a.txt")));
+    let mut owner = McpClient::start(&f, "claude");
+    let mut lp = McpClient::start(&f, "localpilot");
+    let refused = |r: &Value| r["isError"] == true;
+    // Not a required reviewer (the owner), and a stale request.
+    assert!(refused(&owner.tool(
+        "verdict",
+        json!({"decision": "AGREE", "reply_to": asked, "body": "x"})
+    )));
+    let stale = lp.tool(
+        "verdict",
+        json!({"decision": "AGREE", "reply_to": old, "body": "x"}),
+    );
+    assert!(
+        refused(&stale) && tool_text(&stale).contains("newer"),
+        "{stale}"
+    );
+    // The engine's rules on findings.
+    let no_findings = lp.tool(
+        "verdict",
+        json!({"decision": "REVISE", "reply_to": asked, "body": "x"}),
+    );
+    assert!(
+        refused(&no_findings) && tool_text(&no_findings).contains("at least one finding"),
+        "{no_findings}"
+    );
+    let blocked_agree = lp.tool(
+        "verdict",
+        json!({"decision": "AGREE", "reply_to": asked, "body": "x",
+        "findings": [{"file": "a.txt", "severity": "blocking", "text": "wrong"}]}),
+    );
+    assert!(refused(&blocked_agree), "{blocked_agree}");
+    // A tree that changed since the request.
+    std::fs::write(f.anchor.join("a.txt"), "gamma\n").unwrap();
+    let moved = lp.tool(
+        "verdict",
+        json!({"decision": "AGREE", "reply_to": asked, "body": "x"}),
+    );
+    assert!(
+        refused(&moved) && tool_text(&moved).contains("manifest"),
+        "{moved}"
+    );
+    std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
+    // The real thing: the header comes from the findings.
+    let ok = lp.tool(
+        "verdict",
+        json!({"decision": "REVISE", "reply_to": asked, "body": "please fix",
+        "findings": [{"file": "a.txt", "line": 1, "severity": "important", "text": "say why"}]}),
+    );
+    assert_eq!(ok["isError"], false, "{ok}");
+    let v = f.posted("VERDICT");
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0]["reply_to"], asked.as_str());
+    assert!(
+        v[0]["body"]
+            .as_str()
+            .unwrap()
+            .starts_with("REVISE round=1 blocking=0 important=1\n- a.txt:1 [important] say why"),
+        "{}",
+        v[0]["body"]
+    );
+    let twice = lp.tool(
+        "verdict",
+        json!({"decision": "AGREE", "reply_to": asked, "body": "x"}),
+    );
+    assert!(
+        refused(&twice) && tool_text(&twice).contains("already replied"),
+        "{twice}"
+    );
+}
+
+#[tokio::test]
+async fn a_two_party_mcp_verdict_validates_reply_to_but_posts_without_it() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    // Replace the three-party session with a historic pair (schema 1).
+    f.reference(&["park", "--role", "claude", "--reason", "two-party test"]);
+    f.reference(&["start", "--role", "claude", "--task", "pair"]);
+    f.reference(&["join", "--role", "codex", "--timeout", "1"]);
+    std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
+    let body = format!(
+        "Please review.\n\nFingerprints:\na.txt={}\n",
+        f.fingerprint("a.txt")
+    );
+    f.reference(&[
+        "post",
+        "--role",
+        "claude",
+        "--kind",
+        "REVIEW_REQUEST",
+        "--body",
+        &body,
+    ]);
+    let dir = f.anchor.join(".pair-programming");
+    let active: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("active.json")).unwrap()).unwrap();
+    let sid = active["session_id"].as_str().unwrap().to_owned();
+    let journal = |role: &str| -> Vec<Value> {
+        std::fs::read_to_string(
+            dir.join("sessions")
+                .join(&sid)
+                .join("journal")
+                .join(format!("{role}.jsonl")),
+        )
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+    };
+    let seq = journal("claude").last().unwrap()["seq"].as_i64().unwrap();
+    let mut c = McpClient::start(&f, "codex");
+    let r = c.tool(
+        "verdict",
+        json!({"decision": "AGREE", "reply_to": format!("claude:{seq}"), "body": "fine"}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    let v = journal("codex")
+        .into_iter()
+        .filter(|m| m["kind"] == "VERDICT")
+        .collect::<Vec<_>>();
+    assert_eq!(v.len(), 1);
+    assert!(
+        v[0].get("reply_to").is_none(),
+        "a two-party post carries no reply_to: {}",
+        v[0]
+    );
+    assert!(v[0]["body"]
+        .as_str()
+        .unwrap()
+        .starts_with("AGREE round=1 blocking=0 important=0"));
+}

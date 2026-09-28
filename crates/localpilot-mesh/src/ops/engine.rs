@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 
 use super::post::{Expect, PostArgs};
 use super::read::Delivery;
-use super::{authority, schema, sid, str_of, Mesh, Obj, MAX_BODY};
+use super::{authority, schema, seq_of, sid, str_of, Mesh, Obj, MAX_BODY};
 use crate::error::MeshError;
 use crate::jsonl;
 use crate::layout::MAILBOX_DIR;
@@ -280,6 +280,105 @@ impl Mesh {
             Ok(_) => None,
             Err(problems) => Some(revise_for(&problems, request.round, &request.msg_id)),
         })
+    }
+
+    /// The review `role` is asked for by `msg_id`, as the engine would see
+    /// it, for a verdict made outside the engine (the mesh MCP `verdict`
+    /// tool). `Ok(Err(why))` when it cannot be answered with a verdict:
+    /// not a review request of the current unit, not from the unit's owner,
+    /// `role` not a required reviewer, a newer request from the same author
+    /// (only the latest is open), already answered by `role`, or a manifest
+    /// that no longer holds (its problems are the reason).
+    ///
+    /// # Errors
+    /// A refusal reading the session, or unreadable mailbox state.
+    pub fn open_review(
+        &self,
+        role: &str,
+        msg_id: &str,
+    ) -> Result<Result<Request, String>, MeshError> {
+        let s = self.require(role, true)?;
+        let Some(m) = self.find_msg(&s, msg_id)? else {
+            return Ok(Err(format!("no message {msg_id} in this session")));
+        };
+        if str_of(&m, "kind") != Some("REVIEW_REQUEST") {
+            return Ok(Err(format!("{msg_id} is not a REVIEW_REQUEST")));
+        }
+        if str_of(&m, "unit_id") != str_of(&s, "unit_id") {
+            return Ok(Err(format!("{msg_id} belongs to an earlier unit")));
+        }
+        let from = str_of(&m, "role").unwrap_or_default().to_owned();
+        let (owner, required, _) = authority(&s);
+        if from != owner {
+            return Ok(Err(format!(
+                "{msg_id} is from {from}, not the unit's owner {owner}"
+            )));
+        }
+        if !required.iter().any(|r| r == role) {
+            return Ok(Err(format!(
+                "{role} is not a required reviewer of this unit"
+            )));
+        }
+        let unit = str_of(&s, "unit_id");
+        let latest = jsonl::records(&self.mb.journal(sid(&s), &from))?
+            .into_iter()
+            .filter(|r| str_of(r, "kind") == Some("REVIEW_REQUEST") && str_of(r, "unit_id") == unit)
+            .map(|r| seq_of(&r))
+            .max();
+        if latest != Some(seq_of(&m)) {
+            return Ok(Err(format!(
+                "{msg_id} is not the open review request; {from} has posted a newer one"
+            )));
+        }
+        if self.replied(role, msg_id)? {
+            return Ok(Err(format!("{role} has already replied to {msg_id}")));
+        }
+        let body = str_of(&m, "body").unwrap_or_default().to_owned();
+        let files = match self.check_manifest(&s, &body)? {
+            Ok(files) => files,
+            Err(problems) => {
+                return Ok(Err(format!(
+                    "the request's manifest does not hold: {}",
+                    problems.join("; ")
+                )))
+            }
+        };
+        Ok(Ok(Request {
+            need: Need::Review,
+            msg_id: msg_id.to_owned(),
+            kind: "REVIEW_REQUEST".to_owned(),
+            from,
+            body,
+            task: str_of(&s, "task").unwrap_or_default().to_owned(),
+            round: self.verdicts_in_unit(&s, role)? + 1,
+            files,
+            expect: Expect {
+                session_id: sid(&s).to_owned(),
+                unit_id: unit.map(str::to_owned),
+                reviewer: true,
+                owner: false,
+            },
+        }))
+    }
+
+    /// Post a verdict built by [`validate`] for `request`, under the
+    /// request's reviewer guard. In a two-party (schema 1) session the
+    /// `reply_to` link was for validation only and is dropped, because a
+    /// historic pair's post takes no directed-mail fields.
+    ///
+    /// # Errors
+    /// A refusal from the guard or the post.
+    pub fn post_verdict(
+        &self,
+        role: &str,
+        request: &Request,
+        mut args: PostArgs,
+    ) -> Result<Obj, MeshError> {
+        let s = self.require(role, true)?;
+        if schema(&s) == 1 {
+            args.reply_to = None;
+        }
+        self.post_guarded(role, &args, &request.expect)
     }
 
     /// Whether `role` has already posted a reply to `msg_id`.
