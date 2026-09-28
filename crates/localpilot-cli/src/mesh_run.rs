@@ -64,9 +64,21 @@ struct RunCli {
     /// Seconds to wait for a session that names the role; 0 waits for ever.
     #[arg(long, default_value_t = 60)]
     timeout: u64,
-    /// Seconds between looks for mail, from 0.05 to 3600.
-    #[arg(long, default_value_t = 1.0, value_parser = poll_seconds)]
-    poll: f64,
+    /// Register a delivery endpoint and act as soon as a peer's post wakes
+    /// it; the mailbox is still read every `--poll` seconds (30 by default
+    /// when listening).
+    #[arg(long)]
+    listen: bool,
+    /// Seconds between looks for mail, from 0.05 to 3600 (default 1, or 30
+    /// with `--listen`).
+    #[arg(long, value_parser = poll_seconds)]
+    poll: Option<f64>,
+}
+
+impl RunCli {
+    fn poll(&self) -> Duration {
+        Duration::from_secs_f64(self.poll.unwrap_or(if self.listen { 30.0 } else { 1.0 }))
+    }
 }
 
 fn poll_seconds(raw: &str) -> Result<f64, String> {
@@ -149,7 +161,7 @@ impl From<MeshError> for Failure {
 }
 
 async fn engine(mesh: &Mesh, cli: &RunCli, judge: &mut dyn Judge) -> Result<(), Failure> {
-    let poll = Duration::from_secs_f64(cli.poll);
+    let poll = cli.poll();
     let joined = {
         let (mesh, role, timeout) = (mesh.clone(), cli.role.clone(), cli.timeout);
         tokio::task::spawn_blocking(move || mesh.join(&role, timeout, poll))
@@ -169,8 +181,41 @@ async fn engine(mesh: &Mesh, cli: &RunCli, judge: &mut dyn Judge) -> Result<(), 
         mesh.owner_supported(&cli.role)?;
     }
     println!("ENGINE role={} session={sid}", cli.role);
+    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+    let listening = if cli.listen {
+        match crate::mesh_listen::Listening::start(mesh, &cli.role, &sid, wake.clone()).await {
+            Ok(l) => Some(l),
+            Err(why) => {
+                println!("WARN not listening: {why}; the engine polls only");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let result = tokio::select! {
+        r = drive(mesh, cli, judge, &sid, poll, &wake) => r,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    };
+    // Every way out retires the endpoint this run registered.
+    if let Some(l) = listening {
+        l.stop(mesh).await;
+    }
+    result
+}
+
+/// The engine's loop: act on each delivery, then wait for a wake or the
+/// next poll.
+async fn drive(
+    mesh: &Mesh,
+    cli: &RunCli,
+    judge: &mut dyn Judge,
+    sid: &str,
+    poll: Duration,
+    wake: &tokio::sync::Notify,
+) -> Result<(), Failure> {
     loop {
-        let delivered = mesh.receive(&cli.role, 900, Some(&sid))?;
+        let delivered = mesh.receive(&cli.role, 900, Some(sid))?;
         if let Some(delivery) = &delivered {
             for step in mesh.plan_as(&cli.role, delivery, cli.own)? {
                 let go_on = execute(mesh, &cli.role, step, judge).await;
@@ -191,7 +236,10 @@ async fn engine(mesh: &Mesh, cli: &RunCli, judge: &mut dyn Judge) -> Result<(), 
             return Ok(());
         }
         if delivered.is_none() {
-            tokio::time::sleep(poll).await;
+            tokio::select! {
+                () = wake.notified() => {}
+                () = tokio::time::sleep(poll) => {}
+            }
         }
     }
 }

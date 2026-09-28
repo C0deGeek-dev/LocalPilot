@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot mesh run --listen`: LocalPilot wakes when a peer posts.** The
+  engine registers its own delivery endpoint (an owner-only named pipe on
+  Windows, a socket in a private directory on Unix), keeps the token in
+  memory only, checks every wake, records a receipt and acts at once. The
+  60-second lease is renewed on its own schedule, is never taken back from
+  another process, and is retired on a clean exit; the mailbox is still read
+  every `--poll` seconds (30 by default when listening).
 - **Windows named pipes admit only their own user.** The server's named pipe
   (and every later pipe endpoint) is created with a protected DACL whose only
   entry is the current user. Tokio's default also granted read access to

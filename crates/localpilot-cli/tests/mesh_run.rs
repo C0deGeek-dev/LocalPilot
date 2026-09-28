@@ -145,6 +145,79 @@ impl Fixture {
             .unwrap()
     }
 
+    /// The engine as a command, for runs that need extra environment or to
+    /// run in the background.
+    fn engine(&self, extra: &[&str], env: &[(&str, &str)]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_localpilot"));
+        cmd.arg("mesh")
+            .arg("--repo")
+            .arg(&self.anchor)
+            .args([
+                "run",
+                "--role",
+                "localpilot",
+                "--model",
+                "m",
+                "--timeout",
+                "30",
+            ])
+            .args(extra)
+            .current_dir(&self.anchor)
+            .env_remove("PAIR_REPO")
+            .env_remove("PAIR_ENDPOINT_TOKEN")
+            .env("APPDATA", &self.config)
+            .env("XDG_CONFIG_HOME", &self.config)
+            .env("LOCALPILOT_MESH__WRITER", "native");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+
+    /// The reference's output without asserting success.
+    fn reference_out(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut cmd = Command::new(&self.py[0]);
+        cmd.args(&self.py[1..])
+            .arg(suite().join("reference").join("pair.py"))
+            .arg("--repo")
+            .arg(&self.anchor)
+            .args(args)
+            .env_remove("PAIR_REPO")
+            .env_remove("PAIR_ENDPOINT_TOKEN")
+            .env("PYTHONIOENCODING", "utf-8");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    }
+
+    /// A participant's endpoint record, if any.
+    fn endpoint_record(&self, role: &str) -> Option<Value> {
+        let p = self
+            .session_file()
+            .parent()
+            .unwrap()
+            .join("endpoints")
+            .join(format!("{role}.json"));
+        std::fs::read_to_string(p)
+            .ok()
+            .map(|s| serde_json::from_str(&s).unwrap())
+    }
+
+    fn facts(&self, area: &str, role: &str) -> Vec<Value> {
+        let p = self
+            .session_file()
+            .parent()
+            .unwrap()
+            .join(area)
+            .join(format!("{role}.jsonl"));
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
     fn fingerprint(&self, rel: &str) -> String {
         fingerprint_of(&self.anchor, rel).unwrap().unwrap()
     }
@@ -1030,4 +1103,437 @@ async fn a_stop_already_acknowledged_still_stops_a_restarted_owner() {
     );
     assert!(!f.anchor.join("b.txt").exists());
     assert!(f.posted("REVIEW_REQUEST").is_empty());
+}
+
+/// Send one raw wake request to an endpoint address and return the reply.
+async fn wake_raw(transport: &str, address: &str, line: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut reply = Vec::new();
+    #[cfg(windows)]
+    {
+        assert_eq!(transport, "pipe");
+        let mut c = tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(address)
+            .unwrap();
+        c.write_all(line.as_bytes()).await.unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), c.read_to_end(&mut reply))
+            .await;
+    }
+    #[cfg(unix)]
+    {
+        assert_eq!(transport, "unix");
+        let mut c = tokio::net::UnixStream::connect(address).await.unwrap();
+        c.write_all(line.as_bytes()).await.unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), c.read_to_end(&mut reply))
+            .await;
+    }
+    String::from_utf8_lossy(&reply).trim().to_owned()
+}
+
+async fn until<F: Fn() -> bool>(what: &str, ok: F) {
+    for _ in 0..200 {
+        if ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn a_listening_engine_renews_through_a_long_model_turn_then_retires_its_endpoint() {
+    // Renewal runs on its own clock: the lease is renewed while the loop is
+    // parked in a 3 s model turn, and a clean exit unregisters it.
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(AGREE).set_delay(std::time::Duration::from_secs(3)))
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
+    f.request_review(&format!("a.txt={}", f.fingerprint("a.txt")));
+    let mut cmd = f.engine(
+        &["--once", "--listen"],
+        &[("LOCALPILOT_TEST_MESH_RENEW_MS", "200")],
+    );
+    let out = tokio::task::spawn_blocking(move || cmd.output().unwrap())
+        .await
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("LISTENING role=localpilot"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(f.posted("VERDICT").len(), 1, "{}", text(&out));
+    let ep = f.endpoint_record("localpilot").unwrap();
+    assert_eq!(ep["active"], false, "{ep}");
+    assert!(
+        ep["generation"].as_i64().unwrap() >= 5,
+        "renewed only to {ep}"
+    );
+}
+
+#[tokio::test]
+async fn a_listening_engine_acts_on_a_wake_and_the_endpoint_holds_against_other_processes() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(AGREE))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    // Poll once an hour: anything that happens promptly came from a wake.
+    let mut engine = f
+        .engine(&["--listen", "--poll", "3600"], &[])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    until("the endpoint", || {
+        f.endpoint_record("localpilot")
+            .is_some_and(|e| e["active"] == true)
+    })
+    .await;
+    let ep = f.endpoint_record("localpilot").unwrap();
+    let (transport, address) = (
+        ep["transport"].as_str().unwrap().to_owned(),
+        ep["address"].as_str().unwrap().to_owned(),
+    );
+    let generation = ep["generation"].as_i64().unwrap();
+    let sid = ep["session_id"].as_str().unwrap().to_owned();
+
+    // A post by claude wakes it: the push is sent and the endpoint accepts.
+    f.reference(&[
+        "post",
+        "--role",
+        "claude",
+        "--kind",
+        "NOTE",
+        "--to",
+        "localpilot",
+        "--body",
+        "hello",
+    ]);
+    let posted = f.journal("claude").last().unwrap()["msg_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    until("the receipt", || {
+        f.facts("receipts", "localpilot")
+            .iter()
+            .any(|r| r["msg_id"] == posted.as_str())
+    })
+    .await;
+    assert!(f
+        .facts("pushes", "claude")
+        .iter()
+        .any(|p| p["msg_id"] == posted.as_str() && p["outcome"] == "sent"));
+
+    // D009: another process can neither replace the live endpoint nor accept
+    // for it, with no token or a wrong one.
+    let steal = f.reference_out(
+        &[
+            "endpoint",
+            "--role",
+            "localpilot",
+            "--register",
+            "--transport",
+            "pipe",
+            "--address",
+            r"\\.\pipe\thief",
+        ],
+        &[],
+    );
+    assert_eq!(steal.status.code(), Some(5), "{steal:?}");
+    let gen = generation.to_string();
+    let accept = [
+        "accept",
+        "--role",
+        "localpilot",
+        "--msg-id",
+        posted.as_str(),
+        "--generation",
+        gen.as_str(),
+    ];
+    let no_token = f.reference_out(&accept, &[]);
+    assert_eq!(no_token.status.code(), Some(5), "{no_token:?}");
+    assert!(String::from_utf8_lossy(&no_token.stderr).contains("no_token"));
+    let wrong = f.reference_out(&accept, &[("PAIR_ENDPOINT_TOKEN", &"0".repeat(64))]);
+    assert_eq!(wrong.status.code(), Some(5), "{wrong:?}");
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("bad_token"));
+    assert_eq!(
+        f.endpoint_record("localpilot").unwrap()["address"],
+        address.as_str()
+    );
+
+    // Wakes that are malformed or not for this endpoint are refused by code.
+    let wake = |to: &str, session: &str, generation: i64| {
+        json!({"v": 1, "op": "wake", "session_id": session, "to": to, "generation": generation,
+               "msg_id": posted, "from": "claude"})
+        .to_string()
+            + "\n"
+    };
+    for (line, code) in [
+        ("not json\n".to_owned(), "bad_request"),
+        (wake("codex", &sid, generation), "wrong_role"),
+        (
+            wake("localpilot", "20000101T000000Z-00000000", generation),
+            "wrong_session",
+        ),
+        (wake("localpilot", &sid, generation - 1), "stale_generation"),
+    ] {
+        let reply = wake_raw(&transport, &address, &line).await;
+        assert!(
+            reply.contains(&format!("\"reason\":\"{code}\"")),
+            "{line} -> {reply}"
+        );
+    }
+    assert!(
+        wake_raw(&transport, &address, &wake("localpilot", &sid, generation))
+            .await
+            .contains("\"ok\":true")
+    );
+
+    // A STOP reaches it by wake too, and it retires its endpoint on the way out.
+    f.reference(&[
+        "post",
+        "--role",
+        "claude",
+        "--kind",
+        "STOP",
+        "--to",
+        "localpilot",
+        "--body",
+        "halt",
+    ]);
+    let status = tokio::task::spawn_blocking(move || {
+        for _ in 0..150 {
+            if let Some(s) = engine.try_wait().unwrap() {
+                return Some(s);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = engine.kill();
+        None
+    })
+    .await
+    .unwrap();
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "the engine did not stop on the STOP"
+    );
+    assert_eq!(f.endpoint_record("localpilot").unwrap()["active"], false);
+}
+
+#[tokio::test]
+async fn an_endpoint_taken_over_elsewhere_is_never_taken_back() {
+    // Renewal is refused once the record belongs to someone else: the engine
+    // stops listening and leaves that endpoint alone on exit.
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(AGREE).set_delay(std::time::Duration::from_secs(3)))
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
+    f.request_review(&format!("a.txt={}", f.fingerprint("a.txt")));
+    let mut cmd = f.engine(
+        &["--once", "--listen"],
+        &[("LOCALPILOT_TEST_MESH_RENEW_MS", "200")],
+    );
+    let run = tokio::task::spawn_blocking(move || cmd.output().unwrap());
+    until("the endpoint", || {
+        f.endpoint_record("localpilot")
+            .is_some_and(|e| e["active"] == true)
+    })
+    .await;
+    let mut foreign = f.endpoint_record("localpilot").unwrap();
+    foreign["generation"] = json!(999);
+    foreign["token_sha256"] = json!("0".repeat(64));
+    foreign["expires_at"] = json!("2099-01-01T00:00:00Z");
+    let path = f
+        .session_file()
+        .parent()
+        .unwrap()
+        .join("endpoints")
+        .join("localpilot.json");
+    std::fs::write(&path, foreign.to_string()).unwrap();
+    let out = run.await.unwrap();
+    assert!(
+        text(&out).contains("LISTEN_STOPPED role=localpilot"),
+        "{}",
+        text(&out)
+    );
+    let ep = f.endpoint_record("localpilot").unwrap();
+    assert_eq!(
+        (ep["active"].clone(), ep["generation"].clone()),
+        (json!(true), json!(999)),
+        "{ep}"
+    );
+}
+
+/// Makes a participant's endpoint record unwritable while it lives: a
+/// read-only file on Windows (a rename cannot replace it), a read-only
+/// `endpoints/` directory elsewhere. Undone on drop.
+struct Frozen(PathBuf);
+
+impl Frozen {
+    fn new(record: &Path) -> Self {
+        let target = if cfg!(windows) {
+            record.to_path_buf()
+        } else {
+            record.parent().unwrap().to_path_buf()
+        };
+        set_writable(&target, false);
+        Self(target)
+    }
+}
+
+impl Drop for Frozen {
+    fn drop(&mut self) {
+        set_writable(&self.0, true);
+    }
+}
+
+#[cfg(windows)]
+fn set_writable(p: &Path, on: bool) {
+    let mut perm = std::fs::metadata(p).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(!on);
+    std::fs::set_permissions(p, perm).unwrap();
+}
+
+#[cfg(unix)]
+fn set_writable(p: &Path, on: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        p,
+        std::fs::Permissions::from_mode(if on { 0o755 } else { 0o555 }),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_lease_that_runs_out_while_renewal_fails_is_never_registered_again() {
+    // A 2 s lease renewed every 200 ms. Renewal is made to fail (the record
+    // cannot be written) for longer than the lease, then allowed again: the
+    // engine must stop listening, not register over the expired record.
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(AGREE).set_delay(std::time::Duration::from_secs(5)))
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
+    f.request_review(&format!("a.txt={}", f.fingerprint("a.txt")));
+    let mut cmd = f.engine(
+        &["--once", "--listen"],
+        &[
+            ("LOCALPILOT_TEST_MESH_RENEW_MS", "200"),
+            ("LOCALPILOT_TEST_MESH_TTL_S", "2"),
+        ],
+    );
+    let run = tokio::task::spawn_blocking(move || cmd.output().unwrap());
+    until("the endpoint", || {
+        f.endpoint_record("localpilot")
+            .is_some_and(|e| e["active"] == true)
+    })
+    .await;
+    let record = f
+        .session_file()
+        .parent()
+        .unwrap()
+        .join("endpoints")
+        .join("localpilot.json");
+    let frozen_at = {
+        let freeze = Frozen::new(&record);
+        let generation = f.endpoint_record("localpilot").unwrap()["generation"].clone();
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        drop(freeze);
+        generation
+    };
+    let out = run.await.unwrap();
+    let text = text(&out);
+    // Whether the local guard stops the next renewal or the renewal is
+    // refused under the lock as expired depends on scheduling; either way the
+    // listener must stop, and nothing may register again.
+    assert!(text.contains("LISTEN_STOPPED role=localpilot:"), "{text}");
+    let ep = f.endpoint_record("localpilot").unwrap();
+    assert_eq!(
+        ep["generation"], frozen_at,
+        "registered again after the lease ran out: {ep}"
+    );
+}
+
+#[tokio::test]
+async fn a_renewal_that_waits_on_the_lock_past_the_lease_does_not_reclaim_it() {
+    // The race a pre-call check cannot close: the renewal passes its guard,
+    // then waits on the role lock until the lease has run out. Under the lock
+    // it must find the lease expired and refuse, not register afresh.
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(AGREE).set_delay(std::time::Duration::from_secs(5)))
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
+    f.request_review(&format!("a.txt={}", f.fingerprint("a.txt")));
+    let mut cmd = f.engine(
+        &["--once", "--listen"],
+        &[
+            ("LOCALPILOT_TEST_MESH_RENEW_MS", "200"),
+            ("LOCALPILOT_TEST_MESH_TTL_S", "2"),
+        ],
+    );
+    let run = tokio::task::spawn_blocking(move || cmd.output().unwrap());
+    until("the endpoint", || {
+        f.endpoint_record("localpilot")
+            .is_some_and(|e| e["active"] == true)
+    })
+    .await;
+    // Hold localpilot's role lock (the protocol's lock file) across the lease.
+    let lock = f
+        .session_file()
+        .parent()
+        .unwrap()
+        .join("journal")
+        .join("localpilot.lock");
+    let held_at = loop {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            use std::io::Write as _;
+            let _ = writeln!(file, "{{\"pid\": {}}}", std::process::id());
+            break f.endpoint_record("localpilot").unwrap()["generation"].clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(2600)).await;
+    std::fs::remove_file(&lock).unwrap();
+    let out = run.await.unwrap();
+    let text = text(&out);
+    assert!(text.contains("LISTEN_STOPPED role=localpilot"), "{text}");
+    let ep = f.endpoint_record("localpilot").unwrap();
+    assert_eq!(
+        ep["generation"], held_at,
+        "the lease was reclaimed after it ran out: {ep}"
+    );
 }

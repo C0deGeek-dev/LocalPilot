@@ -41,6 +41,7 @@ mod mcp;
 mod mcp_env;
 mod memory_cmd;
 mod mesh_cmd;
+mod mesh_listen;
 mod mesh_push;
 mod mesh_run;
 mod models_cmd;

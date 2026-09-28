@@ -1688,6 +1688,7 @@ dependencies = [
  "localpilot-taskgraph",
  "localpilot-terminal-ui",
  "localpilot-tools",
+ "localpilot-winsec",
  "parking_lot",
  "ratatui",
  "reqwest",

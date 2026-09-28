@@ -66,15 +66,19 @@ pub(super) fn live(ep: &Obj) -> bool {
     active(ep) && !expired
 }
 
-/// Whether the caller holds the token minted when `ep` was registered:
-/// `None` when it does, else the refusal code.
-fn token_problem(ep: &Obj) -> Option<&'static str> {
-    let tok = std::env::var(ENDPOINT_TOKEN_ENV).unwrap_or_default();
+/// The token a command-line caller presents: `PAIR_ENDPOINT_TOKEN`, never argv.
+fn env_token() -> String {
+    std::env::var(ENDPOINT_TOKEN_ENV).unwrap_or_default()
+}
+
+/// Whether `tok` is the token minted when `ep` was registered: `None` when
+/// it is, else the refusal code.
+fn token_problem(ep: &Obj, tok: &str) -> Option<&'static str> {
     if tok.is_empty() {
         return Some("no_token");
     }
     let want = str_of(ep, "token_sha256").unwrap_or_default();
-    let got = sha256_hex(&tok);
+    let got = sha256_hex(tok);
     let same = want.len() == got.len()
         && want
             .bytes()
@@ -108,14 +112,105 @@ pub enum EndpointArgs {
     Unregister,
 }
 
+/// What an endpoint operation did.
+enum Done {
+    Registered { generation: i64, token: String },
+    Unregistered(Out),
+    Refused(Out),
+}
+
 impl Mesh {
     /// `endpoint`: register or retire this participant's delivery endpoint.
-    /// Generations only rise for the life of the session.
+    /// Generations only rise for the life of the session. The token, when one
+    /// is needed, comes from `PAIR_ENDPOINT_TOKEN`.
     ///
     /// # Errors
     /// A refusal from [`Mesh::require`], or a registration missing its
     /// transport or address.
     pub fn endpoint(&self, role: &str, a: &EndpointArgs) -> Result<Out, MeshError> {
+        Ok(match self.endpoint_do(role, a, &env_token(), false)? {
+            // Shown once, to the adapter that registered.
+            Done::Registered { generation, token } => Out::ok(format!(
+                "ENDPOINT {role} generation={generation}\nENDPOINT_TOKEN={token}\n"
+            )),
+            Done::Unregistered(out) | Done::Refused(out) => out,
+        })
+    }
+
+    /// Register (or, holding `token`, renew) this participant's endpoint from
+    /// the endpoint's own process: the new generation and token come back as
+    /// values and are never printed, so a listener can keep its token in
+    /// memory only (spec D-8, P-6). `Err(out)` is the refusal.
+    ///
+    /// # Errors
+    /// As [`Mesh::endpoint`].
+    pub fn register_endpoint(
+        &self,
+        role: &str,
+        transport: &str,
+        address: &str,
+        ttl: Option<i64>,
+        token: &str,
+    ) -> Result<Result<(i64, String), Out>, MeshError> {
+        let a = EndpointArgs::Register {
+            transport: Some(transport.to_owned()),
+            address: Some(address.to_owned()),
+            ttl,
+        };
+        Ok(match self.endpoint_do(role, &a, token, false)? {
+            Done::Registered { generation, token } => Ok((generation, token)),
+            Done::Unregistered(out) | Done::Refused(out) => Err(out),
+        })
+    }
+
+    /// Renew an endpoint this process still holds: under the role lock, the
+    /// current record must be live and registered with `token`, or nothing
+    /// changes. Unlike [`Mesh::register_endpoint`], an expired record is never
+    /// replaced here, however long the lock took: a lease that ran out is no
+    /// longer the renewer's to keep (spec D-4 recovery stays with a fresh
+    /// registration).
+    ///
+    /// # Errors
+    /// As [`Mesh::endpoint`].
+    pub fn renew_endpoint(
+        &self,
+        role: &str,
+        transport: &str,
+        address: &str,
+        ttl: Option<i64>,
+        token: &str,
+    ) -> Result<Result<(i64, String), Out>, MeshError> {
+        let a = EndpointArgs::Register {
+            transport: Some(transport.to_owned()),
+            address: Some(address.to_owned()),
+            ttl,
+        };
+        Ok(match self.endpoint_do(role, &a, token, true)? {
+            Done::Registered { generation, token } => Ok((generation, token)),
+            Done::Unregistered(out) | Done::Refused(out) => Err(out),
+        })
+    }
+
+    /// Retire this participant's endpoint, presenting `token`.
+    ///
+    /// # Errors
+    /// As [`Mesh::endpoint`].
+    pub fn unregister_endpoint(&self, role: &str, token: &str) -> Result<Out, MeshError> {
+        Ok(
+            match self.endpoint_do(role, &EndpointArgs::Unregister, token, false)? {
+                Done::Registered { .. } => Out::ok(String::new()),
+                Done::Unregistered(out) | Done::Refused(out) => out,
+            },
+        )
+    }
+
+    fn endpoint_do(
+        &self,
+        role: &str,
+        a: &EndpointArgs,
+        tok: &str,
+        renewing: bool,
+    ) -> Result<Done, MeshError> {
         let s = self.require(role, true)?;
         let p = self.mb.endpoint(sid(&s), role);
         let (gen, token) = {
@@ -124,15 +219,15 @@ impl Mesh {
             let (transport, address, ttl) = match a {
                 EndpointArgs::Unregister => {
                     if !active(&old) {
-                        return Ok(refuse(
+                        return Ok(Done::Refused(refuse(
                             "no_active_endpoint",
                             &format!("{role} has no active endpoint to unregister"),
-                        ));
+                        )));
                     }
                     // An expired lease is over: retiring it needs no token.
                     if live(&old) {
-                        if let Some(bad) = token_problem(&old) {
-                            return Ok(refuse(bad, &format!("unregistering {role}'s endpoint needs the token it was registered with, in {ENDPOINT_TOKEN_ENV}")));
+                        if let Some(bad) = token_problem(&old, tok) {
+                            return Ok(Done::Refused(refuse(bad, &format!("unregistering {role}'s endpoint needs the token it was registered with, in {ENDPOINT_TOKEN_ENV}"))));
                         }
                     }
                     let mut rec = old.clone();
@@ -142,9 +237,9 @@ impl Mesh {
                     let gen = old
                         .get("generation")
                         .map_or_else(|| "None".to_owned(), Value::to_string);
-                    return Ok(Out::ok(format!(
+                    return Ok(Done::Unregistered(Out::ok(format!(
                         "ENDPOINT {role} unregistered generation={gen}\n"
-                    )));
+                    ))));
                 }
                 EndpointArgs::Register {
                     transport,
@@ -162,11 +257,21 @@ impl Mesh {
                     }
                 },
             };
+            // A renewal needs the lease still live, decided here under the
+            // lock, not when the renewer last looked.
+            if renewing && !live(&old) {
+                return Ok(Done::Refused(refuse(
+                    "expired_endpoint",
+                    &format!(
+                        "{role}'s endpoint is not live any more; a renewal cannot bring it back"
+                    ),
+                )));
+            }
             // Replacing a live endpoint is rotation, and only its holder may
             // rotate it; an expired one is replaceable without its token.
             if live(&old) {
-                if let Some(bad) = token_problem(&old) {
-                    return Ok(refuse(bad, &format!("{role} already has a live endpoint; replacing it needs its token in {ENDPOINT_TOKEN_ENV}")));
+                if let Some(bad) = token_problem(&old, tok) {
+                    return Ok(Done::Refused(refuse(bad, &format!("{role} already has a live endpoint; replacing it needs its token in {ENDPOINT_TOKEN_ENV}"))));
                 }
             }
             let gen = num_at(&old, "generation") + 1;
@@ -185,10 +290,10 @@ impl Mesh {
             )?;
             (gen, token)
         };
-        // Shown once, to the adapter that registered.
-        Ok(Out::ok(format!(
-            "ENDPOINT {role} generation={gen}\nENDPOINT_TOKEN={token}\n"
-        )))
+        Ok(Done::Registered {
+            generation: gen,
+            token,
+        })
     }
 
     /// `accept`: the endpoint's durable acceptance of one message, the only
@@ -197,6 +302,21 @@ impl Mesh {
     /// # Errors
     /// A refusal from [`Mesh::require`]; unreadable mailbox state.
     pub fn accept(&self, role: &str, msg_id: &str, generation: i64) -> Result<Out, MeshError> {
+        self.accept_with(role, msg_id, generation, &env_token())
+    }
+
+    /// [`Mesh::accept`] presenting `token` directly: the endpoint's own
+    /// process accepting with the token it holds in memory.
+    ///
+    /// # Errors
+    /// As [`Mesh::accept`].
+    pub fn accept_with(
+        &self,
+        role: &str,
+        msg_id: &str,
+        generation: i64,
+        tok: &str,
+    ) -> Result<Out, MeshError> {
         let s = self.require(role, true)?;
         {
             let _g = Lock::acquire(&self.mb.role_lock(sid(&s), role))?;
@@ -227,7 +347,7 @@ impl Mesh {
                     &format!("generation {generation} is not {role}'s current {cur}"),
                 ));
             }
-            if let Some(bad) = token_problem(&ep) {
+            if let Some(bad) = token_problem(&ep, tok) {
                 return Ok(refuse(bad, &format!("only {role}'s registered endpoint may accept; it presents its token in {ENDPOINT_TOKEN_ENV}")));
             }
             let Some(m) = self.find_msg(&s, msg_id)? else {

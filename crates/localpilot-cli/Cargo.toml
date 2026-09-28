@@ -135,6 +135,10 @@ localpilot-taskgraph = { path = "../localpilot-taskgraph" }
 localpilot-tools = { path = "../localpilot-tools" }
 localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# Owner-only named pipes for `mesh run --listen` (ADR-0189).
+localpilot-winsec = { path = "../localpilot-winsec" }
+
 [dev-dependencies]
 assert_cmd = { workspace = true }
 localmind-store = { path = "../../external/localmind/crates/localmind-store" }

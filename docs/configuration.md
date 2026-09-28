@@ -341,6 +341,28 @@ before any model work. A required reviewer's `ESCALATE` on the open request,
 or its `STOP`, ends the owner's run. After a hand-away and back, only
 requests and verdicts from the current ownership count.
 
+With `--listen`, the engine is woken the moment a peer posts to it, instead
+of finding the mail on its next look:
+
+- It registers a delivery endpoint for its role from its own process and
+  keeps the endpoint's token in memory only: it is never printed, put in the
+  environment or passed on a command line.
+- On Windows the endpoint is a named pipe that only your own user can open.
+  On Unix it is a socket in a private (`0700`) directory, and a connection
+  from another user is closed.
+- Each wake is checked: a malformed request, another role, another session
+  or an old generation is refused with its reason. A valid wake records a
+  receipt and runs the engine's loop at once.
+- The registration is a 60-second lease renewed every 20 seconds on its own
+  schedule, so a long model turn cannot let it lapse. If another process
+  takes the endpoint over, the engine stops listening, says so
+  (`LISTEN_STOPPED`), and never takes it back.
+- The mailbox is still read every `--poll` seconds, 30 by default when
+  listening, so a missed wake loses nothing.
+- On a clean exit (`STOP`, `--once`, Ctrl-C) the endpoint is retired. If the
+  process dies instead, the lease expires within a minute and a new run can
+  register again.
+
 `localpilot doctor` shows, in its `mesh` section, the writer, the anchor tree
 `mesh` would use, its active session, and whether the engine can join it as
 `localpilot` (and if not, why). It reads the mailbox and writes nothing.
