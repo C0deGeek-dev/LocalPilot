@@ -267,6 +267,47 @@ run, and a long one nightly on Linux and Windows. The anchor tree is `--repo`, t
 | `4` | `guard-write` denied the write (`WRITE_DENIED` on stderr). |
 | `5` | A delivery request was refused (`REFUSED <code>` on stderr). |
 
+#### The participant engine (`localpilot mesh run`)
+
+`localpilot mesh run` takes part on its own: the protocol runs in code, and a
+model is asked only for judgement.
+
+```powershell
+localpilot mesh --repo . run --role localpilot --model qwen3-coder --timeout 300
+```
+
+It joins as soon as a session names the role, then handles each message as
+it is delivered:
+
+- It checks a review request's `Fingerprints` manifest itself before any
+  model is asked. The manifest has one `path=<12 hex>` or `path=deleted` line
+  per changed file, and the fingerprint is SHA-256 with CRLF read as LF. A
+  manifest that does not match the tree gets a `REVISE` from the engine.
+- It asks the model for a verdict when it is a required reviewer, or for a
+  reply to a message that expects one. The model answers with one JSON
+  object. The engine writes the verdict header from the findings. An answer
+  the protocol does not allow is refused and asked for once more. After a
+  second failure the engine posts an `ESCALATE` instead of the model's text.
+- It acknowledges a message only after answering it. A message already
+  answered is acknowledged without a second answer. An answer for a unit
+  that has since moved on is not posted.
+
+The model's turn runs `readonly` under the session's write lease, with its
+transcript kept in memory, no configured MCP server started, and none of
+the user's `[[permissions.allow_commands]]` grants in force, so it can
+read the tree but never change it. The manifest is checked again after the
+model answers; if the tree moved during the review, the engine posts a
+`REVISE` in place of the model's verdict.
+`run` needs a schema-2 session (started with `--with`) under acknowledged
+delivery, and the native writer.
+
+| Exit status | Meaning |
+|---|---|
+| `0` | Stopped cleanly: a `STOP`, or `--once` after one delivery. |
+| `1` | An error, or no session named the role within `--timeout`. |
+| `2` | A usage error, or the delegate writer is selected. |
+| `4` | The session cannot host the engine (the reason is on stderr). |
+
 #### Switching the writer
 
 If the native writer misbehaves, hand every operation to the skill's own

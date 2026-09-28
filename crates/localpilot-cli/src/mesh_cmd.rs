@@ -44,10 +44,11 @@ pub(crate) struct MeshArgs {
     /// The anchor working tree; defaults to `PAIR_REPO`, then the current
     /// directory.
     #[arg(long)]
-    repo: Option<PathBuf>,
-    /// The operation and its arguments, as for `pair.py`.
+    pub(crate) repo: Option<PathBuf>,
+    /// The operation and its arguments, as for `pair.py`; or `run` and its
+    /// options, for the participant engine.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
-    rest: Vec<OsString>,
+    pub(crate) rest: Vec<OsString>,
 }
 
 #[derive(Debug, Parser)]
@@ -197,6 +198,21 @@ struct WatchOpts {
     stale_after: i64,
     #[arg(long)]
     ack_through: Option<String>,
+}
+
+/// Whether the user's configuration selects the native writer. Read from the
+/// user config and the environment only, as `run` reads it.
+///
+/// # Errors
+/// The configuration does not load.
+pub(crate) fn native_writer() -> Result<bool, String> {
+    let paths = localpilot_config::ConfigPaths {
+        user: localpilot_config::user_config_path(),
+        project: None,
+    };
+    localpilot_config::load(&paths, &localpilot_config::CliOverrides::default())
+        .map(|c| c.mesh.writer != localpilot_config::MeshWriter::Delegate)
+        .map_err(|e| format!("localpilot mesh: cannot load configuration: {e}"))
 }
 
 /// Run one mesh operation, writing its output, and return its exit code.
@@ -440,7 +456,7 @@ fn emit(out: &Out) -> u8 {
 /// The anchor tree and how it was chosen: `--repo`, then `PAIR_REPO`, then
 /// the current directory; then the Git top level above it, or else the
 /// nearest directory holding a mailbox.
-fn resolve_anchor(repo: Option<&Path>) -> Result<(PathBuf, &'static str), String> {
+pub(crate) fn resolve_anchor(repo: Option<&Path>) -> Result<(PathBuf, &'static str), String> {
     let (start, source) = if let Some(r) = repo {
         (r.to_path_buf(), "flag")
     } else if let Some(env) = std::env::var_os("PAIR_REPO").filter(|v| !v.is_empty()) {

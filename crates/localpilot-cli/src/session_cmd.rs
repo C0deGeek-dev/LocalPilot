@@ -224,6 +224,35 @@ pub async fn build_runtime(
     profile: Profile,
     trusted: bool,
 ) -> anyhow::Result<SessionRuntime> {
+    build_runtime_with_store(
+        cwd,
+        model,
+        provider_id,
+        profile,
+        trusted,
+        Store::open(cwd),
+        true,
+    )
+    .await
+}
+
+/// [`build_runtime`] with the session's store given, and whether configured
+/// MCP servers are started. An in-memory store keeps a run from writing its
+/// transcript into `cwd`, and no MCP servers keeps its start-up from
+/// launching any configured program, as a pair navigator's review turn must.
+#[allow(clippy::too_many_arguments)] // the shared print/eval set plus two isolation switches
+///
+/// # Errors
+/// As [`build_runtime`].
+pub async fn build_runtime_with_store(
+    cwd: &std::path::Path,
+    model: &str,
+    provider_id: Option<&str>,
+    profile: Profile,
+    trusted: bool,
+    store: Store,
+    start_mcp_servers: bool,
+) -> anyhow::Result<SessionRuntime> {
     let config = localpilot_config::load(&ConfigPaths::standard(cwd), &CliOverrides::default())?;
     let registry = ProviderRegistry::from_config(&config)?;
     let provider = match provider_id {
@@ -238,7 +267,12 @@ pub async fn build_runtime(
         config.harness.context_token_limit,
         provider.declaration().max_output_tokens,
     );
-    let mut registry = crate::mcp::McpTools::load(&config).await.registry();
+    let mcp = if start_mcp_servers {
+        crate::mcp::McpTools::load(&config).await
+    } else {
+        crate::mcp::McpTools::without_servers(&config)
+    };
+    let mut registry = mcp.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
     // Headless run (print/eval): apply the built-in safety rails so a project
     // with no `[harness]` budget/timeout still self-bounds (ADR-0055). Explicit
@@ -249,7 +283,7 @@ pub async fn build_runtime(
         registry,
         PermissionEngine::new(profile, Vec::new()).with_allowed_commands(allowed_commands(&config)),
         Box::new(ScriptedApprover::new(Vec::new())),
-        Store::open(cwd),
+        store,
         workspace_with_read_roots(cwd, &config)?,
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {

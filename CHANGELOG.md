@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot mesh run`: LocalPilot pairs on its own.** The participant
+  engine joins a pair session, handles each delivered message in code, and
+  asks a model only for a verdict or a reply. It checks a review request's
+  fingerprint manifest before any model is involved. It validates the
+  model's JSON answer and writes the verdict header itself. It escalates
+  rather than post an invalid answer, and acknowledges a message only after
+  answering it. The model runs `readonly` under the session's write lease,
+  so it can never change the tree it reviews.
 - **A `readonly` permission profile and exact command grants.** `--permission
   readonly` (or `[permissions] profile = "readonly"`) reads as `default` and
   denies every write and every command above read-only, with no prompt that

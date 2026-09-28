@@ -193,6 +193,46 @@ impl Mesh {
         }))
     }
 
+    /// The active session's id, if the participant engine can run in it as
+    /// `role`: a schema-2 session under acknowledged delivery, so every
+    /// answer can name what it replies to and nothing is lost before it is
+    /// handled.
+    ///
+    /// # Errors
+    /// A refusal naming what is missing.
+    pub fn engine_ready(&self, role: &str) -> Result<String, MeshError> {
+        let s = self.require(role, true)?;
+        if schema(&s) != 2 {
+            return Err(super::refused(
+                "the participant engine needs an N-party (schema 2) session; start it with --with",
+            ));
+        }
+        if super::delivery(&s) != "ack" {
+            return Err(super::refused(
+                "the participant engine needs acknowledged delivery; every participant must join with an ack-capable build",
+            ));
+        }
+        Ok(sid(&s).to_owned())
+    }
+
+    /// A review request's manifest checked again, just before its verdict is
+    /// posted: `None` while it still holds, or the engine's own `REVISE` when
+    /// the tree changed during the review.
+    ///
+    /// # Errors
+    /// A refusal reading the session, or a tree that cannot be observed.
+    pub fn recheck_review(
+        &self,
+        role: &str,
+        request: &Request,
+    ) -> Result<Option<PostArgs>, MeshError> {
+        let s = self.require(role, true)?;
+        Ok(match self.check_manifest(&s, &request.body)? {
+            Ok(_) => None,
+            Err(problems) => Some(revise_for(&problems, request.round, &request.msg_id)),
+        })
+    }
+
     /// Whether `role` has already posted a reply to `msg_id`.
     ///
     /// # Errors

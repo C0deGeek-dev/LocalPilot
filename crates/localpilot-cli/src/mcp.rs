@@ -61,6 +61,17 @@ impl McpTools {
         }
     }
 
+    /// The same tool set with no MCP server started: for a run whose start-up
+    /// must not launch any configured program, such as a pair navigator's
+    /// review turn.
+    #[must_use]
+    pub fn without_servers(config: &Config) -> Self {
+        Self {
+            skills_autonomous: config.skills.autonomous_discovery,
+            ..Self::default()
+        }
+    }
+
     /// Build a tool registry: the builtins plus every discovered MCP tool. An
     /// MCP tool reaches an external process, so it is gated as a network effect —
     /// the permission engine prompts (or denies) exactly as for a builtin.

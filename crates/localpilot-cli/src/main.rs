@@ -41,6 +41,7 @@ mod mcp;
 mod mcp_env;
 mod memory_cmd;
 mod mesh_cmd;
+mod mesh_run;
 mod models_cmd;
 mod output;
 mod outward_cmd;
@@ -2513,7 +2514,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             }
         }
         Command::Mesh(args) => {
-            exit_code = mesh_cmd::run(args);
+            exit_code = if mesh_run::is_run(&args) {
+                mesh_run::run(args).await
+            } else {
+                mesh_cmd::run(args)
+            };
         }
         Command::Lab { workspace, command } => {
             let root = match workspace {
