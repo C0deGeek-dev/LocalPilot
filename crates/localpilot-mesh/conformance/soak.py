@@ -80,9 +80,27 @@ class Soak:
                 break
             time.sleep(0.1 * (attempt + 1))
         if p.returncode:
+            # Read the pointers at once: a refusal such as NO_ACTIVE_SESSION
+            # mid-session is only diagnosable with the state around it.
+            state = self.pointer_state()
             with self.lock:
-                self.errors.append(f"{impl} {' '.join(args[:3])}: rc {p.returncode}: {p.stderr.strip()[-400:]}")
+                self.errors.append(f"{impl} {' '.join(args[:3])}: rc {p.returncode}: {p.stderr.strip()[-400:]}"
+                                   f" [pointers just after: {state}]")
         return p
+
+    def pointer_state(self) -> str:
+        """Whether each pointer file exists now, and how it begins."""
+        base = self.root / run.MAILBOX
+        parts = []
+        for name in ("active.json", "active.v2.json"):
+            try:
+                raw = (base / name).read_bytes()
+                parts.append(f"{name}={raw[:100].decode('utf-8', 'replace').strip()!r}")
+            except FileNotFoundError:
+                parts.append(f"{name}=absent")
+            except OSError as x:
+                parts.append(f"{name}=unreadable ({type(x).__name__} errno={x.errno})")
+        return "; ".join(parts)
 
     def session_dir(self) -> Path:
         base = self.root / run.MAILBOX
