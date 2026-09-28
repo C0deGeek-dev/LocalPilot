@@ -1954,3 +1954,55 @@ async fn nudge_only_refuses_an_acknowledgement() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
 }
+
+#[tokio::test]
+async fn a_waiter_tied_to_its_parent_retires_its_endpoint_when_the_pipe_closes() {
+    // `--exit-with-parent`: the parent's stdin pipe closing (as it does when
+    // the parent dies, even by a forced kill) stops the waiter cleanly, and
+    // its endpoint is retired rather than left to expire.
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    f.reference(&["watch", "--role", "claude", "--timeout", "1"]);
+    f.reference(&["ack", "--role", "claude", "--through", "localpilot:1"]);
+    let mut child = f
+        .waiter(&[
+            "--role",
+            "claude",
+            "--nudge-only",
+            "--exit-with-parent",
+            "--timeout",
+            "120",
+            "--poll",
+            "3600",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    until("claude's endpoint", || {
+        f.endpoint_record("claude")
+            .is_some_and(|e| e["active"] == true)
+    })
+    .await;
+    drop(child.stdin.take()); // the parent's end of the pipe goes away
+    let t0 = std::time::Instant::now();
+    let out = finish(child, 20)
+        .await
+        .expect("the waiter outlived its parent");
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(10),
+        "took {:?}",
+        t0.elapsed()
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(out.stdout.is_empty(), "{}", text(&out));
+    assert_eq!(
+        f.endpoint_record("claude").unwrap()["active"],
+        false,
+        "the endpoint was not retired"
+    );
+}

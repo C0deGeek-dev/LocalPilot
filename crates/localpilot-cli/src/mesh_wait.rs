@@ -45,6 +45,11 @@ struct WaitCli {
     /// Read nothing: report newer unacknowledged mail, move no cursor.
     #[arg(long)]
     nudge_only: bool,
+    /// Stop (retiring the endpoint) when stdin reaches end of file: a
+    /// parent that runs this with a pipe it never writes gets it stopped
+    /// cleanly whenever it exits, even when it is killed.
+    #[arg(long)]
+    exit_with_parent: bool,
     /// With `--nudge-only`: `sender:N[,sender:N]`, the mail already nudged
     /// about; only a newer message ends the wait.
     #[arg(long, requires = "nudge_only")]
@@ -111,6 +116,7 @@ pub(crate) async fn run(args: MeshArgs) -> ExitCode {
     let code = tokio::select! {
         c = wait(&mesh, &cli, &sid, &after, &wake) => c,
         _ = tokio::signal::ctrl_c() => 1,
+        () = parent_gone(cli.exit_with_parent) => 1,
     };
     if let Some(l) = listening {
         l.stop(&mesh).await;
@@ -236,6 +242,25 @@ fn parse_after(raw: Option<&str>) -> Result<Vec<(String, i64)>, String> {
             Ok((s.to_owned(), n))
         })
         .collect()
+}
+
+/// Resolves when stdin reaches end of file, if asked to watch it; never
+/// otherwise. A parent's pipe closes when the parent exits for any reason.
+async fn parent_gone(watch: bool) {
+    if !watch {
+        return std::future::pending().await;
+    }
+    let _ = tokio::task::spawn_blocking(|| {
+        let mut sink = [0u8; 256];
+        let mut stdin = std::io::stdin();
+        loop {
+            match std::io::Read::read(&mut stdin, &mut sink) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
 }
 
 #[cfg(test)]
