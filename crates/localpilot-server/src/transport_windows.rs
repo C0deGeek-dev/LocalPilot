@@ -5,6 +5,11 @@
 //! second attempt to claim the first instance of a live pipe fails with
 //! `ERROR_ACCESS_DENIED`. Each accept creates the next waiting instance before
 //! returning the just-connected one, so a client never races a missing pipe.
+//!
+//! Every instance, the first, each replacement and a recovered one, is created
+//! through `localpilot_winsec::owner_only_pipe`: a protected DACL that admits
+//! only the current user. Tokio's default descriptor also grants Everyone and
+//! the anonymous account read access (LocalHub #192, ADR-0189).
 
 use std::io;
 use std::pin::Pin;
@@ -91,9 +96,10 @@ impl Listener {
         // `first_pipe_instance(true)` is the singleton claim: a second bind of a
         // live pipe fails with ERROR_ACCESS_DENIED, which the daemon layer reads
         // as "already running".
-        let server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&pipe)?;
+        let server = localpilot_winsec::owner_only_pipe(
+            ServerOptions::new().first_pipe_instance(true),
+            &pipe,
+        )?;
         Ok(Self {
             pipe,
             pending: Mutex::new(Some(server)),
@@ -104,7 +110,7 @@ impl Listener {
         let server = self.take_pending()?;
         server.connect().await?;
         // Create the next waiting instance BEFORE returning the connected one.
-        let next = ServerOptions::new().create(&self.pipe)?;
+        let next = localpilot_winsec::owner_only_pipe(&ServerOptions::new(), &self.pipe)?;
         self.store_pending(next)?;
         Ok(RawConn::Server(server))
     }
@@ -115,7 +121,7 @@ impl Listener {
             Some(server) => Ok(server),
             // The one-waiting-instance invariant normally holds; recover by
             // creating a fresh instance rather than erroring.
-            None => ServerOptions::new().create(&self.pipe),
+            None => localpilot_winsec::owner_only_pipe(&ServerOptions::new(), &self.pipe),
         }
     }
 
@@ -153,5 +159,62 @@ pub(super) async fn connect(endpoint: &Endpoint) -> Result<RawConn, TransportErr
             }
             Err(error) => return Err(error.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn endpoint(tag: &str) -> Endpoint {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Endpoint::from_addr(&format!(
+            r"\\.\pipe\lp-server-dacl-{tag}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    /// Protected, one allow entry, and it is the current user's.
+    fn assert_owner_only(server: &NamedPipeServer) {
+        let sid = localpilot_winsec::current_user_sid().unwrap();
+        let dacl = localpilot_winsec::pipe_dacl(server).unwrap();
+        assert!(dacl.starts_with("D:P"), "{dacl}");
+        assert_eq!(dacl.matches("(A;").count(), 1, "{dacl}");
+        assert!(dacl.ends_with(&format!(";;;{sid})")), "{dacl}");
+        assert!(!dacl.contains(";WD)") && !dacl.contains(";AN)"), "{dacl}");
+    }
+
+    fn pending_is_owner_only(listener: &Listener) {
+        let guard = listener.pending.lock().unwrap();
+        assert_owner_only(guard.as_ref().expect("a waiting instance"));
+    }
+
+    #[tokio::test]
+    async fn the_first_replacement_and_recovered_instances_admit_only_the_owner() {
+        let ep = endpoint("all");
+        let listener = Listener::bind(&ep).unwrap();
+        pending_is_owner_only(&listener);
+        // An accepted connection leaves a replacement instance waiting.
+        let dial = tokio::spawn({
+            let ep = ep.clone();
+            async move { connect(&ep).await.map(|_| ()) }
+        });
+        let _conn = listener.accept().await.unwrap();
+        dial.await.unwrap().unwrap();
+        pending_is_owner_only(&listener);
+        // With no waiting instance, take_pending recovers by creating one.
+        drop(listener.take_pending().unwrap());
+        let recovered = listener.take_pending().unwrap();
+        assert_owner_only(&recovered);
+    }
+
+    #[tokio::test]
+    async fn a_second_bind_of_a_live_pipe_is_still_refused() {
+        let ep = endpoint("single");
+        let _first = Listener::bind(&ep).unwrap();
+        assert!(Listener::bind(&ep).is_err());
     }
 }

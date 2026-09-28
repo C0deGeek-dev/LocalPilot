@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0189: Owner-Only Named Pipes, With Unsafe Code Confined To One Crate
+
+**Status:** accepted · **Date:** 2026-09-28. Fixes LocalHub #192. An exception
+to the workspace's `unsafe_code = "forbid"`, scoped to one crate.
+
+**Context.** The server transport creates its Windows named pipe with tokio's
+default security descriptor. Read back from a live pipe, that DACL is
+`D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;<user>)(A;;FR;;;WD)(A;;FR;;;AN)`: besides
+the user, SYSTEM and Administrators, it grants read access to Everyone (`WD`)
+and to the anonymous account (`AN`). The Unix socket is owner-only (`0600`), so
+the two platforms disagreed, and the pair-mesh endpoint (a named pipe per
+recipient) would inherit the wider one. Tokio exposes security attributes only
+through the unsafe `ServerOptions::create_with_security_attributes_raw`, and
+building a DACL is Win32 FFI. The workspace forbids unsafe code, and `forbid`
+cannot be lifted by `allow`.
+
+**Decision.** A new crate, `localpilot-winsec`, holds the only unsafe code in
+the workspace. Its manifest does not inherit the workspace lints: it copies
+them with `unsafe_code = "deny"`, and only its `ffi` module allows unsafe, by
+name. Every unsafe block states why it is sound, and every system allocation is
+freed by an owning type's `Drop`. Its public API is safe: `owner_only_pipe`
+creates a pipe instance with the protected DACL `D:P(A;;GA;;;<user SID>)` (no
+inherited entries, no Everyone, anonymous, SYSTEM or Administrators), and
+`pipe_dacl` reads a live instance's DACL back as SDDL. It uses `windows-sys`
+0.61.2, already in the lock graph through tokio and mio. `localpilot-server`
+keeps `forbid(unsafe_code)` and creates every instance (the first, each
+replacement after an accept, and a recovered one) through `owner_only_pipe`.
+Tests read the DACL back from each of those instances.
+
+**Consequences.** Only the pipe's own user can open it; an administrator or
+another account can no longer read from it. Any future unsafe code belongs in
+this crate, in its `ffi` module, and is reviewed as such. The crate compiles
+empty on other platforms, where the socket's owner-only mode already applies.
+
 ## ADR-0188: Image Tool Results Carry Typed Pixels Through The Existing Permission Gate
 
 **Status:** accepted · **Date:** 2026-09-28. Builds on ADR-0061 (resolved vision)

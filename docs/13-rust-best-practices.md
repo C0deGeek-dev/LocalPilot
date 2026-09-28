@@ -252,7 +252,9 @@ Test toolbox (add as dev-dependencies when the relevant layer lands; see
 - `unsafe` is **forbidden** by default. A crate that needs it requires an ADR and
   a `// SAFETY:` comment on every block justifying the invariants. Default each
   crate to `#![forbid(unsafe_code)]` and only downgrade to `#![deny(unsafe_code,
-  reason = "...")]` with the ADR.
+  reason = "...")]` with the ADR. The one such crate is `localpilot-winsec`
+  (owner-only Windows pipes, ADR-0189); new unsafe code goes there, in its
+  `ffi` module, rather than into another crate.
 - No `unwrap`/`expect`/`panic!`/`todo!`/`unimplemented!`/`unreachable!` on
   runtime paths. `unreachable!` is acceptable only with a proof comment.
 - Avoid `as` casts that can truncate (`u64 as u32`); use `TryFrom` and handle

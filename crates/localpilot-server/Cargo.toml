@@ -46,6 +46,11 @@ tokio = { workspace = true, features = ["net"] }
 # signature.
 tokio-util = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# Owner-only named pipes: every pipe instance gets a DACL that admits only the
+# current user (LocalHub #192, ADR-0189). This crate keeps `forbid(unsafe_code)`.
+localpilot-winsec = { path = "../localpilot-winsec" }
+
 [dev-dependencies]
 # A test session factory mirrors how the harness tests build a `SessionRuntime`:
 # a `FakeProvider` (llm), builtin tools, a bypass permission engine + sandbox

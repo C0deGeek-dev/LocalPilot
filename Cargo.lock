@@ -2072,6 +2072,7 @@ dependencies = [
  "localpilot-store",
  "localpilot-taskgraph",
  "localpilot-tools",
+ "localpilot-winsec",
  "serde",
  "serde_json",
  "sha2",
@@ -2184,6 +2185,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "localpilot-winsec"
+version = "5.0.0"
+dependencies = [
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,0 +1,29 @@
+[package]
+name = "localpilot-winsec"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Owner-only Windows named pipes: the one crate allowed unsafe code (ADR-0189)."
+
+# Deliberately not `[lints] workspace = true`: the workspace forbids unsafe
+# code, and `forbid` cannot be lifted by `allow`. These are the workspace
+# lints with `unsafe_code` at `deny` instead, so only the `ffi` module, which
+# allows it by name, may use unsafe (ADR-0189).
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+dbg_macro = "deny"
+
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true, features = ["net"] }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }

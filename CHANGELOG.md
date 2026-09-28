@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Windows named pipes admit only their own user.** The server's named pipe
+  (and every later pipe endpoint) is created with a protected DACL whose only
+  entry is the current user. Tokio's default also granted read access to
+  Everyone and the anonymous account (LocalHub #192). The Win32 calls live in a
+  new crate, `localpilot-winsec`, the one place unsafe code is allowed
+  (ADR-0189).
 - **`localpilot mesh` wakes listening recipients when it posts.** After any
   operation that appends a message, each addressed recipient with a live
   delivery endpoint (a named pipe or Unix socket) gets one wake-up, and the
