@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Installed skills can be updated, and say when they are behind.**
+  `localpilot skills update [NAME | --all] [-g]` (and `/skills update`)
+  refreshes each owning source and replaces every changed package of a
+  source together, or none of them. A crash midway is finished or undone by
+  the next skills command that changes something. `skills list`, `skills
+  show` and `doctor` now mark:
+  - a managed install that is behind its refreshed source;
+  - a managed install whose directory is gone;
+  - a definition shadowed by another of the same name, for example a
+    `~/.localpilot` copy hiding a newer `~/.agents` one.
+  A source refresh keeps the old cache until the new commit is recorded
+  (LocalHub#189).
 - **`localpilot mesh run`: LocalPilot pairs on its own.** The participant
   engine joins a pair session, handles each delivered message in code, and
   asks a model only for a verdict or a reply. It checks a review request's

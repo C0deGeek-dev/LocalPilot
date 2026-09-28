@@ -312,10 +312,14 @@ impl SourceRegistry {
         };
         let text = toml::to_string_pretty(&file)
             .map_err(|e| SkillError::Corrupt(format!("could not serialize registry: {e}")))?;
-        std::fs::write(&self.path, text).map_err(|source| SkillError::Io {
-            path: self.path.display().to_string(),
-            source,
-        })
+        // One rename: a crash leaves the old registry or the new one.
+        crate::update::write_atomic(&self.path, text.as_bytes())
+    }
+
+    /// The file this registry is saved to.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 

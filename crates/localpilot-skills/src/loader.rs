@@ -100,10 +100,24 @@ impl Skill {
     }
 }
 
+/// A skill definition that lost to another of the same name, with the one
+/// that won. Resolution never merges the two; this is only so a user can see
+/// that the other definition exists (LocalHub#189).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shadowed {
+    pub name: String,
+    pub winner_scope: SkillScope,
+    pub winner_dir: PathBuf,
+    pub loser_scope: SkillScope,
+    pub loser_dir: PathBuf,
+}
+
 /// A set of discovered skills.
 #[derive(Debug, Clone, Default)]
 pub struct SkillSet {
     skills: Vec<Skill>,
+    /// Every definition that lost a name collision, against the final winner.
+    shadowed: Vec<Shadowed>,
     /// Skills that failed to parse, as `path: error` lines. A malformed skill
     /// (bad frontmatter, unreadable file) is skipped and recorded here rather
     /// than aborting the whole set — one bad file must never hide every valid
@@ -140,6 +154,9 @@ impl SkillSet {
         // One effective skill per manifest name; a BTreeMap keys resolution to the
         // name (not directory enumeration) and yields a deterministic, sorted set.
         let mut effective: BTreeMap<String, Skill> = BTreeMap::new();
+        // Every loser, whoever beat it at the time; paired with the final
+        // winner below so the result never depends on enumeration order.
+        let mut losers: Vec<(String, SkillScope, PathBuf)> = Vec::new();
         let mut skipped = Vec::new();
         for (dir, scope) in roots {
             let Ok(entries) = std::fs::read_dir(dir) else {
@@ -154,9 +171,14 @@ impl SkillSet {
                 match Self::load_one(&skill_dir, *scope) {
                     Ok(skill) => match effective.get(&skill.manifest.name) {
                         // Keep the incumbent unless the candidate outranks it.
-                        Some(current) if !skill.supersedes(current) => {}
+                        Some(current) if !skill.supersedes(current) => {
+                            losers.push((skill.manifest.name.clone(), skill.scope, skill.dir));
+                        }
                         _ => {
-                            effective.insert(skill.manifest.name.clone(), skill);
+                            if let Some(old) = effective.insert(skill.manifest.name.clone(), skill)
+                            {
+                                losers.push((old.manifest.name.clone(), old.scope, old.dir));
+                            }
                         }
                     },
                     Err(error) => {
@@ -165,10 +187,30 @@ impl SkillSet {
                 }
             }
         }
+        let shadowed = losers
+            .into_iter()
+            .filter_map(|(name, loser_scope, loser_dir)| {
+                let winner = effective.get(&name)?;
+                Some(Shadowed {
+                    name,
+                    winner_scope: winner.scope,
+                    winner_dir: winner.dir.clone(),
+                    loser_scope,
+                    loser_dir,
+                })
+            })
+            .collect();
         Ok(Self {
             skills: effective.into_values().collect(),
+            shadowed,
             skipped,
         })
+    }
+
+    /// Every definition that lost a name collision, each with the winner.
+    #[must_use]
+    pub fn shadowed(&self) -> &[Shadowed] {
+        &self.shadowed
     }
 
     /// Load a single skill directory into `scope`: a `skill.toml` uses the
@@ -1040,5 +1082,100 @@ body\n",
         assert!(roots.iter().all(|(_, scope)| !scope.is_global()));
         let set = SkillSet::resolve(&roots).unwrap();
         assert_eq!(set.names(), vec!["only-project"]);
+    }
+}
+
+#[cfg(test)]
+mod shadow_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn skill(root: &Path, name: &str) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: d\n---\nfrom {}\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    /// `name` placed in each of `scopes`, resolved with the project trusted or not.
+    fn resolve(scopes: &[SkillScope], trusted: bool) -> (SkillSet, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (project, home) = (tmp.path().join("project"), tmp.path().join("home"));
+        let roots = discovery_roots(&project, Some(&home), true);
+        for scope in scopes {
+            let root = &roots.iter().find(|(_, s)| s == scope).unwrap().0;
+            skill(root, "shared");
+        }
+        (
+            SkillSet::resolve(&discovery_roots(&project, Some(&home), trusted)).unwrap(),
+            tmp,
+        )
+    }
+
+    fn shape(set: &SkillSet) -> (SkillScope, Vec<SkillScope>) {
+        let winner = set.by_name("shared").unwrap().scope;
+        let mut losers: Vec<SkillScope> = set.shadowed().iter().map(|s| s.loser_scope).collect();
+        losers.sort_by_key(|s| s.precedence());
+        for s in set.shadowed() {
+            assert_eq!(s.winner_scope, winner, "every loser names the final winner");
+            assert_eq!(s.winner_dir, set.by_name("shared").unwrap().dir);
+        }
+        (winner, losers)
+    }
+
+    #[test]
+    fn every_shadowed_copy_is_recorded_against_the_winner_that_resolution_chose() {
+        use SkillScope::*;
+        let cases: [(&[SkillScope], SkillScope, Vec<SkillScope>); 5] = [
+            (
+                &[GlobalLocalPilot, GlobalAgents],
+                GlobalLocalPilot,
+                vec![GlobalAgents],
+            ),
+            (
+                &[GlobalAgents, GlobalLocalPilot],
+                GlobalLocalPilot,
+                vec![GlobalAgents],
+            ),
+            (
+                &[GlobalAgents, ProjectLocalPilot, GlobalLocalPilot],
+                ProjectLocalPilot,
+                vec![GlobalAgents, GlobalLocalPilot],
+            ),
+            (
+                &[ProjectAgents, GlobalLocalPilot],
+                ProjectAgents,
+                vec![GlobalLocalPilot],
+            ),
+            (
+                &[ProjectLocalPilot, ProjectAgents],
+                ProjectLocalPilot,
+                vec![ProjectAgents],
+            ),
+        ];
+        for (placed, winner, losers) in cases {
+            let (set, _tmp) = resolve(placed, true);
+            assert_eq!(shape(&set), (winner, losers), "{placed:?}");
+        }
+    }
+
+    #[test]
+    fn an_untrusted_project_neither_wins_nor_appears_as_shadowed() {
+        use SkillScope::*;
+        let (set, _tmp) = resolve(&[ProjectLocalPilot, GlobalLocalPilot, GlobalAgents], false);
+        assert_eq!(shape(&set), (GlobalLocalPilot, vec![GlobalAgents]));
+    }
+
+    #[test]
+    fn a_unique_name_shadows_nothing() {
+        let (set, _tmp) = resolve(&[SkillScope::GlobalAgents], true);
+        assert!(set.shadowed().is_empty());
     }
 }

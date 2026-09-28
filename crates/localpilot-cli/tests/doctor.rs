@@ -231,6 +231,7 @@ fn report() -> DoctorReport {
         },
         hygiene: None,
         permissions: None,
+        skill_maintenance: doctor::SkillMaintenance::default(),
     }
 }
 

@@ -45,4 +45,7 @@ skills:
   autonomous discovery: off (set `[skills] autonomous_discovery = true`)
   discoverable packages: 2
   user-only packages (hidden): 1
+  stale installs (run `localpilot skills update`): pair-programming (global, 88094affae -> 1b2c3d4e5f)
+  missing installs (update reinstalls, delete forgets): old-skill (project)
+  shadowed: pair-programming: /home/u/.localpilot/skills/pair-programming [global (.localpilot)] over /home/u/.agents/skills/pair-programming [global (.agents)]
   project overlay hidden (workspace trust could not be evaluated)

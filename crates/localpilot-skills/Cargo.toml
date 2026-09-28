@@ -13,6 +13,7 @@ localpilot-core = { path = "../localpilot-core" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-tools = { path = "../localpilot-tools" }
 async-trait = { workspace = true }
+fd-lock = { workspace = true }
 figment = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }

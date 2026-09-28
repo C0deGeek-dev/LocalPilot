@@ -405,7 +405,7 @@ pub(crate) async fn run_skills_slash(
     if tokens.is_empty() {
         writeln!(
             out,
-            "usage: /skills <list|show|available|install|delete|repo|research> … — see \
+            "usage: /skills <list|show|available|install|update|delete|repo|research> … — see \
              `localpilot skills --help`"
         )?;
         return Ok(());

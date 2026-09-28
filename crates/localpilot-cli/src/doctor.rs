@@ -68,6 +68,75 @@ pub struct DoctorReport {
     /// The configured permission profile and the user's exact command list;
     /// `None` when the configuration did not load.
     pub permissions: Option<PermissionsStatus>,
+    /// Managed skills that need attention: behind their refreshed source,
+    /// missing their directory, shadowing another definition, or waiting on
+    /// recovery from an interrupted change (LocalHub#189).
+    pub skill_maintenance: SkillMaintenance,
+}
+
+/// What `doctor` reports about keeping installed skills current. Each entry
+/// is a ready-to-print label; all of it is computed offline.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SkillMaintenance {
+    /// `name (scope, installed -> refreshed)`.
+    pub stale: Vec<String>,
+    /// `name (scope)`: in the ledger, directory gone.
+    pub missing: Vec<String>,
+    /// `name: winner [scope] over loser [scope]`.
+    pub shadowed: Vec<String>,
+    /// Scopes with an interrupted update or refresh waiting for recovery.
+    pub recovery_pending: Vec<String>,
+}
+
+fn skill_maintenance(trust: TrustState) -> SkillMaintenance {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let home = localpilot_skills::user_home();
+    let trusted = matches!(trust, TrustState::Trusted);
+    gather_skill_maintenance(&cwd, home.as_deref(), trusted)
+}
+
+fn gather_skill_maintenance(cwd: &Path, home: Option<&Path>, trusted: bool) -> SkillMaintenance {
+    let label = |scope: localpilot_skills::Scope| match scope {
+        localpilot_skills::Scope::Project => "project",
+        localpilot_skills::Scope::Global => "global",
+    };
+    let short = |c: &str| c.chars().take(10).collect::<String>();
+    let mut m = SkillMaintenance::default();
+    if let Ok(set) = localpilot_skills::discover(cwd, home, trusted) {
+        for s in set.shadowed() {
+            m.shadowed.push(format!(
+                "{}: {} [{}] over {} [{}]",
+                s.name,
+                s.winner_dir.display(),
+                s.winner_scope.label(),
+                s.loser_dir.display(),
+                s.loser_scope.label()
+            ));
+        }
+    }
+    let fetcher = localpilot_skills::GitFetcher;
+    let manager = localpilot_skills::SkillsManager::new(cwd, home, trusted, &fetcher, "0");
+    let read = localpilot_skills::ReadScope::Effective;
+    for skill in manager.managed(read).unwrap_or_default() {
+        if skill.missing {
+            m.missing
+                .push(format!("{} ({})", skill.name, label(skill.scope)));
+        } else if let Some((installed, cached)) = skill.stale() {
+            m.stale.push(format!(
+                "{} ({}, {} -> {})",
+                skill.name,
+                label(skill.scope),
+                short(installed),
+                short(cached)
+            ));
+        }
+    }
+    m.recovery_pending = manager
+        .recovery_pending(read)
+        .into_iter()
+        .map(|s| label(s).to_owned())
+        .collect();
+    m
 }
 
 /// The permission settings `doctor` reports.
@@ -399,6 +468,7 @@ pub fn report() -> DoctorReport {
         agents: agents(),
         capabilities: capabilities(),
         skills: skills_doctor(workspace_trust),
+        skill_maintenance: skill_maintenance(workspace_trust),
         workspace_trust,
         workspace_trust_store,
         hygiene: None,
@@ -772,6 +842,30 @@ pub fn render(report: &DoctorReport) -> String {
                 "  installed packages: unreadable (could not scan the skill catalog)"
             );
         }
+    }
+    let upkeep = &report.skill_maintenance;
+    if !upkeep.stale.is_empty() {
+        let _ = writeln!(
+            s,
+            "  stale installs (run `localpilot skills update`): {}",
+            upkeep.stale.join("; ")
+        );
+    }
+    if !upkeep.missing.is_empty() {
+        let _ = writeln!(
+            s,
+            "  missing installs (update reinstalls, delete forgets): {}",
+            upkeep.missing.join("; ")
+        );
+    }
+    for line in &upkeep.shadowed {
+        let _ = writeln!(s, "  shadowed: {line}");
+    }
+    for scope in &upkeep.recovery_pending {
+        let _ = writeln!(
+            s,
+            "  an interrupted skills change in the {scope} scope waits for recovery (the next skills mutation runs it)"
+        );
     }
     // Overlay inclusion is derived from the report's one trust authority, so the
     // skills block never contradicts the trust block. The wording keeps an
@@ -1251,6 +1345,14 @@ mod tests {
                 }),
             },
             hygiene: None,
+            skill_maintenance: SkillMaintenance {
+                stale: vec!["pair-programming (global, 88094affae -> 1b2c3d4e5f)".to_string()],
+                missing: vec!["old-skill (project)".to_string()],
+                shadowed: vec![
+                    "pair-programming: /home/u/.localpilot/skills/pair-programming [global (.localpilot)] over /home/u/.agents/skills/pair-programming [global (.agents)]".to_string(),
+                ],
+                recovery_pending: Vec::new(),
+            },
             permissions: Some(PermissionsStatus {
                 profile: "readonly".to_string(),
                 allow_commands: vec![
@@ -1258,6 +1360,69 @@ mod tests {
                 ],
             }),
         }
+    }
+
+    #[test]
+    fn skill_upkeep_names_stale_missing_and_shadowed_installs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (project, home) = (tmp.path().join("project"), tmp.path().join("home"));
+        std::fs::create_dir_all(&project).unwrap();
+        let lp = home.join(".localpilot");
+        for root in [lp.join("skills"), home.join(".agents").join("skills")] {
+            let dir = root.join("alpha");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                "---
+name: alpha
+description: d
+---
+body
+",
+            )
+            .unwrap();
+        }
+        let entry = |name: &str| {
+            format!(
+                "[[installed]]
+name = \"{name}\"
+source_id = \"src\"
+source_url = \"https://example.invalid/r\"
+commit = \"aaaaaaa1\"
+source_path = \".localpilot/skills/{name}\"
+scope = \"global\"
+installed_at = \"1\"
+"
+            )
+        };
+        std::fs::write(
+            lp.join("installed-skills.toml"),
+            format!(
+                "{}
+{}",
+                entry("alpha"),
+                entry("gone")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            lp.join("skill-sources.toml"),
+            "[[source]]
+id = \"src\"
+url = \"https://example.invalid/r\"
+commit = \"bbbbbbb2\"
+added_at = \"1\"
+",
+        )
+        .unwrap();
+        let m = gather_skill_maintenance(&project, Some(&home), false);
+        assert_eq!(m.stale, ["alpha (global, aaaaaaa1 -> bbbbbbb2)"]);
+        assert_eq!(m.missing, ["gone (global)"]);
+        assert_eq!(m.shadowed.len(), 1, "{:?}", m.shadowed);
+        assert!(
+            m.shadowed[0].starts_with("alpha: ") && m.shadowed[0].ends_with("[global (.agents)]")
+        );
+        assert!(m.recovery_pending.is_empty());
     }
 
     #[test]

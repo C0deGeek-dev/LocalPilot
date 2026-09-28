@@ -143,7 +143,29 @@ Skill sources and managed installs (ADR-0098):
 - A user may register public **HTTPS** Git repositories as skill sources —
   `skills repo add|refresh|list|delete` — search their cached catalogs offline
   with `skills available [query]`, and install/remove packages with
-  `skills install` / `skills delete`. Every command is available as both
+  `skills install` / `skills delete`.
+- `skills update [NAME | --all]` brings managed installs up to their sources.
+  It refreshes each owning source once, then replaces every changed package
+  of a source together, or none of them. A package matches only at the same
+  source path under the same name; a moved or renamed one is refused, never
+  substituted. A project install drawn from a global source is updated
+  from that source's current cache, because a project command does not
+  change the global scope; `skills repo refresh -g` moves it on. Every
+  change to a scope holds that scope's OS lock from its recovery to its
+  end, so two processes never work on one scope at once. Old copies are
+  kept in `<scope>/skills-update/`, outside
+  every discovery root, behind a journal, until the new copies and ledger
+  are durable. A source refresh keeps its old cache until the registry
+  records the new commit. Any later `skills` mutation first finishes or
+  undoes a change that a crash interrupted.
+- `skills list`, `skills show` and `doctor` report, offline:
+  - a managed install behind its source's last refreshed commit
+    (`stale: A -> B`);
+  - a ledger entry whose directory is gone (`missing`);
+  - a definition shadowed by a higher-precedence one of the same name;
+  - an interrupted change waiting for recovery.
+  (LocalHub#189)
+- Every command is available as both
   `localpilot skills …` (CLI) and `/skills …` in the interactive chat host —
   including the default full-screen host, where `/skills` routes to the same
   operation and returns a bounded report (ADR-0129/ADR-0144) — parsing to the

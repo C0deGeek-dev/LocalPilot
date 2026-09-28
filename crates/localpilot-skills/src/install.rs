@@ -118,11 +118,30 @@ impl InstallLedger {
         };
         let text = toml::to_string_pretty(&file)
             .map_err(|e| SkillError::Corrupt(format!("could not serialize ledger: {e}")))?;
-        std::fs::write(&self.path, text).map_err(|source| SkillError::Io {
-            path: self.path.display().to_string(),
-            source,
-        })
+        // One rename: a crash leaves the old ledger or the new one.
+        crate::update::write_atomic(&self.path, text.as_bytes())
     }
+
+    /// Record `provenance`, replacing any entry of the same name. Not saved.
+    pub(crate) fn record(&mut self, provenance: Provenance) {
+        self.entries.retain(|p| p.name != provenance.name);
+        self.entries.push(provenance);
+    }
+}
+
+/// Copy a package tree into `dst` under the same bounds and link rules as an
+/// install, for a caller that stages copies itself.
+///
+/// # Errors
+/// An exceeded bound, an escaping link, or a filesystem failure.
+pub(crate) fn copy_package(src: &Path, dst: &Path) -> Result<(), SkillError> {
+    let mut budget = TreeBudget {
+        max_bytes: MAX_PACKAGE_BYTES,
+        max_files: MAX_PACKAGE_FILES,
+        bytes: 0,
+        files: 0,
+    };
+    copy_tree_bounded(src, dst, src, &mut budget)
 }
 
 /// Install one package into `skills_dir`, recording `provenance` in `ledger`.
@@ -180,8 +199,7 @@ pub fn install_package(
         }
     })?;
 
-    ledger.entries.retain(|p| p.name != provenance.name);
-    ledger.entries.push(provenance);
+    ledger.record(provenance);
     ledger.save()?;
     Ok(target)
 }

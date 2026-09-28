@@ -20,6 +20,7 @@ mod source;
 mod suggest;
 mod templates;
 mod tools;
+mod update;
 
 pub use catalog::{read_catalog, Catalog, CatalogPackage, CATALOG_ROOTS};
 pub use discovery::{
@@ -31,11 +32,11 @@ pub use error::SkillError;
 pub use fetch::{GitFetcher, RepoFetcher, Snapshot};
 pub use install::{InstallLedger, Provenance};
 pub use loader::{
-    discovery_roots, global_skill_dirs, standard_skill_dirs, Skill, SkillScope, SkillSet,
+    discovery_roots, global_skill_dirs, standard_skill_dirs, Shadowed, Skill, SkillScope, SkillSet,
 };
 pub use manager::{
-    Approval, Confirm, InstallSpec, PlainSkillCatalogStyle, ReadScope, Scope, SkillCatalogStyle,
-    SkillsManager,
+    Approval, Confirm, InstallSpec, ManagedSkill, PlainSkillCatalogStyle, ReadScope, Scope,
+    SkillCatalogStyle, SkillsManager, UpdateTarget,
 };
 pub use manifest::{Invocation, SkillManifest, SkillTriggers};
 pub use source::{normalize_url, source_id, SkillSource, SourceRegistry};

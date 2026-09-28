@@ -109,5 +109,17 @@ expression: render_json(&fixture())
     "allow_commands": [
       "python /abs/skills/pair-programming/scripts/pair.py"
     ]
+  },
+  "skill_maintenance": {
+    "stale": [
+      "pair-programming (global, 88094affae -> 1b2c3d4e5f)"
+    ],
+    "missing": [
+      "old-skill (project)"
+    ],
+    "shadowed": [
+      "pair-programming: /home/u/.localpilot/skills/pair-programming [global (.localpilot)] over /home/u/.agents/skills/pair-programming [global (.agents)]"
+    ],
+    "recovery_pending": []
   }
 }

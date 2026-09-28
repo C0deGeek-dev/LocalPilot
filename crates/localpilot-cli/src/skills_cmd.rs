@@ -9,13 +9,14 @@
 //! `skill_search`/`skill_load` tools are the pull-based counterpart and are off
 //! by default.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
 use localpilot_core::{one_line, SUMMARY_CHARS};
 use localpilot_skills::{
     discover_trusted_scoped, user_home, Approval, Confirm, GitFetcher, InstallSpec, Invocation,
-    ReadScope, Scope, SkillCatalogStyle, SkillError, SkillSet, SkillsManager,
+    ReadScope, Scope, SkillCatalogStyle, SkillError, SkillSet, SkillsManager, UpdateTarget,
 };
 
 use crate::trust;
@@ -123,6 +124,28 @@ fn run_managed(
                 out,
             ),
             Err(err) => Err(err),
+        },
+        ProjectSkillsCommand::Update {
+            name,
+            all,
+            global,
+            yes,
+        } => match (name, all) {
+            (Some(name), false) => manager.update(
+                scope(global),
+                UpdateTarget::Named(name),
+                approval(yes, stdin_is_tty, &mut confirm),
+                out,
+            ),
+            (None, true) => manager.update(
+                scope(global),
+                UpdateTarget::All,
+                approval(yes, stdin_is_tty, &mut confirm),
+                out,
+            ),
+            _ => Err(SkillError::Rejected(
+                "name a skill to update, or pass --all".to_string(),
+            )),
         },
         ProjectSkillsCommand::Delete { name, global, yes } => manager.delete(
             scope(global),
@@ -268,7 +291,8 @@ pub fn list(root: &Path, global: bool, out: &mut dyn Write) -> anyhow::Result<()
     let trusted = trust::is_trusted(root);
     match discover_trusted_scoped(root, trusted, global) {
         Ok(set) => {
-            render_list(&set, out)?;
+            let notes = notes(root, user_home().as_deref(), trusted, global, &set);
+            render_list(&set, &notes, out)?;
             disclose_untrusted_effective(global, trusted, out)
         }
         Err(err) => {
@@ -282,11 +306,14 @@ pub fn list(root: &Path, global: bool, out: &mut dyn Write) -> anyhow::Result<()
 ///
 /// # Errors
 /// Returns an error only if output cannot be written.
-fn render_list(set: &SkillSet, out: &mut dyn Write) -> anyhow::Result<()> {
+fn render_list(set: &SkillSet, notes: &Notes, out: &mut dyn Write) -> anyhow::Result<()> {
     // A malformed skill is skipped, not fatal — warn about it but still list the
     // valid ones (LocalHub#38).
     for warning in set.skipped() {
         writeln!(out, "warning: skipped a malformed skill — {warning}")?;
+    }
+    for line in &notes.extra {
+        writeln!(out, "{line}")?;
     }
     let names = set.names();
     if names.is_empty() {
@@ -310,10 +337,86 @@ fn render_list(set: &SkillSet, out: &mut dyn Write) -> anyhow::Result<()> {
                 skill.scope.label(),
                 one_line(&skill.manifest.description, SUMMARY_CHARS)
             )?;
+            for note in notes.per_skill.get(name).into_iter().flatten() {
+                writeln!(out, "  {note}")?;
+            }
         }
     }
     writeln!(out, "\nRead one with: localpilot skills show <name>")?;
     Ok(())
+}
+
+/// What `list` and `show` add to the skills they print: a managed copy behind
+/// its refreshed source, another definition a skill shadows, and, on their
+/// own lines, managed skills whose directory is gone and interrupted changes
+/// waiting for recovery. All offline (LocalHub#189).
+#[derive(Debug, Default)]
+struct Notes {
+    per_skill: BTreeMap<String, Vec<String>>,
+    extra: Vec<String>,
+}
+
+fn notes(root: &Path, home: Option<&Path>, trusted: bool, global: bool, set: &SkillSet) -> Notes {
+    let mut notes = Notes::default();
+    for s in set.shadowed() {
+        notes
+            .per_skill
+            .entry(s.name.clone())
+            .or_default()
+            .push(format!(
+                "shadows {} [{}]",
+                s.loser_dir.display(),
+                s.loser_scope.label()
+            ));
+    }
+    let fetcher = GitFetcher;
+    let manager = SkillsManager::new(root, home, trusted, &fetcher, "0");
+    let read = read_scope(global);
+    for m in manager.managed(read).unwrap_or_default() {
+        let flag = if m.scope == Scope::Global { " -g" } else { "" };
+        if m.missing {
+            notes.extra.push(format!(
+                "- {} [missing, {} install from {}]: its directory is gone; `localpilot skills \
+                 update {}{flag}` reinstalls it, `localpilot skills delete {}{flag}` forgets it",
+                m.name,
+                scope_label(m.scope),
+                short(&m.installed),
+                m.name,
+                m.name
+            ));
+        } else if let Some((installed, cached)) = m.stale() {
+            notes
+                .per_skill
+                .entry(m.name.clone())
+                .or_default()
+                .push(format!(
+                    "stale ({} install): {} -> {} (`localpilot skills update {}{flag}`)",
+                    scope_label(m.scope),
+                    short(installed),
+                    short(cached),
+                    m.name
+                ));
+        }
+    }
+    for scope in manager.recovery_pending(read) {
+        notes.extra.push(format!(
+            "note: an interrupted skills update or refresh in the {} scope is waiting; the next \
+             `localpilot skills` command that changes something recovers it",
+            scope_label(scope)
+        ));
+    }
+    notes
+}
+
+fn scope_label(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Project => "project",
+        Scope::Global => "global",
+    }
+}
+
+fn short(commit: &str) -> String {
+    commit.chars().take(10).collect()
 }
 
 /// Print one skill's body by exact name (a deterministic load). An unknown name is
@@ -325,7 +428,8 @@ pub fn show(root: &Path, name: &str, global: bool, out: &mut dyn Write) -> anyho
     let trusted = trust::is_trusted(root);
     match discover_trusted_scoped(root, trusted, global) {
         Ok(set) => {
-            render_show(&set, name, out)?;
+            let notes = notes(root, user_home().as_deref(), trusted, global, &set);
+            render_show(&set, name, &notes, out)?;
             disclose_untrusted_effective(global, trusted, out)
         }
         Err(err) => {
@@ -339,7 +443,12 @@ pub fn show(root: &Path, name: &str, global: bool, out: &mut dyn Write) -> anyho
 ///
 /// # Errors
 /// Returns an error only if output cannot be written.
-fn render_show(set: &SkillSet, name: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+fn render_show(
+    set: &SkillSet,
+    name: &str,
+    notes: &Notes,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     for warning in set.skipped() {
         writeln!(out, "warning: skipped a malformed skill — {warning}")?;
     }
@@ -351,6 +460,14 @@ fn render_show(set: &SkillSet, name: &str, out: &mut dyn Write) -> anyhow::Resul
                 skill.manifest.name,
                 skill.scope.label()
             )?;
+            for note in notes
+                .per_skill
+                .get(&skill.manifest.name)
+                .into_iter()
+                .flatten()
+            {
+                writeln!(out, "{note}")?;
+            }
             if let Some(hint) = &skill.manifest.argument_hint {
                 writeln!(out, "argument: {hint}")?;
             }
@@ -441,7 +558,7 @@ mod tests {
         write_skill_md(dir.path(), "add-provider", "guide adding a provider", false);
         write_skill_md(dir.path(), "secret-step", "by hand only", true);
         let mut buf = Vec::new();
-        render_list(&resolve(dir.path(), None), &mut buf).unwrap();
+        render_list(&resolve(dir.path(), None), &Notes::default(), &mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
         assert!(
             text.contains("add-provider [discoverable, project (.localpilot)]"),
@@ -475,7 +592,12 @@ mod tests {
         write_skill_md(project.path(), "modern-web-design", "project design", false);
 
         let mut buf = Vec::new();
-        render_list(&resolve(project.path(), Some(home.path())), &mut buf).unwrap();
+        render_list(
+            &resolve(project.path(), Some(home.path())),
+            &Notes::default(),
+            &mut buf,
+        )
+        .unwrap();
         let text = String::from_utf8(buf).unwrap();
         // Global-only skill shows its global origin…
         assert!(
@@ -502,7 +624,7 @@ mod tests {
         let long = format!("guide adding {}", "a provider integration ".repeat(20));
         write_skill_md(dir.path(), "add-provider", long.trim(), false);
         let mut buf = Vec::new();
-        render_list(&resolve(dir.path(), None), &mut buf).unwrap();
+        render_list(&resolve(dir.path(), None), &Notes::default(), &mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
         let line = text
             .lines()
@@ -521,7 +643,13 @@ mod tests {
         write_skill_md(dir.path(), "add-provider", "guide adding a provider", false);
 
         let mut hit = Vec::new();
-        render_show(&resolve(dir.path(), None), "add-provider", &mut hit).unwrap();
+        render_show(
+            &resolve(dir.path(), None),
+            "add-provider",
+            &Notes::default(),
+            &mut hit,
+        )
+        .unwrap();
         let text = String::from_utf8(hit).unwrap();
         assert!(text.contains("Body of add-provider"), "{text}");
         assert!(
@@ -530,7 +658,13 @@ mod tests {
         );
 
         let mut miss = Vec::new();
-        render_show(&resolve(dir.path(), None), "nope", &mut miss).unwrap();
+        render_show(
+            &resolve(dir.path(), None),
+            "nope",
+            &Notes::default(),
+            &mut miss,
+        )
+        .unwrap();
         assert!(String::from_utf8(miss).unwrap().contains("no skill named"));
     }
 
@@ -550,6 +684,7 @@ mod tests {
         render_show(
             &resolve(project.path(), Some(home.path())),
             "threejs-webgl",
+            &Notes::default(),
             &mut buf,
         )
         .unwrap();
@@ -559,5 +694,178 @@ mod tests {
             text.contains("global (.localpilot)"),
             "origin not shown: {text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// A home whose managed `alpha` is behind its refreshed source and
+    /// shadows an `.agents` copy, and whose managed `gone` lost its directory.
+    fn home_needing_upkeep(home: &Path) {
+        let lp = home.join(".localpilot");
+        for (root, name) in [
+            (lp.join("skills"), "alpha"),
+            (home.join(".agents").join("skills"), "alpha"),
+        ] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: d\n---\nbody\n"),
+            )
+            .unwrap();
+        }
+        let entry = |name: &str| {
+            format!(
+                "[[installed]]\nname = \"{name}\"\nsource_id = \"src\"\nsource_url = \"https://example.invalid/r\"\ncommit = \"aaaaaaa1\"\nsource_path = \".localpilot/skills/{name}\"\nscope = \"global\"\ninstalled_at = \"1\"\n"
+            )
+        };
+        std::fs::write(
+            lp.join("installed-skills.toml"),
+            format!("{}\n{}", entry("alpha"), entry("gone")),
+        )
+        .unwrap();
+        std::fs::write(
+            lp.join("skill-sources.toml"),
+            "[[source]]\nid = \"src\"\nurl = \"https://example.invalid/r\"\ncommit = \"bbbbbbb2\"\nadded_at = \"1\"\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_names_stale_missing_and_shadowed_skills_and_a_pending_recovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (project, home) = (tmp.path().join("project"), tmp.path().join("home"));
+        std::fs::create_dir_all(&project).unwrap();
+        home_needing_upkeep(&home);
+        std::fs::create_dir_all(home.join(".localpilot").join("skills-update")).unwrap();
+        std::fs::write(
+            home.join(".localpilot")
+                .join("skills-update")
+                .join("journal.toml"),
+            "phase = \"swapping\"\n",
+        )
+        .unwrap();
+
+        let set = localpilot_skills::discover(&project, Some(&home), false).unwrap();
+        let notes = notes(&project, Some(&home), false, false, &set);
+        let mut buf = Vec::new();
+        render_list(&set, &notes, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("- alpha [discoverable, global (.localpilot)]"),
+            "{text}"
+        );
+        assert!(text.contains("  stale (global install): aaaaaaa1 -> bbbbbbb2 (`localpilot skills update alpha -g`)"), "{text}");
+        assert!(
+            text.contains(".agents")
+                && text.contains("[global (.agents)]")
+                && text.contains("  shadows "),
+            "{text}"
+        );
+        assert!(
+            text.contains("- gone [missing, global install from aaaaaaa1]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("interrupted skills update or refresh in the global scope"),
+            "{text}"
+        );
+
+        let mut buf = Vec::new();
+        render_show(&set, "alpha", &notes, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("stale (global install): aaaaaaa1 -> bbbbbbb2"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_project_install_from_a_global_source_is_shown_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (project, home) = (tmp.path().join("project"), tmp.path().join("home"));
+        home_needing_upkeep(&home);
+        // The same kind of entry, recorded in the project, whose source is
+        // registered globally only.
+        let lp = project.join(".localpilot");
+        let dir = lp.join("skills").join("beta");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---
+name: beta
+description: d
+---
+body
+",
+        )
+        .unwrap();
+        std::fs::write(
+            lp.join("installed-skills.toml"),
+            "[[installed]]
+name = \"beta\"
+source_id = \"src\"
+source_url = \"https://example.invalid/r\"
+commit = \"aaaaaaa1\"
+source_path = \".localpilot/skills/beta\"
+scope = \"project\"
+installed_at = \"1\"
+",
+        )
+        .unwrap();
+        let set = localpilot_skills::discover(&project, Some(&home), true).unwrap();
+        let notes = notes(&project, Some(&home), true, false, &set);
+        let beta = notes.per_skill.get("beta").cloned().unwrap_or_default();
+        assert!(
+            beta.iter().any(|n| n == "stale (project install): aaaaaaa1 -> bbbbbbb2 (`localpilot skills update beta`)"),
+            "{beta:?}"
+        );
+    }
+
+    #[test]
+    fn a_clean_home_adds_no_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let set = localpilot_skills::discover(tmp.path(), Some(tmp.path()), false).unwrap();
+        let notes = notes(tmp.path(), Some(tmp.path()), false, false, &set);
+        assert!(
+            notes.extra.is_empty() && notes.per_skill.is_empty(),
+            "{notes:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod update_command_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use localpilot_skills::PlainSkillCatalogStyle;
+
+    #[test]
+    fn update_needs_a_name_or_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut buf = Vec::new();
+        let outcome = run(
+            ProjectSkillsCommand::Update {
+                name: None,
+                all: false,
+                global: false,
+                yes: true,
+            },
+            tmp.path(),
+            false,
+            &PlainSkillCatalogStyle,
+            &mut buf,
+        )
+        .unwrap();
+        assert!(outcome.had_failure);
+        assert!(String::from_utf8(buf)
+            .unwrap()
+            .contains("name a skill to update, or pass --all"));
     }
 }

@@ -847,6 +847,22 @@ enum ProjectSkillsCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Update managed skills to their sources' current commits (network): each
+    /// owning source is refreshed, then every changed package of a source is
+    /// replaced together, or none are.
+    Update {
+        /// The installed skill to update (omit only together with `--all`).
+        name: Option<String>,
+        /// Update every managed skill in the scope.
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+        /// Update the user-global scope instead of the project.
+        #[arg(short = 'g', long)]
+        global: bool,
+        /// Approve the mutation without an interactive prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Remove a managed (LocalPilot-installed) skill.
     Delete {
         /// The installed skill name.
@@ -2977,6 +2993,11 @@ mod tests {
                 vec!["skills", "delete", "helper", "--yes"],
                 "delete helper --yes",
             ),
+            (
+                vec!["skills", "update", "helper", "--yes"],
+                "update helper --yes",
+            ),
+            (vec!["skills", "update", "--all", "-g"], "update --all -g"),
             (vec!["skills", "list"], "list"),
             (vec!["skills", "show", "helper", "-g"], "show helper -g"),
         ];
