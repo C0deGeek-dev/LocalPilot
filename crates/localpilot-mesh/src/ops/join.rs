@@ -139,7 +139,7 @@ impl Mesh {
                 broadcast: schema(&s) == 2,
                 ..PostArgs::default()
             };
-            self.post_message(role, &hello, Some(sid(&s)), true)?;
+            self.post_message(role, &hello, Some(sid(&s)), true, None)?;
         }
         // The lock is released: re-confirm before announcing a task.
         match self.active()? {

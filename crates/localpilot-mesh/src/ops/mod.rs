@@ -7,6 +7,7 @@
 //! conformance suite's observable layer checks them.
 
 mod delivery;
+pub mod engine;
 mod join;
 mod lease;
 mod post;
@@ -28,8 +29,8 @@ use crate::timefmt::utc_now;
 
 pub use delivery::{EndpointArgs, ENDPOINT_TOKEN_ENV, PUSH_OUTCOMES};
 pub use lease::SessionLease;
-pub use post::PostArgs;
-pub use read::WatchArgs;
+pub use post::{Expect, PostArgs};
+pub use read::{Delivered, Delivery, WatchArgs};
 pub use render::unit_label;
 pub use unit::NextUnitArgs;
 

@@ -50,6 +50,42 @@ impl Default for WatchArgs {
     }
 }
 
+/// One delivered message and how many times it has now been delivered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Delivered {
+    pub record: Obj,
+    /// The delivery count under acknowledged delivery; 0 otherwise.
+    pub count: i64,
+}
+
+/// What one `watch`, `peek` or `receive` delivers: mail, or a notice about a
+/// peer (`PEER_HEALTH`, `PEER_RESUME_DUE`, `PEER_STALE`). Both move the
+/// cursor the same way whoever consumes them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Delivery {
+    Mail {
+        messages: Vec<Delivered>,
+        /// Show route marks (more than one peer).
+        marks: bool,
+    },
+    Notice(String),
+}
+
+impl Delivery {
+    /// The text `watch` and `peek` print for this delivery.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Delivery::Mail { messages, marks } => messages
+                .iter()
+                .map(|d| block(&d.record, d.count, *marks))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            Delivery::Notice(line) => line.clone(),
+        }
+    }
+}
+
 /// A read cursor as `consume` left it, not yet written back.
 pub(crate) struct Pending {
     path: std::path::PathBuf,
@@ -410,7 +446,7 @@ impl Mesh {
         role: &str,
         stale: i64,
         expect_sid: Option<&str>,
-    ) -> Result<(Option<String>, Pending), MeshError> {
+    ) -> Result<(Option<Delivery>, Pending), MeshError> {
         let s = self.require(role, true)?;
         let switched = |active: &str| {
             refused(format!(
@@ -462,12 +498,18 @@ impl Mesh {
                 let top = msgs.iter().map(seq_of).max().unwrap_or(0);
                 c.insert("peer_seq".into(), json!(top));
             }
-            let text = msgs
-                .iter()
-                .map(|m| block(m, n.get(&seq_of(m)).copied().unwrap_or(0), false))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            return Ok((Some(text), pending(c)));
+            let messages = msgs
+                .into_iter()
+                .map(|m| {
+                    let count = n.get(&seq_of(&m)).copied().unwrap_or(0);
+                    Delivered { record: m, count }
+                })
+                .collect();
+            let mail = Delivery::Mail {
+                messages,
+                marks: false,
+            };
+            return Ok((Some(mail), pending(c)));
         }
         let h = self.health_of(&s, &peer)?;
         let gen = num_at(&h, "generation");
@@ -476,17 +518,18 @@ impl Mesh {
             c.insert("peer_health_generation".into(), json!(gen));
             if DOWN.contains(&status) {
                 c.insert("last_actionable_health".into(), json!(status));
-                return Ok((Some(health_notice(&peer, &h)), pending(c)));
+                return Ok((Some(Delivery::Notice(health_notice(&peer, &h))), pending(c)));
             }
             if status == "ready"
                 && DOWN.contains(&str_of(&c, "last_actionable_health").unwrap_or_default())
             {
                 c.insert("last_actionable_health".into(), json!("ready"));
-                return Ok((Some(format!("PEER_HEALTH {peer} status=ready")), pending(c)));
+                let line = format!("PEER_HEALTH {peer} status=ready");
+                return Ok((Some(Delivery::Notice(line)), pending(c)));
             }
         }
         if let Some(notice) = resume_due(&peer, &h, &mut c) {
-            return Ok((Some(notice), pending(c)));
+            return Ok((Some(Delivery::Notice(notice)), pending(c)));
         }
         let fresh = self.active()?.unwrap_or_else(|| s.clone());
         if expect_sid.is_some_and(|e| e != sid(&fresh)) {
@@ -506,7 +549,7 @@ impl Mesh {
                         num(&wseq),
                         str_of(&h, "updated_at").unwrap_or("unknown")
                     );
-                    return Ok((Some(text), pending(c)));
+                    return Ok((Some(Delivery::Notice(text)), pending(c)));
                 }
             }
         }
@@ -519,7 +562,7 @@ impl Mesh {
         role: &str,
         stale: i64,
         expect_sid: Option<&str>,
-    ) -> Result<(Option<String>, Pending), MeshError> {
+    ) -> Result<(Option<Delivery>, Pending), MeshError> {
         let acking = delivery(s) == "ack";
         let peers = others(s, role);
         let path = self.mb.cursor(sid(s), role);
@@ -575,16 +618,22 @@ impl Mesh {
                     seq_of(b),
                 ))
             });
-            let marks = peers.len() > 1;
-            let text = out
-                .iter()
+            let messages = out
+                .into_iter()
                 .map(|m| {
-                    let k = (str_of(m, "role").unwrap_or_default().to_owned(), seq_of(m));
-                    block(m, n.get(&k).copied().unwrap_or(0), marks)
+                    let k = (
+                        str_of(&m, "role").unwrap_or_default().to_owned(),
+                        seq_of(&m),
+                    );
+                    let count = n.get(&k).copied().unwrap_or(0);
+                    Delivered { record: m, count }
                 })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            return Ok((Some(text), pending(c)));
+                .collect();
+            let mail = Delivery::Mail {
+                messages,
+                marks: peers.len() > 1,
+            };
+            return Ok((Some(mail), pending(c)));
         }
         let mut hs = obj_of(c.get("health"));
         for snd in &peers {
@@ -611,7 +660,7 @@ impl Mesh {
             hs.insert(snd.clone(), Value::Object(hc));
             if let Some(text) = notice {
                 c.insert("health".into(), Value::Object(hs));
-                return Ok((Some(text), pending(c)));
+                return Ok((Some(Delivery::Notice(text)), pending(c)));
             }
         }
         c.insert("health".into(), Value::Object(hs));
@@ -645,7 +694,7 @@ impl Mesh {
                     str_of(e, "kind").unwrap_or_default(),
                     str_of(&h, "updated_at").unwrap_or("unknown")
                 );
-                return Ok((Some(text), pending(c)));
+                return Ok((Some(Delivery::Notice(text)), pending(c)));
             }
         }
         Ok((None, pending(c)))
@@ -726,9 +775,10 @@ impl Mesh {
             self.apply_ack(&s, role, t)?;
         }
         loop {
-            let (text, pending) = self.consume(role, a.stale_after, start_sid.as_deref())?;
-            if let Some(text) = text {
-                emit(&text).map_err(|e| MeshError::io(std::path::Path::new("<stdout>"), e))?;
+            let (delivery, pending) = self.consume(role, a.stale_after, start_sid.as_deref())?;
+            if let Some(delivery) = delivery {
+                emit(&delivery.render())
+                    .map_err(|e| MeshError::io(std::path::Path::new("<stdout>"), e))?;
                 self.commit(pending)?;
                 return Ok(0);
             }
@@ -741,6 +791,25 @@ impl Mesh {
             }
             std::thread::sleep(a.poll);
         }
+    }
+}
+
+impl Mesh {
+    /// One look for `role`, as `peek` takes it, returned instead of printed:
+    /// the same cursor moves, committed before this returns. `None` when
+    /// there is nothing to deliver.
+    ///
+    /// # Errors
+    /// A refusal, or a session other than `expect_sid`.
+    pub fn receive(
+        &self,
+        role: &str,
+        stale_after: i64,
+        expect_sid: Option<&str>,
+    ) -> Result<Option<Delivery>, MeshError> {
+        let (delivery, pending) = self.consume(role, stale_after, expect_sid)?;
+        self.commit(pending)?;
+        Ok(delivery)
     }
 }
 

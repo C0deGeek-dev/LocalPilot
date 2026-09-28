@@ -30,7 +30,7 @@ struct Snap {
 
 /// Run git in `repo`: its exit code and stdout, or an error when git could
 /// not be run at all.
-fn git(repo: &Path, args: &[&str]) -> Result<(Option<i32>, String), MeshError> {
+pub(super) fn git(repo: &Path, args: &[&str]) -> Result<(Option<i32>, String), MeshError> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -248,7 +248,7 @@ pub struct NextUnitArgs {
 }
 
 impl Mesh {
-    fn repo(&self) -> &Path {
+    pub(super) fn repo(&self) -> &Path {
         &self.anchor
     }
 
@@ -528,7 +528,7 @@ impl Mesh {
             to: multi.then(|| to.clone()),
             ..PostArgs::default()
         };
-        self.post_message(role, &offer, Some(&sid_), true)?;
+        self.post_message(role, &offer, Some(&sid_), true, None)?;
         Ok(Out::ok(format!("HANDOFF_OFFERED epoch={epoch} to={to}\n")))
     }
 
@@ -614,7 +614,7 @@ impl Mesh {
             broadcast: multi,
             ..PostArgs::default()
         };
-        self.post_message(role, &accept, Some(&sid_), true)?;
+        self.post_message(role, &accept, Some(&sid_), true, None)?;
         Ok(Out::ok(format!(
             "HANDOFF_ACCEPTED epoch={epoch} owner={role}\n"
         )))

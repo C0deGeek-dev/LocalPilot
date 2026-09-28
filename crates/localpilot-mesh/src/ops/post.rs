@@ -14,7 +14,7 @@ use crate::timefmt::utc_now;
 use crate::PROTOCOL;
 
 /// What `post` was asked to send.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PostArgs {
     pub kind: String,
     pub body: String,
@@ -26,6 +26,35 @@ pub struct PostArgs {
     pub forward: bool,
     /// `N` or `sender:N[,sender:N]`, acknowledged before the post.
     pub ack_through: Option<String>,
+}
+
+/// What a guarded post requires of the session. It is checked on the same
+/// read of the session record the message is stamped from, so the post
+/// either lands in exactly the unit it was planned for or not at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expect {
+    pub session_id: String,
+    pub unit_id: Option<String>,
+    /// The poster must be a required reviewer and not the owner.
+    pub reviewer: bool,
+}
+
+impl Expect {
+    fn check(&self, s: &Obj, role: &str) -> Result<(), MeshError> {
+        if sid(s) != self.session_id {
+            return Err(refused(format!("STALE session is now {}", sid(s))));
+        }
+        if str_of(s, "unit_id") != self.unit_id.as_deref() {
+            return Err(refused("STALE the work unit changed"));
+        }
+        if self.reviewer {
+            let (owner, required, _) = super::authority(s);
+            if owner == role || !required.iter().any(|r| r == role) {
+                return Err(refused("STALE no longer a required reviewer"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The directed-mail fields a schema-2 message carries.
@@ -261,8 +290,12 @@ impl Mesh {
         a: &PostArgs,
         expect_sid: Option<&str>,
         internal: bool,
+        guard: Option<&Expect>,
     ) -> Result<Obj, MeshError> {
         let s = self.require(role, true)?;
+        if let Some(g) = guard {
+            g.check(&s, role)?;
+        }
         if let Some(want) = expect_sid {
             if sid(&s) != want {
                 return Err(refused(format!(
@@ -441,6 +474,21 @@ impl Mesh {
         self.save(&fresh)
     }
 
+    /// A post that lands only if the session still matches `expect` (see
+    /// [`Expect`]); a mismatch is refused with a `STALE` reason and writes
+    /// nothing.
+    ///
+    /// # Errors
+    /// A refusal leaves the mailbox as it was.
+    pub fn post_guarded(
+        &self,
+        role: &str,
+        a: &PostArgs,
+        expect: &Expect,
+    ) -> Result<Obj, MeshError> {
+        self.post_message(role, a, None, false, Some(expect))
+    }
+
     /// `post`: acknowledge first when asked, then post; a reminder of mail
     /// still unacknowledged goes to stderr.
     ///
@@ -462,7 +510,7 @@ impl Mesh {
             let s = self.require(role, true)?;
             self.apply_ack(&s, role, t)?;
         }
-        self.post_message(role, a, None, false)?;
+        self.post_message(role, a, None, false, None)?;
         let mut out = Out::code(0);
         if let Some(s) = self.active()? {
             if schema(&s) == 1 {
