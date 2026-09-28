@@ -379,12 +379,28 @@ fn translate_blocks(message: &Message) -> Vec<Value> {
                 "name": call.name,
                 "input": call.input,
             })),
-            ContentBlock::ToolResult(result) => blocks.push(json!({
-                "type": "tool_result",
-                "tool_use_id": result.id.as_str(),
-                "content": result.output,
-                "is_error": result.is_error(),
-            })),
+            ContentBlock::ToolResult(result) => {
+                let content = match &result.image {
+                    Some(image) => json!([
+                        { "type": "text", "text": result.output },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": image.media_type,
+                                "data": image.data,
+                            }
+                        }
+                    ]),
+                    None => json!(result.output),
+                };
+                blocks.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": result.id.as_str(),
+                    "content": content,
+                    "is_error": result.is_error(),
+                }));
+            }
             ContentBlock::Image { media_type, data } => blocks.push(json!({
                 "type": "image",
                 "source": {
@@ -1512,6 +1528,33 @@ mod tests {
         assert_eq!(turns.len(), 3);
         assert_eq!(turns[2]["role"], "user");
         assert_eq!(turns[2]["content"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn image_tool_result_keeps_the_image_inside_its_tool_reply() {
+        use localpilot_core::{ToolImage, ToolResult, ToolUseId};
+        let provider = AnthropicProvider::new(
+            "anthropic",
+            "Anthropic",
+            "https://api.anthropic.com/v1",
+            None,
+        );
+        let mut result = ToolResult::success(ToolUseId::from("t1"), "opened reference.png");
+        result.image = Some(ToolImage {
+            media_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+        });
+        let body = provider.build_body(&ModelRequest::new(
+            "claude",
+            vec![Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult(result)],
+            )],
+        ));
+        let content = &body["messages"][0]["content"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["data"], "aGVsbG8=");
     }
 
     #[tokio::test]

@@ -52,6 +52,7 @@ pub const DEFAULT_SCORE_FLOOR: u32 = 1;
 /// broker, so this default only takes effect when narrowing is enabled.
 pub const DEFAULT_CORE: &[&str] = &[
     "read_file",
+    "read_image",
     "write_file",
     "edit_file",
     "replace_in_file",

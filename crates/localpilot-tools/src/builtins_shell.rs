@@ -604,6 +604,7 @@ impl Tool for RunShell {
             text,
             outcome,
             truncated: presentation_truncated,
+            image: None,
             presentation: Some(ToolOutputPresentation::Shell(ShellOutput {
                 exit_code: code,
                 stdout: presentation_stdout,

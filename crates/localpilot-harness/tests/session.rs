@@ -233,6 +233,90 @@ fn tool_result_outputs(messages: &[Message]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn image_tool_result_reaches_the_next_model_request() {
+    use localpilot_llm::InputBlockKind;
+
+    let mut declaration = FakeProvider::new().declaration().clone();
+    declaration
+        .supported_input_blocks
+        .push(InputBlockKind::Image);
+    let provider = Arc::new(
+        FakeProvider::new()
+            .with_declaration(declaration)
+            .tool_call("img-1", "read_image", json!({"path": "reference.png"}))
+            .text("I can see the image"),
+    );
+    let mut h = build_from_arc(
+        provider.clone(),
+        &[],
+        SessionConfig::default(),
+        Profile::Default,
+    );
+    std::fs::write(
+        h._dir.path().join("reference.png"),
+        [0x89, b'P', b'N', b'G', 13, 10, 26, 10, 1],
+    )
+    .unwrap();
+
+    assert_eq!(
+        h.runtime.run_turn("inspect it", &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let result = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .expect("tool result in follow-up request");
+    assert!(!result.is_error(), "{}", result.output);
+    assert_eq!(result.image.as_ref().unwrap().media_type, "image/png");
+    assert!(!result.output.contains(&result.image.as_ref().unwrap().data));
+}
+
+#[tokio::test]
+async fn image_tool_refuses_a_text_only_model() {
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("img-1", "read_image", json!({"path": "reference.png"}))
+            .text("cannot inspect"),
+    );
+    let mut h = build_from_arc(
+        provider.clone(),
+        &[],
+        SessionConfig::default(),
+        Profile::Default,
+    );
+    std::fs::write(
+        h._dir.path().join("reference.png"),
+        [0x89, b'P', b'N', b'G', 13, 10, 26, 10],
+    )
+    .unwrap();
+
+    assert_eq!(
+        h.runtime.run_turn("inspect it", &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let result = provider.requests()[1]
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .unwrap()
+        .clone();
+    assert!(result.is_error());
+    assert!(result.output.contains("does not accept images"));
+    assert!(result.image.is_none());
+}
+
+#[tokio::test]
 async fn an_unchanged_reread_is_elided_but_still_counts_as_a_read() {
     // Two identical read_file calls on an unchanged file: the second returns a
     // compact "elided" stub instead of the full body, but it still records as a

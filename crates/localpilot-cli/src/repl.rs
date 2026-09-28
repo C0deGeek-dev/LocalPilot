@@ -886,7 +886,7 @@ pub(crate) async fn execute_selfimprove_pump(
 
 /// The largest base64 payload we attach, keeping a single image comfortably under
 /// provider request limits (~5 MB encoded ≈ ~3.7 MB of image bytes).
-const MAX_IMAGE_BASE64_BYTES: usize = 5 * 1024 * 1024;
+const MAX_IMAGE_BASE64_BYTES: usize = localpilot_tools::MAX_IMAGE_BASE64_BYTES;
 
 /// Where a captured image came from, so a success notice can name bitmap
 /// dimensions or a file name without fabricating one from the other.
@@ -944,22 +944,13 @@ pub(crate) enum ClipboardImageRead {
 /// from magic bytes, so a mis-named file is still rejected by content.
 const SUPPORTED_IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
 
+#[cfg(test)]
+use localpilot_tools::encoded_base64_len_within_ceiling;
 /// Identify a provider-safe image type from its leading magic bytes. Returns
 /// `None` for anything that is not PNG, JPEG, WebP, or GIF — including a file
 /// with an image extension but non-image content.
-pub(crate) fn image_media_type_from_magic(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
+#[cfg(test)]
+pub(crate) use localpilot_tools::image_media_type_from_magic;
 
 /// The cardinality of a clipboard file list. The selector classifies count only;
 /// whether the single file is a readable, supported, in-budget image is decided
@@ -978,63 +969,7 @@ pub(crate) fn pick_clipboard_image_file(paths: &[std::path::PathBuf]) -> FileLis
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum ImageLoadError {
-    TooLarge,
-    Unsupported,
-    Unreadable(String),
-}
-
-pub(crate) struct LoadedImage {
-    pub(crate) media_type: &'static str,
-    pub(crate) data: String,
-    pub(crate) byte_len: usize,
-    pub(crate) file_name: String,
-}
-
-/// Whether a raw byte length would base64-encode within the attach ceiling,
-/// computed overflow-safely so a preflight never allocates for an oversize file.
-fn encoded_base64_len_within_ceiling(raw_len: u64) -> bool {
-    match raw_len
-        .checked_add(2)
-        .map(|padded| padded / 3)
-        .and_then(|groups| groups.checked_mul(4))
-    {
-        Some(encoded) => encoded <= MAX_IMAGE_BASE64_BYTES as u64,
-        None => false,
-    }
-}
-
-/// Read an already-encoded image file and prepare it for attachment. The single
-/// content authority: it decides unreadable / unsupported / oversize. The size
-/// is preflighted from metadata before the bytes are read.
-pub(crate) fn load_image_file(path: &std::path::Path) -> Result<LoadedImage, ImageLoadError> {
-    let metadata =
-        std::fs::metadata(path).map_err(|error| ImageLoadError::Unreadable(error.to_string()))?;
-    if !metadata.is_file() {
-        return Err(ImageLoadError::Unreadable("not a regular file".to_string()));
-    }
-    if !encoded_base64_len_within_ceiling(metadata.len()) {
-        return Err(ImageLoadError::TooLarge);
-    }
-    let bytes =
-        std::fs::read(path).map_err(|error| ImageLoadError::Unreadable(error.to_string()))?;
-    let media_type = image_media_type_from_magic(&bytes).ok_or(ImageLoadError::Unsupported)?;
-    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    if data.len() > MAX_IMAGE_BASE64_BYTES {
-        return Err(ImageLoadError::TooLarge);
-    }
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "image".to_string());
-    Ok(LoadedImage {
-        media_type,
-        data,
-        byte_len: bytes.len(),
-        file_name,
-    })
-}
+pub(crate) use localpilot_tools::{load_image_file, ImageLoadError};
 
 fn strip_one_quote_pair(text: &str) -> &str {
     let bytes = text.as_bytes();

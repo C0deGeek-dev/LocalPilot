@@ -5,7 +5,7 @@ use localpilot_sandbox::{Effect, Interactivity, Workspace};
 use serde_json::Value;
 
 use crate::error::ToolError;
-use localpilot_core::ToolOutcome;
+use localpilot_core::{ToolImage, ToolOutcome};
 
 /// Context passed to a tool: the workspace it may touch and how the session runs.
 pub struct ToolContext<'a> {
@@ -239,6 +239,7 @@ pub struct ToolOutput {
     pub text: String,
     pub outcome: ToolOutcome,
     pub truncated: bool,
+    pub image: Option<ToolImage>,
     pub presentation: Option<ToolOutputPresentation>,
     /// What this call touched, reported by the tool itself.
     ///
@@ -272,6 +273,7 @@ impl ToolOutput {
             text: text.into(),
             outcome: ToolOutcome::Ok,
             truncated: false,
+            image: None,
             presentation: None,
             touches: Vec::new(),
         }
@@ -284,6 +286,7 @@ impl ToolOutput {
             text: text.into(),
             outcome: ToolOutcome::Ok,
             truncated: true,
+            image: None,
             presentation: None,
             touches: Vec::new(),
         }
@@ -295,6 +298,13 @@ impl ToolOutput {
     #[must_use]
     pub fn with_outcome(mut self, outcome: ToolOutcome) -> Self {
         self.outcome = outcome;
+        self
+    }
+
+    /// Attach provider-ready image content without inserting bytes into text.
+    #[must_use]
+    pub fn with_image(mut self, image: ToolImage) -> Self {
+        self.image = Some(image);
         self
     }
 

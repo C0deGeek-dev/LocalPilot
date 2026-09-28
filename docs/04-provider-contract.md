@@ -219,6 +219,14 @@ schema, ignore it, and still answer. Callers validate every reply regardless
 
 ### Vision (image input)
 
+An agent can also call `read_image` during a vision-capable session. The
+permission-gated tool reads a local file and returns a typed image alongside its
+textual tool result. The OpenAI-compatible adapter sends the image in a user
+message after all outstanding tool replies; the Anthropic adapter includes it
+inside the matching tool-result block. A text-only session refuses the call
+before reading the file. See [05-tool-system.md](05-tool-system.md) for the path,
+format and size rules.
+
 Whether a provider accepts image (vision) input is a **resolved capability**, not
 an assumption from the source type (ADR-0061). It resolves in a fixed precedence —
 **config > probe > false**:

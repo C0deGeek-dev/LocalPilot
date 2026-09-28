@@ -103,6 +103,24 @@ pub struct ToolResult {
     pub output: String,
     /// How the call turned out.
     pub outcome: ToolOutcome,
+    /// Image returned by a read-only tool, kept separate from model-visible text.
+    pub image: Option<ToolImage>,
+}
+
+/// An image delivered by a tool to a vision-capable provider.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolImage {
+    pub media_type: String,
+    pub data: String,
+}
+
+impl std::fmt::Debug for ToolImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolImage")
+            .field("media_type", &self.media_type)
+            .field("data_bytes", &self.data.len())
+            .finish()
+    }
 }
 
 /// The wire shape of [`ToolResult`] — a strict superset of the pre-outcome
@@ -118,6 +136,8 @@ struct ToolResultWire {
     is_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     outcome: Option<ToolOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image: Option<ToolImage>,
 }
 
 impl From<ToolResultWire> for ToolResult {
@@ -131,6 +151,7 @@ impl From<ToolResultWire> for ToolResult {
             id: wire.id,
             output: wire.output,
             outcome: wire.outcome.unwrap_or(fallback),
+            image: wire.image,
         }
     }
 }
@@ -142,6 +163,7 @@ impl From<ToolResult> for ToolResultWire {
             output: result.output,
             is_error: result.outcome.is_error(),
             outcome: Some(result.outcome),
+            image: result.image,
         }
     }
 }
@@ -154,6 +176,7 @@ impl ToolResult {
             id,
             output: output.into(),
             outcome: ToolOutcome::Ok,
+            image: None,
         }
     }
 
@@ -164,6 +187,7 @@ impl ToolResult {
             id,
             output: output.into(),
             outcome: ToolOutcome::Unusable,
+            image: None,
         }
     }
 
@@ -198,6 +222,7 @@ mod tests {
             id: ToolUseId::from("call_1"),
             output: "exit: 1".into(),
             outcome: ToolOutcome::ReportedFailure,
+            image: None,
         };
         assert!(!ok.is_error());
         assert!(err.is_error());
@@ -226,6 +251,7 @@ mod tests {
             id: ToolUseId::from("c1"),
             output: "exit: 3".into(),
             outcome: ToolOutcome::ReportedFailure,
+            image: None,
         };
         let json = serde_json::to_string(&reported).unwrap();
         // Old readers key on the boolean; new readers refine it.
@@ -233,5 +259,22 @@ mod tests {
         assert!(json.contains(r#""outcome":"reported_failure""#));
         let back: ToolResult = serde_json::from_str(&json).unwrap();
         assert_eq!(reported, back);
+    }
+
+    #[test]
+    fn image_result_round_trips_without_changing_old_results() {
+        let mut result = ToolResult::success(ToolUseId::from("image-1"), "opened image");
+        result.image = Some(ToolImage {
+            media_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+        });
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ToolResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, result);
+        assert!(
+            !serde_json::to_string(&ToolResult::success(ToolUseId::from("text"), "ok"))
+                .unwrap()
+                .contains("image")
+        );
     }
 }

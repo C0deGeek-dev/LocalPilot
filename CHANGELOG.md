@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Agents can inspect local images during a vision task.** The new
+  `read_image` tool opens PNG, JPEG, WebP and GIF files through the usual
+  file-read permission gate and sends pixels to the active vision model.
+  Re-reading a changed screenshot sees its current contents. Text-only models
+  and unsupported or oversized files receive clear errors (LocalHub#199).
+
 - **`doctor` says whether LocalPilot can pair here.** A new `mesh` section
   shows the mesh writer, the anchor tree, the active pair session, and
   whether `localpilot mesh run` can join it as `localpilot`, with the reason

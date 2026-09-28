@@ -2155,6 +2155,7 @@ name = "localpilot-tools"
 version = "5.0.0"
 dependencies = [
  "async-trait",
+ "base64",
  "ignore",
  "insta",
  "localpilot-config",

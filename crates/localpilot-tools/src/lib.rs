@@ -16,6 +16,7 @@ mod builtins_swarm;
 mod catalog;
 mod contract;
 mod error;
+mod image;
 mod registry;
 mod repair;
 mod schema_intent;
@@ -29,8 +30,8 @@ pub use broker::{
     TOOL_SEARCH,
 };
 pub use builtins::{
-    ApplyPatch, EditFile, Fetch, GitCommit, GitStatus, ListFiles, ReadFile, ReadToolOutput,
-    ReplaceInFile, SearchText, WriteFile,
+    ApplyPatch, EditFile, Fetch, GitCommit, GitStatus, ListFiles, ReadFile, ReadImage,
+    ReadToolOutput, ReplaceInFile, SearchText, WriteFile,
 };
 pub use builtins_ask::{AskUser, ASK_USER};
 pub use builtins_background::{BackgroundProcesses, ProcStatus, RunBackground};
@@ -45,6 +46,10 @@ pub use contract::{
     ToolExample, ToolVersion, VerificationMethod,
 };
 pub use error::ToolError;
+pub use image::{
+    encoded_base64_len_within_ceiling, image_media_type_from_magic, load_image_file,
+    ImageLoadError, LoadedImage, MAX_IMAGE_BASE64_BYTES,
+};
 pub use localpilot_core::ToolOutcome;
 pub use registry::{ToolDispatchResult, ToolRegistry};
 pub use repair::{

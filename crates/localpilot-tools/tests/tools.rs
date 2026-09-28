@@ -98,7 +98,7 @@ async fn unknown_tool_returns_an_error_result_not_a_panic() {
 #[test]
 fn every_builtin_generates_a_schema() {
     let registry = ToolRegistry::with_builtins();
-    assert_eq!(registry.names().len(), 24);
+    assert_eq!(registry.names().len(), 25);
     for (name, schema) in registry.schemas() {
         assert!(schema.is_object(), "{name} produced a non-object schema");
     }
@@ -145,6 +145,132 @@ async fn read_file_inside_workspace_is_allowed_and_outside_is_denied() {
     assert!(outside.is_error());
     assert!(outside.output.contains("status: error"));
     assert!(outside.output.contains("permission denied"));
+}
+
+#[tokio::test]
+async fn read_image_delivers_pixels_without_putting_base64_in_text() {
+    let (dir, ws) = workspace_with(&[]);
+    let png = [0x89, b'P', b'N', b'G', 13, 10, 26, 10, 1, 2, 3];
+    std::fs::write(dir.path().join("reference.png"), png).unwrap();
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let result = dispatch(
+        &registry,
+        "read_image",
+        json!({"path": "reference.png"}),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(!result.is_error(), "{}", result.output);
+    let image = result.image.expect("image payload");
+    assert_eq!(image.media_type, "image/png");
+    assert!(!result.output.contains(&image.data));
+    assert_eq!(
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, image.data).unwrap(),
+        png
+    );
+
+    // A later call reads the current bytes, rather than caching the first view.
+    let jpeg = [0xff, 0xd8, 0xff, 1, 2, 3];
+    std::fs::write(dir.path().join("reference.png"), jpeg).unwrap();
+    let updated = dispatch(
+        &registry,
+        "read_image",
+        json!({"path": "reference.png"}),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert_eq!(updated.image.unwrap().media_type, "image/jpeg");
+}
+
+#[tokio::test]
+async fn read_image_respects_permissions_and_reports_invalid_input() {
+    let (_dir, mut ws) = workspace_with(&[]);
+    let outside = tempfile::tempdir().unwrap();
+    let image = outside.path().join("reference.png");
+    std::fs::write(&image, [0x89, b'P', b'N', b'G', 13, 10, 26, 10]).unwrap();
+    let registry = ToolRegistry::with_builtins();
+    let engine = default_engine();
+    let denied = dispatch(
+        &registry,
+        "read_image",
+        json!({"path": image}),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &engine,
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(denied.is_error());
+    assert!(denied.image.is_none());
+
+    ws.add_read_root(outside.path()).unwrap();
+    let granted = dispatch(
+        &registry,
+        "read_image",
+        json!({"path": image}),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &engine,
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(granted.image.is_some(), "{}", granted.output);
+
+    let malformed = dispatch(
+        &registry,
+        "read_image",
+        json!({"unexpected": "reference.png"}),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &engine,
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(malformed.is_error());
+    assert!(malformed.image.is_none());
+
+    // A credential-shaped path keeps its separate read gate, even inside the
+    // workspace and regardless of the bytes it contains.
+    let secret = ws.root().join("private.pem");
+    std::fs::write(&secret, [0x89, b'P', b'N', b'G', 13, 10, 26, 10]).unwrap();
+    let protected = dispatch(
+        &registry,
+        "read_image",
+        json!({"path": "private.pem"}),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &engine,
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(protected.is_error(), "{}", protected.output);
+    assert!(protected.image.is_none());
+}
+
+#[tokio::test]
+async fn read_image_rejects_non_images_and_large_files() {
+    let (dir, ws) = workspace_with(&[("fake.png", "this is text")]);
+    std::fs::write(dir.path().join("large.png"), vec![0; 4 * 1024 * 1024]).unwrap();
+    let registry = ToolRegistry::with_builtins();
+    for (path, reason) in [
+        ("fake.png", "unsupported image content"),
+        ("large.png", "exceeds the 5 MiB encoded limit"),
+        ("missing.png", "missing.png"),
+    ] {
+        let result = dispatch(
+            &registry,
+            "read_image",
+            json!({"path": path}),
+            &ctx(&ws, Interactivity::NonInteractive, true),
+            &default_engine(),
+            &ScriptedApprover::new(Vec::new()),
+        )
+        .await;
+        assert!(result.is_error(), "{path}");
+        assert!(result.output.contains(reason), "{}", result.output);
+        assert!(result.image.is_none());
+    }
 }
 
 #[tokio::test]

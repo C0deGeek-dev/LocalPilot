@@ -3813,11 +3813,18 @@ impl SessionRuntime {
                 // the ordering is pinned and tested in `dispatch_gate`, not implicit
                 // here. The gate inputs are read-only; the permission engine runs
                 // only on `Proceed`.
-                let decision = pre_dispatch_decision(
-                    self.broker_reresolution(name),
-                    self.precondition_block(name, input),
-                    self.check_before_launch_verdict(name, input),
-                );
+                let decision = if name == "read_image" && !self.active_accepts_images() {
+                    PreDispatch::Block {
+                        reason: "the active model does not accept images; use a vision-capable provider to inspect this file".to_string(),
+                        announce: false,
+                    }
+                } else {
+                    pre_dispatch_decision(
+                        self.broker_reresolution(name),
+                        self.precondition_block(name, input),
+                        self.check_before_launch_verdict(name, input),
+                    )
+                };
                 // Phase 1 + 2: validate the arguments; when `[tools] repair` is on,
                 // repair a shape-invalid call to a valid shape and dispatch that;
                 // otherwise (and on an unrepairable or refused call) hand the model
@@ -4507,11 +4514,15 @@ fn image_count(messages: &[Message]) -> usize {
     messages
         .iter()
         .flat_map(|message| &message.content)
-        .filter(|block| matches!(block, ContentBlock::Image { .. }))
-        .count()
+        .map(|block| match block {
+            ContentBlock::Image { .. } => 1,
+            ContentBlock::ToolResult(result) => usize::from(result.image.is_some()),
+            _ => 0,
+        })
+        .sum()
 }
 
-/// Keep only the newest `limit` image blocks in a provider request. The stored
+/// Keep only the newest `limit` images in a provider request. The stored
 /// transcript is not changed; this projection is used only for the overflow
 /// retry, so a later turn or resume still has the authored attachments.
 fn retain_latest_images(mut messages: Vec<Message>, limit: usize) -> Vec<Message> {
@@ -4520,12 +4531,22 @@ fn retain_latest_images(mut messages: Vec<Message>, limit: usize) -> Vec<Message
         return messages;
     }
     for message in &mut messages {
-        message.content.retain(|block| {
-            if to_remove > 0 && matches!(block, ContentBlock::Image { .. }) {
-                to_remove -= 1;
-                false
-            } else {
-                true
+        message.content.retain_mut(|block| {
+            if to_remove == 0 {
+                return true;
+            }
+            match block {
+                ContentBlock::Image { .. } => {
+                    to_remove -= 1;
+                    false
+                }
+                ContentBlock::ToolResult(result) if result.image.is_some() => {
+                    result.image = None;
+                    result.output.push_str("\n[image omitted on retry]");
+                    to_remove -= 1;
+                    true
+                }
+                _ => true,
             }
         });
     }
@@ -4750,6 +4771,28 @@ mod tests {
     use localpilot_llm::{FakeProvider, ProviderDeclaration};
     use localpilot_recovery::RecoveryBudget;
     use localpilot_sandbox::{ScriptedApprover, Workspace};
+
+    #[test]
+    fn overflow_image_limit_counts_tool_results_and_keeps_the_newest_image() {
+        let mut result = ToolResult::success(ToolUseId::from("img-1"), "opened image");
+        result.image = Some(localpilot_core::ToolImage {
+            media_type: "image/png".to_string(),
+            data: "older".to_string(),
+        });
+        let messages = vec![
+            Message::new(Role::Tool, vec![ContentBlock::ToolResult(result)]),
+            Message::new(Role::User, vec![ContentBlock::image("image/png", "newer")]),
+        ];
+        assert_eq!(image_count(&messages), 2);
+        let trimmed = retain_latest_images(messages, 1);
+        assert_eq!(image_count(&trimmed), 1);
+        let ContentBlock::ToolResult(older) = &trimmed[0].content[0] else {
+            panic!("tool pairing must remain");
+        };
+        assert!(older.image.is_none());
+        assert!(older.output.contains("image omitted on retry"));
+        assert!(matches!(trimmed[1].content[0], ContentBlock::Image { .. }));
+    }
 
     #[test]
     fn a_user_soft_interrupt_injects_verbatim_a_system_one_is_labelled() {

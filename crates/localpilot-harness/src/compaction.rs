@@ -34,7 +34,9 @@ fn message_chars(message: &Message) -> usize {
         .map(|block| match block {
             ContentBlock::Text { text } | ContentBlock::Reasoning { text, .. } => text.len(),
             ContentBlock::ToolUse(call) => call.name.len() + call.input.to_string().len(),
-            ContentBlock::ToolResult(result) => result.output.len(),
+            ContentBlock::ToolResult(result) => {
+                result.output.len() + result.image.as_ref().map_or(0, |image| image.data.len())
+            }
             // A pasted image is base64 in the request body — count its payload
             // rather than treating it as free, so a screenshot cannot silently
             // push the real request past the window the estimate believed fit.

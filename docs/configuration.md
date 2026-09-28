@@ -140,6 +140,10 @@ unreadable, unsupported, multiple, or oversize input, and when an open overlay o
 dialog owns the composer — so a paste never silently does nothing. Quick help
 (`?`) and `/help` document the three forms.
 
+During a task, the agent can use `read_image` to inspect a local image by path
+without another user attachment. This call uses the normal file-read permission
+rules and the same formats and 5 MiB encoded-size limit.
+
 Ctrl+G edits the idle composer in a foreground external editor. The host checks
 `LOCALPILOT_EDITOR`, then `VISUAL`, then `EDITOR`; the value may contain a quoted
 executable path and arguments. If none is set, the fallback is Notepad on

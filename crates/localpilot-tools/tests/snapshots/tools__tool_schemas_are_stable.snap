@@ -40,6 +40,24 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
     }
   ],
   [
+    "read_image",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "path": {
+          "description": "Workspace-relative or absolute path to an image.",
+          "type": "string",
+          "x-localpilot-intent": "path"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "ReadImageInput",
+      "type": "object"
+    }
+  ],
+  [
     "write_file",
     {
       "$schema": "http://json-schema.org/draft-07/schema#",

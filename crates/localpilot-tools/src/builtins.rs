@@ -17,7 +17,7 @@ use crate::contract::{
 use crate::error::ToolError;
 use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
 use crate::touch::{changed_range, FileTouch, LineRange, TouchOp};
-use localpilot_core::ToolOutcome;
+use localpilot_core::{ToolImage, ToolOutcome};
 
 /// Approval detail from a single string field of the input. Tools know their
 /// own schema; this is a typed read, not cross-tool key-guessing.
@@ -497,6 +497,67 @@ fn apply_plan(haystack: &str, plan: &EditPlan) -> String {
 }
 
 // --- read_file --------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReadImageInput {
+    /// Workspace-relative or absolute path to an image.
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
+    path: String,
+}
+
+/// Read a local image for a vision-capable model.
+pub struct ReadImage;
+
+#[async_trait]
+impl Tool for ReadImage {
+    fn name(&self) -> &'static str {
+        "read_image"
+    }
+    fn contract(&self) -> ToolContract {
+        read_only_contract("Inspect an image file from the workspace.")
+    }
+    fn approval_detail(&self, input: &Value) -> String {
+        string_field_detail(input, "path")
+    }
+    fn description(&self) -> &'static str {
+        "Inspect a PNG, JPEG, WebP or GIF image by path with a vision-capable model."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<ReadImageInput>()
+    }
+    fn effects(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        let input: ReadImageInput = parse_input(input)?;
+        Ok(vec![read_path_effect(ctx, Path::new(&input.path))])
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: ReadImageInput = parse_input(&input)?;
+        let path = ctx.workspace.normalize(Path::new(&input.path))?;
+        let loaded = crate::image::load_image_file(&path).map_err(|error| match error {
+            crate::image::ImageLoadError::TooLarge => ToolError::Failed(format!(
+                "{}: image exceeds the 5 MiB encoded limit",
+                path.display()
+            )),
+            crate::image::ImageLoadError::Unsupported => ToolError::Failed(format!(
+                "{}: unsupported image content (expected PNG, JPEG, WebP or GIF)",
+                path.display()
+            )),
+            crate::image::ImageLoadError::Unreadable(reason) => {
+                ToolError::Failed(format!("{}: {reason}", path.display()))
+            }
+        })?;
+        Ok(ToolOutput::ok(format!(
+            "opened image {} ({} bytes, {})",
+            path.display(),
+            loaded.byte_len,
+            loaded.media_type
+        ))
+        .with_image(ToolImage {
+            media_type: loaded.media_type.to_string(),
+            data: loaded.data,
+        })
+        .touching(FileTouch::whole(&path, TouchOp::Read)))
+    }
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadFileInput {

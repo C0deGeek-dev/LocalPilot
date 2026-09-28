@@ -2,6 +2,34 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0188: Image Tool Results Carry Typed Pixels Through The Existing Permission Gate
+
+**Status:** accepted · **Date:** 2026-09-28. Builds on ADR-0061 (resolved vision)
+and the existing `ReadPath` permission boundary.
+
+**Context.** Chat attachments allow a user to send an image, but an agent
+working on a design cannot inspect another local image or re-open a screenshot
+it has changed. `read_file` intentionally refuses binary data. Tool results
+carried text only, so an image-reading tool could not deliver pixels to a
+vision model without embedding base64 in text.
+
+**Decision.** `read_image` is a read-only builtin with the same path effect and
+permission decision as `read_file`. It uses the chat attachment's shared file
+loader: PNG, JPEG, WebP and GIF are identified from magic bytes and capped at
+5 MiB encoded. An active text-only model refuses the call before dispatch.
+Successful tool results carry an optional typed image separate from textual
+output; older transcript records remain readable because the field is optional.
+The OpenAI-compatible adapter emits pending tool results before a user-role
+image message, preserving tool-call pairing. The Anthropic adapter puts the
+image inside its matching tool-result block. Context estimation counts image
+bytes; overflow recovery may omit an older image from a retry while retaining
+the textual result and tool pairing.
+
+**Consequences.** Tool-result images are retained in the session transcript so
+a resumed model can receive the same result. Permission decisions still happen
+before bytes are read. The format and payload rules remain identical for chat
+attachments and agent reads.
+
 ## ADR-0187: Replay Runs A Lesson's Ratified Check On Its Own Commits, Only When Asked
 
 **Status:** accepted · **Date:** 2026-09-26. Builds on ADR-0185 (frozen

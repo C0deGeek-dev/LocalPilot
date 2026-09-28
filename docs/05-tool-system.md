@@ -65,6 +65,23 @@ Rules:
 - support line ranges
 - cap output size
 
+### `read_image`
+
+Reads a PNG, JPEG, WebP or GIF file for a vision-capable model. The model receives
+the image as multimodal input associated with the tool result; the tool's text
+contains only the path, byte count and detected media type. The media type comes
+from the file's magic bytes, and the base64 payload is limited to 5 MiB, the
+same limit as a chat attachment. Each call reads the file again, so an agent can
+inspect a screenshot after updating it.
+
+Rules:
+
+- follow the same `ReadPath` permission decision as `read_file`, including
+  secret-like paths, out-of-workspace approval and `extra_read_roots`
+- refuse the call before reading when the active model has no vision capability
+- report missing, unreadable, unsupported and oversized files as tool errors
+- account for the image payload during context compaction
+
 ### `write_file`
 
 Writes a new file or replaces an existing file.

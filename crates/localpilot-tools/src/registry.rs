@@ -11,8 +11,8 @@ use crate::contract::{Confirmation, Reversibility};
 
 use crate::builtins::{
     AppendFile, ApplyPatch, Delegate, EditFile, Fetch, FindFiles, GitAdd, GitCommit, GitDiff,
-    GitLog, GitRestore, GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile,
-    SearchText, UpdatePlan, WriteFile,
+    GitLog, GitRestore, GitStatus, ListFiles, MultiEdit, ReadFile, ReadImage, ReadToolOutput,
+    ReplaceInFile, SearchText, UpdatePlan, WriteFile,
 };
 use crate::builtins_ask::AskUser;
 use crate::builtins_background::RunBackground;
@@ -78,6 +78,7 @@ impl ToolRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
         registry.register(Box::new(ReadFile));
+        registry.register(Box::new(ReadImage));
         registry.register(Box::new(WriteFile));
         registry.register(Box::new(AppendFile));
         registry.register(Box::new(EditFile));
@@ -359,6 +360,7 @@ impl ToolRegistry {
                         id: call.id.clone(),
                         output: format_tool_output(tool.name(), &bounded, output.outcome),
                         outcome: output.outcome,
+                        image: output.image,
                     },
                     presentation: output.presentation.map(redact_presentation),
                     touches: output.touches,

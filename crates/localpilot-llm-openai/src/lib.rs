@@ -491,7 +491,14 @@ fn translate_tool(tool: &ToolSpec) -> Value {
 fn translate_messages(messages: &[Message], round_trip_reasoning: bool) -> Vec<Value> {
     let mut out = Vec::new();
     let mut in_leading_system = true;
+    let mut tool_images = Vec::new();
     for message in messages {
+        if message.role != Role::Tool && !tool_images.is_empty() {
+            out.push(json!({
+                "role": "user",
+                "content": std::mem::take(&mut tool_images),
+            }));
+        }
         // Only the leading run of system messages is the setup prompt. A system
         // message appearing later (e.g. host-injected retrieved context) keeps
         // its position but is delivered as user-role content: it is not reordered
@@ -506,6 +513,23 @@ fn translate_messages(messages: &[Message], round_trip_reasoning: bool) -> Vec<V
             in_leading_system = false;
         }
         translate_message(message, role_override, round_trip_reasoning, &mut out);
+        if message.role == Role::Tool {
+            for block in &message.content {
+                if let ContentBlock::ToolResult(result) = block {
+                    if let Some(image) = &result.image {
+                        tool_images.push(json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", image.media_type, image.data)
+                            },
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    if !tool_images.is_empty() {
+        out.push(json!({ "role": "user", "content": tool_images }));
     }
     out
 }
@@ -1436,6 +1460,61 @@ mod tests {
             content[1]["image_url"]["url"],
             "data:image/png;base64,aGVsbG8="
         );
+    }
+
+    #[test]
+    fn image_tool_result_follows_all_tool_replies_as_vision_input() {
+        use localpilot_core::{ToolCall, ToolImage, ToolResult, ToolUseId};
+        let provider = OpenAiProvider::new(
+            "local",
+            "Local",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .with_declared_vision(Some(true));
+        let mut image_result = ToolResult::success(ToolUseId::from("t1"), "opened reference.png");
+        image_result.image = Some(ToolImage {
+            media_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+        });
+        let messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::ToolUse(ToolCall::new(
+                        ToolUseId::from("t1"),
+                        "read_image",
+                        json!({}),
+                    )),
+                    ContentBlock::ToolUse(ToolCall::new(
+                        ToolUseId::from("t2"),
+                        "read_file",
+                        json!({}),
+                    )),
+                ],
+            ),
+            Message::new(Role::Tool, vec![ContentBlock::ToolResult(image_result)]),
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult(ToolResult::success(
+                    ToolUseId::from("t2"),
+                    "text",
+                ))],
+            ),
+        ];
+        let body = provider.build_body(&ModelRequest::new("m", messages));
+        let turns = body["messages"].as_array().unwrap();
+        assert_eq!(turns.len(), 4);
+        assert_eq!(turns[1]["tool_call_id"], "t1");
+        assert_eq!(turns[2]["tool_call_id"], "t2");
+        assert_eq!(turns[3]["role"], "user");
+        assert_eq!(turns[3]["content"][0]["type"], "image_url");
+        assert_eq!(
+            turns[3]["content"][0]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+        assert!(!turns[1]["content"].to_string().contains("aGVsbG8="));
     }
 
     #[test]
