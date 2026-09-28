@@ -59,7 +59,7 @@ fn active(ep: &Obj) -> bool {
 }
 
 /// Registered, not retired, and its lease (if any) not yet over.
-fn live(ep: &Obj) -> bool {
+pub(super) fn live(ep: &Obj) -> bool {
     let expired = str_of(ep, "expires_at")
         .filter(|e| !e.is_empty())
         .is_some_and(|e| parse_utc(e).is_none_or(|t| t <= now_secs()));
@@ -85,7 +85,7 @@ fn token_problem(ep: &Obj) -> Option<&'static str> {
 }
 
 /// Whether `role` is a recipient of `m`.
-fn addressed_to(m: &Obj, role: &str) -> bool {
+pub(super) fn addressed_to(m: &Obj, role: &str) -> bool {
     if str_of(m, "role") == Some(role) {
         return false;
     }

@@ -388,6 +388,10 @@ impl Mesh {
                 m.insert("forward".into(), json!(r.forward));
             }
             jsonl::append(&jp, &m)?;
+            // In the journal now, so owed its wakes even if a later step
+            // fails (P-3). Only queued here: the caller dials once the
+            // command holds no lock.
+            self.queue_push(&s, &m);
             crate::fsio::write_json(&self.mb.latest(sid(&s), role), &m)?;
             m
         };

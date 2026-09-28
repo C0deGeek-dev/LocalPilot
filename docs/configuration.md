@@ -271,6 +271,20 @@ run, and a long one nightly on Linux and Windows. The anchor tree is `--repo`, t
 | `4` | `guard-write` denied the write (`WRITE_DENIED` on stderr). |
 | `5` | A delivery request was refused (`REFUSED <code>` on stderr). |
 
+Posting wakes the recipients that are listening. After any operation that
+appended a message, and once it holds no lock, `localpilot mesh` sends one
+wake-up to each addressed recipient that has a live delivery endpoint: a
+Windows named pipe or a Unix socket, recorded in the session by the
+recipient's endpoint host. A wake-up carries no message, only "you may have
+mail"; the mailbox stays the record. Each outcome (`sent`, `refused`,
+`failed` or `timeout`) is written to the sender's push log in the session.
+All the wake-ups of one post share a 2-second limit, and they never change the
+operation's exit status or output. `mesh run` does the same after every
+message it posts, keeps at most one wake-up per recipient in flight, and
+cancels any still pending at the limit. An endpoint address that is not a
+well-formed pipe name or absolute socket path for this platform is never
+dialled. Set `PAIR_NO_PUSH=1` to turn wake-ups off.
+
 #### The participant engine (`localpilot mesh run`)
 
 `localpilot mesh run` takes part on its own: the protocol runs in code, and a

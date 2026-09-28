@@ -12,6 +12,7 @@ mod join;
 mod lease;
 pub mod owner;
 mod post;
+pub mod push;
 mod read;
 mod render;
 mod unit;
@@ -107,6 +108,10 @@ pub struct Mesh {
     mb: Mailbox,
     anchor: PathBuf,
     source: String,
+    /// Messages appended through this mailbox and not yet pushed (spec
+    /// P-3). Shared by clones, so a post made on a blocking thread is pushed
+    /// by the async caller.
+    appended: std::sync::Arc<std::sync::Mutex<Vec<(Obj, Obj)>>>,
 }
 
 impl Mesh {
@@ -118,6 +123,7 @@ impl Mesh {
             mb: Mailbox::at(anchor),
             anchor: anchor.to_path_buf(),
             source: source.to_owned(),
+            appended: std::sync::Arc::default(),
         }
     }
 

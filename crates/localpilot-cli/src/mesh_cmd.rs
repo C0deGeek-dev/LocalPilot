@@ -216,7 +216,7 @@ pub(crate) fn native_writer() -> Result<bool, String> {
 }
 
 /// Run one mesh operation, writing its output, and return its exit code.
-pub(crate) fn run(args: MeshArgs) -> ExitCode {
+pub(crate) async fn run(args: MeshArgs) -> ExitCode {
     let name = args
         .rest
         .first()
@@ -267,7 +267,11 @@ pub(crate) fn run(args: MeshArgs) -> ExitCode {
         return delegate(&config.delegate_command, &anchor, &args.rest);
     }
     let mesh = Mesh::at(&anchor, source);
-    match dispatch(&mesh, op) {
+    let result = dispatch(&mesh, op);
+    // Whatever the operation appended is pushed once it holds no lock, even
+    // if it then failed: the message is in the journal (spec P-3).
+    crate::mesh_push::push_all(&mesh).await;
+    match result {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("{e} [anchor={} source={source}]", anchor.display());

@@ -12,7 +12,7 @@ fixture format, the two layers (STATE and CLI) and how to add a fixture.
     python run.py --capture <fixture>      # fill expected values from the reference
 """
 from __future__ import annotations
-import argparse, json, os, re, shlex, stat, subprocess, sys, tempfile, shutil
+import argparse, ctypes, json, os, re, shlex, socket, stat, subprocess, sys, tempfile, threading, time, shutil, uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -63,7 +63,13 @@ STEP_ENV = {"PAIR_ENDPOINT_TOKEN"}
 
 def normalise_text(text: str, root: Path) -> str:
     """Replace what differs between runs of the same build: the fixture root,
-    session ids, times, unit id suffixes and commit ids. Nothing else."""
+    session ids, times, unit id suffixes, commit ids and listener addresses.
+    Nothing else."""
+    for listener in _LISTENERS.values():
+        text = text.replace(listener.address, f"<LISTEN:{listener.name}>")
+    if _LISTENERS:
+        # `status` prints the platform's transport; one capture holds on every OS.
+        text = text.replace(f"transport={LISTEN_TRANSPORT}", "transport=<LISTEN-TRANSPORT>")
     for path, label in _COMPANIONS:
         for form in {str(path), str(path).replace("\\", "/"), path.as_posix()}:
             text = text.replace(form, label)
@@ -87,7 +93,12 @@ def normalise_value(v, root: Path):
     if isinstance(v, list):
         return [normalise_value(x, root) for x in v]
     if isinstance(v, dict):
-        return {normalise_text(k, root): normalise_value(x, root) for k, x in v.items()}
+        d = {normalise_text(k, root): normalise_value(x, root) for k, x in v.items()}
+        # A listener's transport is the platform's (`pipe` on Windows, `unix`
+        # elsewhere); one capture holds on every OS.
+        if str(d.get("address", "")).startswith("<LISTEN:") and d.get("transport") == LISTEN_TRANSPORT:
+            d["transport"] = "<LISTEN-TRANSPORT>"
+        return d
     return v
 
 
@@ -178,6 +189,146 @@ def snapshot(root: Path) -> dict:
         else:
             out[rel] = {"$text": normalise_text(raw, root)}
     return out
+
+
+# --- push listeners -----------------------------------------------------------
+#
+# A fixture endpoint for the push transport (spec §8b): it records each wake it
+# receives and answers as the fixture says. Test code: it runs inside the
+# runner, lives only for one fixture, and is not an endpoint host.
+
+LISTEN_TRANSPORT = "pipe" if os.name == "nt" else "unix"
+LISTEN_REPLIES = {"ok", "refuse", "silent", "garbage"}
+# Per fixture: name -> Listener. Set by a `listen` step, closed after the fixture.
+_LISTENERS: dict = {}
+
+
+class Listener:
+    def __init__(self, name: str, reply: str):
+        self.name, self.reply = name, reply
+        self.heard: list = []
+        self.stop = threading.Event()
+        self._lock = threading.Lock()
+        tag = f"pair-conf-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        if os.name == "nt":
+            self.address = "\\\\.\\pipe\\" + tag
+            self._dir = None
+        else:
+            self._dir = Path(tempfile.mkdtemp(prefix="pair-listen-"))
+            os.chmod(self._dir, 0o700)
+            self.address = str(self._dir / "wake.sock")
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.bind(self.address)
+            self._sock.listen(16)
+        threading.Thread(target=self._accept_loop, daemon=True).start()
+
+    def _answer(self, line: bytes):
+        try:
+            req = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            req = {"$invalid": line.decode("utf-8", errors="replace")}
+        with self._lock:
+            self.heard.append(req)
+        if self.reply == "ok":
+            return b'{"ok":true}\n'
+        if self.reply == "refuse":
+            return b'{"ok":false,"reason":"wrong_session"}\n'
+        if self.reply == "garbage":
+            return b"not json\n"
+        return None  # silent: hold the connection and never answer
+
+    def _accept_loop(self):
+        while not self.stop.is_set():
+            try:
+                conn = self._accept()
+            except OSError:
+                return
+            if conn is None:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        try:
+            buf = b""
+            while b"\n" not in buf and len(buf) < 65536:
+                d = conn.recv(4096)
+                if not d:
+                    return
+                buf += d
+            answer = self._answer(buf.split(b"\n", 1)[0])
+            if answer is None:
+                self.stop.wait()
+            else:
+                conn.send(answer)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    if os.name == "nt":
+        def _accept(self):
+            k = ctypes.windll.kernel32
+            k.CreateNamedPipeW.restype = ctypes.c_void_p
+            h = k.CreateNamedPipeW(self.address, 3, 0, 255, 65536, 65536, 0, None)  # duplex, byte mode
+            if h in (None, ctypes.c_void_p(-1).value):
+                raise OSError("CreateNamedPipeW failed")
+            if not k.ConnectNamedPipe(ctypes.c_void_p(h), None) and ctypes.GetLastError() != 535:
+                k.CloseHandle(ctypes.c_void_p(h))
+                raise OSError("ConnectNamedPipe failed")
+            if self.stop.is_set():
+                k.CloseHandle(ctypes.c_void_p(h))
+                return None
+            return _PipeConn(h)
+    else:
+        def _accept(self):
+            conn, _ = self._sock.accept()
+            if self.stop.is_set():
+                conn.close()
+                return None
+            return conn
+
+    def close(self):
+        self.stop.set()
+        if os.name == "nt":
+            try:  # unblock the pending ConnectNamedPipe
+                with open(self.address, "r+b", buffering=0):
+                    pass
+            except OSError:
+                pass
+        else:
+            try:
+                self._sock.close()
+            finally:
+                shutil.rmtree(self._dir, ignore_errors=True)
+
+
+class _PipeConn:
+    """A connected server end of a Windows pipe, with the two calls _serve needs."""
+
+    def __init__(self, h):
+        self.h = ctypes.c_void_p(h)
+
+    def recv(self, n: int) -> bytes:
+        buf = ctypes.create_string_buffer(n)
+        got = ctypes.c_ulong(0)
+        if not ctypes.windll.kernel32.ReadFile(self.h, buf, n, ctypes.byref(got), None):
+            return b""
+        return buf.raw[:got.value]
+
+    def send(self, data: bytes) -> None:
+        put = ctypes.c_ulong(0)
+        ctypes.windll.kernel32.WriteFile(self.h, data, len(data), ctypes.byref(put), None)
+        ctypes.windll.kernel32.FlushFileBuffers(self.h)
+
+    def close(self) -> None:
+        ctypes.windll.kernel32.DisconnectNamedPipe(self.h)
+        ctypes.windll.kernel32.CloseHandle(self.h)
+
+
+def close_listeners() -> None:
+    for listener in _LISTENERS.values():
+        listener.close()
+    _LISTENERS.clear()
 
 
 # --- containment --------------------------------------------------------------
@@ -510,6 +661,11 @@ def invoke(impls: dict, root: Path, cmd: list, env: dict | None = None):
     # `<REPO>` and `<COMP:name>` stand for the fixture's trees, for arguments
     # that name a path (guard-write --path).
     cmd = [x.replace("<REPO>", str(root)) for x in cmd]
+    # `<LISTEN:name>` and `<LISTEN-TRANSPORT>` stand for a fixture listener
+    # (`endpoint --register --transport <LISTEN-TRANSPORT> --address <LISTEN:L>`).
+    cmd = [x.replace("<LISTEN-TRANSPORT>", LISTEN_TRANSPORT) for x in cmd]
+    for listener in _LISTENERS.values():
+        cmd = [x.replace(f"<LISTEN:{listener.name}>", listener.address) for x in cmd]
     for path, label in _COMPANIONS:
         cmd = [x.replace(label, str(path)) for x in cmd]
     return subprocess.run(argv_for(impls, root, cmd), text=True, encoding="utf-8", errors="replace",
@@ -647,9 +803,11 @@ def validate(fx: dict, capture: bool) -> None:
         raise ValueError(f"{fx['id']}: layers must be a non-empty subset of cli, state")
     concurrent = False
     for i, st in enumerate(fx["steps"]):
-        kinds = [k for k in ("cmd", "raw", "parallel") if k in st]
+        kinds = [k for k in ("cmd", "raw", "parallel", "listen", "heard") if k in st]
         if len(kinds) != 1:
-            raise ValueError(f"{fx['id']} step {i}: exactly one of cmd, raw, parallel")
+            raise ValueError(f"{fx['id']} step {i}: exactly one of cmd, raw, parallel, listen, heard")
+        if "listen" in st and st["listen"].get("reply") not in LISTEN_REPLIES:
+            raise ValueError(f"{fx['id']} step {i}: listen reply must be one of {sorted(LISTEN_REPLIES)}")
         if "cmd" in st:
             check_argv(st["cmd"])
             bad_env = set(st.get("env") or {}) - STEP_ENV
@@ -705,6 +863,18 @@ def run_fixture(fx: dict, impls: dict, capture: bool = False, obs: bool = False)
             return [f"SETUP_FAILED {type(e).__name__}: {e}"]
         for i, st in enumerate(fx["steps"]):
             where = f"step {i}"
+            if "listen" in st:
+                spec = st["listen"]
+                _LISTENERS[spec["name"]] = Listener(spec["name"], spec["reply"])
+                continue
+            if "heard" in st:
+                spec = st["heard"]
+                got = normalise_value(list(_LISTENERS[spec["name"]].heard), root)
+                if capture:
+                    spec["requests"] = got
+                elif spec["requests"] != got:
+                    fails.append(f"{where}: listener {spec['name']} heard {got}, expected {spec['requests']}")
+                continue
             if "raw" in st:
                 op = dict(st["raw"])
                 try:
@@ -734,7 +904,11 @@ def run_fixture(fx: dict, impls: dict, capture: bool = False, obs: bool = False)
                     if got != [n]:
                         fails.append(f"{where}: journal {role} has {got} records, expected {n}")
                 continue
+            started = time.monotonic()
             p = invoke(impls, root, st["cmd"], step_env(st, vars_))
+            took = time.monotonic() - started
+            if "max_seconds" in st and took > st["max_seconds"]:
+                fails.append(f"{where}: took {took:.1f}s, more than {st['max_seconds']}s")
             for name, rx in (st.get("capture") or {}).items():
                 m = re.search(rx, p.stdout)
                 vars_[name] = m.group(1) if m else ""
@@ -775,6 +949,7 @@ def run_fixture(fx: dict, impls: dict, capture: bool = False, obs: bool = False)
                 diff = sorted(k for k in set(exp) | set(got) if exp.get(k) != got.get(k))
                 fails.append(f"final state differs in {diff}")
     finally:
+        close_listeners()
         remove_tree(root)
         for d in cleanup:
             remove_tree(d)

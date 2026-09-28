@@ -86,7 +86,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 time = { workspace = true, optional = true }
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 # Format-preserving TOML edits: merge [providers.local] into an existing
 # .localpilot.toml without dropping the user's other tables or comments. Already

@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot mesh` wakes listening recipients when it posts.** After any
+  operation that appends a message, each addressed recipient with a live
+  delivery endpoint (a named pipe or Unix socket) gets one wake-up, and the
+  outcome goes to the sender's push log. The wake-ups of one post share a
+  2-second limit and never change the operation's result; `mesh run` keeps at
+  most one in flight per recipient and cancels any still pending at the
+  limit. A malformed endpoint address is never dialled. `PAIR_NO_PUSH=1`
+  turns it off.
 - **`localpilot mesh run --own`: LocalPilot can own a unit of pair work.**
   When a unit is handed to it, it accepts, has the model implement the task
   under the session's write lease, builds and fingerprints the review

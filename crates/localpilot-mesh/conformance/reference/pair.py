@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, hashlib, hmac, json, os, re, secrets, subprocess, sys, tempfile, time, uuid
+import argparse, hashlib, hmac, json, os, re, secrets, socket, subprocess, sys, tempfile, threading, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -1182,6 +1182,9 @@ class MB:
                           "thread_id":fields["thread_id"] or mid,"route_trace":fields["route_trace"],"ttl":fields["ttl"],
                           "forward":bool(fields.get("forward"))})
             with p.open("a",encoding="utf-8",newline="\n") as f: f.write(journal_record(m)); f.flush(); os.fsync(f.fileno())
+            # In the journal now, so owed its wakes even if a later step fails
+            # (P-3). Only queued: `push_all` dials once the command holds no lock.
+            PUSHES.append((self,s,m))
             atomic(self.latest(s,role),m)
         with Lock(self.lock):
             fresh=self.active()
@@ -1837,6 +1840,93 @@ def record_push(a):
     with Lock(mb.role_lock(s,a.role)):
         append_fact(mb.pushes(s,a.role),{"msg_id":a.msg_id,"to":a.to,"generation":a.generation,"at":now(),"outcome":a.outcome})
     print(f"PUSH_RECORDED msg_id={a.msg_id} to={a.to} outcome={a.outcome}"); return 0
+
+# Push transport (spec §8b). A push is a wake-up only: it carries no message,
+# and nothing depends on it (P-7). This implementation is a sender; listening
+# is the endpoint host's job.
+PUSH_DEADLINE=2.0
+PUSH_REPLY_CAP=65536
+PUSHES=[]  # (mb, session, message), queued by MB.post and sent by push_all
+
+def push_address_ok(transport,address):
+    """Whether a push may dial this endpoint at all (P-1): a well-formed address
+    of a transport this platform supports. Anything else is never opened, so an
+    endpoint record can never make a writer open an ordinary file."""
+    if not isinstance(address,str): return False
+    if transport=="pipe": return os.name=="nt" and re.fullmatch(r"\\\\\.\\pipe\\[^\\/:*?\"<>|]{1,200}",address) is not None
+    if transport=="unix": return os.name!="nt" and hasattr(socket,"AF_UNIX") and os.path.isabs(address)
+    return False
+
+def push_one(transport,address,req,deadline,out):
+    """One wake exchange (P-2). Leaves the outcome in out[0]; the caller treats
+    a thread still running at the deadline as `timeout`."""
+    line=(json.dumps(req,separators=(",",":"))+"\n").encode("utf-8"); buf=b""
+    try:
+        if transport=="unix":
+            c=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+            try:
+                c.settimeout(max(0.01,deadline-time.monotonic())); c.connect(address); c.sendall(line)
+                while b"\n" not in buf and len(buf)<PUSH_REPLY_CAP:
+                    c.settimeout(max(0.01,deadline-time.monotonic())); d=c.recv(4096)
+                    if not d: break
+                    buf+=d
+            finally: c.close()
+        else:
+            # A Windows pipe read has no timeout. The thread is a daemon: the
+            # caller stops waiting at the deadline, and process exit cancels it
+            # (P-4, short-lived writer).
+            with open(address,"r+b",buffering=0) as f:
+                f.write(line)
+                while b"\n" not in buf and len(buf)<PUSH_REPLY_CAP:
+                    d=f.read(4096)
+                    if not d: break
+                    buf+=d
+    except socket.timeout: out[0]="timeout"; return
+    except (OSError,ValueError): out[0]="failed"; return
+    try: rep=json.loads(buf.split(b"\n",1)[0].decode("utf-8"))
+    except (ValueError,UnicodeDecodeError): rep=None
+    out[0]="sent" if isinstance(rep,dict) and rep.get("ok") is True else "refused"
+
+def push_all():
+    """Wake each recipient of each message this command appended that has a
+    live endpoint, then record every attempt in the sender's push facts (P-3,
+    D-6). Runs after the command, holding no lock. It never changes the
+    command's exit status or output."""
+    todo=list(PUSHES); PUSHES.clear()
+    if not todo or os.environ.get("PAIR_NO_PUSH")=="1": return
+    # Every step is isolated per recipient: one unreadable endpoint, or one
+    # failed record, affects that recipient only (P-3). Nothing depends on a
+    # push (P-7), so no failure here changes the command's exit status.
+    jobs=[]
+    for mb,s,m in todo:
+        for r in participants(s):
+            try:
+                if r==m["role"] or not addressed_to(s,m,r): continue
+                ep=readj(mb.endpoint(s,r))
+                if not endpoint_live(ep) or not push_address_ok(ep.get("transport"),ep.get("address")): continue
+                gen=ep.get("generation")
+                if type(gen) is not int: continue
+                req={"v":1,"op":"wake","session_id":s["session_id"],"to":r,"generation":gen,
+                     "msg_id":m.get("msg_id") or f"{m['role']}:{m['seq']}","from":m["role"]}
+                jobs.append((mb,s,m["role"],r,ep,req))
+            except (OSError,ValueError,KeyError,TypeError,AttributeError): continue
+    if not jobs: return
+    deadline=time.monotonic()+PUSH_DEADLINE; running=[]
+    for job in jobs:
+        out=["failed"]
+        try:
+            th=threading.Thread(target=push_one,args=(job[4]["transport"],job[4]["address"],job[5],deadline,out),daemon=True)
+            th.start()
+        except RuntimeError: th=None
+        running.append((job,th,out))
+    for _,th,_ in running:
+        if th: th.join(max(0.0,deadline-time.monotonic()))
+    for (mb,s,sender,r,_,req),th,out in running:
+        outcome="timeout" if th and th.is_alive() else out[0]
+        try:
+            with Lock(mb.role_lock(s,sender)):
+                append_fact(mb.pushes(s,sender),{"msg_id":req["msg_id"],"to":r,"generation":req["generation"],"at":now(),"outcome":outcome})
+        except (OSError,ValueError,SystemExit): continue
 
 def endpoint_lines(mb,s):
     out=[]
@@ -2977,7 +3067,11 @@ def anchor_line(a):
 if __name__=="__main__":
     a=parser().parse_args()
     try:
-        try: select_anchor(a); raise SystemExit(a.fn(a) or 0)
+        try:
+            select_anchor(a)
+            try: rc=a.fn(a) or 0
+            finally: push_all()
+            raise SystemExit(rc)
         except json.JSONDecodeError as e:
             # A record that exists but cannot be read is refused, never read as
             # absent (spec L-8).

@@ -57,6 +57,17 @@ command line.
 
 A step is exactly one of:
 
+- `{"listen": {"name": "L", "reply": "ok"}}`: start a push listener (spec
+  §8b) for the rest of the fixture. It records each request it receives and
+  answers `ok` (`{"ok": true}`), `refuse` (`{"ok": false, ...}`), `garbage` (a
+  line that is not JSON) or `silent` (it never answers). In a `cmd` argument,
+  `<LISTEN:L>` is its address and `<LISTEN-TRANSPORT>` is the platform's
+  transport (`pipe` on Windows, `unix` elsewhere). Both normalise back, as
+  does `transport=<platform's>` in output while a fixture has a listener, so
+  one capture holds on every OS.
+- `{"heard": {"name": "L", "requests": [...]}}`: the requests listener `L` has
+  received so far, normalised, in order.
+
 - `{"cmd": [...], "rc": 0, "stdout": "...", "stderr": "...", "state": {...}}`:
   run a public command. The runner alone sets `--repo <fixture root>`, and
   replaces `<SID>` in an argument with the active session's id, and `<REPO>`
@@ -101,6 +112,8 @@ A step is exactly one of:
   A `parallel` step may carry `env` as well.
 
 A `cmd` step may also carry:
+
+- `max_seconds`: the step fails if the command takes longer (wall time);
 
 - `capture`, `{NAME: regex}`: the first group of each regex, matched against
   the step's raw stdout, is kept as `NAME`;

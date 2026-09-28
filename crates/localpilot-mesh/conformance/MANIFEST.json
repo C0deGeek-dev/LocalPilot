@@ -1,13 +1,13 @@
 {
  "source_repo": "c0degeek-ai",
  "source_path": "skills/pair-programming/conformance",
- "source_commit": "abb909db52e43a75c0d6554af8422feca5d9ff51",
+ "source_commit": "01c9fc5831504df7a2597f50f731495a40a39f49",
  "files": {
-  "run.py": "2d62107fc82bdc2145f9f6667f4ea946c06a8627c33f98db79e2c970e9bab61d",
+  "run.py": "fbf6a328bb6a5bee732d217d021a1626cad2fb1190949fd17e85d66f488ad60d",
   "soak.py": "4f177528146308580197acba3a04f0223a8451825bb7c8730025e167c7539753",
   "scan_cases.py": "f6fe55f6b718cfe8b1c8f8016d18a7c51ea7193a66f65f9a1c40a41a56c86bf7",
-  "README.md": "efecde49ac6d574495b5e43021701c2142077dd6ebeef928f932100cddc82e52",
-  "participant.json": "4d614fc0201d0a60e495c8acdfda0079a8d4fecea941edd4ec4ccb371cfc0e77",
+  "README.md": "727575351a59dcc537b85c8acce3f0987ae120f1ffd19b5a1304855d5c769176",
+  "participant.json": "3b9ffac1e9041846a56d7baf45807180bad9e3650f146ae698c46c62b549e0cf",
   "fixtures/companion-guard-write-scope.json": "9a99600dc653b7bb0bb86f8c58264224745a49390d6af4b84d45f658fc8115a2",
   "fixtures/companion-handoff-pins-and-refuses-a-moved-companion.json": "662d3b94b800f8679e28c2a20423eb297634436323bb4eb30df655ad60ad75e5",
   "fixtures/companion-next-unit-rebases.json": "c7594b2b2325612d41a4e1a54bcc8e76c78b594e679bad676e667a701b15c5c9",
@@ -53,6 +53,15 @@
   "fixtures/no-vcs-handoff-refused-after-a-change.json": "31d10fd15752a63e677df9c9b50f6667f09310c4c7fe7b40369bd4d9b45fbb73",
   "fixtures/no-vcs-join-post-handoff-complete.json": "fc1a135fc669a506f47e77cbfe29097108a8a06c9d555b05e05262ab030a4134",
   "fixtures/no-vcs-next-unit-rebases-manifest.json": "337fa3367f00bc74ed11148c9d23b3e00cb279aaa0ebf4ae719669e9aaafae2f",
+  "fixtures/push-a-live-endpoint-is-woken-and-the-attempt-recorded.json": "934ea97a0c269fa6dea524ab21c20c0cbe15e495461ccdb7e50a3d25b2ea4ba8",
+  "fixtures/push-a-participant-post-wakes-each-addressed-recipient.json": "78a3e675bdfaeb6aca06545ab4b04cc5e075a73d477a7f0879856f9512cd57ea",
+  "fixtures/push-a-participant-post-wakes-the-driver.json": "b724c905fc5321d13b3734546c6dc49540c3fdafa6cec3be37af7c00ff1d94c9",
+  "fixtures/push-a-refusal-is-recorded-as-refused.json": "895c44fb158467d33b17a466bb95c19207cf376511312bc572ebfbb9b2a50e0b",
+  "fixtures/push-a-silent-endpoint-times-out-and-the-post-returns.json": "6cf48d3f34fe0079ad1e4a748ee388e37be72842e548baf7100771963fda5bb7",
+  "fixtures/push-an-address-not-of-its-transport-is-never-opened.json": "7095a9a3d488f52f0d949023a8d1f0d9356b4eca3bfb37f93e306ca53a91dea9",
+  "fixtures/push-an-unparseable-reply-is-a-refusal.json": "45ff56e48f0874574b008691d1be957e496c6a8481ea722e2ab64e06c31e3ccd",
+  "fixtures/push-each-addressed-recipient-with-a-live-endpoint.json": "de665d5b89d9294f44ff64a03d436da175a1fbe8c9bac2ab0f5ae250eda8af2b",
+  "fixtures/push-no-live-endpoint-no-attempt.json": "5399e72e030863189e93810a158837b5b0a507fdfd23c4e47952854a5134bd03",
   "fixtures/read-absent-cursor-means-nothing-read-yet.json": "9dfb81d7e3c18626aa53f0e0ab5615993def6fe3bd74a1468fd570504e2134c1",
   "fixtures/read-garbage-cursor-is-refused.json": "099c8b490c789f61c1c7296ba783385fb53f35fef18c58730c609f8046e33ed3",
   "fixtures/read-garbage-pointer-is-refused.json": "42f140ce6dd70455976cc997740068e880923db2867f7965d61d375061938de9",
@@ -75,6 +84,6 @@
   "fixtures/version-unknown-major-record-is-refused.json": "7c8aea27da629e961e50cf7bc6648b62cd2737374a1681fa918dd5796cd1284c",
   "fixtures/version-unknown-major-session-is-refused.json": "98e6ab78f7e0ed6b3ad5f7aed155efd499de9ac7e8e2769216458fd1d37fe9e9",
   "fixtures/version-unknown-required-feature-is-refused.json": "fcfe1e0d729e7d5da350b909cf4f73900104a333d0a52dc0f67683e688ae2750",
-  "reference/pair.py": "5924bf530f357192a8ee9f46a422b4a8612b7096603c2fe051f61a0ea541ac22"
+  "reference/pair.py": "ec1e830d999e97241a02a6c71339a85700c464b919989abe2e731c01cd77fdf2"
  }
 }

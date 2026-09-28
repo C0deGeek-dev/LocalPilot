@@ -163,6 +163,7 @@ async fn engine(mesh: &Mesh, cli: &RunCli, judge: &mut dyn Judge) -> Result<(), 
         )));
     }
     print!("{}", joined.stdout);
+    crate::mesh_push::push_all(mesh).await;
     let sid = mesh.engine_ready(&cli.role)?;
     if cli.own {
         mesh.owner_supported(&cli.role)?;
@@ -172,13 +173,19 @@ async fn engine(mesh: &Mesh, cli: &RunCli, judge: &mut dyn Judge) -> Result<(), 
         let delivered = mesh.receive(&cli.role, 900, Some(&sid))?;
         if let Some(delivery) = &delivered {
             for step in mesh.plan_as(&cli.role, delivery, cli.own)? {
-                if !execute(mesh, &cli.role, step, judge).await? {
+                let go_on = execute(mesh, &cli.role, step, judge).await;
+                crate::mesh_push::push_all(mesh).await;
+                if !go_on? {
                     return Ok(());
                 }
             }
         }
-        if cli.own && !owner_step(mesh, &cli.role, judge).await? {
-            return Ok(());
+        if cli.own {
+            let go_on = owner_step(mesh, &cli.role, judge).await;
+            crate::mesh_push::push_all(mesh).await;
+            if !go_on? {
+                return Ok(());
+            }
         }
         if cli.once {
             return Ok(());
