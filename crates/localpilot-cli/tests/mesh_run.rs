@@ -1272,7 +1272,7 @@ async fn a_listening_engine_acts_on_a_wake_and_the_endpoint_holds_against_other_
         .iter()
         .any(|p| p["msg_id"] == posted.as_str() && p["outcome"] == "sent"));
 
-    // D009: another process can neither replace the live endpoint nor accept
+    // Receipt binding (spec D-8): another process can neither replace the live endpoint nor accept
     // for it, with no token or a wrong one.
     let steal = f.reference_out(
         &[

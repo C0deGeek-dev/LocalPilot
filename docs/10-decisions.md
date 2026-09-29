@@ -2,6 +2,36 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0190: The Pair-Mesh Endpoint Lives In The Processes That Wait, Not In `serve`
+
+**Status:** accepted · **Date:** 2026-09-28.
+
+**Context.** A pair-programming peer can push a wake-up to a participant that
+registered a delivery endpoint in the shared mailbox. The endpoint must be
+registered from the process that answers it, with its token kept in memory,
+or any same-user process that reads the token could accept deliveries on its
+behalf. `localpilot serve` hosts chat sessions and has no mailbox role.
+Python's standard library cannot create an owner-only Windows named pipe, so
+the reference `pair.py` cannot host one.
+
+**Decision.** The endpoint is hosted only by LocalPilot processes that already
+wait on the mailbox: `localpilot mesh run --listen` (the participant engine)
+and `localpilot mesh wait` (the one-shot waiter for Claude Code and Codex).
+Each registers from its own process, keeps the token in memory, renews a
+60-second lease every 20 seconds on its own task, never takes back a lease
+another process holds, looks at the mailbox on its own at a bounded interval,
+and retires the endpoint on exit. The endpoint is an owner-only named pipe
+(ADR-0189) on Windows, and on Unix a socket in a `0700` directory with a
+peer-uid check. Every writer, `pair.py` and `localpilot mesh` alike, is only a
+push client. `serve` gains no mailbox role.
+
+**Consequences.** No resident service is needed for a push: an endpoint exists
+only while something waits. A missed or refused push costs at most one poll
+interval, because the mailbox stays the record. Other OS users are kept out by
+the pipe DACL and the directory mode, and a test cannot yet show a second
+account being refused (a manual check). A same-user process is trusted, as it
+already is by the protocol.
+
 ## ADR-0189: Owner-Only Named Pipes, With Unsafe Code Confined To One Crate
 
 **Status:** accepted · **Date:** 2026-09-28. Fixes LocalHub #192. An exception

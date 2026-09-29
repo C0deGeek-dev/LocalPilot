@@ -29,7 +29,7 @@ pub struct Pointer {
 
 /// A session record, as far as a participant needs to understand it. The
 /// rest (authority, waiting, pauses, units, handoff, ...) stays in `extra`
-/// until a later slice gives it a typed view, and is written back as read.
+/// until a later change gives it a typed view, and is written back as read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub session_id: String,
