@@ -1863,12 +1863,14 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
 
         let store = Store::open(dir.path());
         let now = now_unix();
-        // Eligible two seconds out: the first poll waits, and the edit lands
-        // well before the window elapses.
+        // Eligible eight seconds out: the first poll waits, and the edit (200 ms
+        // in) lands well before the window elapses. The clock is in whole
+        // seconds, so two seconds out left as little as one: a loaded Windows
+        // runner reached the window before the edit and ran the stale plan.
         store
             .put_cache(
                 QUOTA_PAUSE_KEY,
-                &serde_json::to_vec(&paused_at(now, Some(now + 2))).unwrap(),
+                &serde_json::to_vec(&paused_at(now, Some(now + 8))).unwrap(),
             )
             .unwrap();
 
