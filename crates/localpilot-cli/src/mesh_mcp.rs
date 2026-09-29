@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use localpilot_mesh::ops::engine::{validate, Answer, Finding};
-use localpilot_mesh::ops::{PostArgs, WatchArgs};
+use localpilot_mesh::ops::{EvidenceArgs, PostArgs, WatchArgs};
 use localpilot_mesh::{Mesh, MeshError, Out};
 use localpilot_rpc::JsonRecordReader;
 use serde_json::{json, Value};
@@ -133,6 +133,17 @@ fn initialize(params: &Value) -> Value {
 
 fn catalog() -> Vec<Value> {
     let string = |d: &str| json!({"type": "string", "description": d});
+    let anchor_schema = json!({
+        "type": "object",
+        "description": "Lines pinned to their hash, exactly as `evidence` returned them.",
+        "properties": {
+            "path": {"type": "string"},
+            "start": {"type": "integer"},
+            "end": {"type": "integer"},
+            "sha": {"type": "string"},
+        },
+        "required": ["path", "start", "end", "sha"],
+    });
     vec![
         json!({"name": "status",
                "description": "The pair session's status, as `status` prints it.",
@@ -169,10 +180,78 @@ fn catalog() -> Vec<Value> {
                        "line": {"type": "integer"},
                        "severity": {"type": "string", "enum": ["blocking", "important", "minor"]},
                        "text": {"type": "string"},
+                       "anchor": anchor_schema.clone(),
                    }, "required": ["file", "severity", "text"]}},
                    "body": string("Your summary."),
                }, "required": ["decision", "reply_to", "body"]}}),
+        json!({"name": "evidence",
+               "description": "Read-only evidence about the shared tree, as one JSON packet naming the session, unit and HEAD. `locate` finds text (hits come back as anchors); `anchor` pins lines start..end of a file to their hash; `verify` checks anchors against the files now (ok, moved, ambiguous, stale, unknown); `diagnostics` runs fixed Git reads and says whether each path exists. It never writes and runs no build or test command. To cite lines in a verdict, put an anchor from here in the finding.",
+               "inputSchema": {"type": "object", "properties": {
+                   "op": {"type": "string", "enum": ["locate", "anchor", "verify", "diagnostics"]},
+                   "query": string("locate: the text, or a regular expression with `regex`."),
+                   "regex": {"type": "boolean", "description": "locate: read `query` as a regular expression."},
+                   "glob": string("locate: only paths matching this glob."),
+                   "path": string("anchor: the file, relative to the tree."),
+                   "start": {"type": "integer", "description": "anchor: the first line, from 1."},
+                   "end": {"type": "integer", "description": "anchor: the last line, inclusive."},
+                   "anchors": {"type": "array", "items": anchor_schema, "description": "verify: the anchors to check."},
+                   "paths": {"type": "array", "items": {"type": "string"}, "description": "diagnostics: paths to check exist."},
+               }, "required": ["op"]}}),
     ]
+}
+
+/// The evidence service as a tool: the packet, or why it was refused.
+fn evidence(mesh: &Mesh, role: &str, args: &Value) -> Result<Value, MeshError> {
+    let usize_arg = |k: &str| {
+        args.get(k)
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+    };
+    let request = match args["op"].as_str() {
+        Some("locate") => match text_arg(args, "query") {
+            Some(query) => EvidenceArgs::Locate {
+                query,
+                regex: args["regex"].as_bool().unwrap_or(false),
+                glob: text_arg(args, "glob"),
+            },
+            None => return Ok(tool_error("locate needs `query`")),
+        },
+        Some("anchor") => match (text_arg(args, "path"), usize_arg("start"), usize_arg("end")) {
+            (Some(path), Some(start), Some(end)) => EvidenceArgs::Anchor { path, start, end },
+            _ => return Ok(tool_error("anchor needs `path`, `start` and `end`")),
+        },
+        Some("verify") => {
+            match serde_json::from_value(args.get("anchors").cloned().unwrap_or(Value::Null)) {
+                Ok(anchors) => EvidenceArgs::Verify { anchors },
+                Err(e) => return Ok(tool_error(&format!("anchors: {e}"))),
+            }
+        }
+        Some("diagnostics") => EvidenceArgs::Diagnostics {
+            paths: args["paths"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        _ => {
+            return Ok(tool_error(
+                "evidence needs `op`: locate, anchor, verify or diagnostics",
+            ))
+        }
+    };
+    Ok(match mesh.evidence(role, &request) {
+        Ok(packet) => json!({
+            "content": [{"type": "text", "text": serde_json::to_string_pretty(&packet).unwrap_or_default()}],
+            "structuredContent": packet,
+            "isError": false,
+        }),
+        Err(MeshError::Refused(why)) => tool_error(&why),
+        Err(e) => return Err(e),
+    })
 }
 
 /// A tool result carrying a command's output.
@@ -251,6 +330,7 @@ fn run_tool(mesh: &Mesh, role: &str, name: &str, args: &Value) -> Result<Value, 
             _ => tool_error("handoff needs action `offer` or `accept`"),
         },
         "verdict" => verdict(mesh, role, args)?,
+        "evidence" => evidence(mesh, role, args)?,
         other => tool_error(&format!("no tool named {other}")),
     })
 }
@@ -280,7 +360,7 @@ fn verdict(mesh: &Mesh, role: &str, args: &Value) -> Result<Value, MeshError> {
         Ok(r) => r,
         Err(why) => return Ok(tool_error(&why)),
     };
-    let post = match validate(&request, &answer) {
+    let post = match validate(mesh.root(), &request, &answer) {
         Ok(p) => p,
         Err(why) => return Ok(tool_error(&why)),
     };
@@ -335,12 +415,12 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_has_the_six_tools_no_wait_and_no_role_argument() {
+    fn the_catalog_has_the_seven_tools_no_wait_and_no_role_argument() {
         let tools = catalog();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["status", "peek", "ack", "post", "handoff", "verdict"]
+            ["status", "peek", "ack", "post", "handoff", "verdict", "evidence"]
         );
         let all = serde_json::to_string(&tools).unwrap();
         assert!(!all.contains("\"role\""), "a role argument appeared");

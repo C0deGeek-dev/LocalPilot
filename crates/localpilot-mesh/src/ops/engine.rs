@@ -591,6 +591,11 @@ pub struct Finding {
     pub line: Option<u32>,
     pub severity: Severity,
     pub text: String,
+    /// Lines cited as an anchor the evidence service issued (the review
+    /// brief lists them). Checked against the tree when the verdict is
+    /// written; a finding without one is posted as a plain file:line.
+    #[serde(default)]
+    pub anchor: Option<crate::evidence::Anchor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -637,11 +642,63 @@ pub fn parse_answer(text: &str) -> Result<Answer, String> {
     Err(last_error)
 }
 
+/// Each finding's anchor tag, checked against the tree under `root` now:
+/// `anchor=ok`, `anchor=moved:<start>-<end>`, `anchor=ambiguous`,
+/// `anchor=stale` or `anchor=unknown`; `None` for a finding with no anchor,
+/// which is never shown as checked.
+///
+/// # Errors
+/// More anchored findings than one check allows, or an anchor that names a
+/// file other than its finding's.
+pub fn anchor_tags(root: &Path, findings: &[Finding]) -> Result<Vec<Option<String>>, String> {
+    use crate::evidence::{verify, Bounds, Check};
+    let bounds = Bounds::default();
+    let anchored = findings.iter().filter(|f| f.anchor.is_some()).count();
+    if anchored > bounds.anchors {
+        return Err(format!(
+            "at most {} findings may carry an anchor, not {anchored}",
+            bounds.anchors
+        ));
+    }
+    let mut spent = 0;
+    findings
+        .iter()
+        .map(|f| {
+            let Some(a) = &f.anchor else {
+                return Ok(None);
+            };
+            if a.path != f.file {
+                return Err(format!(
+                    "the finding on {} carries an anchor for {}",
+                    f.file, a.path
+                ));
+            }
+            if let Some(line) = f.line {
+                let line = line as usize;
+                if line < a.start || line > a.end {
+                    return Err(format!(
+                        "the finding on {} cites line {line}, outside its anchor's lines {}-{}; drop the line or cite one inside",
+                        f.file, a.start, a.end
+                    ));
+                }
+            }
+            Ok(Some(match verify(root, a, &bounds, &mut spent) {
+                Check::Ok => "anchor=ok".to_owned(),
+                Check::Moved { start, end } => format!("anchor=moved:{start}-{end}"),
+                Check::Ambiguous { .. } => "anchor=ambiguous".to_owned(),
+                Check::Stale { .. } => "anchor=stale".to_owned(),
+                Check::Unknown { .. } => "anchor=unknown".to_owned(),
+            }))
+        })
+        .collect()
+}
+
 /// Turn a model's answer to `request` into the post the engine will make.
+/// Anchored findings are checked against the tree under `root`.
 ///
 /// # Errors
 /// Why the answer cannot be posted; it is fed back to the model once.
-pub fn validate(request: &Request, answer: &Answer) -> Result<PostArgs, String> {
+pub fn validate(root: &Path, request: &Request, answer: &Answer) -> Result<PostArgs, String> {
     let text = answer.body.trim();
     if text.is_empty() {
         return Err("the body is empty".into());
@@ -669,18 +726,29 @@ pub fn validate(request: &Request, answer: &Answer) -> Result<PostArgs, String> 
                 "AGREE" | "REVISE" => {}
                 other => return Err(format!("decision must be AGREE or REVISE, not {other:?}")),
             }
+            let tags = anchor_tags(root, &answer.findings)?;
             let mut out = format!(
                 "{decision} round={} blocking={blocking} important={important}",
                 request.round
             );
-            for f in &answer.findings {
-                let at = f.line.map_or(String::new(), |l| format!(":{l}"));
+            for (f, tag) in answer.findings.iter().zip(tags) {
+                let at = match (&f.anchor, f.line) {
+                    (Some(a), _) if a.start == a.end => format!(":{}", a.start),
+                    (Some(a), _) => format!(":{}-{}", a.start, a.end),
+                    (None, Some(l)) => format!(":{l}"),
+                    (None, None) => String::new(),
+                };
+                let tag = tag.map_or(String::new(), |t| format!(" ({t})"));
                 let sev = match f.severity {
                     Severity::Blocking => "blocking",
                     Severity::Important => "important",
                     Severity::Minor => "minor",
                 };
-                out.push_str(&format!("\n- {}{at} [{sev}] {}", f.file, f.text.trim()));
+                out.push_str(&format!(
+                    "\n- {}{at} [{sev}]{tag} {}",
+                    f.file,
+                    f.text.trim()
+                ));
             }
             out.push('\n');
             out.push_str(text);
@@ -1195,12 +1263,93 @@ mod tests {
             line: Some(3),
             severity,
             text: "wrong".into(),
+            anchor: None,
         }
+    }
+
+    #[test]
+    fn an_anchored_finding_is_tagged_with_its_check_and_a_plain_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let issued = crate::evidence::anchor(
+            dir.path(),
+            "a.txt",
+            2,
+            2,
+            &crate::evidence::Bounds::default(),
+        )
+        .unwrap()
+        .anchor;
+        let anchored = |a: crate::evidence::Anchor| Finding {
+            anchor: Some(a),
+            line: None,
+            ..finding(Severity::Important)
+        };
+        let answer_with = |findings| answer("VERDICT", Some("REVISE"), findings, "see findings");
+        let body = |findings| {
+            validate(dir.path(), &request(Need::Review), &answer_with(findings))
+                .unwrap()
+                .body
+        };
+        let b = body(vec![anchored(issued.clone()), finding(Severity::Minor)]);
+        assert!(b.contains("- a.txt:2 [important] (anchor=ok) wrong"), "{b}");
+        assert!(b.contains("- a.txt:3 [minor] wrong"), "{b}");
+        // Edited between the brief and the verdict.
+        std::fs::write(dir.path().join("a.txt"), "zero\none\ntwo\nthree\n").unwrap();
+        assert!(body(vec![anchored(issued.clone())]).contains("(anchor=moved:3-3)"));
+        std::fs::write(dir.path().join("a.txt"), "one\nTWO\n").unwrap();
+        assert!(body(vec![anchored(issued.clone())]).contains("(anchor=stale)"));
+        // A hash nobody could have issued for these lines.
+        let invented = crate::evidence::Anchor {
+            sha: "0".repeat(64),
+            ..issued.clone()
+        };
+        assert!(body(vec![anchored(invented)]).contains("(anchor=stale)"));
+        // An anchor for another file is refused, and said why.
+        let elsewhere = crate::evidence::Anchor {
+            path: "b.txt".into(),
+            ..issued
+        };
+        let refused = validate(
+            dir.path(),
+            &request(Need::Review),
+            &answer_with(vec![anchored(elsewhere)]),
+        )
+        .unwrap_err();
+        assert!(refused.contains("carries an anchor for b.txt"), "{refused}");
+        // A line outside the anchor would present the check at another line.
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let fresh = crate::evidence::anchor(
+            dir.path(),
+            "a.txt",
+            2,
+            2,
+            &crate::evidence::Bounds::default(),
+        )
+        .unwrap()
+        .anchor;
+        let elsewhere_line = Finding {
+            line: Some(3),
+            ..anchored(fresh.clone())
+        };
+        let refused = validate(
+            dir.path(),
+            &request(Need::Review),
+            &answer_with(vec![elsewhere_line]),
+        )
+        .unwrap_err();
+        assert!(refused.contains("outside its anchor"), "{refused}");
+        let inside_line = Finding {
+            line: Some(2),
+            ..anchored(fresh)
+        };
+        assert!(body(vec![inside_line]).contains("- a.txt:2 [important] (anchor=ok) wrong"));
     }
 
     #[test]
     fn the_engine_writes_the_verdict_header_from_the_findings() {
         let post = validate(
+            Path::new("."),
             &request(Need::Review),
             &answer(
                 "VERDICT",
@@ -1221,6 +1370,7 @@ mod tests {
             "REVISE round=2 blocking=1 important=1\n- a.txt:3 [blocking] wrong\n- a.txt:3 [important] wrong\n- a.txt:3 [minor] wrong\nsee above"
         );
         let agree = validate(
+            Path::new("."),
             &request(Need::Review),
             &answer("VERDICT", Some("AGREE"), vec![], "fine"),
         )
@@ -1260,11 +1410,21 @@ mod tests {
             ),
         ];
         for (req, a) in refused {
-            assert!(validate(req, &a).is_err(), "{a:?}");
+            assert!(validate(Path::new("."), req, &a).is_err(), "{a:?}");
         }
-        let q = validate(&reply, &answer("QUESTION", None, vec![], "why?")).unwrap();
+        let q = validate(
+            Path::new("."),
+            &reply,
+            &answer("QUESTION", None, vec![], "why?"),
+        )
+        .unwrap();
         assert!(q.expect_reply);
-        let a = validate(&reply, &answer("DESIGN_AGREED", None, vec![], "ok")).unwrap();
+        let a = validate(
+            Path::new("."),
+            &reply,
+            &answer("DESIGN_AGREED", None, vec![], "ok"),
+        )
+        .unwrap();
         assert!(!a.expect_reply);
         assert_eq!(a.reply_to.as_deref(), Some("claude:7"));
     }

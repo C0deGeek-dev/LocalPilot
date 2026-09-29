@@ -408,7 +408,7 @@ async fn execute(
             Err(e) => return Err(e.into()),
         },
         Step::Judge(request) => {
-            let mut args = judgement(judge, &request).await;
+            let mut args = judgement(judge, mesh.root(), &request).await;
             // The tree may have moved while the model judged it: a verdict
             // is posted only on the manifest it was asked about.
             if request.need == Need::Review {
@@ -452,7 +452,7 @@ fn post(
 
 /// A model's answer as a post: one retry with the reason it was refused,
 /// then an escalation that carries none of its text.
-async fn judgement(judge: &mut dyn Judge, request: &Request) -> PostArgs {
+async fn judgement(judge: &mut dyn Judge, root: &Path, request: &Request) -> PostArgs {
     let mut feedback: Option<String> = None;
     for _ in 0..2 {
         let answer = judge
@@ -460,7 +460,7 @@ async fn judgement(judge: &mut dyn Judge, request: &Request) -> PostArgs {
             .await
             .map_err(|e| format!("the model turn failed: {e}"))
             .and_then(|text| parse_answer(&text))
-            .and_then(|answer| validate(request, &answer));
+            .and_then(|answer| validate(root, request, &answer));
         match answer {
             Ok(args) => return args,
             Err(why) => feedback = Some(why),
@@ -712,7 +712,17 @@ fn brief(anchor: &Path, role: &str, request: &Request, feedback: Option<&str>) -
                 request.files.join(", "),
                 review_diff(anchor, &request.files)
             ));
-            "{\"kind\": \"VERDICT\", \"decision\": \"AGREE\" or \"REVISE\", \"findings\": [{\"file\": \"path\", \"line\": 12, \"severity\": \"blocking\" or \"important\" or \"minor\", \"text\": \"what is wrong and why\"}], \"body\": \"your summary\"}\n\
+            let anchors = hunk_anchors(anchor, &request.files);
+            if !anchors.is_empty() {
+                out.push_str(
+                    "\nAnchors for the changed lines, as the engine read them. To cite lines, copy one of these objects exactly into the finding as \"anchor\" (its \"path\" must be the finding's \"file\"); the engine checks it when it writes your verdict. Never make one up:\n",
+                );
+                for a in &anchors {
+                    out.push_str(&serde_json::to_string(a).unwrap_or_default());
+                    out.push('\n');
+                }
+            }
+            "{\"kind\": \"VERDICT\", \"decision\": \"AGREE\" or \"REVISE\", \"findings\": [{\"file\": \"path\", \"line\": 12, \"severity\": \"blocking\" or \"important\" or \"minor\", \"text\": \"what is wrong and why\", \"anchor\": optional, one of the anchors above}], \"body\": \"your summary\"}\n\
              Do not write the verdict header; the engine writes it from your findings. REVISE needs at least one finding. AGREE may not carry a blocking finding."
         }
         Need::Reply => {
@@ -728,6 +738,69 @@ fn brief(anchor: &Path, role: &str, request: &Request, feedback: Option<&str>) -
         ));
     }
     out
+}
+
+/// The most anchors a review brief lists.
+const BRIEF_ANCHORS: usize = 40;
+
+/// An anchor for each changed range on the new side of each file's diff
+/// against HEAD, and for a file Git confirms is untracked, one for the whole
+/// file. Every file is read through the evidence service's own bounded,
+/// no-follow reads; a file it refuses, or one whose status Git cannot give,
+/// gets no anchor.
+fn hunk_anchors(anchor: &Path, files: &[String]) -> Vec<localpilot_mesh::evidence::Anchor> {
+    use localpilot_mesh::evidence::{self as ev, Bounds};
+    let bounds = Bounds::default();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(anchor)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let mut out = Vec::new();
+    for file in files {
+        if out.len() >= BRIEF_ANCHORS {
+            break;
+        }
+        let untracked = git(&["ls-files", "--others", "--exclude-standard", "--", file])
+            .is_some_and(|o| o.lines().any(|l| l == file));
+        if untracked {
+            if let Ok(a) = ev::anchor_file(anchor, file, &bounds) {
+                out.push(a.anchor);
+            }
+            continue;
+        }
+        let Some(diff) = git(&["diff", "--no-ext-diff", "-U0", "HEAD", "--", file]) else {
+            continue;
+        };
+        for (start, end) in diff.lines().filter_map(new_side) {
+            if out.len() >= BRIEF_ANCHORS {
+                return out;
+            }
+            if let Ok(a) = ev::anchor(anchor, file, start, end, &bounds) {
+                out.push(a.anchor);
+            }
+        }
+    }
+    out
+}
+
+/// The new-side range of a `-U0` hunk header, `@@ -a[,b] +c[,d] @@`; none
+/// for a hunk that only deletes.
+fn new_side(line: &str) -> Option<(usize, usize)> {
+    let rest = line.strip_prefix("@@ ")?;
+    let plus = rest.split_whitespace().find(|w| w.starts_with('+'))?;
+    let mut parts = plus[1..].splitn(2, ',');
+    let start: usize = parts.next()?.parse().ok()?;
+    let count: usize = match parts.next() {
+        Some(c) => c.parse().ok()?,
+        None => 1,
+    };
+    (count > 0 && start > 0).then(|| (start, start + count - 1))
 }
 
 /// The diff of each file against HEAD; a file Git does not track is shown
@@ -757,6 +830,14 @@ fn review_diff(anchor: &Path, files: &[String]) -> String {
 mod tests {
     use super::*;
     use localpilot_mesh::ops::Expect;
+
+    #[test]
+    fn a_hunk_header_gives_its_new_side_range() {
+        assert_eq!(new_side("@@ -3,2 +3,4 @@ fn x"), Some((3, 6)));
+        assert_eq!(new_side("@@ -3 +3 @@"), Some((3, 3)));
+        assert_eq!(new_side("@@ -3,2 +2,0 @@"), None);
+        assert_eq!(new_side("+not a header"), None);
+    }
 
     fn request(need: Need) -> Request {
         Request {
@@ -805,7 +886,7 @@ mod tests {
             ],
             Vec::new(),
         );
-        let post = judgement(&mut judge, &request(Need::Review)).await;
+        let post = judgement(&mut judge, Path::new("."), &request(Need::Review)).await;
         assert_eq!(post.kind, "ESCALATE");
         assert_eq!(post.reply_to.as_deref(), Some("claude:3"));
         assert!(
@@ -828,7 +909,7 @@ mod tests {
             ],
             Vec::new(),
         );
-        let post = judgement(&mut judge, &request(Need::Review)).await;
+        let post = judgement(&mut judge, Path::new("."), &request(Need::Review)).await;
         assert_eq!(post.kind, "VERDICT");
         assert_eq!(post.body, "AGREE round=1 blocking=0 important=0\nfine");
         assert!(judge.1[1]
@@ -857,5 +938,69 @@ mod tests {
         assert!(r.contains("make a.txt say hi"));
         assert!(!r.contains("Judge the change"));
         assert!(bounded(&"x".repeat(10), 4).ends_with("[... cut at 4 characters]"));
+    }
+
+    #[test]
+    fn the_review_brief_lists_an_anchor_for_each_changed_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "core.autocrlf", "false"]);
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "base"]);
+        std::fs::write(dir.path().join("a.txt"), "one\nTWO\nthree\nFOUR\nfive\n").unwrap();
+        let anchors = hunk_anchors(dir.path(), &["a.txt".to_owned()]);
+        let ranges: Vec<(usize, usize)> = anchors.iter().map(|a| (a.start, a.end)).collect();
+        assert_eq!(ranges, vec![(2, 2), (4, 5)]);
+        // Each one checks out against the tree as the engine read it.
+        let mut spent = 0;
+        let bounds = localpilot_mesh::evidence::Bounds::default();
+        for a in &anchors {
+            assert_eq!(
+                localpilot_mesh::evidence::verify(dir.path(), a, &bounds, &mut spent),
+                localpilot_mesh::evidence::Check::Ok
+            );
+        }
+        // Untracked files: the whole file, lines counted as the service
+        // counts them, and only through its bounded, no-follow reads.
+        std::fs::write(dir.path().join("new.txt"), "a\n\nb\n").unwrap();
+        std::fs::write(dir.path().join("big.txt"), "x\n".repeat(600_000)).unwrap();
+        let whole = hunk_anchors(dir.path(), &["new.txt".to_owned(), "big.txt".to_owned()]);
+        assert_eq!(whole.len(), 1, "{whole:?}");
+        assert_eq!(
+            (whole[0].path.as_str(), whole[0].start, whole[0].end),
+            ("new.txt", 1, 3)
+        );
+        // Neither tracked-and-unchanged nor untracked: nothing.
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        assert!(hunk_anchors(dir.path(), &["a.txt".to_owned()]).is_empty());
+        std::fs::write(dir.path().join("a.txt"), "one\nTWO\nthree\nFOUR\nfive\n").unwrap();
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("s.txt"), "secret\n").unwrap();
+            std::os::unix::fs::symlink(outside.path().join("s.txt"), dir.path().join("l.txt"))
+                .unwrap();
+            assert!(hunk_anchors(dir.path(), &["l.txt".to_owned()]).is_empty());
+        }
+        let b = brief(dir.path(), "localpilot", &request(Need::Review), None);
+        assert!(b.contains("Anchors for the changed lines"), "{b}");
+        assert!(
+            b.contains(&serde_json::to_string(&anchors[0]).unwrap()),
+            "{b}"
+        );
+        assert!(b.contains("\"anchor\": optional"), "{b}");
     }
 }

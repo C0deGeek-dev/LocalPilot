@@ -422,6 +422,37 @@ pub fn anchor(
     })
 }
 
+/// Pin every line of `rel` to one hash, as it is now: the same bounded,
+/// no-follow read as [`anchor`], counting lines the same way.
+///
+/// # Errors
+/// A refused path, a missing or too-large file, or a file with no lines.
+pub fn anchor_file(root: &Path, rel: &str, bounds: &Bounds) -> Result<Anchored, EvidenceError> {
+    let lines = split_lines(&read_file(root, rel, bounds.file_bytes)?);
+    if lines.is_empty() {
+        return Err(EvidenceError::BadRange {
+            path: rel.to_owned(),
+            start: 1,
+            end: 1,
+            lines: 0,
+        });
+    }
+    let text = lines
+        .iter()
+        .map(|l| String::from_utf8_lossy(l).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(Anchored {
+        anchor: Anchor {
+            path: normal_rel(rel),
+            start: 1,
+            end: lines.len(),
+            sha: hash_lines(&lines),
+        },
+        text,
+    })
+}
+
 /// `rel` with `/` separators and no `./`.
 fn normal_rel(rel: &str) -> String {
     Path::new(rel)
@@ -452,7 +483,7 @@ pub fn verify(root: &Path, a: &Anchor, bounds: &Bounds, spent: &mut u64) -> Chec
         why: why.to_owned(),
     };
     if !is_sha(&a.sha) || a.start == 0 || a.end < a.start {
-        return stale("not an anchor LocalPilot issued");
+        return stale("invalid anchor hash");
     }
     let bytes = match read_file(root, &a.path, bounds.file_bytes) {
         Ok(b) => b,
@@ -741,6 +772,20 @@ mod tests {
         assert_eq!(a.anchor.sha, bb.anchor.sha);
         assert_eq!(a.text, "two\nthree");
         assert_eq!(a.anchor.sha, tree::hex(&Sha256::digest(b"two\nthree")));
+    }
+
+    #[test]
+    fn a_whole_file_anchor_counts_every_line() {
+        let d = tree_with(&[("a.txt", "a\n\nb\n"), ("b.txt", "a\n\nb"), ("e.txt", "")]);
+        for f in ["a.txt", "b.txt"] {
+            let w = anchor_file(d.path(), f, &b()).unwrap().anchor;
+            assert_eq!((w.start, w.end), (1, 3), "{f}");
+            assert_eq!(w.sha, anchor(d.path(), f, 1, 3, &b()).unwrap().anchor.sha);
+        }
+        assert!(matches!(
+            anchor_file(d.path(), "e.txt", &b()),
+            Err(EvidenceError::BadRange { .. })
+        ));
     }
 
     #[test]

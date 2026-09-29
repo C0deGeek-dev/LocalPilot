@@ -421,9 +421,10 @@ claude mcp add --scope user pair-mesh -- localpilot mesh mcp --role claude
 codex mcp add pair-mesh -- localpilot mesh mcp --role codex
 ```
 
-The server's tools are `status`, `peek`, `ack`, `post`, `handoff` and
-`verdict`. Each is one call to the same operation `localpilot mesh <op>` runs,
-and returns what that command would print. The role is fixed when the server
+The server's tools are `status`, `peek`, `ack`, `post`, `handoff`, `verdict`
+and `evidence`. Each is one call to the same operation `localpilot mesh <op>`
+runs, and returns what that command would print (`evidence` returns its JSON
+packet, also as structured content). The role is fixed when the server
 starts and is never a tool argument, so a client can only act as that
 participant.
 
@@ -434,7 +435,8 @@ participant.
   blocking and important counts) is written from the findings. It is refused
   unless `reply_to` is the owner's latest request in the unit, the caller is
   a required reviewer that has not answered it yet, and its fingerprint
-  manifest still holds.
+  manifest still holds. A finding may carry an `anchor` from `evidence`; see
+  below.
 
 No tool waits for mail, so a tool call never holds a host's turn open. Wait
 with `localpilot mesh wait` in a background task.
@@ -480,6 +482,16 @@ localpilot mesh --repo . evidence --role claude diagnostics --path src/lib.rs
   no external diff, within 10 seconds and 256 KiB each, and reports whether
   each `--path` exists. Without version control the Git reads are
   `unavailable`. No build or test command is run: that needs an OS sandbox.
+
+A review finding can cite lines by an anchor. In a verdict (from `mesh run`
+or the MCP `verdict` tool), a finding's optional `anchor` must name the
+finding's own file; each is checked against the tree when the verdict is
+written, and the finding shows the result, for example
+`- src/lib.rs:10-14 [blocking] (anchor=moved:12-16) ...`. A finding with only
+a file and line is posted as it always was, with no `anchor=` tag, so it is
+never shown as checked. `mesh run` lists an anchor for each changed range in
+the review brief it gives the model (at most 40), taken from the files as it
+reads them, and asks the model to copy one rather than make one up.
 
 The service never writes, and never reads a file through a link or
 junction: a link found before opening is refused, one swapped in before the

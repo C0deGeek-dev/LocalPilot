@@ -2132,7 +2132,7 @@ fn cursor_of(f: &Fixture, role: &str) -> Value {
 }
 
 #[tokio::test]
-async fn the_mcp_server_speaks_the_protocol_and_lists_six_role_free_tools() {
+async fn the_mcp_server_speaks_the_protocol_and_lists_seven_role_free_tools() {
     let server = server().await;
     let Some(f) = Fixture::new(&server) else {
         return;
@@ -2153,7 +2153,7 @@ async fn the_mcp_server_speaks_the_protocol_and_lists_six_role_free_tools() {
         .collect();
     assert_eq!(
         names,
-        ["status", "peek", "ack", "post", "handoff", "verdict"]
+        ["status", "peek", "ack", "post", "handoff", "verdict", "evidence"]
     );
     assert_eq!(
         c.request("nope/nothing", json!({}))["error"]["code"],
@@ -2511,4 +2511,45 @@ async fn a_native_post_whose_latest_write_fails_reports_posted_incomplete() {
         .journal("localpilot")
         .iter()
         .any(|m| m["body"] == "second"));
+}
+
+#[tokio::test]
+async fn an_mcp_verdict_tags_the_anchors_the_evidence_tool_issued() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["join", "--role", "localpilot", "--timeout", "1"]);
+    std::fs::write(f.anchor.join("a.txt"), "beta\ngamma\n").unwrap();
+    let asked = f.request_review(&format!("a.txt={}", f.fingerprint("a.txt")));
+    let mut lp = McpClient::start(&f, "localpilot");
+    let found = lp.tool("evidence", json!({"op": "locate", "query": "gamma"}));
+    assert_eq!(found["isError"], false, "{found}");
+    let hit = found["structuredContent"]["hits"][0].clone();
+    let anchor =
+        json!({"path": hit["path"], "start": hit["start"], "end": hit["end"], "sha": hit["sha"]});
+    let checked = lp.tool(
+        "evidence",
+        json!({"op": "verify", "anchors": [anchor.clone()]}),
+    );
+    assert_eq!(
+        checked["structuredContent"]["checks"][0]["check"]["state"], "ok",
+        "{checked}"
+    );
+    let ok = lp.tool(
+        "verdict",
+        json!({"decision": "REVISE", "reply_to": asked, "body": "see the anchored line",
+        "findings": [
+            {"file": "a.txt", "severity": "important", "text": "why gamma", "anchor": anchor},
+            {"file": "a.txt", "line": 1, "severity": "minor", "text": "plain"}
+        ]}),
+    );
+    assert_eq!(ok["isError"], false, "{ok}");
+    let body = f.posted("VERDICT")[0]["body"].as_str().unwrap().to_owned();
+    assert!(
+        body.contains("- a.txt:2 [important] (anchor=ok) why gamma"),
+        "{body}"
+    );
+    assert!(body.contains("- a.txt:1 [minor] plain"), "{body}");
+    assert!(!body.contains("[minor] (anchor"), "{body}");
 }

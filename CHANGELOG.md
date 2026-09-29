@@ -12,7 +12,12 @@ is SemVer-stable; the configuration schema stability policy is in
   moved, ambiguous or gone (`verify`), and run a fixed set of Git reads
   (`diagnostics`). Each answer is a JSON packet naming the session, unit and
   tree state. It never writes, never follows a link, skips secret-looking
-  names and the mailbox, and runs no build or test command.
+  names and the mailbox, and runs no build or test command. It is also the
+  MCP tool `evidence`. A review finding may cite lines by an anchor, and the
+  verdict shows how the anchor checked when it was posted (`anchor=ok`,
+  `moved`, `ambiguous`, `stale` or `unknown`); `mesh run` lists anchors for
+  the changed lines in its review brief. A finding without one is posted as
+  a plain `file:line`, never marked checked.
 - **A post that landed is never reported as failed.** Once `localpilot mesh`
   has appended a message, it waits up to 65 seconds for the session's state
   lock instead of 10. If anything after the append still fails, it exits `6`
@@ -21,8 +26,8 @@ is SemVer-stable; the configuration schema stability policy is in
   "mailbox lock busy", which invited a duplicate. `mesh run` treats it as
   posted and carries on.
 - **`localpilot mesh mcp --role <r>`: the pair mailbox as MCP tools.** A
-  stdio MCP server for Claude Code or Codex with six tools: `status`, `peek`,
-  `ack`, `post`, `handoff` and `verdict`. The role is fixed when the server
+  stdio MCP server for Claude Code or Codex with seven tools: `status`,
+  `peek`, `ack`, `post`, `handoff`, `verdict` and `evidence`. The role is fixed when the server
   starts, so a client can only act as that participant. `verdict` writes the
   header from the findings and is refused unless it answers the owner's
   current review request with a manifest that still holds. No tool waits for

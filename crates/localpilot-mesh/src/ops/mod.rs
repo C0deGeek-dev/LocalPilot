@@ -142,6 +142,12 @@ impl Mesh {
         }
     }
 
+    /// The anchor working tree.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.anchor
+    }
+
     /// The underlying mailbox paths.
     #[must_use]
     pub fn mailbox(&self) -> &Mailbox {
