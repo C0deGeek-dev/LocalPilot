@@ -25,6 +25,8 @@
 //!   prints; `localpilot mesh` exposes them.
 //! - [`tree`]: a no-VCS tree's scan, manifest and content digest, and the
 //!   globs of `.pairignore` and companion write scopes.
+//! - [`evidence`]: read-only evidence over the tree for the participants
+//!   (find, anchor, verify); a LocalPilot service, not protocol.
 //!
 //! The suite this crate is held to is vendored in `conformance/`; a test in
 //! the `localpilot` crate runs it against `localpilot mesh`.
@@ -32,6 +34,7 @@
 
 pub mod anchor;
 mod error;
+pub mod evidence;
 pub mod fsio;
 pub mod jsonl;
 pub mod layout;

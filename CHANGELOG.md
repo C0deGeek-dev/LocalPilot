@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot mesh evidence`: read-only evidence for a pair session.** A
+  participant can find text in the shared tree (`locate`), pin lines of a
+  file to a hash (`anchor`), check later whether those lines are still there,
+  moved, ambiguous or gone (`verify`), and run a fixed set of Git reads
+  (`diagnostics`). Each answer is a JSON packet naming the session, unit and
+  tree state. It never writes, never follows a link, skips secret-looking
+  names and the mailbox, and runs no build or test command.
 - **A post that landed is never reported as failed.** Once `localpilot mesh`
   has appended a message, it waits up to 65 seconds for the session's state
   lock instead of 10. If anything after the append still fails, it exits `6`

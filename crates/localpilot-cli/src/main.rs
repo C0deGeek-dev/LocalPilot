@@ -41,6 +41,7 @@ mod mcp;
 mod mcp_env;
 mod memory_cmd;
 mod mesh_cmd;
+mod mesh_evidence;
 mod mesh_listen;
 mod mesh_mcp;
 mod mesh_push;
@@ -2540,6 +2541,8 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 mesh_wait::run(args).await
             } else if mesh_mcp::is_mcp(&args) {
                 mesh_mcp::run(args).await
+            } else if mesh_evidence::is_evidence(&args) {
+                mesh_evidence::run(&args)
             } else {
                 mesh_cmd::run(args).await
             };

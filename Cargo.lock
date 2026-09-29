@@ -1695,6 +1695,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.9",
  "time",
@@ -1926,8 +1927,10 @@ name = "localpilot-mesh"
 version = "5.0.0"
 dependencies = [
  "dunce",
+ "ignore",
  "localpilot-sandbox",
  "localpilot-store",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

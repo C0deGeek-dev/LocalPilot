@@ -145,4 +145,5 @@ localmind-store = { path = "../../external/localmind/crates/localmind-store" }
 crossterm = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
 wiremock = { workspace = true }

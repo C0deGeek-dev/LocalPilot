@@ -8,6 +8,7 @@
 
 mod delivery;
 pub mod engine;
+mod evidence;
 mod join;
 mod lease;
 pub mod owner;
@@ -30,6 +31,7 @@ use crate::session;
 use crate::timefmt::utc_now;
 
 pub use delivery::{EndpointArgs, ENDPOINT_TOKEN_ENV, PUSH_OUTCOMES};
+pub use evidence::EvidenceArgs;
 pub use lease::SessionLease;
 pub use post::{Expect, PostArgs};
 pub use read::{Delivered, Delivery, WatchArgs};

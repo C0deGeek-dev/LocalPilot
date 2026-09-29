@@ -439,6 +439,58 @@ participant.
 No tool waits for mail, so a tool call never holds a host's turn open. Wait
 with `localpilot mesh wait` in a background task.
 
+#### Evidence for the other participants (`localpilot mesh evidence`)
+
+`localpilot mesh evidence --role <r>` answers a participant of the active
+session with read-only evidence about the shared tree, as one JSON packet on
+stdout. Every packet names the session, the unit and the Git `HEAD` it was
+taken at. Without version control, or when Git cannot resolve `HEAD`, `head`
+is null and `head_unavailable` says why: the service never rescans the whole
+tree for a digest.
+
+```powershell
+localpilot mesh --repo . evidence --role claude locate --query "fn parse" --glob "src/**"
+localpilot mesh --repo . evidence --role claude anchor --path src/lib.rs --start 10 --end 14
+localpilot mesh --repo . evidence --role claude verify --anchors '[{"path":"src/lib.rs","start":10,"end":14,"sha":"<64 hex>"}]'
+localpilot mesh --repo . evidence --role claude diagnostics --path src/lib.rs
+```
+
+- `locate` finds a literal, or a regular expression with `--regex`, and
+  returns each hit as an anchor with its line. It honours the tree's
+  `.gitignore` files and `.git/info/exclude` (not your global excludes) and
+  `.pairignore`, in the same grammar the no-VCS scan uses. It stops at
+  2,000 files, 1 MiB per file, 64 MiB in total, 10 seconds or 200 hits, and
+  says which limit it reached (`truncated`). Every file it did not search is
+  named: `too_large`, `changed_during_read`, `unreadable`, and
+  `unaddressable` for a name that is not valid Unicode (no anchor could
+  address it). `complete` is true only when nothing was left out.
+- `anchor` pins lines `start..end` of one file: SHA-256 of those lines as the
+  file is now, with CRLF read as LF.
+- `verify` checks anchors against the files as they are now, uncommitted
+  changes included: `ok`, `moved` (the lines are exactly once elsewhere in
+  the same file), `ambiguous` (in more than one place; none is chosen),
+  `stale` (the lines are gone, or the file is), or `unknown` when the file
+  could not be checked (a link, too large, changed while read, unreadable) or
+  looking for moved lines would hash more than 64 MiB across the request. A
+  hash anyone computed verifies the same way: a match proves the file now
+  holds those lines, not who took the anchor or when. One request checks at
+  most 100 anchors.
+- `diagnostics` runs a fixed set of Git reads (`status`, and `diff --stat`
+  against the unit's base) with no optional locks, no filesystem monitor and
+  no external diff, within 10 seconds and 256 KiB each, and reports whether
+  each `--path` exists. Without version control the Git reads are
+  `unavailable`. No build or test command is run: that needs an OS sandbox.
+
+The service never writes, and never reads a file through a link or
+junction: a link found before opening is refused, one swapped in before the
+open is caught on the file handle, and a directory on the way that became a
+link while the file was read is reported as changed. Each file is read only
+up to its limit, from the handle itself. It refuses the mailbox, `.git` and
+secret-looking names such as `.env` or `id_rsa`, in any case and under any
+other name the file system gives them (such as a Windows short name). That
+name check is a filter, not a guarantee that no secret is ever read. A
+refused request exits `1` with the reason on stderr.
+
 #### Switching the writer
 
 If the native writer misbehaves, hand every operation to the skill's own

@@ -306,7 +306,7 @@ pub fn prune_pats(pats: &[String]) -> Vec<String> {
 
 /// A symlink, junction or other reparse point, or a path that cannot be
 /// examined (fail closed).
-fn is_link(p: &Path) -> bool {
+pub(crate) fn is_link(p: &Path) -> bool {
     match fs::symlink_metadata(p) {
         Ok(m) => {
             if m.file_type().is_symlink() {
