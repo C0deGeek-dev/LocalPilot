@@ -445,7 +445,16 @@ with `localpilot mesh wait` in a background task.
 
 `localpilot mesh cockpit` is for the human watching a pair session. It is an
 observer: it has no role, registers no delivery endpoint, and writes nothing
-to the mailbox. `--json` prints one snapshot of the active session and exits:
+to the mailbox. In a terminal it shows a full-screen view of the session,
+re-read every half second: the session, its participants, the open review,
+open waits (a message still owed replies, and by whom) and pauses, and an
+activity list of everyone's recent records, each with its recipients
+(`-> codex`) and the message it answers (`re claude:3`) so a thread can be
+followed (Up, Down, Page Up, Page Down and Home scroll it; `q`, `Esc` or
+Ctrl-C quits). If the session cannot be read, it says so rather than showing
+"no session". It needs a build with
+the terminal UI. `--json` prints one snapshot instead and exits. Either way
+the snapshot shows:
 
 - the owner, required reviewers and advisers, unit, phase and status;
 - any pending handoff, waits and pauses;
