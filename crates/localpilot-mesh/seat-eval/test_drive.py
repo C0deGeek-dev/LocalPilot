@@ -7,6 +7,7 @@ changed fixtures, and never leaves an engine running. No model is needed.
 import argparse
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -91,6 +92,41 @@ class RerunTest(unittest.TestCase):
                 after = sorted((p.relative_to(out).as_posix(), p.read_bytes()) for p in out.rglob("*") if p.is_file())
                 self.assertEqual(before, after, leave)
             self.assertEqual(started, [])
+
+
+class RemoveTreeTest(unittest.TestCase):
+    def test_an_entry_that_vanishes_during_the_delete_is_not_an_error(self):
+        # Git's background maintenance can remove its own lock file while the
+        # tree is being deleted; that entry is already gone.
+        drive = load(HERE)
+        with tempfile.TemporaryDirectory() as d:
+            tree = pathlib.Path(d) / "run"
+            (tree / "objects").mkdir(parents=True)
+            gone = tree / "objects" / "maintenance.lock"
+            gone.write_text("x")
+            real = drive.shutil.rmtree
+
+            def rmtree_with_a_vanishing_entry(path, **kw):
+                handler = kw.get("onexc") or kw.get("onerror")
+                gone.unlink()
+                handler(os.unlink, str(gone), None)
+                return real(path, **kw)
+
+            drive.shutil.rmtree = rmtree_with_a_vanishing_entry
+            try:
+                drive.remove_tree(tree)
+            finally:
+                drive.shutil.rmtree = real
+            self.assertFalse(tree.exists())
+
+    def test_a_scratch_repository_runs_no_background_maintenance(self):
+        drive = load(HERE)
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d) / "run"
+            drive.scratch(repo, "spec")
+            conf = subprocess.run(["git", "-C", str(repo), "config", "--get", "maintenance.auto"],
+                                  capture_output=True, text=True).stdout.strip()
+            self.assertEqual(conf, "false")
 
 
 class FixtureGuardTest(unittest.TestCase):

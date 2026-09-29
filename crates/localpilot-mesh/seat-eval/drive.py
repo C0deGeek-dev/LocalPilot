@@ -142,11 +142,15 @@ def journal(repo, role):
 
 
 def remove_tree(path):
-    """Delete a scratch repository; Git's object files are read-only on
-    Windows, so clear that bit and retry."""
+    """Delete a scratch repository. Git's object files are read-only on
+    Windows, so clear that bit and retry; an entry that vanished meanwhile (a
+    lock Git removed on its own) is already gone, which is the goal."""
     def retry(func, p, _exc):
-        os.chmod(p, 0o700)
-        func(p)
+        try:
+            os.chmod(p, 0o700)
+            func(p)
+        except FileNotFoundError:
+            pass
     if sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=retry)
     else:
@@ -164,8 +168,10 @@ def scratch(path, spec):
     path.mkdir(parents=True)
     (path / MARKER).write_text("seat-eval scratch run\n", encoding="utf-8")
     run_cmd(["git", "init", "-q"], path)
+    # No background maintenance: it would keep writing under .git while the
+    # run, or a later rerun's delete, is using the repository.
     for k, v in [("user.email", "seat-eval@example.invalid"), ("user.name", "seat-eval"),
-                 ("core.autocrlf", "false")]:
+                 ("core.autocrlf", "false"), ("maintenance.auto", "false"), ("gc.auto", "0")]:
         run_cmd(["git", "config", k, v], path)
     (path / "README.md").write_text(spec, encoding="utf-8", newline="\n")
     (path / ".gitignore").write_text(f"__pycache__/\n{MARKER}\n", encoding="utf-8", newline="\n")
