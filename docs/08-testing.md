@@ -272,6 +272,27 @@ reviewable fixture stub for a human to curate into a task.
 cargo test -p localpilot-harness --test first_party -- --nocapture
 ```
 
+#### Pair-seat evaluation
+
+`crates/localpilot-mesh/seat-eval/` measures a model in LocalPilot's pair
+seat (`localpilot mesh run`), where the golden tasks above measure a single
+agent. A pair session needs a second participant and a review protocol, so
+it has its own driver:
+
+- `owner` cells hand a frozen task to LocalPilot and grade the result with a
+  hidden test;
+- `review-bad` and `review-good` cells ask LocalPilot to review a change with a
+  planted defect, and the same change done correctly, and count false AGREEs
+  and false REVISEs.
+
+It needs a live model and is run by hand (see its README). CI runs only
+`drive.py check`, which verifies that the fixtures are unchanged and still
+tell the good change from the bad one:
+
+```powershell
+python crates/localpilot-mesh/seat-eval/drive.py check
+```
+
 #### LLM-as-judge quality rubric
 
 A judge model scores the quality dimensions static signals cannot see —
