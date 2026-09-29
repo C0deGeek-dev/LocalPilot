@@ -259,18 +259,8 @@ pub(crate) async fn run(args: MeshArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // The writer, and above all the delegate's command line, come from the
-    // user's own config and environment only. A repository's
-    // `.localpilot.toml` is not trusted to choose a program this command runs:
-    // otherwise `localpilot mesh status` in a cloned repository could execute
-    // whatever that repository names.
-    let paths = localpilot_config::ConfigPaths {
-        user: localpilot_config::user_config_path(),
-        project: None,
-    };
-    let config = match localpilot_config::load(&paths, &localpilot_config::CliOverrides::default())
-    {
-        Ok(c) => c.mesh,
+    let config = match trusted_mesh_config() {
+        Ok(c) => c,
         Err(e) => {
             // Never guess the writer: a delegate configured in a broken file
             // must not quietly become the native writer.
@@ -491,6 +481,20 @@ fn emit(out: &Out) -> u8 {
 }
 
 /// The anchor tree, as `localpilot mesh` and `doctor` both resolve it.
+/// The `[mesh]` configuration. The writer, and above all the delegate's
+/// command line, come from the user's own config and environment only. A
+/// repository's `.localpilot.toml` is not trusted to choose a program this
+/// command runs: otherwise `localpilot mesh status` in a cloned repository
+/// could execute whatever that repository names.
+pub(crate) fn trusted_mesh_config(
+) -> Result<localpilot_config::MeshConfig, localpilot_config::ConfigError> {
+    let paths = localpilot_config::ConfigPaths {
+        user: localpilot_config::user_config_path(),
+        project: None,
+    };
+    localpilot_config::load(&paths, &localpilot_config::CliOverrides::default()).map(|c| c.mesh)
+}
+
 pub(crate) fn resolve_anchor(repo: Option<&Path>) -> Result<(PathBuf, &'static str), String> {
     localpilot_mesh::anchor::resolve(repo)
 }

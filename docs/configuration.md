@@ -444,13 +444,14 @@ with `localpilot mesh wait` in a background task.
 #### Watching a session (`localpilot mesh cockpit`)
 
 `localpilot mesh cockpit` is for the human watching a pair session. It is an
-observer: it has no role, registers no delivery endpoint, and writes nothing
-to the mailbox. In a terminal it shows a full-screen view of the session,
+observer: it has no role and registers no delivery endpoint, and it never
+writes the mailbox itself (its actions, below, each run a protocol command).
+In a terminal it shows a full-screen view of the session,
 re-read every half second: the session, its participants, the open review,
 open waits (a message still owed replies, and by whom) and pauses, and an
 activity list of everyone's recent records, each with its recipients
 (`-> codex`) and the message it answers (`re claude:3`) so a thread can be
-followed (Up, Down, Page Up, Page Down and Home scroll it; `q`, `Esc` or
+followed, one row per record, clipped at the pane's edge (Up, Down, Page Up, Page Down and Home scroll it; `q`, `Esc` or
 Ctrl-C quits). If the session cannot be read, it says so rather than showing
 "no session". It needs a build with
 the terminal UI. `--json` prints one snapshot instead and exits. Either way
@@ -474,6 +475,31 @@ Each journal is read only in its last 256 KiB, so a snapshot costs the same
 however long the session has run. A participant whose journal is longer says
 `recent_truncated`, and if the open review request lies before that window,
 `review_state` is `beyond_window` rather than a guess.
+
+In the full-screen view, a key starts a human action:
+
+| Key | Action | Command it runs |
+|---|---|---|
+| `s` | STOP, with a reason | `post --kind STOP` (with `--to` every other participant in a session started with `--with`, since only an ESCALATE may be broadcast) |
+| `a` | answer an open QUESTION or ESCALATE (when several are open you pick one; there is no default), as a role it still waits on | `post --kind ANSWER` (with `--reply-to` in a session started with `--with`) |
+| `h` / `d` / `w` | accept, decline or withdraw the pending handoff | `handoff-accept`, `handoff-decline`, `handoff-withdraw` |
+| `p` / `r` | park the session, or resume a parked one | pair.py's `park` and `resume` |
+
+Each action asks which participant to act as, every time and with no
+default, then shows the exact command line it will run (program, arguments
+and `--repo`) and runs it only after `y` or Enter (`Esc` cancels at any
+step). Choices are numbered; a number is taken as soon as no longer one could
+follow it, otherwise on Enter. The action line may take up to half the
+screen; a command too long to show there in full cannot be confirmed until
+the text is shortened or the terminal enlarged. The role's own rules apply: the cockpit adds no
+authority, and a refused command is shown with its exit code and message.
+Every command carries `--actor human`, recorded on the message or on the
+session event. That is a claim made by whoever pressed the key, not an
+identity. Participant operations run through `localpilot mesh` itself, so the
+configured writer applies. Park and resume exist only in pair.py, so they
+run the configured `delegate_command`; without one, the cockpit says so and
+runs nothing. An action only offered for what the view shows (a pending
+handoff, an open question) can lag the session by up to half a second.
 
 #### Evidence for the other participants (`localpilot mesh evidence`)
 
