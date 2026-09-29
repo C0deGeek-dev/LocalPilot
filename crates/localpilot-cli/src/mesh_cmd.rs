@@ -37,6 +37,8 @@ const FULL_ONLY: &[&str] = &[
     "purge",
     "park",
     "resume",
+    "replay",
+    "orphans",
 ];
 
 #[derive(Debug, Args)]

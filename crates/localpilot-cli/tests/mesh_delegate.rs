@@ -187,6 +187,20 @@ fn full_only_operations_stay_refused_and_a_broken_delegate_never_falls_back() {
         !text(&start.stderr).contains(MARK),
         "rejected before delegation"
     );
+    // The reference's crash tools are full-profile too: refused, not delegated.
+    for op in ["replay", "orphans"] {
+        let out = f.mesh(&f.delegate, &[op]);
+        assert_eq!(out.status.code(), Some(2), "{op}: {}", text(&out.stderr));
+        assert!(
+            text(&out.stderr).contains("not provided by the participant profile"),
+            "{op}: {}",
+            text(&out.stderr)
+        );
+        assert!(
+            !text(&out.stderr).contains(MARK),
+            "{op}: rejected before delegation"
+        );
+    }
 
     for broken in ["[]", "[\"no such program for the mesh test\"]"] {
         let out = f.mesh(broken, &["join", "--role", "codex", "--timeout", "1"]);

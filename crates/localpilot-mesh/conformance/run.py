@@ -657,6 +657,11 @@ def argv_for(impls: dict, root: Path, cmd: list) -> list:
     --repo <fixture root>, then the step's own arguments."""
     check_argv(cmd)
     role = cmd[cmd.index("--role") + 1] if "--role" in cmd else OBSERVER
+    if role == OBSERVER and cmd[0] not in PARTICIPANT_OPS:
+        # A full-profile command that takes no role (replay, orphans) belongs
+        # to the reference, as `start` does; it reads what the participant
+        # under test wrote.
+        return [*impls["*"], "--repo", str(root), *cmd]
     return [*(impls.get(role) or impls["*"]), "--repo", str(root), *cmd]
 
 
@@ -752,8 +757,10 @@ def participant_selection(fx: dict, native: list) -> tuple:
     for st in fx["steps"]:
         for cmd in ([st["cmd"]] if "cmd" in st else st.get("parallel", [])):
             role = cmd[cmd.index("--role") + 1] if "--role" in cmd else OBSERVER
-            if (role in roles or role == OBSERVER) and cmd[0] not in PARTICIPANT_OPS:
-                return None, f"{role if role != OBSERVER else 'an observer step'} runs {cmd[0]!r}"
+            # An observer step running a full-profile command goes to the
+            # reference (argv_for), so only a native role's own step counts.
+            if role in roles and cmd[0] not in PARTICIPANT_OPS:
+                return None, f"{role} runs {cmd[0]!r}"
     return roles, None
 
 

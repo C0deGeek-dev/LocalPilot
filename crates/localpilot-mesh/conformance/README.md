@@ -201,7 +201,9 @@ python run.py --participant codex=<command> --participant localpilot=<command>
 ```
 
 - Each named role's steps, and every step that names no role (`status`,
-  `transcript`), run on `<command>`. The other roles run on the reference.
+  `transcript`), run on `<command>`. The other roles run on the reference, and
+  so does a role-less full-profile command (`replay`, `orphans`), which then
+  reads what `<command>` wrote.
 - A fixture is selected only when those steps use the participant operations
   (`participant.json` lists them). Every other fixture is reported as
   `SKIP <id>: <reason>`, and the run ends with

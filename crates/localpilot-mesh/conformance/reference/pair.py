@@ -3093,18 +3093,137 @@ def abandon(a):
         s["abandon_reason"]=getattr(a,"reason",None); s["abandoned_at"]=now(); s["updated_at"]=now(); mb.save(s)
     print(f"ABANDONED session={s['session_id']}"+(f" reason={s['abandon_reason']}" if s["abandon_reason"] else "")); return 0
 
-def transcript(a):
-    mb=MB(root(a.repo))
-    if getattr(a,"session",None):
+def named_or_active(mb,sid):
+    """The session `--session` names, or the active one; refused when neither
+    can be read (L-8)."""
+    if sid:
         base=mb.base/"sessions"
         known={d.name for d in base.iterdir()} if base.is_dir() else set()
-        if a.session not in known: raise SystemExit(f"unknown session {a.session!r}")
-        s=readj(session_file(base/a.session))
-        if not s: raise SystemExit(f"unknown session {a.session!r}")
-        check_protocol(s,f"session {a.session}")
-    else:
-        s=mb.active()
-        if not s: raise SystemExit("NO_ACTIVE_SESSION")
+        if sid not in known: raise SystemExit(f"unknown session {sid!r}")
+        s=readj(session_file(base/sid))
+        if not s: raise SystemExit(f"unknown session {sid!r}")
+        return check_protocol(s,f"session {sid}")
+    s=mb.active()
+    if not s: raise SystemExit("NO_ACTIVE_SESSION")
+    return s
+
+def replay(a):
+    """K-4: what each participant wrote, with every break in the record stream
+    marked where it is. Read-only: it writes nothing, acknowledges nothing and
+    re-runs nothing."""
+    mb=MB(root(a.repo)); s=named_or_active(mb,getattr(a,"session",None))
+    roles=participants(s)
+    if a.only:
+        if a.only not in roles: raise SystemExit(f"role not in session (participants: {', '.join(roles)})")
+        roles=[a.only]
+    for r in roles:
+        p=mb.journal(s,r); last=None
+        if p.exists():
+            lines=journal_lines(p)
+            ended=bool(lines) and lines[-1]==""
+            if ended: lines=lines[:-1]
+            seen=set(); prev=None
+            for n,line in enumerate(lines,1):
+                m=_record(line)
+                if m is None:
+                    # A torn tail is the one invalid line a crash leaves; it is
+                    # named as that instead of as an ordinary invalid line.
+                    print(f"TORN_TAIL {r}" if n==len(lines) and not ended else f"INVALID {r} line={n}")
+                    continue
+                seq=m.get("seq")
+                if not good_seq(seq):
+                    # Damage replay exists to show, never a reason to fail.
+                    print(f"BAD_SEQ {r} line={n}")
+                    continue
+                if seq in seen: print(f"DUPLICATE {r} seq={seq}")
+                elif prev is not None and seq!=prev+1:
+                    print(f"GAP {r} after={prev} next={seq}")
+                seen.add(seq); prev=seq
+                body=str(m.get("body","")).split("\n",1)[0]
+                print(f"{r}#{seq} {m.get('at','')} {m.get('kind','')} {body}")
+                last=m
+        latest=readj(mb.latest(s,r))
+        j=last["seq"] if last else 0
+        if latest is None:
+            if last: print(f"MISSING_LATEST {r} journal={j}")
+        elif not isinstance(latest,dict) or not good_seq(latest.get("seq")):
+            print(f"LATEST_INVALID {r}")
+        else:
+            got=latest.get("seq",0)
+            if got<j: print(f"LATEST_BEHIND {r} latest={got} journal={j}")
+            elif got>j: print(f"LATEST_AHEAD {r} latest={got} journal={j}")
+            elif latest!=last: print(f"LATEST_MISMATCH {r} seq={got}")
+    print("EVENTS")
+    for e in s.get("events") or []:
+        extra=(f" actor={e['actor']}" if e.get("actor") else "")+(f" offer={e['handoff']['offer_id']}" if (e.get("handoff") or {}).get("offer_id") else "")
+        print(f"EVENT {e.get('at','')} {e.get('event','')} {e.get('role','')}{extra}")
+    return 0
+
+def good_seq(v):
+    """A usable `seq`: a positive integer (a JSON `true` is not one)."""
+    return isinstance(v,int) and not isinstance(v,bool) and v>0
+
+def orphan_reason(d,live):
+    """Why session directory `d` is an orphan (K-5), or None. A record that
+    cannot be read is refused, never judged (L-8)."""
+    if d.name==live: return None
+    sf=session_file(d)
+    try: raw=sf.read_text(encoding="utf-8")
+    except FileNotFoundError: return "no-record"
+    except (OSError,UnicodeDecodeError) as e:
+        raise SystemExit(f"session directory {d.name!r} has an unreadable {sf.name} ({type(e).__name__}); refusing to judge it")
+    try: s=json.loads(raw)
+    except json.JSONDecodeError:
+        raise SystemExit(f"session directory {d.name!r} has an unreadable {sf.name}; refusing to judge it")
+    if not isinstance(s,dict) or s.get("session_id")!=d.name:
+        raise SystemExit(f"session directory {d.name!r} does not hold its own session record; refusing to judge it")
+    # A record this build cannot operate is refused before it is judged (V-3),
+    # so a newer build's session is never read as abandoned work.
+    check_protocol(s,f"session {d.name}")
+    st=s.get("status")
+    if st not in ("active","paused","parked","completed","abandoned"):
+        raise SystemExit(f"session directory {d.name!r} has an unknown status {st!r}; refusing to judge it")
+    if st in TERMINAL or st=="parked": return None
+    return "unreferenced"
+
+def orphan_scan(mb):
+    """Every orphan, by directory name. Links are never followed or judged."""
+    base=mb.base/"sessions"
+    if reparse(base) or not base.is_dir(): return {}
+    p=mb.pointer(); live=p.get("session_id") if p else None
+    out={}
+    for d in sorted(base.iterdir()):
+        if reparse(d) or not d.is_dir(): continue
+        why=orphan_reason(d,live)
+        if why: out[d.name]=why
+    return out
+
+def orphans(a):
+    """K-5: list the session directories no protocol path can reach, or remove
+    one of them after checking it again under the state lock."""
+    mb=MB(root(a.repo))
+    if not a.remove:
+        for sid,why in orphan_scan(mb).items(): print(f"ORPHAN {sid} reason={why}")
+        return 0
+    sid=a.remove
+    with Lock(mb.lock):
+        # The same lock `start` holds across its record, pointer, health and
+        # cursor writes: nothing half-started is ever seen here.
+        d=mb.base/"sessions"/sid
+        ok=re.fullmatch(r"[0-9A-Za-z-]+",sid) and not reparse(mb.base/"sessions") and not reparse(d) and d.is_dir()
+        p=mb.pointer() if ok else None
+        if not ok or not orphan_reason(d,p.get("session_id") if p else None):
+            raise SystemExit(f"NOT_AN_ORPHAN {sid}")
+        # The whole tree is checked before anything goes, as `purge` does: a
+        # link found part-way through must not leave half an orphan deleted.
+        check_deletable(d)
+        rmtree_no_links(d)
+    print(f"REMOVED {sid}")
+    return 0
+
+def transcript(a):
+    mb=MB(root(a.repo))
+    s=named_or_active(mb,getattr(a,"session",None))
     arr=[]
     for r in participants(s):
         p=mb.journal(s,r)
@@ -3175,6 +3294,8 @@ def parser():
     q=rc("park"); q.add_argument("--reason"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=park)
     q=rc("resume"); q.add_argument("--session"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=resume)
     q=sp.add_parser("transcript"); q.add_argument("--session"); q.set_defaults(fn=transcript)
+    q=sp.add_parser("replay"); q.add_argument("--session"); q.add_argument("--only",choices=PARTICIPANTS,metavar="ROLE"); q.set_defaults(fn=replay)
+    q=sp.add_parser("orphans"); q.add_argument("--remove",metavar="SESSION"); q.set_defaults(fn=orphans)
     return p
 def select_anchor(a):
     """Pick where this command runs: `--repo`, then `PAIR_REPO`, then the cwd.

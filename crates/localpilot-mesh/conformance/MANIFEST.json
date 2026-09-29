@@ -1,13 +1,13 @@
 {
  "source_repo": "c0degeek-ai",
  "source_path": "skills/pair-programming/conformance",
- "source_commit": "5ed4b661bea1ddc8f1c321c1b447601db77d70ca",
+ "source_commit": "9a2fa24dbae6e94c7d47a70fcce75f63d5313178",
  "files": {
-  "run.py": "474bfcf2945eee11a8ffa7d2c30fa5c2fe6b0db69cea3bae60ecb4fd47814efa",
+  "run.py": "ae44489c1432f4b3ba7e083f3e9437a71c2e93d5f123db1cba51dfdcaa340e19",
   "soak.py": "c05714ae9b778701934d99433098784b71c876607ba25c83003231046093e934",
   "scan_cases.py": "f6fe55f6b718cfe8b1c8f8016d18a7c51ea7193a66f65f9a1c40a41a56c86bf7",
-  "README.md": "4d657f41bae5e0cecdbd6ae5cd66e10bed801db821888dc7cc9a62d3f0ecf9dd",
-  "participant.json": "47d994b230f9c4afbfe9462709b9c43a2d152792d592a481e1740bd940a2595c",
+  "README.md": "5ec638d4e4f939e5fa569acd4861d89ee97aecf25bfdcd3a59f762979533c323",
+  "participant.json": "89085548ba188c7f217bd813a625bc29a0df80cd237d9ac2f4dce3a8e20dba00",
   "fixtures/actor-claim-is-carried-and-changes-nothing.json": "2b11f7404c689e1c6258052db0445ad7a3696680290f08ca5419b06e737e6423",
   "fixtures/companion-guard-write-scope.json": "e41b656187f3493881551aa5307ecc1120e3fd8d8f68715b9a707d18888d8b02",
   "fixtures/companion-handoff-pins-and-refuses-a-moved-companion.json": "060c1d598ee21230e17d985efb958cd73ce4478bd2c89b09403eebe79d96a580",
@@ -60,6 +60,10 @@
   "fixtures/no-vcs-handoff-refused-after-a-change.json": "711941ef188ff88b755cfdd9e4267ccd81ea7cf47748b87590e9d93aa254bd10",
   "fixtures/no-vcs-join-post-handoff-complete.json": "51734ca18d072d6db22d847a499046e1efb83d8cae3013541cd999f666eaeaa1",
   "fixtures/no-vcs-next-unit-rebases-manifest.json": "2c2eee3d9439a0f6e2462a12f3db755c91a2a6a1094d6c4413e613ba2937473d",
+  "fixtures/orphans-after-a-start-that-lost-its-pointer.json": "f0e53e81d1051a15e94fb9609839ce5b21557eed780d5edcb34149eb5dd2b9dc",
+  "fixtures/orphans-are-listed-and-removed-only-on-request.json": "f756a7af6f9d9ea5a40ccb32a53b862ca96f8746a9bf1ca08818f80652f5c20c",
+  "fixtures/orphans-refuse-a-record-they-cannot-judge.json": "bdccf6862effeefe86e7bca190dbeb818699aac30a47b5304651c8591b92d47e",
+  "fixtures/orphans-refuse-an-unreadable-record.json": "dd3a78fa934bae6c86a1496f18f77545025283607d49f755d12c34b22d783469",
   "fixtures/push-a-live-endpoint-is-woken-and-the-attempt-recorded.json": "bee6534c068fb203688db1da57a45386c37fba371dcbc76bd021889891dd979a",
   "fixtures/push-a-participant-post-wakes-each-addressed-recipient.json": "e5d117e68da06a7808c20fb3e0f1c3186b74d598496b7ceaf1b16a0b29478d9d",
   "fixtures/push-a-participant-post-wakes-the-driver.json": "374260dddcd1786c966d5681368336eb03b3ecd8862191af9eb0164c56483d59",
@@ -74,6 +78,9 @@
   "fixtures/read-garbage-pointer-is-refused.json": "a64a8b9d2a855f69434e362b2e25017d80d3e803cedce8fdd17fde06eb743521",
   "fixtures/read-garbage-session-record-is-refused.json": "554ddac550e064be949be40bf91d5f6352109fc2909509fb3c94ab089373edc4",
   "fixtures/read-missing-session-record-is-refused.json": "7571d6be8004f8a07ff5da79fc42c6c7401caccb9c9ec2757f4a49f569949c60",
+  "fixtures/replay-compares-latest-with-the-journal.json": "957ae279c1588ff680d1b823fc2094669929a447eb9894fdf96ea0eb2a7fa803",
+  "fixtures/replay-marks-every-break-in-a-journal.json": "a3a31a1760106af5ba3197dfe1466de4ee9323db8a809854534fe4676deba7e2",
+  "fixtures/replay-survives-a-seq-it-cannot-use.json": "58a84328b58bd3d86347bcf6b115d318ed1ad2c6d5e7640ada44d3c33e4aefcf",
   "fixtures/session-events-record-park-and-resume.json": "239e1023250270d50c1622d7fa15b452d9c08a9f34b8af30e52fc52b23759131",
   "fixtures/two-party-abandon-and-purge.json": "b1b987a25d8b767d4a0ce80ae219a27d02b74cc4b27ee86645395571cd7a04c6",
   "fixtures/two-party-complete-needs-agree.json": "542a6ae8c9baebaf02d76e87fe02d5fd473e115175b5c4700a8a7b57e719de52",
@@ -92,6 +99,6 @@
   "fixtures/version-unknown-major-record-is-refused.json": "a482fed1ba490016ef2f5e9c33c997dcd636a97c206c415c9ff8fb3f360d0df4",
   "fixtures/version-unknown-major-session-is-refused.json": "0a92c913c0add0ff0fc4b037e9dcc51707687c4dfaffa7967404f511decf857d",
   "fixtures/version-unknown-required-feature-is-refused.json": "29e30da9b30b2a8d00df84e92918d77f68d759327da23b2a3087c29fd8c15cf5",
-  "reference/pair.py": "a4651e31980c6e696d6e9cf70d93f9edb60fe7e56b97ad015517724921cdde63"
+  "reference/pair.py": "cc8a779aaecb29e55585dfa64ccad3cf455645bfadb92ff49b9c296765e6b020"
  }
 }
