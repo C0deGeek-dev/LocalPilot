@@ -474,13 +474,24 @@ fn watch(mesh: &Mesh, w: WatchOpts, block: bool) -> Result<u8, MeshError> {
 }
 
 fn emit(out: &Out) -> u8 {
-    print!("{}", out.stdout);
+    // The operation has already happened: its exit code stands even when the
+    // output cannot be delivered.
+    if let Err(e) = write_out(&mut std::io::stdout().lock(), &out.stdout) {
+        eprintln!("localpilot mesh: cannot write the output: {e}");
+    }
     eprint!("{}", out.stderr);
-    let _ = std::io::stdout().flush();
     out.code
 }
 
-/// The anchor tree, as `localpilot mesh` and `doctor` both resolve it.
+/// Write `text` and flush. A reader that closed the pipe (`| head`) is a
+/// clean stop, not an error; any other failure is returned.
+pub(crate) fn write_out(w: &mut impl Write, text: &str) -> std::io::Result<()> {
+    match w.write_all(text.as_bytes()).and_then(|()| w.flush()) {
+        Err(e) if !crate::session_cmd::output_consumer_gone(&e) => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// The `[mesh]` configuration. The writer, and above all the delegate's
 /// command line, come from the user's own config and environment only. A
 /// repository's `.localpilot.toml` is not trusted to choose a program this
@@ -495,6 +506,7 @@ pub(crate) fn trusted_mesh_config(
     localpilot_config::load(&paths, &localpilot_config::CliOverrides::default()).map(|c| c.mesh)
 }
 
+/// The anchor tree, as `localpilot mesh` and `doctor` both resolve it.
 pub(crate) fn resolve_anchor(repo: Option<&Path>) -> Result<(PathBuf, &'static str), String> {
     localpilot_mesh::anchor::resolve(repo)
 }
@@ -505,6 +517,37 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Op, clap::Error> {
         OpCli::try_parse_from(args).map(|c| c.op)
+    }
+
+    /// A stdout whose every write fails with `kind` (or a raw OS code).
+    struct Failing(fn() -> std::io::Error);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err((self.0)())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_reader_that_went_away_is_a_clean_stop_and_other_failures_are_not() {
+        // `localpilot mesh post ... | head`: the post already landed, so a
+        // closed pipe must not turn into a panic or a different exit code.
+        let gone: [fn() -> std::io::Error; 3] = [
+            || std::io::Error::from(std::io::ErrorKind::BrokenPipe),
+            || std::io::Error::from_raw_os_error(109),
+            || std::io::Error::from_raw_os_error(232),
+        ];
+        for e in gone {
+            assert!(write_out(&mut Failing(e), "POSTED\n").is_ok());
+        }
+        let full = write_out(&mut Failing(|| std::io::Error::other("disk full")), "x");
+        assert_eq!(full.unwrap_err().to_string(), "disk full");
+        let mut buf = Vec::new();
+        write_out(&mut buf, "POSTED\n").unwrap();
+        assert_eq!(buf, b"POSTED\n");
     }
 
     #[test]

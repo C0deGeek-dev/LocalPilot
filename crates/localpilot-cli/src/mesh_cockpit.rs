@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use localpilot_mesh::Mesh;
 
-use crate::mesh_cmd::{resolve_anchor, MeshArgs};
+use crate::mesh_cmd::{resolve_anchor, write_out, MeshArgs};
 
 #[derive(Debug, Parser)]
 #[command(name = "localpilot mesh cockpit", no_binary_name = true)]
@@ -47,12 +47,20 @@ pub(crate) fn run(args: &MeshArgs) -> ExitCode {
     };
     let mesh = Mesh::at(&anchor, source);
     if cli.json {
-        let snap = mesh.snapshot();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&snap).unwrap_or_default()
-        );
-        return ExitCode::SUCCESS;
+        let text = match serde_json::to_string_pretty(&mesh.snapshot()) {
+            Ok(t) => t + "\n",
+            Err(e) => {
+                eprintln!("localpilot mesh cockpit: cannot serialize the snapshot: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        return match write_out(&mut std::io::stdout().lock(), &text) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("localpilot mesh cockpit: cannot write the snapshot: {e}");
+                ExitCode::from(1)
+            }
+        };
     }
     full_screen(&mesh, &anchor)
 }
