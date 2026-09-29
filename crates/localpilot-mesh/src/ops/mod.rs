@@ -16,6 +16,7 @@ mod post;
 pub mod push;
 mod read;
 mod render;
+pub mod snapshot;
 mod unit;
 
 use std::path::{Path, PathBuf};
@@ -36,6 +37,7 @@ pub use lease::SessionLease;
 pub use post::{Expect, PostArgs};
 pub use read::{Delivered, Delivery, WatchArgs};
 pub use render::unit_label;
+pub use snapshot::Snapshot;
 pub use unit::NextUnitArgs;
 
 /// A JSON object, as records are held while an operation rewrites them.

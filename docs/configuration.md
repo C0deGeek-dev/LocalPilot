@@ -441,6 +441,31 @@ participant.
 No tool waits for mail, so a tool call never holds a host's turn open. Wait
 with `localpilot mesh wait` in a background task.
 
+#### Watching a session (`localpilot mesh cockpit`)
+
+`localpilot mesh cockpit` is for the human watching a pair session. It is an
+observer: it has no role, registers no delivery endpoint, and writes nothing
+to the mailbox. `--json` prints one snapshot of the active session and exits:
+
+- the owner, required reviewers and advisers, unit, phase and status;
+- any pending handoff, waits and pauses;
+- each participant's health, its unacknowledged mail and its latest records;
+- the open review request with the verdicts that answer it. Only a verdict
+  that names the request (`reply_to`) is shown as its answer; a verdict that
+  names none, as a two-party session posts them, is listed as `unlinked`.
+
+A snapshot is read from several files, so after reading it the whole session
+record and every participant's health are read again. If any of it changed
+in between, even within the same second, the snapshot is taken again, at
+most three times; after that it says
+`"consistent": false` and names what moved, rather than showing a mix of two
+states. A part that cannot be read is listed in `read_errors`.
+
+Each journal is read only in its last 256 KiB, so a snapshot costs the same
+however long the session has run. A participant whose journal is longer says
+`recent_truncated`, and if the open review request lies before that window,
+`review_state` is `beyond_window` rather than a guess.
+
 #### Evidence for the other participants (`localpilot mesh evidence`)
 
 `localpilot mesh evidence --role <r>` answers a participant of the active

@@ -60,6 +60,59 @@ pub fn records(path: &Path) -> Result<Vec<Map<String, Value>>, MeshError> {
     Ok(out)
 }
 
+/// The valid records in the last `max_bytes` of a journal, in file order,
+/// and whether older lines were left unread. Reading starts at a line
+/// boundary: a line cut by the window's start is dropped, never parsed as a
+/// fragment. For an observer that must stay bounded however long the session
+/// runs; protocol decisions always read the whole journal ([`records`]).
+///
+/// # Errors
+/// [`MeshError::Unsupported`] as for [`records`]; I/O errors.
+pub fn tail_records(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(Vec<Map<String, Value>>, bool), MeshError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), false)),
+        Err(e) => return Err(MeshError::io(path, e)),
+    };
+    let len = file.metadata().map_err(|e| MeshError::io(path, e))?.len();
+    let start = len.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| MeshError::io(path, e))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes)
+        .read_to_end(&mut bytes)
+        .map_err(|e| MeshError::io(path, e))?;
+    let mut window: &[u8] = &bytes;
+    let truncated = start > 0;
+    if truncated {
+        // The byte before the window: if it is not a newline, the window
+        // starts inside a line, which is dropped.
+        let mut before = [0_u8; 1];
+        file.seek(SeekFrom::Start(start - 1))
+            .and_then(|_| file.read_exact(&mut before))
+            .map_err(|e| MeshError::io(path, e))?;
+        if before[0] != b'\n' {
+            window = match window.iter().position(|b| *b == b'\n') {
+                Some(i) => &window[i + 1..],
+                None => &[],
+            };
+        }
+    }
+    let mut out = Vec::new();
+    for line in split_lines(window) {
+        if let Some(m) = object(line.as_deref()) {
+            check_protocol(&m, "a journal record")?;
+            out.push(m);
+        }
+    }
+    Ok((out, truncated))
+}
+
 /// The 1-based numbers of a journal's invalid lines (spec J-7).
 ///
 /// Reporting damage reads every line, so a valid record that needs a
@@ -120,6 +173,37 @@ pub fn append(path: &Path, record: &Map<String, Value>) -> Result<(), MeshError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tail_reads_only_its_window_and_never_a_cut_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("j.jsonl");
+        let line = |n: usize| {
+            format!(
+                "{{\"seq\":{n},\"kind\":\"NOTE\",\"body\":\"{}\"}}\n",
+                "x".repeat(40)
+            )
+        };
+        // Four-digit seqs, so every line is the same length.
+        let body: String = (1000..2000).map(line).collect();
+        std::fs::write(&path, &body).unwrap();
+        let one = line(1000).len() as u64;
+        // A small file is read whole.
+        let (all, cut) = tail_records(&path, 1 << 20).unwrap();
+        assert_eq!((all.len(), cut), (1000, false));
+        // A window that starts mid-line drops that line and keeps the rest.
+        let (tail, cut) = tail_records(&path, one * 10 + 5).unwrap();
+        assert!(cut);
+        assert_eq!(tail.len(), 10);
+        assert_eq!(tail[0]["seq"], 1990);
+        assert_eq!(tail[9]["seq"], 1999);
+        // A window that starts exactly at a line keeps that line.
+        let (tail, _) = tail_records(&path, one * 10).unwrap();
+        assert_eq!((tail.len(), tail[0]["seq"].as_u64()), (10, Some(1990)));
+        // A missing journal is empty, not an error.
+        let (none, cut) = tail_records(&dir.path().join("none.jsonl"), 100).unwrap();
+        assert_eq!((none.len(), cut), (0, false));
+    }
     use serde_json::json;
 
     fn obj(v: Value) -> Map<String, Value> {
