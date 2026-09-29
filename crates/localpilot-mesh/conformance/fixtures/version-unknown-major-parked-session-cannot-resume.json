@@ -12,8 +12,8 @@
   "vcs": "git"
  },
  "provenance": {
-  "build": "44892a1ba4f2:pair.py",
-  "sha12": "5e9cbc53fd91",
+  "build": "92b142067941+dirty:pair.py",
+  "sha12": "8461b66f0533",
   "note": "captured from the reference and reviewed; never regenerate with a build under test"
  },
  "steps": [
@@ -88,7 +88,7 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -154,7 +154,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -166,7 +166,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -196,7 +196,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -260,7 +260,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -272,7 +272,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -302,7 +302,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>",
      "parked_from": "active",
@@ -312,7 +312,14 @@
       "status": []
      },
      "park_reason": null,
-     "parked_companions": {}
+     "parked_companions": {},
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "parked",
+       "role": "claude"
+      }
+     ]
     },
     "vcs.json": {
      "vcs": "git",
@@ -382,7 +389,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -394,7 +401,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -434,7 +441,14 @@
       "status": []
      },
      "park_reason": null,
-     "parked_companions": {}
+     "parked_companions": {},
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "parked",
+       "role": "claude"
+      }
+     ]
     },
     "vcs.json": {
      "vcs": "git",
@@ -499,7 +513,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -511,7 +525,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -551,7 +565,14 @@
       "status": []
      },
      "park_reason": null,
-     "parked_companions": {}
+     "parked_companions": {},
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "parked",
+       "role": "claude"
+      }
+     ]
     },
     "vcs.json": {
      "vcs": "git",
@@ -610,7 +631,7 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "joined; navigator ready",
-    "protocol": "1.0"
+    "protocol": "1.1"
    }
   ],
   "sessions/<SID>/latest/codex.json": {
@@ -622,7 +643,7 @@
    "unit_id": "1-<U>",
    "expect_reply": false,
    "body": "joined; navigator ready",
-   "protocol": "1.0"
+   "protocol": "1.1"
   },
   "sessions/<SID>/session.json": {
    "session_id": "<SID>",
@@ -662,7 +683,14 @@
     "status": []
    },
    "park_reason": null,
-   "parked_companions": {}
+   "parked_companions": {},
+   "events": [
+    {
+     "at": "<TS>",
+     "event": "parked",
+     "role": "claude"
+    }
+   ]
   },
   "vcs.json": {
    "vcs": "git",

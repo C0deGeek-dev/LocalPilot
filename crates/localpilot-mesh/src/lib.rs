@@ -51,7 +51,7 @@ pub use ops::{Mesh, Out};
 pub use timefmt::{parse_utc, utc_now};
 
 /// The protocol version this crate implements (spec V-2).
-pub const PROTOCOL: &str = "1.0";
+pub const PROTOCOL: &str = "1.1";
 
 /// Features this crate implements that a record may name in `requires`
 /// (spec V-8). Empty in 1.0.

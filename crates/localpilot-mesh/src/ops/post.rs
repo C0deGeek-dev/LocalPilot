@@ -26,6 +26,9 @@ pub struct PostArgs {
     pub forward: bool,
     /// `N` or `sender:N[,sender:N]`, acknowledged before the post.
     pub ack_through: Option<String>,
+    /// Optional record keys (spec M-8, U-6): each is written only when it is
+    /// not null, so an older reader sees nothing it must understand.
+    pub extra: Obj,
 }
 
 /// What a guarded post requires of the session. It is checked on the same
@@ -407,6 +410,11 @@ impl Mesh {
                 m.insert("route_trace".into(), json!(r.route_trace));
                 m.insert("ttl".into(), r.ttl.clone());
                 m.insert("forward".into(), json!(r.forward));
+            }
+            for (k, v) in &a.extra {
+                if !v.is_null() {
+                    m.insert(k.clone(), v.clone());
+                }
             }
             jsonl::append(&jp, &m)?;
             // In the journal now, so owed its wakes even if a later step

@@ -1,8 +1,7 @@
 {
- "id": "read-garbage-session-record-is-refused",
+ "id": "session-events-record-park-and-resume",
  "profiles": [
-  "two-party",
-  "read"
+  "two-party"
  ],
  "layers": [
   "cli",
@@ -10,11 +9,6 @@
  ],
  "setup": {
   "vcs": "git"
- },
- "provenance": {
-  "build": "3dbfd6cba536:pair.py",
-  "sha12": "5924bf530f35",
-  "note": "captured from the reference and reviewed; never regenerate with a build under test"
  },
  "steps": [
   {
@@ -207,19 +201,385 @@
    }
   },
   {
-   "raw": {
-    "op": "write_file",
-    "path": "sessions/<SID>/session.json",
-    "data": "{not json\n"
+   "cmd": [
+    "watch",
+    "--role",
+    "claude",
+    "--timeout",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "PEER codex #1 HELLO [fixture-task#1]\njoined; navigator ready\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.1"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.1"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.1",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "park",
+    "--role",
+    "claude",
+    "--actor",
+    "human",
+    "--reason",
+    "lunch"
+   ],
+   "rc": 0,
+   "stdout": "PARKED session=<SID> work=fixture-task from=active\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "parked",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.1"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.1"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "parked",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.1",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "parked_from": "active",
+     "parked_at": "<TS>",
+     "parked_tree": {
+      "head": "<SHA>",
+      "status": []
+     },
+     "park_reason": "lunch",
+     "parked_companions": {},
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "parked",
+       "role": "claude",
+       "actor": "human"
+      }
+     ]
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "resume",
+    "--role",
+    "claude",
+    "--actor",
+    "human"
+   ],
+   "rc": 0,
+   "stdout": "RESUMED session=<SID> status=active work=fixture-task\nREVIEW_INVALIDATED phase=implement; a new peer AGREE is required before complete\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.1"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.1"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "implement",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.1",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "park_reason": "lunch",
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "parked",
+       "role": "claude",
+       "actor": "human"
+      },
+      {
+       "at": "<TS>",
+       "event": "resumed",
+       "role": "claude",
+       "actor": "human"
+      }
+     ],
+     "verdict_floor": {
+      "claude": 0,
+      "codex": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
    }
   },
   {
    "cmd": [
     "status"
    ],
-   "rc": 1,
-   "stdout": "",
-   "stderr": "corrupt mailbox: sessions/<SID>/session.json is not valid JSON (Expecting property name enclosed in double quotes); refusing to continue [anchor=<REPO> source=flag]\n",
+   "rc": 0,
+   "stdout": "SESSION <SID> status=active phase=implement driver=claude owner=claude work=fixture-task#1\nclaude: ready updated=<TS> resume_at=-\ncodex: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,codex:ack unacked claude=#1..#1\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
    "state": {
     "active.json": {
      "session_id": "<SID>",
@@ -231,7 +591,11 @@
      "peer_seq": 0,
      "peer_health_generation": 0,
      "resume_seen": null,
-     "stale_wait_seq": null
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
     },
     "sessions/<SID>/cursor/codex.json": {
      "peer_seq": 0,
@@ -280,190 +644,60 @@
      "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
-     "$text": "{not json\n"
-    },
-    "vcs.json": {
-     "vcs": "git",
-     "recorded_at": "<TS>"
-    }
-   },
-   "legacy": {
-    "rc": 1,
-    "stdout": "",
-    "stderr": "json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-    "stderr_compare": "last_line"
-   }
-  },
-  {
-   "cmd": [
-    "post",
-    "--role",
-    "codex",
-    "--kind",
-    "NOTE",
-    "--body",
-    "x"
-   ],
-   "rc": 1,
-   "stdout": "",
-   "stderr": "corrupt mailbox: sessions/<SID>/session.json is not valid JSON (Expecting property name enclosed in double quotes); refusing to continue [anchor=<REPO> source=flag]\n",
-   "state": {
-    "active.json": {
      "session_id": "<SID>",
-     "driver": "claude",
-     "status": "active",
-     "updated_at": "<TS>"
-    },
-    "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
-    },
-    "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
-    },
-    "sessions/<SID>/health/claude.json": {
-     "role": "claude",
-     "status": "ready",
-     "generation": 1,
-     "updated_at": "<TS>",
-     "reason": null,
-     "resume_at": null
-    },
-    "sessions/<SID>/health/codex.json": {
-     "role": "codex",
-     "status": "ready",
-     "generation": 2,
-     "updated_at": "<TS>",
-     "reason": null,
-     "resume_at": null
-    },
-    "sessions/<SID>/journal/codex.jsonl": [
-     {
-      "seq": 1,
-      "at": "<TS>",
-      "role": "codex",
-      "kind": "HELLO",
-      "work_unit": "fixture-task",
-      "unit_id": "1-<U>",
-      "expect_reply": false,
-      "body": "joined; navigator ready",
-      "protocol": "1.1"
-     }
-    ],
-    "sessions/<SID>/latest/codex.json": {
-     "seq": 1,
-     "at": "<TS>",
-     "role": "codex",
-     "kind": "HELLO",
+     "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
-     "expect_reply": false,
-     "body": "joined; navigator ready",
-     "protocol": "1.1"
-    },
-    "sessions/<SID>/session.json": {
-     "$text": "{not json\n"
-    },
-    "vcs.json": {
-     "vcs": "git",
-     "recorded_at": "<TS>"
-    }
-   },
-   "legacy": {
-    "rc": 1,
-    "stdout": "",
-    "stderr": "json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-    "stderr_compare": "last_line"
-   }
-  },
-  {
-   "cmd": [
-    "start",
-    "--role",
-    "claude",
-    "--task",
-    "another"
-   ],
-   "rc": 1,
-   "stdout": "",
-   "stderr": "corrupt mailbox: sessions/<SID>/session.json is not valid JSON (Expecting property name enclosed in double quotes); refusing to continue [anchor=<REPO> source=flag]\n",
-   "state": {
-    "active.json": {
-     "session_id": "<SID>",
      "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
      "status": "active",
-     "updated_at": "<TS>"
-    },
-    "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
-    },
-    "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
-    },
-    "sessions/<SID>/health/claude.json": {
-     "role": "claude",
-     "status": "ready",
-     "generation": 1,
+     "phase": "implement",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.1",
+     "created_at": "<TS>",
      "updated_at": "<TS>",
-     "reason": null,
-     "resume_at": null
-    },
-    "sessions/<SID>/health/codex.json": {
-     "role": "codex",
-     "status": "ready",
-     "generation": 2,
-     "updated_at": "<TS>",
-     "reason": null,
-     "resume_at": null
-    },
-    "sessions/<SID>/journal/codex.jsonl": [
-     {
-      "seq": 1,
-      "at": "<TS>",
-      "role": "codex",
-      "kind": "HELLO",
-      "work_unit": "fixture-task",
-      "unit_id": "1-<U>",
-      "expect_reply": false,
-      "body": "joined; navigator ready",
-      "protocol": "1.1"
+     "park_reason": "lunch",
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "parked",
+       "role": "claude",
+       "actor": "human"
+      },
+      {
+       "at": "<TS>",
+       "event": "resumed",
+       "role": "claude",
+       "actor": "human"
+      }
+     ],
+     "verdict_floor": {
+      "claude": 0,
+      "codex": 1
      }
-    ],
-    "sessions/<SID>/latest/codex.json": {
-     "seq": 1,
-     "at": "<TS>",
-     "role": "codex",
-     "kind": "HELLO",
-     "work_unit": "fixture-task",
-     "unit_id": "1-<U>",
-     "expect_reply": false,
-     "body": "joined; navigator ready",
-     "protocol": "1.1"
-    },
-    "sessions/<SID>/session.json": {
-     "$text": "{not json\n"
     },
     "vcs.json": {
      "vcs": "git",
      "recorded_at": "<TS>"
     }
-   },
-   "legacy": {
-    "rc": 1,
-    "stdout": "",
-    "stderr": "json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-    "stderr_compare": "last_line"
    }
   }
  ],
@@ -478,7 +712,11 @@
    "peer_seq": 0,
    "peer_health_generation": 0,
    "resume_seen": null,
-   "stale_wait_seq": null
+   "stale_wait_seq": null,
+   "delivered_counts": {
+    "1": 1
+   },
+   "delivered_seq": 1
   },
   "sessions/<SID>/cursor/codex.json": {
    "peer_seq": 0,
@@ -527,12 +765,64 @@
    "protocol": "1.1"
   },
   "sessions/<SID>/session.json": {
-   "$text": "{not json\n"
+   "session_id": "<SID>",
+   "task": "fixture task",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "driver": "claude",
+   "navigator": "codex",
+   "owner": "claude",
+   "ownership_epoch": 1,
+   "status": "active",
+   "phase": "implement",
+   "waiting": null,
+   "pause": null,
+   "handoff": null,
+   "vcs": "git",
+   "base_head": "<SHA>",
+   "base_status": [],
+   "companions": [],
+   "absent_companions": [],
+   "caps": {
+    "claude": [
+     "ack"
+    ],
+    "codex": [
+     "ack"
+    ]
+   },
+   "delivery": "ack",
+   "protocol": "1.1",
+   "created_at": "<TS>",
+   "updated_at": "<TS>",
+   "park_reason": "lunch",
+   "events": [
+    {
+     "at": "<TS>",
+     "event": "parked",
+     "role": "claude",
+     "actor": "human"
+    },
+    {
+     "at": "<TS>",
+     "event": "resumed",
+     "role": "claude",
+     "actor": "human"
+    }
+   ],
+   "verdict_floor": {
+    "claude": 0,
+    "codex": 1
+   }
   },
   "vcs.json": {
    "vcs": "git",
    "recorded_at": "<TS>"
   }
  },
- "legacy_build": "1316f38:pair.py"
+ "provenance": {
+  "build": "92b142067941+dirty:pair.py",
+  "sha12": "8461b66f0533",
+  "note": "captured from the reference and reviewed; never regenerate with a build under test"
+ }
 }

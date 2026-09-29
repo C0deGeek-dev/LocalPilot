@@ -88,7 +88,7 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -154,7 +154,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -166,7 +166,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -196,7 +196,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -271,7 +271,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -332,7 +332,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -404,7 +404,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -465,7 +465,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -538,7 +538,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -599,7 +599,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -666,7 +666,7 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "joined; navigator ready",
-    "protocol": "1.0"
+    "protocol": "1.1"
    },
    {
     "seq": 2,
@@ -727,7 +727,7 @@
     ]
    },
    "delivery": "ack",
-   "protocol": "1.0",
+   "protocol": "1.1",
    "created_at": "<TS>",
    "updated_at": "<TS>"
   },

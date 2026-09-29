@@ -46,6 +46,9 @@ PLACED_PATH = re.compile(r"(<(?:REPO|COMP-PARENT|COMP:[a-z][a-z0-9-]*)>)(\\[^\s;
 # normalised: they are content-derived and exact.
 _COMPANIONS: list = []
 HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
+# A handoff offer's id (spec U-6, 1.1): drawn at random per offer.
+OFFER_ID = re.compile(r"^[0-9a-f]{16}$")
+OFFER_IN_TEXT = re.compile(r"\boffer=[0-9a-f]{16}\b")
 # The impls key for steps that name no role (status, transcript): in
 # participant mode they run on the implementation under test.
 OBSERVER = "<observer>"
@@ -53,8 +56,8 @@ OBSERVER = "<observer>"
 # "Conformance"). Everything else (start, park, resume, purge, verify-request)
 # stays with the reference.
 PARTICIPANT_OPS = frozenset({"join", "post", "watch", "peek", "ack", "status", "transcript", "health",
-                             "handoff-offer", "handoff-accept", "next-unit", "complete", "guard-write",
-                             "endpoint", "accept", "record-push"})
+                             "handoff-offer", "handoff-accept", "handoff-decline", "handoff-withdraw",
+                             "next-unit", "complete", "guard-write", "endpoint", "accept", "record-push"})
 MANDATORY_FILE = HERE / "participant.json"
 # Environment a step may set, from a value an earlier step printed. Nothing
 # else: in particular never PAIR_REPO.
@@ -84,6 +87,7 @@ def normalise_text(text: str, root: Path) -> str:
     text = UNIT_SUFFIX.sub(r"\1-<U>", text)
     text = HEX64.sub("<HEX64>", text)
     text = SHA.sub("<SHA>", text)
+    text = OFFER_IN_TEXT.sub("offer=<OFFER>", text)
     return text.replace("\r\n", "\n")
 
 
@@ -94,6 +98,8 @@ def normalise_value(v, root: Path):
         return [normalise_value(x, root) for x in v]
     if isinstance(v, dict):
         d = {normalise_text(k, root): normalise_value(x, root) for k, x in v.items()}
+        if isinstance(d.get("offer_id"), str) and OFFER_ID.match(v.get("offer_id", "")):
+            d["offer_id"] = "<OFFER>"
         # A listener's transport is the platform's (`pipe` on Windows, `unix`
         # elsewhere); one capture holds on every OS.
         if str(d.get("address", "")).startswith("<LISTEN:") and d.get("transport") == LISTEN_TRANSPORT:

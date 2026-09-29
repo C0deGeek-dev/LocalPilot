@@ -136,7 +136,7 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>",
      "schema": 2,
@@ -267,7 +267,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.0",
+      "protocol": "1.1",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -293,7 +293,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "msg_id": "codex:1",
      "to": [
       "claude",
@@ -334,7 +334,7 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>",
      "schema": 2,
@@ -465,7 +465,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.0",
+      "protocol": "1.1",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -492,7 +492,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.0",
+      "protocol": "1.1",
       "msg_id": "localpilot:1",
       "to": [
        "claude",
@@ -518,7 +518,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "msg_id": "codex:1",
      "to": [
       "claude",
@@ -543,7 +543,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "msg_id": "localpilot:1",
      "to": [
       "claude",
@@ -587,7 +587,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>",
      "schema": 2,

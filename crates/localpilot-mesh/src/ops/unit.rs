@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
-use super::post::PostArgs;
+use super::post::{Expect, PostArgs};
 use super::read::num_at;
 use super::{
     authority, participants, refused, schema, seq_of, settle_status, sid, str_of, strings,
@@ -21,6 +21,82 @@ use crate::tree;
 const DECISION_KINDS: &[&str] = &["VERDICT", "STOP", "ESCALATE", "CHALLENGE"];
 /// Decisions no thread scopes away.
 const GLOBAL_DECISIONS: &[&str] = &["STOP", "ESCALATE"];
+
+/// How a pending handoff ends without being accepted.
+#[derive(Clone, Copy)]
+enum End {
+    Declined,
+    Withdrawn,
+}
+
+impl End {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Declined => "declined",
+            Self::Withdrawn => "withdrawn",
+        }
+    }
+    const fn event(self) -> &'static str {
+        match self {
+            Self::Declined => "handoff_declined",
+            Self::Withdrawn => "handoff_withdrawn",
+        }
+    }
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Declined => "HANDOFF_DECLINED",
+            Self::Withdrawn => "HANDOFF_WITHDRAWN",
+        }
+    }
+    const fn verb(self) -> &'static str {
+        match self {
+            Self::Declined => "decline",
+            Self::Withdrawn => "withdraw",
+        }
+    }
+}
+
+/// 16 random lowercase hex digits (spec U-6). A v4 UUID keeps its version
+/// and variant bits in bytes 6 and 8; its bytes 0..6 and 9..11 are all
+/// random, so those eight are the id.
+fn new_offer_id() -> String {
+    use std::fmt::Write as _;
+    let b = uuid::Uuid::new_v4().into_bytes();
+    b[..6]
+        .iter()
+        .chain(&b[9..11])
+        .fold(String::new(), |mut out, x| {
+            let _ = write!(out, "{x:02x}");
+            out
+        })
+}
+
+/// Optional record keys for [`PostArgs::extra`]; a null value is not written.
+fn extra<const N: usize>(kv: [(&str, Value); N]) -> Obj {
+    kv.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
+}
+
+/// Append a session event (spec S-8) to `s`, which the caller saves in the
+/// same rewrite as the transition it records.
+fn add_event(s: &mut Obj, event: &str, role: &str, actor: Option<&str>, handoff: Option<Value>) {
+    let mut e = Obj::new();
+    e.insert("at".into(), json!(utc_now()));
+    e.insert("event".into(), json!(event));
+    e.insert("role".into(), json!(role));
+    if let Some(a) = actor {
+        e.insert("actor".into(), json!(a));
+    }
+    if let Some(h) = handoff {
+        e.insert("handoff".into(), h);
+    }
+    let mut all = s
+        .get("events")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    all.push(Value::Object(e));
+    s.insert("events".into(), Value::Array(all));
+}
 
 /// The state a handoff or a unit boundary is pinned to.
 struct Snap {
@@ -474,7 +550,7 @@ impl Mesh {
     /// Not the owner; an ambiguous or invalid `to`; a handoff that would leave
     /// no required reviewer.
     pub fn handoff_offer(&self, role: &str, to: Option<&str>) -> Result<Out, MeshError> {
-        let (epoch, to, head, dirty, multi, sid_) = {
+        let (epoch, to, head, dirty, multi, sid_, offer_id) = {
             let _g = self.state_lock()?;
             let mut s = self.require(role, false)?;
             if str_of(&s, "owner") != Some(role) {
@@ -505,10 +581,13 @@ impl Mesh {
             let q = snap(self.repo(), self.anchor_vcs(&s)?)?;
             let cq = Self::companion_pins(&s)?;
             let epoch = num_at(&s, "ownership_epoch") + 1;
+            // Random per offer (spec U-6): a repeated offer at the same epoch
+            // is a different offer, and its post can be told apart.
+            let offer_id = new_offer_id();
             s.insert(
                 "handoff".into(),
                 json!({"epoch": epoch, "from": role, "to": to, "head": q.head, "status": q.status,
-                       "companions": cq, "offered_at": utc_now()}),
+                       "companions": cq, "offered_at": utc_now(), "offer_id": offer_id}),
             );
             s.insert("updated_at".into(), json!(utc_now()));
             self.save(&s)?;
@@ -519,6 +598,7 @@ impl Mesh {
                 q.status.len(),
                 others.len() > 1,
                 sid(&s).to_owned(),
+                offer_id,
             )
         };
         let offer = PostArgs {
@@ -526,6 +606,7 @@ impl Mesh {
             body: format!("epoch={epoch} to={to} head={head} dirty={dirty}"),
             expect_reply: true,
             to: multi.then(|| to.clone()),
+            extra: extra([("offer_id", json!(offer_id))]),
             ..PostArgs::default()
         };
         self.post_message(role, &offer, Some(&sid_), true, None)?;
@@ -537,6 +618,14 @@ impl Mesh {
     /// # Errors
     /// No offer to this role; a tree that moved since the offer.
     pub fn handoff_accept(&self, role: &str) -> Result<Out, MeshError> {
+        self.handoff_accept_as(role, None)
+    }
+
+    /// `handoff-accept`, carrying an actor claim (spec M-8) on its record.
+    ///
+    /// # Errors
+    /// As [`Mesh::handoff_accept`].
+    pub fn handoff_accept_as(&self, role: &str, actor: Option<&str>) -> Result<Out, MeshError> {
         let (epoch, head, multi, sid_) = {
             let _g = self.state_lock()?;
             let mut s = self.require(role, false)?;
@@ -612,12 +701,144 @@ impl Mesh {
             kind: "HANDOFF_ACCEPT".into(),
             body: format!("epoch={epoch} head={head}"),
             broadcast: multi,
+            extra: extra([("actor", json!(actor))]),
             ..PostArgs::default()
         };
         self.post_message(role, &accept, Some(&sid_), true, None)?;
         Ok(Out::ok(format!(
             "HANDOFF_ACCEPTED epoch={epoch} owner={role}\n"
         )))
+    }
+
+    /// `handoff-decline` (spec U-6a): the recipient refuses a pending
+    /// handoff. Ownership is unchanged.
+    ///
+    /// # Errors
+    /// No pending handoff; a role the handoff was not offered to.
+    pub fn handoff_decline(&self, role: &str, actor: Option<&str>) -> Result<Out, MeshError> {
+        self.handoff_end(role, End::Declined, actor)
+    }
+
+    /// `handoff-withdraw` (spec U-6b): the offerer takes a pending handoff
+    /// back. Ownership is unchanged.
+    ///
+    /// # Errors
+    /// No pending handoff; a role that did not offer it.
+    pub fn handoff_withdraw(&self, role: &str, actor: Option<&str>) -> Result<Out, MeshError> {
+        self.handoff_end(role, End::Withdrawn, actor)
+    }
+
+    /// Clear a pending handoff and record the event in one rewrite, then
+    /// post the note. From that rewrite on nothing is undone: a note that is
+    /// not appended, for any reason, is exit 7, never a retryable failure.
+    fn handoff_end(&self, role: &str, how: End, actor: Option<&str>) -> Result<Out, MeshError> {
+        let (ident, multi) = {
+            let _g = self.state_lock()?;
+            let mut s = self.require(role, true)?;
+            let o = s
+                .get("handoff")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            if o.is_empty() {
+                return Err(refused("NO_PENDING_HANDOFF: there is no pending handoff"));
+            }
+            let (field, code, verb) = match how {
+                End::Declined => ("to", "NOT_THE_HANDOFF_RECIPIENT", "decline"),
+                End::Withdrawn => ("from", "NOT_THE_HANDOFF_OFFERER", "withdraw"),
+            };
+            if str_of(&o, field) != Some(role) {
+                return Err(refused(format!(
+                    "{code}: only {} may {verb} this handoff",
+                    str_of(&o, field).unwrap_or("None")
+                )));
+            }
+            let pick = |k: &str| o.get(k).cloned().unwrap_or(Value::Null);
+            let ident = json!({
+                "session_id": sid(&s), "unit_id": s.get("unit_id").cloned().unwrap_or(Value::Null),
+                "epoch": pick("epoch"), "from": pick("from"), "to": pick("to"),
+                "offer_id": pick("offer_id"),
+            });
+            s.insert("handoff".into(), Value::Null);
+            add_event(&mut s, how.event(), role, actor, Some(ident.clone()));
+            s.insert("updated_at".into(), json!(utc_now()));
+            self.save(&s)?;
+            (ident, participants(&s).len() > 2)
+        };
+        let ident = ident.as_object().cloned().unwrap_or_default();
+        let text = |k: &str| match ident.get(k) {
+            Some(Value::String(v)) => v.clone(),
+            Some(Value::Null) | None => "None".to_owned(),
+            Some(v) => v.to_string(),
+        };
+        let word = how.word();
+        let oid = str_of(&ident, "offer_id").map(str::to_owned);
+        let suffix = match &oid {
+            None => " (offer post not checked)",
+            Some(id) => {
+                let from = str_of(&ident, "from").unwrap_or_default();
+                match jsonl::records(&self.mb.journal(&text("session_id"), from)) {
+                    Ok(v)
+                        if v.iter().any(|m| {
+                            str_of(m, "kind") == Some("HANDOFF_OFFER")
+                                && str_of(m, "offer_id") == Some(id)
+                        }) =>
+                    {
+                        ""
+                    }
+                    Ok(_) => " (offer post missing)",
+                    // An unreadable journal says nothing either way.
+                    Err(_) => " (offer post not checked)",
+                }
+            }
+        };
+        let offer = oid.as_deref().unwrap_or("-");
+        let body = format!(
+            "{word} epoch={} from={} to={} offer={offer}{suffix}",
+            text("epoch"),
+            text("from"),
+            text("to")
+        );
+        let other = text(match how {
+            End::Declined => "from",
+            End::Withdrawn => "to",
+        });
+        let note = PostArgs {
+            kind: "NOTE".into(),
+            body,
+            to: multi.then_some(other),
+            extra: extra([
+                (
+                    "handoff",
+                    json!({ how.key(): Value::Object(ident.clone()) }),
+                ),
+                ("actor", json!(actor)),
+            ]),
+            ..PostArgs::default()
+        };
+        // Pinned to the session and unit the handoff belonged to: one that
+        // moved since the rewrite never receives this note.
+        let pin = Expect {
+            session_id: text("session_id"),
+            unit_id: str_of(&ident, "unit_id").map(str::to_owned),
+            reviewer: false,
+            owner: false,
+        };
+        let epoch = text("epoch");
+        match self.post_message(role, &note, Some(&pin.session_id), true, Some(&pin)) {
+            Ok(_) => Ok(Out::ok(format!("{word} epoch={epoch} offer={offer}\n"))),
+            // Appended: only its bookkeeping failed (spec M-7).
+            Err(e @ MeshError::PostedIncomplete { .. }) => Err(e),
+            Err(_) => Ok(Out {
+                code: 7,
+                stdout: String::new(),
+                stderr: format!(
+                    "{word}_NOTE_MISSING epoch={epoch}: the handoff is {}; its note did not post. Do not {} it again.\n",
+                    how.key(),
+                    how.verb()
+                ),
+            }),
+        }
     }
 
     /// `complete`: the owner closes the session on its reviewers' agreement.
@@ -857,6 +1078,126 @@ mod tests {
                            "work_unit": "w", "unit_id": "1-abc", "expect_reply": false, "body": "AGREE round=1"});
         std::fs::write(sd.join("journal").join("codex.jsonl"), format!("{agree}\n")).unwrap();
         sd.join("session.json")
+    }
+
+    /// A session with a handoff offered to codex, carrying `offer_id`.
+    fn offered(dir: &Path, offer_id: &str) -> PathBuf {
+        let rec = session(dir, true);
+        let mut s: Obj = serde_json::from_slice(&std::fs::read(&rec).unwrap()).unwrap();
+        s["handoff"]["offer_id"] = json!(offer_id);
+        std::fs::write(&rec, Value::Object(s).to_string()).unwrap();
+        rec
+    }
+
+    fn record(rec: &Path) -> Obj {
+        serde_json::from_slice(&std::fs::read(rec).unwrap()).unwrap()
+    }
+
+    fn journal(rec: &Path, role: &str) -> Vec<Obj> {
+        jsonl::records(&rec.with_file_name("journal").join(format!("{role}.jsonl"))).unwrap()
+    }
+
+    #[test]
+    fn a_decline_whose_note_cannot_be_written_is_exit_7_and_never_applies_twice() {
+        // The note's journal cannot be appended to (a directory stands in its
+        // place): the decline stands, its event is recorded once, exit 7.
+        let dir = tempfile::tempdir().unwrap();
+        let rec = offered(dir.path(), "0123456789abcdef");
+        let jd = rec.with_file_name("journal");
+        std::fs::rename(jd.join("codex.jsonl"), jd.join("codex.moved")).unwrap();
+        std::fs::create_dir(jd.join("codex.jsonl")).unwrap();
+        let mesh = Mesh::at(dir.path(), "flag");
+        let out = mesh.handoff_decline("codex", Some("human")).unwrap();
+        assert_eq!(out.code, 7, "{out:?}");
+        assert!(out.stderr.starts_with(
+            "HANDOFF_DECLINED_NOTE_MISSING epoch=1: the handoff is declined; its note did not post. Do not decline it again."
+        ));
+        let s = record(&rec);
+        assert!(s["handoff"].is_null());
+        assert_eq!(s["owner"], json!("claude"));
+        let events = s["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], json!("handoff_declined"));
+        assert_eq!(events[0]["actor"], json!("human"));
+        assert_eq!(events[0]["handoff"]["offer_id"], json!("0123456789abcdef"));
+        let again = mesh.handoff_decline("codex", None);
+        assert!(
+            matches!(again, Err(MeshError::Refused(ref m)) if m.starts_with("NO_PENDING_HANDOFF")),
+            "{again:?}"
+        );
+        assert_eq!(record(&rec)["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_offerer_journal_that_cannot_be_read_is_not_checked() {
+        // Unreadable, or holding a record this build refuses: either way it
+        // says nothing about the offer post, and the decline still succeeds.
+        for broken in ["dir", "unsupported"] {
+            let dir = tempfile::tempdir().unwrap();
+            let rec = offered(dir.path(), "0123456789abcdef");
+            let j = rec.with_file_name("journal").join("claude.jsonl");
+            if broken == "dir" {
+                std::fs::create_dir(&j).unwrap();
+            } else {
+                let bad = json!({"seq": 1, "role": "claude", "kind": "NOTE", "body": "x", "protocol": "9.0"});
+                std::fs::write(&j, format!("{bad}\n")).unwrap();
+            }
+            let out = Mesh::at(dir.path(), "flag")
+                .handoff_decline("codex", None)
+                .unwrap();
+            assert_eq!(out.code, 0, "{broken}: {out:?}");
+            let note = journal(&rec, "codex").pop().unwrap();
+            assert_eq!(note["kind"], json!("NOTE"));
+            assert_eq!(
+                note["body"],
+                json!("HANDOFF_DECLINED epoch=1 from=claude to=codex offer=0123456789abcdef (offer post not checked)"),
+                "{broken}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_offer_id_is_sixteen_random_hex_digits() {
+        // No position is fixed: a UUID's version digit must not leak in.
+        let ids: Vec<String> = (0..64).map(|_| new_offer_id()).collect();
+        for id in &ids {
+            assert_eq!(id.len(), 16, "{id}");
+            assert!(
+                id.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+                "{id}"
+            );
+        }
+        for i in 0..16 {
+            let first = ids[0].as_bytes()[i];
+            assert!(
+                ids.iter().any(|id| id.as_bytes()[i] != first),
+                "position {i} is the same in 64 ids"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pinned_note_is_refused_in_a_unit_that_moved() {
+        // The pin handoff_end posts under: a unit that moved since the
+        // decline refuses the note before anything is appended.
+        let dir = tempfile::tempdir().unwrap();
+        let rec = session(dir.path(), false);
+        let before = journal(&rec, "codex").len();
+        let pin = Expect {
+            session_id: SID.into(),
+            unit_id: Some("0-old".into()),
+            reviewer: false,
+            owner: false,
+        };
+        let note = PostArgs {
+            kind: "NOTE".into(),
+            body: "x".into(),
+            ..PostArgs::default()
+        };
+        let r =
+            Mesh::at(dir.path(), "flag").post_message("codex", &note, Some(SID), true, Some(&pin));
+        assert!(matches!(r, Err(MeshError::Refused(_))), "{r:?}");
+        assert_eq!(journal(&rec, "codex").len(), before);
     }
 
     fn unseen(r: Result<Out, MeshError>) -> bool {

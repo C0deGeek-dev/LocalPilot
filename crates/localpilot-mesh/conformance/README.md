@@ -127,7 +127,9 @@ other 64-hex values normalise to `<HEX64>`.
 
 Only what differs between two runs of the same build is replaced: the fixture
 root (`<REPO>`), session ids (`<SID>`), times (`<TS>`), unit-id suffixes
-(`1-<U>`, and `#1` where shown), and commit ids (`<SHA>`). The base commit uses
+(`1-<U>`, and `#1` where shown), commit ids (`<SHA>`), and handoff offer ids
+(`offer_id` values and `offer=` in note text become `<OFFER>`; they are drawn
+at random per offer, spec U-6). The base commit uses
 a fixed date, so it is the same on every run. Line endings compare as `\n`.
 In the STATE layer the session the pointer names is `<SID>`; any other
 session in the mailbox is `<SID-2>`, `<SID-3>`, ordered by its `created_at`

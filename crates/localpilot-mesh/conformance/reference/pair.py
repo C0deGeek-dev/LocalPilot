@@ -14,6 +14,9 @@ for _s in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError, OSError): pass
 
 ROLES=("claude","codex")
+# The only defined value of the actor claim (M-8): self-asserted by whoever ran
+# the command, never an identity and never authority.
+ACTORS={"human"}
 KINDS={"HELLO","PLAN","CHALLENGE","DESIGN_AGREED","CHECKPOINT","STOP","STEER","NOTE","QUESTION","ANSWER","REVIEW_REQUEST","VERDICT","HANDOFF_OFFER","HANDOFF_ACCEPT","ESCALATE","COMPLETE"}
 HEALTH={"not_joined","ready","working","waiting","rate_limited","paused","offline"}
 PAIR_DIR=".pair-programming"
@@ -38,7 +41,7 @@ CAPS=["ack"]
 # The mailbox protocol this build speaks (references/spec.md), and the optional
 # features it implements. A record may name features it `requires`; an unknown
 # one, or another major version, is refused rather than guessed at.
-PROTOCOL="1.0"
+PROTOCOL="1.1"
 FEATURES=frozenset()
 # Identities a session may be made of, and the historic pair. A session of
 # exactly the historic pair keeps schema 1 for its whole life: the legacy file
@@ -996,6 +999,8 @@ class Lock:
         try: self.p.unlink()
         except FileNotFoundError: pass
 
+UNPINNED=object()   # MB.post: no unit pin (a unit_id of None is still a pin)
+
 class MB:
     def __init__(self,repo): self.repo=repo; self.base=repo/PAIR_DIR; self.lock=self.base/".state.lock"
     def pointer(self):
@@ -1121,10 +1126,12 @@ class MB:
         s=s or require(self,role,allow_paused=True); p=self.health(s,role); old=readj(p,{}) or {}
         changed=any((old.get("status")!=status,old.get("reason")!=reason,old.get("resume_at")!=resume))
         obj={"role":role,"status":status,"generation":int(old.get("generation",0))+(1 if changed or not old else 0),"updated_at":now(),"reason":reason,"resume_at":resume}; atomic(p,obj); return obj
-    def post(self,role,kind,body,expect=False,expect_sid=None,to=None,reply_to=None,broadcast=False,internal=False,forward=False):
+    def post(self,role,kind,body,expect=False,expect_sid=None,to=None,reply_to=None,broadcast=False,internal=False,forward=False,extra=None,expect_unit=UNPINNED):
         s=require(self,role,allow_paused=True)
         if expect_sid and s["session_id"]!=expect_sid:
             raise SystemExit(f"session changed under this command (expected {expect_sid}, active {s['session_id']})")
+        if expect_unit is not UNPINNED and s.get("unit_id")!=expect_unit:
+            raise SystemExit(f"unit changed under this command (expected {expect_unit}, active {s.get('unit_id')})")
         # Checked on THIS snapshot, the one that chooses the journal. A check made
         # by the caller on an earlier read could validate one session and let the
         # append land in a replacement session with different participants.
@@ -1184,6 +1191,8 @@ class MB:
                 m.update({"msg_id":mid,"to":fields["to"],"reply_to":fields["reply_to"],"broadcast":fields["broadcast"],
                           "thread_id":fields["thread_id"] or mid,"route_trace":fields["route_trace"],"ttl":fields["ttl"],
                           "forward":bool(fields.get("forward"))})
+            # Optional 1.1 keys, only when set: an older reader ignores them (V-1).
+            if extra: m.update({k:v for k,v in extra.items() if v is not None})
             with p.open("a",encoding="utf-8",newline="\n") as f: f.write(journal_record(m)); f.flush(); os.fsync(f.fileno())
             # In the journal now, so owed its wakes even if a later step fails
             # (P-3). Only queued: `push_all` dials once the command holds no lock.
@@ -2125,10 +2134,13 @@ def handoff_offer(a):
         # accepts a state, and a plan record that moved between offer and accept
         # is as much a changed state as a moved HEAD.
         q=snap(repo); cq=[{"name":c["name"],**snap(Path(c["root"]),c.get("vcs"))} for c in (s.get("companions") or [])]
-        ep=int(s["ownership_epoch"])+1; s["handoff"]={"epoch":ep,"from":a.role,"to":to,**q,"companions":cq,"offered_at":now()}; s["updated_at"]=now(); mb.save(s)
+        # offer_id (U-6, 1.1): an offer, a decline and a new offer in one unit
+        # share an epoch, so only this tells two offers apart.
+        ep=int(s["ownership_epoch"])+1; oid=secrets.token_hex(8)
+        s["handoff"]={"epoch":ep,"from":a.role,"to":to,"offer_id":oid,**q,"companions":cq,"offered_at":now()}; s["updated_at"]=now(); mb.save(s)
     multi=len(others)>1
     mb.post(a.role,"HANDOFF_OFFER",f"epoch={ep} to={to} head={q['head']} dirty={len(q['status'])}",True,
-            to=to if multi else None,internal=True); print(f"HANDOFF_OFFERED epoch={ep} to={to}"); return 0
+            to=to if multi else None,internal=True,extra={"offer_id":oid}); print(f"HANDOFF_OFFERED epoch={ep} to={to}"); return 0
 def handoff_accept(a):
     repo=root(a.repo); mb=MB(repo)
     with Lock(mb.lock):
@@ -2155,7 +2167,69 @@ def handoff_accept(a):
                 fl=dict(s.get("verdict_floor") or {}); fl[old]=int((readj(mb.latest(s,old),{}) or {}).get("seq",0)); s["verdict_floor"]=fl
         s["owner"]=a.role; s["ownership_epoch"]=o["epoch"]; s["handoff"]=None; s["waiting"]=None; settle_status(s); s["updated_at"]=now(); mb.save(s)
     multi=len(participants(s))>2
-    mb.post(a.role,"HANDOFF_ACCEPT",f"epoch={o['epoch']} head={o['head']}",broadcast=multi,internal=True); print(f"HANDOFF_ACCEPTED epoch={o['epoch']} owner={a.role}"); return 0
+    mb.post(a.role,"HANDOFF_ACCEPT",f"epoch={o['epoch']} head={o['head']}",broadcast=multi,internal=True,
+            extra={"actor":getattr(a,"actor",None)}); print(f"HANDOFF_ACCEPTED epoch={o['epoch']} owner={a.role}"); return 0
+
+def add_event(s,event,role,actor=None,handoff=None):
+    """Append a session event (S-8) to the record `s`, which the caller then
+    saves in the same rewrite as the transition it records. Append-only."""
+    e={"at":now(),"event":event,"role":role}
+    if actor: e["actor"]=actor
+    if handoff is not None: e["handoff"]=handoff
+    s["events"]=list(s.get("events") or [])+[e]
+
+def handoff_end(a,how):
+    """handoff-decline (U-6a) and handoff-withdraw (U-6b): clear a pending
+    handoff, recording the event in the same rewrite, then post the note."""
+    mb=MB(root(a.repo)); actor=getattr(a,"actor",None)
+    with Lock(mb.lock):
+        s=require(mb,a.role,allow_paused=True); o=s.get("handoff")
+        if not o: raise SystemExit("NO_PENDING_HANDOFF: there is no pending handoff")
+        if how=="declined" and o.get("to")!=a.role:
+            raise SystemExit(f"NOT_THE_HANDOFF_RECIPIENT: only {o.get('to')} may decline this handoff")
+        if how=="withdrawn" and o.get("from")!=a.role:
+            raise SystemExit(f"NOT_THE_HANDOFF_OFFERER: only {o.get('from')} may withdraw this handoff")
+        ident={"session_id":s["session_id"],"unit_id":s.get("unit_id"),"epoch":o.get("epoch"),
+               "from":o.get("from"),"to":o.get("to"),"offer_id":o.get("offer_id")}
+        s["handoff"]=None; add_event(s,f"handoff_{how}",a.role,actor,ident); s["updated_at"]=now(); mb.save(s)
+    # The durable point is behind us: everything below reports, never undoes,
+    # and nothing below may escape as an ordinary failure (U-6a).
+    word={"declined":"HANDOFF_DECLINED","withdrawn":"HANDOFF_WITHDRAWN"}[how]
+    oid=ident["offer_id"]
+    if oid is None: suffix=" (offer post not checked)"
+    else:
+        try:
+            j=mb.journal(s,ident["from"])
+            offers=[m for m in journal_records(j) if m.get("kind")=="HANDOFF_OFFER" and m.get("offer_id")==oid] if j.exists() else []
+            suffix="" if offers else " (offer post missing)"
+        except (Exception,SystemExit):
+            # An offerer's journal that cannot be read, or holds a record this
+            # build refuses (check_protocol exits), says nothing either way.
+            suffix=" (offer post not checked)"
+    body=f"{word} epoch={ident['epoch']} from={ident['from']} to={ident['to']} offer={oid or '-'}{suffix}"
+    other=ident["from"] if how=="declined" else ident["to"]
+    multi=len(participants(s))>2
+    try:
+        # Pinned to the session and unit the handoff belonged to: a session or
+        # unit that moved since the transition never receives this note.
+        mb.post(a.role,"NOTE",body,to=other if multi else None,internal=True,
+                expect_sid=ident["session_id"],expect_unit=ident["unit_id"],
+                extra={"handoff":{how:ident},"actor":actor})
+    except SystemExit as e:
+        if e.code==6: raise          # the note is appended (M-7); only its bookkeeping is not
+        note_missing(word,how,ident)
+    except Exception:
+        # Anything before the append (MB.post maps a failure after it to exit 6).
+        note_missing(word,how,ident)
+    print(f"{word} epoch={ident['epoch']} offer={oid or '-'}"); return 0
+
+def note_missing(word,how,ident):
+    print(f"{word}_NOTE_MISSING epoch={ident['epoch']}: the handoff is {how}; its note did not post. "
+          f"Do not {'decline' if how=='declined' else 'withdraw'} it again.",file=sys.stderr)
+    raise SystemExit(7)
+
+def handoff_decline(a): return handoff_end(a,"declined")
+def handoff_withdraw(a): return handoff_end(a,"withdrawn")
 
 def phase(a):
     mb=MB(root(a.repo))
@@ -2901,6 +2975,7 @@ def park(a):
         s["parked_from"]=s["status"]; s["status"]="parked"; s["parked_at"]=now()
         s["parked_tree"]=snap(root(a.repo)); s["park_reason"]=getattr(a,"reason",None)
         s["parked_companions"]={c["name"]:snap(Path(c["root"]),c.get("vcs")) for c in (s.get("companions") or [])}
+        add_event(s,"parked",a.role,getattr(a,"actor",None))
         s["updated_at"]=now(); mb.save(s)
     print(f"PARKED session={s['session_id']} work={s['work_unit']} from={s['parked_from']}"); return 0
 
@@ -2952,6 +3027,7 @@ def resume(a):
                 wm=waiting_map(s)
                 for e in wm.values(): e["since"]=now()
                 s["waiting"]=wm
+        add_event(s,"resumed",a.role,getattr(a,"actor",None))
         s["updated_at"]=now(); mb.save(s)
     print(f"RESUMED session={s['session_id']} status={s['status']} work={s['work_unit']}")
     if len(participants(s))>2:
@@ -2991,7 +3067,7 @@ def cmd_post(a):
     if not b.strip(): raise SystemExit("refusing to post an empty message; a body that failed to render is worse than no post, because the peer treats it as a real turn")
     if a.ack_through is not None:
         with Lock(mb.lock): apply_ack(mb,require(mb,a.role,allow_paused=True),a.role,a.ack_through)
-    m=mb.post(a.role,a.kind,b,a.expect_reply,to=a.to,reply_to=a.reply_to,broadcast=a.broadcast,forward=a.forward)
+    m=mb.post(a.role,a.kind,b,a.expect_reply,to=a.to,reply_to=a.reply_to,broadcast=a.broadcast,forward=a.forward,extra={"actor":getattr(a,"actor",None)})
     # stderr, so a successful post stays silent on stdout. Not an ack: a post
     # proves the model is active, not that it saw what some watcher printed.
     s=mb.active()
@@ -3070,6 +3146,7 @@ def parser():
     q.add_argument("--reply-to",help="the msg_id (<role>:<seq>) this answers; the reply goes to its author")
     q.add_argument("--broadcast",action="store_true",help="send to every participant (ESCALATE only)")
     q.add_argument("--forward",action="store_true",help="pass the --reply-to message on to --to; spends one forward edge")
+    q.add_argument("--actor",choices=sorted(ACTORS),help="claim who acted (self-asserted; never identity or authority)")
     q.set_defaults(fn=cmd_post)
     for n,b in (("watch",True),("peek",False)):
         q=rc(n); q.add_argument("--timeout",type=int,default=0); q.add_argument("--poll",type=float,default=1); q.add_argument("--stale-after",type=int,default=900)
@@ -3084,7 +3161,9 @@ def parser():
     q=rc("record-push"); q.add_argument("--msg-id",required=True); q.add_argument("--to",required=True); q.add_argument("--generation",type=int,required=True)
     q.add_argument("--outcome",choices=["sent","refused","failed","timeout"],required=True); q.set_defaults(fn=record_push)
     q=rc("handoff-offer"); q.add_argument("--to",help="the incoming owner; required with three participants"); q.set_defaults(fn=handoff_offer)
-    q=rc("handoff-accept"); q.set_defaults(fn=handoff_accept)
+    q=rc("handoff-accept"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=handoff_accept)
+    q=rc("handoff-decline"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=handoff_decline)
+    q=rc("handoff-withdraw"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=handoff_withdraw)
     q=rc("phase"); q.add_argument("--phase",choices=("huddle","implement","review","blocked","complete"),required=True); q.set_defaults(fn=phase)
     q=rc("verify-request"); q.add_argument("--criteria"); q.add_argument("--criteria-file"); q.add_argument("--check",action="append"); q.add_argument("--file",action="append"); q.add_argument("--round",default="1"); q.set_defaults(fn=verify_request)
     q=rc("next-unit"); q.add_argument("--task",dest="body"); q.add_argument("--task-file",dest="body_file"); q.add_argument("--work-unit")
@@ -3093,8 +3172,8 @@ def parser():
     q=rc("complete"); q.set_defaults(fn=complete)
     q=rc("abandon"); q.add_argument("--reason"); q.set_defaults(fn=abandon)
     q=rc("purge"); g=q.add_mutually_exclusive_group(); g.add_argument("--session"); g.add_argument("--all-closed",action="store_true"); q.add_argument("--apply",action="store_true"); q.set_defaults(fn=purge)
-    q=rc("park"); q.add_argument("--reason"); q.set_defaults(fn=park)
-    q=rc("resume"); q.add_argument("--session"); q.set_defaults(fn=resume)
+    q=rc("park"); q.add_argument("--reason"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=park)
+    q=rc("resume"); q.add_argument("--session"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=resume)
     q=sp.add_parser("transcript"); q.add_argument("--session"); q.set_defaults(fn=transcript)
     return p
 def select_anchor(a):

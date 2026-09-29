@@ -89,6 +89,9 @@ enum Op {
         broadcast: bool,
         #[arg(long)]
         forward: bool,
+        /// Who acted (self-asserted; never identity or authority).
+        #[arg(long, value_parser = ["human"])]
+        actor: Option<String>,
     },
     Watch(WatchOpts),
     Peek(WatchOpts),
@@ -128,6 +131,20 @@ enum Op {
     HandoffAccept {
         #[arg(long)]
         role: String,
+        #[arg(long, value_parser = ["human"])]
+        actor: Option<String>,
+    },
+    HandoffDecline {
+        #[arg(long)]
+        role: String,
+        #[arg(long, value_parser = ["human"])]
+        actor: Option<String>,
+    },
+    HandoffWithdraw {
+        #[arg(long)]
+        role: String,
+        #[arg(long, value_parser = ["human"])]
+        actor: Option<String>,
     },
     Complete {
         #[arg(long)]
@@ -353,6 +370,7 @@ fn dispatch(mesh: &Mesh, op: Op) -> Result<u8, MeshError> {
             reply_to,
             broadcast,
             forward,
+            actor,
         } => {
             let body = text_arg(body_file, body)?;
             let a = PostArgs {
@@ -364,6 +382,13 @@ fn dispatch(mesh: &Mesh, op: Op) -> Result<u8, MeshError> {
                 broadcast,
                 forward,
                 ack_through,
+                extra: actor
+                    .map(|v| {
+                        [("actor".to_owned(), serde_json::Value::String(v))]
+                            .into_iter()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             };
             mesh.post(&role, &a)?
         }
@@ -380,7 +405,9 @@ fn dispatch(mesh: &Mesh, op: Op) -> Result<u8, MeshError> {
         Op::Transcript { session } => mesh.transcript(session.as_deref())?,
         Op::GuardWrite { role, path } => mesh.guard_write(&role, path.as_deref())?,
         Op::HandoffOffer { role, to } => mesh.handoff_offer(&role, to.as_deref())?,
-        Op::HandoffAccept { role } => mesh.handoff_accept(&role)?,
+        Op::HandoffAccept { role, actor } => mesh.handoff_accept_as(&role, actor.as_deref())?,
+        Op::HandoffDecline { role, actor } => mesh.handoff_decline(&role, actor.as_deref())?,
+        Op::HandoffWithdraw { role, actor } => mesh.handoff_withdraw(&role, actor.as_deref())?,
         Op::Complete { role } => mesh.complete(&role)?,
         Op::Endpoint {
             role,

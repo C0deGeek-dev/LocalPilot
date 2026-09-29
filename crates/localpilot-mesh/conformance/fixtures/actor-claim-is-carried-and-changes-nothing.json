@@ -1,5 +1,5 @@
 {
- "id": "two-party-handoff",
+ "id": "actor-claim-is-carried-and-changes-nothing",
  "profiles": [
   "two-party"
  ],
@@ -9,11 +9,6 @@
  ],
  "setup": {
   "vcs": "git"
- },
- "provenance": {
-  "build": "92b142067941+dirty:pair.py",
-  "sha12": "8461b66f0533",
-  "note": "captured from the reference and reviewed; never regenerate with a build under test"
  },
  "steps": [
   {
@@ -319,6 +314,148 @@
   },
   {
    "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "NOTE",
+    "--body",
+    "from the cockpit",
+    "--actor",
+    "human"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "UNACKED peer #1..#1 (post --ack-through N or `ack --through N` once read)\n",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "from the cockpit",
+      "protocol": "1.1",
+      "actor": "human"
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.1"
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "NOTE",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "from the cockpit",
+     "protocol": "1.1",
+     "actor": "human"
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.1"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.1",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
     "handoff-offer",
     "--role",
     "claude"
@@ -370,12 +507,23 @@
       "seq": 1,
       "at": "<TS>",
       "role": "claude",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "from the cockpit",
+      "protocol": "1.1",
+      "actor": "human"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
       "kind": "HANDOFF_OFFER",
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
       "offer_id": "<OFFER>"
      }
     ],
@@ -393,7 +541,7 @@
      }
     ],
     "sessions/<SID>/latest/claude.json": {
-     "seq": 1,
+     "seq": 2,
      "at": "<TS>",
      "role": "claude",
      "kind": "HANDOFF_OFFER",
@@ -401,7 +549,6 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "epoch=2 to=codex head=<SHA> dirty=0",
-     "protocol": "1.1",
      "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
@@ -429,7 +576,7 @@
      "waiting": {
       "from_role": "claude",
       "for_role": "codex",
-      "seq": 1,
+      "seq": 2,
       "kind": "HANDOFF_OFFER",
       "since": "<TS>"
      },
@@ -477,7 +624,7 @@
     "2"
    ],
    "rc": 0,
-   "stdout": "PEER claude #1 HANDOFF_OFFER [fixture-task#1] REPLY_REQUIRED\nepoch=2 to=codex head=<SHA> dirty=0\n",
+   "stdout": "PEER claude #1 NOTE [fixture-task#1]\nfrom the cockpit\n\nPEER claude #2 HANDOFF_OFFER [fixture-task#1] REPLY_REQUIRED\nepoch=2 to=codex head=<SHA> dirty=0\n",
    "stderr": "",
    "state": {
     "active.json": {
@@ -502,9 +649,10 @@
      "resume_seen": null,
      "stale_wait_seq": null,
      "delivered_counts": {
-      "1": 1
+      "1": 1,
+      "2": 1
      },
-     "delivered_seq": 1
+     "delivered_seq": 2
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -527,12 +675,23 @@
       "seq": 1,
       "at": "<TS>",
       "role": "claude",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "from the cockpit",
+      "protocol": "1.1",
+      "actor": "human"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
       "kind": "HANDOFF_OFFER",
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
       "offer_id": "<OFFER>"
      }
     ],
@@ -550,7 +709,7 @@
      }
     ],
     "sessions/<SID>/latest/claude.json": {
-     "seq": 1,
+     "seq": 2,
      "at": "<TS>",
      "role": "claude",
      "kind": "HANDOFF_OFFER",
@@ -558,7 +717,6 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "epoch=2 to=codex head=<SHA> dirty=0",
-     "protocol": "1.1",
      "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
@@ -586,7 +744,7 @@
      "waiting": {
       "from_role": "claude",
       "for_role": "codex",
-      "seq": 1,
+      "seq": 2,
       "kind": "HANDOFF_OFFER",
       "since": "<TS>"
      },
@@ -629,7 +787,9 @@
    "cmd": [
     "handoff-accept",
     "--role",
-    "codex"
+    "codex",
+    "--actor",
+    "human"
    ],
    "rc": 0,
    "stdout": "HANDOFF_ACCEPTED epoch=2 owner=codex\n",
@@ -657,9 +817,10 @@
      "resume_seen": null,
      "stale_wait_seq": null,
      "delivered_counts": {
-      "1": 1
+      "1": 1,
+      "2": 1
      },
-     "delivered_seq": 1
+     "delivered_seq": 2
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -682,12 +843,23 @@
       "seq": 1,
       "at": "<TS>",
       "role": "claude",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "from the cockpit",
+      "protocol": "1.1",
+      "actor": "human"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
       "kind": "HANDOFF_OFFER",
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
       "offer_id": "<OFFER>"
      }
     ],
@@ -711,11 +883,12 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": false,
-      "body": "epoch=2 head=<SHA>"
+      "body": "epoch=2 head=<SHA>",
+      "actor": "human"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
-     "seq": 1,
+     "seq": 2,
      "at": "<TS>",
      "role": "claude",
      "kind": "HANDOFF_OFFER",
@@ -723,7 +896,6 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "epoch=2 to=codex head=<SHA> dirty=0",
-     "protocol": "1.1",
      "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
@@ -734,7 +906,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": false,
-     "body": "epoch=2 head=<SHA>"
+     "body": "epoch=2 head=<SHA>",
+     "actor": "human"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -806,9 +979,10 @@
      "resume_seen": null,
      "stale_wait_seq": null,
      "delivered_counts": {
-      "1": 1
+      "1": 1,
+      "2": 1
      },
-     "delivered_seq": 1
+     "delivered_seq": 2
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -831,12 +1005,23 @@
       "seq": 1,
       "at": "<TS>",
       "role": "claude",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "from the cockpit",
+      "protocol": "1.1",
+      "actor": "human"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
       "kind": "HANDOFF_OFFER",
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
       "offer_id": "<OFFER>"
      }
     ],
@@ -860,11 +1045,12 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": false,
-      "body": "epoch=2 head=<SHA>"
+      "body": "epoch=2 head=<SHA>",
+      "actor": "human"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
-     "seq": 1,
+     "seq": 2,
      "at": "<TS>",
      "role": "claude",
      "kind": "HANDOFF_OFFER",
@@ -872,7 +1058,6 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "epoch=2 to=codex head=<SHA> dirty=0",
-     "protocol": "1.1",
      "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
@@ -883,7 +1068,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": false,
-     "body": "epoch=2 head=<SHA>"
+     "body": "epoch=2 head=<SHA>",
+     "actor": "human"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -955,9 +1141,10 @@
      "resume_seen": null,
      "stale_wait_seq": null,
      "delivered_counts": {
-      "1": 1
+      "1": 1,
+      "2": 1
      },
-     "delivered_seq": 1
+     "delivered_seq": 2
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -980,12 +1167,23 @@
       "seq": 1,
       "at": "<TS>",
       "role": "claude",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "from the cockpit",
+      "protocol": "1.1",
+      "actor": "human"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
       "kind": "HANDOFF_OFFER",
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
       "offer_id": "<OFFER>"
      }
     ],
@@ -1009,11 +1207,12 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": false,
-      "body": "epoch=2 head=<SHA>"
+      "body": "epoch=2 head=<SHA>",
+      "actor": "human"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
-     "seq": 1,
+     "seq": 2,
      "at": "<TS>",
      "role": "claude",
      "kind": "HANDOFF_OFFER",
@@ -1021,7 +1220,6 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "epoch=2 to=codex head=<SHA> dirty=0",
-     "protocol": "1.1",
      "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
@@ -1032,7 +1230,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": false,
-     "body": "epoch=2 head=<SHA>"
+     "body": "epoch=2 head=<SHA>",
+     "actor": "human"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -1074,10 +1273,14 @@
   },
   {
    "cmd": [
-    "status"
+    "watch",
+    "--role",
+    "claude",
+    "--timeout",
+    "2"
    ],
    "rc": 0,
-   "stdout": "SESSION <SID> status=active phase=huddle driver=claude owner=codex work=fixture-task#1\nclaude: ready updated=<TS> resume_at=-\ncodex: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,codex:ack unacked claude=#1..#1 codex=#1..#1\nANCHOR=<REPO> source=flag\n",
+   "stdout": "PEER codex #1 HELLO [fixture-task#1] REDELIVERED n=2\njoined; navigator ready\n\nPEER codex #2 HANDOFF_ACCEPT [fixture-task#1]\nepoch=2 head=<SHA>\n",
    "stderr": "",
    "state": {
     "active.json": {
@@ -1092,9 +1295,10 @@
      "resume_seen": null,
      "stale_wait_seq": null,
      "delivered_counts": {
-      "1": 1
+      "1": 2,
+      "2": 1
      },
-     "delivered_seq": 1
+     "delivered_seq": 2
     },
     "sessions/<SID>/cursor/codex.json": {
      "peer_seq": 0,
@@ -1102,9 +1306,10 @@
      "resume_seen": null,
      "stale_wait_seq": null,
      "delivered_counts": {
-      "1": 1
+      "1": 1,
+      "2": 1
      },
-     "delivered_seq": 1
+     "delivered_seq": 2
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -1127,12 +1332,23 @@
       "seq": 1,
       "at": "<TS>",
       "role": "claude",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "from the cockpit",
+      "protocol": "1.1",
+      "actor": "human"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
       "kind": "HANDOFF_OFFER",
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
       "offer_id": "<OFFER>"
      }
     ],
@@ -1156,11 +1372,12 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": false,
-      "body": "epoch=2 head=<SHA>"
+      "body": "epoch=2 head=<SHA>",
+      "actor": "human"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
-     "seq": 1,
+     "seq": 2,
      "at": "<TS>",
      "role": "claude",
      "kind": "HANDOFF_OFFER",
@@ -1168,7 +1385,6 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "epoch=2 to=codex head=<SHA> dirty=0",
-     "protocol": "1.1",
      "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
@@ -1179,7 +1395,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": false,
-     "body": "epoch=2 head=<SHA>"
+     "body": "epoch=2 head=<SHA>",
+     "actor": "human"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -1233,9 +1450,10 @@
    "resume_seen": null,
    "stale_wait_seq": null,
    "delivered_counts": {
-    "1": 1
+    "1": 2,
+    "2": 1
    },
-   "delivered_seq": 1
+   "delivered_seq": 2
   },
   "sessions/<SID>/cursor/codex.json": {
    "peer_seq": 0,
@@ -1243,9 +1461,10 @@
    "resume_seen": null,
    "stale_wait_seq": null,
    "delivered_counts": {
-    "1": 1
+    "1": 1,
+    "2": 1
    },
-   "delivered_seq": 1
+   "delivered_seq": 2
   },
   "sessions/<SID>/health/claude.json": {
    "role": "claude",
@@ -1268,12 +1487,23 @@
     "seq": 1,
     "at": "<TS>",
     "role": "claude",
+    "kind": "NOTE",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "from the cockpit",
+    "protocol": "1.1",
+    "actor": "human"
+   },
+   {
+    "seq": 2,
+    "at": "<TS>",
+    "role": "claude",
     "kind": "HANDOFF_OFFER",
     "work_unit": "fixture-task",
     "unit_id": "1-<U>",
     "expect_reply": true,
     "body": "epoch=2 to=codex head=<SHA> dirty=0",
-    "protocol": "1.1",
     "offer_id": "<OFFER>"
    }
   ],
@@ -1297,11 +1527,12 @@
     "work_unit": "fixture-task",
     "unit_id": "1-<U>",
     "expect_reply": false,
-    "body": "epoch=2 head=<SHA>"
+    "body": "epoch=2 head=<SHA>",
+    "actor": "human"
    }
   ],
   "sessions/<SID>/latest/claude.json": {
-   "seq": 1,
+   "seq": 2,
    "at": "<TS>",
    "role": "claude",
    "kind": "HANDOFF_OFFER",
@@ -1309,7 +1540,6 @@
    "unit_id": "1-<U>",
    "expect_reply": true,
    "body": "epoch=2 to=codex head=<SHA> dirty=0",
-   "protocol": "1.1",
    "offer_id": "<OFFER>"
   },
   "sessions/<SID>/latest/codex.json": {
@@ -1320,7 +1550,8 @@
    "work_unit": "fixture-task",
    "unit_id": "1-<U>",
    "expect_reply": false,
-   "body": "epoch=2 head=<SHA>"
+   "body": "epoch=2 head=<SHA>",
+   "actor": "human"
   },
   "sessions/<SID>/session.json": {
    "session_id": "<SID>",
@@ -1358,5 +1589,10 @@
    "vcs": "git",
    "recorded_at": "<TS>"
   }
+ },
+ "provenance": {
+  "build": "92b142067941+dirty:pair.py",
+  "sha12": "8461b66f0533",
+  "note": "captured from the reference and reviewed; never regenerate with a build under test"
  }
 }

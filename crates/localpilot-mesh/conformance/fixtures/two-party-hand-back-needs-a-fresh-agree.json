@@ -11,8 +11,8 @@
   "vcs": "git"
  },
  "provenance": {
-  "build": "44892a1ba4f2:pair.py",
-  "sha12": "5e9cbc53fd91",
+  "build": "92b142067941+dirty:pair.py",
+  "sha12": "8461b66f0533",
   "note": "captured from the reference and reviewed; never regenerate with a build under test"
  },
  "steps": [
@@ -87,7 +87,7 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -153,7 +153,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -165,7 +165,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -195,7 +195,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -265,7 +265,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -277,7 +277,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -307,7 +307,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -380,7 +380,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -393,7 +393,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -405,7 +405,7 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "please review",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 1,
@@ -416,7 +416,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -452,7 +452,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -524,7 +524,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -537,7 +537,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -549,7 +549,7 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "please review",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 1,
@@ -560,7 +560,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -596,7 +596,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -670,7 +670,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -683,7 +683,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -705,7 +705,7 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "please review",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 2,
@@ -745,7 +745,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -817,7 +817,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -830,7 +830,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -852,7 +852,7 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "please review",
-     "protocol": "1.0"
+     "protocol": "1.1"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 2,
@@ -892,7 +892,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -962,7 +962,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -972,7 +972,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=2 to=codex head=<SHA> dirty=0"
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -985,7 +986,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1006,7 +1007,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=2 to=codex head=<SHA> dirty=0"
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 2,
@@ -1041,6 +1043,7 @@
       "epoch": 2,
       "from": "claude",
       "to": "codex",
+      "offer_id": "<OFFER>",
       "head": "<SHA>",
       "status": [],
       "companions": [],
@@ -1060,7 +1063,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -1134,7 +1137,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1144,7 +1147,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=2 to=codex head=<SHA> dirty=0"
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -1157,7 +1161,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1178,7 +1182,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=2 to=codex head=<SHA> dirty=0"
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 2,
@@ -1213,6 +1218,7 @@
       "epoch": 2,
       "from": "claude",
       "to": "codex",
+      "offer_id": "<OFFER>",
       "head": "<SHA>",
       "status": [],
       "companions": [],
@@ -1232,7 +1238,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -1304,7 +1310,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1314,7 +1320,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=2 to=codex head=<SHA> dirty=0"
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -1327,7 +1334,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1358,7 +1365,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=2 to=codex head=<SHA> dirty=0"
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 3,
@@ -1398,7 +1406,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -1470,7 +1478,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1480,7 +1488,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=2 to=codex head=<SHA> dirty=0"
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -1493,7 +1502,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1523,7 +1532,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=3 to=claude head=<SHA> dirty=0"
+      "body": "epoch=3 to=claude head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -1534,7 +1544,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=2 to=codex head=<SHA> dirty=0"
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 4,
@@ -1544,7 +1555,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=3 to=claude head=<SHA> dirty=0"
+     "body": "epoch=3 to=claude head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -1569,6 +1581,7 @@
       "epoch": 3,
       "from": "codex",
       "to": "claude",
+      "offer_id": "<OFFER>",
       "head": "<SHA>",
       "status": [],
       "companions": [],
@@ -1588,7 +1601,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -1664,7 +1677,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1674,7 +1687,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=2 to=codex head=<SHA> dirty=0"
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -1687,7 +1701,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1717,7 +1731,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=3 to=claude head=<SHA> dirty=0"
+      "body": "epoch=3 to=claude head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -1728,7 +1743,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=2 to=codex head=<SHA> dirty=0"
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 4,
@@ -1738,7 +1754,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=3 to=claude head=<SHA> dirty=0"
+     "body": "epoch=3 to=claude head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -1763,6 +1780,7 @@
       "epoch": 3,
       "from": "codex",
       "to": "claude",
+      "offer_id": "<OFFER>",
       "head": "<SHA>",
       "status": [],
       "companions": [],
@@ -1782,7 +1800,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -1856,7 +1874,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1866,7 +1884,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=2 to=codex head=<SHA> dirty=0"
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      },
      {
       "seq": 3,
@@ -1889,7 +1908,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -1919,7 +1938,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=3 to=claude head=<SHA> dirty=0"
+      "body": "epoch=3 to=claude head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -1940,7 +1960,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=3 to=claude head=<SHA> dirty=0"
+     "body": "epoch=3 to=claude head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -1970,7 +1991,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -2044,7 +2065,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -2054,7 +2075,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=2 to=codex head=<SHA> dirty=0"
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      },
      {
       "seq": 3,
@@ -2077,7 +2099,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -2107,7 +2129,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=3 to=claude head=<SHA> dirty=0"
+      "body": "epoch=3 to=claude head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -2128,7 +2151,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=3 to=claude head=<SHA> dirty=0"
+     "body": "epoch=3 to=claude head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -2158,7 +2182,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -2230,7 +2254,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "please review",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -2240,7 +2264,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=2 to=codex head=<SHA> dirty=0"
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      },
      {
       "seq": 3,
@@ -2263,7 +2288,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.0"
+      "protocol": "1.1"
      },
      {
       "seq": 2,
@@ -2293,7 +2318,8 @@
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": true,
-      "body": "epoch=3 to=claude head=<SHA> dirty=0"
+      "body": "epoch=3 to=claude head=<SHA> dirty=0",
+      "offer_id": "<OFFER>"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -2314,7 +2340,8 @@
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": true,
-     "body": "epoch=3 to=claude head=<SHA> dirty=0"
+     "body": "epoch=3 to=claude head=<SHA> dirty=0",
+     "offer_id": "<OFFER>"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -2344,7 +2371,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.0",
+     "protocol": "1.1",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -2410,7 +2437,7 @@
     "unit_id": "1-<U>",
     "expect_reply": true,
     "body": "please review",
-    "protocol": "1.0"
+    "protocol": "1.1"
    },
    {
     "seq": 2,
@@ -2420,7 +2447,8 @@
     "work_unit": "fixture-task",
     "unit_id": "1-<U>",
     "expect_reply": true,
-    "body": "epoch=2 to=codex head=<SHA> dirty=0"
+    "body": "epoch=2 to=codex head=<SHA> dirty=0",
+    "offer_id": "<OFFER>"
    },
    {
     "seq": 3,
@@ -2443,7 +2471,7 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "joined; navigator ready",
-    "protocol": "1.0"
+    "protocol": "1.1"
    },
    {
     "seq": 2,
@@ -2473,7 +2501,8 @@
     "work_unit": "fixture-task",
     "unit_id": "1-<U>",
     "expect_reply": true,
-    "body": "epoch=3 to=claude head=<SHA> dirty=0"
+    "body": "epoch=3 to=claude head=<SHA> dirty=0",
+    "offer_id": "<OFFER>"
    }
   ],
   "sessions/<SID>/latest/claude.json": {
@@ -2494,7 +2523,8 @@
    "work_unit": "fixture-task",
    "unit_id": "1-<U>",
    "expect_reply": true,
-   "body": "epoch=3 to=claude head=<SHA> dirty=0"
+   "body": "epoch=3 to=claude head=<SHA> dirty=0",
+   "offer_id": "<OFFER>"
   },
   "sessions/<SID>/session.json": {
    "session_id": "<SID>",
@@ -2524,7 +2554,7 @@
     ]
    },
    "delivery": "ack",
-   "protocol": "1.0",
+   "protocol": "1.1",
    "created_at": "<TS>",
    "updated_at": "<TS>"
   },

@@ -1,5 +1,5 @@
 {
- "id": "two-party-handoff",
+ "id": "handoff-decline-clears-the-offer",
  "profiles": [
   "two-party"
  ],
@@ -9,11 +9,6 @@
  ],
  "setup": {
   "vcs": "git"
- },
- "provenance": {
-  "build": "92b142067941+dirty:pair.py",
-  "sha12": "8461b66f0533",
-  "note": "captured from the reference and reviewed; never regenerate with a build under test"
  },
  "steps": [
   {
@@ -627,12 +622,12 @@
   },
   {
    "cmd": [
-    "handoff-accept",
+    "handoff-decline",
     "--role",
     "codex"
    ],
    "rc": 0,
-   "stdout": "HANDOFF_ACCEPTED epoch=2 owner=codex\n",
+   "stdout": "HANDOFF_DECLINED epoch=2 offer=<OFFER>\n",
    "stderr": "",
    "state": {
     "active.json": {
@@ -707,11 +702,21 @@
       "seq": 2,
       "at": "<TS>",
       "role": "codex",
-      "kind": "HANDOFF_ACCEPT",
+      "kind": "NOTE",
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": false,
-      "body": "epoch=2 head=<SHA>"
+      "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+      "handoff": {
+       "declined": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -730,11 +735,21 @@
      "seq": 2,
      "at": "<TS>",
      "role": "codex",
-     "kind": "HANDOFF_ACCEPT",
+     "kind": "NOTE",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": false,
-     "body": "epoch=2 head=<SHA>"
+     "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+     "handoff": {
+      "declined": {
+       "session_id": "<SID>",
+       "unit_id": "1-<U>",
+       "epoch": 2,
+       "from": "claude",
+       "to": "codex",
+       "offer_id": "<OFFER>"
+      }
+     }
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -743,8 +758,8 @@
      "unit_id": "1-<U>",
      "driver": "claude",
      "navigator": "codex",
-     "owner": "codex",
-     "ownership_epoch": 2,
+     "owner": "claude",
+     "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
@@ -766,7 +781,22 @@
      "delivery": "ack",
      "protocol": "1.1",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "handoff_declined",
+       "role": "codex",
+       "handoff": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     ]
     },
     "vcs.json": {
      "vcs": "git",
@@ -780,9 +810,9 @@
     "--role",
     "codex"
    ],
-   "rc": 0,
+   "rc": 4,
    "stdout": "",
-   "stderr": "",
+   "stderr": "WRITE_DENIED status=active owner=claude handoff=no\n",
    "state": {
     "active.json": {
      "session_id": "<SID>",
@@ -856,11 +886,21 @@
       "seq": 2,
       "at": "<TS>",
       "role": "codex",
-      "kind": "HANDOFF_ACCEPT",
+      "kind": "NOTE",
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": false,
-      "body": "epoch=2 head=<SHA>"
+      "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+      "handoff": {
+       "declined": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -879,11 +919,21 @@
      "seq": 2,
      "at": "<TS>",
      "role": "codex",
-     "kind": "HANDOFF_ACCEPT",
+     "kind": "NOTE",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": false,
-     "body": "epoch=2 head=<SHA>"
+     "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+     "handoff": {
+      "declined": {
+       "session_id": "<SID>",
+       "unit_id": "1-<U>",
+       "epoch": 2,
+       "from": "claude",
+       "to": "codex",
+       "offer_id": "<OFFER>"
+      }
+     }
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -892,8 +942,8 @@
      "unit_id": "1-<U>",
      "driver": "claude",
      "navigator": "codex",
-     "owner": "codex",
-     "ownership_epoch": 2,
+     "owner": "claude",
+     "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
@@ -915,7 +965,22 @@
      "delivery": "ack",
      "protocol": "1.1",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "handoff_declined",
+       "role": "codex",
+       "handoff": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     ]
     },
     "vcs.json": {
      "vcs": "git",
@@ -929,155 +994,8 @@
     "--role",
     "claude"
    ],
-   "rc": 4,
-   "stdout": "",
-   "stderr": "WRITE_DENIED status=active owner=codex handoff=no\n",
-   "state": {
-    "active.json": {
-     "session_id": "<SID>",
-     "driver": "claude",
-     "status": "active",
-     "updated_at": "<TS>"
-    },
-    "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
-     },
-     "delivered_seq": 1
-    },
-    "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
-     },
-     "delivered_seq": 1
-    },
-    "sessions/<SID>/health/claude.json": {
-     "role": "claude",
-     "status": "ready",
-     "generation": 1,
-     "updated_at": "<TS>",
-     "reason": null,
-     "resume_at": null
-    },
-    "sessions/<SID>/health/codex.json": {
-     "role": "codex",
-     "status": "ready",
-     "generation": 2,
-     "updated_at": "<TS>",
-     "reason": null,
-     "resume_at": null
-    },
-    "sessions/<SID>/journal/claude.jsonl": [
-     {
-      "seq": 1,
-      "at": "<TS>",
-      "role": "claude",
-      "kind": "HANDOFF_OFFER",
-      "work_unit": "fixture-task",
-      "unit_id": "1-<U>",
-      "expect_reply": true,
-      "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
-      "offer_id": "<OFFER>"
-     }
-    ],
-    "sessions/<SID>/journal/codex.jsonl": [
-     {
-      "seq": 1,
-      "at": "<TS>",
-      "role": "codex",
-      "kind": "HELLO",
-      "work_unit": "fixture-task",
-      "unit_id": "1-<U>",
-      "expect_reply": false,
-      "body": "joined; navigator ready",
-      "protocol": "1.1"
-     },
-     {
-      "seq": 2,
-      "at": "<TS>",
-      "role": "codex",
-      "kind": "HANDOFF_ACCEPT",
-      "work_unit": "fixture-task",
-      "unit_id": "1-<U>",
-      "expect_reply": false,
-      "body": "epoch=2 head=<SHA>"
-     }
-    ],
-    "sessions/<SID>/latest/claude.json": {
-     "seq": 1,
-     "at": "<TS>",
-     "role": "claude",
-     "kind": "HANDOFF_OFFER",
-     "work_unit": "fixture-task",
-     "unit_id": "1-<U>",
-     "expect_reply": true,
-     "body": "epoch=2 to=codex head=<SHA> dirty=0",
-     "protocol": "1.1",
-     "offer_id": "<OFFER>"
-    },
-    "sessions/<SID>/latest/codex.json": {
-     "seq": 2,
-     "at": "<TS>",
-     "role": "codex",
-     "kind": "HANDOFF_ACCEPT",
-     "work_unit": "fixture-task",
-     "unit_id": "1-<U>",
-     "expect_reply": false,
-     "body": "epoch=2 head=<SHA>"
-    },
-    "sessions/<SID>/session.json": {
-     "session_id": "<SID>",
-     "task": "fixture task",
-     "work_unit": "fixture-task",
-     "unit_id": "1-<U>",
-     "driver": "claude",
-     "navigator": "codex",
-     "owner": "codex",
-     "ownership_epoch": 2,
-     "status": "active",
-     "phase": "huddle",
-     "waiting": null,
-     "pause": null,
-     "handoff": null,
-     "vcs": "git",
-     "base_head": "<SHA>",
-     "base_status": [],
-     "companions": [],
-     "absent_companions": [],
-     "caps": {
-      "claude": [
-       "ack"
-      ],
-      "codex": [
-       "ack"
-      ]
-     },
-     "delivery": "ack",
-     "protocol": "1.1",
-     "created_at": "<TS>",
-     "updated_at": "<TS>"
-    },
-    "vcs.json": {
-     "vcs": "git",
-     "recorded_at": "<TS>"
-    }
-   }
-  },
-  {
-   "cmd": [
-    "status"
-   ],
    "rc": 0,
-   "stdout": "SESSION <SID> status=active phase=huddle driver=claude owner=codex work=fixture-task#1\nclaude: ready updated=<TS> resume_at=-\ncodex: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,codex:ack unacked claude=#1..#1 codex=#1..#1\nANCHOR=<REPO> source=flag\n",
+   "stdout": "",
    "stderr": "",
    "state": {
     "active.json": {
@@ -1152,11 +1070,21 @@
       "seq": 2,
       "at": "<TS>",
       "role": "codex",
-      "kind": "HANDOFF_ACCEPT",
+      "kind": "NOTE",
       "work_unit": "fixture-task",
       "unit_id": "1-<U>",
       "expect_reply": false,
-      "body": "epoch=2 head=<SHA>"
+      "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+      "handoff": {
+       "declined": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -1175,11 +1103,21 @@
      "seq": 2,
      "at": "<TS>",
      "role": "codex",
-     "kind": "HANDOFF_ACCEPT",
+     "kind": "NOTE",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "expect_reply": false,
-     "body": "epoch=2 head=<SHA>"
+     "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+     "handoff": {
+      "declined": {
+       "session_id": "<SID>",
+       "unit_id": "1-<U>",
+       "epoch": 2,
+       "from": "claude",
+       "to": "codex",
+       "offer_id": "<OFFER>"
+      }
+     }
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -1188,8 +1126,8 @@
      "unit_id": "1-<U>",
      "driver": "claude",
      "navigator": "codex",
-     "owner": "codex",
-     "ownership_epoch": 2,
+     "owner": "claude",
+     "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
@@ -1211,7 +1149,762 @@
      "delivery": "ack",
      "protocol": "1.1",
      "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "handoff_declined",
+       "role": "codex",
+       "handoff": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     ]
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "claude",
+    "--timeout",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "PEER codex #1 HELLO [fixture-task#1] REDELIVERED n=2\njoined; navigator ready\n\nPEER codex #2 NOTE [fixture-task#1]\nHANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
      "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 2,
+      "2": 1
+     },
+     "delivered_seq": 2
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "protocol": "1.1",
+      "offer_id": "<OFFER>"
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.1"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+      "handoff": {
+       "declined": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "HANDOFF_OFFER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "protocol": "1.1",
+     "offer_id": "<OFFER>"
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "NOTE",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+     "handoff": {
+      "declined": {
+       "session_id": "<SID>",
+       "unit_id": "1-<U>",
+       "epoch": 2,
+       "from": "claude",
+       "to": "codex",
+       "offer_id": "<OFFER>"
+      }
+     }
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.1",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "handoff_declined",
+       "role": "codex",
+       "handoff": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     ]
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "handoff-decline",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "NO_PENDING_HANDOFF: there is no pending handoff [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 2,
+      "2": 1
+     },
+     "delivered_seq": 2
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "protocol": "1.1",
+      "offer_id": "<OFFER>"
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.1"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+      "handoff": {
+       "declined": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "HANDOFF_OFFER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "protocol": "1.1",
+     "offer_id": "<OFFER>"
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "NOTE",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+     "handoff": {
+      "declined": {
+       "session_id": "<SID>",
+       "unit_id": "1-<U>",
+       "epoch": 2,
+       "from": "claude",
+       "to": "codex",
+       "offer_id": "<OFFER>"
+      }
+     }
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.1",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "handoff_declined",
+       "role": "codex",
+       "handoff": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     ]
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "handoff-accept",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "no handoff offered to this role [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 2,
+      "2": 1
+     },
+     "delivered_seq": 2
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "protocol": "1.1",
+      "offer_id": "<OFFER>"
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.1"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+      "handoff": {
+       "declined": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "HANDOFF_OFFER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "protocol": "1.1",
+     "offer_id": "<OFFER>"
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "NOTE",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+     "handoff": {
+      "declined": {
+       "session_id": "<SID>",
+       "unit_id": "1-<U>",
+       "epoch": 2,
+       "from": "claude",
+       "to": "codex",
+       "offer_id": "<OFFER>"
+      }
+     }
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.1",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "handoff_declined",
+       "role": "codex",
+       "handoff": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     ]
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "status"
+   ],
+   "rc": 0,
+   "stdout": "SESSION <SID> status=active phase=huddle driver=claude owner=claude work=fixture-task#1\nclaude: ready updated=<TS> resume_at=-\ncodex: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,codex:ack unacked claude=#1..#2 codex=#1..#1\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 2,
+      "2": 1
+     },
+     "delivered_seq": 2
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "protocol": "1.1",
+      "offer_id": "<OFFER>"
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.1"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "NOTE",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+      "handoff": {
+       "declined": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "HANDOFF_OFFER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "protocol": "1.1",
+     "offer_id": "<OFFER>"
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "NOTE",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+     "handoff": {
+      "declined": {
+       "session_id": "<SID>",
+       "unit_id": "1-<U>",
+       "epoch": 2,
+       "from": "claude",
+       "to": "codex",
+       "offer_id": "<OFFER>"
+      }
+     }
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.1",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "events": [
+      {
+       "at": "<TS>",
+       "event": "handoff_declined",
+       "role": "codex",
+       "handoff": {
+        "session_id": "<SID>",
+        "unit_id": "1-<U>",
+        "epoch": 2,
+        "from": "claude",
+        "to": "codex",
+        "offer_id": "<OFFER>"
+       }
+      }
+     ]
     },
     "vcs.json": {
      "vcs": "git",
@@ -1233,9 +1926,10 @@
    "resume_seen": null,
    "stale_wait_seq": null,
    "delivered_counts": {
-    "1": 1
+    "1": 2,
+    "2": 1
    },
-   "delivered_seq": 1
+   "delivered_seq": 2
   },
   "sessions/<SID>/cursor/codex.json": {
    "peer_seq": 0,
@@ -1293,11 +1987,21 @@
     "seq": 2,
     "at": "<TS>",
     "role": "codex",
-    "kind": "HANDOFF_ACCEPT",
+    "kind": "NOTE",
     "work_unit": "fixture-task",
     "unit_id": "1-<U>",
     "expect_reply": false,
-    "body": "epoch=2 head=<SHA>"
+    "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+    "handoff": {
+     "declined": {
+      "session_id": "<SID>",
+      "unit_id": "1-<U>",
+      "epoch": 2,
+      "from": "claude",
+      "to": "codex",
+      "offer_id": "<OFFER>"
+     }
+    }
    }
   ],
   "sessions/<SID>/latest/claude.json": {
@@ -1316,11 +2020,21 @@
    "seq": 2,
    "at": "<TS>",
    "role": "codex",
-   "kind": "HANDOFF_ACCEPT",
+   "kind": "NOTE",
    "work_unit": "fixture-task",
    "unit_id": "1-<U>",
    "expect_reply": false,
-   "body": "epoch=2 head=<SHA>"
+   "body": "HANDOFF_DECLINED epoch=2 from=claude to=codex offer=<OFFER>",
+   "handoff": {
+    "declined": {
+     "session_id": "<SID>",
+     "unit_id": "1-<U>",
+     "epoch": 2,
+     "from": "claude",
+     "to": "codex",
+     "offer_id": "<OFFER>"
+    }
+   }
   },
   "sessions/<SID>/session.json": {
    "session_id": "<SID>",
@@ -1329,8 +2043,8 @@
    "unit_id": "1-<U>",
    "driver": "claude",
    "navigator": "codex",
-   "owner": "codex",
-   "ownership_epoch": 2,
+   "owner": "claude",
+   "ownership_epoch": 1,
    "status": "active",
    "phase": "huddle",
    "waiting": null,
@@ -1352,11 +2066,31 @@
    "delivery": "ack",
    "protocol": "1.1",
    "created_at": "<TS>",
-   "updated_at": "<TS>"
+   "updated_at": "<TS>",
+   "events": [
+    {
+     "at": "<TS>",
+     "event": "handoff_declined",
+     "role": "codex",
+     "handoff": {
+      "session_id": "<SID>",
+      "unit_id": "1-<U>",
+      "epoch": 2,
+      "from": "claude",
+      "to": "codex",
+      "offer_id": "<OFFER>"
+     }
+    }
+   ]
   },
   "vcs.json": {
    "vcs": "git",
    "recorded_at": "<TS>"
   }
+ },
+ "provenance": {
+  "build": "92b142067941+dirty:pair.py",
+  "sha12": "8461b66f0533",
+  "note": "captured from the reference and reviewed; never regenerate with a build under test"
  }
 }
