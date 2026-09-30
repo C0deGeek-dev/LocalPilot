@@ -2,6 +2,38 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0191: Explicit Quota Transitions And Advisory Session Context
+
+Status: accepted.
+
+Mailbox protocol 1.2 keeps immutable artifact bytes outside the journal and
+attaches their SHA-256 ids to mail. Usage is incremental, idempotent by report
+id, separated by participant/unit/source, and always labelled partial. Provider
+counts from the engine and participant reports are audit claims; unknown costs
+and quota remain unknown. Numbers never decide authority.
+
+A healthy duty holder can pre-authorize a named successor for its current
+session, unit and ownership epoch. A quota takeover applies only while that
+holder has a recorded pause, with a healthy successor and an independent healthy
+required reviewer. It preserves the pause, consumes authorization, advances the
+epoch, clears waits and invalidates old verdicts under the state lock. Recovery
+never returns a duty automatically. Ownership returns through ordinary handoff;
+a healthy current reviewer explicitly transfers its seat to a healthy adviser.
+The required `quota-takeover` feature makes unsupported writers refuse these
+sessions. The participant engine does not automate takeover.
+
+Advisory context requires session opt-in at start. Capture uses bounded visible
+journal records, source ids and known-secret filtering. The existing LocalMind
+importer and deterministic closeout produce pending candidates locally, without
+automatic promotion even when normal session learning uses automatic review.
+LocalMind opt-out still applies. Capture never changes protocol authority.
+
+Rationale: quota is a liveness event, not evidence that another participant may
+take authority. A memory summary is source material, not a verdict. Reusing the
+existing importer, extractor, redactor and handoff authority calculation keeps
+those boundaries explicit without introducing another memory or ownership
+subsystem. Pattern redaction remains best-effort; inspect material before sharing.
+
 ## ADR-0190: The Pair-Mesh Endpoint Lives In The Processes That Wait, Not In `serve`
 
 **Status:** accepted · **Date:** 2026-09-28.

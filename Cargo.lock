@@ -1705,6 +1705,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width 0.2.0",
+ "uuid",
  "wiremock",
 ]
 
@@ -1929,6 +1930,7 @@ version = "5.0.0"
 dependencies = [
  "dunce",
  "ignore",
+ "localpilot-config",
  "localpilot-sandbox",
  "localpilot-store",
  "regex",

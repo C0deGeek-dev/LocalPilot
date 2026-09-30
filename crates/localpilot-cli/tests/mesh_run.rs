@@ -337,7 +337,10 @@ async fn a_review_request_gets_a_verdict_with_the_engines_header_and_is_acknowle
     let server = server().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(says(AGREE))
+        .respond_with(sse(&[
+            json!({"choices":[{"delta":{"content":AGREE}}]}),
+            json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":10}}}),
+        ]))
         .expect(1)
         .mount(&server)
         .await;
@@ -358,6 +361,19 @@ async fn a_review_request_gets_a_verdict_with_the_engines_header_and_is_acknowle
     );
     // The run wrote nothing into the tree: only the change under review.
     assert_eq!(f.status(), " M a.txt\n");
+    // Provider usage is persisted through the real model-turn host edge,
+    // with the cached prefix separated and no invented price or quota.
+    let session: Value = serde_json::from_slice(&std::fs::read(f.session_file()).unwrap()).unwrap();
+    let usage = session["usage"].as_array().unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0]["source"], "engine");
+    assert_eq!(usage[0]["role"], "localpilot");
+    assert_eq!(usage[0]["unit_id"], session["unit_id"]);
+    assert_eq!(usage[0]["input_tokens"], 90);
+    assert_eq!(usage[0]["output_tokens"], 20);
+    assert_eq!(usage[0]["cache_read_input_tokens"], 10);
+    assert!(usage[0]["cost_microusd"].is_null());
+    assert!(usage[0]["limit_percent"].is_null());
     // Acknowledged: a second run finds nothing to do and posts nothing more.
     let again = f.run(&[]).await;
     assert!(again.status.success(), "{}", text(&again));

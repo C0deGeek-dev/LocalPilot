@@ -357,6 +357,9 @@ impl Mesh {
             format!(" unacked {}", un.join(" "))
         };
         line(format!("DELIVERY mode={} caps={caps}{tail}", delivery(&s)));
+        for usage in super::continuity::usage_lines(&s) {
+            line(usage);
+        }
         if schema(&s) == 2 && parts.len() > 2 {
             for (mid, e) in waiting_map(&s) {
                 let e = e.as_object().cloned().unwrap_or_default();

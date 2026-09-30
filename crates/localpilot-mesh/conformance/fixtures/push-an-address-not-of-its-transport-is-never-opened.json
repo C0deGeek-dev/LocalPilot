@@ -88,7 +88,7 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -154,7 +154,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -166,7 +166,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -196,7 +196,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -284,7 +284,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -296,7 +296,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -326,7 +326,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -405,7 +405,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "for codex",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -418,7 +418,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -430,7 +430,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "for codex",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 1,
@@ -441,7 +441,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -471,7 +471,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -544,7 +544,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "for codex",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/journal/codex.jsonl": [
@@ -557,7 +557,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -569,7 +569,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "for codex",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/latest/codex.json": {
      "seq": 1,
@@ -580,7 +580,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -610,7 +610,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -677,7 +677,7 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "for codex",
-    "protocol": "1.1"
+    "protocol": "1.2"
    }
   ],
   "sessions/<SID>/journal/codex.jsonl": [
@@ -690,7 +690,7 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "joined; navigator ready",
-    "protocol": "1.1"
+    "protocol": "1.2"
    }
   ],
   "sessions/<SID>/latest/claude.json": {
@@ -702,7 +702,7 @@
    "unit_id": "1-<U>",
    "expect_reply": false,
    "body": "for codex",
-   "protocol": "1.1"
+   "protocol": "1.2"
   },
   "sessions/<SID>/latest/codex.json": {
    "seq": 1,
@@ -713,7 +713,7 @@
    "unit_id": "1-<U>",
    "expect_reply": false,
    "body": "joined; navigator ready",
-   "protocol": "1.1"
+   "protocol": "1.2"
   },
   "sessions/<SID>/session.json": {
    "session_id": "<SID>",
@@ -743,7 +743,7 @@
     ]
    },
    "delivery": "ack",
-   "protocol": "1.1",
+   "protocol": "1.2",
    "created_at": "<TS>",
    "updated_at": "<TS>"
   },

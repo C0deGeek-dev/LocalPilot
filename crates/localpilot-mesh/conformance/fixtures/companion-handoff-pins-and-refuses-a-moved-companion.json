@@ -136,7 +136,7 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -202,7 +202,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -214,7 +214,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/manifests/c1-1-<U>.mf": {
      "$text": "n.txt\u0000f\u00005\u0000<HEX64>\u0000"
@@ -274,7 +274,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -338,7 +338,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
+      "protocol": "1.2",
       "offer_id": "<OFFER>"
      }
     ],
@@ -352,7 +352,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -364,7 +364,7 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "epoch=2 to=codex head=<SHA> dirty=0",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
@@ -376,7 +376,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/manifests/c1-1-<U>.mf": {
      "$text": "n.txt\u0000f\u00005\u0000<HEX64>\u0000"
@@ -462,7 +462,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -534,7 +534,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
+      "protocol": "1.2",
       "offer_id": "<OFFER>"
      }
     ],
@@ -548,7 +548,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -560,7 +560,7 @@
      "unit_id": "1-<U>",
      "expect_reply": true,
      "body": "epoch=2 to=codex head=<SHA> dirty=0",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "offer_id": "<OFFER>"
     },
     "sessions/<SID>/latest/codex.json": {
@@ -572,7 +572,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/manifests/c1-1-<U>.mf": {
      "$text": "n.txt\u0000f\u00005\u0000<HEX64>\u0000"
@@ -658,7 +658,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -722,7 +722,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
+      "protocol": "1.2",
       "offer_id": "<OFFER>"
      },
      {
@@ -747,7 +747,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/latest/claude.json": {
@@ -770,7 +770,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/manifests/c1-1-<U>.mf": {
      "$text": "n.txt\u0000f\u00005\u0000<HEX64>\u0000"
@@ -856,7 +856,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -920,7 +920,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
+      "protocol": "1.2",
       "offer_id": "<OFFER>"
      },
      {
@@ -945,7 +945,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      },
      {
       "seq": 2,
@@ -1037,7 +1037,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -1099,7 +1099,7 @@
       "unit_id": "1-<U>",
       "expect_reply": true,
       "body": "epoch=2 to=codex head=<SHA> dirty=0",
-      "protocol": "1.1",
+      "protocol": "1.2",
       "offer_id": "<OFFER>"
      },
      {
@@ -1124,7 +1124,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      },
      {
       "seq": 2,
@@ -1216,7 +1216,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -1272,7 +1272,7 @@
     "unit_id": "1-<U>",
     "expect_reply": true,
     "body": "epoch=2 to=codex head=<SHA> dirty=0",
-    "protocol": "1.1",
+    "protocol": "1.2",
     "offer_id": "<OFFER>"
    },
    {
@@ -1297,7 +1297,7 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "joined; navigator ready",
-    "protocol": "1.1"
+    "protocol": "1.2"
    },
    {
     "seq": 2,
@@ -1389,7 +1389,7 @@
     ]
    },
    "delivery": "ack",
-   "protocol": "1.1",
+   "protocol": "1.2",
    "created_at": "<TS>",
    "updated_at": "<TS>"
   },

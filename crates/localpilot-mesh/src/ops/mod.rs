@@ -6,6 +6,8 @@
 //! here rather than in a CLI because models read these lines, and the
 //! conformance suite's observable layer checks them.
 
+mod artifacts;
+mod continuity;
 mod delivery;
 pub mod engine;
 mod evidence;
@@ -31,6 +33,7 @@ use crate::lock::Lock;
 use crate::session;
 use crate::timefmt::utc_now;
 
+pub use continuity::UsageReport;
 pub use delivery::{EndpointArgs, ENDPOINT_TOKEN_ENV, PUSH_OUTCOMES};
 pub use evidence::EvidenceArgs;
 pub use lease::SessionLease;

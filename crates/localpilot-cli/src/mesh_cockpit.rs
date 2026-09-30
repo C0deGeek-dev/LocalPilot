@@ -1581,7 +1581,8 @@ mod view {
             f.render_widget(footer(snap, s), foot);
             return;
         };
-        let rows = v.participants.len() as u16;
+        let rows =
+            (v.participants.len() + v.usage.len().min(3) + usize::from(v.usage.len() > 3)) as u16;
         let waits = waits_and_pauses(v, s);
         let action = prompt_lines(prompt, runner, s, area.width, area.height);
         let [head, people, review, pending, activity, ask, foot] = Layout::vertical([
@@ -1767,7 +1768,7 @@ mod view {
     }
 
     fn participants<'a>(v: &SessionView, s: &Styles) -> Paragraph<'a> {
-        let lines: Vec<Line> = v
+        let mut lines: Vec<Line> = v
             .participants
             .iter()
             .map(|p| {
@@ -1795,7 +1796,19 @@ mod view {
                 Line::from(spans)
             })
             .collect();
-        Paragraph::new(lines).block(block("participants", s))
+        for usage in v.usage.iter().rev().take(3) {
+            lines.push(Line::styled(clean(usage), s.muted));
+        }
+        if v.usage.len() > 3 {
+            lines.push(Line::styled(
+                format!(
+                    "{} more usage groups: mesh usage or cockpit --json",
+                    v.usage.len() - 3
+                ),
+                s.muted,
+            ));
+        }
+        Paragraph::new(lines).block(block("participants / usage (partial)", s))
     }
 
     fn review_pane<'a>(v: &SessionView, s: &Styles) -> Paragraph<'a> {
@@ -2039,6 +2052,21 @@ mod view {
             // the screen.
             assert!(!out.contains("more"), "{out}");
             assert!(!out.contains('\u{1b}'), "{out}");
+        }
+
+        #[test]
+        fn usage_is_visible_and_extra_groups_are_disclosed() {
+            let mut view = session();
+            view.usage=(1..=5).map(|n|format!("USAGE role=codex unit={n} source=reported tokens=15 cost_microusd=unknown coverage=partial")).collect();
+            let snap = Snapshot {
+                session: Some(view),
+                consistent: true,
+                ..Snapshot::default()
+            };
+            let out = screen(&snap);
+            assert!(out.contains("source=reported tokens=15"));
+            assert!(out.contains("2 more usage groups"));
+            assert!(out.contains("coverage=partial"));
         }
 
         #[test]

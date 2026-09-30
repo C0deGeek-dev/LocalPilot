@@ -123,6 +123,16 @@ A `cmd` step may also carry:
 Only `PAIR_ENDPOINT_TOKEN` may be set this way, never `PAIR_REPO`. Tokens and
 other 64-hex values normalise to `<HEX64>`.
 
+A step's arguments and a `raw` step's path may also say `${NAME}` for a value
+an earlier step captured (an artifact id, say). A name never captured refuses
+the step; the result is still checked as any argument (`--repo` is refused)
+or raw path (confined to the mailbox) is.
+
+A `cmd` step's `compare` chooses how its stdout is matched: exactly (the
+default), `entries` (a transcript's entries as a set: same-second entries may
+reorder), `blocks` (peer mail from several senders), or `lines` (the lines as
+a set, for a listing whose order follows the clock).
+
 ### Normalisation
 
 Only what differs between two runs of the same build is replaced: the fixture
@@ -130,7 +140,13 @@ root (`<REPO>`), session ids (`<SID>`), times (`<TS>`), unit-id suffixes
 (`1-<U>`, and `#1` where shown), commit ids (`<SHA>`), and handoff offer ids
 (`offer_id` values and `offer=` in note text become `<OFFER>`; they are drawn
 at random per offer, spec U-6). The base commit uses
-a fixed date, so it is the same on every run. Line endings compare as `\n`.
+a fixed date and exact bytes, and every fixture repository sets
+`core.autocrlf=false`, so the base is the same on every run and platform.
+Artifacts (spec §4a) are labelled in the STATE layer: an artifact's id hashes
+a manifest holding its creation time, so each is `<ART-n>`, ordered by its
+type and files; a stored file is named by the hash of its bytes, which is
+stable, so it keeps a prefix (`<BLOB-xxxxxxxxxxxx>`); generated material,
+whose text can hold run-dependent values, is `<GEN-name>`. Line endings compare as `\n`.
 In the STATE layer the session the pointer names is `<SID>`; any other
 session in the mailbox is `<SID-2>`, `<SID-3>`, ordered by its `created_at`
 and work unit, so two sessions never merge under one key.

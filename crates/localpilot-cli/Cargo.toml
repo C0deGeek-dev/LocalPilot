@@ -50,6 +50,7 @@ keychain = ["localpilot-config/keychain"]
 render-browser = ["dep:localpilot-render"]
 
 [dependencies]
+uuid = { workspace = true }
 anyhow.workspace = true
 anstyle.workspace = true
 async-trait.workspace = true

@@ -64,6 +64,9 @@ pub struct SessionView {
     pub waiting: Value,
     /// Lifecycle events the record carries (empty before protocol 1.1).
     pub events: Vec<Value>,
+    /// Incremental usage, grouped by role, unit and source; always partial.
+    pub usage: Vec<String>,
+    pub context_summaries: bool,
     pub participants: Vec<ParticipantView>,
     /// The owner's latest review request in this unit, and its answers.
     pub review: Option<ReviewView>,
@@ -251,6 +254,11 @@ impl Mesh {
             review: review.0,
             review_state: review.1.to_owned(),
             participants: people,
+            usage: super::continuity::usage_lines(s),
+            context_summaries: s
+                .get("context_summaries")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         };
         (view, health)
     }

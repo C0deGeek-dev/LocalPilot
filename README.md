@@ -155,7 +155,7 @@ comparison on one model, not a model claim.
 | `localpilot ask` | One prompt, no tools |
 | `localpilot print` | A non-interactive agent run for scripts and pipelines |
 | `localpilot pair <task>` | Opt-in two-agent collaboration on one task; see [Pair collaboration](docs/configuration.md#pair-collaboration) |
-| `localpilot mesh …` | Take part in a Claude Code / Codex pair-programming session through its shared file mailbox, operation by operation or as a participant engine (`mesh run`); see [Pairing with Claude Code and Codex](docs/configuration.md#pairing-with-claude-code-and-codex-localpilot-mesh) |
+| `localpilot mesh …` | Take part in a Claude Code / Codex pair-programming session through its shared file mailbox, operation by operation or as a participant engine (`mesh run`); includes artifact references, usage, explicit quota takeover, and opt-in advisory context. See [Pairing with Claude Code and Codex](docs/configuration.md#pairing-with-claude-code-and-codex-localpilot-mesh) and [recorded model evaluation](docs/mesh-model-evaluation.md) |
 | `localpilot init` | Project-local configuration and ignore rules |
 | `localpilot models` | Models reported by configured OpenAI-compatible servers |
 | `localpilot session list` | Find, export, name (`session name`, or `/name` in chat), resume — by id or name — or prune durable sessions |

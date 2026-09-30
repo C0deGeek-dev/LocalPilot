@@ -380,6 +380,63 @@ of finding the mail on its next look:
 | `2` | A usage error, or the delegate writer is selected. |
 | `4` | The session cannot host the engine (the reason is on stderr). |
 
+#### Artifacts, usage, quota takeover, and advisory context
+
+The native participant implements mailbox protocol 1.2. Mail can carry
+`--artifact <sha256-id>` references; every attached bundle is verified before
+posting and shown when mail is read. Immutable artifact creation and extraction
+remain reference operations: use `pair.py artifact put|list|show|get` or
+`pair.py verify-request --pack`. `mesh artifact` and `mesh summary` refuse with
+exit 2, including under the delegate writer. Hash verification proves stored
+bytes, not the truth of a test claim or the quality of a document.
+
+```powershell
+localpilot mesh usage
+localpilot mesh usage --role codex --report-id turn-1 --input-tokens 100 --output-tokens 20
+localpilot mesh usage --role codex --report-id turn-2 --cost-microusd 200 --limit-percent 80
+```
+
+Reports are incremental and idempotent by role and report id. A conflicting
+retry refuses. Totals stay separate per session, participant, unit and source;
+the native engine records provider token counts after each model turn as
+`engine`, while CLI reports are `reported`. Sources are audit claims on a shared
+trusted filesystem. Missing price or quota stays unknown. Totals always disclose
+partial coverage and the fraction of reports with known costs; no price is
+guessed. `status`, cockpit JSON, and the terminal cockpit show the ledger. The
+terminal shows three groups and discloses any additional groups; `mesh usage`
+and cockpit JSON show all groups.
+
+Before a duty holder is rate-limited, it can authorize a named successor:
+
+```powershell
+localpilot mesh takeover-authorize --role codex --to localpilot --duty reviewer
+# Only after codex has a recorded pause:
+localpilot mesh takeover --role localpilot --from codex --duty reviewer
+# After codex's terminal has joined again, return the seat explicitly:
+localpilot mesh reviewer-transfer --role localpilot --to codex
+```
+
+`--duty owner` authorizes ownership instead. `takeover-authorize --revoke`
+cancels an authorization. Only three-party sessions with a healthy independent
+required reviewer can transfer a duty. Authorization is scoped to session, unit
+and epoch; the transition consumes it, invalidates old reviews, clears waits,
+records its event, and preserves the original holder's pause. Recovery never
+returns a duty automatically. Ownership returns by ordinary handoff. Sessions
+using quota transitions require `quota-takeover`; older writers refuse them.
+The engine never initiates a takeover itself.
+
+Start through the reference with `--context-summaries` to opt in once. Then
+`pair.py summary --role <r>` creates an advisory artifact, or native
+`localpilot mesh memory --role <r>` captures visible recent mail into LocalMind.
+Capture reads at most 256 KiB per journal and uses its last 50 records, with
+bodies capped at 1,000 characters after known-secret filtering. Source message
+ids are preserved. LocalMind's own learning opt-out is honored. Extraction is
+deterministic and local; candidates remain pending even under automatic review
+mode. No model is called and no accepted lesson is created automatically.
+Filtering is best-effort: inspect material before sharing it. Summaries never
+enter agreement, ownership or acknowledgement rules. `mesh memory` requires
+the native writer; the delegate has no LocalMind capture operation.
+
 #### Waiting for mail (`localpilot mesh wait`)
 
 `localpilot mesh wait` is a one-shot waiter that a host (Claude Code or

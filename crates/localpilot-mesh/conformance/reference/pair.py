@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, contextlib, hashlib, hmac, json, os, re, secrets, socket, subprocess, sys, tempfile, threading, time, uuid
+import argparse, contextlib, csv, hashlib, hmac, io, json, os, re, secrets, socket, stat, subprocess, sys, tempfile, threading, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -41,8 +41,8 @@ CAPS=["ack"]
 # The mailbox protocol this build speaks (references/spec.md), and the optional
 # features it implements. A record may name features it `requires`; an unknown
 # one, or another major version, is refused rather than guessed at.
-PROTOCOL="1.1"
-FEATURES=frozenset()
+PROTOCOL="1.2"
+FEATURES=frozenset({"quota-takeover"})
 # Identities a session may be made of, and the historic pair. A session of
 # exactly the historic pair keeps schema 1 for its whole life: the legacy file
 # layout (JSON `active.json`, `session.json`) and never the schema-2 keys
@@ -1346,6 +1346,7 @@ def start(a):
         # `crows` are what both the digests and the stored manifests come from.
         q,rows=snap_rows(repo,vcs); crows={}
         s={"session_id":sid,"task":task,"work_unit":a.work_unit or slug(task),"unit_id":"1-"+uuid.uuid4().hex[:8],"driver":a.role,"navigator":parts[1],"owner":a.role,"ownership_epoch":1,"status":"active","phase":"huddle","waiting":None,"pause":None,"handoff":None,"vcs":vcs,"base_head":q["head"],"base_status":q["status"],"companions":snap_companions(comps,crows),"absent_companions":absent,"caps":{a.role:list(CAPS)},"delivery":"print","protocol":PROTOCOL,"created_at":now(),"updated_at":now()}
+        if getattr(a,"context_summaries",False): s["context_summaries"]=True
         if set(parts)!=set(HISTORIC):
             # Schema 2 carries its participant list and no single navigator: with
             # three identities there is none, and a derived one would be a guess.
@@ -1612,7 +1613,7 @@ def consume(mb,role,stale,expect_sid=None):
             u=f" [{unit_label(m.get('work_unit'),m.get('unit_id'))}]" if m.get("work_unit") else ""
             r=f" REDELIVERED n={n[m['seq']]}" if n.get(m["seq"],0)>1 else ""
             return f"PEER {m['role']} #{m['seq']} {m['kind']}{u}{' REPLY_REQUIRED' if m.get('expect_reply') else ''}{r}"
-        return "\n\n".join(head(m)+("\n"+m['body'] if m.get('body') else "") for m in msgs), commit
+        return "\n\n".join(head(m)+("\n"+m['body'] if m.get('body') else "")+art_lines(m) for m in msgs), commit
     peer=the_peer(s,role)
     h=readj(mb.health(s,peer),{}) or {}; gen=int(h.get("generation",0)); seen=int(c.get("peer_health_generation",0)); status=h.get("status")
     if gen>seen:
@@ -1710,7 +1711,7 @@ def consume_v2(mb,s,role,stale,expect_sid):
             # else got it and which id to --reply-to or acknowledge.
             mk=route_marks(m) if len(others)>1 else ""
             return f"PEER {m['role']} #{m['seq']} {m['kind']}{u}{mk}{' REPLY_REQUIRED' if m.get('expect_reply') else ''}{rd}"
-        return "\n\n".join(head_line(m)+("\n"+m['body'] if m.get('body') else "") for m in out), commit
+        return "\n\n".join(head_line(m)+("\n"+m['body'] if m.get('body') else "")+art_lines(m) for m in out), commit
     # Health and resume notices, per sender.
     hs=c["health"]
     for snd in others:
@@ -2041,6 +2042,7 @@ def status(a):
         un=" ".join(f"{r}=" + ",".join(f"{snd}:{a}..{snd}:{b}" for snd,a,b in u)
                     for r in participants(s) for u in [unacked_v2(mb,s,r)] if u)
     print(f"DELIVERY mode={delivery(s)} caps={caps}"+(f" unacked {un}" if un else ""))
+    for line in usage_lines(s): print(line)
     if schema(s)==2 and len(participants(s))>2:
         for mid,e in sorted(waiting_map(s).items()):
             print(f"WAITING {mid} {e.get('kind')} from={e.get('from')} pending={','.join(e.get('pending') or []) or '-'} "
@@ -2254,6 +2256,400 @@ def latest_decision(mb,s,role):
         if m.get("kind") in DECISION_KINDS or m.get("expect_reply"): last=m
     return last
 
+# ---- Artifacts (spec §4a, R-1..R-8) ----------------------------------------
+ARTIFACT_TYPES={"review-pack","plan","design","document","dataset","summary"}
+ART_MAX_FILES=64; ART_MAX_FILE=16*1024*1024; ART_MAX_TOTAL=64*1024*1024; ART_MAX_REFS=16
+ART_ID=re.compile(r"[0-9a-f]{64}")
+
+def art_lines(m):
+    """R-5: a message's attached artifacts, one line each after its body."""
+    refs=m.get("artifacts")
+    if not isinstance(refs,list): return ""
+    return "".join(f"\nARTIFACT {r.get('id')} type={r.get('type')}" for r in refs if isinstance(r,dict))
+
+def canon(obj):
+    """R-1's canonical bytes: keys sorted, compact, UTF-8, J-2's escapes, one
+    trailing newline. The artifact id is the SHA-256 of exactly these bytes."""
+    line=json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+    for raw,esc in RAW_BREAKS.items(): line=line.replace(raw,esc)
+    return (line+"\n").encode("utf-8")
+
+def intake_path_problem(rel):
+    """Why `rel` may not be taken into an artifact, or None."""
+    if not rel or rel.startswith(("/","\\")) or re.match(r"^[A-Za-z]:",rel): return "is not a relative path"
+    parts=rel.replace("\\","/").split("/")
+    if any(x in ("",".","..") for x in parts): return "is not a plain relative path"
+    if parts[0].lower().rstrip(". ") in (".git",PAIR_DIR): return "is inside .git or the mailbox"
+    return None
+
+def pinned_read(tree_root,rel,limit):
+    """R-3: read one file through one pinned handle, or refuse. The path and
+    every ancestor are checked before and after, and the handle is matched to
+    the path, so a swap to a link or another file is caught."""
+    why=intake_path_problem(rel)
+    if why: raise SystemExit(f"INTAKE_REFUSED {rel}: {why}")
+    parts=rel.replace("\\","/").split("/")
+    chain=[Path(tree_root).joinpath(*parts[:i]) for i in range(1,len(parts)+1)]
+    def look():
+        out=[]
+        for q in chain:
+            if reparse(q): raise SystemExit(f"INTAKE_REFUSED {rel}: {q.name} is a link or reparse point")
+            try: out.append(os.lstat(q))
+            except FileNotFoundError: raise SystemExit(f"INTAKE_REFUSED {rel}: no such file")
+        return out
+    before=look()
+    if any(not stat.S_ISDIR(st.st_mode) for st in before[:-1]) or not stat.S_ISREG(before[-1].st_mode):
+        raise SystemExit(f"INTAKE_REFUSED {rel}: not a regular file")
+    if before[-1].st_size>limit: raise SystemExit(f"INTAKE_REFUSED {rel}: larger than {limit} bytes")
+    fd=os.open(chain[-1],os.O_RDONLY|getattr(os,"O_BINARY",0)|getattr(os,"O_NOFOLLOW",0))
+    try:
+        fs=os.fstat(fd)
+        if (fs.st_dev,fs.st_ino)!=(before[-1].st_dev,before[-1].st_ino):
+            raise SystemExit(f"INTAKE_CHANGED {rel}; nothing stored")
+        chunks=[]; got=0
+        while True:
+            b=os.read(fd,1<<20)
+            if not b: break
+            got+=len(b); chunks.append(b)
+            if got>limit: raise SystemExit(f"INTAKE_REFUSED {rel}: larger than {limit} bytes")
+    finally: os.close(fd)
+    data=b"".join(chunks)
+    after=look()
+    key=lambda st:(st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns)
+    if [key(x) for x in before]!=[key(x) for x in after] or len(data)!=before[-1].st_size:
+        raise SystemExit(f"INTAKE_CHANGED {rel}; nothing stored")
+    return data
+
+def art_dir(mb,s): return mb.sd(s)/"artifacts"
+
+def usage_lines(s):
+    groups={}
+    for r in s.get("usage") or []:
+        key=(r["role"],r["unit_id"],r["source"])
+        g=groups.setdefault(key,{"tokens":0,"cost":0,"known":0,"reports":0,"limit":None})
+        g["tokens"]+=sum(r[k] for k in ("input_tokens","output_tokens","cache_creation_input_tokens","cache_read_input_tokens"))
+        g["reports"]+=1
+        if r.get("cost_microusd") is not None: g["cost"]+=r["cost_microusd"]; g["known"]+=1
+        if r.get("limit_percent") is not None: g["limit"]=r["limit_percent"]
+    return [f"USAGE role={role} unit={unit} source={source} tokens={g['tokens']} "
+            f"cost_microusd={g['cost'] if g['known'] else 'unknown'} cost_coverage={g['known']}/{g['reports']} "
+            f"limit_percent={g['limit'] if g['limit'] is not None else 'unknown'} reports={g['reports']} coverage=partial"
+            for (role,unit,source),g in sorted(groups.items())]
+
+def usage(a):
+    mb=MB(root(a.repo))
+    if not a.report_id:
+        s=named_or_active(mb,a.session)
+        print("\n".join(usage_lines(s)) or "USAGE coverage=none"); return 0
+    if not a.role or a.session: raise SystemExit("usage recording needs --role and the active session")
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}",a.report_id): raise SystemExit("invalid report id")
+    fields=("input_tokens","output_tokens","cache_creation_input_tokens","cache_read_input_tokens","cost_microusd")
+    vals={k:getattr(a,k) for k in fields}
+    if any(v is not None and (v<0 or v>2**64-1) for v in vals.values()): raise SystemExit("usage counts must be uint64")
+    if a.limit_percent is not None and not 0<=a.limit_percent<=100: raise SystemExit("limit percent must be 0..100")
+    with Lock(mb.lock):
+        s=require(mb,a.role,allow_paused=True)
+        rec={"role":a.role,"unit_id":s.get("unit_id"),"report_id":a.report_id,"source":"reported",**vals,"limit_percent":a.limit_percent}
+        rows=list(s.get("usage") or [])
+        old=next((r for r in rows if r["role"]==a.role and r["report_id"]==a.report_id),None)
+        if old:
+            if {k:v for k,v in old.items() if k!="at"}!=rec: raise SystemExit("usage report id reused with different content")
+        else:
+            rows.append({**rec,"at":now()}); s["usage"]=rows; s["updated_at"]=now(); mb.save(s)
+    print(f"USAGE_RECORDED role={a.role} report_id={a.report_id}"); return 0
+
+def healthy(mb,s,role):
+    return role not in pauses(s) and (readj(mb.health(s,role),{}) or {}).get("status")=="ready"
+
+def takeover_authorize(a):
+    mb=MB(root(a.repo))
+    with Lock(mb.lock):
+        s=require(mb,a.role); au=authority(s)
+        if schema(s)!=2: raise SystemExit("takeover needs a three-party session with an independent reviewer")
+        if not healthy(mb,s,a.role): raise SystemExit("only a healthy duty holder may authorize")
+        if a.to not in participants(s) or a.to==a.role or not healthy(mb,s,a.to): raise SystemExit("successor must be another healthy participant")
+        if (a.duty=="owner" and au["owner"]!=a.role) or (a.duty=="reviewer" and a.role not in au["required_reviewers"]):
+            raise SystemExit("role does not hold that duty")
+        if a.duty=="reviewer" and a.to not in au["advisers"]: raise SystemExit("reviewer successor must be an adviser")
+        rows=[x for x in s.get("takeover_authorizations") or [] if not (x["from"]==a.role and x["duty"]==a.duty)]
+        if not a.revoke:
+            rows.append({"from":a.role,"to":a.to,"duty":a.duty,"session_id":s["session_id"],
+                         "unit_id":s.get("unit_id"),"epoch":s["ownership_epoch"],"at":now()})
+        s["takeover_authorizations"]=rows
+        s["requires"]=sorted(set(s.get("requires") or [])|{"quota-takeover"})
+        add_event(s,"takeover-revoked" if a.revoke else "takeover-authorized",a.role,handoff={"to":a.to,"duty":a.duty})
+        s["updated_at"]=now(); mb.save(s)
+    print(f"TAKEOVER_{'REVOKED' if a.revoke else 'AUTHORIZED'} from={a.role} to={a.to} duty={a.duty}"); return 0
+
+def takeover(a):
+    mb=MB(root(a.repo))
+    with Lock(mb.lock):
+        s=require(mb,a.role,allow_paused=True); au=authority(s)
+        auth=next((x for x in s.get("takeover_authorizations") or [] if x["from"]==a.from_role and x["to"]==a.role and x["duty"]==a.duty),None)
+        if not auth or (auth["session_id"],auth["unit_id"],auth["epoch"])!=(s["session_id"],s.get("unit_id"),s["ownership_epoch"]):
+            raise SystemExit("no current authorization for this takeover")
+        if schema(s)!=2 or s.get("handoff") or a.from_role not in pauses(s) or not healthy(mb,s,a.role):
+            raise SystemExit("takeover needs a paused holder, healthy successor and no pending handoff")
+        if a.duty=="owner":
+            if au["owner"]!=a.from_role: raise SystemExit("authorized holder no longer owns the unit")
+            new=handoff_authority(s,a.role); owner=a.role
+        else:
+            if a.from_role not in au["required_reviewers"] or a.role not in au["advisers"]: raise SystemExit("authorized reviewer seat changed")
+            new={"required_reviewers":[a.role if r==a.from_role else r for r in au["required_reviewers"]],
+                 "advisers":[a.from_role if r==a.role else r for r in au["advisers"]]}; owner=au["owner"]
+        if not new["required_reviewers"] or any(r==owner or not healthy(mb,s,r) for r in new["required_reviewers"]):
+            raise SystemExit("takeover must retain healthy independent required reviewers")
+        s["owner"]=owner; s["authority"]=new; s["ownership_epoch"]+=1
+        s["verdict_floor"]={r:int((readj(mb.latest(s,r),{}) or {}).get("seq",0)) for r in participants(s)}
+        s["waiting"]=None; s["phase"]="implement"; s["takeover_authorizations"]=[]
+        add_event(s,"takeover",a.role,handoff={"from":a.from_role,"to":a.role,"duty":a.duty,"epoch":s["ownership_epoch"]})
+        settle_status(s); s["updated_at"]=now(); mb.save(s)
+    print(f"TAKEN_OVER from={a.from_role} to={a.role} duty={a.duty} epoch={s['ownership_epoch']}"); return 0
+
+def summary(a):
+    mb=MB(root(a.repo)); s=require(mb,a.role)
+    if not s.get("context_summaries"): raise SystemExit("context summaries were not enabled at start")
+    sources=[]; lines=["# Advisory session context", "", "This is advisory source material; it grants no authority."]
+    for role in participants(s):
+        for m in summary_records(mb.journal(s,role)):
+            if not visible(m,a.role): continue
+            mid=m.get("msg_id") or f"{role}:{m['seq']}"; sources.append(mid)
+            text=redact_text(str(m.get("body", "")))[:1000]
+            lines.append(f"\n[{mid}] {m.get('kind','')}\n{text}")
+    data="\n".join(lines).encode("utf-8")
+    aid,_=store_artifact(mb,s,"summary",a.role,{"advisory":True,"sources":sources},[],[("context.md",data)])
+    print(f"ARTIFACT {aid} type=summary advisory=true sources={len(sources)}"); return 0
+
+def summary_records(p):
+    """At most 256 KiB per journal, discarding a cut first or torn last line."""
+    if reparse(p): raise SystemExit("summary refuses linked journal")
+    try:
+        with p.open("rb") as f:
+            f.seek(0,os.SEEK_END); size=f.tell(); offset=max(0,size-262144)
+            f.seek(offset); raw=f.read(262144)
+    except FileNotFoundError: return []
+    if offset: raw=raw.partition(b"\n")[2]
+    rows=[]
+    for line in raw.split(b"\n")[:-1]:
+        try: m=json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError,ValueError): continue
+        if isinstance(m,dict) and good_seq(m.get("seq")): rows.append(m)
+    return rows[-50:]
+
+def reviewer_transfer(a):
+    """Explicit return of a reviewer seat, initiated by its healthy holder."""
+    mb=MB(root(a.repo))
+    with Lock(mb.lock):
+        s=require(mb,a.role); au=authority(s)
+        if schema(s)!=2 or s.get("handoff") or a.role not in au["required_reviewers"] or a.to not in au["advisers"]:
+            raise SystemExit("reviewer transfer needs a required holder, adviser successor and no handoff")
+        if not all(healthy(mb,s,r) for r in [a.role,a.to]): raise SystemExit("reviewer transfer needs healthy participants")
+        s["authority"]={"required_reviewers":[a.to if r==a.role else r for r in au["required_reviewers"]],
+                        "advisers":[a.role if r==a.to else r for r in au["advisers"]]}
+        s["ownership_epoch"]+=1; s["phase"]="implement"; s["waiting"]=None; s["takeover_authorizations"]=[]
+        s["verdict_floor"]={r:int((readj(mb.latest(s,r),{}) or {}).get("seq",0)) for r in participants(s)}
+        s["requires"]=sorted(set(s.get("requires") or [])|{"quota-takeover"})
+        add_event(s,"reviewer-transfer",a.role,handoff={"from":a.role,"to":a.to,"duty":"reviewer","epoch":s["ownership_epoch"]})
+        s["updated_at"]=now(); mb.save(s)
+    print(f"REVIEWER_TRANSFERRED from={a.role} to={a.to} epoch={s['ownership_epoch']}"); return 0
+
+def verify_artifact(d,aid):
+    """R-2: the manifest hashes to the id and every entry to its name and size;
+    anything else is ARTIFACT_CORRUPT, never absent."""
+    if any(reparse(p) for p in (d.parent,d,d/"files",d/"artifact.json")):
+        raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+    try: raw=(d/"artifact.json").read_bytes()
+    except (FileNotFoundError,OSError): raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+    if hashlib.sha256(raw).hexdigest()!=aid: raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+    try: m=json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError,json.JSONDecodeError): raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+    if (not isinstance(m,dict) or m.get("type") not in ARTIFACT_TYPES
+        or not isinstance(m.get("files"),list) or not isinstance(m.get("generated"),list)):
+        raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+    for e in m["files"]+m["generated"]:
+        if not isinstance(e,dict): raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+        if e.get("deleted"): continue
+        h=e.get("sha256","")
+        if not ART_ID.fullmatch(str(h)): raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+        f=d/"files"/h
+        if reparse(f): raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+        try: b=f.read_bytes()
+        except (FileNotFoundError,OSError): raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+        if hashlib.sha256(b).hexdigest()!=h or len(b)!=e.get("size"): raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+    return m
+
+def store_artifact(mb,s,typ,role,meta,entries,generated=()):
+    with Lock(mb.lock):
+        fresh=require(mb,role)
+        if any(fresh.get(k)!=s.get(k) for k in ("session_id","unit_id","ownership_epoch")):
+            raise SystemExit("session changed during artifact capture; nothing stored")
+        return _store_artifact(mb,s,typ,role,meta,entries,generated)
+
+def _store_artifact(mb,s,typ,role,meta,entries,generated=()):
+    """R-1/R-2: write the artifact once, into a temporary sibling that is then
+    renamed into place. `entries` is (tree, path, bytes or None for a deletion);
+    `generated` is (name, bytes). An id that already exists counts only after
+    it verifies."""
+    stored=[e for e in entries if e[2] is not None]
+    if len(stored)+len(generated)>ART_MAX_FILES: raise SystemExit(f"ARTIFACT_TOO_LARGE: more than {ART_MAX_FILES} files")
+    if sum(len(e[2]) for e in stored)+sum(len(g[1]) for g in generated)>ART_MAX_TOTAL:
+        raise SystemExit(f"ARTIFACT_TOO_LARGE: more than {ART_MAX_TOTAL} bytes in all")
+    blobs={}
+    files=[]
+    for tree,path,data in sorted(entries,key=lambda e:(e[0],e[1])):
+        if data is None: files.append({"tree":tree,"path":path,"deleted":True}); continue
+        h=hashlib.sha256(data).hexdigest(); blobs[h]=data
+        files.append({"tree":tree,"path":path,"sha256":h,"size":len(data)})
+    gen=[]
+    for name,data in generated:
+        h=hashlib.sha256(data).hexdigest(); blobs[h]=data
+        gen.append({"name":name,"sha256":h,"size":len(data)})
+    m={"type":typ,"created_by":role,"created_at":now(),"unit_id":s.get("unit_id"),
+       "meta":meta,"files":files,"generated":gen}
+    raw=canon(m); aid=hashlib.sha256(raw).hexdigest()
+    base=art_dir(mb,s); final=base/aid
+    if reparse(base) or reparse(final): raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+    if final.exists(): verify_artifact(final,aid); return aid,m
+    base.mkdir(parents=True,exist_ok=True)
+    tmp=base/f".tmp-{secrets.token_hex(8)}"
+    (tmp/"files").mkdir(parents=True)
+    try:
+        for h,data in blobs.items():
+            with open(tmp/"files"/h,"wb") as f: f.write(data); f.flush(); os.fsync(f.fileno())
+        with open(tmp/"artifact.json","wb") as f: f.write(raw); f.flush(); os.fsync(f.fileno())
+        try: os.rename(tmp,final)
+        except OSError:
+            if not final.exists(): raise
+            verify_artifact(final,aid)
+    finally:
+        if tmp.exists(): rmtree_no_links(tmp)
+    return aid,m
+
+def md_headings(text):
+    return {line.rstrip("\r") for line in text.split("\n")}
+
+def validate_artifact(typ,meta,entries):
+    """R-4: the shape the type names, and nothing more."""
+    texts=[]
+    for tree,path,data in entries:
+        if data is None: raise SystemExit(f"ARTIFACT_INVALID {typ}: a deletion is only for a review pack")
+        if typ in ("plan","design","document"):
+            try: texts.append(data.decode("utf-8"))
+            except UnicodeDecodeError: raise SystemExit(f"ARTIFACT_INVALID {typ}: {path} is not UTF-8 text")
+    if typ=="document":
+        if not entries: raise SystemExit("ARTIFACT_INVALID document: no file")
+    elif typ in ("plan","design"):
+        if len(entries)!=1: raise SystemExit(f"ARTIFACT_INVALID {typ}: exactly one Markdown file")
+        lines=md_headings(texts[0])
+        need=["## Goal","## Steps"] if typ=="plan" else ["## Problem","## Decision"]
+        if typ=="plan" and not any(l.startswith("# ") for l in lines): raise SystemExit("ARTIFACT_INVALID plan: no '# <title>' line")
+        for h in need:
+            if h not in lines: raise SystemExit(f"ARTIFACT_INVALID {typ}: no '{h}' heading")
+    elif typ=="dataset":
+        if not isinstance(meta,dict) or meta.get("format") not in ("csv","jsonl","json") or not good_seq_or_zero(meta.get("rows")):
+            raise SystemExit("ARTIFACT_INVALID dataset: meta needs format csv|jsonl|json and a whole-number rows")
+        if len(entries)!=1: raise SystemExit("ARTIFACT_INVALID dataset: exactly one file")
+        data=entries[0][2]
+        try: text=data.decode("utf-8")
+        except UnicodeDecodeError: raise SystemExit("ARTIFACT_INVALID dataset: not UTF-8")
+        fmt=meta["format"]
+        if fmt=="csv": n=max(0,sum(1 for _ in csv.reader(io.StringIO(text,newline="")))-1)
+        elif fmt=="jsonl":
+            rows=[l for l in text.split("\n") if l.strip()]
+            for l in rows:
+                try: json.loads(l)
+                except json.JSONDecodeError: raise SystemExit("ARTIFACT_INVALID dataset: a jsonl line is not JSON")
+            n=len(rows)
+        else:
+            try: v=json.loads(text)
+            except json.JSONDecodeError: raise SystemExit("ARTIFACT_INVALID dataset: not JSON")
+            if not isinstance(v,list): raise SystemExit("ARTIFACT_INVALID dataset: json must be a top-level array")
+            n=len(v)
+        if n!=meta["rows"]: raise SystemExit(f"ARTIFACT_INVALID dataset: {n} rows, meta says {meta['rows']}")
+    elif typ in ("review-pack","summary"): raise SystemExit(f"ARTIFACT_INVALID {typ}: generated by its capture command, never by hand")
+    else: raise SystemExit(f"ARTIFACT_INVALID: unknown type {typ!r} (types: {', '.join(sorted(ARTIFACT_TYPES))})")
+
+def good_seq_or_zero(v): return isinstance(v,int) and not isinstance(v,bool) and v>=0
+
+def artifact_put(a):
+    repo=root(a.repo); mb=MB(repo); s=require(mb,a.role)
+    meta=None
+    if a.meta:
+        try: meta=json.loads(a.meta)
+        except json.JSONDecodeError: raise SystemExit("--meta must be JSON")
+    if len(a.paths)>ART_MAX_FILES: raise SystemExit(f"ARTIFACT_TOO_LARGE: more than {ART_MAX_FILES} files")
+    entries=[]; seen=set()
+    for raw in a.paths:
+        q=Path(raw)
+        if q.is_absolute():
+            try: rel=q.relative_to(repo).as_posix()
+            except ValueError: raise SystemExit(f"INTAKE_REFUSED {raw}: outside the tree")
+        else: rel=q.as_posix()
+        if rel in seen: raise SystemExit(f"INTAKE_REFUSED {rel}: named twice")
+        seen.add(rel); entries.append(("anchor",rel,pinned_read(repo,rel,ART_MAX_FILE)))
+    validate_artifact(a.type,meta,entries)
+    aid,m=store_artifact(mb,s,a.type,a.role,meta,entries)
+    print(f"ARTIFACT {aid} type={a.type} files={len(m['files'])}"); return 0
+
+def artifact_session(mb,a): return named_or_active(mb,getattr(a,"session",None))
+
+def artifact_list(a):
+    mb=MB(root(a.repo)); s=artifact_session(mb,a); d=art_dir(mb,s)
+    if not d.is_dir() or reparse(d): return 0
+    found=[(e,verify_artifact(e,e.name)) for e in d.iterdir() if ART_ID.fullmatch(e.name) and not reparse(e)]
+    # Creation order (R-7): the time, then the type, then the id.
+    for e,m in sorted(found,key=lambda x:(str(x[1].get("created_at","")),str(x[1].get("type","")),x[0].name)):
+        print(f"ARTIFACT {e.name} type={m.get('type')} by={m.get('created_by')} unit={m.get('unit_id')} "
+              f"files={len(m.get('files') or [])} generated={len(m.get('generated') or [])}")
+    return 0
+
+def artifact_open(mb,s,aid):
+    if not ART_ID.fullmatch(aid or ""): raise SystemExit(f"unknown artifact {aid!r}")
+    d=art_dir(mb,s)/aid
+    if reparse(art_dir(mb,s)) or reparse(d): raise SystemExit(f"ARTIFACT_CORRUPT {aid}")
+    if not d.is_dir(): raise SystemExit(f"unknown artifact {aid}")
+    return d,verify_artifact(d,aid)
+
+def artifact_show(a):
+    mb=MB(root(a.repo)); s=artifact_session(mb,a); d,m=artifact_open(mb,s,a.id)
+    print(f"ARTIFACT {a.id} type={m.get('type')} by={m.get('created_by')} unit={m.get('unit_id')} VERIFIED")
+    print(json.dumps(m,ensure_ascii=False,indent=1,sort_keys=True)); return 0
+
+def artifact_get(a):
+    repo=root(a.repo); mb=MB(repo); s=artifact_session(mb,a); d,m=artifact_open(mb,s,a.id)
+    out=Path(a.out).absolute()
+    if os.path.lexists(out): raise SystemExit(f"--out {out} already exists")
+    try:
+        out.relative_to(mb.base.absolute()); raise SystemExit("--out must be outside the mailbox")
+    except ValueError: pass
+    plan=[]; seen=set()
+    for e in m.get("files") or []:
+        if e.get("deleted"): continue
+        rel=f"{e.get('tree')}/{e.get('path')}"
+        if intake_path_problem(str(e.get("path"))) or intake_path_problem(str(e.get("tree"))): raise SystemExit(f"refusing to write {rel}: it would leave {out}")
+        plan.append((out/"trees"/str(e["tree"])/Path(*str(e["path"]).split("/")),e["sha256"]))
+    for g in m.get("generated") or []:
+        if intake_path_problem(str(g.get("name"))) or "/" in str(g.get("name")): raise SystemExit(f"refusing to write generated/{g.get('name')}")
+        plan.append((out/"generated"/str(g["name"]),g["sha256"]))
+    for dest,_ in plan:
+        k=os.path.normcase(str(dest))
+        if k in seen: raise SystemExit(f"refusing to write {dest}: two entries land there")
+        seen.add(k)
+    for dest,h in plan:
+        dest.parent.mkdir(parents=True,exist_ok=True); dest.write_bytes((d/"files"/h).read_bytes())
+    for e in m.get("files") or []:
+        if e.get("deleted"): print(f"DELETED {e.get('tree')}/{e.get('path')}")
+    print(f"GOT {a.id} files={len(plan)} into {out}"); return 0
+
+def artifact_refs(mb,s,ids):
+    """R-5: the `artifacts` key for a post, each id verified in this session."""
+    if len(ids)>ART_MAX_REFS: raise SystemExit(f"at most {ART_MAX_REFS} artifacts on one message")
+    refs=[]
+    for aid in ids:
+        _,m=artifact_open(mb,s,aid)
+        refs.append({"id":aid,"type":m.get("type")})
+    return refs
+
 def changed_paths(repo,base,mode=None,manifest=None):
     """Everything committed since `base`, plus everything currently uncommitted.
 
@@ -2305,6 +2701,98 @@ def digest_rows(root_dir,paths):
         except (FileNotFoundError,IsADirectoryError,PermissionError): rows.append(("gone/unreadable",f))
     return rows
 
+SECRET_SHAPES=[re.compile(p) for p in (
+    r"(?is)-----BEGIN[A-Z ]*PRIVATE KEY-----.*?(?:-----END[A-Z ]*PRIVATE KEY-----|$)",
+    r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*",
+    r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+:[^\s:/@]+@[^\s]+",
+    r"(?i)(password|passwd|secret|token|api[_-]?key)\s*[=:]\s*\S+",
+    r"sk-[A-Za-z0-9_-]{16,}", r"gh[pousr]_[A-Za-z0-9]{20,}", r"AKIA[0-9A-Z]{16}",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----")]
+
+def redact_text(s):
+    for r in SECRET_SHAPES: s=r.sub("[REDACTED]",s)
+    return s
+
+def companion_scope(mb,s,ci,c):
+    """A companion's changed paths inside its write scope, and outside it: one
+    definition for the request and for its pack."""
+    croot=Path(c["root"]); cbase=c.get("head") or "UNBORN"; cvcs=c.get("vcs") or "git"
+    ct,cd=changed_paths(croot,cbase,cvcs,mb.manifest(s,ckey(c,ci)))
+    allp=sorted({x for x in ct+cd if x}); inside=[f for f in allp if glob_match(c["write"],f)]
+    return croot,cbase,cvcs,inside,[f for f in allp if f not in set(inside)]
+
+def tree_section(name,troot,vcs,base,paths,manifest):
+    """One tree's part of review.diff: a textual diff for Git, an honest change
+    list for a tree with no history (R-4)."""
+    head=f"### tree {name} ({'git' if vcs!='none' else 'no VCS'}, base {base})"
+    if not paths: return head+"\n(no changed paths)\n"
+    if vcs=="none":
+        was=read_manifest(manifest) or {}
+        live={r:d for r,k,sz,d in scan_tree(troot)}
+        lines=[head,"A change list, not a diff: the unit's manifest keeps digests, not the old bytes."]
+        for p in paths:
+            old=was.get(p,(None,None,None))[2] if p in was else None
+            lines.append(f"{p} was={old or 'absent'} now={live.get(p) or 'deleted'}")
+        return "\n".join(lines)+"\n"
+    frm=base if base!="UNBORN" else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    tracked=set(x for x in git(troot,"ls-files","-z",check=False).split(chr(0)) if x)
+    at_base=set(x for x in git(troot,"ls-tree","-r","--name-only","-z",base,check=False).split(chr(0)) if x) if base!="UNBORN" else set()
+    known=[p for p in paths if p in tracked or p in at_base]
+    out=[head]
+    if known: out.append(git(troot,"diff","--no-color","--no-ext-diff",frm,"--",*known,check=False).rstrip("\n"))
+    for p in paths:
+        if p in known: continue
+        fp=Path(troot)/p
+        if not fp.is_file(): continue
+        b=fp.read_bytes()
+        try: text=b.decode("utf-8")
+        except UnicodeDecodeError:
+            out.append(f"new untracked file {p}: binary, {len(b)} bytes, sha256 {hashlib.sha256(b).hexdigest()}"); continue
+        lines=text.split("\n"); ended=lines[-1]==""
+        if ended: lines=lines[:-1]
+        out.append(f"new untracked file {p}\n"+"\n".join("+"+l for l in lines)+("" if ended else "\n\\ No newline at end of file"))
+    return "\n".join(out)+"\n"
+
+def build_pack(a,repo,mb,s,vcs,base,files):
+    """R-4: the review pack for exactly the set this request fingerprints, in
+    every tree of the boundary, or PACK_TOO_LARGE and nothing stored."""
+    entries=[]; trees=[]; sections=[]
+    def take(tree,troot,paths):
+        for f in paths:
+            fp=Path(troot)/f
+            if not os.path.lexists(fp): entries.append((tree,f,None)); continue
+            try: entries.append((tree,f,pinned_read(troot,f,ART_MAX_FILE)))
+            except SystemExit as e:
+                if "larger than" in str(e): raise SystemExit(f"PACK_TOO_LARGE {tree}/{f}; use verify-request without --pack")
+                raise
+    def current(troot,tvcs):
+        if tvcs=="none": return tree_digest(scan_tree(troot))
+        return git(troot,"rev-parse","--verify","-q","HEAD",check=False).strip() or "UNBORN"
+    take("anchor",repo,files)
+    trees.append({"name":"anchor","vcs":"none" if vcs=="none" else "git","base":base,"current":current(repo,vcs),"changed":len(files)})
+    sections.append(tree_section("anchor",repo,vcs,base,files,mb.manifest(s)))
+    for ci,c in enumerate(s.get("companions") or []):
+        croot,cbase,cvcs,inside,_=companion_scope(mb,s,ci,c)
+        take(c["name"],croot,inside)
+        trees.append({"name":c["name"],"vcs":"none" if cvcs=="none" else "git","base":cbase,"current":current(croot,cvcs),"changed":len(inside)})
+        sections.append(tree_section(c["name"],croot,cvcs,cbase,inside,mb.manifest(s,ckey(c,ci))))
+    meta={"trees":trees,"absent":[c["name"] for c in (s.get("absent_companions") or [])],"unit_id":s.get("unit_id")}
+    if getattr(a,"test_result",None) is not None: meta["tests"]=a.test_result
+    # The diff and bytes must describe the same snapshot, including companion
+    # trees. A concurrent edit invalidates this pack instead of mixing states.
+    roots={"anchor":repo,**{c["name"]:Path(c["root"]) for c in s.get("companions") or []}}
+    for tree,path,data in entries:
+        fp=roots[tree]/path
+        if data is None:
+            if os.path.lexists(fp): raise SystemExit(f"INTAKE_CHANGED {tree}/{path}; nothing stored")
+        elif pinned_read(roots[tree],path,ART_MAX_FILE)!=data:
+            raise SystemExit(f"INTAKE_CHANGED {tree}/{path}; nothing stored")
+    stored=[e for e in entries if e[2] is not None]
+    diff="\n".join(sections).encode("utf-8")
+    if len(stored)+1>ART_MAX_FILES or sum(len(e[2]) for e in stored)+len(diff)>ART_MAX_TOTAL:
+        raise SystemExit("PACK_TOO_LARGE: the changed set does not fit an artifact; use verify-request without --pack")
+    return store_artifact(mb,s,"review-pack",a.role,meta,entries,[("review.diff",diff)])
+
 def verify_request(a):
     """Emit a self-contained verification request for a fresh, uninvolved reader.
 
@@ -2327,6 +2815,10 @@ def verify_request(a):
     but can never stand in for it. Anything else would weaken the one mechanical
     guarantee that a second agent signed off."""
     repo=root(a.repo); mb=MB(repo); s=require(mb,a.role)
+    if getattr(a,"pack",False) and getattr(a,"tests",None):
+        r=subprocess.run(a.tests,shell=True,cwd=repo,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=1800)
+        a.test_result={"command":redact_text(a.tests),"rc":r.returncode,
+                       "tail":redact_text("\n".join((r.stdout+r.stderr).splitlines()[-20:]))}
     vcs=s.get("vcs") or mailbox_vcs(repo)
     files=list(a.file or [])
     base=s.get("base_head") or "UNBORN"
@@ -2406,10 +2898,7 @@ def verify_request(a):
                 f"  Declared for: {c['why']}",
                 f"  Declared write scope, not granted this session: {', '.join(c['write'])}"]
     for ci,c in enumerate(s.get("companions") or []):
-        croot=Path(c["root"]); cbase=c.get("head") or "UNBORN"; cvcs=c.get("vcs") or "git"
-        ct,cd=changed_paths(croot,cbase,cvcs,mb.manifest(s,ckey(c,ci)))
-        allp=sorted({x for x in ct+cd if x}); inside=[f for f in allp if glob_match(c["write"],f)]
-        outside=[f for f in allp if f not in set(inside)]
+        croot,cbase,cvcs,inside,outside=companion_scope(mb,s,ci,c)
         out += ["",f"Companion repository: {c['name']}",
                 f"  Root: {c['root']}",
                 f"  Declared for: {c['why']}",
@@ -2427,6 +2916,11 @@ def verify_request(a):
                     "  to write these, so treat them as a finding rather than as work under"
                        " review:"]
             out += [f"    {f}" for f in outside]
+    if getattr(a,"pack",False):
+        aid,pm=build_pack(a,repo,mb,s,vcs,base,files)
+        out += ["",f"Review pack: {aid}",
+                "  An immutable copy of every file above as it is now, deletions marked, and",
+                "  review.diff. Read it with: artifact show / artifact get --out <dir>."]
     checks=list(a.check or [])
     out += ["","Checks to run (non-mutating):"] + ([f"  {c}" for c in checks] or
             ["  (none named — inspect the diff and say what you could not verify without one)"])
@@ -2439,7 +2933,9 @@ def verify_request(a):
             "This verdict is advisory. It goes back to the pair, who weigh it and issue their",
             "own review. Nothing you write here closes the work, so say what you actually",
             "found rather than what would let it pass."]
-    print("\n".join(out)); return 0
+    print("\n".join(out))
+    if getattr(a,"pack",False): print(f"ARTIFACT {aid} type=review-pack files={len(pm['files'])}")
+    return 0
 
 def journal_rows(mb,s,role):
     p=mb.journal(s,role); out=[]
@@ -3062,12 +3558,15 @@ def cmd_post(a):
     s0=mb.active()
     if s0 and a.role in participants(s0):
         address(mb,s0,a.role,a.kind,a.expect_reply,a.to,a.reply_to,a.broadcast,forward=a.forward)
+    # R-5: every referenced artifact is verified before anything is written.
+    refs=artifact_refs(mb,s0,a.artifact) if (s0 and getattr(a,"artifact",None)) else None
     # Validated before the ack, so a post refused for its body cannot leave an
     # acknowledgement behind that no reply ever accompanied.
     if not b.strip(): raise SystemExit("refusing to post an empty message; a body that failed to render is worse than no post, because the peer treats it as a real turn")
     if a.ack_through is not None:
         with Lock(mb.lock): apply_ack(mb,require(mb,a.role,allow_paused=True),a.role,a.ack_through)
-    m=mb.post(a.role,a.kind,b,a.expect_reply,to=a.to,reply_to=a.reply_to,broadcast=a.broadcast,forward=a.forward,extra={"actor":getattr(a,"actor",None)})
+    m=mb.post(a.role,a.kind,b,a.expect_reply,to=a.to,reply_to=a.reply_to,broadcast=a.broadcast,forward=a.forward,
+              expect_sid=s0["session_id"] if refs else None,extra={"actor":getattr(a,"actor",None),"artifacts":refs})
     # stderr, so a successful post stays silent on stdout. Not an ack: a post
     # proves the model is active, not that it saw what some watcher printed.
     s=mb.active()
@@ -3240,7 +3739,7 @@ def transcript(a):
     for m in sorted(arr,key=lambda x:(x.get("at",""),x.get("role",""),x.get("seq",0))):
         unit=f" [{unit_label(m.get('work_unit'),m.get('unit_id'))}]" if m.get("work_unit") else ""
         mk=route_marks(m) if m.get("msg_id") else ""
-        print(f"## {m['at']} {m['role']} #{m['seq']} {m['kind']}{unit}{mk}\n{m.get('body','')}\n")
+        print(f"## {m['at']} {m['role']} #{m['seq']} {m['kind']}{unit}{mk}\n{m.get('body','')}{art_lines(m)}\n")
     # The closing record, after the mail it closed, for the same reason `park`
     # keeps its reason: a transcript read later must say why the work stopped.
     if s.get("status")=="abandoned" and s.get("abandon_reason"):
@@ -3257,6 +3756,7 @@ def parser():
     # so the navigator's `join` and every later command read it rather than being
     # told again — and cannot be told a different one.
     q.add_argument("--no-vcs",action="store_true",help="anchor ownership to a content digest of this directory instead of Git HEAD; refused inside a Git working tree")
+    q.add_argument("--context-summaries",action="store_true",help="opt into advisory LocalMind session summaries")
     q.set_defaults(fn=start)
     q=rc("join"); q.add_argument("--timeout",type=int,default=0); q.add_argument("--poll",type=float,default=1); q.set_defaults(fn=join)
     q=rc("post"); q.add_argument("--kind",choices=sorted(KINDS),required=True); q.add_argument("--body"); q.add_argument("--body-file"); q.add_argument("--expect-reply",action="store_true")
@@ -3266,6 +3766,7 @@ def parser():
     q.add_argument("--broadcast",action="store_true",help="send to every participant (ESCALATE only)")
     q.add_argument("--forward",action="store_true",help="pass the --reply-to message on to --to; spends one forward edge")
     q.add_argument("--actor",choices=sorted(ACTORS),help="claim who acted (self-asserted; never identity or authority)")
+    q.add_argument("--artifact",action="append",metavar="ID",help="attach a stored artifact by id (repeatable)")
     q.set_defaults(fn=cmd_post)
     for n,b in (("watch",True),("peek",False)):
         q=rc(n); q.add_argument("--timeout",type=int,default=0); q.add_argument("--poll",type=float,default=1); q.add_argument("--stale-after",type=int,default=900)
@@ -3273,6 +3774,14 @@ def parser():
     q=rc("ack"); q.add_argument("--through",required=True,help="N, or sender:N[,sender:N]"); q.set_defaults(fn=ack)
     q=rc("health"); q.add_argument("--status",choices=sorted(HEALTH),required=True); q.add_argument("--reason"); q.add_argument("--resume-at"); q.set_defaults(fn=health)
     q=sp.add_parser("status"); q.set_defaults(fn=status)
+    q=sp.add_parser("usage"); q.add_argument("--role",choices=PARTICIPANTS); q.add_argument("--report-id"); q.add_argument("--session")
+    for f in ("input-tokens","output-tokens","cache-creation-input-tokens","cache-read-input-tokens"):
+        q.add_argument("--"+f,type=int,default=0)
+    q.add_argument("--cost-microusd",type=int); q.add_argument("--limit-percent",type=int); q.set_defaults(fn=usage)
+    q=rc("takeover-authorize"); q.add_argument("--to",required=True); q.add_argument("--duty",choices=("owner","reviewer"),required=True); q.add_argument("--revoke",action="store_true"); q.set_defaults(fn=takeover_authorize)
+    q=rc("takeover"); q.add_argument("--from",dest="from_role",required=True); q.add_argument("--duty",choices=("owner","reviewer"),required=True); q.set_defaults(fn=takeover)
+    q=rc("summary"); q.set_defaults(fn=summary)
+    q=rc("reviewer-transfer"); q.add_argument("--to",required=True); q.set_defaults(fn=reviewer_transfer)
     q=rc("guard-write"); q.add_argument("--path"); q.set_defaults(fn=guard)
     q=rc("endpoint"); g=q.add_mutually_exclusive_group(required=True); g.add_argument("--register",action="store_true"); g.add_argument("--unregister",action="store_true")
     q.add_argument("--transport"); q.add_argument("--address"); q.add_argument("--ttl",type=int,help="seconds until the registration expires"); q.set_defaults(fn=endpoint)
@@ -3284,7 +3793,10 @@ def parser():
     q=rc("handoff-decline"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=handoff_decline)
     q=rc("handoff-withdraw"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=handoff_withdraw)
     q=rc("phase"); q.add_argument("--phase",choices=("huddle","implement","review","blocked","complete"),required=True); q.set_defaults(fn=phase)
-    q=rc("verify-request"); q.add_argument("--criteria"); q.add_argument("--criteria-file"); q.add_argument("--check",action="append"); q.add_argument("--file",action="append"); q.add_argument("--round",default="1"); q.set_defaults(fn=verify_request)
+    q=rc("verify-request"); q.add_argument("--criteria"); q.add_argument("--criteria-file"); q.add_argument("--check",action="append"); q.add_argument("--file",action="append"); q.add_argument("--round",default="1")
+    q.add_argument("--pack",action="store_true",help="also store an immutable review pack and name it in the request")
+    q.add_argument("--tests",help="with --pack: run this command and record its exit code and last lines")
+    q.set_defaults(fn=verify_request)
     q=rc("next-unit"); q.add_argument("--task",dest="body"); q.add_argument("--task-file",dest="body_file"); q.add_argument("--work-unit")
     q.add_argument("--advisers",help="advisers for the new unit, or 'none'; default: the current unit's advisers")
     q.set_defaults(fn=next_unit)
@@ -3296,6 +3808,12 @@ def parser():
     q=sp.add_parser("transcript"); q.add_argument("--session"); q.set_defaults(fn=transcript)
     q=sp.add_parser("replay"); q.add_argument("--session"); q.add_argument("--only",choices=PARTICIPANTS,metavar="ROLE"); q.set_defaults(fn=replay)
     q=sp.add_parser("orphans"); q.add_argument("--remove",metavar="SESSION"); q.set_defaults(fn=orphans)
+    q=sp.add_parser("artifact"); asp=q.add_subparsers(dest="artifact_op",required=True)
+    r=asp.add_parser("put"); r.add_argument("--role",choices=PARTICIPANTS,required=True); r.add_argument("--type",required=True)
+    r.add_argument("--meta"); r.add_argument("paths",nargs="+"); r.set_defaults(fn=artifact_put)
+    r=asp.add_parser("list"); r.add_argument("--session"); r.set_defaults(fn=artifact_list)
+    r=asp.add_parser("show"); r.add_argument("id"); r.add_argument("--session"); r.set_defaults(fn=artifact_show)
+    r=asp.add_parser("get"); r.add_argument("id"); r.add_argument("--out",required=True); r.add_argument("--session"); r.set_defaults(fn=artifact_get)
     return p
 def select_anchor(a):
     """Pick where this command runs: `--repo`, then `PAIR_REPO`, then the cwd.

@@ -521,7 +521,9 @@ impl Judge for ModelJudge {
         let tracer = tokio::spawn(trace(rx));
         let cancel = CancellationToken::new();
         let prompt = brief(&self.anchor, &self.role, request, feedback);
+        let usage_scope = self.mesh.usage_scope(&self.role)?;
         let stop = runtime.run_turn(&prompt, &events, &cancel).await;
+        self.record_turn_usage(runtime.current_turn_usage(), &usage_scope);
         drop(events);
         // The runtime may hold a sender of its own; never wait on it for long.
         let _ = tokio::time::timeout(Duration::from_millis(500), tracer).await;
@@ -564,7 +566,9 @@ impl Judge for ModelJudge {
         let tracer = tokio::spawn(trace(rx));
         let cancel = CancellationToken::new();
         let prompt = owner_brief(&self.anchor, &self.role, task, feedback);
+        let usage_scope = self.mesh.usage_scope(&self.role)?;
         let stop = runtime.run_turn(&prompt, &events, &cancel).await;
+        self.record_turn_usage(runtime.current_turn_usage(), &usage_scope);
         drop(events);
         // The runtime may hold a sender of its own; never wait on it for long.
         let _ = tokio::time::timeout(Duration::from_millis(500), tracer).await;
@@ -572,6 +576,26 @@ impl Judge for ModelJudge {
         runtime
             .current_turn_assistant_text()
             .ok_or_else(|| anyhow::anyhow!("the turn ended ({stop:?}) without an answer"))
+    }
+}
+
+impl ModelJudge {
+    fn record_turn_usage(&self, usage: localpilot_core::TokenUsage, scope: &(String, String)) {
+        let report = localpilot_mesh::ops::UsageReport {
+            report_id: uuid::Uuid::new_v4().to_string(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cost_microusd: None,
+            limit_percent: None,
+        };
+        if let Err(e) = self
+            .mesh
+            .record_usage(&self.role, &report, "engine", Some(scope))
+        {
+            eprintln!("USAGE_NOT_RECORDED {e}");
+        }
     }
 }
 

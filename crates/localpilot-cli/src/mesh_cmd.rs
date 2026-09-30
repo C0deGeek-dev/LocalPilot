@@ -24,7 +24,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use localpilot_mesh::ops::{EndpointArgs, NextUnitArgs, PostArgs, WatchArgs};
+use localpilot_mesh::ops::{EndpointArgs, NextUnitArgs, PostArgs, UsageReport, WatchArgs};
 use localpilot_mesh::{Mesh, MeshError, Out};
 
 /// Operations of the reference implementation that a participant does not
@@ -39,6 +39,8 @@ const FULL_ONLY: &[&str] = &[
     "resume",
     "replay",
     "orphans",
+    "artifact",
+    "summary",
 ];
 
 #[derive(Debug, Args)]
@@ -94,6 +96,8 @@ enum Op {
         /// Who acted (self-asserted; never identity or authority).
         #[arg(long, value_parser = ["human"])]
         actor: Option<String>,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
     },
     Watch(WatchOpts),
     Peek(WatchOpts),
@@ -114,6 +118,54 @@ enum Op {
         resume_at: Option<String>,
     },
     Status,
+    Usage {
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        report_id: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        input_tokens: u64,
+        #[arg(long, default_value_t = 0)]
+        output_tokens: u64,
+        #[arg(long, default_value_t = 0)]
+        cache_creation_input_tokens: u64,
+        #[arg(long, default_value_t = 0)]
+        cache_read_input_tokens: u64,
+        #[arg(long)]
+        cost_microusd: Option<u64>,
+        #[arg(long)]
+        limit_percent: Option<u8>,
+    },
+    TakeoverAuthorize {
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long, value_parser=["owner","reviewer"])]
+        duty: String,
+        #[arg(long)]
+        revoke: bool,
+    },
+    Takeover {
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        from: String,
+        #[arg(long, value_parser=["owner","reviewer"])]
+        duty: String,
+    },
+    ReviewerTransfer {
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        to: String,
+    },
+    Memory {
+        #[arg(long)]
+        role: String,
+    },
     Transcript {
         #[arg(long)]
         session: Option<String>,
@@ -363,9 +415,10 @@ fn dispatch(mesh: &Mesh, op: Op) -> Result<u8, MeshError> {
             broadcast,
             forward,
             actor,
+            artifacts,
         } => {
             let body = text_arg(body_file, body)?;
-            let a = PostArgs {
+            let mut a = PostArgs {
                 kind,
                 body,
                 expect_reply,
@@ -382,6 +435,10 @@ fn dispatch(mesh: &Mesh, op: Op) -> Result<u8, MeshError> {
                     })
                     .unwrap_or_default(),
             };
+            if !artifacts.is_empty() {
+                a.extra
+                    .insert("artifacts".into(), mesh.artifact_refs(&role, &artifacts)?);
+            }
             mesh.post(&role, &a)?
         }
         Op::Watch(w) => return watch(mesh, w, true),
@@ -394,6 +451,65 @@ fn dispatch(mesh: &Mesh, op: Op) -> Result<u8, MeshError> {
             resume_at,
         } => mesh.health(&role, &status, reason.as_deref(), resume_at.as_deref())?,
         Op::Status => mesh.status()?,
+        Op::Usage {
+            role,
+            session,
+            report_id,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            cost_microusd,
+            limit_percent,
+        } => {
+            if let Some(report_id) = report_id {
+                if session.is_some() {
+                    return Err(MeshError::Refused(
+                        "usage recording needs --role and the active session".into(),
+                    ));
+                }
+                let role = role.ok_or_else(|| {
+                    MeshError::Refused("usage recording needs --role and the active session".into())
+                })?;
+                mesh.record_usage(
+                    &role,
+                    &UsageReport {
+                        report_id,
+                        input_tokens,
+                        output_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                        cost_microusd,
+                        limit_percent,
+                    },
+                    "reported",
+                    None,
+                )?
+            } else {
+                mesh.usage(session.as_deref())?
+            }
+        }
+        Op::TakeoverAuthorize {
+            role,
+            to,
+            duty,
+            revoke,
+        } => mesh.takeover_authorize(&role, &to, &duty, revoke)?,
+        Op::Takeover { role, from, duty } => mesh.takeover(&role, &from, &duty)?,
+        Op::ReviewerTransfer { role, to } => mesh.reviewer_transfer(&role, &to)?,
+        Op::Memory { role } => {
+            let material = mesh.context_material(&role)?;
+            let result = localpilot_localmind::capture_mesh_context(mesh.repo(), &material)
+                .map_err(|e| MeshError::Refused(e.to_string()))?;
+            Out {
+                code: 0,
+                stdout: format!(
+                    "MEMORY advisory=true session={} candidates={} enqueued={} accepted=0\n",
+                    result.session_id, result.candidate_count, result.enqueued_count
+                ),
+                stderr: String::new(),
+            }
+        }
         Op::Transcript { session } => mesh.transcript(session.as_deref())?,
         Op::GuardWrite { role, path } => mesh.guard_write(&role, path.as_deref())?,
         Op::HandoffOffer { role, to } => mesh.handoff_offer(&role, to.as_deref())?,

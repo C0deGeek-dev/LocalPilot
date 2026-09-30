@@ -955,7 +955,7 @@ fn block(m: &Obj, count: i64, marks: bool) -> String {
         str_of(m, "kind").unwrap_or_default()
     );
     match str_of(m, "body").filter(|b| !b.is_empty()) {
-        Some(b) => format!("{head}\n{b}"),
-        None => head,
+        Some(b) => format!("{head}\n{b}{}", super::artifacts::lines(m)),
+        None => format!("{head}{}", super::artifacts::lines(m)),
     }
 }

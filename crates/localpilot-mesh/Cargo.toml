@@ -21,6 +21,7 @@ time = { workspace = true }
 uuid = { workspace = true }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-store = { path = "../localpilot-store" }
+localpilot-config = { path = "../localpilot-config" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

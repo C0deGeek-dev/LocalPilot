@@ -2,7 +2,7 @@
 //!
 //! This crate is LocalPilot's implementation of the mailbox protocol that
 //! Claude Code, Codex and LocalPilot use to pair on one working tree. The
-//! protocol's normative source is its written specification (version 1.0) and
+//! protocol's normative source is its written specification (version 1.2) and
 //! the language-neutral conformance suite that pins it; this crate is built to
 //! those, not to any other implementation's code. It claims the specification's
 //! **participant profile**: it joins, reads, posts, acknowledges, hands off,
@@ -51,8 +51,8 @@ pub use ops::{Mesh, Out};
 pub use timefmt::{parse_utc, utc_now};
 
 /// The protocol version this crate implements (spec V-2).
-pub const PROTOCOL: &str = "1.1";
+pub const PROTOCOL: &str = "1.2";
 
 /// Features this crate implements that a record may name in `requires`
-/// (spec V-8). Empty in 1.0.
-pub const FEATURES: &[&str] = &[];
+/// (spec V-8). Sessions opt into quota transitions explicitly.
+pub const FEATURES: &[&str] = &["quota-takeover"];

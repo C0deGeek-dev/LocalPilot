@@ -88,7 +88,7 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -154,7 +154,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -166,7 +166,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -196,7 +196,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -288,7 +288,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      },
      {
       "$invalid": ""
@@ -316,7 +316,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -346,7 +346,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -413,7 +413,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      },
      {
       "$invalid": ""
@@ -441,7 +441,7 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.1"
+     "protocol": "1.2"
     },
     "sessions/<SID>/session.json": {
      "session_id": "<SID>",
@@ -471,7 +471,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -549,7 +549,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      },
      {
       "$invalid": ""
@@ -616,7 +616,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -688,7 +688,7 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.1"
+      "protocol": "1.2"
      },
      {
       "$invalid": ""
@@ -755,7 +755,7 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.1",
+     "protocol": "1.2",
      "created_at": "<TS>",
      "updated_at": "<TS>"
     },
@@ -822,7 +822,7 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "joined; navigator ready",
-    "protocol": "1.1"
+    "protocol": "1.2"
    },
    {
     "$invalid": ""
@@ -889,7 +889,7 @@
     ]
    },
    "delivery": "ack",
-   "protocol": "1.1",
+   "protocol": "1.2",
    "created_at": "<TS>",
    "updated_at": "<TS>"
   },

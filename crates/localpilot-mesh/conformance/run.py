@@ -57,7 +57,8 @@ OBSERVER = "<observer>"
 # stays with the reference.
 PARTICIPANT_OPS = frozenset({"join", "post", "watch", "peek", "ack", "status", "transcript", "health",
                              "handoff-offer", "handoff-accept", "handoff-decline", "handoff-withdraw",
-                             "next-unit", "complete", "guard-write", "endpoint", "accept", "record-push"})
+                             "next-unit", "complete", "guard-write", "endpoint", "accept", "record-push",
+                             "usage", "takeover-authorize", "takeover", "reviewer-transfer"})
 MANDATORY_FILE = HERE / "participant.json"
 # Environment a step may set, from a value an earlier step printed. Nothing
 # else: in particular never PAIR_REPO.
@@ -167,13 +168,52 @@ def session_labels(base: Path) -> dict:
     return labels
 
 
+def artifact_labels(base: Path) -> dict:
+    """Run-independent labels for artifacts (spec §4a). An artifact's id
+    hashes its manifest, whose `created_at` differs between runs, so every id
+    would normalise to one `<HEX64>` and merge their files. Each is
+    `<ART-n>`, in the order of its type and files, which no clock changes
+    (two artifacts that tie hold the same normalised content). A stored
+    file is named by the hash of its bytes, which is the same in every run,
+    so it keeps a readable prefix: `<BLOB-xxxxxxxxxxxx>`."""
+    labels, items = {}, []
+    for store in sorted((base / "sessions").glob("*/artifacts")):
+        for d in store.iterdir():
+            if not d.is_dir() or not HEX64.fullmatch(d.name):
+                continue
+            try:
+                m = json.loads((d / "artifact.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                m = {}
+            m = m if isinstance(m, dict) else {}
+            items.append(((str(m.get("type", "")), json.dumps(m.get("files"), sort_keys=True),
+                           json.dumps(m.get("generated"), sort_keys=True), d.name), d))
+    for i, (_, d) in enumerate(sorted(items, key=lambda x: x[0]), 1):
+        labels[d.name] = f"<ART-{i}>"
+        if (d / "files").is_dir():
+            for f in (d / "files").iterdir():
+                if HEX64.fullmatch(f.name):
+                    labels.setdefault(f.name, f"<BLOB-{f.name[:12]}>")
+        # Generated material (a pack's review.diff) can carry run-dependent
+        # text such as a companion's commit id, so its hash is labelled by its
+        # name; its text is normalised like any other.
+        try:
+            m = json.loads((d / "artifact.json").read_text(encoding="utf-8"))
+            for g in (m.get("generated") or []) if isinstance(m, dict) else []:
+                if isinstance(g, dict) and HEX64.fullmatch(str(g.get("sha256", ""))):
+                    labels[g["sha256"]] = f"<GEN-{g.get('name')}>"
+        except (OSError, ValueError):
+            pass
+    return labels
+
+
 def snapshot(root: Path) -> dict:
     """The normalised mailbox tree: relative path -> parsed content."""
     base = root / MAILBOX
     out = {}
     if not base.exists():
         return out
-    labels = session_labels(base)
+    labels = {**session_labels(base), **artifact_labels(base)}
     def relabel(text: str) -> str:
         for sid, label in labels.items():
             text = text.replace(sid, label)
@@ -488,9 +528,11 @@ def new_root(vcs: str) -> Path:
     if vcs == "git":
         env = dict(os.environ, GIT_AUTHOR_DATE=GIT_DATE, GIT_COMMITTER_DATE=GIT_DATE)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
-        for k, v in (("user.email", "pair@example.invalid"), ("user.name", "pair-test")):
+        for k, v in (("user.email", "pair@example.invalid"), ("user.name", "pair-test"), ("core.autocrlf", "false")):
             subprocess.run(["git", "-C", str(root), "config", k, v], check=True)
-        (root / "README.md").write_text("base\n", encoding="utf-8")
+        # Exact bytes: text mode would write CRLF on Windows, and the base
+        # would then differ by platform (a pack's diff would show it).
+        (root / "README.md").write_bytes(b"base\n")
         subprocess.run(["git", "-C", str(root), "add", "README.md"], check=True)
         subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True, env=env)
     return root
@@ -613,7 +655,7 @@ def _build(root: Path, setup: dict, comps: list, cleanup: list) -> None:
             _write_files(tree, c.get("files"))
             if c.get("vcs", "git") == "git":
                 subprocess.run(["git", "init", "-q", str(tree)], check=True)
-                for k, v in (("user.email", "pair@example.invalid"), ("user.name", "pair-test")):
+                for k, v in (("user.email", "pair@example.invalid"), ("user.name", "pair-test"), ("core.autocrlf", "false")):
                     subprocess.run(["git", "-C", str(tree), "config", k, v], check=True)
                 _commit_all(tree, "companion base")
             _COMPANIONS.append((tree, f"<COMP:{name}>"))
@@ -642,6 +684,18 @@ def child_env(extra: dict | None = None) -> dict:
             raise Refused(f"ENV_REFUSED a step may not set {k!r}")
         e[k] = v
     return e
+
+
+def with_vars(text: str, vars_: dict) -> str:
+    """`${NAME}` in a step's argument or raw path, replaced by the value an
+    earlier step captured (an artifact id, say). An unknown name is refused:
+    an empty substitution would silently test something else. The result is
+    still checked as any argument or raw path is (check_argv, confine)."""
+    def one(m):
+        if m.group(1) not in vars_:
+            raise Refused(f"VAR_REFUSED ${{{m.group(1)}}} was never captured")
+        return vars_[m.group(1)]
+    return re.sub(r"\$\{(\w+)\}", one, text)
 
 
 def step_env(st: dict, vars_: dict) -> dict:
@@ -682,6 +736,10 @@ def invoke(impls: dict, root: Path, cmd: list, env: dict | None = None):
     return subprocess.run(argv_for(impls, root, cmd), text=True, encoding="utf-8", errors="replace",
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           env=child_env(env), timeout=STEP_TIMEOUT)
+
+
+# `"compare": "lines"`: the step's lines as a set, for a listing whose order
+# depends on the clock (artifacts created within one second, spec R-7).
 
 
 def entries(t: str) -> list:
@@ -894,7 +952,7 @@ def run_fixture(fx: dict, impls: dict, capture: bool = False, obs: bool = False)
                     if op.get("op") == "write_tree":
                         tree_write(root, op)
                     else:
-                        op["path"] = resolve_session_path(root, op.get("path", ""))
+                        op["path"] = resolve_session_path(root, with_vars(op.get("path", ""), vars_))
                         raw_step(root, op)
                 except Refused as e:
                     if st.get("expect_refused"):
@@ -918,7 +976,12 @@ def run_fixture(fx: dict, impls: dict, capture: bool = False, obs: bool = False)
                         fails.append(f"{where}: journal {role} has {got} records, expected {n}")
                 continue
             started = time.monotonic()
-            p = invoke(impls, root, st["cmd"], step_env(st, vars_))
+            try:
+                cmd = [with_vars(x, vars_) for x in st["cmd"]]
+            except Refused as e:
+                fails.append(f"{where}: {e}")
+                return fails
+            p = invoke(impls, root, cmd, step_env(st, vars_))
             took = time.monotonic() - started
             if "max_seconds" in st and took > st["max_seconds"]:
                 fails.append(f"{where}: took {took:.1f}s, more than {st['max_seconds']}s")
@@ -942,6 +1005,9 @@ def run_fixture(fx: dict, impls: dict, capture: bool = False, obs: bool = False)
                 if st.get("compare") == "entries":
                     if entries(st["stdout"]) != entries(out) or len(st["stdout"]) != len(out):
                         fails.append(f"{where}: transcript entries differ")
+                elif st.get("compare") == "lines":
+                    if sorted(st["stdout"].splitlines()) != sorted(out.splitlines()):
+                        fails.append(f"{where}: lines differ\n--- expected\n{st['stdout']}--- got\n{out}")
                 elif st.get("compare") == "blocks":
                     if blocks(st["stdout"]) != blocks(out):
                         fails.append(f"{where}: peer mail differs\n--- expected\n{st['stdout']}--- got\n{out}")
@@ -1043,6 +1109,7 @@ def capture_legacy(fx: dict, impls: dict, label: str) -> int:
         if "cmd" not in st:
             continue
         same_out = (blocks(st["stdout"]) == blocks(was["stdout"]) if st.get("compare") == "blocks"
+                    else sorted(st["stdout"].splitlines()) == sorted(was["stdout"].splitlines()) if st.get("compare") == "lines"
                     else entries(st["stdout"]) == entries(was["stdout"]) if st.get("compare") == "entries"
                     else st["stdout"] == was["stdout"])
         if st["rc"] != was["rc"] or not same_out or st["stderr"] != was["stderr"]:

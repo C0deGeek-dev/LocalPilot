@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Mailbox protocol 1.2 artifacts and continuity.** Posts accept verified
+  immutable artifact references. `mesh usage` records idempotent incremental
+  reports, and the engine records its token usage; status and the cockpit show
+  partial totals with unknown cost and quota disclosed. Explicit healthy-holder
+  pre-authorization permits quota takeover while preserving independent review
+  and the holder's pause. Recovery never returns authority automatically.
+  `mesh memory` captures opted-in, source-linked, redacted advisory context into
+  LocalMind using local deterministic extraction; candidates are never promoted
+  automatically. See the command examples and boundaries in configuration docs.
+
 - **`localpilot mesh evidence`: read-only evidence for a pair session.** A
   participant can find text in the shared tree (`locate`), pin lines of a
   file to a hash (`anchor`), check later whether those lines are still there,

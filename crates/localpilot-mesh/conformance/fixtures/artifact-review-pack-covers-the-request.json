@@ -1,0 +1,1429 @@
+{
+ "id": "artifact-review-pack-covers-the-request",
+ "profiles": [
+  "two-party",
+  "artifacts"
+ ],
+ "layers": [
+  "cli",
+  "state"
+ ],
+ "setup": {
+  "vcs": "git"
+ },
+ "steps": [
+  {
+   "cmd": [
+    "start",
+    "--role",
+    "claude",
+    "--task",
+    "fixture task"
+   ],
+   "rc": 0,
+   "stdout": "STARTED session=<SID> role=driver peer=codex work=fixture-task\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "not_joined",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ]
+     },
+     "delivery": "print",
+     "protocol": "1.2",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "join",
+    "--role",
+    "codex",
+    "--timeout",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "JOINED session=<SID> role=navigator peer=claude work=fixture-task\nANCHOR=<REPO> source=flag\nTASK:\nfixture task\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.2"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.2"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.2",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "claude",
+    "--timeout",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "PEER codex #1 HELLO [fixture-task#1]\njoined; navigator ready\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.2"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.2"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.2",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "raw": {
+    "op": "write_tree",
+    "path": "README.md",
+    "data": "base\nchanged\n"
+   }
+  },
+  {
+   "raw": {
+    "op": "write_tree",
+    "path": "new.txt",
+    "data": "brand new\n"
+   }
+  },
+  {
+   "cmd": [
+    "verify-request",
+    "--role",
+    "claude",
+    "--criteria",
+    "it works",
+    "--pack"
+   ],
+   "capture": {
+    "PACK": "ARTIFACT ([0-9a-f]{64})"
+   },
+   "rc": 0,
+   "stdout": "FRESH-EYES VERIFICATION REQUEST\n\nWorking tree: <REPO>\nWork unit: fixture-task#1   Review round: 1\nBase commit for this unit: <SHA>\n\nReproduce the change with either of these (both non-mutating):\n  git diff <SHA>..HEAD\n  git status --porcelain=v1 --untracked-files=all   # uncommitted work, if any\n\nYou were opened in a new session so that you carry none of the implementation\nnarrative. That absence is the whole value — do not reconstruct it, and do not go\nlooking for it. Read only the repositories and the change described below.\n\nRules, all hard:\n- Read-only end to end. Create, edit, or delete nothing — no commits, no branches,\n  no staging, not even an untracked or generated file. If a check below would write,\n  report it unrun and substitute a non-writing equivalent if one exists.\n- Do not look for, or read, any pairing mailbox, journal, transcript, or session\n  log, even if you find one. It would anchor you to the story this role exists to\n  be free of.\n- If what you find does not match what is described here, say so and stop rather\n  than improvising a scope.\n\nAcceptance criteria:\nit works\n\nFiles under review (sha256 prefix — re-hash before judging; a mismatch means the\ntree moved under this request and you should say so rather than review stale bytes):\n  b58b263c9d49  README.md\n  2189cef37533  new.txt\n\n(That set is: everything committed since this unit's base, plus everything\ncurrently uncommitted — including files that were already dirty when the unit\nbegan, and including untracked scratch. It is deliberately over-broad rather\nthan a true delta. If something there is not work, the request should have\npinned the set explicitly; say so rather than reviewing it.)\n\nReview pack: <HEX64>\n  An immutable copy of every file above as it is now, deletions marked, and\n  review.diff. Read it with: artifact show / artifact get --out <dir>.\n\nChecks to run (non-mutating):\n  (none named — inspect the diff and say what you could not verify without one)\n\nAnswer with a verdict whose first line is exactly one of:\n  AGREE round=<n> blocking=0 important=<n>\n  REVISE round=<n> blocking=<n> important=<n>\nusing round=1. Then list only actionable findings, one per line, as\n  path:line — problem — fix\nName the sha prefixes you formed the verdict against. Then stop.\n\nThis verdict is advisory. It goes back to the pair, who weigh it and issue their\nown review. Nothing you write here closes the work, so say what you actually\nfound rather than what would let it pass.\nARTIFACT <HEX64> type=review-pack files=2\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "README.md",
+       "sha256": "<BLOB-b58b263c9d49>",
+       "size": 13,
+       "tree": "anchor"
+      },
+      {
+       "path": "new.txt",
+       "sha256": "<BLOB-2189cef37533>",
+       "size": 10,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [
+      {
+       "name": "review.diff",
+       "sha256": "<GEN-review.diff>",
+       "size": 233
+      }
+     ],
+     "meta": {
+      "absent": [],
+      "trees": [
+       {
+        "base": "<SHA>",
+        "changed": 2,
+        "current": "<SHA>",
+        "name": "anchor",
+        "vcs": "git"
+       }
+      ],
+      "unit_id": "1-<U>"
+     },
+     "type": "review-pack",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-2189cef37533>": {
+     "$text": "brand new\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b58b263c9d49>": {
+     "$text": "base\nchanged\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
+     "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\nnew untracked file new.txt\n+brand new\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.2"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.2"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.2",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "artifact",
+    "show",
+    "${PACK}"
+   ],
+   "rc": 0,
+   "stdout": "ARTIFACT <HEX64> type=review-pack by=claude unit=1-<U> VERIFIED\n{\n \"created_at\": \"<TS>\",\n \"created_by\": \"claude\",\n \"files\": [\n  {\n   \"path\": \"README.md\",\n   \"sha256\": \"<HEX64>\",\n   \"size\": 13,\n   \"tree\": \"anchor\"\n  },\n  {\n   \"path\": \"new.txt\",\n   \"sha256\": \"<HEX64>\",\n   \"size\": 10,\n   \"tree\": \"anchor\"\n  }\n ],\n \"generated\": [\n  {\n   \"name\": \"review.diff\",\n   \"sha256\": \"<HEX64>\",\n   \"size\": 233\n  }\n ],\n \"meta\": {\n  \"absent\": [],\n  \"trees\": [\n   {\n    \"base\": \"<SHA>\",\n    \"changed\": 2,\n    \"current\": \"<SHA>\",\n    \"name\": \"anchor\",\n    \"vcs\": \"git\"\n   }\n  ],\n  \"unit_id\": \"1-<U>\"\n },\n \"type\": \"review-pack\",\n \"unit_id\": \"1-<U>\"\n}\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "README.md",
+       "sha256": "<BLOB-b58b263c9d49>",
+       "size": 13,
+       "tree": "anchor"
+      },
+      {
+       "path": "new.txt",
+       "sha256": "<BLOB-2189cef37533>",
+       "size": 10,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [
+      {
+       "name": "review.diff",
+       "sha256": "<GEN-review.diff>",
+       "size": 233
+      }
+     ],
+     "meta": {
+      "absent": [],
+      "trees": [
+       {
+        "base": "<SHA>",
+        "changed": 2,
+        "current": "<SHA>",
+        "name": "anchor",
+        "vcs": "git"
+       }
+      ],
+      "unit_id": "1-<U>"
+     },
+     "type": "review-pack",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-2189cef37533>": {
+     "$text": "brand new\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b58b263c9d49>": {
+     "$text": "base\nchanged\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
+     "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\nnew untracked file new.txt\n+brand new\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.2"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.2"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.2",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "artifact",
+    "list"
+   ],
+   "rc": 0,
+   "stdout": "ARTIFACT <HEX64> type=review-pack by=claude unit=1-<U> files=2 generated=1\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "README.md",
+       "sha256": "<BLOB-b58b263c9d49>",
+       "size": 13,
+       "tree": "anchor"
+      },
+      {
+       "path": "new.txt",
+       "sha256": "<BLOB-2189cef37533>",
+       "size": 10,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [
+      {
+       "name": "review.diff",
+       "sha256": "<GEN-review.diff>",
+       "size": 233
+      }
+     ],
+     "meta": {
+      "absent": [],
+      "trees": [
+       {
+        "base": "<SHA>",
+        "changed": 2,
+        "current": "<SHA>",
+        "name": "anchor",
+        "vcs": "git"
+       }
+      ],
+      "unit_id": "1-<U>"
+     },
+     "type": "review-pack",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-2189cef37533>": {
+     "$text": "brand new\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b58b263c9d49>": {
+     "$text": "base\nchanged\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
+     "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\nnew untracked file new.txt\n+brand new\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.2"
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.2"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.2",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   },
+   "compare": "lines"
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "REVIEW_REQUEST",
+    "--body",
+    "please review",
+    "--expect-reply",
+    "--artifact",
+    "${PACK}"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "UNACKED peer #1..#1 (post --ack-through N or `ack --through N` once read)\n",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "README.md",
+       "sha256": "<BLOB-b58b263c9d49>",
+       "size": 13,
+       "tree": "anchor"
+      },
+      {
+       "path": "new.txt",
+       "sha256": "<BLOB-2189cef37533>",
+       "size": 10,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [
+      {
+       "name": "review.diff",
+       "sha256": "<GEN-review.diff>",
+       "size": 233
+      }
+     ],
+     "meta": {
+      "absent": [],
+      "trees": [
+       {
+        "base": "<SHA>",
+        "changed": 2,
+        "current": "<SHA>",
+        "name": "anchor",
+        "vcs": "git"
+       }
+      ],
+      "unit_id": "1-<U>"
+     },
+     "type": "review-pack",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-2189cef37533>": {
+     "$text": "brand new\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b58b263c9d49>": {
+     "$text": "base\nchanged\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
+     "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\nnew untracked file new.txt\n+brand new\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "please review",
+      "protocol": "1.2",
+      "artifacts": [
+       {
+        "id": "<ART-1>",
+        "type": "review-pack"
+       }
+      ]
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.2"
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "please review",
+     "protocol": "1.2",
+     "artifacts": [
+      {
+       "id": "<ART-1>",
+       "type": "review-pack"
+      }
+     ]
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.2"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": {
+      "from_role": "claude",
+      "for_role": "codex",
+      "seq": 1,
+      "kind": "REVIEW_REQUEST",
+      "since": "<TS>"
+     },
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.2",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "watch",
+    "--role",
+    "codex",
+    "--timeout",
+    "2"
+   ],
+   "rc": 0,
+   "stdout": "PEER claude #1 REVIEW_REQUEST [fixture-task#1] REPLY_REQUIRED\nplease review\nARTIFACT <HEX64> type=review-pack\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "README.md",
+       "sha256": "<BLOB-b58b263c9d49>",
+       "size": 13,
+       "tree": "anchor"
+      },
+      {
+       "path": "new.txt",
+       "sha256": "<BLOB-2189cef37533>",
+       "size": 10,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [
+      {
+       "name": "review.diff",
+       "sha256": "<GEN-review.diff>",
+       "size": 233
+      }
+     ],
+     "meta": {
+      "absent": [],
+      "trees": [
+       {
+        "base": "<SHA>",
+        "changed": 2,
+        "current": "<SHA>",
+        "name": "anchor",
+        "vcs": "git"
+       }
+      ],
+      "unit_id": "1-<U>"
+     },
+     "type": "review-pack",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-2189cef37533>": {
+     "$text": "brand new\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b58b263c9d49>": {
+     "$text": "base\nchanged\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
+     "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\nnew untracked file new.txt\n+brand new\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "peer_seq": 0,
+     "peer_health_generation": 0,
+     "resume_seen": null,
+     "stale_wait_seq": null,
+     "delivered_counts": {
+      "1": 1
+     },
+     "delivered_seq": 1
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "please review",
+      "protocol": "1.2",
+      "artifacts": [
+       {
+        "id": "<ART-1>",
+        "type": "review-pack"
+       }
+      ]
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "protocol": "1.2"
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "please review",
+     "protocol": "1.2",
+     "artifacts": [
+      {
+       "id": "<ART-1>",
+       "type": "review-pack"
+      }
+     ]
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "protocol": "1.2"
+    },
+    "sessions/<SID>/session.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "navigator": "codex",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": {
+      "from_role": "claude",
+      "for_role": "codex",
+      "seq": 1,
+      "kind": "REVIEW_REQUEST",
+      "since": "<TS>"
+     },
+     "pause": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.2",
+     "created_at": "<TS>",
+     "updated_at": "<TS>"
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  }
+ ],
+ "final_state": {
+  "active.json": {
+   "session_id": "<SID>",
+   "driver": "claude",
+   "status": "active",
+   "updated_at": "<TS>"
+  },
+  "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+   "created_at": "<TS>",
+   "created_by": "claude",
+   "files": [
+    {
+     "path": "README.md",
+     "sha256": "<BLOB-b58b263c9d49>",
+     "size": 13,
+     "tree": "anchor"
+    },
+    {
+     "path": "new.txt",
+     "sha256": "<BLOB-2189cef37533>",
+     "size": 10,
+     "tree": "anchor"
+    }
+   ],
+   "generated": [
+    {
+     "name": "review.diff",
+     "sha256": "<GEN-review.diff>",
+     "size": 233
+    }
+   ],
+   "meta": {
+    "absent": [],
+    "trees": [
+     {
+      "base": "<SHA>",
+      "changed": 2,
+      "current": "<SHA>",
+      "name": "anchor",
+      "vcs": "git"
+     }
+    ],
+    "unit_id": "1-<U>"
+   },
+   "type": "review-pack",
+   "unit_id": "1-<U>"
+  },
+  "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-2189cef37533>": {
+   "$text": "brand new\n"
+  },
+  "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b58b263c9d49>": {
+   "$text": "base\nchanged\n"
+  },
+  "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
+   "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\nnew untracked file new.txt\n+brand new\n"
+  },
+  "sessions/<SID>/cursor/claude.json": {
+   "peer_seq": 0,
+   "peer_health_generation": 0,
+   "resume_seen": null,
+   "stale_wait_seq": null,
+   "delivered_counts": {
+    "1": 1
+   },
+   "delivered_seq": 1
+  },
+  "sessions/<SID>/cursor/codex.json": {
+   "peer_seq": 0,
+   "peer_health_generation": 0,
+   "resume_seen": null,
+   "stale_wait_seq": null,
+   "delivered_counts": {
+    "1": 1
+   },
+   "delivered_seq": 1
+  },
+  "sessions/<SID>/health/claude.json": {
+   "role": "claude",
+   "status": "ready",
+   "generation": 1,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/health/codex.json": {
+   "role": "codex",
+   "status": "ready",
+   "generation": 2,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/journal/claude.jsonl": [
+   {
+    "seq": 1,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "REVIEW_REQUEST",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": true,
+    "body": "please review",
+    "protocol": "1.2",
+    "artifacts": [
+     {
+      "id": "<ART-1>",
+      "type": "review-pack"
+     }
+    ]
+   }
+  ],
+  "sessions/<SID>/journal/codex.jsonl": [
+   {
+    "seq": 1,
+    "at": "<TS>",
+    "role": "codex",
+    "kind": "HELLO",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "joined; navigator ready",
+    "protocol": "1.2"
+   }
+  ],
+  "sessions/<SID>/latest/claude.json": {
+   "seq": 1,
+   "at": "<TS>",
+   "role": "claude",
+   "kind": "REVIEW_REQUEST",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "expect_reply": true,
+   "body": "please review",
+   "protocol": "1.2",
+   "artifacts": [
+    {
+     "id": "<ART-1>",
+     "type": "review-pack"
+    }
+   ]
+  },
+  "sessions/<SID>/latest/codex.json": {
+   "seq": 1,
+   "at": "<TS>",
+   "role": "codex",
+   "kind": "HELLO",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "expect_reply": false,
+   "body": "joined; navigator ready",
+   "protocol": "1.2"
+  },
+  "sessions/<SID>/session.json": {
+   "session_id": "<SID>",
+   "task": "fixture task",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "driver": "claude",
+   "navigator": "codex",
+   "owner": "claude",
+   "ownership_epoch": 1,
+   "status": "active",
+   "phase": "huddle",
+   "waiting": {
+    "from_role": "claude",
+    "for_role": "codex",
+    "seq": 1,
+    "kind": "REVIEW_REQUEST",
+    "since": "<TS>"
+   },
+   "pause": null,
+   "handoff": null,
+   "vcs": "git",
+   "base_head": "<SHA>",
+   "base_status": [],
+   "companions": [],
+   "absent_companions": [],
+   "caps": {
+    "claude": [
+     "ack"
+    ],
+    "codex": [
+     "ack"
+    ]
+   },
+   "delivery": "ack",
+   "protocol": "1.2",
+   "created_at": "<TS>",
+   "updated_at": "<TS>"
+  },
+  "vcs.json": {
+   "vcs": "git",
+   "recorded_at": "<TS>"
+  }
+ },
+ "provenance": {
+  "build": "ee625a451f4f+dirty:pair.py",
+  "sha12": "767e880593bc",
+  "note": "captured from the reference and reviewed; never regenerate with a build under test"
+ }
+}

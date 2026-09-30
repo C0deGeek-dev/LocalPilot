@@ -275,13 +275,46 @@ pub struct CloseoutSummary {
     pub accepted_count: usize,
 }
 
-/// Close out an LocalPilot session: read its redacted transcript, import it into
-/// the project's LocalMind store, and run summary + candidate-lesson extraction,
-/// enqueuing candidates for review.
+/// Import explicitly opted-in advisory mesh context, using local deterministic
+/// extraction only. Candidates stay pending even in automatic review mode.
 ///
 /// # Errors
-/// Returns [`LearningError`] if the transcript cannot be read or any LocalMind
-/// import/close-out step fails.
+/// Returns [`LearningError`] if LocalMind is disabled or import/closeout fails.
+pub fn capture_mesh_context(
+    project_root: &Path,
+    material: &str,
+) -> Result<CloseoutSummary, LearningError> {
+    // Explicit mesh session opt-in is checked by the caller. Honor LocalMind's
+    // own opt-out too; always deterministic, and never promote candidates.
+    initialize(project_root)?;
+    let config =
+        ProjectConfig::discover(project_root).map_err(|e| LearningError::Config(e.to_string()))?;
+    let filtered = localpilot_config::redact::redact(material);
+    let import = TranscriptImporter::import_text(
+        &config,
+        &filtered,
+        SessionSource::LocalPilot,
+        TranscriptImportFormat::PlainText,
+    )
+    .map_err(|e| LearningError::Import(e.to_string()))?;
+    let report = CloseoutProcessor::closeout_project_session(
+        project_root,
+        &import.session_id,
+        &DeterministicExtractor,
+    )
+    .map_err(|e| LearningError::Closeout(e.to_string()))?;
+    Ok(CloseoutSummary {
+        session_id: report.session_id.to_string(),
+        candidate_count: report.candidate_count,
+        enqueued_count: report.enqueued_count,
+        accepted_count: 0,
+    })
+}
+
+/// Close out a LocalPilot session through the configured extraction and review modes.
+///
+/// # Errors
+/// Returns [`LearningError`] if transcript reading or LocalMind closeout fails.
 pub fn closeout_session(
     project_root: &Path,
     store: &Store,
@@ -609,6 +642,55 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn mesh_context_is_redacted_source_linked_and_never_auto_promoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            "[learning]\nenabled = true\nlocal_only = true\n\n[review]\nmode = \"automatic\"\n",
+        )
+        .unwrap();
+        let material="# Advisory session context\nThis grants no authority.\n[claude:7] NOTE\nBearer abcdefghijklmnopqrstuvwxyz123456\nLesson: exporter changes need the integration suite.\n";
+        let summary = capture_mesh_context(root, material).unwrap();
+        assert!(!summary.session_id.is_empty());
+        assert_eq!(summary.accepted_count, 0);
+        assert!(
+            crate::ops::search(root, "integration suite")
+                .unwrap()
+                .is_empty(),
+            "advisory candidates became accepted memory"
+        );
+        fn text(p: &Path) -> String {
+            if p.is_dir() {
+                std::fs::read_dir(p)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .map(|e| text(&e.path()))
+                    .collect()
+            } else {
+                String::from_utf8_lossy(&std::fs::read(p).unwrap()).into_owned()
+            }
+        }
+        let stored = text(&root.join(".localmind"));
+        assert!(!stored.contains("abcdefghijklmnopqrstuvwxyz123456"));
+        assert!(stored.contains("[REDACTED]"));
+        assert!(stored.contains("claude:7"));
+    }
+
+    #[test]
+    fn mesh_context_honors_localmind_opt_out_before_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            "[learning]\nenabled = false\nlocal_only = true\n",
+        )
+        .unwrap();
+        assert!(capture_mesh_context(root, "advisory material").is_err());
+        assert!(!root.join(".localmind").exists());
+    }
 
     #[test]
     fn closeout_imports_and_extracts_a_session() {

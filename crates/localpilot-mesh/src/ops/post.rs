@@ -325,6 +325,7 @@ impl Mesh {
         guard: Option<&Expect>,
     ) -> Result<Obj, MeshError> {
         let s = self.require(role, true)?;
+        self.check_artifact_refs(role, &a.extra)?;
         if let Some(g) = guard {
             g.check(&s, role)?;
         }

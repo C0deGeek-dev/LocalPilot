@@ -78,7 +78,13 @@ fn extra<const N: usize>(kv: [(&str, Value); N]) -> Obj {
 
 /// Append a session event (spec S-8) to `s`, which the caller saves in the
 /// same rewrite as the transition it records.
-fn add_event(s: &mut Obj, event: &str, role: &str, actor: Option<&str>, handoff: Option<Value>) {
+pub(super) fn add_event(
+    s: &mut Obj,
+    event: &str,
+    role: &str,
+    actor: Option<&str>,
+    handoff: Option<Value>,
+) {
     let mut e = Obj::new();
     e.insert("at".into(), json!(utc_now()));
     e.insert("event".into(), json!(event));
@@ -251,7 +257,7 @@ fn unit_suffix() -> String {
 }
 
 /// The reviewer sets after `new_owner` takes the unit over (spec U-5).
-fn handoff_authority(s: &Obj, new_owner: &str) -> Result<Value, MeshError> {
+pub(super) fn handoff_authority(s: &Obj, new_owner: &str) -> Result<Value, MeshError> {
     let (old, required, advisers) = authority(s);
     let order = participants(s);
     let mut req: Vec<String> = required
@@ -324,7 +330,8 @@ pub struct NextUnitArgs {
 }
 
 impl Mesh {
-    pub(super) fn repo(&self) -> &Path {
+    /// The anchor working tree for this mailbox.
+    pub fn repo(&self) -> &Path {
         &self.anchor
     }
 
