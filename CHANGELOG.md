@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Windows release compiler compatibility.** Windows archives use Rust 1.95.0
+  so captured child processes work under the Codex restricted-token sandbox.
+  A separate Windows CI job checks that compiler; the existing Rust 1.82 MSRV
+  checks and non-Windows release compiler remain unchanged.
+
 - **Mailbox protocol 1.2 artifacts and continuity.** Posts accept verified
   immutable artifact references. `mesh usage` records idempotent incremental
   reports, and the engine records its token usage; status and the cockpit show

@@ -21,6 +21,17 @@ The CI quartet above is also available as `cargo ci-fmt`, `cargo ci-lint`,
 `cargo ci-test`, and `cargo ci-check` (see `.cargo/config.toml`); run all four to
 mirror `.github/workflows/ci.yml`.
 
+Windows release archives use Rust 1.95.0 (ADR-0192). To build a Windows binary
+that captures child-process output inside a restricted-token sandbox, use:
+
+```powershell
+cargo +1.95.0 build --locked -p localpilot --features tui,keychain
+```
+
+Rust 1.82 remains the source MSRV and the compiler for the existing MSRV jobs
+and non-Windows release archives. A separate Windows CI job tests the release
+compiler. Successful ordinary MSRV tests do not prove restricted-token behavior.
+
 ### Optional pre-commit hook
 
 A `pre-commit` hook that runs `cargo fmt --check` and a fast `cargo clippy` lives
@@ -94,4 +105,3 @@ license. Sign off every commit with `git commit -s`. The resulting
 `Signed-off-by` trailer certifies that you agree to this Contributor
 Certificate of Origin and the license grant above; this project does not use
 a separate signed CLA process beyond that trailer.
-

@@ -16,6 +16,10 @@ jobs:
   archives:
     name: archive (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    env:
+      # Override rust-toolchain.toml as well as rustup's default. Rust 1.82's
+      # captured child-process pipes fail under Windows restricted tokens.
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain || '1.82' }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,13 +49,14 @@ jobs:
             target: x86_64-pc-windows-msvc
             ext: tar.gz
             localpilot_features: tui,keychain
+            toolchain: "1.95.0"
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.82"
+          toolchain: ${{ matrix.toolchain || '1.82' }}
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:

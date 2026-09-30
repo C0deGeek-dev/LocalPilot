@@ -332,6 +332,27 @@ jobs:
       - run: cargo nextest run -p localpilot --features tui --bin localpilot
         timeout-minutes: 15
 
+  windows-release-compiler:
+    name: Windows release compiler (1.95.0)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: "1.95.0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release-1.95.0
+      - uses: taiki-e/install-action@nextest
+      - run: cargo build --locked -p localpilot --features tui,keychain
+      - run: cargo nextest run --locked --workspace
+      - run: cargo nextest run --locked -p localpilot --features tui --bin localpilot
+
   coverage:
     name: coverage (line floor)
     runs-on: ubuntu-latest

@@ -2,6 +2,30 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0192: Windows Releases Use A Compiler Compatible With Restricted Tokens
+
+**Status:** Accepted
+
+**Context:** A contained native mesh acceptance run could not capture Git's
+output: Rust 1.82 returned Windows access denied before observing the tree.
+A minimal captured-subprocess program reproduced the failure under the same
+Codex restricted token. Git itself and an uncaptured subprocess worked.
+Compiling the same program with Rust 1.95.0 made both captured cases work.
+The Windows release workflow previously pinned 1.82, so changing only a local
+test build would leave the distributed binary broken in that environment.
+
+**Decision:** Pin Windows release builds to Rust 1.95.0, including an explicit
+RUSTUP_TOOLCHAIN override of the repository toolchain file. Add a Windows CI
+build and workspace test job with the same compiler. Retain Rust 1.82 as the
+source MSRV and compiler for the existing MSRV checks and non-Windows releases.
+Keep Cargo.lock and product source unchanged. Recheck actual restricted-token
+execution and containment on the frozen replacement binary before acceptance.
+
+**Consequences:** Windows source builders needing restricted-token execution
+must use `cargo +1.95.0 build --locked -p localpilot --features tui,keychain`.
+A newer compiler is not permission to broaden the sandbox's writable roots,
+and ordinary MSRV test success cannot substitute for the real host probe.
+
 ## ADR-0191: Explicit Quota Transitions And Advisory Session Context
 
 Status: accepted.
