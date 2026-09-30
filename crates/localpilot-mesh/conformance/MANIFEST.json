@@ -1,13 +1,13 @@
 {
  "source_repo": "c0degeek-ai",
  "source_path": "skills/pair-programming/conformance",
- "source_commit": "88f184885ac3f48f5f0900949bf411cbca0488b4",
+ "source_commit": "6269531b632710329f928ceda739d932887981c4",
  "files": {
   "run.py": "c0c2b915d7c78fb78874d43b8c8e13edbde09fe158cb3eaea18222066d59dfbc",
   "soak.py": "c05714ae9b778701934d99433098784b71c876607ba25c83003231046093e934",
   "scan_cases.py": "f6fe55f6b718cfe8b1c8f8016d18a7c51ea7193a66f65f9a1c40a41a56c86bf7",
   "README.md": "3b93e0b2049c5510683359ac0184b4652d7e5e0bbbd6ed9a442c56f4dcbc3405",
-  "participant.json": "4a09d3de20cffbb55695110adb2fe9c27aa9bfe616426f2591cf1a6768a83f27",
+  "participant.json": "5db5efca53ab8d9b3167db9fb66c7c448646fc03e8f53302ff56bff4682b09d3",
   "fixtures/actor-claim-is-carried-and-changes-nothing.json": "b353583074d3090d83ded03dd835dbe70e9cd285f5f3b65b58bf19fabe1dc6a7",
   "fixtures/artifact-a-corrupt-store-is-refused-everywhere.json": "6fad10da0dc9439029f684a94e14e02595a2f7cc29af0db7fba09d26ea7faa0f",
   "fixtures/artifact-each-type-is-stored-listed-and-shown.json": "59a494d550be158c8fc0da090d207b96ac6a70c010bb7ff1ba8641d9e8220a9b",
@@ -41,6 +41,7 @@
   "fixtures/extension-a-delivery-feature-is-required-on-the-session.json": "cef0f38dae0109288ad1c772cdcf9ea0157a9990a93e9e88bceee5f10731f48f",
   "fixtures/extension-archival-transcript-honours-requires.json": "f9f0cbfbfaa0daa94b6947521caecb2cf9f4835411024c57ac68c5816c1542ad",
   "fixtures/extension-optional-additions-are-ignored.json": "afb1c2a90861b2ea8e476127b304beb93d0a5b7f993e1e7500bec8c98e5f5faf",
+  "fixtures/extension-quota-takeover-is-refused-by-an-older-reader.json": "8448ad75e7c3b64817fc439acf03d2ba55dccc63f1e47918feb555f85a4c137d",
   "fixtures/handoff-decline-by-another-role-is-refused.json": "74bda54c9d1bd60892e9a2ee45fd145a79e20e12c666928d8539cd0f3ff10d68",
   "fixtures/handoff-decline-clears-the-offer.json": "d8c46d3ab62b0602f126523c1a9a1c79e589d29489ee761ade542fdb113f9e94",
   "fixtures/handoff-decline-without-the-offer-post.json": "d1ef1ba06f45ac924d4764569e33c0ba50077bf55aad6e1c493593015b22e823",

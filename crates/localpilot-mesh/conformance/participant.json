@@ -58,6 +58,7 @@
   "extension-a-delivery-feature-is-required-on-the-session",
   "extension-archival-transcript-honours-requires",
   "extension-optional-additions-are-ignored",
+  "extension-quota-takeover-is-refused-by-an-older-reader",
   "handoff-decline-by-another-role-is-refused",
   "handoff-decline-clears-the-offer",
   "handoff-decline-without-the-offer-post",
