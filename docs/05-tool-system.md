@@ -466,13 +466,17 @@ Shell and process behaviour:
   [security & privacy](07-security-and-privacy.md)) — never a fallback like
   `C:\Windows`.
 - **Whole-tree termination on timeout.** When a command exceeds its timeout its
-  *entire* process tree is killed (`taskkill /T /F` on Windows; a process-group
-  `kill` on Unix), so a shell-wrapped build's grandchildren (`make`→`cc1`,
+  *entire* owned process tree is killed (a kill-on-close Job Object on Windows;
+  a process-group `kill` on Unix), so a shell-wrapped build's grandchildren (`make`→`cc1`,
   `gradle`→its daemon) never orphan and leak memory for the rest of the session.
 - **Whole-tree termination on cancellation.** Dropping an in-flight
   `run_shell` future synchronously drops its capture readers, so late child
-  output cannot enter model context, and an armed process-tree guard then
-  best-effort signals the same Windows tree or Unix process group. The runtime
+  output cannot enter model context. Its guard closes the Windows Job Object
+  directly, or best-effort signals the Unix process group. Windows commands are
+  spawned suspended, assigned to the job, then resumed; setup failure returns
+  an error without running uncontained user code. The job survives a parent's
+  exit and also closes when capture completes. Use `run_background` for work
+  intended to outlive the foreground call. The runtime
   synthesizes an explicit cancelled error result and records the failed tool
   completion rather than reporting success.
 
@@ -500,6 +504,10 @@ Rules:
   `kill_on_drop`, and the session terminates all of them on close (and when a new
   session starts). No background process outlives the session — there are no
   cross-invocation daemons.
+- Windows starts use the same suspended-spawn Job Object ownership as
+  `run_shell`. Cancelling during startup's grace period closes the unregistered
+  job; a successful start transfers ownership into the registry. Stop, close,
+  and registry drop terminate the owned tree even if its leader already exited.
 
 ### quality-gate checks
 

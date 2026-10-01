@@ -2,6 +2,43 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0195: Windows Tool Commands Own Kernel Process Trees
+
+**Status:** Accepted · **Date:** 2026-10-01
+
+**Context:** A dropped shell call spawned a detached `taskkill /T`, ignored its
+result, and relied on surviving parent links. Increasing the cancellation test
+delay did not prevent orphaned descendants under load. Assigning a job after
+ordinary spawn would leave another race before assignment.
+
+**Decision:** Windows `run_shell` and `run_background` create unnamed, non-inheritable Job Objects
+with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Spawn with `CREATE_SUSPENDED` and the
+existing `CREATE_NO_WINDOW`; assign before resuming the initial thread through
+documented ToolHelp/ResumeThread calls. Setup failure kills the suspended child
+and returns a tool error, never an uncontained fallback. Keep the sole job
+handle in the capture guard until cancellation, timeout, error, or completion.
+Close it to terminate members even after their original parent exits. Null
+stdin and typed output capture remain unchanged; Unix keeps its process groups.
+Background starts retain job ownership during their grace period, then transfer
+it to the registry entry. Stop, session close and registry drop close that job.
+
+Extend the existing ADR-0189 `localpilot-winsec::ffi` boundary with a safe
+`spawn_in_job` API and RAII-owned handles. No other crate gains unsafe code and
+no new external dependency is needed. The source MSRV remains Rust 1.82.
+
+**Consequences:** A foreground command cannot leave a background descendant
+running after its capture finishes; use `run_background` for session-long work.
+Other PID-only cleanup callers retain their current behavior. Jobs are
+process-lifecycle ownership, not a security sandbox: a
+separately brokered launch (for example through WMI) is outside this tree.
+Tests cover dropped calls, timeout, harness cancellation, background cancellation
+during grace, stop/session close, exited parents, job isolation, and injected
+failures before/after assignment.
+
+**References:** [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects),
+[Thread32First](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-thread32first),
+[ResumeThread](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-resumethread).
+
 ## ADR-0194: Shared Served Context Windows Across Session Hosts
 
 **Status:** Accepted

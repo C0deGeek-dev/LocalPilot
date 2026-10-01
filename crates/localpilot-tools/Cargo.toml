@@ -23,6 +23,9 @@ tokio = { workspace = true }
 localpilot-config = { path = "../localpilot-config" }
 localpilot-core = { path = "../localpilot-core" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
+
+[target.'cfg(windows)'.dependencies]
+localpilot-winsec = { path = "../localpilot-winsec" }
 localpilot-store = { path = "../localpilot-store" }
 
 [dev-dependencies]

@@ -59,21 +59,50 @@ struct NormalizedRunShellInput {
 
 /// Owns the spawned command's process tree until the child has been reaped.
 /// Dropping an in-flight `run_shell` future must not orphan a shell wrapper's
-/// grandchildren, so the fallback path signals the whole tree best-effort.
+/// grandchildren. Windows owns a kernel job; Unix signals the process group.
 struct ProcessTreeGuard {
+    #[cfg(not(windows))]
     pid: Option<u32>,
+    #[cfg(windows)]
+    job: Option<localpilot_winsec::ProcessJob>,
 }
 
 impl ProcessTreeGuard {
-    fn new(pid: Option<u32>) -> Self {
-        Self { pid }
+    fn spawn(
+        command: &mut tokio::process::Command,
+    ) -> std::io::Result<(tokio::process::Child, Self)> {
+        #[cfg(windows)]
+        {
+            let (child, job) = localpilot_winsec::spawn_in_job(command, CREATE_NO_WINDOW)?;
+            Ok((child, Self { job: Some(job) }))
+        }
+        #[cfg(not(windows))]
+        {
+            let child = command.spawn()?;
+            let guard = Self { pid: child.id() };
+            Ok((child, guard))
+        }
     }
 
     fn disarm(&mut self) {
-        self.pid = None;
+        #[cfg(not(windows))]
+        {
+            self.pid = None;
+        }
+        #[cfg(windows)]
+        {
+            // A completed foreground call does not own session-long daemons.
+            // Closing its job also retires descendants left behind by the leader.
+            self.job = None;
+        }
     }
 
     async fn kill(&mut self) {
+        #[cfg(windows)]
+        {
+            self.job = None;
+        }
+        #[cfg(not(windows))]
         if let Some(pid) = self.pid {
             kill_process_tree(pid).await;
             self.pid = None;
@@ -83,6 +112,7 @@ impl ProcessTreeGuard {
 
 impl Drop for ProcessTreeGuard {
     fn drop(&mut self) {
+        #[cfg(not(windows))]
         if let Some(pid) = self.pid.take() {
             kill_process_tree_detached(pid);
         }
@@ -564,10 +594,8 @@ impl Tool for RunShell {
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 
-        let child = command
-            .spawn()
+        let (child, mut process_tree) = ProcessTreeGuard::spawn(&mut command)
             .map_err(|e| ToolError::Failed(format!("failed to start {program}: {e}")))?;
-        let mut process_tree = ProcessTreeGuard::new(child.id());
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(Ok(output)) => {
                 process_tree.disarm();
@@ -655,15 +683,8 @@ pub async fn kill_process_tree(pid: u32) {
 /// turn loop, or the session-close path. Fire-and-forget by design — the point
 /// is that the signal reaches the *group* before the caller forgets the child,
 /// so nothing is left holding an inherited pipe or a port.
+#[cfg(not(windows))]
 pub(crate) fn kill_process_tree_detached(pid: u32) {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
     #[cfg(unix)]
     {
         // See the note in `kill_process_tree`: without `-s`/`--` this signals

@@ -2171,6 +2171,7 @@ dependencies = [
  "localpilot-core",
  "localpilot-sandbox",
  "localpilot-store",
+ "localpilot-winsec",
  "parking_lot",
  "regex",
  "reqwest",
@@ -2199,6 +2200,7 @@ dependencies = [
 name = "localpilot-winsec"
 version = "5.0.0"
 dependencies = [
+ "tempfile",
  "tokio",
  "windows-sys 0.61.2",
 ]

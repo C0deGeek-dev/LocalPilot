@@ -1,5 +1,13 @@
 # Test Plan
 
+Windows command cleanup is covered by the tools crate's drop/timeout
+tests and `localpilot-harness`'s cancellation integration test. The Win32 shim's
+`ffi::job::tests` additionally checks an exited parent's live descendant,
+independent job isolation, and injected setup failures before/after assignment.
+Run these under workspace parallel load as well as the package gate: the
+original detached `taskkill` failure appeared only under load.
+Background tests cover cancellation during startup grace, stop and session close.
+
 ## Retrieval-Quality Measurement
 
 Two harnesses measure whether retrieval returns the *right* things, as distinct

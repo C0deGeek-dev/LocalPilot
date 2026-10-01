@@ -4,7 +4,7 @@ version = "5.0.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Owner-only Windows named pipes: the one crate allowed unsafe code (ADR-0189)."
+description = "Windows security and process containment: the one crate allowed unsafe code."
 
 # Deliberately not `[lints] workspace = true`: the workspace forbids unsafe
 # code, and `forbid` cannot be lifted by `allow`. These are the workspace
@@ -26,4 +26,9 @@ windows-sys = { workspace = true, features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

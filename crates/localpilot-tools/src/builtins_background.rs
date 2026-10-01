@@ -28,9 +28,11 @@ use tokio::io::AsyncReadExt;
 
 use crate::builtins::cap;
 use crate::builtins_shell::{
-    execution_class, execution_text, kill_process_tree, kill_process_tree_detached,
-    normalize_execution, render_stream, shell_program_and_args, RunShellExecution,
+    execution_class, execution_text, normalize_execution, render_stream, shell_program_and_args,
+    RunShellExecution,
 };
+#[cfg(not(windows))]
+use crate::builtins_shell::{kill_process_tree, kill_process_tree_detached};
 use crate::contract::{
     Idempotency, Reversibility, SideEffectClass, ToolContract, VerificationMethod,
 };
@@ -72,6 +74,10 @@ impl RollingLog {
 /// One tracked background process.
 struct ProcEntry {
     command: String,
+    // Close the job before dropping the immediate child. Unlike a parent-link
+    // walk, this also owns descendants after their original parent exits.
+    #[cfg(windows)]
+    job: Option<localpilot_winsec::ProcessJob>,
     child: tokio::process::Child,
     log: Arc<Mutex<RollingLog>>,
     started_at: Instant,
@@ -156,6 +162,11 @@ impl BackgroundProcesses {
         #[cfg(windows)]
         command.creation_flags(crate::builtins::CREATE_NO_WINDOW);
 
+        #[cfg(windows)]
+        let (mut child, job) =
+            localpilot_winsec::spawn_in_job(&mut command, crate::builtins::CREATE_NO_WINDOW)
+                .map_err(|e| ToolError::Failed(format!("failed to start {program}: {e}")))?;
+        #[cfg(not(windows))]
         let mut child = command
             .spawn()
             .map_err(|e| ToolError::Failed(format!("failed to start {program}: {e}")))?;
@@ -188,6 +199,8 @@ impl BackgroundProcesses {
                     id.clone(),
                     ProcEntry {
                         command: command_line,
+                        #[cfg(windows)]
+                        job: Some(job),
                         child,
                         log,
                         started_at,
@@ -226,8 +239,8 @@ impl BackgroundProcesses {
 
     /// Stop and forget the process `id`. Returns whether it was tracked.
     ///
-    /// Kills the whole process group, not just the child. The child leads its own
-    /// group (set at spawn), and a shell-wrapped command leaves the real workload
+    /// Kills the owned job or Unix process group, not just the child. A
+    /// shell-wrapped command leaves the real workload
     /// — a dev server, a watcher, a test run — as a grandchild: killing only the
     /// leader orphans it, still holding the port it bound and the stdout pipe it
     /// inherited. `run_shell` has always reaped the tree on timeout for exactly
@@ -237,14 +250,19 @@ impl BackgroundProcesses {
         // lock across an await.
         let entry = self.state.lock().procs.remove(id);
         if let Some(mut entry) = entry {
-            // Read the pid before signalling: once the child is waited on, its id
-            // is gone and the group can no longer be addressed.
-            let pid = entry.child.id();
-            // Reap the tree *before* killing the child: the descendants are found
-            // by walking links from the parent, so killing the parent first
-            // orphans them and the walk then finds nothing.
-            if let Some(pid) = pid {
-                kill_process_tree(pid).await;
+            #[cfg(windows)]
+            {
+                entry.job = None;
+            }
+            #[cfg(not(windows))]
+            {
+                // Read the pid before signalling: once the child is waited on, its id
+                // is gone and the group can no longer be addressed.
+                let pid = entry.child.id();
+                // Preserve the group id before waiting on the leader.
+                if let Some(pid) = pid {
+                    kill_process_tree(pid).await;
+                }
             }
             let _ = entry.child.start_kill();
             let _ = tokio::time::timeout(Duration::from_secs(5), entry.child.wait()).await;
@@ -257,13 +275,20 @@ impl BackgroundProcesses {
     /// Stop and forget the process `id` without awaiting its exit. Returns
     /// whether it was tracked. Synchronous so a UI command (a `/bg stop`) can run
     /// it off the turn loop; `kill_on_drop` reaps the child as the entry drops,
-    /// and the detached group kill reaps what the child itself started.
+    /// and the job/Unix group cleanup reaps what the child itself started.
     pub fn stop_now(&self, id: &str) -> bool {
         let mut state = self.state.lock();
         if let Some(mut entry) = state.procs.remove(id) {
-            let pid = entry.child.id();
-            if let Some(pid) = pid {
-                kill_process_tree_detached(pid);
+            #[cfg(windows)]
+            {
+                entry.job = None;
+            }
+            #[cfg(not(windows))]
+            {
+                let pid = entry.child.id();
+                if let Some(pid) = pid {
+                    kill_process_tree_detached(pid);
+                }
             }
             let _ = entry.child.start_kill();
             true
@@ -274,14 +299,21 @@ impl BackgroundProcesses {
 
     /// Terminate and forget every tracked process. Synchronous so it can run from
     /// the session-close path; `kill_on_drop` reaps the children as they drop, and
-    /// the detached group kill reaps their descendants — otherwise closing a
+    /// the job/Unix group cleanup reaps their descendants — otherwise closing a
     /// session leaves the servers it started running.
     pub fn kill_all(&self) {
         let mut state = self.state.lock();
         for entry in state.procs.values_mut() {
-            let pid = entry.child.id();
-            if let Some(pid) = pid {
-                kill_process_tree_detached(pid);
+            #[cfg(windows)]
+            {
+                entry.job = None;
+            }
+            #[cfg(not(windows))]
+            {
+                let pid = entry.child.id();
+                if let Some(pid) = pid {
+                    kill_process_tree_detached(pid);
+                }
             }
             let _ = entry.child.start_kill();
         }
@@ -648,6 +680,40 @@ mod tests {
 
         procs.kill_all();
         assert!(procs.list().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cancelling_background_start_during_grace_reaps_the_unregistered_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let procs = BackgroundProcesses::new();
+        let execution = RunShellExecution::Direct {
+            program: "powershell.exe".to_string(),
+            args: vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Set-Content started ready; while (!(Test-Path released)) { Start-Sleep -Milliseconds 20 }; Set-Content leaked bad".to_string(),
+            ],
+        };
+        let mut start = Box::pin(procs.start(execution, dir.path(), Duration::from_secs(60)));
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                tokio::select! {
+                    result = &mut start => panic!("start completed before grace cancellation: {}", result.is_ok()),
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {
+                        if dir.path().join("started").exists() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }).await.unwrap();
+        drop(start);
+        std::fs::write(dir.path().join("released"), "go").unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(procs.list().is_empty());
+        assert!(!dir.path().join("leaked").exists());
     }
 
     /// Stopping a shell-wrapped process must take the workload with it, not just

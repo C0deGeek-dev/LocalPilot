@@ -1,4 +1,4 @@
-//! Owner-only Windows named pipes (LocalHub #192, ADR-0189).
+//! Owner-only Windows named pipes and contained command trees (ADR-0189).
 //!
 //! Tokio creates a named pipe with the default security descriptor, whose
 //! DACL grants read access to Everyone and to the anonymous account. This
@@ -12,7 +12,7 @@
 
 #![deny(
     unsafe_code,
-    reason = "Win32 security calls for owner-only pipes; only the ffi module allows it (ADR-0189)"
+    reason = "Win32 security and containment calls; only the ffi module allows it (ADR-0189)"
 )]
 
 #[cfg(windows)]
@@ -20,6 +20,9 @@ mod ffi;
 
 #[cfg(windows)]
 pub use pipes::{canonical_sddl, current_user_sid, owner_only_pipe, owner_trustee, pipe_dacl};
+
+#[cfg(windows)]
+pub use ffi::job::{spawn_in_job, ProcessJob};
 
 /// The SDDL of a protected DACL whose only entry grants `sid` full access: no
 /// inherited entries, no Everyone, no anonymous, no SYSTEM. Plain text, so it

@@ -127,7 +127,7 @@ time = { version = "=0.3.37", features = ["local-offset"] }
 toml = "=0.8.23"
 tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util", "io-std", "time", "sync"] }
 tokio-util = { version = "=0.7.13", features = ["rt"] }
-# Win32 security calls for owner-only named pipes, used only by
+# Win32 security and process containment calls, used only by
 # `localpilot-winsec` (ADR-0189). Already in the lock graph through tokio and
 # mio at this version; features are chosen per use.
 windows-sys = "=0.61.2"

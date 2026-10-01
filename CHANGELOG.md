@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Reliable Windows tool command cleanup.** Cancellation, timeout and
+  completion close a kernel-owned Job Object, terminating descendants even
+  after their parent exits. Commands are contained before they begin running;
+  a setup failure returns an error instead of running without containment.
+  Background starts own the same job during grace and transfer it to the
+  registry; stop, session close and registry drop retire their descendants.
+
 - **Served context windows on every session path.** Interactive, headless,
   harness and server sessions share cached, bounded metadata discovery. Configured
   windows cap the served per-slot window; unavailable metadata preserves the
