@@ -355,7 +355,9 @@ picker and pair picker. Owns:
   adds the CLI-injected, engine-neutral `/localmind` workspace tab (ADR-0152); the
   presentation crates remain free of LocalMind dependencies. The full-screen
   host also runs `/compact`, the long-running `/ingest` runs, `/research`, the
-  `/harness-intake` / `/harness-brief` brief conversations, and the
+  `/harness-intake` / `/harness-brief` brief conversations, the
+  `/harness-plan` / `/harness-replan` plan conversations (one stage host, so
+  only one document conversation is ever live), and the
   `/harness-resume` / `/wait-resume` resume commands on its
   operation pump (a UI-agnostic progress lane surfaces ingest milestones without the
   operation and the pump both mutating the model). The LocalMind Graph section's

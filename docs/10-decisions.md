@@ -2,6 +2,116 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0197: A Plan Is Reviewed Against Its Brief, And Finished Work Is Not The Draft's To Restate
+
+**Status:** accepted · **Date:** 2026-10-01. Extends ADR-0182 (a brief is read
+before it is the project's) to the second harness document, and ADR-0179 (a plan
+records the brief revision it was built from) to the moment of approval.
+
+**Context.** `harness plan` wrote `PROGRESS.md` the moment the model produced a
+parseable document, with the same consequence ADR-0182 described for the brief:
+the first sight of a plan was already the source of truth. A plan carries two
+extra hazards a brief does not.
+
+The first is that a syntactically valid plan is not a plan that does the job. A
+document can parse perfectly while leaving an acceptance criterion unimplemented,
+saying nothing about how any step is checked, or declaring an order that points
+at itself. Nothing in the file could express those facts, so nothing could check
+them, and a reviewer had no way to see them without reading the brief and the
+plan side by side and holding the mapping in their head.
+
+The second is that a plan is also a record of what already happened. Replanning
+over work that is committed means a model is restating history it did not
+witness. The failure mode is specific and quiet: a redraft that moves a finished
+step to a different number files its commit under a step that never produced it,
+one that respells the step rewrites the words the work was done under, and one
+that credits it with a criterion written after the fact makes the plan claim a
+check that never ran.
+
+**Decision.**
+
+**The plan format states intent, and absence means unknown.** A step may carry
+`covers` (acceptance criteria by position in the bound brief), `verify` (the
+smallest check that shows it works, or `none - <reason>`) and `depends` (step
+numbers that must come first). An explicit nothing is spelled on disk, so a
+reader can tell a decision from a silence. A step that omits a line states
+*unknown*: every plan written before this format does, and such a plan parses,
+executes and retains its recorded fields when rendered. A bare `verify: none` is malformed on
+purpose — claiming a step needs no check is exactly the claim that should carry
+its reason into the document.
+
+**The three lines are required at approval, not at parse.** Requiring them of a
+file that already exists would impose a judgement nobody made; requiring them of
+future steps being approved now is asking the person making the decision to make
+it. Completed legacy steps retain absent historical metadata, with no invented
+verification or criterion credits; new future steps cover the remaining criteria.
+`validate_for_approval` is the one gate, it runs against the brief the plan is
+about to be bound to, and it returns *every* defect rather than the first: a
+reviewer told one problem per round is a reviewer we have wasted.
+
+**Approval binds to the reviewed revision, and refuses if the brief moved.** The
+criterion numbers a reviewer approved meant particular sentences. If `brief.md`
+changed while the draft was on screen, validating against the new brief would
+silently re-aim the decision, so approval is refused and the draft is kept.
+Approval also compares the saved plan with the source seen before generation and
+refuses any later change. A draft cannot invent completion or restate recorded
+evidence, including the sessions that worked each step.
+
+**Finished work is not the draft's to restate.** Whenever the saved plan has
+completed steps, a draft is reconciled with it before review — for an ordinary
+revision as much as for a replan, because a revision can drop a finished step
+just as easily as a redraft can. A completed step keeps its number, its wording,
+its commit, its attempt count, its ordered session IDs and its verification; new work is numbered after
+it; dependencies are remapped with it; and a gap left by dropped work stays a
+gap. `covers` is the single field a draft may change on finished work, and only
+downwards — widening is refused, because crediting a commit with a criterion it
+was never checked against is the one thing a replan must never do. Where the
+brief has moved, or the old plan recorded no revision at all, no credit is
+verifiable and any claim is refused; the way forward is a new step that owns the
+changed criterion.
+
+**Ambiguity is named, never guessed.** Work the new plan does not contain,
+wording repeated on either side, an unverifiable credit, and finished work
+declared to wait on unfinished work are all conflicts. Nothing is written, the
+draft is held so the reviewer can revise it rather than start over, and a
+conflicted draft is not approvable.
+
+**A replan is constrained to the brief plus the finished steps.** Unfinished
+steps were written for a brief that has since moved; feeding them back turns a
+replan into a reshuffle of stale intent. The prompt requires finished steps to be
+reproduced verbatim — and reconciliation catches it when they are not, because a
+prompt is an instruction, not a guarantee.
+
+**The review discloses what resuming will do.** The next step, the live
+permission profile, auto-commit, attempts per step and the resolved quality-gate
+checks are part of the draft, with a line saying approving changes none of them.
+A disclosure the reviewer has to ask for is one they will approve without, and a
+reviewer who thinks approval sets these is about to be surprised by the first
+commit. Production review reads the same persisted settings loader that resume
+uses; the permission profile is read live, because `/bypass` changes it
+mid-conversation. The runner currently commits successful steps even when
+`auto_commit` is false. Review discloses that limitation explicitly; this change
+does not alter the existing runner's commit semantics.
+
+**One conversation host for both documents.** A brief conversation and a plan
+conversation cannot both be live. Planning waits for an active brief conversation
+to finish; explicitly opening another brief or resetting a plan supersedes the
+prior generation. Decision controls cannot discard the other document's draft.
+The host holds `LiveStage::{Brief, Plan}` rather than two
+hosts, so generations stay unique across both and "that exact conversation"
+routing keeps meaning something. The six review verbs are one type, shared by
+`/harness-brief`, `/harness-plan` and `/harness-replan`, because a second
+identical enum is a second place to forget a verb.
+
+**Consequences.** A plan can no longer be approved while an acceptance criterion
+has no owner, which is a new refusal on a path that previously always wrote. A
+legacy plan's future steps need explicit planning fields before approval; its
+completed history remains unchanged. A replan over a brief that moved
+will refuse to carry criterion credits and asks for new steps instead, which is
+more friction than renumbering and is the point. `/harness-plan` over an existing
+plan opens it for review rather than redrafting it, so regenerating a plan is
+always a deliberate `/harness-replan`.
+
 ## ADR-0196: Owned Session Scratch and Inspectable Command Path Effects
 
 **Status:** Accepted · **Date:** 2026-10-01

@@ -372,6 +372,22 @@ UI:
   says that a plan built from the previous brief is stale. Approving is
   classified as writing the project, so an incognito session refuses it
   (ADR-0182).
+- `/harness-plan` and `/harness-replan` run on the same pump and share that
+  conversation's shape, verbs and failure handling; only the first draft
+  differs. `/harness-plan` drafts from the approved brief, or opens an existing
+  `PROGRESS.md` for review rather than regenerating it. `/harness-replan` states
+  why the plan is being replaced and what survives before the model runs, and
+  constrains its input to the current brief plus the finished steps verbatim.
+  The review carries the acceptance mapping, each step's verification, and the
+  execution disclosure (next step, live permission profile, auto-commit,
+  attempts per step, resolved quality-gate checks) so what resuming does is
+  visible before any resume is available. Approval validates against the brief
+  the draft was reviewed against, reports every defect at once, refuses if the
+  brief moved under the draft, and writes atomically. Any draft over a saved plan
+  with completed steps is reconciled first: completed number, wording, commit,
+  attempts and verification are preserved, `covers` may only narrow, and an
+  unresolvable difference is a named conflict that holds the draft and writes
+  nothing.
 - `/harness-resume` and `/wait-resume` run in the full-screen chat host on the
   operation pump: each enters Harness mode synchronously (`/agent` exits), snapshots
   the live model/provider/sandbox-profile/trust at dispatch (a `/model` or profile

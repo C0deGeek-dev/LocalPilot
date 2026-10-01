@@ -283,9 +283,9 @@ pub enum RetryTarget {
 /// something a person started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageOutcome {
-    /// The reviewed draft became `brief.md`.
+    /// The reviewed draft became the document.
     Approved,
-    /// The user rejected the draft. Any existing brief is untouched.
+    /// The user rejected the draft. Anything already saved is untouched.
     Rejected,
     /// The user left the conversation.
     Cancelled,
@@ -295,13 +295,18 @@ pub enum StageOutcome {
 
 impl StageOutcome {
     /// A short reason, for telling a queued input why its conversation is gone.
+    ///
+    /// `subject` names the conversation that ended ("brief", "plan"), because a
+    /// user told "the brief was approved" after a planning conversation would
+    /// look for a brief they never touched. The outcomes are shared between the
+    /// two conversations; only the noun differs.
     #[must_use]
-    pub fn reason(self) -> &'static str {
+    pub fn reason(self, subject: &str) -> String {
         match self {
-            Self::Approved => "the brief was approved",
-            Self::Rejected => "the draft was rejected",
-            Self::Cancelled => "the brief conversation was cancelled",
-            Self::Superseded => "a newer brief conversation replaced this one",
+            Self::Approved => format!("the {subject} was approved"),
+            Self::Rejected => "the draft was rejected".to_string(),
+            Self::Cancelled => format!("the {subject} conversation was cancelled"),
+            Self::Superseded => format!("a newer {subject} conversation replaced this one"),
         }
     }
 }
@@ -639,14 +644,14 @@ mod tests {
     fn every_terminal_outcome_states_its_own_reason() {
         // A queued input whose conversation ended is told which of these
         // happened; "the stage is gone" is the absence of a reason, not one.
-        let reasons: Vec<&str> = [
+        let reasons: Vec<String> = [
             StageOutcome::Approved,
             StageOutcome::Rejected,
             StageOutcome::Cancelled,
             StageOutcome::Superseded,
         ]
         .into_iter()
-        .map(StageOutcome::reason)
+        .map(|outcome| outcome.reason("brief"))
         .collect();
         let unique: std::collections::BTreeSet<_> = reasons.iter().collect();
         assert_eq!(unique.len(), reasons.len(), "{reasons:?}");

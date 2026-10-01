@@ -314,16 +314,40 @@ fn lifecycle_line(state: &localpilot_harness::WorkspaceState) -> String {
 /// user where the project now stands, and it must say what `harness status`
 /// says rather than keeping a second, shorter table of its own.
 pub(crate) fn blocked_reason(reason: &localpilot_harness::NotResumable) -> String {
+    blocked_reason_on(reason, false)
+}
+
+/// The same diagnosis with command names for the surface presenting it.
+pub(crate) fn blocked_reason_on(
+    reason: &localpilot_harness::NotResumable,
+    interactive: bool,
+) -> String {
     use localpilot_harness::NotResumable as R;
+    let intake = if interactive {
+        "/harness-intake"
+    } else {
+        "`localpilot harness intake`"
+    };
+    let plan = if interactive {
+        "/harness-plan"
+    } else {
+        "`localpilot harness plan`"
+    };
+    let replan = if interactive {
+        "/harness-replan"
+    } else {
+        "`localpilot harness plan`"
+    };
     match reason {
-        R::NoBrief => "brief.md not found; run `localpilot harness intake` first".to_string(),
+        R::NoBrief => format!("brief.md not found; run {intake} first"),
         R::BriefBroken { detail } => format!("brief.md cannot be used: {detail}"),
-        R::NoPlan => "PROGRESS.md not found; run `localpilot harness plan` first".to_string(),
+        R::NoPlan => format!("PROGRESS.md not found; run {plan} first"),
         R::PlanBroken { detail } => format!("PROGRESS.md cannot be used: {detail}"),
-        R::Unbound => "PROGRESS.md records no brief revision, so whether it still matches \
+        R::Unbound => format!(
+            "PROGRESS.md records no brief revision, so whether it still matches \
              brief.md is unknown. Run `localpilot harness adopt` to declare that this plan \
-             belongs to the current brief, or `localpilot harness plan` to replan."
-            .to_string(),
+             belongs to the current brief, or {replan} to replan."
+        ),
         R::Stale { recorded, current } => format!(
             "PROGRESS.md was built against brief revision {recorded}, but brief.md is now \
              {current}. Replan before resuming; the completed steps and their commits are kept."
@@ -336,6 +360,14 @@ pub(crate) fn blocked_reason(reason: &localpilot_harness::NotResumable) -> Strin
         R::Complete => "every step in PROGRESS.md is already done".to_string(),
         R::OperationActive => "a harness operation is already running".to_string(),
     }
+}
+
+/// Settings the harness runner loads on resume. Review uses this same loader,
+/// including its existing fallback, so it describes execution rather than the
+/// configuration the interactive host happened to load at startup.
+pub(crate) fn resume_config(root: &Path) -> Config {
+    localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
+        .unwrap_or_else(|_| Config::default())
 }
 
 /// Bind an existing unbound plan to the current brief.
@@ -1013,8 +1045,7 @@ async fn resume_with_provider<A>(
 where
     A: FnMut() -> Box<dyn Approver>,
 {
-    let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
-        .unwrap_or_else(|_| Config::default());
+    let config = resume_config(root);
     let workspace = crate::session_cmd::workspace_with_read_roots(root, &config)?;
     let rules = RuleEngine::with_baseline(&config.harness.rules);
     let test_command = config.harness.test_command.clone();
@@ -1467,7 +1498,11 @@ fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harnes
     }
 }
 
-fn repo_summary(root: &Path) -> String {
+/// A one-line view of the repository for the planner.
+///
+/// Shared with the full-screen planning conversation so both plan from the same
+/// description; a second copy would drift the moment either changed.
+pub(crate) fn repo_summary(root: &Path) -> String {
     let mut entries: Vec<String> = std::fs::read_dir(root)
         .into_iter()
         .flatten()

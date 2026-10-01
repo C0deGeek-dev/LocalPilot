@@ -371,6 +371,15 @@ rather than entering provider input. The rest:
   Nothing is written to the project until an explicit approval; a failed attempt
   is retryable rather than fatal; and an unapproved draft does not survive
   `/agent`, a session change, or the session itself.
+- `/harness-plan [show|no-change|approve|reject|reset|cancel]` does the same for
+  `PROGRESS.md`, and `/harness-replan` replaces a plan around work that is
+  already finished. The review shows which step owns each acceptance criterion,
+  how each step is verified, and the persisted execution settings the runner
+  loads. The runner's current automatic-commit behavior is disclosed even when
+  `auto_commit = false` is configured. Approval is refused while a criterion has no owner or
+  source documents changed during review, and a draft
+  that cannot be squared with completed commits is held with the conflict named
+  rather than written.
 - `/ingest <action>` manages project-local folder ingestion (`run`, `refresh`,
   `resume`, `preview`, `status`, `review`, and so on). The walking actions
   (`run`, `refresh`, `resume`) show a live progress loader — discovering,

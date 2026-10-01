@@ -25,6 +25,9 @@ mod judge;
 mod launch_targets;
 mod lessons;
 mod paths_in_play;
+mod plan_draft;
+mod plan_reconcile;
+mod plan_review;
 mod planning;
 mod precondition;
 mod progress;
@@ -69,8 +72,16 @@ pub use intake::{
 pub use judge::{judge_ranking_selftest_live, judge_score_live};
 pub use lessons::{Lesson, Lessons};
 pub use paths_in_play::PathsInPlay;
+pub use plan_draft::{
+    draft_plan, draft_replan, persist_approved_plan, revise_plan, PlanApproval, PlanDraft,
+    PlanRetry, PlanStage,
+};
+pub use plan_reconcile::{reconcile, CreditReason, ReconcileConflict};
+pub use plan_review::{
+    coverage, numbered_criteria, validate_for_approval, verification_text, PlanDefect,
+};
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
-pub use progress::{Progress, Step};
+pub use progress::{Progress, Step, Verification};
 pub use project_analysis::{
     analyze_project, register_project_analysis_context, ProjectAnalysis, ProjectAnalysisContext,
 };

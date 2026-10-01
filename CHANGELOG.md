@@ -320,6 +320,45 @@ is SemVer-stable; the configuration schema stability policy is in
   the operator cannot see. ADR-0090's `[stale: …]` and
   `[full source unavailable: …]` markers reach the screen (LocalHub#153).
 
+- **A plan can now be read before it becomes the project's, and it says what
+  it is for.** `/harness-plan` turns the approved brief into a draft you can
+  discuss, revise and reject, and approving is what writes `PROGRESS.md` —
+  atomically, bound to the brief it was reviewed against rather than to whatever
+  the brief says by then. A current saved plan opens for review; stale or unbound
+  plans require explicit replanning. Approval refuses source changes during review
+  and completion evidence invented by the draft.
+
+  Steps now say what they are for. A step may carry `covers` (which acceptance
+  criteria it satisfies), `verify` (the smallest check that shows it works, or a
+  stated reason none applies) and `depends` (what must come first). A plan
+  written before this format states none of them, is still executed and still
+  preserves its recorded fields; the three are required for future steps being
+  approved now. Historical verification stays unknown when it was not recorded.
+  The review shows every acceptance criterion beside the step that
+  owns it, or `no step` where nothing does, and approval is refused — with every
+  problem named at once — when a criterion has no owner, a step claims one the
+  brief does not have, or a dependency points forward.
+
+  Before any of that, the review says what resuming will actually do: the next
+  step, the live permission profile, whether each step is committed
+  automatically, the attempts per step, and the quality-gate checks loaded by the
+  runner — and that approving the plan changes none of it. The review also says
+  when `auto_commit = false` is configured but the runner still commits successful
+  steps; changing that existing behavior is separate from plan approval.
+
+  **`/harness-replan` replaces a plan without rewriting what already happened.**
+  It says why the plan is being replaced and how much finished work carries
+  across before it runs, and gives the model the current brief and the finished
+  steps verbatim — never the unfinished ones, which were written for a brief that
+  has since moved. A completed step keeps its number, its wording, its commit,
+  its attempt count, its ordered session IDs and the check that verified it; new work is numbered after
+  it, and a gap left by dropped work stays a gap. A draft may narrow what
+  finished work covers but never widen it: crediting a commit with a criterion it
+  was never checked against is refused, and so is anything else reconciliation
+  cannot settle — the conflict is named, the draft is held for you to revise, and
+  nothing is written. The same protection applies to an ordinary revision of a
+  saved plan, not just to a replan.
+
 - **A brief can now be read before it becomes the project's.** `/harness-intake`
   turns an idea into a draft you can discuss, revise and reject, and
   `/harness-brief approve` is what writes `brief.md` — atomically, exactly as

@@ -47,22 +47,27 @@ pub enum Profile {
     Unrestricted,
 }
 
-/// What `/harness-brief` was asked to do.
+/// What `/harness-brief`, `/harness-plan` or `/harness-replan` was asked to do.
+///
+/// One set of verbs for both reviewable documents: a brief and a plan are
+/// reviewed the same way, and a second identical enum would be a second place to
+/// forget a verb.
 ///
 /// Typed rather than parsed at the call site: a decision about a draft is a
 /// transition, and a transition decided by matching a string somewhere in the
 /// host is one nobody can enumerate later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BriefAction {
-    /// Show the current brief, or the draft under review.
+pub enum ReviewAction {
+    /// Show the saved document, or the draft under review.
     Show,
-    /// The brief needs no changes: write nothing and continue.
+    /// The saved document needs no changes: write nothing and continue.
     NoChange,
-    /// Save the reviewed draft as `brief.md`.
+    /// Save the reviewed draft.
     Approve,
-    /// Discard the draft; any existing brief is untouched.
+    /// Discard the draft; anything already saved is untouched.
     Reject,
-    /// Start again from the original idea.
+    /// Start again from the source — the original idea for a brief, the approved
+    /// brief for a plan.
     Reset,
     /// Leave the conversation.
     Cancel,
@@ -133,7 +138,12 @@ pub enum SlashAction {
     /// `Some(idea)` supplies it up front; `None` asks for it.
     HarnessIntake(Option<String>),
     /// Review the existing brief, or act on a draft under review.
-    HarnessBrief(BriefAction),
+    HarnessBrief(ReviewAction),
+    /// Turn the approved brief into a reviewed `PROGRESS.md`, or act on the
+    /// draft under review.
+    HarnessPlan(ReviewAction),
+    /// Replace a stale or rejected plan, carrying finished work across.
+    HarnessReplan(ReviewAction),
     /// Switch the active provider/model mid-session, or — with no provider — list
     /// the configured providers and their available models. `model` is only set
     /// when a model id follows the provider id.
@@ -381,14 +391,25 @@ impl SlashAction {
             // Reviewing, rejecting, resetting and leaving a brief conversation
             // all write nothing; approving writes the project.
             Self::HarnessBrief(action) => match action {
-                BriefAction::Approve => {
+                ReviewAction::Approve => {
                     Persistence::Persistent("brief.md and the intake record")
                 }
-                BriefAction::Show
-                | BriefAction::NoChange
-                | BriefAction::Reject
-                | BriefAction::Reset
-                | BriefAction::Cancel => Persistence::ReadOnly,
+                ReviewAction::Show
+                | ReviewAction::NoChange
+                | ReviewAction::Reject
+                | ReviewAction::Reset
+                | ReviewAction::Cancel => Persistence::ReadOnly,
+            },
+
+            // The same split for the plan conversation. Drafting a plan — even a
+            // replan around finished work — writes nothing until it is approved.
+            Self::HarnessPlan(action) | Self::HarnessReplan(action) => match action {
+                ReviewAction::Approve => Persistence::Persistent("PROGRESS.md"),
+                ReviewAction::Show
+                | ReviewAction::NoChange
+                | ReviewAction::Reject
+                | ReviewAction::Reset
+                | ReviewAction::Cancel => Persistence::ReadOnly,
             },
 
             // Touch the session store only — in-memory under incognito, so these
@@ -639,6 +660,7 @@ slash_commands! {
         Agent, Harness, Default, Relaxed, Bypass, Unrestricted, Think, Effort,
         Model, Localbox, Selfimprove, New, Fork, Clone, Tree, Sessions, Session, Name,
         Continue, Clear, Compact, HarnessResume, WaitResume, HarnessIntake, HarnessBrief,
+        HarnessPlan, HarnessReplan,
         Ingest, Knowledge,
         Context, Research, Agents, Skills, Bg, Exit,
         // Full-screen/pair takeover identities: `parse_slash_for(Fullscreen|Pair)`
@@ -712,6 +734,18 @@ slash_commands! {
             Optional,
             Fall,
             "Review the brief, or approve/reject a draft",
+        ),
+        HarnessPlan => fullscreen_only(
+            "harness-plan",
+            Optional,
+            Fall,
+            "Turn the brief into a reviewed plan, or approve/reject a draft",
+        ),
+        HarnessReplan => fullscreen_only(
+            "harness-replan",
+            Optional,
+            Fall,
+            "Replace a stale or rejected plan, keeping finished work",
         ),
         Ingest => fullscreen_only("ingest", Optional, Fall, "Manage workspace ingestion"),
         Knowledge => fullscreen_only("knowledge", Required, Fall, "Query the knowledge base"),
@@ -869,6 +903,8 @@ impl SlashAction {
             SlashAction::HarnessResume => C::HarnessResume,
             SlashAction::HarnessIntake(_) => C::HarnessIntake,
             SlashAction::HarnessBrief(_) => C::HarnessBrief,
+            SlashAction::HarnessPlan(_) => C::HarnessPlan,
+            SlashAction::HarnessReplan(_) => C::HarnessReplan,
             SlashAction::WaitResume => C::WaitResume,
             SlashAction::Ingest(_) => C::Ingest,
             SlashAction::Knowledge(_) => C::Knowledge,
@@ -1129,23 +1165,18 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
             }
         }
         C::HarnessResume => no_arg(spelling, name, args, command, SlashAction::HarnessResume),
-        C::HarnessIntake => SlashAction::HarnessIntake(
-            (!args.trim().is_empty()).then(|| args.trim().to_string()),
-        ),
-        C::HarnessBrief => match args.trim() {
-            "" | "show" => SlashAction::HarnessBrief(BriefAction::Show),
-            "ok" | "no-change" => SlashAction::HarnessBrief(BriefAction::NoChange),
-            "approve" => SlashAction::HarnessBrief(BriefAction::Approve),
-            "reject" => SlashAction::HarnessBrief(BriefAction::Reject),
-            "reset" => SlashAction::HarnessBrief(BriefAction::Reset),
-            "cancel" => SlashAction::HarnessBrief(BriefAction::Cancel),
-            other => SlashAction::Invalid {
-                command: name.to_string(),
-                reason: format!(
-                    "unknown action '{other}'; usage: /harness-brief                      [show|no-change|approve|reject|reset|cancel]"
-                ),
-            },
-        },
+        C::HarnessIntake => {
+            SlashAction::HarnessIntake((!args.trim().is_empty()).then(|| args.trim().to_string()))
+        }
+        C::HarnessBrief => {
+            review_action(args, name).map_or_else(|invalid| invalid, SlashAction::HarnessBrief)
+        }
+        C::HarnessPlan => {
+            review_action(args, name).map_or_else(|invalid| invalid, SlashAction::HarnessPlan)
+        }
+        C::HarnessReplan => {
+            review_action(args, name).map_or_else(|invalid| invalid, SlashAction::HarnessReplan)
+        }
         C::WaitResume => no_arg(spelling, name, args, command, SlashAction::WaitResume),
         C::Ingest => parse_ingest(args),
         C::Knowledge => {
@@ -1243,6 +1274,28 @@ fn stray(spelling: &Spelling, name: &str, command: &str) -> SlashAction {
             reason: "this command does not take arguments".to_string(),
         },
         StrayArgs::FallThroughUnknown => SlashAction::Unknown(command.to_string()),
+    }
+}
+
+/// The verb a `/harness-brief`, `/harness-plan` or `/harness-replan` argument
+/// names, or the invalid-command reply for anything else.
+///
+/// Shared so the three commands cannot drift into accepting different words for
+/// the same decision.
+fn review_action(args: &str, name: &str) -> Result<ReviewAction, SlashAction> {
+    match args.trim() {
+        "" | "show" => Ok(ReviewAction::Show),
+        "ok" | "no-change" => Ok(ReviewAction::NoChange),
+        "approve" => Ok(ReviewAction::Approve),
+        "reject" => Ok(ReviewAction::Reject),
+        "reset" => Ok(ReviewAction::Reset),
+        "cancel" => Ok(ReviewAction::Cancel),
+        other => Err(SlashAction::Invalid {
+            command: name.to_string(),
+            reason: format!(
+                "unknown action '{other}'; usage: /{name} [show|no-change|approve|reject|reset|cancel]"
+            ),
+        }),
     }
 }
 
@@ -1443,7 +1496,7 @@ mod tests {
             from_table, from_enum,
             "SLASH_SPELLINGS identities must equal SlashCommand::ALL"
         );
-        assert_eq!(from_enum.len(), 41, "expected 41 command identities");
+        assert_eq!(from_enum.len(), 43, "expected 43 command identities");
     }
 
     #[test]
@@ -1457,8 +1510,9 @@ mod tests {
         // parse-only aliases stay hidden but remain typeable in full-screen.
         // `/localmind` adds the one full-screen-only six-section workspace tab.
         // 41→43 adds `harness-intake` and `harness-brief`, the reviewable brief
-        // conversation; the rest of the harness family lands with the router.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 43);
+        // conversation; 43→45 adds `harness-plan` and `harness-replan`, the same
+        // review conversation for `PROGRESS.md`.
+        assert_eq!(specs_for(Host::Fullscreen).len(), 45);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 

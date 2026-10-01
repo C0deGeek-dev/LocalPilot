@@ -11,7 +11,30 @@ use crate::error::HarnessError;
 
 const DOCUMENT: &str = "PROGRESS.md";
 
+/// How a step is verified, when the plan says.
+///
+/// "Nothing to run here" is a claim a person should have to make in words, so
+/// the absence of a command carries a reason rather than being spelled as an
+/// empty command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Verification {
+    /// The smallest relevant check for this step.
+    Command(String),
+    /// Nothing executable applies, and why.
+    None { reason: String },
+}
+
 /// A single plan step.
+///
+/// The three planning fields — `covers`, `verify`, `depends` — are `Option`
+/// because absence means UNKNOWN, not empty: every plan written before this
+/// format existed has none of them, and a legacy plan must round-trip
+/// byte-identically rather than acquire fields nobody decided. An explicit
+/// "none" is a different fact and is spelled on disk (`covers: none`,
+/// `depends: none`, `verify: none - <reason>`), so a reader can tell a decision
+/// from a silence. Newly approved plans are required to carry all three; that
+/// rule belongs to approval, not to parsing, because a user-edited file is
+/// accepted whenever it is semantically valid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     pub number: usize,
@@ -27,6 +50,16 @@ pub struct Step {
     /// link existed, which is *unknown*, not "no session".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<String>,
+    /// Acceptance criteria this step owns, by their numbers in the bound brief.
+    /// `Some(empty)` is an explicit "this step owns none of them".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covers: Option<Vec<usize>>,
+    /// The step's verification, or a stated reason none applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<Verification>,
+    /// Step numbers that must come first. `Some(empty)` is an explicit "nothing".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends: Option<Vec<usize>>,
 }
 
 /// A parsed `PROGRESS.md`.
@@ -124,6 +157,9 @@ impl Progress {
                                 .filter(|id| !id.is_empty())
                                 .map(str::to_string),
                         ),
+                        "covers" => last.covers = Some(parse_numbers(value, true)?),
+                        "depends" => last.depends = Some(parse_numbers(value, false)?),
+                        "verify" => last.verify = Some(parse_verification(value)?),
                         _ => {}
                     }
                 }
@@ -164,6 +200,22 @@ impl Progress {
                 if !step.sessions.is_empty() {
                     out.push_str(&format!("  - sessions: {}\n", step.sessions.join(", ")));
                 }
+            }
+            // Written only when present, for the same reason the binding is: a
+            // plan that predates the format round-trips byte-identically rather
+            // than gaining fields nobody decided.
+            if let Some(covers) = &step.covers {
+                out.push_str(&format!("  - covers: {}\n", render_numbers(covers, "AC")));
+            }
+            if let Some(verify) = &step.verify {
+                let value = match verify {
+                    Verification::Command(command) => command.clone(),
+                    Verification::None { reason } => format!("none - {reason}"),
+                };
+                out.push_str(&format!("  - verify: {value}\n"));
+            }
+            if let Some(depends) = &step.depends {
+                out.push_str(&format!("  - depends: {}\n", render_numbers(depends, "")));
             }
         }
         out
@@ -206,6 +258,13 @@ impl Progress {
             commit: None,
             attempts: 0,
             sessions: Vec::new(),
+            // `feature` appends a step nobody planned against a brief criterion,
+            // so the three planning fields are UNKNOWN here rather than empty.
+            // Claiming it covers nothing would be a decision this command has no
+            // standing to make.
+            covers: None,
+            verify: None,
+            depends: None,
         });
         number
     }
@@ -232,6 +291,18 @@ impl Progress {
             false
         }
     }
+}
+
+/// A number list as it is written back, or the explicit `none`.
+fn render_numbers(numbers: &[usize], prefix: &str) -> String {
+    if numbers.is_empty() {
+        return "none".to_string();
+    }
+    numbers
+        .iter()
+        .map(|number| format!("{prefix}{number}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn parse_step_line(line: &str) -> Result<Option<Step>, HarnessError> {
@@ -272,7 +343,105 @@ fn parse_step_line(line: &str) -> Result<Option<Step>, HarnessError> {
         commit: None,
         attempts: 0,
         sessions: Vec::new(),
+        // Filled by the metadata sub-bullets that follow the step line, if any.
+        covers: None,
+        verify: None,
+        depends: None,
     }))
+}
+
+/// A comma-separated list of numbers, or the explicit word `none`.
+///
+/// `none` yields an empty list: the caller keeps it inside `Some`, which is what
+/// distinguishes a stated "nothing" from a legacy silence.
+///
+/// `allow_ac` is the difference between the two vocabularies. A criterion may be
+/// written `AC3` or `3`, because the render uses the prefix and a hand-editor
+/// will type either. A dependency is a step number and never carries it —
+/// accepting `AC3` there would let a plan appear to depend on a criterion, which
+/// is a different kind of thing entirely. Nothing else is accepted: a parser
+/// that took `C1`, `A1` or `ACAC1` would read a spelling it never writes back.
+fn parse_numbers(value: &str, allow_ac: bool) -> Result<Vec<usize>, HarnessError> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+    let expected = if allow_ac {
+        "a list of criterion numbers like 'AC1, AC3' or '1, 3'"
+    } else {
+        "a list of step numbers like '1, 2'"
+    };
+    let mut out = Vec::new();
+    for part in value.split(',') {
+        let part = part.trim();
+        let digits = match part.get(..2) {
+            Some(head) if allow_ac && head.eq_ignore_ascii_case("ac") => &part[2..],
+            _ => part,
+        };
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(HarnessError::Malformed {
+                document: DOCUMENT,
+                detail: format!("'{value}' is not {expected}"),
+            });
+        }
+        let number: usize = digits.parse().map_err(|_| HarnessError::Malformed {
+            document: DOCUMENT,
+            detail: format!("'{value}' is not {expected}"),
+        })?;
+        if number == 0 {
+            return Err(HarnessError::Malformed {
+                document: DOCUMENT,
+                detail: format!("'{value}' contains 0; numbering starts at 1"),
+            });
+        }
+        if !out.contains(&number) {
+            out.push(number);
+        }
+    }
+    Ok(out)
+}
+
+/// `none - <reason>` or a command.
+///
+/// A bare `none` is malformed on purpose: claiming a step needs no verification
+/// is exactly the claim that should carry its reason into the document.
+fn parse_verification(value: &str) -> Result<Verification, HarnessError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(HarnessError::Malformed {
+            document: DOCUMENT,
+            detail: "empty 'verify:' - name the check, or 'none - <why>'".to_string(),
+        });
+    }
+    if let Some(reason) = strip_none_prefix(value) {
+        if reason.trim().is_empty() {
+            return Err(HarnessError::Malformed {
+                document: DOCUMENT,
+                detail: "'verify: none' needs a reason - write 'verify: none - <why>'".to_string(),
+            });
+        }
+        return Ok(Verification::None {
+            reason: reason.trim().to_string(),
+        });
+    }
+    Ok(Verification::Command(value.to_string()))
+}
+
+/// The text after a leading `none` and its separator, when the value states one.
+fn strip_none_prefix(value: &str) -> Option<&str> {
+    value
+        .get(..4)
+        .filter(|head| head.eq_ignore_ascii_case("none"))?;
+    let tail = &value[4..];
+    for separator in [" - ", " — ", " -- ", ": "] {
+        if let Some(reason) = tail.strip_prefix(separator) {
+            return Some(reason);
+        }
+    }
+    if tail.trim().is_empty() {
+        return Some("");
+    }
+    None
 }
 
 fn parse_meta_line(line: &str) -> Option<(&str, &str)> {
@@ -316,6 +485,128 @@ mod tests {
         assert!(
             matches!(err, HarnessError::Malformed { detail, .. } if detail.contains("duplicate"))
         );
+    }
+
+    const PLANNED: &str = "# Progress: parser errors
+Branch: feature/parser-errors
+
+## Steps
+
+- [ ] 1. Write the failing test
+  - covers: AC1, AC3
+  - verify: cargo test -p localpilot-harness parser
+  - depends: none
+- [ ] 2. Implement it
+  - covers: none
+  - verify: none - documentation only
+  - depends: 1
+";
+
+    #[test]
+    fn a_plan_without_the_planning_fields_round_trips_byte_identically() {
+        // The legacy case, and the reason the fields are Option: a plan written
+        // before this format must come back exactly as it went in, not acquire
+        // fields nobody decided. Absence is UNKNOWN, never empty.
+        let progress = Progress::parse(VALID).unwrap();
+        for step in &progress.steps {
+            assert_eq!(step.covers, None);
+            assert_eq!(step.verify, None);
+            assert_eq!(step.depends, None);
+        }
+        assert_eq!(progress.render(), VALID);
+    }
+
+    #[test]
+    fn the_planning_fields_round_trip_and_keep_their_three_states_apart() {
+        let progress = Progress::parse(PLANNED).unwrap();
+        let first = &progress.steps[0];
+        assert_eq!(first.covers, Some(vec![1, 3]));
+        assert_eq!(
+            first.verify,
+            Some(Verification::Command(
+                "cargo test -p localpilot-harness parser".to_string()
+            ))
+        );
+        // Stated "nothing", which is a different fact from the legacy silence
+        // above and is spelled on disk so a reader can tell them apart.
+        assert_eq!(first.depends, Some(Vec::new()));
+
+        let second = &progress.steps[1];
+        assert_eq!(second.covers, Some(Vec::new()));
+        assert_eq!(
+            second.verify,
+            Some(Verification::None {
+                reason: "documentation only".to_string()
+            })
+        );
+        assert_eq!(second.depends, Some(vec![1]));
+
+        assert_eq!(progress.render(), PLANNED);
+        assert_eq!(Progress::parse(&progress.render()).unwrap(), progress);
+    }
+
+    #[test]
+    fn a_bare_verify_none_is_malformed() {
+        // "Nothing to run here" is a claim, and a claim carries its reason into
+        // the document rather than being spelled as an empty command.
+        let text = PLANNED.replace("none - documentation only", "none");
+        let error = Progress::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("needs a reason"), "{error}");
+    }
+
+    #[test]
+    fn the_two_number_vocabularies_are_not_interchangeable() {
+        // A criterion may be written AC3 or 3; a dependency is a step number and
+        // never carries the prefix. A parser that stripped leading A/C also took
+        // C1, A1 and ACAC1, then wrote back a spelling it had never read.
+        let with_plain = PLANNED.replace("covers: AC1, AC3", "covers: 1, 3");
+        assert_eq!(
+            Progress::parse(&with_plain).unwrap().steps[0].covers,
+            Some(vec![1, 3])
+        );
+
+        for bad in ["covers: C1", "covers: A1", "covers: ACAC1", "depends: AC1"] {
+            let (key, value) = bad.split_once(": ").unwrap();
+            let text = PLANNED.replace(
+                if key == "covers" {
+                    "covers: AC1, AC3"
+                } else {
+                    "depends: 1"
+                },
+                &format!("{key}: {value}"),
+            );
+            let error = Progress::parse(&text).unwrap_err().to_string();
+            assert!(error.contains("is not a list"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_empty_verification_is_malformed_rather_than_an_empty_command() {
+        // Left as Command("") it would satisfy a presence check at approval
+        // while saying nothing at all.
+        let text = PLANNED.replace("verify: none - documentation only", "verify:");
+        let error = Progress::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("empty 'verify:'"), "{error}");
+    }
+
+    #[test]
+    fn criterion_and_dependency_lists_refuse_what_is_not_a_number() {
+        for bad in ["covers: everything", "depends: later"] {
+            let (key, value) = bad.split_once(": ").unwrap();
+            let text = PLANNED.replace(
+                match key {
+                    "covers" => "covers: AC1, AC3",
+                    _ => "depends: 1",
+                },
+                &format!("{key}: {value}"),
+            );
+            let error = Progress::parse(&text).unwrap_err().to_string();
+            assert!(error.contains("not a list"), "{bad}: {error}");
+        }
+
+        let zeroed = PLANNED.replace("covers: AC1, AC3", "covers: AC0");
+        let error = Progress::parse(&zeroed).unwrap_err().to_string();
+        assert!(error.contains("numbering starts at 1"), "{error}");
     }
 
     #[test]

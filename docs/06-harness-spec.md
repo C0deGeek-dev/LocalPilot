@@ -154,7 +154,7 @@ Brief: sha256-v1:<64 hex>
 - [ ] 3. Document parser errors
 ```
 
-Completed steps include metadata:
+Completed steps include their evidence:
 
 ```markdown
 - [x] 1. Write failing test for parser errors
@@ -171,6 +171,27 @@ this file, so a pending step leaves no uncommitted change behind. A step
 completed before this line existed has none: its sessions are unknown, not
 absent, and nothing reads the missing line as "no session". An older build
 ignores the line and drops it if it rewrites the file.
+A step may also state what it is for, how it is checked, and what must come
+first:
+
+```markdown
+- [ ] 2. Implement parser errors
+  - covers: AC1, AC3
+  - verify: cargo test -p parser
+  - depends: 1
+```
+
+`covers` names acceptance criteria by their position in the bound brief, counting
+from 1; `depends` names step numbers. An explicit nothing is written out
+(`covers: none`, `depends: none`, `verify: none - <reason>`), and a bare
+`verify: none` is malformed on purpose — claiming a step needs no check is
+exactly the claim that should carry its reason into the document.
+
+Absence is different from nothing: a step that omits a line states *unknown*, and
+every plan written before this format did. Such a plan is still parsed, executed
+and retains its recorded fields when rendered. The three lines are required for
+future steps approved through `/harness-plan`, because that is a decision someone is making
+now, not a judgement imposed retroactively on a file that already exists.
 
 The `Brief:` line is the plan's **binding**: the revision of `brief.md` this plan
 was generated from. A plan means nothing apart from the requirements it was built
@@ -430,8 +451,8 @@ and their attempt counts are untouched.
 
 A provider error, an unusable reply, an exhausted repair budget, or Ctrl+C does
 **not** end the conversation. What the failed attempt was working from is kept,
-and the next message retries it: an empty message repeats the same attempt, and
-anything else replaces its input — a new idea, or a different revision
+and `/harness-brief show` repeats the same attempt. A new message replaces its
+input — a new idea, or a different revision
 instruction. Only approving, rejecting, `no-change`, cancelling, `/agent`, a
 session change, or starting another conversation ends one.
 
@@ -469,6 +490,135 @@ Approval replaces `brief.md` atomically and then appends the audit record. If th
 record cannot be appended, the brief **is** saved and the message says so: the
 two failures are reported differently because only one of them leaves anything to
 retry.
+
+### `/harness-plan` and `/harness-replan`
+
+The interactive way to write a plan, and the only path where a plan is seen
+before it is saved. `localpilot harness plan` still writes `PROGRESS.md` in one
+step for scripted use; these commands exist for the same reason the brief
+conversation does, plus one more: a plan is also a claim about what already
+happened, and a plan generated over finished work can misreport it.
+
+`/harness-plan` starts a planning conversation from the approved brief. Over a
+current, brief-bound `PROGRESS.md` it opens that plan *for review* instead of
+redrafting it — replacing a plan is what `/harness-replan` is for, deliberately
+rather than as a side effect of asking to look.
+
+A stale, unbound or unsupported binding requires `/harness-replan`; a broken or
+unreadable document needs repair first. An unfinished brief conversation must be
+approved, rejected or cancelled before planning begins.
+
+`/harness-replan` replaces a stale or rejected plan. Before the model runs it
+says why the plan is being replaced, using the same lifecycle gate the rest of
+the harness uses, and how much finished work carries across. The model is given
+the current brief and the finished steps verbatim, and nothing else from the old
+plan: unfinished steps were written for a brief that has since moved, and feeding
+them back turns a replan into a reshuffle of stale intent.
+
+Both commands take the same decisions, because after the first draft they are the
+same conversation:
+
+| Form | Effect |
+| --- | --- |
+| `/harness-plan` or `show` | Draft a plan, open the saved one for review, or redisplay the draft already under review |
+| `no-change` (or `ok`) | The plan stands as it is: writes nothing and ends the conversation |
+| `approve` | Save the reviewed draft as `PROGRESS.md`, bound to the brief it was reviewed against |
+| `reject` | Discard the draft; an existing plan is untouched |
+| `reset` | Start again from the brief |
+| `cancel` | Leave; the project is unchanged |
+
+#### What the review shows
+
+A plan is syntactically valid long before it is a good plan, so the review shows
+what a reviewer would otherwise have to take on trust:
+
+- every acceptance criterion in the brief beside the step that owns it, or
+  `no step` where nothing does;
+- how each step says it is verified, or the stated reason nothing executable
+  applies;
+- what resuming will actually do — the next step, the live permission profile,
+  automatic commits, the attempts per step, and the
+  resolved quality-gate checks — with the reminder that approving the plan
+  changes none of it. The settings are read through the same persisted-config
+  loader the harness runner uses at resume. The runner currently commits every
+  successful step even when `harness.auto_commit = false`; the review states that
+  limitation explicitly rather than promising a commit-free run. Configuration
+  may change again before resume, so entering a review is not execution consent.
+
+#### What approval requires
+
+Approval is the last moment these checks are free; a plan that reaches disk
+unsatisfying its brief is one `resume` executes anyway. A draft is refused, with
+every problem named at once rather than one per round, when:
+
+- a future step does not state all three of `covers`, `verify` and `depends`;
+- an acceptance criterion has no owning step, or a step claims a criterion the
+  brief does not have;
+- a step depends on a step that does not exist, or on one that does not come
+  before it.
+
+Approval also refuses if `brief.md` changed while the draft was on screen. The
+criterion numbers a reviewer approved meant something in one brief; validating
+against a different one would silently re-aim the decision. The draft is kept, and
+`reset` drafts against the new brief.
+
+Approval also refuses if the saved plan changed after this conversation started,
+including completion evidence recorded by another run. A draft cannot invent a
+completed step or rewrite recorded evidence. Start a new conversation to review
+the current source; approval never silently incorporates a different plan.
+
+The write is atomic and binds the plan to the revision it was *reviewed* against,
+not to whatever `brief.md` says by the time approval happens.
+
+#### Finished work
+
+Whenever the saved plan has completed steps, a draft is reconciled with it before
+it can be reviewed — for an ordinary revision as much as for a replan, because a
+revision can drop a finished step just as easily as a redraft can.
+
+A completed step keeps its original number, its original wording, its commit, its
+attempt count, session IDs in their original order, and its verification. All of
+those are facts about the past: a check
+chosen after the commit did not verify it, and a plan that said otherwise would
+not be auditable. The reconciled plan lists finished work first, in the order it
+happened, and numbers the remaining work after it; dependencies move to the new
+numbering with it. A gap left by work that was planned and then dropped stays a
+gap, because closing it would move a commit onto a different step.
+
+Older finished steps may have no planning metadata. That history is retained
+without inventing checks or acceptance credits; review labels missing historical
+verification explicitly. New future steps must supply all planning fields and
+own any acceptance criteria the historical record cannot substantiate.
+
+The one field a draft may change on finished work is `covers`, and only
+downwards. Widening is refused: crediting a commit with a criterion it was never
+checked against is the single thing a replan must never do. Where the brief has
+moved, or the old plan recorded no brief revision at all, no credit can be
+verified and any claim is refused — the way forward is to let a *new* step own
+the changed criterion.
+
+Anything reconciliation cannot settle deterministically is named rather than
+guessed, and nothing is written:
+
+| Conflict | What it means |
+| --- | --- |
+| Finished work the new plan does not contain | The plan would drop work that is already committed |
+| Wording repeated in the new plan | Which step holds the evidence is not determined |
+| Wording repeated in the old plan | The evidence cannot be attributed even before the new plan is considered |
+| A credit that cannot be verified | The plan credits finished work with criteria it was not checked against |
+| Finished work depending on unfinished work | The declared order contradicts what has already happened |
+
+A conflicted draft is held, not discarded and not approvable: describing the
+change that resolves it revises the draft in place, and `reject` leaves the saved
+plan exactly as it was.
+
+#### Failures
+
+As with the brief conversation, a provider error, an unusable reply, an exhausted
+repair budget or Ctrl+C does not end the conversation. `/harness-plan show` retries
+the same attempt. A message sent while there is no draft yet is answered rather
+than silently spent, because a first draft takes no instruction — there is
+nothing for one to change.
 
 ### `localpilot harness adopt`
 

@@ -55,17 +55,37 @@ Branch: feature/<kebab-name>\n\
 \n\
 ## Steps\n\
 \n\
-- [ ] 1. <small, verifiable step>\n\
-- [ ] 2. <next step>\n\
+- [ ] 1. <small, verifiable step>\n  \
+- covers: AC1, AC2\n  \
+- verify: <the smallest command that shows this step works>\n  \
+- depends: none\n\
+- [ ] 2. <next step>\n  \
+- covers: none\n  \
+- verify: none - <why nothing executable applies>\n  \
+- depends: 1\n\
 \n\
 Each step must be small enough to complete and verify in one sitting, ordered so \
 that tests come before the implementation they cover. Number steps from 1 with no \
 gaps.\n\
 \n\
+Every step carries all three metadata lines.\n\
+- covers: the acceptance criteria this step satisfies, numbered from 1 in \
+the order they appear in the brief, written AC1, AC2; or 'none' when the step \
+supports the work without satisfying a criterion by itself. Every criterion in \
+the brief must be covered by at least one step, and no step may name a \
+criterion the brief does not have.\n\
+- verify: the smallest command that shows the step works; or 'none - <reason>' \
+when nothing executable applies. A bare 'none' is not accepted - say why.\n\
+- depends: the numbers of steps that must come first, or 'none'. A dependency \
+may only name an earlier step.\n\
+\n\
 Study the repository summary before writing steps. Where existing code already \
 covers part of the work, prefer a step that extends or reuses it, naming that \
 module, type, or function in the step, over adding parallel code; add new code \
 only where nothing existing fits.\n\
+Name the expected files or code regions in each step's description when they \
+are known from the repository summary. When they are unknown, state what must \
+be inspected to locate them rather than inventing a path.\n\
 \n\
 The steps together must satisfy every acceptance criterion in the brief; do not \
 leave a criterion unaddressed.";
@@ -100,15 +120,9 @@ pub async fn run_plan(
     brief: &Brief,
     repo_summary: &str,
 ) -> Result<Progress, HarnessError> {
-    let user = format!(
-        "Project brief:\n\n{}\n\nRepository summary:\n\n{repo_summary}",
-        brief.render()
-    );
-    let seed = vec![
-        Message::text(Role::System, PLANNER_PROMPT),
-        Message::text(Role::User, user),
-    ];
-    generate(provider, model, seed, "PROGRESS.md", Progress::parse).await
+    let revision = crate::BriefRevision::of(brief);
+    let draft = crate::draft_plan(provider, model, brief, revision.as_str(), repo_summary).await?;
+    Ok(draft.progress)
 }
 
 pub(crate) async fn generate<T>(

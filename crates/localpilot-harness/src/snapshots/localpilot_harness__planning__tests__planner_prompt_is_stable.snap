@@ -12,10 +12,22 @@ Branch: feature/<kebab-name>
 ## Steps
 
 - [ ] 1. <small, verifiable step>
+  - covers: AC1, AC2
+  - verify: <the smallest command that shows this step works>
+  - depends: none
 - [ ] 2. <next step>
+  - covers: none
+  - verify: none - <why nothing executable applies>
+  - depends: 1
 
 Each step must be small enough to complete and verify in one sitting, ordered so that tests come before the implementation they cover. Number steps from 1 with no gaps.
 
+Every step carries all three metadata lines.
+- covers: the acceptance criteria this step satisfies, numbered from 1 in the order they appear in the brief, written AC1, AC2; or 'none' when the step supports the work without satisfying a criterion by itself. Every criterion in the brief must be covered by at least one step, and no step may name a criterion the brief does not have.
+- verify: the smallest command that shows the step works; or 'none - <reason>' when nothing executable applies. A bare 'none' is not accepted - say why.
+- depends: the numbers of steps that must come first, or 'none'. A dependency may only name an earlier step.
+
 Study the repository summary before writing steps. Where existing code already covers part of the work, prefer a step that extends or reuses it, naming that module, type, or function in the step, over adding parallel code; add new code only where nothing existing fits.
+Name the expected files or code regions in each step's description when they are known from the repository summary. When they are unknown, state what must be inspected to locate them rather than inventing a path.
 
 The steps together must satisfy every acceptance criterion in the brief; do not leave a criterion unaddressed.
