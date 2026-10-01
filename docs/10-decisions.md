@@ -16,8 +16,10 @@ context capacity never establish capability. Eight valid successful calls and
 two verified changed units without failures are needed for the bounded stronger
 profile. This is evidence of structured execution, not a general intelligence
 score or proof of semantic correctness. Unknown, failed and malformed evidence
-stay conservative. Counts remain in memory and reset on provider/model changes,
-new/load/fork sessions and process restart. Provider schemas can be misleading;
+stay conservative. Failed verification of changed work also narrows reliability;
+unavailable verifiers remain missing evidence rather than proof about the model.
+Counts remain in memory and reset on provider/model changes, new/load/fork
+sessions and process restart. Provider schemas can be misleading;
 their successful use never waives the real checks. No raw values or persisted
 scorecards become capability evidence.
 

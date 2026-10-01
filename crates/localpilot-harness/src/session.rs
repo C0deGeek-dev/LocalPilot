@@ -2692,6 +2692,9 @@ impl SessionRuntime {
                 }
             }
             CheckStatus::Failed => {
+                if bounded_mutation {
+                    self.capability_evidence.observe_outcome(false);
+                }
                 *attempts += 1;
                 let _ = events.send(RuntimeEvent::Warning(format!(
                     "verify-before-done: `{}` failed (attempt {}/{VERIFY_GATE_MAX_ATTEMPTS}); feeding diagnostics back",

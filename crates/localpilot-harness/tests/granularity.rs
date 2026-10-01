@@ -713,3 +713,35 @@ async fn changed_unit_without_a_verifier_stops_with_a_durable_next_action() {
             if detail.contains("no applicable verification target")
     )));
 }
+
+#[tokio::test]
+async fn failed_changed_unit_verification_narrows_reliability() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "write",
+                "write_file",
+                json!({"path":"small.txt", "content":"small"}),
+            )
+            .text("done")
+            .text("done")
+            .text("done")
+            .text("done"),
+    );
+    let mut agent = runtime(
+        dir.path(),
+        provider,
+        Profile::Bypass,
+        Some("rustc --invalid-bounded-fixture-option".to_string()),
+    );
+    assert_eq!(turn(&mut agent).await.0, StopReason::NoProgress);
+    assert_eq!(agent.work_profile().unwrap().reliability, Reliability::Weak);
+    assert!(dir.path().join("small.txt").exists());
+    let events = agent.store().read_events(agent.session_id()).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        localpilot_store::SessionEventKind::CheckRan { status, .. }
+            if status == "failed"
+    )));
+}
