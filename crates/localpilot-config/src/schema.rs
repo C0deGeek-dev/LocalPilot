@@ -1449,6 +1449,10 @@ impl HarnessConfig {
 #[serde(default)]
 pub struct PermissionsConfig {
     pub profile: PermissionProfile,
+    /// Private session scratch: true/default selects OS temp, false disables
+    /// it, a string selects an absolute existing parent. User/environment only;
+    /// a project cannot choose where the agent gains write authority.
+    pub scratch_root: ScratchRootConfig,
     /// Directories (absolute paths) granted standing *read* scope in addition
     /// to the workspace. Reads under these roots are treated like in-workspace
     /// reads by the permission engine; writes keep the workspace boundary. A
@@ -1464,6 +1468,20 @@ pub struct PermissionsConfig {
     /// only: a project `.localpilot.toml` that sets it is refused, so a
     /// repository can never vet its own commands.
     pub allow_commands: Vec<AllowCommand>,
+}
+
+/// User-owned creation policy; a directory value never grants its whole tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ScratchRootConfig {
+    Enabled(bool),
+    Parent(String),
+}
+
+impl Default for ScratchRootConfig {
+    fn default() -> Self {
+        Self::Enabled(true)
+    }
 }
 
 /// One `[[permissions.allow_commands]]` entry.

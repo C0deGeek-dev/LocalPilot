@@ -1222,18 +1222,23 @@ impl SessionRuntime {
         engine: PermissionEngine,
         approver: Box<dyn Approver>,
         store: Store,
-        workspace: localpilot_sandbox::Workspace,
+        mut workspace: localpilot_sandbox::Workspace,
         recovery: RecoveryEngine,
         config: SessionConfig,
         seed: Vec<Message>,
     ) -> Self {
+        let session_id = SessionId::new();
+        crate::session_scratch::initialize(&mut workspace, &session_id.to_string());
         let mut messages = Vec::with_capacity(seed.len() + 1);
         messages.push(Message::text(
             Role::System,
-            crate::system_prompt::agent_system_prompt(
-                &tools,
-                config.tool_marker_enabled,
-                config.package_discovery_disabled_but_present,
+            crate::session_scratch::prompt(
+                crate::system_prompt::agent_system_prompt(
+                    &tools,
+                    config.tool_marker_enabled,
+                    config.package_discovery_disabled_but_present,
+                ),
+                &workspace,
             ),
         ));
         messages.extend(seed);
@@ -1253,7 +1258,7 @@ impl SessionRuntime {
             workspace,
             recovery,
             config,
-            session_id: SessionId::new(),
+            session_id,
             messages,
             last_quota: None,
             last_event: None,
@@ -1568,6 +1573,8 @@ impl SessionRuntime {
     /// Record that this session is closing.
     pub fn close(&mut self) {
         self.background.kill_all();
+        self.workspace.clear_scratch();
+        self.replace_system_prompt(self.system_prompt_text());
         self.persist_graduation();
         self.record_event(SessionEventKind::SessionClosed);
     }
@@ -1579,6 +1586,7 @@ impl SessionRuntime {
         self.background.kill_all();
         self.clear_conversation();
         self.session_id = SessionId::new();
+        self.renew_scratch();
         self.last_event = None;
         self.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -1644,8 +1652,11 @@ impl SessionRuntime {
             .filter(|message| message.role == Role::System)
             .cloned();
         self.session_id = session;
+        self.background.kill_all();
+        crate::session_scratch::initialize(&mut self.workspace, &session.to_string());
         self.last_event = events.last().map(|event| event.id);
         self.messages = setup.into_iter().chain(transcript).collect();
+        self.replace_system_prompt(self.system_prompt_text());
         self.last_quota = None;
         self.history_generation += 1;
         self.compaction_cache = None;
@@ -1671,6 +1682,8 @@ impl SessionRuntime {
         let fork_point = self.last_event;
         let history: Vec<Message> = self.messages.iter().skip(1).cloned().collect();
         self.session_id = SessionId::new();
+        self.background.kill_all();
+        self.renew_scratch();
         self.last_event = None;
         self.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::Forked,
@@ -2700,12 +2713,20 @@ impl SessionRuntime {
     }
 
     pub fn replace_system_prompt(&mut self, prompt: impl Into<String>) {
-        let message = Message::text(Role::System, prompt.into());
+        let message = Message::text(
+            Role::System,
+            crate::session_scratch::prompt(prompt.into(), &self.workspace),
+        );
         match self.messages.first_mut() {
             Some(first) if first.role == Role::System => *first = message,
             _ => self.messages.insert(0, message),
         }
         self.history_generation = self.history_generation.wrapping_add(1);
+    }
+
+    fn renew_scratch(&mut self) {
+        crate::session_scratch::initialize(&mut self.workspace, &self.session_id.to_string());
+        self.replace_system_prompt(self.system_prompt_text());
     }
 
     /// Whether this session treats the workspace as trusted — the one live value
@@ -4762,6 +4783,15 @@ pub fn check_command_digest(check: &CheckConfig) -> String {
         hex.push_str(&format!("{byte:02x}"));
     }
     hex
+}
+
+impl Drop for SessionRuntime {
+    fn drop(&mut self) {
+        // Close process ownership before scratch ownership: children must not
+        // keep writing into a directory whose session authority has ended.
+        self.background.kill_all();
+        self.workspace.clear_scratch();
+    }
 }
 
 #[cfg(test)]

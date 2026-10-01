@@ -88,7 +88,7 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
 /// Keys a project file must never set: they grant the agent more than the
 /// user's own settings do, and a repository must not be able to grant itself
 /// anything. Refused loudly rather than ignored, so the author sees why.
-const USER_ONLY_KEYS: [&str; 1] = ["permissions.allow_commands"];
+const USER_ONLY_KEYS: [&str; 2] = ["permissions.allow_commands", "permissions.scratch_root"];
 
 fn refuse_user_only_keys(project: &Path) -> Result<(), ConfigError> {
     let layer = Figment::from(Toml::file(project));
@@ -499,6 +499,43 @@ profile = \"readonly\"
             ),
             "{err}"
         );
+    }
+
+    #[test]
+    fn scratch_policy_is_user_owned_and_cannot_be_granted_by_a_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        let paths = ConfigPaths {
+            user: Some(user.clone()),
+            project: Some(project.clone()),
+        };
+        std::fs::write(&project, "").unwrap();
+        for (value, expected) in [
+            ("true", crate::ScratchRootConfig::Enabled(true)),
+            ("false", crate::ScratchRootConfig::Enabled(false)),
+            (
+                "'/custom/scratch'",
+                crate::ScratchRootConfig::Parent("/custom/scratch".into()),
+            ),
+        ] {
+            std::fs::write(&user, format!("[permissions]\nscratch_root = {value}\n")).unwrap();
+            assert_eq!(
+                load(&paths, &CliOverrides::default())
+                    .unwrap()
+                    .permissions
+                    .scratch_root,
+                expected
+            );
+        }
+        std::fs::write(&project, "[permissions]\nscratch_root = true\n").unwrap();
+        assert!(matches!(
+            load(&paths, &CliOverrides::default()),
+            Err(ConfigError::UserOnly {
+                key: "permissions.scratch_root",
+                ..
+            })
+        ));
     }
 
     #[test]

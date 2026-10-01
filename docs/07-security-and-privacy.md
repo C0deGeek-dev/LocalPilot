@@ -332,9 +332,9 @@ deliberately. Profiles apply in both agent mode and harness mode.
   interactive prompt, not a trusted workspace. It is for a session that must
   never change the tree it is looking at, such as a pair-programming navigator.
   Only an entry in `[permissions] allow_commands` lifts its command gate.
-- `bypass`: a launch mode that approves everything with no prompts, equivalent to
-  running fully localpilot. The single exception is an out-of-workspace path,
-  which prompts (see the boundary rule below).
+- `bypass`: auto-approves command classes and ordinary in-scope paths.
+  External paths, secret-like scratch paths and opaque command targets still
+  prompt interactively or are denied headless (see the boundary rule below).
 - `unrestricted`: a launch mode that approves everything — out-of-workspace
   paths included — with no prompts at all. The user explicitly accepts full
   responsibility. Like `bypass` it is never the default, must be set explicitly
@@ -357,15 +357,35 @@ Rules:
   or config, and the active profile is always shown in the footer/status output.
 - `bypass` does not silently disable redaction or logging; disabling those
   requires separate explicit settings.
-- **Bypass keeps the workspace boundary for path effects only — as a prompt,
-  never a dead end.** The file tools' read/write effects carry path
-  information, and an out-of-workspace path under bypass prompts in an
-  interactive session and is denied non-interactively — exactly the `default`
-  gate, so bypass is never *weaker* than `default` (ADR-0070; it previously
-  hard-denied with no way to approve). Shell commands carry no path
-  information: bypass auto-allows every command class, and a command's own
-  file access is not contained (its working directory is the workspace root,
-  nothing more). Treat bypass as full shell access for the model.
+- **File and inspectable shell targets share path decisions.** Outside the
+  workspace and owned session scratch, writes ask interactively and are denied
+  headless, including under bypass. Literal redirects and supported file-writing
+  commands in `run_shell` and `run_background` use the file tools' normalized
+  path effects. Unknown executables, interpreter scripts, command chains and
+  dynamic targets add an opaque-target gate: approve interactively, vet an exact
+  structured command in user config, or select unrestricted explicitly. A command
+  grant never overrides an inspectable external path (ADR-0196).
+- **Private session scratch.** Each runtime creates a unique owned directory
+  under OS temp, reports its concrete path once in the system prompt, and sets
+  `LOCALPILOT_SCRATCH_DIR` plus `TEMP`/`TMP`/`TMPDIR` for shell children. Ordinary
+  reads/writes there are allowed in trusted default and bypass sessions without
+  an outside-workspace prompt. Secret-shaped names retain their gate, including
+  under bypass; readonly, denied write leases, incognito and trust restrictions
+  remain in force. Shell command-class/irreversibility decisions are independent
+  of path approval. Other sessions and the temp parent are outside this grant.
+  Canonicalization rejects symlink/junction escapes. User-only `scratch_root`
+  can disable it or select a parent; Windows children inherit that parent's ACL,
+  so choose a user-private parent. Unix children start with mode 0700.
+  Session change/close/drop terminates background jobs then releases scratch;
+  the last active workspace clone owns cleanup. Creation failure grants nothing.
+  Crashes or filesystem cleanup failures can leave orphan directories; deletion
+  is not secure erasure.
+- **Permission inspection is not an OS filesystem sandbox.** Build/network
+  command classes retain their existing gates; explicit path arguments add path
+  checks. Executed build code and approved scripts have the user's process
+  authority. Text inspection cannot contain their hidden effects or defend
+  against malicious concurrent filesystem mutation. Use unrestricted only when
+  accepting full process authority deliberately.
 - **Standing read grants: `[permissions] extra_read_roots`.** Directories
   listed there (absolute paths, canonicalized at startup) are treated like
   in-workspace paths for *read* effects only, in every profile and in
@@ -391,8 +411,9 @@ Rules:
   irreversible tool such as `run_shell`, so it runs headless. The key is read
   from the user config and the environment only: a project `.localpilot.toml`
   that sets it is refused, because a repository must never vet its own
-  commands. `bypass` and `unrestricted` already allow every command and are
-  unaffected.
+  commands. Structured `run_background` starts use the same grants. Under
+  bypass a grant can authorize opaque code; unrestricted already grants full
+  authority. Inspectable path effects and session floors still apply.
 - **An unknown profile name is an error.** Every `--permission` flag accepts
   only `default`, `relaxed`, `readonly`, `bypass` and `unrestricted`; any
   other value is a usage error (exit 2). A name that silently became

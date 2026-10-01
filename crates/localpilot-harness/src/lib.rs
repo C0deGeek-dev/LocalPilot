@@ -36,6 +36,7 @@ mod retrospective;
 mod rules;
 mod scorecard;
 mod session;
+mod session_scratch;
 mod step_sessions;
 mod summarizer;
 mod system_prompt;

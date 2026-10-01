@@ -19,7 +19,9 @@ fn runtime(root: &std::path::Path, provider: FakeProvider) -> SessionRuntime {
     SessionRuntime::new(
         Arc::new(provider),
         ToolRegistry::with_builtins(),
-        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        // This fixture exercises process lifecycle with explicitly authorized
+        // opaque shell code; path/opaque-target policy has separate regressions.
+        PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         Box::new(ScriptedApprover::always()),
         Store::open(root),
         Workspace::new(root).unwrap(),

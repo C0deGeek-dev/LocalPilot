@@ -843,7 +843,8 @@ async fn compaction_summary_does_not_produce_two_system_messages() {
         SessionConfig {
             // The calibrated compactor keeps a 5% safety cushion, so 1,470
             // preserves this fixture's former ~1,400 raw-estimator boundary.
-            context_token_limit: 1_470,
+            // Include headroom for the owned scratch authority cue.
+            context_token_limit: 1_726,
             ..SessionConfig::default()
         },
         Profile::Default,
@@ -880,6 +881,7 @@ async fn compaction_summary_does_not_produce_two_system_messages() {
         "the request must not carry two consecutive system messages"
     );
     let combined = system_messages.join("\n");
+    assert_eq!(combined.matches("<session-scratch>").count(), 1);
     assert!(
         combined.contains("Available tools:"),
         "system block keeps the agent prompt"
@@ -1469,7 +1471,8 @@ async fn manual_compaction_stores_a_summary_for_future_turns() {
         Arc::clone(&provider),
         &[],
         SessionConfig {
-            context_token_limit: 1_400,
+            // Include headroom for the owned scratch authority cue.
+            context_token_limit: 1_656,
             ..SessionConfig::default()
         },
         Profile::Default,

@@ -5,11 +5,10 @@
 //! search tools. Shares the output cap with the rest of the builtins; everything
 //! else here is shell-specific.
 
-use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use localpilot_sandbox::{classify, is_secret_like, CommandClass, Effect, ExactCommand};
+use localpilot_sandbox::{classify, CommandClass, Effect, ExactCommand};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -254,28 +253,6 @@ fn has_shell_metachar(command: &str) -> bool {
     })
 }
 
-/// The candidate file-path arguments of an execution: the non-flag tokens after
-/// the program. Used to gate a read-only command that reads a secret-like or
-/// out-of-workspace file. `-`-prefixed flags are skipped; everything else is
-/// treated as a possible path (a `/`-prefixed token is a POSIX absolute path, not
-/// a flag — an inline Windows shell never reaches here, it is `unknown`).
-fn command_path_args(execution: &RunShellExecution) -> Vec<String> {
-    let tokens = match execution {
-        RunShellExecution::Direct { args, .. } => args.clone(),
-        RunShellExecution::Shell { command } => {
-            let mut parts = split_command_line(command).unwrap_or_default();
-            if !parts.is_empty() {
-                parts.remove(0); // drop the program
-            }
-            parts
-        }
-    };
-    tokens
-        .into_iter()
-        .filter(|token| !token.starts_with('-'))
-        .collect()
-}
-
 fn command_output(code: i32, stdout: &str, stderr: &str) -> String {
     format!("exit: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}")
 }
@@ -509,31 +486,7 @@ impl Tool for RunShell {
     fn effects(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
         let input: RunShellInput = parse_input(input)?;
         let input = normalize_run_shell_input(input)?;
-        let class = execution_class(&input.execution)?;
-        let mut effects = vec![Effect::RunCommand(class)];
-        if class == CommandClass::Network {
-            effects.push(Effect::Network);
-        }
-        // A command carries no contained path, so a `read-only` command
-        // (`cat`/`type`/`head`) reading a secret or an out-of-workspace file would
-        // otherwise be auto-allowed and pull it into model context. Add a
-        // `ReadPath` effect for each such argument so the permission engine gates
-        // it exactly like the file tools. Best-effort and conservative: ordinary
-        // in-workspace reads add nothing.
-        if class == CommandClass::ReadOnly {
-            for arg in command_path_args(&input.execution) {
-                let path = Path::new(&arg);
-                let secret = is_secret_like(path);
-                let inside = ctx.workspace.contains(path);
-                if secret || !inside {
-                    effects.push(Effect::ReadPath {
-                        inside_workspace: inside,
-                        secret_like: secret,
-                    });
-                }
-            }
-        }
-        Ok(effects)
+        crate::command_paths::effects(&input.execution, ctx)
     }
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: RunShellInput = parse_input(&input)?;
@@ -594,6 +547,8 @@ impl Tool for RunShell {
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 
+        let scratch = ctx.workspace.scratch_process_dir();
+        crate::command_paths::scratch_environment(&mut command, scratch.as_deref());
         let (child, mut process_tree) = ProcessTreeGuard::spawn(&mut command)
             .map_err(|e| ToolError::Failed(format!("failed to start {program}: {e}")))?;
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
@@ -938,8 +893,23 @@ mod tests {
         let effects = effects_of(json!({ "program": "cat", "args": ["src/main.rs"] }));
         assert!(!reads_a_secret(&effects));
         assert!(!reads_outside_workspace(&effects));
-        // Only the RunCommand effect — no added prompt for a routine read.
-        assert_eq!(effects.len(), 1);
+        // Declared targets retain the ordinary read-only permission decision.
+        let engine = localpilot_sandbox::PermissionEngine::new(
+            localpilot_sandbox::Profile::Default,
+            Vec::new(),
+        );
+        for effect in effects {
+            assert_eq!(
+                engine.decide(&localpilot_sandbox::PermissionRequest {
+                    tool: "run_shell".into(),
+                    effect,
+                    interactivity: localpilot_sandbox::Interactivity::NonInteractive,
+                    trusted: true,
+                    detail: String::new(),
+                }),
+                localpilot_sandbox::Decision::Allow
+            );
+        }
     }
 
     fn long_running(command: &str) -> bool {

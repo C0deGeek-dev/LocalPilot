@@ -54,6 +54,15 @@ entries; dynamic metadata must not be forced into a static lifetime.
 
 ## Builtin Tools
 
+File tools and supported literal shell targets share normalized path effects.
+The runtime's unique private scratch child is in read/write scope, with secret
+and session permission restrictions preserved. It is reported in the system
+prompt and supplied to child commands through `LOCALPILOT_SCRATCH_DIR` and
+`TEMP`/`TMP`/`TMPDIR`. Unknown code and dynamic targets ask or deny headless even
+under bypass; an exact user structured-command grant can authorize opaque code.
+This is permission inspection, not OS filesystem containment. See ADR-0196 and
+[security/privacy](07-security-and-privacy.md) for the policy and limits.
+
 ### `read_file`
 
 Reads UTF-8 text from a workspace path.
@@ -89,7 +98,8 @@ Writes a new file or replaces an existing file.
 Rules:
 
 - require approval for overwrite until trust is established
-- create parent directories only inside workspace
+- create parent directories in an approved path; ordinary session scratch uses
+  the same path decision as workspace writes
 - preserve newline style where possible
 - refuse a single payload larger than the soft write-size limit (64 KiB),
   steering the model to split the work into smaller modular files or to build

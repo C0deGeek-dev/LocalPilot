@@ -169,7 +169,7 @@ async fn smart_cutover_replaces_the_deterministic_summary() {
     );
     // 1,470 preserves this fixture's former ~1,400 raw-estimator boundary
     // after the compactor's 5% safety cushion.
-    let mut h = smart_runtime(Arc::clone(&provider), 1_470);
+    let mut h = smart_runtime(Arc::clone(&provider), 1_726); // Headroom for session scratch metadata.
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Ok(smart_summary(
             "SMART_MARKER",
@@ -196,7 +196,7 @@ async fn smart_failure_falls_back_to_the_deterministic_projection() {
             .text("three")
             .text("after"),
     );
-    let mut h = smart_runtime(Arc::clone(&provider), 945);
+    let mut h = smart_runtime(Arc::clone(&provider), 1_201); // Headroom for session scratch metadata.
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Err(FallbackReason::Timeout))));
 
@@ -226,7 +226,7 @@ async fn malformed_smart_output_leaves_active_history_unchanged() {
             .text("three")
             .text("after"),
     );
-    let mut h = smart_runtime(Arc::clone(&provider), 945);
+    let mut h = smart_runtime(Arc::clone(&provider), 1_201); // Headroom for session scratch metadata.
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Err(FallbackReason::Malformed))));
 
@@ -271,7 +271,7 @@ async fn long_session_with_repeated_failures_is_digested_under_budget() {
     );
     // Budget leaves headroom for the agent system prompt (which carries the
     // tool-discipline guidance) on top of the digested content.
-    let mut h = smart_runtime(Arc::clone(&provider), 1_281);
+    let mut h = smart_runtime(Arc::clone(&provider), 1_537); // Headroom for session scratch metadata.
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Ok(smart_summary(
             "rewrite the tokenizer",
@@ -470,8 +470,8 @@ async fn repeated_compaction_folds_the_previous_summary_once() {
     );
     // Budget leaves headroom for the agent system prompt (which carries the
     // tool-discipline guidance) on top of the digested content.
-    let mut h = det_runtime(Arc::clone(&provider), 1_281);
-    let filler = "context ".repeat(120);
+    let mut h = det_runtime(Arc::clone(&provider), 1_537); // Headroom for session scratch metadata.
+    let filler = "context ".repeat(150); // Still force both compaction rounds with metadata present.
 
     for label in ["alpha keep src/keep.rs", "beta"] {
         let reason = h

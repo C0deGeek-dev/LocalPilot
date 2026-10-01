@@ -112,6 +112,17 @@ pub fn workspace_with_read_roots(
     config: &localpilot_config::Config,
 ) -> Result<Workspace, localpilot_sandbox::SandboxError> {
     let mut workspace = Workspace::new(cwd)?;
+    workspace.set_scratch_root(match &config.permissions.scratch_root {
+        localpilot_config::ScratchRootConfig::Enabled(true) => {
+            localpilot_sandbox::ScratchRoot::OsTemp
+        }
+        localpilot_config::ScratchRootConfig::Enabled(false) => {
+            localpilot_sandbox::ScratchRoot::Disabled
+        }
+        localpilot_config::ScratchRootConfig::Parent(parent) => {
+            localpilot_sandbox::ScratchRoot::Parent(parent.into())
+        }
+    });
     for root in &config.permissions.extra_read_roots {
         if let Err(error) = workspace.add_read_root(std::path::Path::new(root)) {
             eprintln!("warning: skipping [permissions] extra_read_roots entry {root:?}: {error}");
@@ -932,6 +943,27 @@ mod tests {
         let workspace = workspace_with_read_roots(cwd.path(), &config).unwrap();
         assert!(workspace.read_scoped(&granted.path().join("note.md")));
         assert!(!workspace.contains(granted.path()));
+    }
+
+    #[test]
+    fn host_workspace_applies_disabled_and_custom_scratch_configuration() {
+        let cwd = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let mut config = localpilot_config::Config::default();
+        config.permissions.scratch_root = localpilot_config::ScratchRootConfig::Enabled(false);
+        let mut workspace = workspace_with_read_roots(cwd.path(), &config).unwrap();
+        workspace.start_scratch("disabled").unwrap();
+        assert!(workspace.scratch_dir().is_none());
+        config.permissions.scratch_root =
+            localpilot_config::ScratchRootConfig::Parent(parent.path().display().to_string());
+        let mut workspace = workspace_with_read_roots(cwd.path(), &config).unwrap();
+        workspace.start_scratch("custom").unwrap();
+        let scratch = workspace.scratch_dir().unwrap().to_path_buf();
+        assert!(scratch.starts_with(std::fs::canonicalize(parent.path()).unwrap()));
+        assert!(!workspace.scratch_contains(parent.path()));
+        workspace.clear_scratch();
+        assert!(!scratch.exists());
+        assert!(parent.path().exists());
     }
 
     /// A sink whose every write fails with the given pipe-closed error, standing in

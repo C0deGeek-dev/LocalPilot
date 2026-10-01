@@ -210,6 +210,13 @@ What the host owns:
   producer path is a library surface for future work; only user steering produces
   interrupts today.)
 
+The central `SessionRuntime::new` initializes owned per-session scratch for
+library hosts too. Configure the `Workspace` with `set_scratch_root` before
+construction to select `ScratchRoot::Disabled`, `OsTemp`, or a custom parent.
+Workspace clones share an active root's ownership; a delegated runtime creates
+its own child. Close or drop the runtime to stop background commands and release
+scratch. Host prompt replacement retains one current scratch cue automatically.
+
 What the runtime guarantees is the reliability contract in
 [`docs/06`](06-harness-spec.md) and [`docs/07`](07-security-and-privacy.md):
 tool pairing on every exit path, permission mediation for every side effect,

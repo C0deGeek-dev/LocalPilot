@@ -1,5 +1,15 @@
 # Test Plan
 
+Session scratch behavior is pinned through the sandbox profile/lease matrix,
+canonical symlink/junction escapes and owned-directory lifecycle, real file and
+foreground/background shell dispatch, exact structured-command grants, child
+environment, host setup, session new/resume/fork/close/drop and prompt replacement.
+Opaque expansion/provider targets remain gated, including under bypass. The
+compaction fixtures reserve headroom for the scratch authority cue and assert
+it appears once in the combined system message. No model endpoint or user store
+is required for these checks; temporary parents and outside targets are owned
+test fixtures.
+
 Windows command cleanup is covered by the tools crate's drop/timeout
 tests and `localpilot-harness`'s cancellation integration test. The Win32 shim's
 `ffi::job::tests` additionally checks an exited parent's live descendant,

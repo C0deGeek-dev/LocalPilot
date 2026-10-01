@@ -31,13 +31,12 @@ pub enum Profile {
     ReadOnly,
     /// A user allowlist auto-approves common safe actions; the rest still prompt.
     Relaxed,
-    /// A launch mode that approves everything with no prompts. Never the
-    /// default. Path-bearing effects (the file tools) keep the workspace
-    /// boundary — an out-of-workspace path prompts interactively and is denied
-    /// headless, so bypass is never weaker than `default` — and
-    /// redaction/logging stay on. Shell commands carry no path information, so
-    /// bypass auto-allows any command class; a command's own file access is
-    /// not contained. See docs/07 §Permission Profiles.
+    /// Auto-approves command classes and ordinary in-scope paths. Never the
+    /// default. File and inspectable shell paths keep workspace/scratch scope;
+    /// external paths, secret scratch paths and uninspectable command targets
+    /// ask interactively or are denied headless. Explicit structured command
+    /// grants can vet opaque code. This is audit policy, not OS containment.
+    /// Redaction/logging stay on. See docs/07 §Permission Profiles.
     Bypass,
     /// A launch mode that approves everything, including out-of-workspace
     /// paths, with no prompts at all. The user explicitly accepts full
@@ -69,6 +68,17 @@ pub enum Effect {
         overwrite: bool,
         secret_like: bool,
     },
+    /// A path in the owned session scratch root. Secret checks and all session
+    /// floors still apply; this is never authority over the OS temp parent.
+    ScratchPath {
+        write: bool,
+        overwrite: bool,
+        secret_like: bool,
+    },
+    /// Executable code or dynamic shell targets whose filesystem effects cannot
+    /// be inspected. Bypass cannot silently lift this path uncertainty; an
+    /// explicit structured command grant or unrestricted can authorize it.
+    UnscopedCommand,
     /// Run a classified command.
     RunCommand(CommandClass),
     /// Perform a network operation.
@@ -103,11 +113,18 @@ impl Effect {
         match self {
             Effect::WritePath {
                 overwrite: false, ..
-            } => true,
+            }
+            | Effect::ScratchPath {
+                write: true,
+                overwrite: false,
+                ..
+            }
+            | Effect::UnscopedCommand => true,
             Effect::WritePath {
                 overwrite: true, ..
             }
             | Effect::ReadPath { .. }
+            | Effect::ScratchPath { .. }
             | Effect::Network => false,
             Effect::RunCommand(class) => matches!(
                 class,
@@ -151,6 +168,17 @@ impl Effect {
                 overwrite: true, ..
             } => "overwrite a file",
             Effect::WritePath { .. } => "write a file",
+            Effect::ScratchPath {
+                secret_like: true,
+                write: true,
+                ..
+            } => "write a secret-like scratch path",
+            Effect::ScratchPath {
+                secret_like: true, ..
+            } => "read a secret-like scratch path",
+            Effect::ScratchPath { write: true, .. } => "write a scratch file",
+            Effect::ScratchPath { .. } => "read a scratch file",
+            Effect::UnscopedCommand => "run code with uninspectable file targets",
             Effect::RunCommand(_) => "run a command",
             Effect::Network => "make a network request",
         }
@@ -355,8 +383,14 @@ impl PermissionEngine {
         if self.lease.is_some() {
             return self.resolved().decide_command(request, command);
         }
-        let vetted = matches!(request.effect, Effect::RunCommand(_))
-            && command.is_some_and(|command| self.allows_command(command));
+        let vetted = command.is_some_and(|command| match request.effect {
+            Effect::RunCommand(_) => self.allows_command(command),
+            Effect::UnscopedCommand => self
+                .allowed_commands
+                .iter()
+                .any(|entry| entry.matches(command)),
+            _ => false,
+        });
         let decision = if vetted {
             untrusted_floor(Decision::Allow, request.trusted, request.interactivity)
         } else {
@@ -374,15 +408,19 @@ impl PermissionEngine {
         match self.profile {
             Profile::Unrestricted => Decision::Allow,
             Profile::Bypass => {
-                // Approve everything except an out-of-workspace *path* effect:
-                // the workspace boundary is not silently lifted by bypass for
-                // the file tools. It is lifted the same way `default` lifts it
-                // — an interactive approval — never harder: a hard deny here
-                // would make the most permissive prompting profile *weaker*
-                // than `default` for the one effect it still gates. Commands
-                // carry no path information and are allowed as-is (see the
-                // Profile::Bypass docs).
-                if request.effect.is_outside_workspace() {
+                // Command-class approval never grants an inspectable external
+                // path or proves opaque code safe. Scratch has its own secret
+                // gate; unrestricted is the explicit full-authority mode.
+                if request.effect.is_outside_workspace()
+                    || matches!(
+                        request.effect,
+                        Effect::UnscopedCommand
+                            | Effect::ScratchPath {
+                                secret_like: true,
+                                ..
+                            }
+                    )
+                {
                     ask_or_deny(request.interactivity)
                 } else {
                     Decision::Allow
@@ -438,6 +476,8 @@ fn allowlist_may_relax(effect: Effect) -> bool {
             ..
         } => inside_workspace && !secret_like,
         Effect::Network => true,
+        Effect::ScratchPath { secret_like, .. } => !secret_like,
+        Effect::UnscopedCommand => false,
     }
 }
 
@@ -445,16 +485,27 @@ fn allowlist_may_relax(effect: Effect) -> bool {
 /// `read-only`, with nobody able to approve one; everything else as `default`.
 fn read_only_decision(request: &PermissionRequest) -> Decision {
     match request.effect {
-        Effect::WritePath { .. } => Decision::Deny,
+        Effect::WritePath { .. }
+        | Effect::ScratchPath { write: true, .. }
+        | Effect::UnscopedCommand => Decision::Deny,
         Effect::RunCommand(CommandClass::ReadOnly) => Decision::Allow,
         Effect::RunCommand(_) => Decision::Deny,
-        Effect::ReadPath { .. } | Effect::Network => base_decision(request),
+        Effect::ReadPath { .. } | Effect::ScratchPath { .. } | Effect::Network => {
+            base_decision(request)
+        }
     }
 }
 
 /// The out-of-box decision for an effect, before profile or trust adjustments.
 fn base_decision(request: &PermissionRequest) -> Decision {
     match request.effect {
+        Effect::ScratchPath {
+            secret_like: false, ..
+        } => Decision::Allow,
+        Effect::ScratchPath {
+            secret_like: true, ..
+        }
+        | Effect::UnscopedCommand => ask_or_deny(request.interactivity),
         Effect::ReadPath {
             inside_workspace: true,
             secret_like: false,
@@ -700,6 +751,86 @@ mod tests {
 
     fn engine(profile: Profile) -> PermissionEngine {
         PermissionEngine::new(profile, Vec::new())
+    }
+
+    #[test]
+    fn scratch_allows_trusted_headless_work_but_preserves_permission_floors() {
+        let write = Effect::ScratchPath {
+            write: true,
+            overwrite: false,
+            secret_like: false,
+        };
+        let secret = Effect::ScratchPath {
+            write: true,
+            overwrite: false,
+            secret_like: true,
+        };
+        for profile in [Profile::Default, Profile::Relaxed, Profile::Bypass] {
+            let e = engine(profile);
+            assert_eq!(
+                e.decide(&req(write, Interactivity::NonInteractive, true)),
+                Decision::Allow
+            );
+            assert_eq!(
+                e.decide(&req(secret, Interactivity::Interactive, true)),
+                Decision::Ask
+            );
+            assert_eq!(
+                e.decide(&req(secret, Interactivity::NonInteractive, true)),
+                Decision::Deny
+            );
+            assert_eq!(
+                e.with_incognito(true)
+                    .decide(&req(write, Interactivity::NonInteractive, true)),
+                Decision::Deny
+            );
+        }
+        assert_eq!(
+            engine(Profile::Default).decide(&req(write, Interactivity::NonInteractive, false)),
+            Decision::Deny
+        );
+        assert_eq!(
+            engine(Profile::ReadOnly).decide(&req(write, Interactivity::Interactive, true)),
+            Decision::Deny
+        );
+        assert_eq!(
+            engine(Profile::ReadOnly).decide(&req(
+                Effect::ScratchPath {
+                    write: false,
+                    overwrite: false,
+                    secret_like: false
+                },
+                Interactivity::NonInteractive,
+                true
+            )),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn opaque_targets_require_authority_even_under_bypass() {
+        let request = req(Effect::UnscopedCommand, Interactivity::NonInteractive, true);
+        let exact = ExactCommand {
+            program: "python".into(),
+            args: vec!["/vetted/script.py".into()],
+        };
+        let e = engine(Profile::Bypass);
+        assert_eq!(e.decide(&request), Decision::Deny);
+        let e = e.with_allowed_commands(vec![AllowedCommand {
+            program: exact.program.clone(),
+            args_prefix: exact.args.clone(),
+        }]);
+        assert_eq!(e.decide_command(&request, Some(&exact)), Decision::Allow);
+        assert_eq!(e.decide_command(&request, None), Decision::Deny);
+        assert_eq!(
+            e.with_incognito(true)
+                .decide_command(&request, Some(&exact)),
+            Decision::Deny
+        );
+        assert_eq!(
+            engine(Profile::Unrestricted).decide(&request),
+            Decision::Allow
+        );
     }
 
     #[test]
@@ -1354,6 +1485,30 @@ mod tests {
         Profile::Bypass,
         Profile::Unrestricted,
     ];
+
+    #[test]
+    fn a_denied_lease_cannot_write_into_scratch_under_any_profile() {
+        let lease = TestLease::new(LeaseState::Denied("not the writer".into()));
+        let request = req(
+            Effect::ScratchPath {
+                write: true,
+                overwrite: false,
+                secret_like: false,
+            },
+            Interactivity::NonInteractive,
+            true,
+        );
+        for profile in ALL_PROFILES {
+            let engine = engine(profile).with_lease(lease.clone());
+            assert_eq!(engine.decide(&request), Decision::Deny);
+            assert_eq!(
+                engine
+                    .with_profile(Profile::Bypass, Vec::new())
+                    .decide(&request),
+                Decision::Deny
+            );
+        }
+    }
 
     fn configured(profile: Profile) -> PermissionEngine {
         PermissionEngine::new(profile, vec!["run_shell".to_string()])

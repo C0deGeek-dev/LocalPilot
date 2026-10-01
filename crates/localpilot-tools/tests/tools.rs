@@ -1095,6 +1095,7 @@ async fn run_shell_runs_relative_paths_against_the_workspace_not_a_fallback_dir(
 
 #[tokio::test]
 async fn run_shell_accepts_simple_command_strings_and_builtin_reads() {
+    // Explicit authority for this shell/output fixture; opaque-target permission is tested separately.
     let (_dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();
     let c = ctx(&ws, Interactivity::NonInteractive, true);
@@ -1119,7 +1120,7 @@ async fn run_shell_accepts_simple_command_strings_and_builtin_reads() {
         "run_shell",
         json!({ "command": "echo $PWD" }),
         &c,
-        &bypass_engine(),
+        &PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         &ScriptedApprover::always(),
     )
     .await;
@@ -1141,6 +1142,7 @@ async fn run_shell_accepts_simple_command_strings_and_builtin_reads() {
 
 #[tokio::test]
 async fn run_shell_command_field_uses_the_platform_shell() {
+    // Explicit authority for this shell/output fixture; opaque-target permission is tested separately.
     let (_dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();
     let c = ctx(&ws, Interactivity::NonInteractive, true);
@@ -1155,7 +1157,7 @@ async fn run_shell_command_field_uses_the_platform_shell() {
         "run_shell",
         json!({ "command": command }),
         &c,
-        &bypass_engine(),
+        &PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         &ScriptedApprover::always(),
     )
     .await;
@@ -1165,6 +1167,7 @@ async fn run_shell_command_field_uses_the_platform_shell() {
 
 #[tokio::test]
 async fn run_shell_runs_and_chained_commands_on_an_and_capable_shell() {
+    // Explicit authority for this shell/output fixture; opaque-target permission is tested separately.
     // The `&&` chain (02): on a `&&`-capable shell both commands run. Unix
     // `sh -lc` always supports `&&`; on Windows it works only when PowerShell 7+
     // (`pwsh`) is the selected shell — Windows PowerShell 5.1 lacks the operator,
@@ -1175,13 +1178,13 @@ async fn run_shell_runs_and_chained_commands_on_an_and_capable_shell() {
     let c = ctx(&ws, Interactivity::NonInteractive, true);
 
     // `&&` is a shell metachar, so the command classifies Unknown and is gated;
-    // bypass clears the gate so the shell behaviour itself is what is tested.
+    // explicit unrestricted authority lets this fixture test shell behavior.
     let result = dispatch(
         &registry,
         "run_shell",
         json!({ "command": "echo chain-a && echo chain-b" }),
         &c,
-        &bypass_engine(),
+        &PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         &ScriptedApprover::always(),
     )
     .await;
@@ -2144,6 +2147,7 @@ fn exit_command(code: u32) -> serde_json::Value {
 
 #[tokio::test]
 async fn a_non_zero_exit_is_a_reported_failure_with_full_capture() {
+    // Explicit authority for this shell/output fixture; opaque-target permission is tested separately.
     let (_dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();
     let c = ctx(&ws, Interactivity::NonInteractive, true);
@@ -2152,7 +2156,7 @@ async fn a_non_zero_exit_is_a_reported_failure_with_full_capture() {
         "run_shell",
         exit_command(3),
         &c,
-        &bypass_engine(),
+        &PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         &ScriptedApprover::always(),
     )
     .await;
@@ -2178,6 +2182,7 @@ async fn a_non_zero_exit_is_a_reported_failure_with_full_capture() {
 
 #[tokio::test]
 async fn a_zero_exit_is_ok_and_still_reports_the_exit_line() {
+    // Explicit authority for this shell/output fixture; opaque-target permission is tested separately.
     let (_dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();
     let c = ctx(&ws, Interactivity::NonInteractive, true);
@@ -2186,7 +2191,7 @@ async fn a_zero_exit_is_ok_and_still_reports_the_exit_line() {
         "run_shell",
         exit_command(0),
         &c,
-        &bypass_engine(),
+        &PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         &ScriptedApprover::always(),
     )
     .await;
@@ -2196,6 +2201,7 @@ async fn a_zero_exit_is_ok_and_still_reports_the_exit_line() {
 
 #[tokio::test]
 async fn a_genuine_spawn_failure_is_a_malfunction() {
+    // Explicit authority for this shell/output fixture; opaque-target permission is tested separately.
     let (_dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();
     let c = ctx(&ws, Interactivity::NonInteractive, true);
@@ -2206,7 +2212,7 @@ async fn a_genuine_spawn_failure_is_a_malfunction() {
         "run_shell",
         json!({ "program": "definitely-not-a-real-binary-xyz", "args": ["--version"] }),
         &c,
-        &bypass_engine(),
+        &PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         &ScriptedApprover::always(),
     )
     .await;
@@ -2220,6 +2226,7 @@ async fn a_genuine_spawn_failure_is_a_malfunction() {
 
 #[tokio::test]
 async fn a_missing_binary_as_a_command_string_is_a_reported_failure() {
+    // Explicit authority for this shell/output fixture; opaque-target permission is tested separately.
     let (_dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();
     let c = ctx(&ws, Interactivity::NonInteractive, true);
@@ -2231,7 +2238,7 @@ async fn a_missing_binary_as_a_command_string_is_a_reported_failure() {
         "run_shell",
         json!({ "command": "definitely-not-a-real-binary-xyz" }),
         &c,
-        &bypass_engine(),
+        &PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         &ScriptedApprover::always(),
     )
     .await;

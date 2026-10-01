@@ -185,7 +185,14 @@ pub(crate) fn binary_placeholder(len: usize) -> String {
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-fn read_path_effect(ctx: &ToolContext<'_>, path: &Path) -> Effect {
+pub(crate) fn read_path_effect(ctx: &ToolContext<'_>, path: &Path) -> Effect {
+    if ctx.workspace.scratch_contains(path) {
+        return Effect::ScratchPath {
+            write: false,
+            overwrite: false,
+            secret_like: is_secret_like(path),
+        };
+    }
     Effect::ReadPath {
         // Reads use the wider read scope (workspace + granted extra read
         // roots); writes below stay on the hard workspace boundary.
@@ -194,7 +201,14 @@ fn read_path_effect(ctx: &ToolContext<'_>, path: &Path) -> Effect {
     }
 }
 
-fn write_path_effect(ctx: &ToolContext<'_>, path: &Path, overwrite: bool) -> Effect {
+pub(crate) fn write_path_effect(ctx: &ToolContext<'_>, path: &Path, overwrite: bool) -> Effect {
+    if ctx.workspace.scratch_contains(path) {
+        return Effect::ScratchPath {
+            write: true,
+            overwrite,
+            secret_like: is_secret_like(path),
+        };
+    }
     Effect::WritePath {
         inside_workspace: ctx.workspace.contains(path),
         overwrite,

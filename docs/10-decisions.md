@@ -2,6 +2,53 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0196: Owned Session Scratch and Inspectable Command Path Effects
+
+**Status:** Accepted · **Date:** 2026-10-01
+
+**Context:** Temp-file writes through file tools were outside the workspace,
+even under bypass, while write-capable shell calls carried no path effects.
+That encouraged a less auditable route and blocked headless scratch work.
+Granting the entire OS temp tree would expose other sessions' and processes'
+files. Literal parsing cannot establish arbitrary script containment.
+
+**Decision:** The central session runtime creates an unpredictable, owned
+`localpilot-<session-id>-<random>` child under OS temp. User/environment-only
+`permissions.scratch_root` selects OS temp, disables scratch, or chooses an
+absolute existing parent. A custom parent is never granted or deleted. Reuse
+the exact-pinned tempfile dependency; Unix children are created with mode 0700,
+Windows children inherit the configured parent's ACL. Canonical containment
+reuses Workspace's existing-ancestor normalization; hard workspace containment
+and extra read roots retain their meaning. Scratch has an explicit path effect
+in the existing engine: ordinary reads/writes are allowed in trusted default
+and bypass sessions, secret-shaped paths keep their prompt/headless denial,
+readonly/lease/incognito/trust floors remain in force. Unrestricted retains
+its explicit full-authority meaning.
+
+Report the current root once in a runtime-owned system-prompt block and provide
+LOCALPILOT_SCRATCH_DIR plus TEMP/TMP/TMPDIR to foreground/background children.
+Every delegated session gets a new root. Session changes and teardown terminate
+background commands before releasing scratch; active Workspace clones retain
+ownership until their last user finishes. Failed creation grants nothing.
+
+File tools and foreground/background shell tools share normalized read/write
+effects for supported literal targets and redirections. Unknown programs,
+interpreter scripts, dynamic syntax and uninspectable targets add an explicit
+unscoped-command effect: ask interactively or deny headless, including bypass.
+User exact structured command grants can authorize opaque code, but do not
+override inspectable external paths or session floors. Build/network command
+classes retain their existing policy, with explicit path arguments additionally
+gated. Their runtime effects and approved scripts are not OS-contained.
+
+**Consequences:** Bypass sessions that previously ran arbitrary opaque scripts
+headless now need an exact user grant or explicit unrestricted authority. Default
+shell command-class and irreversible-action confirmation remain independent of
+scratch path approval. Scratch ownership is released at ordinary teardown, but a killed
+process or filesystem cleanup failure may leave an orphan directory; no claim
+of secure erasure is made. Text inspection is an audit gate, not a filesystem
+sandbox or a race-proof defense against malicious concurrent filesystem mutation.
+No dependency versions, unsafe boundary or persistent schema change.
+
 ## ADR-0195: Windows Tool Commands Own Kernel Process Trees
 
 **Status:** Accepted · **Date:** 2026-10-01

@@ -301,8 +301,8 @@ impl ToolRegistry {
         // asks to always confirm) raises an `Allow` to `Ask`, so even the
         // relaxed profile pauses for a destructive, un-undoable action. This is
         // tighten-only — it never turns a `Deny` into anything weaker — and it
-        // does not touch `bypass` or `unrestricted`, whose whole point is no
-        // prompts.
+        // does not add contract prompts to `bypass` or `unrestricted`.
+        // Protected path and opaque-code decisions remain independent.
         let contract = tool.contract();
         let force_confirm = intent == DispatchIntent::Model
             && !matches!(engine.profile(), Profile::Bypass | Profile::Unrestricted)
@@ -313,12 +313,16 @@ impl ToolRegistry {
         // registry does not guess at input keys. Display-only, never decisive.
         let detail = tool.approval_detail(&call.input);
         // A direct command on the user's exact list: the entry is the user's
-        // advance confirmation of it, so its command effect skips the
-        // force-confirm above once the engine (floors included) allows it.
+        // advance confirmation of it, so allowed effects need no duplicate
+        // contract confirmation. The engine still decides every path effect.
         let command = tool.exact_command(&call.input);
         let vetted = command
             .as_ref()
             .is_some_and(|command| engine.allows_command(command));
+        // An execution is confirmed once. Individual path Ask/Deny decisions
+        // remain independent; adding safe path effects must not repeat the
+        // irreversible-command confirmation the user already gave.
+        let mut confirmed = vetted;
         for effect in &effects {
             let request = PermissionRequest {
                 tool: tool.name().to_string(),
@@ -327,13 +331,12 @@ impl ToolRegistry {
                 trusted: ctx.trusted,
                 detail: detail.clone(),
             };
-            let confirmed = vetted && matches!(effect, Effect::RunCommand(_));
             let allowed = match engine.decide_command(&request, command.as_ref()) {
                 Decision::Allow if force_confirm && !confirmed => approver.approve(&request).await,
                 Decision::Allow => true,
                 Decision::Ask
                     if intent == DispatchIntent::UserShell
-                        && matches!(effect, Effect::RunCommand(_)) =>
+                        && matches!(effect, Effect::RunCommand(_) | Effect::UnscopedCommand) =>
                 {
                     true
                 }
@@ -347,6 +350,9 @@ impl ToolRegistry {
                     &denial_message(tool.name(), &request, engine, command.as_ref()),
                     ctx,
                 ));
+            }
+            if matches!(effect, Effect::RunCommand(_) | Effect::UnscopedCommand) {
+                confirmed = true;
             }
         }
 
@@ -419,7 +425,10 @@ fn denial_message(
     if let Some(reason) = engine.lease_denial() {
         if matches!(
             request.effect,
-            Effect::WritePath { .. } | Effect::RunCommand(_)
+            Effect::WritePath { .. }
+                | Effect::ScratchPath { write: true, .. }
+                | Effect::RunCommand(_)
+                | Effect::UnscopedCommand
         ) && command.is_none_or(|command| !engine.allows_command(command))
         {
             message.push_str(&format!(
@@ -448,7 +457,7 @@ fn denial_message(
     }
     if engine.profile() == Profile::ReadOnly {
         match request.effect {
-            Effect::WritePath { .. } => {
+            Effect::WritePath { .. } | Effect::ScratchPath { write: true, .. } => {
                 message.push_str(": the readonly profile denies every write.");
             }
             Effect::RunCommand(_) => match command {
@@ -476,6 +485,9 @@ fn denial_message(
              `extra_read_roots` under `[permissions]` in .localpilot.toml, or relaunch with \
              `--permission unrestricted`.",
         );
+    }
+    if request.effect == Effect::UnscopedCommand {
+        message.push_str(": this command's file targets cannot be inspected. Approve it interactively, vet the exact structured program and argument prefix in user permissions.allow_commands, or explicitly select unrestricted. Bypass does not authorize opaque file targets.");
     }
     message
 }

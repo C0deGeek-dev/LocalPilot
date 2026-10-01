@@ -1017,6 +1017,7 @@ engine.
 | --- | --- | --- | --- |
 | `profile` | `default` \| `relaxed` \| `readonly` \| `bypass` \| `unrestricted` | `default` | Permission profile. `bypass` and `unrestricted` are never the default and are always surfaced. `unrestricted` approves everything — out-of-workspace paths included — with no prompts; the user accepts full responsibility. `readonly` denies every write and every command above read-only, with no prompt |
 | `extra_read_roots` | array of string | `[]` | Absolute directories granted standing **read** scope in addition to the workspace, in every profile including non-interactive runs. Writes keep the workspace boundary; secret-like reads keep their gate. A missing directory is reported and skipped at startup |
+| `scratch_root` | bool or string | `true` | **User config and environment only.** `true` creates a unique per-session child under OS temp; `false` disables it; an absolute existing directory selects a custom parent. Only the owned child gets scratch scope and cleanup; the parent is never granted or removed. Failed creation warns and grants nothing. Ordinary scratch file reads/writes pass in trusted default/bypass headless sessions; secret-like names and session restrictions keep their gates |
 | `allow_commands` | array of `{ program, args_prefix }` | `[]` | **User config and environment only**; a project file that sets it is refused. A structured `run_shell` call (`program` + `args`, never a free-text `command`) whose program equals `program` and whose arguments start with `args_prefix` passes the command gate in `default`, `relaxed` and `readonly`, and runs headless. Exact string match. An entry admits every call that starts with it, so name a script's absolute path in `args_prefix`. The untrusted-workspace and incognito floors still apply. `localpilot doctor` lists the entries |
 
 ```toml
@@ -1028,6 +1029,24 @@ profile = "readonly"
 program = "python"
 args_prefix = ["D:/repos/c0degeek-ai/skills/pair-programming/scripts/pair.py"]
 ```
+
+Scratch configuration belongs in the user file, for example:
+
+```toml
+[permissions]
+scratch_root = true # OS temp; false disables it
+# scratch_root = 'D:/private-temp' # existing user-private parent
+```
+
+Every interactive, print, harness, server and delegated session creates its own
+child. The system prompt reports the actual path, and shell children receive
+`LOCALPILOT_SCRATCH_DIR` plus `TEMP`/`TMP`/`TMPDIR`. File tools accept that concrete
+path. Literal shell targets use the same boundary; opaque scripts require an
+interactive approval or an exact structured command grant, including under
+bypass. Structured `run_background` starts also use `allow_commands`.
+Inspectable external paths remain gated even with a command grant. The root is
+released at session teardown; crashes or filesystem cleanup failures can leave
+orphan directories. See [security and privacy](07-security-and-privacy.md).
 
 ### `[quota]`
 

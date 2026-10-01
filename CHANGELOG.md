@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Private session scratch and consistent path permissions.** Sessions own a
+  unique temporary directory, report it to the model and shell children, and
+  remove it on teardown. User-only `permissions.scratch_root` selects OS temp,
+  a custom parent, or off. File and inspectable shell targets share path gates;
+  secrets, readonly/lease/incognito restrictions and symlink escapes retain
+  their protection. **Bypass compatibility change:** opaque scripts and dynamic
+  targets now require interactive approval, an exact user structured-command
+  grant, or explicit unrestricted authority. This is permission inspection,
+  with the limits described in ADR-0196, rather than OS filesystem containment.
+
 - **Reliable Windows tool command cleanup.** Cancellation, timeout and
   completion close a kernel-owned Job Object, terminating descendants even
   after their parent exits. Commands are contained before they begin running;

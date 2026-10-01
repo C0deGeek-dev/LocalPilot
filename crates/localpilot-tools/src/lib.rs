@@ -14,6 +14,7 @@ mod builtins_background;
 mod builtins_shell;
 mod builtins_swarm;
 mod catalog;
+mod command_paths;
 mod contract;
 mod error;
 mod image;

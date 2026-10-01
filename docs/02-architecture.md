@@ -28,7 +28,7 @@ The session runtime runs in one of two operating modes. Agent mode is a direct
 conversational loop with no rule engine. Harness mode wraps the same loop in the
 rule engine, commit policy, and replan loop. Both modes share the tool runtime
 and the permission engine. The permission engine is configurable from
-least-privilege (default) up to a bypass (allow-all) launch mode; the operating
+least-privilege (default) up to explicit unrestricted authority; the operating
 mode does not change which profile is active.
 
 The opt-in `localpilot pair` interface composes two independent Agent-mode
@@ -899,8 +899,11 @@ V1 should implement conservative policy without relying on OS sandboxing:
 - never read secret-like files without approval
 
 The default profile enforces these. The relaxed profile auto-approves a
-user-defined allowlist. The bypass profile is a launch mode that disables
-prompting entirely, like running fully localpilot, and is never the default.
+user-defined allowlist. Bypass auto-approves command classes and ordinary
+in-scope paths; external/opaque targets and secret scratch paths retain their
+gate. Unrestricted is explicit full authority. The central session runtime owns
+a unique scratch child via Workspace, with lifecycle and path effects described
+in ADR-0196; hard workspace containment remains separate.
 
 ### `localpilot-mcp`
 

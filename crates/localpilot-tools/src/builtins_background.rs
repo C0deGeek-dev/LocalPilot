@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use localpilot_sandbox::{CommandClass, Effect};
+use localpilot_sandbox::{Effect, ExactCommand};
 use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -28,8 +28,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::builtins::cap;
 use crate::builtins_shell::{
-    execution_class, execution_text, normalize_execution, render_stream, shell_program_and_args,
-    RunShellExecution,
+    execution_text, normalize_execution, render_stream, shell_program_and_args, RunShellExecution,
 };
 #[cfg(not(windows))]
 use crate::builtins_shell::{kill_process_tree, kill_process_tree_detached};
@@ -126,11 +125,22 @@ impl BackgroundProcesses {
     /// # Errors
     /// Returns [`ToolError::Failed`] if the process cannot be spawned or its exit
     /// status cannot be polled.
+    #[cfg(test)]
     pub(crate) async fn start(
         &self,
         execution: RunShellExecution,
         cwd: &Path,
         grace: Duration,
+    ) -> Result<StartOutcome, ToolError> {
+        self.start_with_scratch(execution, cwd, grace, None).await
+    }
+
+    pub(crate) async fn start_with_scratch(
+        &self,
+        execution: RunShellExecution,
+        cwd: &Path,
+        grace: Duration,
+        scratch: Option<&Path>,
     ) -> Result<StartOutcome, ToolError> {
         let command_line = execution_text(&execution);
         let (program, args) = match execution {
@@ -162,6 +172,7 @@ impl BackgroundProcesses {
         #[cfg(windows)]
         command.creation_flags(crate::builtins::CREATE_NO_WINDOW);
 
+        crate::command_paths::scratch_environment(&mut command, scratch);
         #[cfg(windows)]
         let (mut child, job) =
             localpilot_winsec::spawn_in_job(&mut command, crate::builtins::CREATE_NO_WINDOW)
@@ -422,7 +433,7 @@ impl Tool for RunBackground {
             .map(|execution| detail_preview(&execution_text(&execution)))
             .unwrap_or_default()
     }
-    fn effects(&self, input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+    fn effects(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
         let input: RunBackgroundInput = parse_input(input)?;
         // Only `start` runs a command; managing our own tracked processes
         // (list/logs/stop) has no external effect.
@@ -430,12 +441,17 @@ impl Tool for RunBackground {
             return Ok(Vec::new());
         }
         let execution = Self::execution(&input)?;
-        let class = execution_class(&execution)?;
-        let mut effects = vec![Effect::RunCommand(class)];
-        if class == CommandClass::Network {
-            effects.push(Effect::Network);
+        crate::command_paths::effects(&execution, ctx)
+    }
+    fn exact_command(&self, input: &Value) -> Option<ExactCommand> {
+        let input: RunBackgroundInput = parse_input(input).ok()?;
+        if !matches!(input.action, BackgroundAction::Start) {
+            return None;
         }
-        Ok(effects)
+        match Self::execution(&input).ok()? {
+            RunShellExecution::Direct { program, args } => Some(ExactCommand { program, args }),
+            RunShellExecution::Shell { .. } => None,
+        }
     }
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: RunBackgroundInput = parse_input(&input)?;
@@ -454,7 +470,11 @@ impl Tool for RunBackground {
                 // De-verbatim spawn cwd (see `Workspace::process_dir`): a background
                 // dev server/watcher must start in the workspace, not `C:\Windows`.
                 let cwd = ctx.workspace.process_dir();
-                match procs.start(execution, &cwd, grace).await? {
+                let scratch = ctx.workspace.scratch_process_dir();
+                match procs
+                    .start_with_scratch(execution, &cwd, grace, scratch.as_deref())
+                    .await?
+                {
                     StartOutcome::Running { id, log } => Ok(cap(format!(
                         "started background process `{id}` (`{detail}`). \
                          Use run_background with action `logs` and this id to read more \

@@ -860,8 +860,8 @@ fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harnes
 
 fn describe(request: &PermissionRequest) -> ApprovalRequest {
     let target_kind = match request.effect {
-        Effect::ReadPath { .. } | Effect::WritePath { .. } => "path",
-        Effect::RunCommand(_) => "command",
+        Effect::ReadPath { .. } | Effect::WritePath { .. } | Effect::ScratchPath { .. } => "path",
+        Effect::RunCommand(_) | Effect::UnscopedCommand => "command",
         Effect::Network => "network",
     };
     let risk_class = request.effect.risk_label();
@@ -1652,8 +1652,10 @@ mod tests {
         let b_directive = localpilot_server::swarm::pair_session_directive("B", "A", task);
         let a_prompt = pair.a.session.runtime.system_prompt_text();
         let b_prompt = pair.b.session.runtime.system_prompt_text();
-        assert!(a_prompt.ends_with(&a_directive));
-        assert!(b_prompt.ends_with(&b_directive));
+        assert_eq!(a_prompt.matches(&a_directive).count(), 1);
+        assert_eq!(b_prompt.matches(&b_directive).count(), 1);
+        assert_eq!(a_prompt.matches("<session-scratch>").count(), 1);
+        assert_eq!(b_prompt.matches("<session-scratch>").count(), 1);
         assert!(!a_prompt.contains("You are coordinating several agents"));
         assert!(!b_prompt.contains("You are coordinating several agents"));
         assert!(first_provider.requests().is_empty());

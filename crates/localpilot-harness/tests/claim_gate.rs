@@ -78,7 +78,7 @@ fn an_unverifiable_tool_result_is_recorded_as_unverified() {
     let mut runtime = SessionRuntime::new(
         Arc::new(provider),
         ToolRegistry::with_builtins(),
-        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         Box::new(ScriptedApprover::always()),
         Store::open(root),
         Workspace::new(root).unwrap(),
