@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Lessons can get approved test questions for an uplift comparison.**
+  `localpilot lab tasks draft <lesson> --model <m>` has your configured model
+  draft questions a model should get wrong without the lesson and right with it.
+  `lab tasks show` prints them, and `lab tasks approve <lesson> --reviewer
+  <name>` makes them final — a draft runs nothing. The pieces that run the
+  lesson-off/on comparison through LocalBench, stage each arm's memory in a
+  throwaway workspace, and accept only a result that provably belongs to the
+  run are in place; the command that starts a run comes next, with its limits
+  (ADR-0200).
 - **Automatic bounded work.** Agent sessions and harness planning/execution use
   separate context-pressure and observed-reliability inputs. Unknown models start
   conservatively; file edits and reads are checked before dispatch, retained

@@ -194,9 +194,10 @@ async fn classify_queued(
         progress: progress.as_ref(),
         checks: &checks,
     };
-    let classification = crate::classify_for_lab(&item.candidate, &context);
+    let mut classification = crate::classify_for_lab(&item.candidate, &context);
 
     let store = localpilot_store::Store::open(project_root);
+    crate::lab_eligibility::keep_approved_tasks(store.root(), &mut classification);
     crate::lab_eligibility::write_record(store.root(), &classification)
         .map_err(|e| LearningError::Review(format!("could not keep the lab record: {e}")))?;
     let produced_at = std::time::SystemTime::now()

@@ -231,12 +231,190 @@ pub async fn replay(
     Ok(())
 }
 
+/// The one classified lesson `selection` names: a candidate identity or an
+/// unambiguous prefix of one, still in review.
+fn resolve(
+    root: &Path,
+    selection: &str,
+) -> anyhow::Result<(
+    localpilot_localmind::LabClassification,
+    localmind_core::CandidateLesson,
+)> {
+    let store = Store::open(root);
+    let mut matches: Vec<_> = read_lab_records(store.root())
+        .into_iter()
+        .filter(|record| record.candidate_identity.starts_with(selection))
+        .collect();
+    let record = match matches.len() {
+        0 => {
+            anyhow::bail!("no classified lesson matches `{selection}` (see `localpilot lab list`)")
+        }
+        1 => matches.remove(0),
+        n => anyhow::bail!("`{selection}` matches {n} lessons; give more of the identity"),
+    };
+    let Some((_, candidate)) = lab_candidate(root, &record.candidate_identity)? else {
+        anyhow::bail!("{} is no longer in review", record.candidate_identity);
+    };
+    Ok((record, candidate))
+}
+
+fn print_tasks(set: &localpilot_localmind::LabTaskSet, out: &mut dyn Write) -> std::io::Result<()> {
+    for task in &set.tasks {
+        writeln!(out, "  {}: {}", task.id, task.prompt)?;
+        writeln!(out, "      expects: {}", task.expect)?;
+    }
+    Ok(())
+}
+
+/// Have the configured model draft uplift tasks for a lesson, and write them as
+/// a draft for a person to read, edit and approve. A draft tests nothing.
+///
+/// Sends the lesson and its hindsight — not the run's raw facts — to the
+/// provider the project is already configured to use.
+///
+/// # Errors
+/// The lesson cannot be resolved, the model cannot draft, or the draft cannot
+/// be written.
+pub async fn tasks_draft(
+    root: &Path,
+    selection: &str,
+    model: &str,
+    provider: &dyn localpilot_llm::ModelProvider,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let (record, candidate) = resolve(root, selection)?;
+    let drafted = localpilot_localmind::draft_tasks(provider, model, &candidate)
+        .await
+        .map_err(|failure| anyhow::anyhow!("no draft: {failure}"))?;
+    let store = Store::open(root);
+    let path = localpilot_localmind::write_draft(store.root(), &drafted.set)?;
+    writeln!(
+        out,
+        "Drafted {} task(s) for {} with {model} ({} model call(s){}):",
+        drafted.set.tasks.len(),
+        record.candidate_identity,
+        drafted.model_calls,
+        if drafted.repaired { ", one repair" } else { "" }
+    )?;
+    print_tasks(&drafted.set, out)?;
+    writeln!(out, "Draft: {}", path.display())?;
+    writeln!(
+        out,
+        "A draft tests nothing. Read it — would a model get these wrong without the lesson, and \
+         is the expected text the behaviour the lesson is about? Edit the file if needed, then:"
+    )?;
+    writeln!(
+        out,
+        "  localpilot lab tasks approve {} --reviewer <your name>",
+        record.candidate_identity
+    )?;
+    Ok(())
+}
+
+/// Show a lesson's draft and its approved task set, if any.
+///
+/// # Errors
+/// The lesson cannot be resolved or a file cannot be read.
+pub fn tasks_show(root: &Path, selection: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+    let (record, candidate) = resolve(root, selection)?;
+    let store = Store::open(root);
+    writeln!(
+        out,
+        "{}: {}",
+        record.candidate_identity,
+        candidate.summary()
+    )?;
+    let draft = localpilot_localmind::read_task_set(&localpilot_localmind::draft_path(
+        store.root(),
+        &record.candidate_identity,
+    ))
+    .map_err(anyhow::Error::msg)?;
+    match &draft {
+        Some(set) => {
+            writeln!(
+                out,
+                "Draft ({} task(s){}):",
+                set.tasks.len(),
+                set.drafted_by
+                    .as_ref()
+                    .map(|model| format!(", drafted by {model}"))
+                    .unwrap_or_default()
+            )?;
+            print_tasks(set, out)?;
+            if let Err(problems) = localpilot_localmind::validate_tasks(set, &candidate) {
+                for problem in problems {
+                    writeln!(out, "  cannot be approved: {problem}")?;
+                }
+            }
+        }
+        None => writeln!(out, "No draft.")?,
+    }
+    match localpilot_localmind::approved_tasks(store.root(), &candidate) {
+        Ok(Some(set)) => {
+            writeln!(
+                out,
+                "Approved by {} ({} task(s), {}):",
+                set.approved_by.as_deref().unwrap_or("?"),
+                set.tasks.len(),
+                set.content_hash()
+            )?;
+            print_tasks(&set, out)?;
+        }
+        Ok(None) => writeln!(out, "Not approved.")?,
+        Err(problem) => writeln!(out, "The approved set no longer holds: {problem}")?,
+    }
+    Ok(())
+}
+
+/// Approve a lesson's draft in `reviewer`'s name: freeze it as the lesson's
+/// uplift assignment and keep it in the lesson's lab record.
+///
+/// # Errors
+/// The lesson cannot be resolved, the approval is refused, or the record
+/// cannot be written.
+pub fn tasks_approve(
+    root: &Path,
+    selection: &str,
+    reviewer: &str,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let (mut record, candidate) = resolve(root, selection)?;
+    let store = Store::open(root);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        });
+    let (set, assignment) =
+        localpilot_localmind::approve_tasks(store.root(), &candidate, reviewer, now)
+            .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    // One approved task set per lesson: a new approval replaces the old one.
+    record.assignments.retain(|assignment| {
+        !matches!(
+            assignment.source,
+            Some(AssignmentSource::ApprovedTaskSet { .. })
+        )
+    });
+    record.assignments.push(assignment);
+    localpilot_localmind::write_lab_record(store.root(), &record)?;
+    writeln!(
+        out,
+        "Approved {} task(s) for {} as {}. Frozen as {}.",
+        set.tasks.len(),
+        record.candidate_identity,
+        set.approved_by.as_deref().unwrap_or_default(),
+        set.content_hash()
+    )?;
+    Ok(())
+}
+
 fn source_name(source: Option<&AssignmentSource>) -> &'static str {
     match source {
         Some(AssignmentSource::RecordedTrajectory { .. }) => "recorded trajectory",
         Some(AssignmentSource::FailFixPair { .. }) => "fail/fix pair",
         Some(AssignmentSource::ControlledMutation { .. }) => "controlled mutation",
         Some(AssignmentSource::RatifiedCheck { .. }) => "ratified check",
+        Some(AssignmentSource::ApprovedTaskSet { .. }) => "approved task set",
         _ => "other",
     }
 }
@@ -547,5 +725,96 @@ mod tests {
             vec![(LabVerdict::Invalid, vec![VerdictReason::OracleMutable])]
         );
         assert_eq!(worktrees(root), 0);
+    }
+
+    #[tokio::test]
+    async fn a_drafted_task_set_runs_nothing_until_a_named_person_approves_it() {
+        use localpilot_llm::FakeProvider;
+
+        let (dir, candidate) = project();
+        let root = dir.path();
+        let identity = candidate.content_identity();
+        let reply = r#"{"tasks":[
+            {"prompt":"The check reads a file that is not there yet. What should happen first?","expect":"write the state file"},
+            {"prompt":"In which order do the state file and its check go?","expect":"state file first"}
+        ]}"#;
+        let provider = FakeProvider::new().text(reply);
+
+        // Draft, by an unambiguous prefix of the identity.
+        let mut out = Vec::new();
+        tasks_draft(root, &identity[..10], "local-model", &provider, &mut out)
+            .await
+            .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("Drafted 2 task(s)"), "{printed}");
+        assert!(printed.contains("A draft tests nothing"), "{printed}");
+        let store = Store::open(root);
+        assert!(localpilot_localmind::draft_path(store.root(), &identity).is_file());
+
+        let uplift = |root: &Path| {
+            read_lab_records(Store::open(root).root())[0]
+                .assignments
+                .iter()
+                .find(|assignment| {
+                    matches!(
+                        assignment.source,
+                        Some(AssignmentSource::ApprovedTaskSet { .. })
+                    )
+                })
+                .cloned()
+        };
+        assert_eq!(uplift(root), None, "a draft is not an assignment");
+        let mut out = Vec::new();
+        tasks_show(root, &identity, &mut out).unwrap();
+        let shown = String::from_utf8(out).unwrap();
+        assert!(shown.contains("drafted by local-model") && shown.contains("Not approved."));
+
+        // An approval needs a name.
+        let mut out = Vec::new();
+        assert!(tasks_approve(root, &identity, " ", &mut out).is_err());
+        assert_eq!(uplift(root), None);
+
+        let mut out = Vec::new();
+        tasks_approve(root, &identity, "reviewer", &mut out).unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("Approved 2 task(s)") && printed.contains("as reviewer"));
+
+        // The frozen assignment is in the lesson's lab record, beside its
+        // Replay assignment, and projects into a run.
+        let assignment = uplift(root).expect("the approval froze an assignment");
+        assert_eq!(
+            assignment.source,
+            Some(AssignmentSource::ApprovedTaskSet {
+                approved_by: "reviewer".to_string(),
+                drafted_by: Some("local-model".to_string()),
+            })
+        );
+        assert!(read_lab_records(store.root())[0].assignments.len() >= 2);
+        let tasks = localpilot_localmind::approved_tasks(store.root(), &candidate)
+            .unwrap()
+            .unwrap();
+        let projection =
+            localpilot_localmind::project_uplift(&candidate, &assignment, &tasks, "rev").unwrap();
+        assert_eq!(projection.lineage.candidate_identity, identity);
+
+        let mut listing = Vec::new();
+        list(root, &mut listing).unwrap();
+        assert!(String::from_utf8(listing)
+            .unwrap()
+            .contains("approved task set"));
+
+        // Approving again replaces the approved set rather than adding a second.
+        let mut out = Vec::new();
+        tasks_approve(root, &identity, "second reviewer", &mut out).unwrap();
+        let approved: Vec<_> = read_lab_records(store.root())[0]
+            .assignments
+            .iter()
+            .filter(|a| matches!(a.source, Some(AssignmentSource::ApprovedTaskSet { .. })))
+            .cloned()
+            .collect();
+        assert_eq!(approved.len(), 1);
+
+        let mut out = Vec::new();
+        assert!(tasks_show(root, "cnd-does-not-exist", &mut out).is_err());
     }
 }

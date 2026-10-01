@@ -33,6 +33,7 @@ localpilot-recovery = { path = "../localpilot-recovery" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }
+localx-eval-core = { workspace = true }
 regex = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

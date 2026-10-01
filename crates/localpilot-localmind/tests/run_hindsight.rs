@@ -604,3 +604,54 @@ async fn a_lesson_no_test_can_judge_says_why_in_review_and_keeps_its_review_path
         "the ordinary review path is unchanged"
     );
 }
+
+#[tokio::test]
+async fn offering_a_lesson_again_keeps_the_task_set_a_person_approved() {
+    let dir = finished_run(LEARNING);
+    let root = dir.path();
+    let run = capture_run_facts(root, &Store::open(root));
+    let reply = draft(&run, Some(LESSON));
+    let first = offer(root, &one_pass(&[&reply]), &run).await;
+    let identity = first.lab.unwrap().candidate_identity;
+
+    // A person approves tasks for the lesson.
+    let localpilot = Store::open(root);
+    let (_, candidate) = localpilot_localmind::lab_candidate(root, &identity)
+        .unwrap()
+        .unwrap();
+    localpilot_localmind::write_draft(
+        localpilot.root(),
+        &localpilot_localmind::LabTaskSet {
+            version: 1,
+            candidate_identity: identity.clone(),
+            tasks: vec![localpilot_localmind::LabTask {
+                id: "t1".to_string(),
+                prompt: "The user tests fail on a missing table. What comes first?".to_string(),
+                expect: "the migration".to_string(),
+            }],
+            drafted_by: None,
+            approved_by: None,
+            approved_at: None,
+        },
+    )
+    .unwrap();
+    let (_, assignment) =
+        localpilot_localmind::approve_tasks(localpilot.root(), &candidate, "reviewer", 1).unwrap();
+    let mut record = localpilot_localmind::read_lab_records(localpilot.root()).remove(0);
+    record.assignments.push(assignment.clone());
+    localpilot_localmind::write_lab_record(localpilot.root(), &record).unwrap();
+
+    // The same run is offered again: the lesson is classified again.
+    offer(root, &one_pass(&[&reply]), &run).await;
+
+    let kept = localpilot_localmind::read_lab_records(localpilot.root()).remove(0);
+    assert!(kept.assignments.contains(&assignment), "{kept:?}");
+    assert_eq!(
+        kept.assignments
+            .iter()
+            .filter(|a| **a == assignment)
+            .count(),
+        1,
+        "and not twice"
+    );
+}

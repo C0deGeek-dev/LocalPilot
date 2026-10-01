@@ -23,6 +23,7 @@ mod ingest;
 mod inspector;
 mod knowledge_tool;
 mod lab_eligibility;
+mod lab_tasks;
 mod layered;
 mod layered_tool;
 mod logic_lab;
@@ -47,6 +48,7 @@ mod span_store;
 mod tool_use;
 mod transcript;
 mod uplift_downweight;
+mod uplift_lab;
 mod workspace;
 
 use std::fmt::Write as _;
@@ -81,8 +83,15 @@ pub use inspector::{
 };
 pub use knowledge_tool::KnowledgeSearch;
 pub use lab_eligibility::{
-    classify as classify_for_lab, read_records as read_lab_records, Eligibility, LabClassification,
-    LabContext, RejectedAssignment,
+    classify as classify_for_lab, read_records as read_lab_records,
+    write_record as write_lab_record, Eligibility, LabClassification, LabContext,
+    RejectedAssignment,
+};
+pub use lab_tasks::{
+    approve_tasks, approved_path, approved_tasks, draft_path, draft_tasks,
+    read_set as read_task_set, uplift_assignment, validate as validate_tasks, write_draft,
+    ApprovalRefusal, DraftFailure, Drafted, LabTask, LabTaskSet, TaskProblem, CANDIDATE_LESSON_ID,
+    LAB_TASKS_DIR, MAX_TASKS,
 };
 pub use layered::{expand_layer, fetch_layer, Expansion, FetchedBody};
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
@@ -147,6 +156,12 @@ pub use transcript::{
     TranscriptRecord, TranscriptSchema, MAX_SPAN_BYTES, SPAN_CHUNKING_VERSION,
 };
 pub use uplift_downweight::{downweight_unhelpful_lessons, UpliftArmOutcome};
+pub use uplift_lab::{
+    import_receipt, project as project_uplift, run_uplift, stage_baseline, stage_lessons, ArmCall,
+    BenchFailure, ImportRefusal, Imported, Lineage, LocalBenchCli, Projection, ProjectionRefusal,
+    UpliftBench, UpliftOutcome, UpliftSettings, BENCH_FAILED, LAB_UPLIFT_DIR, MIS_STAGED,
+    RECEIPT_REJECTED,
+};
 pub use workspace::{is_store_root, resolve_store_root, StoreRoot};
 
 use localmind_core::SessionSource;

@@ -122,6 +122,32 @@ pub fn write_record(
     Ok(path)
 }
 
+/// Carry a lesson's approved task set over from its existing record. A person
+/// approved it; classifying the same lesson again must not throw that away.
+pub fn keep_approved_tasks(localpilot_dir: &Path, classification: &mut LabClassification) {
+    let Ok(text) = std::fs::read_to_string(record_path(
+        localpilot_dir,
+        &classification.candidate_identity,
+    )) else {
+        return;
+    };
+    let Ok(existing) = serde_json::from_str::<LabClassification>(&text) else {
+        return;
+    };
+    let approved = |assignment: &LessonAssignment| {
+        matches!(
+            assignment.source,
+            Some(AssignmentSource::ApprovedTaskSet { .. })
+        )
+    };
+    if classification.assignments.iter().any(approved) {
+        return;
+    }
+    classification
+        .assignments
+        .extend(existing.assignments.into_iter().filter(approved));
+}
+
 /// Every classification kept under `localpilot_dir`, sorted by candidate
 /// identity. A record that does not parse is skipped: it is the lab's own
 /// output, and one damaged file must not hide the rest.

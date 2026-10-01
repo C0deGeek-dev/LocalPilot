@@ -2,6 +2,102 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0200: An Uplift Run Is Staged Per Arm, And Its Receipt Is Matched By Identity
+
+**Status:** accepted · **Date:** 2026-10-02. Builds on ADR-0185 (frozen
+assignments) and ADR-0187 (the gated runner Replay uses). Uses LocalMind
+D-LM-0048 (tiers, verdicts, the opaque receipt) and D-LM-0054 (an approved task
+set as an assignment source). Finishes ADR-0059's outcome down-weight by giving
+it its caller.
+
+**Context.** Only a lesson-off/on comparison with a real actor can say whether a
+lesson helps, and LocalBench already ships that comparison. Three things stood
+between it and evidence about a lesson.
+
+- **Nobody staged the arms.** Both arms run in one workspace and need different
+  memory, and LocalBench ran them back to back. Every run from outside was void.
+- **The result named no run.** Its report carried a task set's name and a model.
+  A report from any run that shared the name would have been accepted.
+- **There was nothing to ask.** Nothing in a run's record or a project's history
+  is a question to put to a model with and without a lesson.
+
+**Decision.**
+
+**Tasks are drafted by a model and made final by a person.**
+- `localpilot lab tasks draft` sends a lesson and its hindsight — not the run's
+  raw facts — to the project's configured model. Every reply is validated, with
+  one repair.
+- A task whose question contains its expected answer, or quotes the lesson, is
+  refused: the first measures nothing and the second gives the lesson to both arms.
+- A draft tests nothing. `localpilot lab tasks approve --reviewer <name>` freezes
+  the draft as it stands on disk, edits included, as an assignment. Its oracle is
+  the approved content by hash, and its source records who approved it and which
+  model drafted it.
+- Whether the questions are good is the approver's judgement. The checks are
+  mechanical.
+
+**LocalBench stays the owner of the measurement.** It gained a per-arm surface: an
+arm's memory configuration, one arm run alone, and a combine step emitting a
+receipt bound to the run's identity. The identity types live in the shared eval
+crate. LocalPilot links no LocalBench code. It reaches it through one seam,
+`UpliftBench`, whose production form runs the `localbench` program through the
+permission-gated check runner, as Replay runs a check.
+
+**The adapter stages each arm, and proves it.**
+- Both arms run in a throwaway workspace under `.localpilot/lab/uplift/<run>/`,
+  never the project and never the user's memory.
+- **Baseline:** LocalBench's baseline configuration (learning off) and a memory
+  store shown to hold nothing.
+- **Lesson arm:** learning on, project scope only, and a store seeded with exactly
+  the lesson under test. The seeded memory's own id is what the arm must show it
+  used.
+- A seed pack that is not this lesson alone stops the run before the lesson arm.
+- The workspace is removed afterwards. The task set, lineage, arm files and
+  receipt are kept.
+
+**A receipt is matched by identity, never by name.** The run is bound to a
+`binding`: the digest of the candidate, assignment, approved oracle and source
+revision. LocalPilot computes what it expects the receipt to attest, and a receipt
+that differs in any of these is rejected and not attached:
+- the binding;
+- the task set's digest;
+- each arm's configuration digest, model, trials and timeout;
+- the lesson arm's intended id and seed-pack digest.
+
+**The verdict mapping is fixed in advance.**
+
+| Receipt | Verdict |
+|---|---|
+| uplift | `Supported` |
+| regression | `Contradicted` |
+| within noise (both pass, both fail) | `Inconclusive` |
+| void: the control saw a memory | `InvalidExperiment` / `ArmContaminated` |
+| void: the lesson arm did not use the lesson | `InvalidExperiment` / `InjectionNotObserved` |
+| the lesson arm used the lesson and something else | `InvalidExperiment` / `ArmContaminated` |
+| an arm could not be staged | `InvalidExperiment` / `MisStaged` |
+| half a pair, a cancel, a timeout, a denied command | `InvalidExperiment`, with `PartialPair` when the baseline had run |
+| a receipt of another run, or of another schema | `InvalidExperiment` / `ReceiptRejected` |
+
+Injection is recorded as `Retrieved`: LocalPilot has no forced injection, and each
+result says a result within noise may reflect retrieval as much as the lesson.
+
+**A harmful result may route accepted memory to review.** When
+`[memory] outcome_downweight` is on and a run is `Contradicted`, an accepted
+memory in the project holding the same lesson is flagged for review, never
+deleted. A lesson still in review has no accepted memory; its result is the
+recommendation.
+
+**Consequences.**
+- An uplift result can now be evidence about one lesson and one run.
+- There is no command that starts a run yet: authorization, hard ceilings,
+  cancellation and restart come with it, so that an expensive run is never
+  startable before it is bounded.
+- The approved oracle's origin is `Human` although a model may have drafted it
+  from the lesson. The reviewer, not the label, is what keeps a test from
+  restating its lesson.
+- The receipt's own fields are read in one place at import. A LocalBench change to
+  them shows up there as a rejected receipt, not as a wrong verdict.
+
 ## ADR-0199: Work Units Are Sized By Independent Context And Reliability Evidence
 
 **Status:** accepted · **Date:** 2026-10-01. Extends ADR-0194's shared capacity

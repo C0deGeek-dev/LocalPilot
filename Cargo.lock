@@ -1896,6 +1896,7 @@ dependencies = [
  "localpilot-sandbox",
  "localpilot-store",
  "localpilot-tools",
+ "localx-eval-core",
  "regex",
  "rusqlite",
  "schemars",

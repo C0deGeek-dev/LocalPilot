@@ -439,7 +439,7 @@ pub fn status(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn provider_for(
+pub(crate) fn provider_for(
     root: &Path,
     provider_id: Option<&str>,
 ) -> anyhow::Result<std::sync::Arc<dyn localpilot_llm::ModelProvider>> {

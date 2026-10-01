@@ -1131,6 +1131,42 @@ enum LabCommand {
         #[arg(long, default_value_t = 900)]
         timeout_secs: u64,
     },
+    /// Uplift tasks for a lesson: a model drafts them, a person approves them.
+    /// Nothing runs from a draft.
+    Tasks {
+        #[command(subcommand)]
+        command: LabTasksCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LabTasksCommand {
+    /// Have the configured model draft tasks for a lesson. Sends the lesson
+    /// and its hindsight to the project's configured provider.
+    Draft {
+        /// The lesson's candidate identity, or an unambiguous prefix of it.
+        candidate: String,
+        /// Model name to request.
+        #[arg(long)]
+        model: String,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Show a lesson's draft and its approved task set.
+    Show {
+        /// The lesson's candidate identity, or an unambiguous prefix of it.
+        candidate: String,
+    },
+    /// Approve the draft as it now stands on disk, freezing it as the
+    /// lesson's uplift assignment.
+    Approve {
+        /// The lesson's candidate identity, or an unambiguous prefix of it.
+        candidate: String,
+        /// Who is approving. Recorded with the assignment.
+        #[arg(long)]
+        reviewer: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2559,6 +2595,30 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             let mut stdout = io::stdout().lock();
             match command {
                 LabCommand::List => lab_cmd::list(&root, &mut stdout)?,
+                LabCommand::Tasks { command } => match command {
+                    LabTasksCommand::Draft {
+                        candidate,
+                        model,
+                        provider,
+                    } => {
+                        let provider = harness_cmd::provider_for(&root, provider.as_deref())?;
+                        lab_cmd::tasks_draft(
+                            &root,
+                            &candidate,
+                            &model,
+                            provider.as_ref(),
+                            &mut stdout,
+                        )
+                        .await?;
+                    }
+                    LabTasksCommand::Show { candidate } => {
+                        lab_cmd::tasks_show(&root, &candidate, &mut stdout)?;
+                    }
+                    LabTasksCommand::Approve {
+                        candidate,
+                        reviewer,
+                    } => lab_cmd::tasks_approve(&root, &candidate, &reviewer, &mut stdout)?,
+                },
                 LabCommand::Replay {
                     candidate,
                     yes,

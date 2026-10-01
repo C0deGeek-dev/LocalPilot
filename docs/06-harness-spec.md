@@ -1414,6 +1414,25 @@ replay`, and only in a project whose committed `.localpilot.toml` sets
 | `Invalid` | it does not discriminate; the check, its tests or the fixture changed; the run edited a test file |
 | `InvalidExperiment` | denied, timed out, cancelled, could not start, left something running, could not be cleaned up — never a finding about the lesson |
 
+Whether a lesson *helps* needs a comparison with a real actor (ADR-0200), and its
+questions have to be written.
+- **Tasks.** `localpilot lab tasks draft <lesson> --model <m>` has the configured
+  model draft them from the lesson and its hindsight. `lab tasks show` prints the
+  draft, and `lab tasks approve <lesson> --reviewer <name>` freezes it — edits
+  included — as the lesson's uplift assignment. A draft runs nothing.
+- **The run.** LocalBench runs the lesson-off/on comparison. LocalPilot stages
+  each arm in a throwaway workspace: a clean store with learning off, then the
+  lesson seeded alone with learning on.
+- **The receipt.** It is accepted only if every identity in it is the one that
+  was asked for.
+
+| Result | When |
+|---|---|
+| `Supported` / `Contradicted` / `Inconclusive` | the lesson arm did better, worse, or within noise — with the lesson shown to have reached it and nothing else |
+| `InvalidExperiment` | an arm was mis-staged or contaminated, the lesson was not observed, the pair is incomplete, or the receipt is not this run's |
+
+No command starts an uplift run yet.
+
 ## Completion Teardown Sweep
 
 At the same completion seam, when `[harness] teardown_sweep` is enabled, the
