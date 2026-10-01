@@ -476,3 +476,12 @@ cargo machete
 ```
 
 These are blocking before public release and run in CI's supply-chain job.
+
+### Context metadata and budget parity
+
+`cargo test -p localpilot-llm context_` exercises mock-server props/listing
+precedence, model routing without autoload, authentication, per-slot capacity,
+invalid/training-only metadata, timeout and redirect refusal.
+`cargo test -p localpilot --bin localpilot context_` checks caps, output reserves,
+concurrent cache reuse, failed/disabled probes, and actual headless and synchronous
+server/worker runtime budgets. These checks make no live model calls.

@@ -262,15 +262,48 @@ pub async fn build_runtime_with_store(
     .cloned()
     .ok_or_else(|| anyhow::anyhow!("no provider is configured"))?;
 
-    let context_token_limit = localpilot_harness::effective_context_limit(
+    build_runtime_with_provider(
+        cwd,
+        model,
+        profile,
+        trusted,
+        store,
+        start_mcp_servers,
+        &config,
+        provider,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)] // explicit session inputs, with config/provider injectable
+async fn build_runtime_with_provider(
+    cwd: &std::path::Path,
+    model: &str,
+    profile: Profile,
+    trusted: bool,
+    store: Store,
+    start_mcp_servers: bool,
+    config: &localpilot_config::Config,
+    provider: std::sync::Arc<dyn localpilot_llm::ModelProvider>,
+) -> anyhow::Result<SessionRuntime> {
+    let resolution = crate::context_window::resolve(
+        config,
+        &provider.declaration().id,
+        model,
         provider.declaration().max_context_tokens,
+    )
+    .await;
+    if let Some(warning) = resolution.warning_once() {
+        eprintln!("{warning}");
+    }
+    let context_token_limit = resolution.window.budget(
         config.harness.context_token_limit,
         provider.declaration().max_output_tokens,
     );
     let mcp = if start_mcp_servers {
-        crate::mcp::McpTools::load(&config).await
+        crate::mcp::McpTools::load(config).await
     } else {
-        crate::mcp::McpTools::without_servers(&config)
+        crate::mcp::McpTools::without_servers(config)
     };
     let mut registry = mcp.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
@@ -281,10 +314,10 @@ pub async fn build_runtime_with_store(
     let mut runtime = SessionRuntime::new(
         provider,
         registry,
-        PermissionEngine::new(profile, Vec::new()).with_allowed_commands(allowed_commands(&config)),
+        PermissionEngine::new(profile, Vec::new()).with_allowed_commands(allowed_commands(config)),
         Box::new(ScriptedApprover::new(Vec::new())),
         store,
-        workspace_with_read_roots(cwd, &config)?,
+        workspace_with_read_roots(cwd, config)?,
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             model: model.to_string(),
@@ -310,6 +343,11 @@ pub async fn build_runtime_with_store(
             ..SessionConfig::default()
         },
         Vec::new(),
+    );
+    tracing::debug!(
+        context_budget = runtime.context_usage().1,
+        context_source = resolution.window.source.as_str(),
+        "headless context resolved"
     );
     runtime.set_broker(broker);
     if let Some(agents) = crate::agents_cmd::session_agents(cwd) {
@@ -685,6 +723,55 @@ async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn context_headless_runtime_uses_server_window_instead_of_default_budget() {
+        use localpilot_llm::{FakeProvider, ModelProvider};
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/props"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "default_generation_settings":{"n_ctx":262144}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = format!("{}/v1", server.uri());
+        let config = crate::context_window::tests::config_for(&base, None);
+        crate::context_window::resolve_with_probe(
+            &config,
+            "context-test",
+            "model",
+            None,
+            localpilot_llm::probe_context_window(&base, "model", None, true),
+        )
+        .await;
+        let mut declaration = FakeProvider::new().declaration().clone();
+        declaration.id = "context-test".to_owned();
+        declaration.max_context_tokens = None;
+        declaration.max_output_tokens = Some(4096);
+        let provider = std::sync::Arc::new(FakeProvider::new().with_declaration(declaration));
+        let cwd = tempfile::tempdir().unwrap();
+        let runtime = build_runtime_with_provider(
+            cwd.path(),
+            "model",
+            Profile::Default,
+            true,
+            Store::ephemeral(),
+            false,
+            &config,
+            provider,
+        )
+        .await
+        .unwrap();
+        assert_eq!(runtime.context_usage().1, 262_144 - 4096);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
 
     #[test]
     fn failing_tool_events_map_to_bounded_stderr_lines() {

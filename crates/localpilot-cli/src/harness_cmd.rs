@@ -1086,6 +1086,16 @@ where
         let rails = config
             .harness
             .resolved_rails(matches!(run.interactivity, Interactivity::Interactive));
+        let resolution = crate::context_window::resolve(
+            &config,
+            &provider.declaration().id,
+            model,
+            provider.declaration().max_context_tokens,
+        )
+        .await;
+        if let Some(warning) = resolution.warning_once() {
+            writeln!(out, "{warning}")?;
+        }
         let mut runtime = build_runtime(
             root,
             Arc::clone(&provider),
@@ -1094,8 +1104,7 @@ where
             run.trusted,
             model,
             &mcp,
-            localpilot_harness::effective_context_limit(
-                provider.declaration().max_context_tokens,
+            resolution.window.budget(
                 config.harness.context_token_limit,
                 provider.declaration().max_output_tokens,
             ),

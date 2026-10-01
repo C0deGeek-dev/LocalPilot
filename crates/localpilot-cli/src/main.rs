@@ -12,6 +12,7 @@ use localpilot_store::Store;
 mod agents_cmd;
 mod bypass;
 mod context_inject;
+mod context_window;
 mod credential_cmd;
 mod curate_cmd;
 mod doctor;

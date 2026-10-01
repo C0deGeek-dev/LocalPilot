@@ -1,4 +1,7 @@
 #[allow(dead_code)]
+#[path = "../src/context_window.rs"]
+mod context_window;
+#[allow(dead_code)]
 #[path = "../src/doctor.rs"]
 mod doctor;
 
@@ -43,6 +46,9 @@ fn doctor_does_not_print_secret_values() {
         model: None,
         context_window: None,
         supports_vision: None,
+        resolved_context_window: None,
+        context_window_source: None,
+        context_warning: None,
     }];
 
     let rendered = doctor::render(&report);
@@ -64,6 +70,9 @@ fn doctor_renders_google_adc_source_without_file_contents() {
         model: Some("google/gemini-3.5-flash".to_string()),
         context_window: None,
         supports_vision: None,
+        resolved_context_window: None,
+        context_window_source: None,
+        context_warning: None,
     }];
 
     let rendered = doctor::render(&report);
@@ -171,6 +180,9 @@ fn report() -> DoctorReport {
                 model: None,
                 context_window: None,
                 supports_vision: None,
+                resolved_context_window: None,
+                context_window_source: None,
+                context_warning: None,
             },
             ProviderStatus {
                 name: "openai".to_string(),
@@ -181,6 +193,9 @@ fn report() -> DoctorReport {
                 model: None,
                 context_window: None,
                 supports_vision: None,
+                resolved_context_window: None,
+                context_window_source: None,
+                context_warning: None,
             },
             ProviderStatus {
                 name: "anthropic".to_string(),
@@ -191,6 +206,9 @@ fn report() -> DoctorReport {
                 model: None,
                 context_window: None,
                 supports_vision: None,
+                resolved_context_window: None,
+                context_window_source: None,
+                context_warning: None,
             },
         ],
         tools: vec![

@@ -47,6 +47,11 @@ enum Status {
 struct ModelEntry {
     id: String,
     context_window: Option<u64>,
+    context_window_source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_warning: Option<String>,
     /// Whether this is the provider's configured default model.
     configured: bool,
 }
@@ -164,14 +169,24 @@ pub async fn run(
                 results.push(provider_blocked(id, entry, &base_url, Status::NoModels));
             }
             Ok(models) => {
-                let listed = models
-                    .into_iter()
-                    .map(|model| ModelEntry {
+                let mut listed = Vec::new();
+                for model in models {
+                    let resolution = crate::context_window::resolve(
+                        &config,
+                        id,
+                        &model.id,
+                        entry.context_window,
+                    )
+                    .await;
+                    listed.push(ModelEntry {
                         configured: entry_default == Some(model.id.as_str()),
                         id: model.id,
-                        context_window: model.context_window,
-                    })
-                    .collect();
+                        context_window: Some(resolution.window.tokens),
+                        context_window_source: resolution.window.source.as_str(),
+                        server_context_window: resolution.window.server.map(|server| server.tokens),
+                        context_warning: resolution.warning_once(),
+                    });
+                }
                 // The server is reachable, so resolve its vision capability:
                 // config wins, else a best-effort read-only probe, else default off.
                 let probe = if config.discovery.vision_probe {
@@ -319,8 +334,15 @@ fn render_human(out: &mut dyn std::io::Write, results: &[ProviderModels]) -> any
                 for model in &r.models {
                     let marker = if model.configured { "  * " } else { "    " };
                     match model.context_window {
-                        Some(window) => writeln!(out, "{marker}{} (context {window})", model.id)?,
+                        Some(window) => writeln!(
+                            out,
+                            "{marker}{} (context {window}; {})",
+                            model.id, model.context_window_source
+                        )?,
                         None => writeln!(out, "{marker}{}", model.id)?,
+                    }
+                    if let Some(warning) = &model.context_warning {
+                        writeln!(out, "      {warning}")?;
                     }
                 }
             }
@@ -374,30 +396,7 @@ fn render_human(out: &mut dyn std::io::Write, results: &[ProviderModels]) -> any
 /// listing, or `None` for protocol shapes without one. Shared with the `/model`
 /// picker so both list models through the one discovery path.
 pub(crate) fn listing_base_url(entry: &ProviderConfig) -> Option<String> {
-    match entry.kind.as_str() {
-        "openai" => Some(
-            entry
-                .base_url
-                .clone()
-                .or_else(|| env_non_empty("OPENAI_BASE_URL"))
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
-        ),
-        "openai-compatible" | "local" | "custom" | "custom-user-endpoint" => entry
-            .base_url
-            .clone()
-            .or_else(|| env_non_empty("OPENAI_BASE_URL")),
-        "google-vertex-openai" => entry.base_url.clone().or_else(|| {
-            let project = entry.google_project.as_deref()?.trim();
-            let location = entry.google_location.as_deref()?.trim();
-            if project.is_empty() || location.is_empty() {
-                return None;
-            }
-            Some(format!(
-                "https://aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/endpoints/openapi"
-            ))
-        }),
-        _ => None,
-    }
+    localpilot_llm::model_listing_base_url(entry)
 }
 
 pub(crate) async fn discover_models_for_provider(
@@ -436,12 +435,6 @@ pub(crate) fn confirm(question: &str) -> anyhow::Result<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
-fn env_non_empty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +448,9 @@ mod tests {
             models: vec![ModelEntry {
                 id: configured.to_string(),
                 context_window: Some(131_072),
+                context_window_source: "model_listing",
+                server_context_window: Some(131_072),
+                context_warning: None,
                 configured: true,
             }],
             supports_vision: None,
@@ -481,6 +477,12 @@ mod tests {
         assert_eq!(parsed[0]["status"], "ok");
         assert_eq!(parsed[0]["models"][0]["id"], "q3635ba3bapex");
         assert_eq!(parsed[0]["models"][0]["configured"], true);
+        assert_eq!(parsed[0]["models"][0]["context_window"], 131_072);
+        assert_eq!(
+            parsed[0]["models"][0]["context_window_source"],
+            "model_listing"
+        );
+        assert_eq!(parsed[0]["models"][0]["server_context_window"], 131_072);
     }
 
     #[test]

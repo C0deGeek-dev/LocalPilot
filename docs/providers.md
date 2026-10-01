@@ -292,10 +292,16 @@ fields. The switch itself is never forwarded as a raw API field.
 
 `localpilot models` queries each configured OpenAI-compatible server's public
 `GET /models` listing and prints what is actually loaded, with the context
-window where the server reports one. The request is a network effect and
-passes the permission engine like any other. In the interactive REPL the same
-listing is consulted at startup (best-effort, silent on failure) to derive the
-session budget when no `context_window` is configured.
+window and its source. The listing is a network effect and passes the permission
+engine like any other. All session hosts also consult bounded, cached context
+metadata at startup: model-routed `/props` per-slot `n_ctx`, then the exact model
+listing's `meta.n_ctx` or legacy context fields. Training windows are ignored.
+The configured `context_window` caps the served window and remains the fallback
+if metadata is unavailable. Without either signal, the existing harness budget
+is retained. Cap mismatches produce one warning per process resolution.
+`localpilot doctor` reports the same window and provenance; mesh ENGINE startup
+prints them too. Set `[discovery] context_probe = false` to disable these context
+requests independently of vision probing. See ADR-0194.
 
 For agent use, `localpilot models` is non-interactive-safe: it takes
 `--format human|json` (`--json`; JSON by default off a terminal) and a `--yes`

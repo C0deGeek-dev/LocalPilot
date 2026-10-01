@@ -108,6 +108,37 @@ impl ProviderRegistry {
     }
 }
 
+/// The public model-listing URL for a configured provider, when its protocol
+/// exposes one. Uses the same configured/environment/default endpoint choices
+/// as provider construction; Anthropic has no compatible listing.
+#[must_use]
+pub fn model_listing_base_url(entry: &ProviderConfig) -> Option<String> {
+    match entry.kind.as_str() {
+        "openai" => Some(
+            entry
+                .base_url
+                .clone()
+                .or_else(|| env_non_empty("OPENAI_BASE_URL"))
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+        ),
+        "openai-compatible" | "local" | "custom" | "custom-user-endpoint" => entry
+            .base_url
+            .clone()
+            .or_else(|| env_non_empty("OPENAI_BASE_URL")),
+        "google-vertex-openai" => entry.base_url.clone().or_else(|| {
+            let project = entry.google_project.as_deref()?.trim();
+            let location = entry.google_location.as_deref()?.trim();
+            if project.is_empty() || location.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "https://aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/endpoints/openapi"
+            ))
+        }),
+        _ => None,
+    }
+}
+
 fn build_provider(
     id: &str,
     entry: &ProviderConfig,

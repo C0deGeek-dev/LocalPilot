@@ -2,6 +2,38 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0194: Shared Served Context Windows Across Session Hosts
+
+**Status:** Accepted
+
+**Context:** Interactive sessions discovered model metadata, while headless and
+server paths could silently retain a 24,000-token prompt budget. A configured
+window could exceed the actual served per-slot allocation. Training windows
+and aggregate slot capacity do not describe the served request limit.
+
+**Decision:** Use a shared process cache keyed by provider, endpoint, model and
+budget settings. Read model-routed llama.cpp `/props`
+`default_generation_settings.n_ctx` first with `autoload=false`; otherwise use
+the matching listing's positive `meta.n_ctx`, then legacy context fields. Never
+use `n_ctx_train` or multiply by slot count. Configured windows are caps and
+fallbacks; absent both signals, retain the existing harness prompt budget.
+Known windows retain the existing output reserve. Cache failed probes, bound
+the entire sequence to two seconds, and refuse credential-bearing redirects.
+`discovery.context_probe` disables this independently of vision probing. No
+unconfigured provider is contacted. Server setup resolves windows asynchronously
+before its synchronous session/worker factories. Doctor/models expose sources;
+mesh ENGINE startup prints its window and source. Warn once on cap mismatch.
+
+**Consequences:** Interactive, print/eval/mesh, harness resume and server sessions
+share resolution and reserve rules. Metadata failure stays silent. Allocation
+changes during a process become visible on its next start. Mock-server tests
+cover routing, precedence, invalid/training-only signals, timeouts, redirects,
+concurrent caching and actual headless/server/worker budgets.
+
+**References:** [llama.cpp server API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+(model routing and props), [vLLM model metadata](https://docs.vllm.ai/en/v0.20.1/api/vllm/entrypoints/openai/models/serving/)
+(legacy `max_model_len`).
+
 ## ADR-0193: Linux Test Steps Cover Every Workspace Package
 
 **Status:** Accepted

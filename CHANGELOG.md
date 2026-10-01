@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Served context windows on every session path.** Interactive, headless,
+  harness and server sessions share cached, bounded metadata discovery. Configured
+  windows cap the served per-slot window; unavailable metadata preserves the
+  configured/default budget. Doctor/models and mesh startup show the source.
+  Set `discovery.context_probe = false` to disable context discovery.
+
 - **Complete Linux workspace test coverage.** Every workspace package now has
   a named gating test step; an offline metadata guard catches future omissions.
 

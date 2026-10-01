@@ -60,6 +60,19 @@ async fn server() -> MockServer {
     MockServer::start().await
 }
 
+/// Metadata discovery is independent of the model-turn transcript.
+async fn chat_requests(server: &MockServer) -> Vec<MockRequest> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| {
+            request.method.as_str() == "POST" && request.url.path() == "/chat/completions"
+        })
+        .collect()
+}
+
 impl Fixture {
     /// A Git repository with a committed `a.txt`, a schema-2 session that
     /// the reference started as claude with localpilot, and a user config
@@ -335,6 +348,14 @@ const AGREE: &str = r#"Looks right. {"kind": "VERDICT", "decision": "AGREE", "fi
 #[tokio::test]
 async fn a_review_request_gets_a_verdict_with_the_engines_header_and_is_acknowledged() {
     let server = server().await;
+    Mock::given(method("GET"))
+        .and(path("/props"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "default_generation_settings": {"n_ctx": 262144}
+        })))
+        .expect(2) // This test starts two separate engine processes.
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(sse(&[
@@ -352,6 +373,22 @@ async fn a_review_request_gets_a_verdict_with_the_engines_header_and_is_acknowle
 
     let out = f.run(&[]).await;
     assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("context_window=262144 context_source=server_props"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/props")
+            .count(),
+        1,
+        "startup and runtime construction must share one process cache"
+    );
     let verdicts = f.posted("VERDICT");
     assert_eq!(verdicts.len(), 1, "{}", text(&out));
     assert_eq!(verdicts[0]["reply_to"], asked.as_str());
@@ -466,7 +503,7 @@ async fn the_judging_model_cannot_write_the_tree() {
     assert_eq!(f.status(), " M a.txt\n");
     assert_eq!(f.posted("VERDICT").len(), 1);
     // The write was really attempted, and the model was told it was denied.
-    let requests = server.received_requests().await.unwrap();
+    let requests = chat_requests(&server).await;
     assert_eq!(requests.len(), 2, "one tool call, then the answer");
     let second = String::from_utf8_lossy(&requests[1].body).into_owned();
     assert!(
@@ -758,7 +795,7 @@ async fn a_command_the_user_vetted_still_cannot_run_in_a_review_turn() {
         std::fs::read_to_string(f.anchor.join("a.txt")).unwrap(),
         "beta\n"
     );
-    let requests = server.received_requests().await.unwrap();
+    let requests = chat_requests(&server).await;
     assert_eq!(requests.len(), 2, "one tool call, then the answer");
     let second = String::from_utf8_lossy(&requests[1].body).into_owned();
     assert!(
@@ -882,7 +919,7 @@ async fn a_revise_verdict_gets_a_second_round_with_its_findings() {
         "beta, fixed\n"
     );
     // The model was shown the findings.
-    let requests = server.received_requests().await.unwrap();
+    let requests = chat_requests(&server).await;
     let last = String::from_utf8_lossy(&requests.last().unwrap().body).into_owned();
     assert!(last.contains("say fixed"), "{last}");
 }
@@ -911,7 +948,7 @@ async fn an_owner_that_changes_nothing_escalates_after_one_retry() {
         esc[0]["body"]
     );
     // The model saw why its first answer was refused.
-    let requests = server.received_requests().await.unwrap();
+    let requests = chat_requests(&server).await;
     let second = String::from_utf8_lossy(&requests[1].body).into_owned();
     assert!(second.contains("nothing changed in the unit"), "{second}");
 }
@@ -1004,7 +1041,7 @@ async fn an_owner_that_loses_the_tree_mid_turn_writes_nothing_more_and_posts_not
         "a write landed after the lease was lost"
     );
     assert!(f.posted("REVIEW_REQUEST").is_empty(), "{}", text(&out));
-    let requests = server.received_requests().await.unwrap();
+    let requests = chat_requests(&server).await;
     let second = String::from_utf8_lossy(&requests[1].body).into_owned();
     assert!(
         second.contains("does not let this participant write"),

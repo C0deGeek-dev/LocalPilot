@@ -14,10 +14,12 @@ mod registry;
 mod vision;
 
 pub use discovery::{
-    discover_models, discover_models_with_auth_provider, probe_vision, DiscoveredModel,
+    discover_models, discover_models_with_auth_provider, probe_context_window,
+    probe_context_window_with_auth_provider, probe_vision, ContextWindowSource, DiscoveredModel,
+    ServerContextWindow,
 };
 pub use fake::FakeProvider;
-pub use registry::{discovery_auth_provider_from_config, ProviderRegistry};
+pub use registry::{discovery_auth_provider_from_config, model_listing_base_url, ProviderRegistry};
 pub use vision::{resolve_vision, resolve_vision_with_source, VisionSource};
 
 pub use localpilot_llm_anthropic::AnthropicProvider;

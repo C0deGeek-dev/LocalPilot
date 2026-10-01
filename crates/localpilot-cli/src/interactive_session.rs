@@ -502,15 +502,23 @@ impl InteractiveSessionSetup {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("provider '{provider_id}' is not configured"))?;
 
-        // The real context window: per-provider declaration first, then
-        // best-effort discovery. Failure falls back to the configured budget.
-        let mut context_window = provider.declaration().max_context_tokens;
+        let resolution = crate::context_window::resolve(
+            &self.config,
+            provider_id,
+            model,
+            provider.declaration().max_context_tokens,
+        )
+        .await;
+        let context_window = resolution.window.known_window();
+        if let Some(warning) = resolution.warning_once() {
+            // Startup builds precede the host acquiring the terminal, so this
+            // remains visible even when TUI tracing is routed only to a file.
+            eprintln!("{warning}");
+            tracing::warn!(provider = provider_id, model, "{warning}");
+        }
         // The output cap the request will reserve, captured before `provider` is
         // moved into the runtime, so the session budget subtracts it.
         let max_output = provider.declaration().max_output_tokens;
-        if context_window.is_none() {
-            context_window = discovered_window(&self.config, provider_id, model).await;
-        }
 
         let (approval_tx, approvals) = mpsc::unbounded_channel::<ApprovalCall>();
         let (question_tx, questions) = mpsc::unbounded_channel::<QuestionCall>();
@@ -837,21 +845,6 @@ pub(crate) async fn resolved_image_support(
         None
     };
     Some(localpilot_llm::resolve_vision(declared, probed))
-}
-
-async fn discovered_window(config: &Config, provider_id: &str, model: &str) -> Option<u64> {
-    let entry = config.providers.get(provider_id)?;
-    if entry.kind == "anthropic" {
-        return None;
-    }
-    let base_url = crate::models_cmd::listing_base_url(entry)?;
-    let models = crate::models_cmd::discover_models_for_provider(config, provider_id, &base_url)
-        .await
-        .ok()?;
-    models
-        .into_iter()
-        .find(|candidate| candidate.id == model)
-        .and_then(|candidate| candidate.context_window)
 }
 
 fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harness::CompactionMode {

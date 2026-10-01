@@ -133,7 +133,22 @@ pub(crate) async fn run(args: MeshArgs) -> ExitCode {
         model: cli.model.clone(),
         provider: cli.provider.clone(),
     };
-    match engine(&mesh, &cli, &mut judge).await {
+    let config = match localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(&anchor),
+        &localpilot_config::CliOverrides::default(),
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
+    };
+    let provider_id = cli.provider.as_deref().unwrap_or(&config.provider.default);
+    let resolution = crate::context_window::resolve(&config, provider_id, &cli.model, None).await;
+    if let Some(warning) = resolution.warning_once() {
+        eprintln!("{warning}");
+    }
+    match engine(&mesh, &cli, &mut judge, resolution.window).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Refused(msg)) => {
             eprintln!("{msg} [anchor={}]", anchor.display());
@@ -160,7 +175,12 @@ impl From<MeshError> for Failure {
     }
 }
 
-async fn engine(mesh: &Mesh, cli: &RunCli, judge: &mut dyn Judge) -> Result<(), Failure> {
+async fn engine(
+    mesh: &Mesh,
+    cli: &RunCli,
+    judge: &mut dyn Judge,
+    window: crate::context_window::Window,
+) -> Result<(), Failure> {
     let poll = cli.poll();
     let joined = {
         let (mesh, role, timeout) = (mesh.clone(), cli.role.clone(), cli.timeout);
@@ -180,7 +200,12 @@ async fn engine(mesh: &Mesh, cli: &RunCli, judge: &mut dyn Judge) -> Result<(), 
     if cli.own {
         mesh.owner_supported(&cli.role)?;
     }
-    println!("ENGINE role={} session={sid}", cli.role);
+    println!(
+        "ENGINE role={} session={sid} context_window={} context_source={}",
+        cli.role,
+        window.tokens,
+        window.source.as_str()
+    );
     let wake = std::sync::Arc::new(tokio::sync::Notify::new());
     let listening = if cli.listen {
         match crate::mesh_listen::Listening::start(mesh, &cli.role, &sid, wake.clone()).await {

@@ -21,6 +21,7 @@ fuzzing = [
 async-trait = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
+tokio = { workspace = true }
 serde_json = { workspace = true }
 localpilot-config = { path = "../localpilot-config" }
 localpilot-core = { path = "../localpilot-core" }

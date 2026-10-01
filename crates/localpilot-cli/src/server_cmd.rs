@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 use localpilot_config::{CliOverrides, ConfigPaths};
 use localpilot_core::SessionId;
 use localpilot_harness::{
-    effective_context_limit, register_project_analysis_context,
-    register_project_instructions_context, SessionConfig, SessionRuntime, SummarizerTuning,
+    register_project_analysis_context, register_project_instructions_context, SessionConfig,
+    SessionRuntime, SummarizerTuning,
 };
 use localpilot_llm::{ModelProvider, ProviderRegistry};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -72,6 +72,8 @@ pub(crate) struct SessionSetup {
     /// setup; each [`build`](Self::build) projects a fresh registry from it.
     mcp: crate::mcp::McpTools,
     agents: Option<Arc<localpilot_agents::AgentSet>>,
+    /// Resolved at asynchronous setup, consumed by the synchronous factories.
+    context_windows: HashMap<(String, String), crate::context_window::Window>,
 }
 
 /// A freshly built session plus the wire approver's serve-loop halves. The
@@ -113,6 +115,34 @@ impl SessionSetup {
         }
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("no provider is configured"))?;
+        let mut selections = HashMap::new();
+        for id in registry.ids() {
+            if let (Some(model), Some(provider)) = (registry.default_model(&id), registry.get(&id))
+            {
+                selections.insert(
+                    (id, model.to_owned()),
+                    provider.declaration().max_context_tokens,
+                );
+            }
+        }
+        selections.insert(
+            (provider.declaration().id.clone(), model.clone()),
+            provider.declaration().max_context_tokens,
+        );
+        let resolutions =
+            futures::future::join_all(selections.into_iter().map(|((id, model), declared)| {
+                let config = &config;
+                async move {
+                    let resolution =
+                        crate::context_window::resolve(config, &id, &model, declared).await;
+                    if let Some(warning) = resolution.warning_once() {
+                        eprintln!("{warning}");
+                    }
+                    ((id, model), resolution.window)
+                }
+            }))
+            .await;
+        let context_windows = resolutions.into_iter().collect();
         let mcp = crate::mcp::McpTools::load(&config).await;
         let agents = crate::agents_cmd::session_agents(&cwd);
         Ok(Self {
@@ -123,6 +153,7 @@ impl SessionSetup {
             profile,
             mcp,
             agents,
+            context_windows,
         })
     }
 
@@ -143,6 +174,7 @@ impl SessionSetup {
             profile: Profile::Bypass,
             mcp: crate::mcp::McpTools::default(),
             agents: None,
+            context_windows: HashMap::new(),
         }
     }
 
@@ -249,8 +281,18 @@ impl SessionSetup {
         approver: Box<dyn Approver>,
         interactivity: Interactivity,
     ) -> anyhow::Result<SessionRuntime> {
-        let context_token_limit = effective_context_limit(
-            provider.declaration().max_context_tokens,
+        let window = self
+            .context_windows
+            .get(&(provider.declaration().id.clone(), model.to_owned()))
+            .copied()
+            .unwrap_or_else(|| {
+                crate::context_window::Window::from_signals(
+                    None,
+                    provider.declaration().max_context_tokens,
+                    self.config.harness.context_token_limit,
+                )
+            });
+        let context_token_limit = window.budget(
             self.config.harness.context_token_limit,
             provider.declaration().max_output_tokens,
         );
@@ -1297,6 +1339,51 @@ mod tests {
     /// hang the test turns into a failure.
     const DEADLINE: Duration = Duration::from_secs(15);
 
+    #[tokio::test]
+    async fn context_server_and_worker_factories_use_the_pre_resolved_window() {
+        let mut declaration = FakeProvider::new().declaration().clone();
+        declaration.id = "context-test".to_owned();
+        declaration.max_context_tokens = Some(131_072);
+        declaration.max_output_tokens = Some(4096);
+        let provider: Arc<dyn ModelProvider> =
+            Arc::new(FakeProvider::new().with_declaration(declaration));
+        let cwd = tempfile::tempdir().unwrap();
+        let mut setup = SessionSetup::for_test(provider.clone(), "model", cwd.path().to_owned());
+        setup.config = crate::context_window::tests::config_for(
+            "http://context-server-test.invalid/v1",
+            Some(131_072),
+        );
+        let resolution = crate::context_window::resolve_with_probe(
+            &setup.config,
+            "context-test",
+            "model",
+            Some(131_072),
+            async {
+                Some(localpilot_llm::ServerContextWindow {
+                    tokens: 32768,
+                    source: localpilot_llm::ContextWindowSource::ServerProps,
+                })
+            },
+        )
+        .await;
+        setup.context_windows.insert(
+            ("context-test".to_owned(), "model".to_owned()),
+            resolution.window,
+        );
+        assert_eq!(
+            setup.build().unwrap().runtime.context_usage().1,
+            32768 - 4096
+        );
+        assert_eq!(
+            setup
+                .build_worker(&provider, "model")
+                .unwrap()
+                .context_usage()
+                .1,
+            32768 - 4096
+        );
+    }
+
     /// Builds `SessionRuntime`s over one shared temp-dir store and provider —
     /// mirrors the server crate's own test factory — with no wire approver (a
     /// bypass session never asks), so `take_asks` is `None`.
@@ -1709,6 +1796,7 @@ mod tests {
             profile: Profile::Bypass,
             mcp: crate::mcp::McpTools::default(),
             agents: None,
+            context_windows: HashMap::new(),
         };
 
         // The one provider stack the setup captured, before any session is built.
@@ -1923,6 +2011,7 @@ mod tests {
             profile: Profile::Bypass,
             mcp: crate::mcp::McpTools::default(),
             agents: None,
+            context_windows: HashMap::new(),
         };
 
         let routes = setup.provider_routes();

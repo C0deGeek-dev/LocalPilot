@@ -351,3 +351,15 @@ google_adc / google_adc_file / none).
 Bring-your-own-key only — no subscription-credential or "sign in with
 Claude/ChatGPT" path (ADR-0042). See
 [providers.md](providers.md) §Storing credentials.
+
+### Served context metadata
+
+All session hosts resolve the selected provider/model through one cached seam
+(ADR-0194). Model-routed `/props` per-slot `default_generation_settings.n_ctx`
+takes precedence over the exact model listing's positive `meta.n_ctx`, then
+legacy context fields. Training context and aggregate slot capacity are ignored.
+Configured windows are caps and fallbacks; the existing harness prompt budget
+remains the final fallback. Known windows preserve the provider output reserve.
+Metadata has one two-second deadline, refuses redirects, and caches failures.
+Disable independently through `discovery.context_probe`. Diagnostics expose
+`server_props`, `model_listing`, `config` or `default` provenance.

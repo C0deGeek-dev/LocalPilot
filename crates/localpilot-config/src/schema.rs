@@ -164,6 +164,9 @@ impl TimelineDensity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiscoveryConfig {
+    /// Read-only context metadata from configured provider endpoints at startup
+    /// and in diagnostics. Set false to use only configuration/fallback budgets.
+    pub context_probe: bool,
     /// Whether to probe a local server's read-only `/props` endpoint for vision
     /// (multimodal projector) support, so an undeclared but vision-capable server
     /// resolves its capability without a hand edit. Default `true`: the probe is
@@ -175,7 +178,10 @@ pub struct DiscoveryConfig {
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
-        Self { vision_probe: true }
+        Self {
+            context_probe: true,
+            vision_probe: true,
+        }
     }
 }
 

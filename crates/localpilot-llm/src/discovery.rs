@@ -33,6 +33,140 @@ pub struct DiscoveredModel {
 /// metadata, not inference.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The metadata endpoint that reported a served window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContextWindowSource {
+    ServerProps,
+    ModelListing,
+}
+
+impl ContextWindowSource {
+    /// A stable diagnostic label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ServerProps => "server_props",
+            Self::ModelListing => "model_listing",
+        }
+    }
+}
+
+/// Positive context capacity reported by the selected model's server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerContextWindow {
+    pub tokens: u64,
+    pub source: ContextWindowSource,
+}
+
+/// Probe a server's served context window without running inference.
+///
+/// For a user-run compatible server, `probe_props` enables the documented
+/// llama.cpp `/props` endpoint before the matching `/models` entry. Router GETs
+/// name the model and disable autoload. Official APIs use only their listing.
+/// Both requests together have a two-second ceiling and never follow redirects.
+/// Missing, malformed or unreachable metadata returns `None`; training context
+/// is not a served window.
+pub async fn probe_context_window(
+    base_url: &str,
+    model: &str,
+    api_key: Option<&Secret>,
+    probe_props: bool,
+) -> Option<ServerContextWindow> {
+    probe_context_with_auth(
+        base_url,
+        model,
+        DiscoveryAuth::from_api_key(api_key),
+        probe_props,
+        Duration::from_secs(2),
+    )
+    .await
+}
+
+/// [`probe_context_window`] using a dynamic bearer-token provider. Token
+/// acquisition shares the probe's timeout; failures retain the normal fallback.
+pub async fn probe_context_window_with_auth_provider(
+    base_url: &str,
+    model: &str,
+    auth_provider: &dyn AuthProvider,
+    probe_props: bool,
+) -> Option<ServerContextWindow> {
+    probe_context_with_auth(
+        base_url,
+        model,
+        DiscoveryAuth::Dynamic(auth_provider),
+        probe_props,
+        Duration::from_secs(2),
+    )
+    .await
+}
+
+async fn probe_context_with_auth(
+    base_url: &str,
+    model: &str,
+    auth: DiscoveryAuth<'_>,
+    probe_props: bool,
+    timeout: Duration,
+) -> Option<ServerContextWindow> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+    tokio::time::timeout(timeout, async {
+        if probe_props {
+            let request = client
+                .get(format!("{}/props", server_root(base_url)))
+                .query(&[("model", model), ("autoload", "false")]);
+            if let Some(body) = probe_json(request, &auth).await {
+                if let Some(tokens) = positive_tokens(&body["default_generation_settings"]["n_ctx"])
+                {
+                    return Some(ServerContextWindow {
+                        tokens,
+                        source: ContextWindowSource::ServerProps,
+                    });
+                }
+            }
+        }
+        let request = client.get(format!("{}/models", base_url.trim_end_matches('/')));
+        let body = probe_json(request, &auth).await?;
+        let entry = body["data"]
+            .as_array()?
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some(model))?;
+        context_window_of(entry).map(|tokens| ServerContextWindow {
+            tokens,
+            source: ContextWindowSource::ModelListing,
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn probe_json(
+    mut request: reqwest::RequestBuilder,
+    auth: &DiscoveryAuth<'_>,
+) -> Option<Value> {
+    match auth {
+        DiscoveryAuth::None => {}
+        DiscoveryAuth::ApiKey(key) => request = request.bearer_auth(key.expose()),
+        DiscoveryAuth::Dynamic(provider) => {
+            let token = provider.access_token().await.ok()?;
+            request = request.bearer_auth(token.expose());
+        }
+    }
+    let response = request.send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json().await.ok()
+}
+
+fn positive_tokens(value: &Value) -> Option<u64> {
+    value.as_u64().filter(|tokens| *tokens > 0)
+}
+
 /// List the models an OpenAI-compatible server reports.
 ///
 /// # Errors
@@ -168,13 +302,16 @@ fn server_root(base_url: &str) -> &str {
 /// Best-effort context length from the non-standard fields common servers
 /// attach to their model listings.
 fn context_window_of(entry: &Value) -> Option<u64> {
+    if let Some(value) = positive_tokens(&entry["meta"]["n_ctx"]) {
+        return Some(value);
+    }
     for key in [
         "context_length",
         "max_model_len",
         "max_context_length",
         "n_ctx",
     ] {
-        if let Some(value) = entry[key].as_u64() {
+        if let Some(value) = positive_tokens(&entry[key]) {
             return Some(value);
         }
     }
@@ -186,6 +323,125 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn context_props_are_model_routed_no_autoload_and_authoritative_per_slot() {
+        use wiremock::matchers::{header, query_param};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/props"))
+            .and(query_param("model", "model/a:Q4"))
+            .and(query_param("autoload", "false"))
+            .and(header("authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "default_generation_settings": {"n_ctx": 262144}, "total_slots": 4,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let secret = Secret::new("test-token");
+        let window = probe_context_window(
+            &format!("{}/v1/", server.uri()),
+            "model/a:Q4",
+            Some(&secret),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(window.tokens, 262_144);
+        assert_eq!(window.source, ContextWindowSource::ServerProps);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn context_listing_fallback_accepts_served_metadata_and_legacy_vllm_fields() {
+        for entry in [
+            serde_json::json!({"id":"selected", "meta":{"n_ctx":32768, "n_ctx_train":131072}, "context_length":65536}),
+            serde_json::json!({"id":"selected", "max_model_len":32768}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/props"))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/v1/models"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"data":[
+                        {"id":"other", "n_ctx":999999}, entry
+                    ]})),
+                )
+                .mount(&server)
+                .await;
+            let window =
+                probe_context_window(&format!("{}/v1", server.uri()), "selected", None, true)
+                    .await
+                    .unwrap();
+            assert_eq!(window.tokens, 32768);
+            assert_eq!(window.source, ContextWindowSource::ModelListing);
+        }
+    }
+
+    #[tokio::test]
+    async fn context_rejects_training_only_zero_negative_and_wrong_model_metadata() {
+        for entry in [
+            serde_json::json!({"id":"selected", "meta":{"n_ctx_train":131072}}),
+            serde_json::json!({"id":"selected", "meta":{"n_ctx":0}, "n_ctx":0}),
+            serde_json::json!({"id":"selected", "n_ctx":-1}),
+            serde_json::json!({"id":"other", "n_ctx":131072}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/models"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"data":[entry]})),
+                )
+                .mount(&server)
+                .await;
+            assert_eq!(
+                probe_context_window(&server.uri(), "selected", None, false).await,
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn context_probe_has_one_timeout_for_the_whole_sequence_and_refuses_redirects() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/props"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            probe_context_with_auth(
+                &server.uri(),
+                "selected",
+                DiscoveryAuth::None,
+                true,
+                Duration::from_millis(50)
+            )
+            .await,
+            None
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        let redirect = MockServer::start().await;
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/models", target.uri())),
+            )
+            .mount(&redirect)
+            .await;
+        assert_eq!(
+            probe_context_window(&redirect.uri(), "selected", None, false).await,
+            None
+        );
+        assert!(target.received_requests().await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn lists_models_with_best_effort_context_length() {

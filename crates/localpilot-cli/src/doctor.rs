@@ -332,6 +332,12 @@ pub struct ProviderStatus {
     pub model: Option<String>,
     /// The model's context window in tokens, when configured.
     pub context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_warning: Option<String>,
     /// The provider's declared vision (image-input) capability, when set in
     /// config. `doctor` reads config offline, so this is the *declared* value;
     /// the discovery probe (and the full config-or-probe resolution) surfaces in
@@ -646,6 +652,27 @@ fn research_docs() -> Option<ResearchDocsStatus> {
 pub async fn report_with_mcp() -> DoctorReport {
     let mut report = report();
     report.mcp_servers = mcp_servers().await;
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(config) =
+            localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())
+        {
+            for provider in &mut report.providers {
+                if let Some(model) = provider.model.as_deref() {
+                    let resolution = crate::context_window::resolve(
+                        &config,
+                        &provider.name,
+                        model,
+                        provider.context_window,
+                    )
+                    .await;
+                    provider.resolved_context_window = Some(resolution.window.tokens);
+                    provider.context_window_source =
+                        Some(resolution.window.source.as_str().to_owned());
+                    provider.context_warning = resolution.warning_once();
+                }
+            }
+        }
+    }
     report
 }
 
@@ -779,9 +806,14 @@ pub fn render(report: &DoctorReport) -> String {
         };
         let model = p.model.as_deref().unwrap_or("(none)");
         let window = p
-            .context_window
+            .resolved_context_window
+            .or(p.context_window)
             .map(|w| format!("{w} tokens"))
             .unwrap_or_else(|| "unknown".to_string());
+        let window = match &p.context_window_source {
+            Some(source) => format!("{window} ({source})"),
+            None => window,
+        };
         let base = p
             .base_url
             .as_deref()
@@ -799,6 +831,9 @@ pub fn render(report: &DoctorReport) -> String {
             "  {} ({}): credential {} [{source}]{base}; model {model}; context window {window}{vision}",
             p.name, p.kind, p.credential_env
         );
+        if let Some(warning) = &p.context_warning {
+            let _ = writeln!(s, "    {warning}");
+        }
     }
     let _ = writeln!(s);
 
@@ -1173,6 +1208,9 @@ fn providers() -> Vec<ProviderStatus> {
         model: None,
         context_window: None,
         supports_vision: None,
+        resolved_context_window: None,
+        context_window_source: None,
+        context_warning: None,
     })
     .collect()
 }
@@ -1222,6 +1260,9 @@ fn configured_providers() -> Option<Vec<ProviderStatus>> {
                     model: entry.model.clone(),
                     context_window: entry.context_window,
                     supports_vision: entry.supports_vision,
+                    resolved_context_window: None,
+                    context_window_source: None,
+                    context_warning: None,
                 }
             })
             .collect(),
@@ -1465,6 +1506,9 @@ mod tests {
                     model: None,
                     context_window: None,
                     supports_vision: Some(true),
+                    resolved_context_window: None,
+                    context_window_source: None,
+                    context_warning: None,
                 },
                 ProviderStatus {
                     name: "openai".to_string(),
@@ -1475,6 +1519,9 @@ mod tests {
                     model: None,
                     context_window: None,
                     supports_vision: None,
+                    resolved_context_window: None,
+                    context_window_source: None,
+                    context_warning: None,
                 },
             ],
             memory_root: Some("/work/.localmind".to_string()),
