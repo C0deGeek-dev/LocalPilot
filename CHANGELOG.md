@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Cross-platform tool dependency and Windows short paths.** The tools crate's
+  store dependency remains available on all platforms. Scratch command targets
+  accept literal embedded tildes in Windows short paths; leading shell home
+  expansion remains gated.
+
 - **Private session scratch and consistent path permissions.** Sessions own a
   unique temporary directory, report it to the model and shell children, and
   remove it on teardown. User-only `permissions.scratch_root` selects OS temp,

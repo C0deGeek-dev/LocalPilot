@@ -329,6 +329,7 @@ fn inspect_powershell_writer(
 
 fn literal_target(target: &str) -> bool {
     !target.is_empty()
+        && !target.starts_with('~')
         && (!target.contains(':') || Path::new(target).is_absolute())
         && !target.chars().any(|c| {
             matches!(
@@ -350,7 +351,6 @@ fn literal_target(target: &str) -> bool {
                     | '\r'
                     | '<'
                     | '>'
-                    | '~'
                     | '('
                     | ')'
             )
@@ -410,7 +410,8 @@ fn literal_tokens(command: &str) -> (Vec<String>, bool) {
                 }
             }
             (_, c) => {
-                if matches!(c, '|' | '&' | ';' | '`' | '~' | '(' | ')' | '\n' | '\r')
+                if matches!(c, '|' | '&' | ';' | '`' | '(' | ')' | '\n' | '\r')
+                    || (quote.is_none() && c == '~' && word.is_empty())
                     || (quote != Some('\'') && matches!(c, '$' | '%' | '!'))
                     || (quote.is_none() && matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
                     || (cfg!(unix) && c == '\\')
@@ -448,7 +449,12 @@ mod tests {
     fn output_options_and_hidden_directory_leaves_keep_their_write_gate() {
         use localpilot_sandbox::{Interactivity, Workspace};
         let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        // Windows runners spell their profile with an embedded 8.3 tilde.
+        // A tilde inside a path component is literal, unlike leading ~.
+        let outside = tempfile::Builder::new()
+            .prefix("literal~1-")
+            .tempdir()
+            .unwrap();
         let ws = Workspace::new(root.path()).unwrap();
         let ctx = ToolContext {
             workspace: &ws,
@@ -526,6 +532,9 @@ mod tests {
         assert!(!literal_target("HKCU:Software/fixture"));
         assert!(!literal_target("C:relative"));
         assert!(!literal_target("~/fixture"));
+        assert!(literal_target("literal~1/fixture"));
+        assert!(!literal_tokens("echo x > 'literal~1/fixture'").1);
+        assert!(!literal_tokens("touch literal~1/fixture").1);
         assert!(!literal_target("(Join-Path"));
         let (tokens, opaque) =
             literal_tokens("echo 'data > remains data' > 'fixture with spaces.txt'");

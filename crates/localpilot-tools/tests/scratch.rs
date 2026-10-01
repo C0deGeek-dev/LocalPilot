@@ -129,7 +129,14 @@ fn redirect(target: &Path) -> String {
 async fn file_and_shell_dispatch_agree_on_scratch_outside_and_secret_paths() {
     let dir = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
+    let parent = tempfile::Builder::new()
+        .prefix("literal~1-")
+        .tempdir()
+        .unwrap();
     let mut ws = Workspace::new(dir.path()).unwrap();
+    ws.set_scratch_root(localpilot_sandbox::ScratchRoot::Parent(
+        parent.path().to_path_buf(),
+    ));
     ws.start_scratch("tools").unwrap();
     let root = ws.scratch_process_dir().unwrap();
     let link = root.join("escape");
