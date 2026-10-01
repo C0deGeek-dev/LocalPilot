@@ -366,6 +366,7 @@ fn assemble(
             commit: completed.commit.clone(),
             attempts: completed.attempts,
             sessions: completed.sessions.clone(),
+            scope: completed.scope,
             covers: source.covers.clone(),
             verify: completed.verify.clone(),
             depends: renumber_old(&completed.depends),

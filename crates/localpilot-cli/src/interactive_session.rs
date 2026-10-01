@@ -745,6 +745,7 @@ fn interactive_config(
         repair_mode: config.tools.repair,
         elide_seen_reads: config.tools.elide_seen_reads,
         turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
+        granularity: Some(config.harness.granularity.clone()),
         verify_before_done: config.harness.verify_before_done,
         verify_command: config.harness.verify_command.clone(),
         ..SessionConfig::default()
@@ -2021,6 +2022,16 @@ mod tests {
     #[tokio::test]
     async fn built_runtime_routes_real_questions_and_approvals_to_its_bundle() {
         let directory = tempfile::tempdir().expect("temporary workspace");
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            "[package]\nname = \"approval-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"verify.rs\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("verify.rs"),
+            "#[test] fn approved_answer_is_written() { assert_eq!(std::fs::read_to_string(\"answer.txt\").unwrap(), \"Postgres\"); }\n",
+        )
+        .unwrap();
         let seed = FakeProvider::new();
         let mut declaration = seed.declaration().clone();
         declaration.id = "first".to_string();
@@ -2081,7 +2092,19 @@ mod tests {
         assert!(questions.try_recv().is_err());
         approval.reply.send(true).expect("approve write");
 
-        assert_eq!(turn.await, StopReason::Done);
+        loop {
+            tokio::select! {
+                reason = &mut turn => {
+                    assert_eq!(reason, StopReason::Done);
+                    break;
+                },
+                call = approvals.recv() => {
+                    let call = call.expect("verification approval reaches its host");
+                    assert_eq!(call.request.tool, localpilot_harness::QUALITY_CHECK_TOOL);
+                    call.reply.send(true).expect("approve the applicable check");
+                }
+            }
+        }
         assert_eq!(
             std::fs::read_to_string(directory.path().join("answer.txt")).expect("written file"),
             "Postgres"

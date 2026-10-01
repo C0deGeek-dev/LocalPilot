@@ -17,6 +17,7 @@ pub(super) struct ResumeConsent {
     profile: String,
     trusted: bool,
     execution: ExecutionSnapshot,
+    work_profile: Option<localpilot_harness::granularity::WorkProfile>,
 }
 
 impl ResumeConsent {
@@ -32,11 +33,28 @@ impl ResumeConsent {
                 .to_string(),
             trusted: runtime.trusted(),
             execution: ctx.execution.clone(),
+            work_profile: resume_work_profile(runtime, progress),
         })
     }
 }
 
-pub(super) fn status(app: &mut AppModel, cwd: &Path, stages: &StageHost) {
+fn resume_work_profile(
+    runtime: &SessionRuntime,
+    progress: &localpilot_harness::Progress,
+) -> Option<localpilot_harness::granularity::WorkProfile> {
+    let mut profile = runtime.planned_work_profile()?;
+    if let Some(scope) = progress.next_incomplete().and_then(|step| step.scope) {
+        profile.bound_to_scope(scope);
+    }
+    Some(profile)
+}
+
+pub(super) fn status(
+    app: &mut AppModel,
+    cwd: &Path,
+    stages: &StageHost,
+    profile: Option<localpilot_harness::granularity::WorkProfile>,
+) {
     let mut out = Vec::new();
     let liveness = if stages.operation_active.get() {
         localpilot_harness::OperationLiveness::Running
@@ -46,6 +64,9 @@ pub(super) fn status(app: &mut AppModel, cwd: &Path, stages: &StageHost) {
     let result = crate::harness_cmd::gather_status_with_liveness(cwd, liveness)
         .map(|report| out.extend_from_slice(report.render().as_bytes()));
     let mut output = crate::repl::command_output_from_buffer(out, result);
+    if let Some(profile) = profile {
+        output.lines.push(profile.instruction());
+    }
     output.lines.push(if stages.operation_active.get() {
         "operation: active harness work; /harness-stop signals cancellation".to_string()
     } else if let Some((_, stage)) = &stages.live {
@@ -122,6 +143,9 @@ fn offer_resume(app: &mut AppModel, runtime: &SessionRuntime, ctx: &mut SlashCon
                 runtime.active_provider_id(),
                 runtime.active_model()
             ));
+            if let Some(profile) = resume_work_profile(runtime, progress) {
+                lines.push(profile.instruction());
+            }
             present_command_report(
                 app,
                 command_report(
@@ -160,7 +184,7 @@ where
     app.set_shared_mode(localpilot_slash::Mode::Harness);
     ctx.stages.guided = true;
     if !after_brief && ctx.stages.live.is_some() {
-        status(app, ctx.cwd, ctx.stages);
+        status(app, ctx.cwd, ctx.stages, runtime.work_profile());
         app.apply_runtime(RuntimeUpdate::Notice(
             "continue the active harness conversation, or /harness-stop to leave it".to_string(),
         ));
@@ -217,7 +241,7 @@ where
         }
         DocumentState::PlanReady { .. } => offer_resume(app, runtime, ctx),
         DocumentState::PlanComplete { .. } => {
-            status(app, ctx.cwd, ctx.stages);
+            status(app, ctx.cwd, ctx.stages, runtime.work_profile());
             ctx.stages.begin(LiveStage::Guide(GuideStage::Options));
             app.apply_runtime(RuntimeUpdate::Notice("all plan steps are complete. Use /harness-status to inspect evidence, /harness-brief to review requirements, or /harness-feature <description> to extend the approved work. /agent leaves.".to_string()));
         }
@@ -227,7 +251,7 @@ where
         | DocumentState::PlanMalformed { .. }
         | DocumentState::PlanUnbound { .. }
         | DocumentState::PlanBindingUnsupported { .. } => {
-            status(app, ctx.cwd, ctx.stages);
+            status(app, ctx.cwd, ctx.stages, runtime.work_profile());
             ctx.stages.begin(LiveStage::Guide(GuideStage::Options));
             app.apply_runtime(RuntimeUpdate::Notice("repair the named document error, then reply retry to inspect again. No repair or execution was attempted.".to_string()));
         }
@@ -328,7 +352,7 @@ where
                 enter_on(app, runtime, ctx, queue, io, false).await?;
                 return Ok(false);
             }
-            status(app, ctx.cwd, ctx.stages);
+            status(app, ctx.cwd, ctx.stages, runtime.work_profile());
             app.apply_runtime(RuntimeUpdate::Notice("use the displayed harness commands or /agent to leave; this input was not sent as an agent task".to_string()));
         }
     }

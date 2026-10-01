@@ -188,6 +188,9 @@ pub async fn run_agent(
     );
 
     let config = SessionConfig {
+        granularity: ctx.config.granularity.clone(),
+        verify_before_done: ctx.config.verify_before_done,
+        verify_command: ctx.config.verify_command.clone(),
         model: definition
             .model
             .clone()

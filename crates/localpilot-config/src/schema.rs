@@ -1102,6 +1102,9 @@ impl ClaimGate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HarnessConfig {
+    /// Automatic work sizing; configured values can only tighten its bounds.
+    #[serde(skip_serializing_if = "GranularityConfig::is_default")]
+    pub granularity: GranularityConfig,
     pub mode: Mode,
     pub attempts_per_step: u32,
     pub auto_commit: bool,
@@ -1171,6 +1174,7 @@ pub struct HarnessConfig {
 impl Default for HarnessConfig {
     fn default() -> Self {
         Self {
+            granularity: GranularityConfig::default(),
             mode: Mode::default(),
             attempts_per_step: 3,
             auto_commit: true,
@@ -1187,6 +1191,29 @@ impl Default for HarnessConfig {
             verify_command: None,
             guidance: GuidanceConfig::default(),
         }
+    }
+}
+
+/// Optional stricter ceilings for automatic work sizing. Zero is clamped to one.
+/// There is no switch or broad override that waives permission or verification.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GranularityConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_files: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_regions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_read_lines: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_changed_lines: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_decisions: Option<usize>,
+}
+
+impl GranularityConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 

@@ -1,5 +1,27 @@
 # Tool System
 
+## Bounded Agent Work
+
+Production hosts supply the shared automatic work profile. Before permissions,
+`read_file` and `read_tool_output` require explicit pages within its line bound
+(very small files can be read whole). Exact edits, multi-edit hunks and structured
+patch operations spend cumulative file/region/changed-material budgets. Large
+whole-file overwrite/deletion and global/regex replacement return an actionable
+refusal; use bounded exact hunks. Giant single lines also spend byte-equivalent
+material, so line count alone cannot permit a large rewrite.
+
+Every successful or failed output uses the existing redacted retention store and
+bounded head/tail projection, with a visible truncation/recovery notice. Long
+individual lines can still exceed a page's byte budget: their full output remains
+retained, and the model must inspect smaller logical material rather than treat a
+truncated page as complete. Permission decisions, schema validation/repair and
+verification retain their existing paths. Repairs do not establish capability.
+
+Opaque model shell/MCP writes require observed-diff checks at completion; typed
+arguments alone cannot enforce them. No repository baseline means model shell/
+background calls are refused; explicit user shell remains separately authorized.
+Delegated runtimes inherit the envelope. See [the harness specification](06-harness-spec.md#automatic-work-granularity).
+
 ## Session Spans In The Knowledge Tools
 
 `knowledge_search` returns session-transcript spans alongside ingested files,

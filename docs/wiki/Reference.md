@@ -43,3 +43,9 @@ which maps every area to its owning doc.
 `/harness` guides brief and plan review before confirmed execution. The direct
 `/harness-*` command family and cancellation/compatibility contract are documented
 in [the harness specification](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/06-harness-spec.md#guided-harness-and-direct-lifecycle-commands).
+
+## Automatic work sizing
+
+Agent and harness runtimes share context-pressure and observed-reliability
+profiles. See [the work-unit contract](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/06-harness-spec.md#automatic-work-granularity)
+and [stricter configuration caps](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/configuration.md#harnessgranularity).

@@ -163,6 +163,12 @@ comparison on one model, not a model claim.
 | `localpilot research` | Research a topic across local sources and the web (on by default — disclosed, allowlist-gated, audited; `--no-web` skips it) with multi-round, coverage-driven retrieval, optional MCP search proposers, and depth knobs (`--rounds`, `--quick`); writes a report and review-gated memory candidates |
 | `localpilot doctor` | Diagnose providers, credentials, tools, trust, and configuration |
 
+Agent sessions automatically use bounded reads and edits sized separately for
+context pressure and observed structured reliability. Unknown models start
+conservatively. Harness plans validate scope before approval, and constrained
+runs stop after a durable checkpoint. Inspect the strategy with `/harness-status`
+and tighten it through [`harness.granularity`](docs/configuration.md#harnessgranularity).
+
 Additional surfaces include MCP tools, `rpc`, `acp`, `mcp serve`, project
 knowledge ingestion, memory search, skill inspection, handoffs, self-review,
 and redacted session exports. `localpilot mcp serve` turns the session runtime

@@ -16,6 +16,7 @@ mod dispatch_gate;
 mod elision;
 mod error;
 mod evidence;
+pub mod granularity;
 mod guidance;
 mod handoff;
 mod hooks;
@@ -73,12 +74,13 @@ pub use judge::{judge_ranking_selftest_live, judge_score_live};
 pub use lessons::{Lesson, Lessons};
 pub use paths_in_play::PathsInPlay;
 pub use plan_draft::{
-    draft_plan, draft_replan, persist_approved_plan, revise_plan, PlanApproval, PlanDraft,
-    PlanRetry, PlanStage,
+    draft_plan, draft_plan_with_profile, draft_replan, draft_replan_with_profile,
+    persist_approved_plan, revise_plan, PlanApproval, PlanDraft, PlanRetry, PlanStage,
 };
 pub use plan_reconcile::{reconcile, CreditReason, ReconcileConflict};
 pub use plan_review::{
-    coverage, numbered_criteria, validate_for_approval, verification_text, PlanDefect,
+    coverage, numbered_criteria, validate_for_approval, validate_work_scope, verification_text,
+    PlanDefect,
 };
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step, Verification};

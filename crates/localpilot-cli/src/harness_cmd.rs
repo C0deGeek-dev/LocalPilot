@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use indexmap::IndexMap;
 use localpilot_config::{CliOverrides, Config, ConfigPaths, RuleSeverity};
 use localpilot_harness::{
-    propose_gate, ratify_gate, resume_one_step_with_events, run_plan, summarize_proposal, Brief,
+    propose_gate, ratify_gate, resume_one_step_with_events, summarize_proposal, Brief,
     CheckOutcome, CheckStatus, RuleEngine, RuntimeEvent, SessionConfig, SessionRuntime,
     QUALITY_CHECK_TOOL, QUOTA_PAUSE_KEY,
 };
@@ -694,14 +694,42 @@ pub async fn plan(root: &Path, model: &str, provider_id: Option<&str>) -> anyhow
         anyhow::anyhow!("brief.md not found; run `localpilot harness intake` first")
     })?;
     let brief = Brief::parse(&brief_text)?;
+    let expected = std::fs::read_to_string(root.join("PROGRESS.md"))
+        .ok()
+        .map(|text| localpilot_harness::Progress::parse(&text))
+        .transpose()?;
     let provider = provider_for(root, provider_id)?;
     let summary = repo_summary(root);
-    let mut progress = run_plan(provider.as_ref(), model, &brief, &summary).await?;
-    // A plan is bound to the brief it was generated from at the moment it is
-    // written. Without this every new plan would start life unbound, and the
-    // binding would only ever describe plans someone adopted by hand.
-    progress.bind_to_brief(localpilot_harness::BriefRevision::of(&brief).as_str());
-    std::fs::write(root.join("PROGRESS.md"), progress.render())?;
+    let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
+    let resolution = crate::context_window::resolve(
+        &config,
+        &provider.declaration().id,
+        model,
+        provider.declaration().max_context_tokens,
+    )
+    .await;
+    let profile = localpilot_harness::granularity::WorkProfile::resolve(
+        localpilot_harness::granularity::ContextCapacity {
+            used: 0,
+            limit: resolution.window.budget(
+                config.harness.context_token_limit,
+                provider.declaration().max_output_tokens,
+            ),
+            provenance: localpilot_harness::granularity::ContextProvenance::ResolvedBudget,
+        },
+        localpilot_harness::granularity::Reliability::Unknown,
+        &config.harness.granularity,
+    );
+    let draft = localpilot_harness::draft_plan_with_profile(
+        provider.as_ref(),
+        model,
+        &brief,
+        localpilot_harness::BriefRevision::of(&brief).as_str(),
+        &summary,
+        Some(profile),
+    )
+    .await?;
+    localpilot_harness::persist_approved_plan(root, &draft, &brief, expected.as_ref())?;
     Ok(())
 }
 
@@ -1162,6 +1190,22 @@ where
             &config.tools,
             (run.approver)(),
         );
+        runtime.set_granularity(config.harness.granularity.clone());
+        runtime.set_verify_before_done(
+            config.harness.verify_before_done,
+            config.harness.verify_command.clone(),
+        );
+        if let Some(mut profile) = runtime.work_profile() {
+            if let Some(scope) = state
+                .documents
+                .progress()
+                .and_then(|progress| progress.next_incomplete())
+                .and_then(|step| step.scope)
+            {
+                profile.bound_to_scope(scope);
+            }
+            writeln!(out, "{}", profile.instruction())?;
+        }
         localpilot_harness::register_project_analysis_context(
             root,
             config.context.project_analysis,
@@ -1203,6 +1247,17 @@ where
             // audit. Surface it and stop rather than reporting a clean run.
             if let Some(reason) = &outcome.blocked_reason {
                 writeln!(out, "phase gate blocked: {reason}")?;
+                break;
+            }
+            if runtime
+                .work_profile()
+                .is_some_and(|profile| profile.stop_after_checkpoint)
+                && localpilot_harness::inspect(localpilot_harness::WorkspaceInputs::at(root))
+                    .documents
+                    .progress()
+                    .is_some_and(|p| p.next_incomplete().is_some())
+            {
+                writeln!(out, "bounded checkpoint saved; next action: harness resume (the next step starts fresh context)")?;
                 break;
             }
         } else {
@@ -2520,6 +2575,15 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
     /// A committed, runnable one-step project with an isolated LocalMind store.
     fn completion_fixture(root: &Path, localmind: &str) {
         runnable_project(root);
+        // This text-only fixture has no build marker. Its approved smallest
+        // check verifies the real diff rather than silently omitting evidence.
+        let path = root.join("PROGRESS.md");
+        let mut progress =
+            localpilot_harness::Progress::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        progress.steps[0].verify = Some(localpilot_harness::Verification::Command(
+            "git diff --check".to_string(),
+        ));
+        std::fs::write(path, progress.render()).unwrap();
         // Written up front so nothing probes this machine for an inference
         // endpoint on first use.
         std::fs::write(root.join(".localmind.toml"), localmind).unwrap();

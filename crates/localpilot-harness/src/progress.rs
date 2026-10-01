@@ -60,6 +60,8 @@ pub struct Step {
     /// Step numbers that must come first. `Some(empty)` is an explicit "nothing".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends: Option<Vec<usize>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<crate::granularity::WorkScope>,
 }
 
 /// A parsed `PROGRESS.md`.
@@ -160,6 +162,7 @@ impl Progress {
                         "covers" => last.covers = Some(parse_numbers(value, true)?),
                         "depends" => last.depends = Some(parse_numbers(value, false)?),
                         "verify" => last.verify = Some(parse_verification(value)?),
+                        "scope" => last.scope = Some(parse_scope(value)?),
                         _ => {}
                     }
                 }
@@ -214,6 +217,12 @@ impl Progress {
                 };
                 out.push_str(&format!("  - verify: {value}\n"));
             }
+            if let Some(scope) = step.scope {
+                out.push_str(&format!(
+                    "  - scope: {}, {}, {}, {}\n",
+                    scope.files, scope.regions, scope.decisions, scope.changed_lines
+                ));
+            }
             if let Some(depends) = &step.depends {
                 out.push_str(&format!("  - depends: {}\n", render_numbers(depends, "")));
             }
@@ -265,6 +274,7 @@ impl Progress {
             covers: None,
             verify: None,
             depends: None,
+            scope: None,
         });
         number
     }
@@ -347,6 +357,7 @@ fn parse_step_line(line: &str) -> Result<Option<Step>, HarnessError> {
         covers: None,
         verify: None,
         depends: None,
+        scope: None,
     }))
 }
 
@@ -448,6 +459,18 @@ fn parse_meta_line(line: &str) -> Option<(&str, &str)> {
     let rest = line.strip_prefix("- ")?;
     let (key, value) = rest.split_once(':')?;
     Some((key.trim(), value.trim()))
+}
+
+fn parse_scope(value: &str) -> Result<crate::granularity::WorkScope, HarnessError> {
+    let parts = value
+        .split(',')
+        .map(|part| part.trim().parse::<usize>())
+        .collect::<Result<Vec<_>, _>>();
+    match parts.as_deref() {
+        Ok([files, regions, decisions, changed_lines]) if *decisions > 0 && regions >= files =>
+            Ok(crate::granularity::WorkScope { files: *files, regions: *regions, decisions: *decisions, changed_lines: *changed_lines }),
+        _ => Err(HarnessError::Malformed { document: DOCUMENT, detail: "scope requires four nonnegative counts: files, regions, decisions (>0), changed_lines; regions must cover files".to_string() }),
+    }
 }
 
 #[cfg(test)]

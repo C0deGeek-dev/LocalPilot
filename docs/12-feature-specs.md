@@ -2,6 +2,15 @@
 
 ## UI Direction
 
+Production agent and harness runtimes share independent context and reliability
+axes. New plans declare scope and are rejected before approval when oversized;
+execution enforces the declared footprint and current stricter profile. Reads are
+paged, edits are cumulative, and constrained harness execution stops only after
+its verified durable checkpoint. Compaction cannot enlarge the active unit.
+Plan review, execution disclosure and idle `/harness-status` expose the strategy;
+`[harness.granularity]` accepts stricter caps. See
+[the harness specification](06-harness-spec.md#automatic-work-granularity).
+
 Reference images:
 
 - `img/Base.png`

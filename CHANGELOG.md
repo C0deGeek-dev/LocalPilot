@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Automatic bounded work.** Agent sessions and harness planning/execution use
+  separate context-pressure and observed-reliability inputs. Unknown models start
+  conservatively; file edits and reads are checked before dispatch, retained
+  output is paged, and repository diffs are checked before completion/commit.
+  New plans declare scope, oversized units return for revision, and constrained
+  harness runs stop after a durable checkpoint. `[harness.granularity]` can only
+  tighten bounds. Legacy documents remain readable; completed evidence is retained.
+
 - **Guided harness lifecycle.** Bare `/harness` now routes intake, existing brief
   review, planning/replanning, completion and recovery through shared operations.
   `/harness-status`, `/harness-feature <description>` and `/harness-stop` complete

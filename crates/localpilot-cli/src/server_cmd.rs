@@ -329,6 +329,7 @@ impl SessionSetup {
                 repair_mode: self.config.tools.repair,
                 elide_seen_reads: self.config.tools.elide_seen_reads,
                 turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
+                granularity: Some(self.config.harness.granularity.clone()),
                 verify_before_done: self.config.harness.verify_before_done,
                 verify_command: self.config.harness.verify_command.clone(),
                 ..SessionConfig::default()

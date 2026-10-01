@@ -33,6 +33,7 @@ pub struct PlanDraft {
     pub repo_summary: String,
     /// How many accepted revisions this draft has been through.
     pub revisions: usize,
+    pub work_profile: Option<crate::granularity::WorkProfile>,
 }
 
 /// How an approval failed.
@@ -105,12 +106,14 @@ pub enum PlanRetry {
         brief: Box<Brief>,
         brief_revision: String,
         repo_summary: String,
+        work_profile: Option<crate::granularity::WorkProfile>,
     },
     /// Redrafting around work that is already finished.
     Replan {
         brief: Box<Brief>,
         brief_revision: String,
         repo_summary: String,
+        work_profile: Option<crate::granularity::WorkProfile>,
         completed: Vec<Step>,
     },
     /// Revising the draft on screen.
@@ -165,14 +168,32 @@ pub async fn draft_plan(
     brief_revision: &str,
     repo_summary: &str,
 ) -> Result<PlanDraft, HarnessError> {
+    draft_plan_with_profile(provider, model, brief, brief_revision, repo_summary, None).await
+}
+
+/// Generate using a captured automatic work envelope.
+///
+/// # Errors
+/// Returns a provider or document validation error.
+pub async fn draft_plan_with_profile(
+    provider: &dyn ModelProvider,
+    model: &str,
+    brief: &Brief,
+    brief_revision: &str,
+    repo_summary: &str,
+    work_profile: Option<crate::granularity::WorkProfile>,
+) -> Result<PlanDraft, HarnessError> {
     let user = format!(
         "Project brief:\n\n{}\n\nRepository summary:\n\n{repo_summary}",
         brief.render()
     );
-    let seed = vec![
+    let mut seed = vec![
         Message::text(Role::System, PLANNER_PROMPT),
         Message::text(Role::User, user),
     ];
+    if let Some(profile) = work_profile {
+        seed.insert(0, Message::text(Role::System, format!("{}\nEvery future step must declare scope: files, regions, decisions, changed_lines as four comma-separated integer counts. Split oversized work without dropping coverage or ordering.", profile.instruction())));
+    }
     let mut progress = generate(provider, model, seed, "PROGRESS.md", Progress::parse).await?;
     progress.bind_to_brief(brief_revision);
     Ok(PlanDraft {
@@ -180,6 +201,7 @@ pub async fn draft_plan(
         brief_revision: brief_revision.to_string(),
         repo_summary: repo_summary.to_string(),
         revisions: 0,
+        work_profile,
     })
 }
 
@@ -205,6 +227,31 @@ pub async fn draft_replan(
     repo_summary: &str,
     completed: &[Step],
 ) -> Result<PlanDraft, HarnessError> {
+    draft_replan_with_profile(
+        provider,
+        model,
+        brief,
+        brief_revision,
+        repo_summary,
+        completed,
+        None,
+    )
+    .await
+}
+
+/// Generate using a captured automatic work envelope.
+///
+/// # Errors
+/// Returns a provider or document validation error.
+pub async fn draft_replan_with_profile(
+    provider: &dyn ModelProvider,
+    model: &str,
+    brief: &Brief,
+    brief_revision: &str,
+    repo_summary: &str,
+    completed: &[Step],
+    work_profile: Option<crate::granularity::WorkProfile>,
+) -> Result<PlanDraft, HarnessError> {
     let finished = if completed.is_empty() {
         "None; nothing has been completed yet.".to_string()
     } else {
@@ -219,11 +266,14 @@ pub async fn draft_replan(
 Finished steps, to reproduce verbatim:\n\n{finished}",
         brief.render()
     );
-    let seed = vec![
+    let mut seed = vec![
         Message::text(Role::System, PLANNER_PROMPT),
         Message::text(Role::System, REPLAN_PROMPT),
         Message::text(Role::User, user),
     ];
+    if let Some(profile) = work_profile {
+        seed.insert(0, Message::text(Role::System, format!("{}\nEvery future step must declare scope: files, regions, decisions, changed_lines as four comma-separated integer counts. Split oversized work without dropping coverage or ordering.", profile.instruction())));
+    }
     let mut progress = generate(provider, model, seed, "PROGRESS.md", Progress::parse).await?;
     progress.bind_to_brief(brief_revision);
     Ok(PlanDraft {
@@ -231,6 +281,7 @@ Finished steps, to reproduce verbatim:\n\n{finished}",
         brief_revision: brief_revision.to_string(),
         repo_summary: repo_summary.to_string(),
         revisions: 0,
+        work_profile,
     })
 }
 
@@ -276,10 +327,22 @@ pub async fn revise_plan(
         "Current plan:\n\n{}\n\nInstruction:\n\n{instruction}",
         draft.progress.render()
     );
-    let seed = vec![
+    let mut seed = vec![
         Message::text(Role::System, REVISE_PROMPT),
         Message::text(Role::User, user),
     ];
+    if let Some(profile) = draft.work_profile {
+        seed.insert(
+            0,
+            Message::text(
+                Role::System,
+                format!(
+                    "{}\nPreserve scope metadata and split oversized future work.",
+                    profile.instruction()
+                ),
+            ),
+        );
+    }
     let mut progress = generate(provider, model, seed, "PROGRESS.md", Progress::parse).await?;
     progress.bind_to_brief(&draft.brief_revision);
     Ok(PlanDraft {
@@ -287,6 +350,7 @@ pub async fn revise_plan(
         brief_revision: draft.brief_revision.clone(),
         repo_summary: draft.repo_summary.clone(),
         revisions: draft.revisions + 1,
+        work_profile: draft.work_profile,
     })
 }
 
@@ -362,6 +426,10 @@ pub fn persist_approved_plan(
         }
     }
     validate_for_approval(&draft.progress, brief).map_err(PlanApproval::NotSatisfied)?;
+    if let Some(profile) = draft.work_profile {
+        crate::plan_review::validate_work_scope(&draft.progress, profile)
+            .map_err(PlanApproval::NotSatisfied)?;
+    }
 
     let mut progress = draft.progress.clone();
     // Bound to the revision the draft was made against, which is the one the

@@ -19,9 +19,16 @@ use crate::progress::{Progress, Step, Verification};
 /// that says "invalid" is a review nobody can act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanDefect {
+    WorkEnvelope {
+        step: usize,
+        detail: String,
+    },
     /// A step is missing one of the three planning fields. Absence is unknown,
     /// and a plan approved with unknowns is a plan nobody decided.
-    MissingMetadata { step: usize, field: &'static str },
+    MissingMetadata {
+        step: usize,
+        field: &'static str,
+    },
     /// A step claims a criterion the bound brief does not have.
     UnknownCriterion {
         step: usize,
@@ -29,17 +36,27 @@ pub enum PlanDefect {
         criteria: usize,
     },
     /// A criterion no step owns. The plan would ship without doing it.
-    OrphanCriterion { criterion: usize, text: String },
+    OrphanCriterion {
+        criterion: usize,
+        text: String,
+    },
     /// A dependency on a step that does not exist.
-    UnknownDependency { step: usize, depends_on: usize },
+    UnknownDependency {
+        step: usize,
+        depends_on: usize,
+    },
     /// A dependency on a later step, or on itself. Declared order that points
     /// forward is not an order, and it is how a cycle gets in.
-    ForwardDependency { step: usize, depends_on: usize },
+    ForwardDependency {
+        step: usize,
+        depends_on: usize,
+    },
 }
 
 impl std::fmt::Display for PlanDefect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::WorkEnvelope { step, detail } => write!(f, "step {step}: {detail}; split it while preserving acceptance coverage and dependency order"),
             Self::MissingMetadata { step, field } => write!(
                 f,
                 "step {step} does not say '{field}'; an approved plan states all three of covers, verify and depends"
@@ -64,6 +81,29 @@ impl std::fmt::Display for PlanDefect {
                 "step {step} depends on step {depends_on}, which does not come before it"
             ),
         }
+    }
+}
+
+/// New adaptive plans declare their decision/material scope before approval.
+/// Historical completed work is never retroactively sized or rewritten.
+///
+/// # Errors
+/// Returns named defects for unknown or oversized future scope.
+pub fn validate_work_scope(
+    progress: &Progress,
+    profile: crate::granularity::WorkProfile,
+) -> Result<(), Vec<PlanDefect>> {
+    let defects: Vec<_> = progress.steps.iter().filter(|step| !step.done).filter_map(|step| {
+        match step.scope {
+            Some(scope) if profile.accepts(scope) => None,
+            Some(_) => Some(PlanDefect::WorkEnvelope { step: step.number, detail: profile.instruction() }),
+            None => Some(PlanDefect::WorkEnvelope { step: step.number, detail: "declare scope: files, regions, decisions, changed_lines (four comma-separated counts)".to_string() }),
+        }
+    }).collect();
+    if defects.is_empty() {
+        Ok(())
+    } else {
+        Err(defects)
     }
 }
 

@@ -285,3 +285,14 @@ intake asks about them before writing `brief.md` instead of guessing — see
 
 The nine harness gates are specified in
 [06-harness-spec.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/06-harness-spec.md).
+
+## Keep work units small
+
+Agent mode automatically uses bounded reads and edits; Harness mode validates
+planned scope before approval and stops constrained runs at a durable checkpoint.
+Inspect the current strategy with `/harness-status`. Tighten it in
+`.localpilot.toml`, for example `[harness.granularity]` with `max_read_lines = 40`
+and `max_changed_lines = 30`. Run `harness resume` again to start the persisted
+next step with fresh context. See
+[automatic work sizing](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/06-harness-spec.md#automatic-work-granularity)
+for scope, verification, conservative unknown evidence and compatibility.

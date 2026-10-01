@@ -349,6 +349,7 @@ async fn build_runtime_with_provider(
             repair_mode: config.tools.repair,
             elide_seen_reads: config.tools.elide_seen_reads,
             turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
+            granularity: Some(config.harness.granularity.clone()),
             verify_before_done: config.harness.verify_before_done,
             verify_command: config.harness.verify_command.clone(),
             ..SessionConfig::default()

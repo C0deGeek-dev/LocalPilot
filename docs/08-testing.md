@@ -18,6 +18,19 @@ Run these under workspace parallel load as well as the package gate: the
 original detached `taskkill` failure appeared only under load.
 Background tests cover cancellation during startup grace, stop and session close.
 
+## Automatic Work Sizing
+
+`localpilot-harness/tests/granularity.rs` drives the real shared runtime with
+fake providers: oversized/whole-file requests, explicit pages, cumulative edits,
+UTF-8 giant-line retention, unavailable verification, recorded passing checks,
+oversized plan refusal with coverage/order intact, durable fresh-runtime resume,
+opaque shell refusal before commit, malformed observations, stream truncation and
+actual compaction. Pure `granularity::tests` cross context sizes independently
+with weak/strong/unknown/malformed evidence, stricter caps and active-unit
+monotonicity. No GPU or model name is required. Portable file/diff limits are the
+same on Windows, Linux and macOS; platform shell fixtures use their existing
+explicit platform branches. Live model checks remain opportunistic.
+
 ## Retrieval-Quality Measurement
 
 Two harnesses measure whether retrieval returns the *right* things, as distinct

@@ -2,6 +2,72 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0199: Work Units Are Sized By Independent Context And Reliability Evidence
+
+**Status:** accepted · **Date:** 2026-10-01. Extends ADR-0194's shared capacity
+resolution and ADR-0197's approval gate; retains the existing executor,
+permission engine, compaction, quality gates and durable progress/commit seam.
+
+Production agent sessions, server sessions and harness steps automatically use
+one typed work envelope. Calibrated context usage controls material size; actual
+schema-valid successful calls and passing verification of changed units control
+structured reliability. Names, declared protocol support, recovery health and
+context capacity never establish capability. Eight valid successful calls and
+two verified changed units without failures are needed for the bounded stronger
+profile. This is evidence of structured execution, not a general intelligence
+score or proof of semantic correctness. Unknown, failed and malformed evidence
+stay conservative. Counts remain in memory and reset on provider/model changes,
+new/load/fork sessions and process restart. Provider schemas can be misleading;
+their successful use never waives the real checks. No raw values or persisted
+scorecards become capability evidence.
+
+Below 32,000 usable prompt tokens, or at 70% pressure, material bounds narrow.
+Unknown context provenance is also conservative; provider/model switches do not
+reuse the previous identity's capacity as evidence for wider work.
+Reliability independently bounds decisions and simultaneous regions/files. An
+active unit can tighten, but neither successful calls nor compaction widen it.
+Stricter configuration caps are floored at one and applied with `min`; there is
+no broad override or disable switch. Library callers explicitly supply the same
+policy through `SessionConfig`; production hosts always wire it.
+
+New drafts carry the profile and declare four integer scope counts. Approval
+rejects missing/oversized future scope without losing coverage or order.
+The reviewed scope is also an execution ceiling, including zero for read-only
+work. Refusing every requested mutation cannot complete an empty harness step;
+the durable stop asks the user to split and retry the work.
+Completed evidence and legacy unknown metadata are preserved. Harness planning
+uses unknown reliability because its future executor starts fresh; conversation
+successes cannot authorize larger fresh-runtime steps. Updated stricter caps
+are checked again at approval and execution consent includes the configuration.
+
+Builtin reads require pages; attempted edits cumulatively spend the unit's file,
+region and patch budgets before permission dispatch. Retained redacted output is
+bounded on success and failure. Delegation inherits policy and spends a region;
+model fan-out is refused because it has no single bounded mutation scope.
+Opaque shell/MCP effects are checked against the observed repository diff from
+the starting commit before
+completion and again after quality auto-fixes before commit. Unchanged initial
+dirty files are excluded from ordinary-turn comparisons. Existing dirty material
+in a file changed this turn may conservatively cause refusal. Without a repository
+baseline, model shell/background commands are refused; bounded file tools and
+the existing permission-gated verification runner remain available. Explicit user
+shell keeps its authorization path. This is work policy, not a new security boundary.
+
+The smallest planned check gives timely feedback and cannot replace ratified
+quality gates. Denied/unstartable verification leaves a changed bounded unit
+unverified and stopped. A reviewed `verify: none - reason` exempts only that
+timely check; explicit session and ratified gates still apply. An undetectable
+target stops a changed bounded unit with an actionable durable reason; read-only
+legacy opt-in checks retain their visible warning. No missing signal is counted
+as a successful observation.
+Constrained runs stop only after the existing verified commit/progress/session
+checkpoint. Documentation is a bounded follow-up unit in the same plan before
+feature completion, rather than forcing another file into a one-region unit.
+Runtime-owned `.localpilot/` and `.localmind/` state is not product work or commit
+content. A command that commits during a harness unit is stopped with a durable
+review reason; it cannot move the comparison baseline or waive the owning gate.
+The existing automatic-commit limitation remains disclosed.
+
 ## ADR-0198: Harness Mode Guides Approved Documents And Binds Consent To Execution Inputs
 
 **Status:** accepted · **Date:** 2026-10-01. Amends ADR-0144's former cosmetic

@@ -2014,6 +2014,16 @@ mod tests {
         // denies B's, so only A's file lands. This proves the real allow/deny effect on
         // top of the already-covered attribution/answer-only-origin/queue/fail-close tests.
         let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            "[package]\nname = \"pair-approval-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"verify.rs\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("verify.rs"),
+            "#[test] fn only_the_approved_write_exists() { assert_eq!(std::fs::read_to_string(\"a.txt\").unwrap(), \"ALPHA\"); assert!(!std::path::Path::new(\"b.txt\").exists()); }\n",
+        )
+        .unwrap();
         let ask = json!({
             "questions": [{
                 "header": "Choice",
@@ -2056,7 +2066,7 @@ mod tests {
         let mut b_questioned = false;
         let mut a_write_asked = false;
         let mut b_write_asked = false;
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while let Some(event) = run.next().await {
                 let PairPumpEvent::Ask(ask) = event else {
                     continue;
@@ -2083,6 +2093,11 @@ mod tests {
                         .expect("answer B question");
                     }
                     (PairAskRequest::Approval(request), PairPeer::A) => {
+                        if request.tool == localpilot_harness::QUALITY_CHECK_TOOL {
+                            run.answer_ask(ask.id, PairAskAnswer::Approval(true))
+                                .expect("approve A verification");
+                            continue;
+                        }
                         a_write_asked = true;
                         assert_eq!(request.tool, "write_file");
                         // Allow A's write.
@@ -2090,6 +2105,11 @@ mod tests {
                             .expect("allow A write");
                     }
                     (PairAskRequest::Approval(request), PairPeer::B) => {
+                        if request.tool == localpilot_harness::QUALITY_CHECK_TOOL {
+                            run.answer_ask(ask.id, PairAskAnswer::Approval(true))
+                                .expect("approve B verification");
+                            continue;
+                        }
                         b_write_asked = true;
                         assert_eq!(request.tool, "write_file");
                         // Deny B's write.

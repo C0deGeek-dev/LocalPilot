@@ -6,10 +6,53 @@ The harness is a deterministic workflow layer around an LLM agent. It controls
 state, rules, retries, and commits. The model proposes actions. The harness
 decides whether those actions are allowed to advance the project.
 
+## Automatic Work Granularity
+
+Ordinary agent and harness runtimes share `granularity::WorkProfile`. Context
+capacity/pressure controls read, patch and retained-output material; session-local
+structured reliability controls decisions and simultaneous regions. Unknown and
+malformed evidence start conservatively. Model names, parameter counts and large
+context windows never establish capability. See ADR-0199 for thresholds and
+[configuration](configuration.md#harnessgranularity) for stricter caps.
+
+New future steps declare `scope: files, regions, decisions, changed_lines` as four
+comma-separated integer counts. Approval refuses missing or oversized scope and
+returns the draft for splitting while preserving acceptance coverage and ordering.
+Counts are a reviewed declaration, not proof of complexity; runtime dispatch and
+observed diffs enforce material independently. Completed evidence remains untouched.
+Legacy steps without scope still parse and execute conservatively; no migration or
+invented historical metadata is required. A stricter effective profile can require
+replanning an existing explicitly sized future step.
+
+One unit reads relevant explicit ranges, applies one coherent bounded region,
+runs its smallest planned check, then uses the existing rule/gate/commit/progress
+and session-link path. The ratified quality gate still runs. Small context or
+conservative reliability stops after that durable checkpoint; the next invocation
+starts fresh context at the persisted next incomplete step. A blocked oversized
+unit keeps its work and records the reason/next action instead of silently
+resetting it. Owned `.localpilot/` and `.localmind/` runtime state is excluded
+from project work and commits.
+
+Builtin limits apply cumulatively to attempts, including partial/failed mutations.
+Model delegation inherits the policy and spends a region; fan-out is refused.
+Shell/MCP arguments cannot prove their diff size, so repository diffs are checked
+before completion and again after auto-fixes before commit. Ordinary comparisons
+exclude unchanged pre-existing dirty files; prior dirty content in a file changed
+this turn can conservatively trigger refusal. Without a repository baseline,
+model shell/background calls are refused; file tools and permission-gated
+verification remain available. Explicit user shell retains its authorization.
+This policy does not add permissions or claim to be a filesystem security boundary.
+
+Compaction remains reactive recovery. It neither refunds work already attempted
+nor widens an active unit. Capability counters are not persisted; restarting,
+loading/forking a session or switching identity resets to unknown while completed
+work and its next action remain in the authoritative documents and event log.
+
 ## Operating Modes
 
-The harness is the enforced operating mode. The other mode is agent mode, a plain
-conversational loop with no rule engine. See the product spec for the split.
+Harness mode enforces the approved project workflow, quality gates and commit
+policy. Agent mode uses a direct conversational loop with shared baseline rules,
+permissions and bounded work policy. See the product spec for the split.
 
 Harness mode is entered three ways:
 
@@ -312,7 +355,10 @@ Inputs:
 - `brief.md`
 - repository summary
 
-Re-running `localpilot harness plan` regenerates `PROGRESS.md` from the brief.
+Re-running `localpilot harness plan` regenerates future work from the brief only
+when approval validation succeeds. It captures the saved source before generation,
+refuses later source changes or loss of completed evidence, and writes atomically.
+Use interactive `/harness-replan` to retain and reconcile finished work.
 
 Output:
 
@@ -1197,7 +1243,9 @@ tool call first runs a **verification command** — "does this workspace build /
 do its tests pass?". On a failure the captured diagnostics are fed back as the
 next turn's input and the loop continues, so the model fixes the problem instead
 of stopping; on a pass (or no detectable target, or the gate off) the turn
-finalizes as before.
+finalizes as before for read-only legacy opt-in checks. Changed bounded units
+also require this gate when the optional setting is off (ADR-0199), unless their
+harness step has an explicitly reviewed `verify: none - reason` exemption.
 
 - **Command resolution.** `[harness] verify_command` (a single command line,
   split on whitespace — no shell) wins; otherwise the command is detected from
@@ -1206,18 +1254,16 @@ finalizes as before.
   `package.json` → `npm test`, a Python project → `python -m pytest`, a
   `Makefile` → `make`, otherwise C++ sources at the root → an artifact-free
   `g++ -std=c++17 -I. -fsyntax-only <sources>` compile check). A workspace with
-  no detectable target and no override is a clean no-op — the turn finalizes
-  unchanged, and a warning is emitted so the un-verified finalize is visible
-  rather than mistaken for a pass.
+  no detectable target and no override stops changed bounded work with a durable
+  next action. Legacy read-only opt-in checks emit a warning and finalize.
 - **Reuses the quality-gate runner.** The command runs through the same
   permission-gated [`CheckRunner`](05-tool-system.md) the step-cadence quality
   gate and `harness resume` use — there is no second command engine and no second
-  retry loop. A denied or unstartable command does not wedge a finished turn: it
-  is recorded and the turn finalizes without a verify signal.
+  retry loop. A denied or unstartable command stops changed bounded work;
+  legacy read-only opt-in checks record the warning and finalize.
 - **Bounded.** The gate can never loop forever: it is bound by the per-turn
   tool-call budget and `turn_timeout` rails *and* a fixed re-entry cap. After the
-  cap is reached the turn finalizes with the failing state recorded, rather than
-  spinning.
+  cap is reached the turn stops with `NoProgress` and the failing state recorded.
 - **In-workspace, de-verbatim working directory.** This gate's build/test
   command — like every child process the harness spawns (the shell and git
   tools, background processes) — runs with the workspace as its working
@@ -1229,11 +1275,11 @@ finalizes as before.
   therefore use the de-verbatim equivalent, while the containment boundary keeps
   the verbatim root unchanged. See [security & privacy](07-security-and-privacy.md).
 - **Default: off interactively, on for `eval`.** As a config lever
-  (`[harness] verify_before_done`) it ships **off**, so an interactive or `print`
-  turn is unchanged. For `localpilot eval` it is **on by default**: a benchmark
+  (`[harness] verify_before_done`) it ships **off** for extra checks on read-only
+  turns; changed bounded work still verifies. For `localpilot eval` it is **on by default**: a benchmark
   must measure compiled+tested solves, not code that was never built. Opt out
-  with `localpilot eval --no-verify` (byte-identical to the pre-default
-  behaviour); `--verify-command <cmd>` overrides the detected command. The legacy
+  with `localpilot eval --no-verify` for that extra check; bounded-unit checks
+  remain required. `--verify-command <cmd>` overrides the detected command. The legacy
   `--verify` flag is accepted but redundant. The per-call `localpilot-verify`
   contract verifier is a separate mechanism.
 
@@ -1263,7 +1309,7 @@ step is already committed, and it is best-effort: a provider or quota error at t
 point is swallowed so a finished run is never broken, and a reply in the wrong
 shape degrades to "no findings" rather than an error. The worker prompt also
 carries a doc-currency cue, so a step that changes observable behaviour,
-configuration, or interfaces updates the matching documentation in the same step.
+configuration, or interfaces updates the matching documentation in a bounded follow-up step in the same plan before feature completion.
 
 ### Completion hindsight
 

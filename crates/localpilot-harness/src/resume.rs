@@ -28,7 +28,7 @@ const WORKER_PROMPT: &str = "\
 You are completing exactly one step of an implementation plan. Make the change \
 using the available tools, then briefly confirm completion. If the change alters \
 observable behaviour, configuration, or interfaces, update the matching \
-documentation in the same step. Do not start any other step.\n\nStep: ";
+documentation in a bounded follow-up step in this plan before completing the feature. Do not start any other step.\n\nStep: ";
 
 /// The store key under which a paused run is persisted (an inspectable file
 /// under `.localpilot/cache/`).
@@ -119,6 +119,10 @@ pub async fn resume_one_step_with_events(
         .next_incomplete()
         .ok_or(crate::workspace_state::NotResumable::Complete)?
         .clone();
+    let work_baseline = runtime
+        .work_profile()
+        .and_then(|_| work_diff_baseline(root).ok());
+    runtime.set_harness_checkpoint_owner(step.scope);
     let progress_path = root.join("PROGRESS.md");
     let mut progress = progress.clone();
 
@@ -161,6 +165,23 @@ pub async fn resume_one_step_with_events(
     // step, runs the step-cadence gate, and turns the findings into a verdict.
     let mut step_loop = StepLoop::new(max_attempts.max(1), MAX_REPLANS);
     let mut prompt = format!("{WORKER_PROMPT}{}. {}", step.number, step.description);
+    if let Some(profile) = runtime.work_profile() {
+        if let Some(verification) = &step.verify {
+            runtime.set_work_unit_verification(verification);
+        }
+        if step.scope.is_some_and(|scope| !profile.accepts(scope)) {
+            return Ok(ResumeOutcome {
+                step_number: step.number, committed: false, paused: false, gate: Vec::new(),
+                blocked_reason: Some("step exceeds the effective work envelope; replan and split it while preserving coverage and dependencies".to_string()),
+            });
+        }
+        prompt.push_str(&format!("\n\n{}", profile.instruction()));
+        if let Some(crate::Verification::Command(command)) = &step.verify {
+            prompt.push_str(&format!(
+                "\nSmallest planned verification: {command}. The full ratified gate still applies."
+            ));
+        }
+    }
     // The deciding attempt's gate outcomes, surfaced on the returned outcome.
     // Assigned on every loop pass before any exit that reads it.
     let mut final_gate: Vec<CheckOutcome>;
@@ -233,6 +254,21 @@ pub async fn resume_one_step_with_events(
                 paused: false,
                 gate: Vec::new(),
             });
+        }
+
+        // Argument sizing cannot establish the footprint of shell/MCP writes.
+        // Inspect the actual diff before any quality auto-fix or commit. Refusal
+        // keeps the work and session evidence for an explicit split/review.
+        if let Some(profile) = runtime.work_profile() {
+            if let Some(reason) = work_diff_block(root, profile, work_baseline.as_ref(), true)? {
+                return Ok(ResumeOutcome {
+                    step_number: step.number,
+                    committed: false,
+                    blocked_reason: Some(reason),
+                    paused: false,
+                    gate: Vec::new(),
+                });
+            }
         }
 
         // Run configured tests (`suite_green`) and the step-cadence quality gate,
@@ -362,6 +398,23 @@ pub async fn resume_one_step_with_events(
     }
 
     // Commit the step.
+    if let Some(before) = &work_baseline {
+        if git(root, &["rev-parse", "HEAD"])? != before.head {
+            return Ok(ResumeOutcome { step_number: step.number, committed: false, paused: false,
+                blocked_reason: Some("a command committed before the harness checkpoint; review that commit before resuming; no completion was recorded".to_string()), gate: final_gate });
+        }
+    }
+    if let Some(profile) = runtime.work_profile() {
+        if let Some(reason) = work_diff_block(root, profile, work_baseline.as_ref(), true)? {
+            return Ok(ResumeOutcome {
+                step_number: step.number,
+                committed: false,
+                blocked_reason: Some(reason),
+                paused: false,
+                gate: final_gate,
+            });
+        }
+    }
     let changed_paths = committable_status_paths(root)?
         .into_iter()
         .filter(|path| path != "PROGRESS.md")
@@ -536,12 +589,133 @@ fn git_add_paths(root: &Path, paths: &[String]) -> Result<(), HarnessError> {
     git(root, &args).map(|_| ())
 }
 
+pub(crate) fn work_diff_block(
+    root: &Path,
+    profile: crate::granularity::WorkProfile,
+    baseline: Option<&WorkDiffBaseline>,
+    ignore_progress: bool,
+) -> Result<Option<String>, HarnessError> {
+    let base = baseline.map_or("HEAD", |before| before.head.trim());
+    let mut paths = committable_status_paths(root)?;
+    paths.extend(
+        git(
+            root,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                base,
+                "--",
+            ],
+        )?
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string),
+    );
+    paths.sort();
+    paths.dedup();
+    paths.retain(|p| {
+        !is_runtime_state_path(p)
+            && (!ignore_progress || p != "PROGRESS.md")
+            && baseline
+                .is_none_or(|before| before.files.get(p) != work_fingerprint(root, p).ok().as_ref())
+    });
+    let mut lines = 0usize;
+    let mut regions = 0usize;
+    for path in &paths {
+        let stat = git(
+            root,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--numstat",
+                "--no-renames",
+                base,
+                "--",
+                path,
+            ],
+        )?;
+        if stat.is_empty() {
+            // New files have no tracked diff. Bound bytes before reading and
+            // reject opaque/binary material rather than treating it as zero.
+            let candidate = root.join(path);
+            let metadata =
+                std::fs::symlink_metadata(&candidate).map_err(|source| HarnessError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            if !metadata.is_file()
+                || metadata.len() > profile.max_changed_lines.saturating_mul(80) as u64
+            {
+                return Ok(Some("work envelope: new/opaque file exceeds bounded material; preserve the work and split the step before committing".to_string()));
+            }
+            let body = std::fs::read_to_string(&candidate).map_err(|source| HarnessError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            lines = lines.saturating_add(body.lines().count().max(body.len().div_ceil(80)));
+            regions += 1;
+        } else {
+            for row in stat.lines() {
+                let counts: Vec<_> = row.split('\t').take(2).map(str::parse::<usize>).collect();
+                if let [Ok(added), Ok(removed)] = counts.as_slice() {
+                    lines = lines.saturating_add(*added).saturating_add(*removed);
+                } else {
+                    return Ok(Some("work envelope: binary/unknown diff requires an explicit smaller reviewed unit".to_string()));
+                }
+            }
+            // First reject a huge diff before materializing its patch.
+            if lines <= profile.max_changed_lines {
+                let diff = git(
+                    root,
+                    &[
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--unified=0",
+                        "--no-renames",
+                        base,
+                        "--",
+                        path,
+                    ],
+                )?;
+                let material = diff
+                    .lines()
+                    .filter(|line| {
+                        (line.starts_with('+') && !line.starts_with("+++"))
+                            || (line.starts_with('-') && !line.starts_with("---"))
+                    })
+                    .map(|line| line.len().saturating_sub(1).div_ceil(80))
+                    .sum::<usize>();
+                if material > profile.max_changed_lines {
+                    return Ok(Some("work envelope: changed byte material exceeds the profile (including giant single lines); preserve and split the work".to_string()));
+                }
+                regions += diff.lines().filter(|line| line.starts_with("@@ ")).count();
+            }
+        }
+        if paths.len() > profile.max_files
+            || lines > profile.max_changed_lines
+            || regions > profile.max_regions
+        {
+            return Ok(Some("work envelope: observed files, regions or changed lines exceed the effective profile; work is preserved, split/review it before committing".to_string()));
+        }
+    }
+    Ok(None)
+}
+
 fn has_unrelated_uncommitted_changes(root: &Path) -> Result<bool, HarnessError> {
     Ok(!committable_status_paths(root)?.is_empty())
 }
 
 fn committable_status_paths(root: &Path) -> Result<Vec<String>, HarnessError> {
-    let status = git(root, &["status", "--porcelain", "--untracked-files=all"])?;
+    let status = git(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
     Ok(parse_status_paths(&status)
         .into_iter()
         .filter(|path| !is_runtime_state_path(path))
@@ -549,23 +723,30 @@ fn committable_status_paths(root: &Path) -> Result<Vec<String>, HarnessError> {
 }
 
 fn parse_status_paths(status: &str) -> Vec<String> {
-    status
-        .lines()
-        .filter_map(|line| {
-            let path = line.get(3..)?.trim();
-            let path = path.rsplit_once(" -> ").map_or(path, |(_, new)| new);
-            if path.is_empty() {
-                None
-            } else {
-                Some(path.trim_matches('"').replace('\\', "/"))
+    let mut records = status.split('\0');
+    let mut paths = Vec::new();
+    while let Some(record) = records.next() {
+        if let Some(path) = record.get(3..).filter(|p| !p.is_empty()) {
+            paths.push(path.to_string());
+            // Porcelain -z spells rename destination first, then source in a
+            // separate record. Neither path is quoted or shell interpreted.
+            if record
+                .get(..2)
+                .is_some_and(|state| state.contains(['R', 'C']))
+            {
+                records.next();
             }
-        })
-        .collect()
+        }
+    }
+    paths
 }
 
 fn is_runtime_state_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    normalized == ".localpilot" || normalized.starts_with(".localpilot/")
+    normalized == ".localpilot"
+        || normalized.starts_with(".localpilot/")
+        || normalized == ".localmind"
+        || normalized.starts_with(".localmind/")
 }
 
 fn first_blocking_reason(
@@ -596,6 +777,42 @@ fn write(path: &Path, contents: &str) -> Result<(), HarnessError> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkDiffBaseline {
+    pub(crate) head: String,
+    pub(crate) files: std::collections::BTreeMap<String, String>,
+}
+
+pub(crate) fn work_diff_baseline(root: &Path) -> Result<WorkDiffBaseline, HarnessError> {
+    let head = git(root, &["rev-parse", "HEAD"])?;
+    let files = committable_status_paths(root)?
+        .into_iter()
+        .map(|path| {
+            let hash = work_fingerprint(root, &path)?;
+            Ok((path, hash))
+        })
+        .collect::<Result<_, HarnessError>>()?;
+    Ok(WorkDiffBaseline { head, files })
+}
+
+fn work_fingerprint(root: &Path, path: &str) -> Result<String, HarnessError> {
+    let candidate = root.join(path);
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::read_link(&candidate)
+            .map(|p| format!("link:{}", p.display()))
+            .map_err(|source| HarnessError::Io {
+                path: path.to_string(),
+                source,
+            }),
+        Ok(_) => git(root, &["hash-object", "--", path]),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("absent".to_string()),
+        Err(source) => Err(HarnessError::Io {
+            path: path.to_string(),
+            source,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::WORKER_PROMPT;
@@ -603,9 +820,10 @@ mod tests {
     #[test]
     fn worker_prompt_carries_the_doc_currency_cue() {
         // A step that changes observable behaviour must ship its docs in the same
-        // step; the worker prompt states that contract to the model.
+        // plan; the worker prompt states that contract without forcing a second
+        // file into a single-region unit.
         assert!(
-            WORKER_PROMPT.contains("update the matching documentation in the same step"),
+            WORKER_PROMPT.contains("update the matching documentation in a bounded follow-up step"),
             "doc-currency cue missing from the worker prompt"
         );
     }

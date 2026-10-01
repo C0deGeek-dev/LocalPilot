@@ -8,6 +8,17 @@ that plan through an LLM plus local tools under rules that preserve reviewabilit
 
 The product is not a general chatbot. It is an engineering workflow controller.
 
+## Bounded Work In Both Modes
+
+Production agent sessions automatically receive the same work-sizing policy as
+harness steps. Small/pressured context narrows reading and patch material;
+unknown or weaker structured reliability narrows decisions and coherent scope.
+Large context alone cannot authorize a larger multi-concern change. New harness
+plans declare and validate scope before approval, and constrained execution stops
+at a verified durable checkpoint with the next action retained. Users can inspect
+the strategy and set stricter caps; correctness and permissions do not relax.
+See [the harness specification](06-harness-spec.md#automatic-work-granularity).
+
 ## Target Users
 
 - individual developers building software locally

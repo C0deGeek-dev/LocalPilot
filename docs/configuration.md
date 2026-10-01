@@ -938,7 +938,7 @@ discovery time (it never runs model inference).
 | `tool_call_budget_max` | int | built-in | Hard cost ceiling: the per-turn tool-call count that always stops the loop, regardless of progress. Setting either budget field enables an explicit budget (and an explicit value always wins). **When both are unset a conservative built-in ceiling applies** so a fresh project never runs an unbounded, externally-killed loop (a safety default; ADR-0055): **200** tool calls for a headless run (`eval`/`print`/`harness` step) and **500** for an interactive session. Raise it above `tool_call_budget` to let a productive turn extend |
 | `claim_gate` | `off` \| `warn` | `off` | The no-unsupported-claim gate over the final reply. `warn` appends a visible, non-destructive note to a completed-action claim no verified tool call this turn supports (matched per claim); `off` skips it. Default `off` while its false-positive rate is measured (ADR-0023) |
 | `turn_timeout_secs` | int | built-in (headless) | Bounded per-turn wall-clock timeout in seconds. When set, a turn that runs longer stops cleanly with a parseable `handoff:` summary instead of hanging — the bound a non-interactive caller (`print`) relies on. An explicit value always wins. **When unset, a headless run (`eval`/`print`/`harness` step) applies a conservative built-in bound of 600 s** so it self-bounds without a human watching (ADR-0055); an interactive session sets no default wall-clock — a long interactive turn is legitimate and the user can cancel it. To run a headless turn without a wall-clock bound, set an explicit large value |
-| `verify_before_done` | bool | `false` | Verify the workspace builds/tests before a turn finalizes. When on, a turn that would end with no tool call first runs a verification command; on failure the diagnostics are fed back and the loop continues (bounded by the budget/timeout rails plus a fixed re-entry cap) instead of "finishing" code that never compiled. The config default is `false`, so interactive and `print` turns are unchanged; **`localpilot eval` defaults it on** (opt out with `localpilot eval --no-verify`, which reproduces the pre-default behaviour) so a benchmark measures compiled+tested solves. A workspace with no detectable target finalizes unchanged (with a warning). See [06-harness-spec.md](06-harness-spec.md) §Verify-Before-Done Gate (ADR-0054/0058) |
+| `verify_before_done` | bool | `false` | Verify the workspace builds/tests before a turn finalizes. When on, a turn that would end with no tool call first runs a verification command; on failure the diagnostics are fed back and the loop continues (bounded by the budget/timeout rails plus a fixed re-entry cap) instead of "finishing" code that never compiled. The config default is `false`; bounded changed units still receive timely verification; **`localpilot eval` defaults it on** (disable the extra gate with `localpilot eval --no-verify`; bounded changed units still verify) so a benchmark measures compiled+tested solves. A read-only turn with no detectable target finalizes with a warning; a changed bounded unit stops with a durable next action. See [06-harness-spec.md](06-harness-spec.md) §Verify-Before-Done Gate (ADR-0054/0058/0199) |
 | `verify_command` | string | none | Override the verify-before-done command (a single command line, split on whitespace — no shell, like `test_command`). Unset resolves a command from the workspace stack (`cargo test`, `go test ./...`, `npm test`, `python -m pytest`, `mvn test`, `gradle test`, `make`, or — for C++ sources at the root — `g++ -std=c++17 -I. -fsyntax-only <sources>`); set this for a non-standard build/test invocation, or for a stack the detector does not cover (e.g. a CMake project whose sources are not at the root, where a full `ctest` run is wanted) |
 | `rules.<name>` | `off` \| `warn` \| `block` \| `discard` | — | Per-rule severity overrides. `discard` escalates a rule's actionable (`retry`) failures to the anti-sunk-cost discard rung: the attempt is abandoned and the working tree restored to committed state before a fresh attempt (e.g. `quality_gate = "discard"`). Rule-level only — a per-check `severity = "discard"` is rejected at load |
 | `guidance.enabled` | bool | `false` | Pre-brief guidance gate for `harness intake`: assess the idea's decision axes and pause below the threshold instead of writing a brief that encodes guesses. `--guidance` / `--no-guidance` override per run. The score is an inspectable signal (the full axis list is recorded in `.localpilot/intake.jsonl`), not proof the idea is fully specified — an axis the model never lists cannot count against it. See [06-harness-spec.md](06-harness-spec.md) §`localpilot harness intake` |
@@ -950,6 +950,42 @@ Notable rule key:
 | Rule | Default | Meaning |
 | --- | --- | --- |
 | `check_before_launch` | `warn` | When the task prompt named a local serveable target (a loopback host, or any `host:port` with an explicit port) that has not been probed this session, an attempt to launch a local server or scaffold a competing `index.html` is nudged (`warn`, the call still runs), refused (`block`), or ignored (`off`). Auto-extracted from the prompt — an external reference URL without a port is not a target. Advisory, tighten-only, best-effort. See [06-harness-spec.md](06-harness-spec.md). |
+
+### `[harness.granularity]`
+
+Automatic work sizing is enabled by production hosts. These optional positive
+integer ceilings only tighten the derived profile: `max_files`, `max_regions`,
+`max_read_lines`, `max_changed_lines`, and `max_decisions`. Zero is floored at one;
+a larger configured number cannot broaden an automatic bound. There is no broad
+override. For example:
+
+```toml
+[harness.granularity]
+max_read_lines = 40
+max_changed_lines = 30
+```
+
+Context below 32,000 usable prompt tokens or at 70% pressure gets 80-line reads,
+80 changed-line equivalents and 4 KiB output projections; sufficient context gets
+200, 200 and 12 KiB. Unknown/weak/malformed reliability permits one file, one
+region and one decision. Repeated valid tool successes plus verified changed
+units permit at most three files, four regions and two decisions with sufficient
+context (two regions with small context). Small context or conservative reliability
+stops harness execution after a durable checkpoint. Caps apply cumulatively to
+attempted edits, including old/new text and giant-line byte equivalents.
+
+Plan review and execution disclosure show the strategy; idle `/harness-status`
+also shows the current agent profile. `harness resume` prints the fresh executor's
+profile before work. Harness steps start with unknown reliability. Stricter caps
+changed during review apply again at approval, and changed execution inputs need
+new consent. Compaction never widens an active unit.
+
+Changed units receive timely permission-gated verification even when the optional
+extra `verify_before_done` gate is off. `eval --no-verify` disables that extra gate,
+but does not waive bounded-unit verification. Without an applicable target the
+changed unit stops with a durable next action; a reviewed plan can state
+`verify: none - reason` when no immediate executable check applies.
+Denied/unstartable verification stops a changed unit without a success claim.
 
 ### `[context]`
 

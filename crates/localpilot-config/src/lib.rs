@@ -26,13 +26,13 @@ pub use load::{
 };
 pub use schema::{
     AllowCommand, AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config,
-    ContextConfig, DiscoveryConfig, DocsConfig, GuidanceConfig, HarnessConfig, HistoryConfig,
-    HistoryPersistence, IngestConfig, IngestMode, LabConfig, LookupPolicy, McpConfig, McpEnvEntry,
-    McpEnvObject, McpServerConfig, MemoryConfig, MeshConfig, MeshWriter, Mode, PermissionProfile,
-    PermissionsConfig, ProviderAuth, ProviderConfig, ProviderSelection, QuotaAutoResume,
-    QuotaConfig, RenderMode, RepairMode, ResearchConfig, ResearchMcpConfig, ResearchMcpTool,
-    ResearchRenderConfig, ResearchWebConfig, ResolvedRails, RuleSeverity, ScratchRootConfig,
-    SelfImprovementConfig, SensitiveLiteral, SkillsConfig, StorageConfig, TerminalConfig,
-    TimelineDensity, ToolsConfig, DEFAULT_HEADLESS_TOOL_BUDGET_MAX,
+    ContextConfig, DiscoveryConfig, DocsConfig, GranularityConfig, GuidanceConfig, HarnessConfig,
+    HistoryConfig, HistoryPersistence, IngestConfig, IngestMode, LabConfig, LookupPolicy,
+    McpConfig, McpEnvEntry, McpEnvObject, McpServerConfig, MemoryConfig, MeshConfig, MeshWriter,
+    Mode, PermissionProfile, PermissionsConfig, ProviderAuth, ProviderConfig, ProviderSelection,
+    QuotaAutoResume, QuotaConfig, RenderMode, RepairMode, ResearchConfig, ResearchMcpConfig,
+    ResearchMcpTool, ResearchRenderConfig, ResearchWebConfig, ResolvedRails, RuleSeverity,
+    ScratchRootConfig, SelfImprovementConfig, SensitiveLiteral, SkillsConfig, StorageConfig,
+    TerminalConfig, TimelineDensity, ToolsConfig, DEFAULT_HEADLESS_TOOL_BUDGET_MAX,
     DEFAULT_HEADLESS_TURN_TIMEOUT_SECS, DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX,
 };

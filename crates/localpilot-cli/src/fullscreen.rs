@@ -659,6 +659,7 @@ enum PromptTarget {
 /// review is shown rather than remembered from startup.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 struct ExecutionSnapshot {
+    granularity: localpilot_config::GranularityConfig,
     auto_commit: bool,
     attempts_per_step: u32,
     /// The quality-gate checks in force, resolved exactly as the harness
@@ -669,6 +670,7 @@ struct ExecutionSnapshot {
 impl ExecutionSnapshot {
     fn of(harness: &localpilot_config::HarnessConfig) -> Self {
         Self {
+            granularity: harness.granularity.clone(),
             auto_commit: harness.auto_commit,
             attempts_per_step: harness.attempts_per_step,
             checks: harness
@@ -3782,7 +3784,9 @@ async fn execute_fullscreen_slash_action(
                 "internal: a document command reached the synchronous dispatch path".to_string(),
             ));
         }
-        SlashAction::HarnessStatus => harness_router::status(app, cwd, stages),
+        SlashAction::HarnessStatus => {
+            harness_router::status(app, cwd, stages, runtime.work_profile())
+        }
         SlashAction::HarnessStop => harness_router::stop(app, stages),
         SlashAction::HarnessFeature(description) => {
             if stages.brief().is_some() || stages.plan().is_some() {
@@ -3795,7 +3799,7 @@ async fn execute_fullscreen_slash_action(
                 let result = crate::harness_cmd::feature(cwd, &description);
                 let output = crate::repl::command_output_from_buffer(Vec::new(), result);
                 present_command_report(app, command_report("harness-feature", output));
-                harness_router::status(app, cwd, stages);
+                harness_router::status(app, cwd, stages, runtime.work_profile());
             }
         }
         SlashAction::HarnessResume | SlashAction::WaitResume => {
@@ -7384,6 +7388,11 @@ fn approve_plan_draft(
         return;
     }
 
+    let mut current_draft = draft.clone();
+    if let Some(profile) = &mut current_draft.work_profile {
+        profile.tighten_caps(&ctx.execution.granularity);
+    }
+    let draft = &current_draft;
     match localpilot_harness::persist_approved_plan(
         ctx.cwd,
         draft,
@@ -7489,6 +7498,7 @@ where
 
     let retry = match entry {
         PlanCommand::First => PlanRetry::Draft {
+            work_profile: runtime.planned_work_profile(),
             brief: Box::new(brief),
             brief_revision: revision,
             repo_summary,
@@ -7516,6 +7526,7 @@ where
                 retained_evidence(&completed)
             )));
             PlanRetry::Replan {
+                work_profile: runtime.planned_work_profile(),
                 brief: Box::new(brief),
                 brief_revision: revision,
                 repo_summary,
@@ -7578,6 +7589,7 @@ fn open_saved_plan_for_review(
         brief_revision,
         repo_summary,
         revisions: 0,
+        work_profile: None,
     });
     ctx.stages
         .begin(LiveStage::Plan(localpilot_harness::PlanStage::Reviewing(
@@ -7736,13 +7748,15 @@ where
                         brief,
                         brief_revision,
                         repo_summary,
+                        work_profile,
                     } => {
-                        localpilot_harness::draft_plan(
+                        localpilot_harness::draft_plan_with_profile(
                             provider.as_ref(),
                             &model,
                             &brief,
                             &brief_revision,
                             &repo_summary,
+                            work_profile,
                         )
                         .await
                     }
@@ -7751,14 +7765,16 @@ where
                         brief_revision,
                         repo_summary,
                         completed,
+                        work_profile,
                     } => {
-                        localpilot_harness::draft_replan(
+                        localpilot_harness::draft_replan_with_profile(
                             provider.as_ref(),
                             &model,
                             &brief,
                             &brief_revision,
                             &repo_summary,
                             &completed,
+                            work_profile,
                         )
                         .await
                     }
@@ -7898,13 +7914,19 @@ fn present_plan_draft(
     draft: &localpilot_harness::PlanDraft,
 ) {
     let state = localpilot_harness::inspect(localpilot_harness::WorkspaceInputs::at(ctx.cwd));
-    let lines = plan_review_lines(
+    let mut lines = plan_review_lines(
         &draft.progress,
         state.documents.brief(),
         crate::repl::ui_profile(runtime.permission_engine_handle().profile()).label(),
         &ctx.execution,
     );
 
+    if let Some(profile) = draft.work_profile {
+        lines.push(profile.instruction());
+        if let Err(defects) = localpilot_harness::validate_work_scope(&draft.progress, profile) {
+            lines.extend(defects.into_iter().map(|defect| defect.to_string()));
+        }
+    }
     let output = crate::repl::CommandOutput { lines, error: None };
     present_command_report(app, command_report("plan draft (not yet saved)", output));
     app.apply_runtime(RuntimeUpdate::Notice(
@@ -9266,7 +9288,7 @@ fn run_active_fullscreen_slash(
             false
         }
         SlashAction::HarnessStatus => {
-            harness_router::status(app, cwd, stages);
+            harness_router::status(app, cwd, stages, None);
             false
         }
         SlashAction::SetMode(localpilot_slash::Mode::Harness) => {
@@ -21169,17 +21191,17 @@ last_seen = "2026-08-10"
     // ------------------------------------------------------------------
 
     const ROUTE_PLAN: &str = "# Progress: greeting\nBranch: feature/greeting\n\n## Steps\n\n\
-- [ ] 1. Write the greeting test\n  - covers: AC1\n  - verify: cargo test greeting\n  \
+- [ ] 1. Write the greeting test\n  - covers: AC1\n  - scope: 1, 1, 1, 4\n  - verify: cargo test greeting\n  \
 - depends: none\n";
 
     const ROUTE_PLAN_REVISED: &str = "# Progress: greeting\nBranch: feature/greeting\n\n\
-## Steps\n\n- [ ] 1. Write the greeting test\n  - covers: AC1\n  - verify: cargo test greeting\n  \
+## Steps\n\n- [ ] 1. Write the greeting test\n  - covers: AC1\n  - scope: 1, 1, 1, 4\n  - verify: cargo test greeting\n  \
 - depends: none\n- [ ] 2. Document the greeting\n  - covers: none\n  \
-- verify: none - prose only\n  - depends: 1\n";
+- scope: 1, 1, 1, 4\n  - verify: none - prose only\n  - depends: 1\n";
 
     /// A plan that satisfies nothing in the brief.
     const ROUTE_PLAN_UNCOVERED: &str = "# Progress: greeting\nBranch: feature/greeting\n\n\
-## Steps\n\n- [ ] 1. Tidy the repository\n  - covers: none\n  - verify: cargo fmt\n  \
+## Steps\n\n- [ ] 1. Tidy the repository\n  - covers: none\n  - scope: 1, 1, 1, 4\n  - verify: cargo fmt\n  \
 - depends: none\n";
 
     #[tokio::test]
@@ -21893,12 +21915,12 @@ last_seen = "2026-08-10"
     const ROUTE_REPLAN: &str = "# Progress: greeting\nBranch: feature/rewritten\n\n## Steps\n\n\
 - [ ] 1. Write the greeting test\n  - covers: AC1\n  - verify: cargo test greeting\n  \
 - depends: none\n- [ ] 2. Translate the greeting\n  - covers: none\n  \
-- verify: cargo test translate\n  - depends: 1\n";
+- scope: 1, 1, 1, 4\n  - verify: cargo test translate\n  - depends: 1\n";
 
     /// A replan that forgets the finished step.
     const ROUTE_REPLAN_FORGETFUL: &str = "# Progress: greeting\nBranch: feature/greeting\n\n\
 ## Steps\n\n- [ ] 1. Translate the greeting\n  - covers: AC1\n  \
-- verify: cargo test translate\n  - depends: none\n";
+- scope: 1, 1, 1, 4\n  - verify: cargo test translate\n  - depends: none\n";
 
     /// Write the brief the plan routes read, and return the revision a plan
     /// approved against it must be bound to.
@@ -22016,6 +22038,42 @@ last_seen = "2026-08-10"
     }
 
     #[tokio::test]
+    async fn interactive_plan_approval_enforces_the_production_work_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        write_route_brief(dir.path());
+        let oversized = ROUTE_PLAN.replace("scope: 1, 1, 1, 4", "scope: 20, 20, 20, 2000");
+        let provider = scripted(&[&oversized]);
+        let mut bundle = brief_session(dir.path(), provider).await;
+        assert!(bundle.runtime.planned_work_profile().is_some());
+        let mut app = app();
+        let mut host = ConversationHost::new(dir.path(), None);
+        host.plan(
+            &mut app,
+            &mut bundle.runtime,
+            PlanCommand::First,
+            localpilot_slash::ReviewAction::Show,
+        )
+        .await;
+        assert!(
+            host.stages.plan().is_some(),
+            "oversized draft stays reviewable"
+        );
+        host.plan(
+            &mut app,
+            &mut bundle.runtime,
+            PlanCommand::First,
+            localpilot_slash::ReviewAction::Approve,
+        )
+        .await;
+        assert!(!dir.path().join("PROGRESS.md").exists());
+        assert!(
+            host.stages.plan().is_some(),
+            "refusal preserves the draft for splitting"
+        );
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
     async fn rejecting_a_draft_leaves_the_saved_plan_exactly_as_it_was() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
@@ -22117,7 +22175,7 @@ last_seen = "2026-08-10"
         std::fs::write(cwd.join("PROGRESS.md"), &existing).unwrap();
         let response = "# Progress: greeting\nBranch: feature/greeting\n\n## Steps\n\n\
 - [x] 1. Old implementation\n  - covers: none\n  - verify: cargo test invented\n  - depends: none\n\
-- [ ] 2. Verify the current acceptance criterion\n  - covers: AC1\n  - verify: cargo test greeting\n  - depends: 1\n";
+- [ ] 2. Verify the current acceptance criterion\n  - covers: AC1\n  - scope: 1, 1, 1, 4\n  - verify: cargo test greeting\n  - depends: 1\n";
         let provider = scripted(&[response]);
         let mut bundle = brief_session(cwd, provider).await;
         let mut app = app();
@@ -22336,6 +22394,7 @@ last_seen = "2026-08-10"
             auto_commit: true,
             attempts_per_step: 3,
             checks: vec!["test: cargo test --workspace".to_string()],
+            ..ExecutionSnapshot::default()
         };
 
         let lines = plan_review_lines(&progress, Some(&brief), "BYPASS", &execution);

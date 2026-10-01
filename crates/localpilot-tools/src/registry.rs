@@ -36,6 +36,7 @@ pub struct ToolRegistry {
     /// Provenance of each tool, kept in lockstep with `tools`, so the catalog
     /// projection can discriminate a builtin from a specific MCP server's tool.
     sources: Vec<ToolSource>,
+    context_output_bytes: usize,
 }
 
 /// One authorized tool dispatch with both its model-facing result and an
@@ -70,7 +71,13 @@ impl ToolRegistry {
         Self {
             tools: Vec::new(),
             sources: Vec::new(),
+            context_output_bytes: CONTEXT_OUTPUT_BYTES,
         }
+    }
+
+    /// Tighten retained output projection; full redacted output stays pageable.
+    pub fn set_context_output_limit(&mut self, bytes: usize) {
+        self.context_output_bytes = bytes.clamp(1024, CONTEXT_OUTPUT_BYTES);
     }
 
     /// A registry with all builtin tools.
@@ -171,7 +178,11 @@ impl ToolRegistry {
                 sources.push(source.clone());
             }
         }
-        Self { tools, sources }
+        Self {
+            tools,
+            sources,
+            context_output_bytes: self.context_output_bytes,
+        }
     }
 
     /// The registered tool names.
@@ -240,6 +251,7 @@ impl ToolRegistry {
                 &call.id,
                 "the explicit user-shell dispatch accepts only run_shell",
                 ctx,
+                self.context_output_bytes,
             ));
         }
         self.dispatch_detailed_with_intent(call, ctx, engine, approver, DispatchIntent::UserShell)
@@ -278,6 +290,7 @@ impl ToolRegistry {
                 &call.id,
                 &format!("unknown tool: {}", call.name),
                 ctx,
+                self.context_output_bytes,
             ));
         };
 
@@ -293,6 +306,7 @@ impl ToolRegistry {
                     &call.id,
                     &err.to_string(),
                     ctx,
+                    self.context_output_bytes,
                 ))
             }
         };
@@ -349,6 +363,7 @@ impl ToolRegistry {
                     &call.id,
                     &denial_message(tool.name(), &request, engine, command.as_ref()),
                     ctx,
+                    self.context_output_bytes,
                 ));
             }
             if matches!(effect, Effect::RunCommand(_) | Effect::UnscopedCommand) {
@@ -360,7 +375,13 @@ impl ToolRegistry {
             // Redaction happens here, for every profile including bypass.
             Ok(output) => {
                 let redacted = redact(&output.text);
-                let bounded = bound_output(tool.name(), &call.id, &redacted, ctx);
+                let bounded = bound_output_with_limit(
+                    tool.name(),
+                    &call.id,
+                    &redacted,
+                    ctx,
+                    self.context_output_bytes,
+                );
                 ToolDispatchResult {
                     result: ToolResult {
                         id: call.id.clone(),
@@ -377,6 +398,7 @@ impl ToolRegistry {
                 &call.id,
                 &err.to_string(),
                 ctx,
+                self.context_output_bytes,
             )),
         }
     }
@@ -403,9 +425,10 @@ fn unusable_result(
     call_id: &localpilot_core::ToolUseId,
     text: &str,
     ctx: &ToolContext<'_>,
+    limit: usize,
 ) -> ToolResult {
     let redacted = redact(text);
-    let bounded = bound_output(tool_name, call_id, &redacted, ctx);
+    let bounded = bound_output_with_limit(tool_name, call_id, &redacted, ctx, limit);
     ToolResult::error(
         call_id.clone(),
         format_tool_output(tool_name, &bounded, ToolOutcome::Unusable),
@@ -495,13 +518,14 @@ fn denial_message(
 /// Bound an output to the context budget: keep the head and tail, spill the
 /// full (already redacted) text to the retention store under the call id, and
 /// say so explicitly — truncation is never silent.
-fn bound_output(
+fn bound_output_with_limit(
     tool: &str,
     id: &localpilot_core::ToolUseId,
     text: &str,
     ctx: &ToolContext<'_>,
+    limit: usize,
 ) -> String {
-    if text.len() <= CONTEXT_OUTPUT_BYTES || tool == "read_tool_output" {
+    if text.len() <= limit || (tool == "read_tool_output" && limit == CONTEXT_OUTPUT_BYTES) {
         return text.to_string();
     }
     let retention_note = match ctx.retention {
@@ -516,12 +540,13 @@ fn bound_output(
         }
         None => "full output was not retained in this session".to_string(),
     };
-    let head_end = floor_char_boundary(text, CONTEXT_OUTPUT_BYTES - CONTEXT_TAIL_BYTES);
-    let tail_start = floor_char_boundary(text, text.len() - CONTEXT_TAIL_BYTES);
+    let tail = CONTEXT_TAIL_BYTES.min(limit / 4);
+    let head_end = floor_char_boundary(text, limit - tail);
+    let tail_start = floor_char_boundary(text, text.len() - tail);
     format!(
         "{}\n... [output truncated: {} of {} bytes shown; {}] ...\n{}",
         &text[..head_end],
-        CONTEXT_OUTPUT_BYTES,
+        limit,
         text.len(),
         retention_note,
         &text[tail_start..]

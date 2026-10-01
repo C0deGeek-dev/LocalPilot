@@ -25,9 +25,9 @@ The runtime owns conversation flow. The provider runtime owns model calls. The
 tool runtime owns local effects. The harness orchestrator owns project workflow.
 
 The session runtime runs in one of two operating modes. Agent mode is a direct
-conversational loop with no rule engine. Harness mode wraps the same loop in the
-rule engine, commit policy, and replan loop. Both modes share the tool runtime
-and the permission engine. The permission engine is configurable from
+conversational loop with baseline rules and bounded work policy. Harness mode
+adds the approved project workflow, commit policy, and replan loop. Both modes
+share the rule, tool, recovery and permission engines. The permission engine is configurable from
 least-privilege (default) up to explicit unrestricted authority; the operating
 mode does not change which profile is active.
 

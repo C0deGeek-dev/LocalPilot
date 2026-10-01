@@ -228,6 +228,9 @@ pub struct ManualCompaction {
 /// Tuning for a session.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
+    /// Production hosts enable automatic bounded units; library callers can
+    /// explicitly supply the same policy. Caps only tighten automatic bounds.
+    pub granularity: Option<localpilot_config::GranularityConfig>,
     pub model: String,
     pub interactivity: Interactivity,
     pub trusted: bool,
@@ -344,6 +347,7 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
+            granularity: None,
             model: "default".to_string(),
             interactivity: Interactivity::Interactive,
             trusted: true,
@@ -807,7 +811,7 @@ enum VerifyGate {
     Retry(String),
     /// The re-entry cap was reached with the build still failing; stop the turn
     /// with `NoProgress`.
-    GiveUp,
+    GiveUp(String),
 }
 
 /// Stable store key under which the broker's graduated tools persist across
@@ -1072,6 +1076,16 @@ pub enum SwitchError {
 
 /// The agent-mode runtime.
 pub struct SessionRuntime {
+    capability_evidence: crate::granularity::CapabilityEvidence,
+    active_work_profile: Option<crate::granularity::WorkProfile>,
+    work_unit: crate::granularity::WorkUnit,
+    work_diff_baseline: Option<crate::resume::WorkDiffBaseline>,
+    harness_checkpoint_owner: bool,
+    unit_scope: Option<crate::granularity::WorkScope>,
+    work_context_provenance: crate::granularity::ContextProvenance,
+    unit_verification_exempt: Option<String>,
+    unit_verify_command: Option<String>,
+    work_mutation_refusal: Option<String>,
     provider: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
     /// Shared + swappable so an interactive host can change the permission
@@ -1246,6 +1260,16 @@ impl SessionRuntime {
         let rule_engine = RuleEngine::with_baseline(&config.rules);
 
         let mut runtime = Self {
+            capability_evidence: crate::granularity::CapabilityEvidence::default(),
+            active_work_profile: None,
+            work_unit: crate::granularity::WorkUnit::default(),
+            work_diff_baseline: None,
+            harness_checkpoint_owner: false,
+            unit_scope: None,
+            work_context_provenance: crate::granularity::ContextProvenance::RuntimeUsage,
+            unit_verification_exempt: None,
+            unit_verify_command: None,
+            work_mutation_refusal: None,
             provider,
             tools,
             // The incognito floor is a session property, not a profile, so it is
@@ -1344,7 +1368,24 @@ impl SessionRuntime {
     /// model-visible block reason when a precondition is unmet (tighten-only:
     /// this can only refuse a call, never grant one). Projects the evidence
     /// ledger from this session's own event log.
-    fn precondition_block(&self, name: &str, input: &serde_json::Value) -> Option<String> {
+    fn precondition_block(&mut self, name: &str, input: &serde_json::Value) -> Option<String> {
+        if let Some(profile) = self.work_profile() {
+            let active = self.active_work_profile.get_or_insert(profile);
+            active.tighten(profile);
+            self.tools.set_context_output_limit(active.max_output_bytes);
+            if let Some(reason) = self
+                .work_unit
+                .refusal(*active, name, input, &self.workspace)
+            {
+                return Some(reason);
+            }
+        }
+        if self.config.granularity.is_some()
+            && self.work_diff_baseline.is_none()
+            && matches!(name, "run_shell" | "run_background")
+        {
+            return Some("work envelope: no repository diff baseline for opaque commands; use bounded file tools for edits and the automatic verification gate for checks".to_string());
+        }
         let contract = self.tools.get(name)?.contract();
         if contract.preconditions.is_empty() {
             return None;
@@ -1359,6 +1400,16 @@ impl SessionRuntime {
             self.config.enforce_prior_read,
         )
         .err()
+    }
+
+    /// Spend an attempted dispatch only after redirect/schema/contract/rule
+    /// refusal has been ruled out. Permission denial and partial failure remain
+    /// conservative attempted work, but a prior-read repair can still proceed.
+    fn reserve_work_input(&mut self, name: &str, input: &serde_json::Value) -> Option<String> {
+        self.active_work_profile.and_then(|profile| {
+            self.work_unit
+                .check_and_reserve(profile, name, input, &self.workspace)
+        })
     }
 
     /// Evaluate the `check_before_launch` discipline rule for a tool call. When
@@ -1506,9 +1557,11 @@ impl SessionRuntime {
     /// check). Pure measurement: dispatch behaviour is unchanged either way.
     fn record_tool_input_validity(&mut self, name: &str, input: &serde_json::Value) {
         let Some(schema) = self.tools.get(name).map(localpilot_tools::Tool::schema) else {
+            self.capability_evidence.observe_input(false);
             return;
         };
         let issues = localpilot_tools::tool_input_issues(&schema, input);
+        self.capability_evidence.observe_input(issues.is_empty());
         let provider = self.active_provider_id().to_string();
         let model = self.config.model.clone();
         let kind = match issues.first() {
@@ -1579,12 +1632,25 @@ impl SessionRuntime {
         self.record_event(SessionEventKind::SessionClosed);
     }
 
-    /// Start a fresh session: a new id, a clean conversation (the setup
-    /// system prompt is kept), and a new durable event chain.
+    /// Clear harness ownership when a runtime enters another session.
+    fn reset_work_unit_ownership(&mut self) {
+        self.harness_checkpoint_owner = false;
+        self.unit_scope = None;
+        self.unit_verification_exempt = None;
+        self.unit_verify_command = None;
+        self.work_mutation_refusal = None;
+        self.work_diff_baseline = None;
+        self.work_unit = crate::granularity::WorkUnit::default();
+    }
+
+    /// Start a fresh session with no previous harness unit's scope or exemption.
     pub fn start_new_session(&mut self) {
         // A fresh session must not inherit the previous one's running servers.
         self.background.kill_all();
         self.clear_conversation();
+        self.capability_evidence = crate::granularity::CapabilityEvidence::default();
+        self.active_work_profile = None;
+        self.reset_work_unit_ownership();
         self.session_id = SessionId::new();
         self.renew_scratch();
         self.last_event = None;
@@ -1651,7 +1717,10 @@ impl SessionRuntime {
             .first()
             .filter(|message| message.role == Role::System)
             .cloned();
+        self.capability_evidence = crate::granularity::CapabilityEvidence::default();
+        self.active_work_profile = None;
         self.session_id = session;
+        self.reset_work_unit_ownership();
         self.background.kill_all();
         crate::session_scratch::initialize(&mut self.workspace, &session.to_string());
         self.last_event = events.last().map(|event| event.id);
@@ -1680,7 +1749,10 @@ impl SessionRuntime {
         mark_fork: bool,
     ) -> Result<SessionId, localpilot_store::StoreError> {
         let fork_point = self.last_event;
+        self.reset_work_unit_ownership();
         let history: Vec<Message> = self.messages.iter().skip(1).cloned().collect();
+        self.capability_evidence = crate::granularity::CapabilityEvidence::default();
+        self.active_work_profile = None;
         self.session_id = SessionId::new();
         self.background.kill_all();
         self.renew_scratch();
@@ -1980,6 +2052,36 @@ impl SessionRuntime {
         }
     }
 
+    pub fn set_granularity(&mut self, caps: localpilot_config::GranularityConfig) {
+        self.config.granularity = Some(caps);
+    }
+
+    /// The reviewed step selects timely verification; a stated exemption does
+    /// not waive the caller's ratified quality gate or explicit session gate.
+    pub(crate) fn set_harness_checkpoint_owner(
+        &mut self,
+        scope: Option<crate::granularity::WorkScope>,
+    ) {
+        self.harness_checkpoint_owner = true;
+        self.unit_scope = scope;
+        self.unit_verification_exempt = None;
+        self.unit_verify_command = None;
+        self.active_work_profile = None;
+    }
+
+    pub fn set_work_unit_verification(&mut self, verification: &crate::Verification) {
+        match verification {
+            crate::Verification::Command(command) => {
+                self.unit_verify_command = Some(command.clone());
+                self.unit_verification_exempt = None;
+            }
+            crate::Verification::None { reason } => {
+                self.unit_verify_command = None;
+                self.unit_verification_exempt = Some(reason.clone())
+            }
+        }
+    }
+
     /// The currently requested reasoning effort.
     #[must_use]
     pub fn reasoning_effort(&self) -> Option<localpilot_llm::ReasoningEffort> {
@@ -2102,6 +2204,9 @@ impl SessionRuntime {
             ),
         };
         self.provider = provider;
+        self.work_context_provenance = crate::granularity::ContextProvenance::Unknown;
+        self.capability_evidence = crate::granularity::CapabilityEvidence::default();
+        self.active_work_profile = None;
         self.config.model = model.clone();
         self.prompt_token_calibration = PromptTokenCalibration::default();
         self.compaction_cache = None;
@@ -2126,6 +2231,9 @@ impl SessionRuntime {
             return Err(SwitchError::TurnInFlight);
         }
         self.config.model = model.into();
+        self.work_context_provenance = crate::granularity::ContextProvenance::Unknown;
+        self.capability_evidence = crate::granularity::CapabilityEvidence::default();
+        self.active_work_profile = None;
         self.prompt_token_calibration = PromptTokenCalibration::default();
         self.compaction_cache = None;
         Ok(())
@@ -2280,6 +2388,61 @@ impl SessionRuntime {
         )
     }
 
+    /// Inspect the active envelope. Outside a turn, derive the next unit from
+    /// calibrated pressure and session-local reliability observations.
+    #[must_use]
+    pub fn work_profile(&self) -> Option<crate::granularity::WorkProfile> {
+        let caps = self.config.granularity.as_ref()?;
+        let (used, limit) = self.context_usage();
+        let limit =
+            if self.work_context_provenance == crate::granularity::ContextProvenance::Unknown {
+                0
+            } else {
+                limit
+            };
+        let next = crate::granularity::WorkProfile::resolve(
+            crate::granularity::ContextCapacity {
+                used,
+                limit,
+                provenance: self.work_context_provenance,
+            },
+            self.capability_evidence.reliability(),
+            caps,
+        );
+        let mut profile = self.active_work_profile.unwrap_or(next);
+        if self.turn_in_flight {
+            profile.tighten(next);
+        } else {
+            profile = next;
+        }
+        if let Some(scope) = self.unit_scope {
+            profile.bound_to_scope(scope);
+        }
+        Some(profile)
+    }
+
+    /// Harness steps start a fresh runtime, so this conversation's successes
+    /// cannot establish reliability for that future executor.
+    #[must_use]
+    pub fn planned_work_profile(&self) -> Option<crate::granularity::WorkProfile> {
+        let (used, limit) = self.context_usage();
+        let limit =
+            if self.work_context_provenance == crate::granularity::ContextProvenance::Unknown {
+                0
+            } else {
+                limit
+            };
+        Some(crate::granularity::WorkProfile::resolve(
+            crate::granularity::ContextCapacity {
+                used,
+                limit,
+                provenance: self.work_context_provenance,
+            },
+            crate::granularity::Reliability::Unknown,
+            self.config.granularity.as_ref()?,
+        ))
+    }
+
     /// Run the quality-gate checks whose cadence maps to `trigger`, through this
     /// session's own permission engine and approver — the same path tool calls
     /// take, so a check never bypasses a permission decision. Returns one outcome
@@ -2396,22 +2559,68 @@ impl SessionRuntime {
     }
 
     /// The verify-before-done gate, consulted when a turn would finalize with no
-    /// tool call. Reuses [`Self::run_check`] — the same runner the quality gate
+    /// tool call. Reuses [`Self::run_gate_checks`] — the same runner the quality gate
     /// uses — so it never runs a second compile engine. The outcome tells the
     /// caller how to end (or continue) the turn:
-    /// - [`VerifyGate::Finalize`] — gate off, no target, verification passed, or
-    ///   the command could not run: finalize the turn as `Done`.
+    /// - [`VerifyGate::Finalize`] — no required check, a passing check, or an
+    ///   unavailable legacy read-only opt-in check.
     /// - [`VerifyGate::Retry`] — verification failed and a re-entry remains: feed
     ///   the diagnostics back and keep going.
-    /// - [`VerifyGate::GiveUp`] — the re-entry cap was reached with the build
-    ///   still failing: stop the turn with `NoProgress` rather than accept a
-    ///   never-green "done". This ties the no-progress stop to the verify signal.
+    /// - [`VerifyGate::GiveUp`] — bounded work was refused, exceeded its scope,
+    ///   or cannot pass required verification: stop with a durable next action.
     async fn verify_before_done(
-        &self,
+        &mut self,
         attempts: &mut usize,
         events: &broadcast::Sender<RuntimeEvent>,
     ) -> VerifyGate {
-        if !self.config.verify_before_done {
+        let mut diff_mutated = false;
+        if self.harness_checkpoint_owner {
+            if let Some(before) = &self.work_diff_baseline {
+                if crate::resume::work_diff_baseline(&self.workspace.process_dir())
+                    .is_ok_and(|after| after.head != before.head)
+                {
+                    let detail = "a command committed before harness verification; review that commit separately; completion is not recorded".to_string();
+                    let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                    return VerifyGate::GiveUp(detail);
+                }
+            }
+        }
+        if let (Some(profile), Some(baseline)) =
+            (self.work_profile(), self.work_diff_baseline.as_ref())
+        {
+            match crate::resume::work_diff_block(
+                &self.workspace.process_dir(),
+                profile,
+                Some(baseline),
+                false,
+            ) {
+                Ok(Some(reason)) => {
+                    let _ = events.send(RuntimeEvent::Warning(reason.clone()));
+                    return VerifyGate::GiveUp(reason);
+                }
+                Err(error) => {
+                    let _ = events.send(RuntimeEvent::Warning(format!(
+                        "cannot inspect bounded unit: {error}"
+                    )));
+                    return VerifyGate::GiveUp(format!("cannot inspect bounded unit: {error}"));
+                }
+                Ok(None) => {}
+            }
+            diff_mutated = crate::resume::work_diff_baseline(&self.workspace.process_dir())
+                .is_ok_and(|after| &after != baseline);
+        }
+        let bounded_mutation =
+            self.config.granularity.is_some() && (self.work_unit.has_mutations() || diff_mutated);
+        if !diff_mutated && (self.harness_checkpoint_owner || !self.work_unit.has_mutations()) {
+            if let Some(reason) = &self.work_mutation_refusal {
+                return VerifyGate::GiveUp(format!(
+                    "requested mutation was refused: {reason}; split the work and retry; completion is not recorded"
+                ));
+            }
+        }
+        if !self.config.verify_before_done
+            && (!bounded_mutation || self.unit_verification_exempt.is_some())
+        {
             return VerifyGate::Finalize;
         }
         // The gate runs its build/test command as a child process, so it needs the
@@ -2420,8 +2629,18 @@ impl SessionRuntime {
         // workspace. Detection reads marker files, which resolve the same on either
         // spelling.
         let root = self.workspace.process_dir();
-        let Some(check) = crate::resolve_verify_check(&root, self.config.verify_command.as_deref())
-        else {
+        let Some(check) = crate::resolve_verify_check(
+            &root,
+            self.config
+                .verify_command
+                .as_deref()
+                .or(self.unit_verify_command.as_deref()),
+        ) else {
+            if bounded_mutation {
+                let detail = "bounded unit has no applicable verification target; set verify_command or review an explicit verify: none reason before completion".to_string();
+                let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                return VerifyGate::GiveUp(detail);
+            }
             // The gate is on but no build/test target was detected (and no
             // override): finalize unchanged, but surface it so a silently
             // un-verified solve is visible rather than mistaken for a pass.
@@ -2437,19 +2656,40 @@ impl SessionRuntime {
                 "verify-before-done: still failing after {VERIFY_GATE_MAX_ATTEMPTS} attempts; \
                  stopping (no forward progress toward a passing build)"
             )));
-            return VerifyGate::GiveUp;
+            return VerifyGate::GiveUp(
+                "verification attempt limit reached; fix the failed check before continuing"
+                    .to_string(),
+            );
         }
-        let outcome = self.run_check(&check, &root).await;
+        let outcome = self
+            .run_gate_checks(std::slice::from_ref(&check), Trigger::PhaseComplete, &root)
+            .await
+            .remove(0);
         match outcome.status {
-            CheckStatus::Passed => VerifyGate::Finalize,
-            // An environment problem (denied or unstartable command) must not
-            // wedge a finished turn: record it and finalize without a signal.
+            CheckStatus::Passed => {
+                if bounded_mutation && diff_mutated {
+                    self.capability_evidence.observe_verification();
+                }
+                VerifyGate::Finalize
+            }
+            // A changed bounded unit cannot finish without its required signal.
+            // Legacy read-only opt-in checks retain their visible warning.
             CheckStatus::Denied | CheckStatus::Errored => {
                 let _ = events.send(RuntimeEvent::Warning(format!(
-                    "verify-before-done: could not run `{}` ({:?}); finalizing without a verify signal",
-                    check.program, outcome.status
+                    "verify-before-done: could not run `{}` ({:?}); {}",
+                    check.program,
+                    outcome.status,
+                    if bounded_mutation {
+                        "bounded unit remains unverified; stopping"
+                    } else {
+                        "finalizing without a verify signal"
+                    }
                 )));
-                VerifyGate::Finalize
+                if bounded_mutation {
+                    VerifyGate::GiveUp(format!("verification {}: {:?}; unit remains unverified; restore the verifier and resume", check.program, outcome.status))
+                } else {
+                    VerifyGate::Finalize
+                }
             }
             CheckStatus::Failed => {
                 *attempts += 1;
@@ -2960,6 +3200,18 @@ impl SessionRuntime {
         self.turn_in_flight = true;
         self.turn_tool_calls = 0;
         self.turn_files_changed.clear();
+        self.work_unit = crate::granularity::WorkUnit::default();
+        self.work_mutation_refusal = None;
+        self.active_work_profile = None;
+        self.active_work_profile = self.work_profile();
+        self.work_diff_baseline =
+            self.config.granularity.as_ref().and_then(|_| {
+                crate::resume::work_diff_baseline(&self.workspace.process_dir()).ok()
+            });
+        if let Some(profile) = self.active_work_profile {
+            self.tools
+                .set_context_output_limit(profile.max_output_bytes);
+        }
         self.turn_assistant_text = None;
         self.turn_usage = TokenUsage::default();
         self.turn_memory_written = false;
@@ -2987,6 +3239,10 @@ impl SessionRuntime {
                 memories: contribution.memories,
             });
         }
+        let retrieval_text = match self.active_work_profile {
+            Some(profile) => format!("{retrieval_text}\n\n{}", profile.instruction()),
+            None => retrieval_text,
+        };
         let turn_context = (!retrieval_text.is_empty())
             .then(|| Message::new(Role::System, vec![ContentBlock::text(retrieval_text)]));
         let context_reserve = turn_context
@@ -3289,6 +3545,9 @@ impl SessionRuntime {
                         Some(Ok(ModelEvent::Done)) => break,
                         Some(Ok(_)) => {}
                         Some(Err(err)) => {
+                            if matches!(err, ProviderError::StreamDecode(_) | ProviderError::MalformedToolArguments { .. }) {
+                                self.capability_evidence.observe_input(false);
+                            }
                             self.last_quota = err.quota().cloned();
                             if let Some(reset) = self.last_quota.as_ref().map(quota_reset_label) {
                                 let _ = events.send(RuntimeEvent::QuotaPaused {
@@ -3636,7 +3895,12 @@ impl SessionRuntime {
                         );
                         continue;
                     }
-                    VerifyGate::GiveUp => return self.stop(events, StopReason::NoProgress),
+                    VerifyGate::GiveUp(detail) => {
+                        self.append(
+                            Message::text(Role::User, &detail).into_synthetic("bounded unit stop"),
+                        );
+                        return self.stop_with_detail(events, StopReason::NoProgress, Some(detail));
+                    }
                 }
             }
 
@@ -3842,7 +4106,7 @@ impl SessionRuntime {
                 } else {
                     pre_dispatch_decision(
                         self.broker_reresolution(name),
-                        self.precondition_block(name, input),
+                        self.precondition_block(name, projected_input),
                         self.check_before_launch_verdict(name, input),
                     )
                 };
@@ -3872,6 +4136,9 @@ impl SessionRuntime {
                         ))
                     }
                     PreDispatch::Block { reason, announce } => {
+                        if is_file_write_tool(name) && reason.starts_with("work envelope:") {
+                            self.work_mutation_refusal = Some(reason.clone());
+                        }
                         // A contract precondition (quiet) or a blocking
                         // `check_before_launch` severity (announced) refused the call
                         // before permission. Tighten-only: surface it as an error
@@ -3893,6 +4160,15 @@ impl SessionRuntime {
                             Some(localpilot_core::ToolResult::error(
                                 ToolUseId::from(id.as_str()),
                                 message.clone(),
+                            ))
+                        } else if let Some(reason) = self.reserve_work_input(name, projected_input)
+                        {
+                            if is_file_write_tool(name) {
+                                self.work_mutation_refusal = Some(reason.clone());
+                            }
+                            Some(localpilot_core::ToolResult::error(
+                                ToolUseId::from(id.as_str()),
+                                reason,
                             ))
                         } else {
                             // Dispatch the repaired input in place of the original
@@ -4155,6 +4431,7 @@ impl SessionRuntime {
                 if let Some(scrubbed) = scrub_control_chars(&result.output) {
                     result.output = scrubbed;
                 }
+                self.capability_evidence.observe_outcome(!result.is_error());
 
                 // Every workspace file a call named is now "in play", whether the
                 // call read it, wrote it, or failed on it: a path-scoped
