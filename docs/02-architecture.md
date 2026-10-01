@@ -1034,3 +1034,9 @@ Log levels:
 - `info`: major lifecycle events
 - `debug`: payload metadata, never raw secrets
 - `trace`: local-only deep diagnostics
+
+The full-screen harness router orchestrates guided choices through the existing
+`StageHost`, document review operations, workspace inspector and operation pump.
+Resume confirmation compares the displayed document and execution inputs before
+calling the existing runner; status takes actual host liveness into the shared
+status renderer. Cancellation uses the pump token with explicit harness ownership.

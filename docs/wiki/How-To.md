@@ -239,7 +239,7 @@ local-only, and `[research] enabled = false` turns research off entirely (see
 localpilot harness intake       # idea -> brief.md
 localpilot harness plan         # brief.md -> PROGRESS.md
 localpilot harness status       # which lifecycle state this project is in
-localpilot harness feature      # worked, committed steps; resume on quota
+localpilot harness resume       # worked, committed steps; resume on quota
 ```
 
 Inside full-screen chat, `/harness-intake` turns an idea into a brief you review
@@ -261,8 +261,17 @@ A plan created before LocalPilot recorded that revision has no binding, so
 whether it still matches its brief is unknown and it will not run. Bind it once
 with `localpilot harness adopt`, which writes only that line.
 
-Inside full-screen chat you can also resume harness work without leaving the session:
-`/harness-resume` continues plan steps and `/wait-resume` waits for quota and then
+Inside full-screen chat, start with `/harness`: describe the idea, review and
+approve the brief with `/harness-brief approve`, then review and approve the plan
+with `/harness-plan approve`. It shows the next step and execution settings before
+you reply `resume`. Existing briefs first ask whether changes are needed; reply
+`no` to keep the brief unchanged. Use `/harness-status` for read-only inspection,
+`/harness-feature <description>` to extend approved current work, or
+`/harness-stop` to cancel harness work and discard unapproved drafts. `/agent`
+leaves the guided flow. Entering `/harness` executes no plan step.
+
+The direct `/harness-resume` command also asks for confirmation before it
+continues plan steps and `/wait-resume` waits for quota and then
 resumes, both entering Harness mode (the footer shows it; `/agent` exits). They use the
 model, provider, and permission profile in force when you invoke them, tool approvals
 appear in the normal dialog, a single Ctrl+C stops gracefully, and the result opens as a

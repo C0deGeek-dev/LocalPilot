@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Guided harness lifecycle.** Bare `/harness` now routes intake, existing brief
+  review, planning/replanning, completion and recovery through shared operations.
+  `/harness-status`, `/harness-feature <description>` and `/harness-stop` complete
+  the direct command family. Resume reviews execution settings and requires
+  confirmation again if documents or settings change. Harness input stays in its
+  captured conversation; stop cannot cancel unrelated work. Execution is refused
+  in incognito. The runner's existing automatic-commit limitation remains disclosed.
+
 - **Cross-platform tool dependency and Windows short paths.** The tools crate's
   store dependency remains available on all platforms. Scratch command targets
   accept literal embedded tildes in Windows short paths; leading shell home

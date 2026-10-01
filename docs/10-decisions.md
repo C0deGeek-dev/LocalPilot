@@ -2,6 +2,34 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0198: Harness Mode Guides Approved Documents And Binds Consent To Execution Inputs
+
+**Status:** accepted · **Date:** 2026-10-01. Amends ADR-0144's former cosmetic
+Harness mode behavior; retains its shared slash catalog and operation pump.
+
+Bare `/harness` orchestrates the typed workspace inspector and existing brief/
+plan review operations. It asks about an existing brief before inspecting the
+plan, diagnoses unknown or malformed state without guessing, and offers explicit
+resume confirmation on current incomplete work. Approval persists only the
+reviewed document; it is not execution consent.
+
+Guided choices join the same monotonically identified stage host as document
+reviews. Queued replies retain their generation. Harness input without a live
+conversation opens guidance rather than an ordinary agent turn. The existing
+runner starts only after consent matched against parsed plan content, live
+model/provider/profile/trust and the same loaded settings the runner uses.
+Changed inputs are redisclosed and require another confirmation. This is a
+check at dispatch, not a lock across external file/config writes.
+
+Status consumes the same domain status with actual host liveness; feature reuses
+the CLI mutation and fail-closed binding updates. Stop uses explicit in-flight
+harness ownership and the existing cancellation token; unrelated work continues.
+Model/provider changes and /agent end idle unapproved conversations. Execution
+is refused in incognito. No runner or permission engine is duplicated.
+
+The current automatic-commit limitation remains explicitly disclosed, as in
+ADR-0197. Existing runtime documents and binding formats require no migration.
+
 ## ADR-0197: A Plan Is Reviewed Against Its Brief, And Finished Work Is Not The Draft's To Restate
 
 **Status:** accepted · **Date:** 2026-10-01. Extends ADR-0182 (a brief is read
@@ -2830,6 +2858,9 @@ draft is not an available package); flipping the `autonomous_discovery` default;
 second trust authority or a second discovery/invocation filter.
 
 ## ADR-0144: One Shared Slash-Command Surface For Inline, Full-Screen, And Pair Hosts
+
+**Amendment:** ADR-0198 supersedes the cosmetic bare `/harness` behavior below;
+its catalog/pump/report contracts remain in force.
 
 Status: accepted. A fifth increment adds the **synchronous command + bounded
 report tier**: `/tree`, `/knowledge`, `/context`, `/agents`, `/skills`, and `/bg`

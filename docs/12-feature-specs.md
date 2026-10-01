@@ -388,7 +388,14 @@ UI:
   attempts and verification are preserved, `covers` may only narrow, and an
   unresolvable difference is a named conflict that holds the draft and writes
   nothing.
-- `/harness-resume` and `/wait-resume` run in the full-screen chat host on the
+- Bare `/harness` guides intake, brief review, planning/replanning and confirmed
+  resume through the existing document stages and runner. Harness messages never
+  fall through to an ordinary agent turn. `/harness-status` is read-only,
+  `/harness-feature <description>` shares the CLI mutation and binding contract,
+  and `/harness-stop` cancels only harness work. Resume consent is bound to the
+  displayed plan and effective model/provider/profile/quality gate; changed inputs
+  require confirmation again. The actual automatic-commit limitation is disclosed.
+- `/harness-resume` (after confirmation) and `/wait-resume` run in the full-screen chat host on the
   operation pump: each enters Harness mode synchronously (`/agent` exits), snapshots
   the live model/provider/sandbox-profile/trust at dispatch (a `/model` or profile
   switch after launch is honoured, and the live provider makes `/wait-resume`'s

@@ -1,5 +1,8 @@
 //! Crossterm host for the backend-neutral full-screen chat model.
 
+#[path = "fullscreen_harness.rs"]
+mod harness_router;
+
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -629,8 +632,8 @@ fn restore_exit_with(exit: ExitDraft, restore: impl FnOnce()) -> RestoredExit {
 
 /// The operating mode a queued prompt was submitted under, captured at ENQUEUE
 /// time and branched at drain, so a later mode switch cannot reinterpret an
-/// already-queued prompt. `Agent` and `Harness` both drain to an ordinary model
-/// turn (inline parity); only `Research` reroutes.
+/// already-queued prompt. Harness prompts open guidance; stage prompts retain
+/// the exact conversation generation captured when they were submitted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PromptTarget {
     Agent,
@@ -701,6 +704,7 @@ struct StageGeneration(u64);
 enum LiveStage {
     Brief(localpilot_harness::BriefStage),
     Plan(localpilot_harness::PlanStage),
+    Guide(harness_router::GuideStage),
 }
 
 impl LiveStage {
@@ -709,6 +713,7 @@ impl LiveStage {
         match self {
             Self::Brief(_) => "brief",
             Self::Plan(_) => "plan",
+            Self::Guide(_) => "harness guidance",
         }
     }
 }
@@ -721,6 +726,9 @@ impl LiveStage {
 /// approved" after a planning conversation would send the user looking at a file
 /// they never touched.
 struct StageHost {
+    guided: bool,
+    operation_active: Cell<bool>,
+    stop_requested: Cell<bool>,
     next_generation: u64,
     live: Option<(StageGeneration, LiveStage)>,
     /// The saved plan this conversation may replace. Approval refuses later
@@ -741,6 +749,9 @@ const REMEMBERED_STAGE_OUTCOMES: usize = 16;
 impl StageHost {
     fn new() -> Self {
         Self {
+            guided: false,
+            operation_active: Cell::new(false),
+            stop_requested: Cell::new(false),
             next_generation: 0,
             live: None,
             plan_source: None,
@@ -880,6 +891,7 @@ enum PumpedIngest {
 /// A slash command that runs on the operation pump rather than synchronously.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum PumpedSlash {
+    HarnessGuide,
     /// Adopt a running server, or launch `serve` first when supplied.
     LocalBoxAdopt {
         serve: Option<String>,
@@ -1027,6 +1039,9 @@ fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
         // One-shot `/research <topic>` pumps; bare `/research` (mode entry, `None`)
         // stays synchronous.
         SlashAction::Research(Some(topic)) => SlashRoute::Pumped(PumpedSlash::Research { topic }),
+        SlashAction::SetMode(localpilot_slash::Mode::Harness) => {
+            SlashRoute::Pumped(PumpedSlash::HarnessGuide)
+        }
         SlashAction::HarnessResume => SlashRoute::Pumped(PumpedSlash::HarnessResume),
         SlashAction::HarnessIntake(idea) => SlashRoute::Pumped(PumpedSlash::HarnessIntake(idea)),
         SlashAction::HarnessBrief(action) => SlashRoute::Pumped(PumpedSlash::HarnessBrief(action)),
@@ -3449,7 +3464,20 @@ async fn execute_fullscreen_slash_action(
             provider: Some(provider),
             model,
         } => {
+            let old_target = (
+                runtime.active_provider_id().to_string(),
+                runtime.active_model().to_string(),
+            );
             let report = switch_model_target(runtime, config, &provider, model).await;
+            if old_target
+                != (
+                    runtime.active_provider_id().to_string(),
+                    runtime.active_model().to_string(),
+                )
+            {
+                end_stage_conversation(app, stages, "changing model/provider");
+                stages.guided = false;
+            }
             app.set_active_provider_model(report.provider, report.model);
             for notice in report.notices {
                 app.apply_runtime(RuntimeUpdate::Notice(notice));
@@ -3718,22 +3746,19 @@ async fn execute_fullscreen_slash_action(
                 "internal: one-shot /research reached the synchronous dispatch path".to_string(),
             ));
         }
-        // `/agent` and `/harness` are silent typed mode transitions — exact inline
-        // parity (inline `/harness` is `state.mode = Harness` and nothing else; plain
-        // prompts in Agent OR Harness mode take the ordinary model turn). No notice,
-        // no synthetic timeline item; the footer/settings render the mode.
-        //
-        // `/agent` is also the advertised exit from a brief conversation, and a
-        // live conversation outranks the mode when deciding who owns a prompt —
-        // so the exit has to end it. Leaving it live would make `/agent` claim to
-        // leave while every later message still went to the draft.
-        SlashAction::SetMode(
-            mode @ (localpilot_slash::Mode::Agent | localpilot_slash::Mode::Harness),
-        ) => {
+        // Leaving Harness mode ends unapproved session state so later prompts
+        // cannot remain attached to a conversation the UI claims has ended.
+        SlashAction::SetMode(mode @ localpilot_slash::Mode::Agent) => {
             if matches!(mode, localpilot_slash::Mode::Agent) {
                 end_stage_conversation(app, stages, "/agent");
+                stages.guided = false;
             }
             app.set_shared_mode(mode);
+        }
+        SlashAction::SetMode(localpilot_slash::Mode::Harness) => {
+            app.apply_runtime(RuntimeUpdate::Warning(
+                "internal: harness guidance reached the synchronous dispatch path".to_string(),
+            ))
         }
         // `SetMode(Research)` is never produced by a spelling (bare `/research` parses to
         // `Research(None)`), but the exhaustive match must select Research TRUTHFULLY —
@@ -3756,6 +3781,22 @@ async fn execute_fullscreen_slash_action(
             app.apply_runtime(RuntimeUpdate::Notice(
                 "internal: a document command reached the synchronous dispatch path".to_string(),
             ));
+        }
+        SlashAction::HarnessStatus => harness_router::status(app, cwd, stages),
+        SlashAction::HarnessStop => harness_router::stop(app, stages),
+        SlashAction::HarnessFeature(description) => {
+            if stages.brief().is_some() || stages.plan().is_some() {
+                app.apply_runtime(RuntimeUpdate::Warning(
+                    "finish or cancel the active harness conversation before adding a feature"
+                        .to_string(),
+                ));
+            } else {
+                stages.end(localpilot_harness::StageOutcome::Superseded);
+                let result = crate::harness_cmd::feature(cwd, &description);
+                let output = crate::repl::command_output_from_buffer(Vec::new(), result);
+                present_command_report(app, command_report("harness-feature", output));
+                harness_router::status(app, cwd, stages);
+            }
         }
         SlashAction::HarnessResume | SlashAction::WaitResume => {
             app.apply_runtime(RuntimeUpdate::Notice(
@@ -4786,9 +4827,48 @@ async fn drive_operation_chain(
                 app.begin_work_before(next_item);
                 // Branch on the kind captured at ENQUEUE, so a mode switch made while
                 // this prompt sat in the queue cannot reinterpret it. Agent and Harness
-                // both take the ordinary model turn (inline parity); only Research
+                // Harness opens guidance; only Agent takes an ordinary model turn. Research
                 // reroutes — and it must not `begin_work` again (already Busy here).
                 let exit = match prompt.target {
+                    PromptTarget::Stage(generation) if matches!(&ctx.stages.live, Some((current, LiveStage::Guide(_))) if *current == generation) =>
+                    {
+                        let mut io = TerminalIo {
+                            poll: |timeout: Duration| event::poll(timeout),
+                            read: || event::read(),
+                            draw: |app: &AppModel| draw_synchronized(terminal, app),
+                            event_driven: true,
+                        };
+                        ctx.execution = ExecutionSnapshot::of(
+                            &crate::harness_cmd::resume_config(ctx.cwd).harness,
+                        );
+                        let resume = harness_router::input_on(
+                            app,
+                            runtime,
+                            &mut ctx,
+                            queue,
+                            &mut io,
+                            generation,
+                            &prompt.text,
+                        )
+                        .await?;
+                        finish_stage_step(app, true)?;
+                        if resume {
+                            drive_harness_resume(
+                                terminal,
+                                app,
+                                runtime,
+                                &mut ctx,
+                                queue,
+                                ResumeAuthority {
+                                    approval_tx: authority.approval_tx,
+                                },
+                                ResumeKind::Harness,
+                            )
+                            .await?
+                        } else {
+                            false
+                        }
+                    }
                     PromptTarget::Stage(generation) => {
                         drive_stage_input(
                             terminal,
@@ -4817,7 +4897,13 @@ async fn drive_operation_chain(
                         )
                         .await?
                     }
-                    PromptTarget::Agent | PromptTarget::Harness => {
+                    PromptTarget::Harness => {
+                        app.apply_runtime(RuntimeUpdate::Notice("this prompt belongs to Harness mode; opening guidance instead of an agent turn".to_string()));
+                        finish_stage_step(app, true)?;
+                        drive_harness_guide(terminal, app, runtime, &mut ctx, queue, false).await?;
+                        false
+                    }
+                    PromptTarget::Agent => {
                         drive_turn(
                             terminal,
                             app,
@@ -4865,16 +4951,46 @@ async fn drive_slash_command(
     authority: &mut PumpedAuthority<'_>,
 ) -> Result<bool> {
     match command {
+        PumpedSlash::HarnessGuide => {
+            drive_harness_guide(terminal, app, runtime, ctx, queue, false).await?;
+            Ok(false)
+        }
         PumpedSlash::HarnessIntake(idea) => {
             drive_harness_intake(terminal, app, runtime, ctx, queue, idea).await?;
             Ok(false)
         }
         PumpedSlash::HarnessBrief(action) => {
             drive_harness_brief(terminal, app, runtime, ctx, queue, action).await?;
+            if ctx.stages.guided
+                && ctx.stages.live.is_none()
+                && matches!(
+                    action,
+                    localpilot_slash::ReviewAction::Approve
+                        | localpilot_slash::ReviewAction::NoChange
+                )
+            {
+                drive_harness_guide(terminal, app, runtime, ctx, queue, true).await?;
+            }
+            if ctx.stages.live.is_none() && matches!(action, localpilot_slash::ReviewAction::Cancel)
+            {
+                ctx.stages.guided = false;
+                app.set_shared_mode(localpilot_slash::Mode::Agent);
+            }
             Ok(false)
         }
         PumpedSlash::HarnessPlan { entry, action } => {
             drive_harness_plan(terminal, app, runtime, ctx, queue, entry, action).await?;
+            if ctx.stages.guided
+                && ctx.stages.live.is_none()
+                && matches!(action, localpilot_slash::ReviewAction::Approve)
+            {
+                drive_harness_guide(terminal, app, runtime, ctx, queue, true).await?;
+            }
+            if ctx.stages.live.is_none() && matches!(action, localpilot_slash::ReviewAction::Cancel)
+            {
+                ctx.stages.guided = false;
+                app.set_shared_mode(localpilot_slash::Mode::Agent);
+            }
             Ok(false)
         }
         PumpedSlash::LocalBoxAdopt {
@@ -4919,6 +5035,11 @@ async fn drive_slash_command(
             drive_research(terminal, app, runtime, ctx, &topic, queue, BeginWork::Own).await
         }
         PumpedSlash::HarnessResume => {
+            ctx.execution =
+                ExecutionSnapshot::of(&crate::harness_cmd::resume_config(ctx.cwd).harness);
+            if !harness_router::confirm_resume(app, runtime, ctx) {
+                return Ok(false);
+            }
             drive_harness_resume(
                 terminal,
                 app,
@@ -6160,11 +6281,34 @@ fn end_stage_conversation(app: &mut AppModel, stages: &mut StageHost, cause: &st
     if stages.live_generation().is_none() {
         return;
     }
+    let subject = stages
+        .live
+        .as_ref()
+        .map(|(_, stage)| stage.subject())
+        .unwrap_or("harness");
     stages.end(localpilot_harness::StageOutcome::Cancelled);
     app.apply_runtime(RuntimeUpdate::Notice(format!(
-        "{cause} left the brief conversation; the unapproved draft was discarded and the \
+        "{cause} left the {subject} conversation; the unapproved draft was discarded and the \
          project is unchanged"
     )));
+}
+
+async fn drive_harness_guide(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    after_brief: bool,
+) -> Result<()> {
+    ctx.execution = ExecutionSnapshot::of(&crate::harness_cmd::resume_config(ctx.cwd).harness);
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    harness_router::enter_on(app, runtime, ctx, queue, &mut io, after_brief).await
 }
 
 /// `/harness-intake`: start a brief conversation.
@@ -6727,6 +6871,14 @@ where
     };
 
     match live {
+        LiveStage::Guide(guide) => {
+            ctx.stages.live = Some((generation, LiveStage::Guide(guide)));
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "use the guided harness choice; this input was not sent as an agent task"
+                    .to_string(),
+            ));
+            finish_stage_step(app, busy)
+        }
         LiveStage::Brief(stage) => {
             let action = decide_brief_turn(app, stage, text);
             let Some(in_flight) = in_flight_stage(&action) else {
@@ -6761,6 +6913,10 @@ where
                 }
             };
             ctx.stages.live = Some((generation, LiveStage::Brief(next)));
+            if ctx.stages.stop_requested.replace(false) {
+                ctx.stages.guided = false;
+                end_stage_conversation(app, ctx.stages, "stopping harness work");
+            }
             finish_stage_step(app, busy)
         }
         LiveStage::Plan(stage) => {
@@ -6785,6 +6941,10 @@ where
                 }
             };
             ctx.stages.live = Some((generation, LiveStage::Plan(next)));
+            if ctx.stages.stop_requested.replace(false) {
+                ctx.stages.guided = false;
+                end_stage_conversation(app, ctx.stages, "stopping harness work");
+            }
             finish_stage_step(app, busy)
         }
     }
@@ -6916,6 +7076,7 @@ where
 
     let outcome: std::rc::Rc<std::cell::RefCell<Option<_>>> = std::rc::Rc::default();
     let captured = outcome.clone();
+    ctx.stages.operation_active.set(true);
     drive_fullscreen_operation(
         app,
         SlashContext {
@@ -7376,6 +7537,10 @@ where
     finish_stage_step(app, true)?;
     let next = result?;
     ctx.stages.live = Some((generation, LiveStage::Plan(next)));
+    if ctx.stages.stop_requested.replace(false) {
+        ctx.stages.guided = false;
+        end_stage_conversation(app, ctx.stages, "stopping harness work");
+    }
     Ok(())
 }
 
@@ -7619,6 +7784,7 @@ where
 
     let outcome: std::rc::Rc<std::cell::RefCell<Option<_>>> = std::rc::Rc::default();
     let captured = outcome.clone();
+    ctx.stages.operation_active.set(true);
     drive_fullscreen_operation(
         app,
         SlashContext {
@@ -7918,6 +8084,13 @@ async fn drive_harness_resume(
     resume: ResumeAuthority<'_>,
     kind: ResumeKind,
 ) -> Result<bool> {
+    if runtime.is_incognito() {
+        app.apply_runtime(RuntimeUpdate::Warning(
+            "harness execution writes project files and commits; leave incognito before resuming"
+                .to_string(),
+        ));
+        return Ok(false);
+    }
     // Dispatch-time LIVE snapshot (never launch-time), built through the shared seam.
     let snapshot = resume_dispatch_snapshot(runtime);
     let image_capability = ImageCapabilitySnapshot {
@@ -7981,7 +8154,8 @@ async fn drive_harness_resume(
         draw: |app: &AppModel| draw_synchronized(terminal, app),
         event_driven: true,
     };
-    drive_fullscreen_operation(
+    ctx.stages.operation_active.set(true);
+    let result = drive_fullscreen_operation(
         app,
         SlashContext {
             approval_rx: &mut *ctx.approval_rx,
@@ -8012,7 +8186,11 @@ async fn drive_harness_resume(
             apply_resume_result(app, result, kind);
         },
     )
-    .await
+    .await;
+    if ctx.stages.stop_requested.replace(false) {
+        ctx.stages.guided = false;
+    }
+    result
 }
 
 /// The terminal I/O the full-screen operation pump depends on. Production wraps
@@ -8769,6 +8947,7 @@ where
         dismiss_pending_questions(app, &mut pending_questions);
         dismiss_buffered_questions(question_rx);
     }
+    stages.operation_active.set(false);
     outcome
 }
 
@@ -8977,7 +9156,7 @@ fn handle_turn_event_impl(
                     false
                 }
                 AppCommand::RunSlash(submitted) => {
-                    run_active_fullscreen_slash(app, submitted, live, cancel)
+                    run_active_fullscreen_slash(app, submitted, live, cancel, stages, cwd)
                 }
                 AppCommand::Submit(submitted) => {
                     if let Some(operation) =
@@ -9047,6 +9226,8 @@ fn run_active_fullscreen_slash(
     submitted: SubmittedInput,
     live: Option<&LiveControls>,
     cancel: &CancellationToken,
+    stages: &StageHost,
+    cwd: &Path,
 ) -> bool {
     if !submitted.images.is_empty() {
         app.apply_runtime(RuntimeUpdate::Notice(
@@ -9068,6 +9249,37 @@ fn run_active_fullscreen_slash(
     }
 
     match action {
+        SlashAction::HarnessStop | SlashAction::SetMode(localpilot_slash::Mode::Agent) => {
+            if stages.operation_active.get() {
+                stages.stop_requested.set(true);
+                cancel.cancel();
+                app.set_shared_mode(localpilot_slash::Mode::Agent);
+                app.apply_runtime(RuntimeUpdate::Notice(
+                    "stopping the active harness operation; waiting for it to finish cancellation"
+                        .to_string(),
+                ));
+            } else {
+                app.apply_runtime(RuntimeUpdate::Notice(
+                    "no active harness operation; current work continues".to_string(),
+                ));
+            }
+            false
+        }
+        SlashAction::HarnessStatus => {
+            harness_router::status(app, cwd, stages);
+            false
+        }
+        SlashAction::SetMode(localpilot_slash::Mode::Harness) => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                if stages.operation_active.get() {
+                    "harness operation already active; no duplicate started"
+                } else {
+                    "another operation is active; enter /harness after it finishes"
+                }
+                .to_string(),
+            ));
+            false
+        }
         SlashAction::Exit { print_transcript } => {
             app.request_exit(print_transcript);
             cancel.cancel();
@@ -11581,28 +11793,6 @@ mod tests {
             );
         }
 
-        // `/harness` is now a real SILENT typed mode entry — exact inline parity (a
-        // label flip, no notice, no synthetic timeline row). `/agent` is the exit,
-        // covered by `research_mode_entry_exit_and_harness_stay_correct_in_the_synchronous_arm`.
-        {
-            let mut app = app();
-            let before_rows = app.active_timeline().items().len();
-            let _ = execute_fullscreen_slash(
-                &mut app,
-                &mut bundle.runtime,
-                &config,
-                cwd,
-                slash_input("/harness"),
-            )
-            .await;
-            assert_eq!(app.shared_mode(), "harness", "/harness enters harness mode");
-            assert_eq!(
-                app.active_timeline().items().len(),
-                before_rows,
-                "/harness is silent — no notice, no synthetic timeline row"
-            );
-        }
-
         bundle.runtime.close();
     }
 
@@ -13798,7 +13988,7 @@ mod tests {
             .collect();
         let expected_full_screen: &[(&str, &str)] = &[
             ("agent", "Switch to agent mode"),
-            ("harness", "Switch to harness mode"),
+            ("harness", "Guide brief review, planning and confirmed harness execution"),
             ("default", "Use the default permission profile"),
             ("relaxed", "Use the relaxed permission profile"),
             ("bypass", "Use the bypass permission profile"),
@@ -13832,7 +14022,10 @@ mod tests {
             ("clear", "Clear the conversation view"),
             ("compact", "Summarize and compact the context"),
             ("resume", "Continue a previous session"),
-            ("harness-resume", "Resume harness plan work"),
+            ("harness-resume", "Review execution settings, then confirm harness resume"),
+            ("harness-status", "Show harness document and operation state"),
+            ("harness-feature", "Add a feature to the approved current brief and plan"),
+            ("harness-stop", "Stop harness work and discard its unapproved draft"),
             ("wait-resume", "Wait for quota, then resume"),
             ("harness-intake", "Turn an idea into a reviewed brief"),
             ("harness-brief", "Review the brief, or approve/reject a draft"),
@@ -13876,7 +14069,7 @@ mod tests {
                 "Incognito: save nothing; new files need approval (`/incognito off` to end)",
             ),
         ];
-        assert_eq!(full_screen.len(), 45);
+        assert_eq!(full_screen.len(), 48);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
@@ -18127,7 +18320,7 @@ mod tests {
         ));
         assert!(matches!(
             route_fullscreen_slash(SlashAction::SetMode(localpilot_slash::Mode::Harness)),
-            SlashRoute::Synchronous(SlashAction::SetMode(localpilot_slash::Mode::Harness))
+            SlashRoute::Pumped(PumpedSlash::HarnessGuide)
         ));
         // The two resume commands pump; bare `/harness` is a synchronous real mode entry (above).
         assert!(matches!(
@@ -18311,54 +18504,7 @@ mod tests {
             localpilot_slash::Mode::Agent,
             "/agent exits Research mode"
         );
-        // `/harness` is now a real SILENT typed mode entry — it transitions to Harness
-        // and emits no "not available" notice (inline parity: a label flip and nothing
-        // else; plain Harness prompts take the ordinary turn, same as Agent).
-        let before_rows = app.active_timeline().items().len();
-        let _ = execute_fullscreen_slash(
-            &mut app,
-            &mut bundle.runtime,
-            &config,
-            cwd,
-            slash_input("/harness"),
-        )
-        .await;
-        assert_eq!(
-            app.mode(),
-            localpilot_slash::Mode::Harness,
-            "/harness enters Harness mode"
-        );
-        assert!(
-            !app.active_timeline()
-                .items()
-                .iter()
-                .any(|item| item.text.contains("not available in full-screen chat")),
-            "/harness is no longer deferred — no 'not available' notice"
-        );
-        assert_eq!(
-            app.active_timeline().items().len(),
-            before_rows,
-            "/harness is silent — no notice, no synthetic timeline row"
-        );
-        assert!(
-            rendered_footer(&app).contains("harness"),
-            "the footer renders Harness mode"
-        );
-        assert!(
-            fullscreen_settings(&app, &config)
-                .iter()
-                .any(|entry| entry.name == "Mode and profile" && entry.value.contains("harness")),
-            "the settings 'Mode and profile' row reads harness"
-        );
-        // With no brief conversation live, the route-derived Harness mode captures
-        // `PromptTarget::Harness`, which drains to the ordinary turn (inline parity
-        // — same as Agent). Ownership binding is covered by
-        // `queued_prompts_keep_the_owner_they_were_enqueued_under`.
-        assert_eq!(
-            prompt_target(app.mode(), &StageHost::new()),
-            PromptTarget::Harness,
-            "Harness mode with no live conversation captures PromptTarget::Harness"
-        );
+        // Guidance has its own pumped route and operation tests.
         // `/agent` exits Harness via the REAL route (not a direct `set_shared_mode`).
         let _ = execute_fullscreen_slash(
             &mut app,
@@ -20726,6 +20872,96 @@ last_seen = "2026-08-10"
             self.stages.live_generation()
         }
 
+        async fn guide(
+            &mut self,
+            app: &mut AppModel,
+            runtime: &mut SessionRuntime,
+            after_brief: bool,
+        ) {
+            let mut io = self.io();
+            let Self {
+                approval_rx,
+                question_rx,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+                queue,
+                stages,
+                guidance,
+                execution,
+                cwd,
+                ..
+            } = self;
+            harness_router::enter_on(
+                app,
+                runtime,
+                &mut SlashContext {
+                    approval_rx,
+                    question_rx,
+                    cwd,
+                    history,
+                    mouse_state,
+                    paste_burst,
+                    workspace_index,
+                    stages,
+                    guidance: *guidance,
+                    execution: execution.clone(),
+                },
+                queue,
+                &mut io,
+                after_brief,
+            )
+            .await
+            .unwrap();
+        }
+
+        async fn choose(
+            &mut self,
+            app: &mut AppModel,
+            runtime: &mut SessionRuntime,
+            generation: StageGeneration,
+            text: &str,
+        ) -> bool {
+            let mut io = self.io();
+            let Self {
+                approval_rx,
+                question_rx,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+                queue,
+                stages,
+                guidance,
+                execution,
+                cwd,
+                ..
+            } = self;
+            harness_router::input_on(
+                app,
+                runtime,
+                &mut SlashContext {
+                    approval_rx,
+                    question_rx,
+                    cwd,
+                    history,
+                    mouse_state,
+                    paste_burst,
+                    workspace_index,
+                    stages,
+                    guidance: *guidance,
+                    execution: execution.clone(),
+                },
+                queue,
+                &mut io,
+                generation,
+                text,
+            )
+            .await
+            .unwrap()
+        }
+
         /// `/harness-intake [idea]`.
         async fn intake(
             &mut self,
@@ -20945,6 +21181,490 @@ last_seen = "2026-08-10"
     const ROUTE_PLAN_UNCOVERED: &str = "# Progress: greeting\nBranch: feature/greeting\n\n\
 ## Steps\n\n- [ ] 1. Tidy the repository\n  - covers: none\n  - verify: cargo fmt\n  \
 - depends: none\n";
+
+    #[tokio::test]
+    async fn guided_fresh_workspace_reaches_confirmation_without_executing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let provider = scripted(&[ROUTE_BRIEF, ROUTE_PLAN]);
+        let mut bundle = brief_session(cwd, provider.clone()).await;
+        let mut app = app();
+        let mut host = ConversationHost::new(cwd, None);
+        host.guide(&mut app, &mut bundle.runtime, false).await;
+        assert!(matches!(
+            host.stages.brief(),
+            Some(localpilot_harness::BriefStage::AwaitingIdea)
+        ));
+        assert!(provider.requests().is_empty());
+        host.say(&mut app, &mut bundle.runtime, "build a greeting")
+            .await;
+        assert!(!cwd.join("brief.md").exists());
+        host.brief(
+            &mut app,
+            &mut bundle.runtime,
+            localpilot_slash::ReviewAction::Approve,
+        )
+        .await;
+        host.guide(&mut app, &mut bundle.runtime, true).await;
+        assert!(host.stages.plan().is_some());
+        assert!(!cwd.join("PROGRESS.md").exists());
+        host.plan(
+            &mut app,
+            &mut bundle.runtime,
+            PlanCommand::First,
+            localpilot_slash::ReviewAction::Approve,
+        )
+        .await;
+        host.guide(&mut app, &mut bundle.runtime, true).await;
+        assert!(matches!(
+            host.stages.live,
+            Some((_, LiveStage::Guide(harness_router::GuideStage::Resume(_))))
+        ));
+        assert_eq!(
+            provider.requests().len(),
+            2,
+            "only drafting, no step execution"
+        );
+        assert!(app.active_work_activity().is_none());
+        let generation = host.live().unwrap();
+        assert!(
+            !host
+                .choose(&mut app, &mut bundle.runtime, generation, "no")
+                .await
+        );
+        assert!(
+            host.choose(&mut app, &mut bundle.runtime, generation, "resume")
+                .await
+        );
+        assert_eq!(
+            provider.requests().len(),
+            2,
+            "consent hands off to the existing runner; no second implementation"
+        );
+        assert!(host.live().is_none());
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn guided_existing_brief_decision_routes_every_document_state() {
+        for case in [
+            "brief only",
+            "ready",
+            "complete",
+            "stale",
+            "unbound",
+            "unsupported",
+            "malformed",
+            "unreadable",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path();
+            write_route_brief(cwd);
+            let plan = match case {
+                "ready" => Some(bound_plan(ROUTE_BRIEF, "- [ ] 1. Implement it\n")),
+                "complete" => Some(bound_plan(ROUTE_BRIEF, "- [x] 1. Implement it\n")),
+                "stale" => Some(bound_plan(ROUTE_REVISED, "- [ ] 1. Implement it\n")),
+                "unbound" => Some(ROUTE_PLAN.to_string()),
+                "unsupported" => Some(
+                    bound_plan(ROUTE_BRIEF, "- [ ] 1. Implement it\n")
+                        .replace("sha256-v1:", "future-v2:"),
+                ),
+                "malformed" => Some("broken plan".to_string()),
+                _ => None,
+            };
+            if let Some(plan) = &plan {
+                std::fs::write(cwd.join("PROGRESS.md"), plan).unwrap();
+            }
+            if case == "unreadable" {
+                std::fs::create_dir(cwd.join("PROGRESS.md")).unwrap();
+            }
+            let provider = scripted(&[ROUTE_PLAN]);
+            let mut bundle = brief_session(cwd, provider.clone()).await;
+            let mut app = app();
+            let mut host = ConversationHost::new(cwd, None);
+            host.guide(&mut app, &mut bundle.runtime, false).await;
+            assert!(
+                matches!(
+                    host.stages.live,
+                    Some((
+                        _,
+                        LiveStage::Guide(harness_router::GuideStage::BriefDecision(_))
+                    ))
+                ),
+                "{case}"
+            );
+            assert!(provider.requests().is_empty());
+            let first = host.live().unwrap();
+            assert!(
+                !host
+                    .choose(&mut app, &mut bundle.runtime, first, "no")
+                    .await
+            );
+            assert_eq!(
+                std::fs::read_to_string(cwd.join("brief.md")).unwrap(),
+                ROUTE_BRIEF,
+                "{case}: no change writes nothing"
+            );
+            match case {
+                "brief only" | "stale" => {
+                    assert!(host.stages.plan().is_some(), "{case}");
+                    assert_eq!(provider.requests().len(), 1);
+                }
+                "ready" => {
+                    assert!(matches!(
+                        host.stages.live,
+                        Some((_, LiveStage::Guide(harness_router::GuideStage::Resume(_))))
+                    ));
+                    assert!(provider.requests().is_empty());
+                }
+                _ => {
+                    assert!(matches!(
+                        host.stages.live,
+                        Some((_, LiveStage::Guide(harness_router::GuideStage::Options)))
+                    ));
+                    assert!(provider.requests().is_empty());
+                }
+            }
+            if let Some(plan) = plan {
+                assert_eq!(
+                    std::fs::read_to_string(cwd.join("PROGRESS.md")).unwrap(),
+                    plan,
+                    "{case}"
+                );
+            }
+            bundle.runtime.close();
+        }
+    }
+
+    #[tokio::test]
+    async fn guided_resume_rechecks_documents_config_and_permission_before_consent() {
+        for change in ["plan", "brief", "checks", "profile", "model", "trust"] {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path();
+            write_route_brief(cwd);
+            std::fs::write(
+                cwd.join("PROGRESS.md"),
+                bound_plan(ROUTE_BRIEF, "- [ ] 1. Implement it\n"),
+            )
+            .unwrap();
+            let provider = scripted(&[]);
+            let mut bundle = brief_session(cwd, provider.clone()).await;
+            let mut app = app();
+            let mut host = ConversationHost::new(cwd, None);
+            host.guide(&mut app, &mut bundle.runtime, true).await;
+            let generation = host.live().unwrap();
+            match change {
+                "plan" => std::fs::write(
+                    cwd.join("PROGRESS.md"),
+                    bound_plan(ROUTE_BRIEF, "- [ ] 1. Different work\n"),
+                )
+                .unwrap(),
+                "brief" => std::fs::write(cwd.join("brief.md"), ROUTE_REVISED).unwrap(),
+                "checks" => host
+                    .execution
+                    .checks
+                    .push("new: verify differently".to_string()),
+                "profile" => {
+                    let permissions = bundle.runtime.permission_engine_handle();
+                    permissions.set(
+                        permissions
+                            .snapshot()
+                            .with_profile(Profile::Bypass, Vec::new()),
+                    );
+                }
+                "model" => {
+                    bundle.runtime.set_active_model("model-b").unwrap();
+                }
+                "trust" => bundle.runtime.set_trusted(!bundle.runtime.trusted()),
+                _ => unreachable!(),
+            }
+            assert!(
+                !host
+                    .choose(&mut app, &mut bundle.runtime, generation, "resume")
+                    .await,
+                "{change}: stale consent cannot run"
+            );
+            assert!(provider.requests().is_empty());
+            assert_ne!(host.live(), Some(generation));
+            bundle.runtime.close();
+        }
+    }
+
+    #[tokio::test]
+    async fn guided_choices_preserve_queue_ownership_and_stop_discards_only_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        write_route_brief(cwd);
+        let provider = scripted(&[]);
+        let mut bundle = brief_session(cwd, provider.clone()).await;
+        let mut app = app();
+        let mut host = ConversationHost::new(cwd, None);
+        host.guide(&mut app, &mut bundle.runtime, false).await;
+        let captured = host.live().unwrap();
+        assert_eq!(
+            prompt_target(app.mode(), &host.stages),
+            PromptTarget::Stage(captured)
+        );
+        host.guide(&mut app, &mut bundle.runtime, false).await;
+        assert_eq!(
+            host.live(),
+            Some(captured),
+            "repeated entry focuses instead of duplicating"
+        );
+        harness_router::stop(&mut app, &mut host.stages);
+        host.guide(&mut app, &mut bundle.runtime, false).await;
+        assert!(
+            !host
+                .choose(&mut app, &mut bundle.runtime, captured, "no")
+                .await
+        );
+        assert!(matches!(
+            host.stages.live,
+            Some((
+                _,
+                LiveStage::Guide(harness_router::GuideStage::BriefDecision(_))
+            ))
+        ));
+        assert!(
+            provider.requests().is_empty(),
+            "ended choice cannot reach a new plan or agent turn"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("brief.md")).unwrap(),
+            ROUTE_BRIEF
+        );
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn guided_resume_refuses_incognito_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        write_route_brief(cwd);
+        std::fs::write(
+            cwd.join("PROGRESS.md"),
+            bound_plan(ROUTE_BRIEF, "- [ ] 1. Implement it\n"),
+        )
+        .unwrap();
+        let provider = scripted(&[]);
+        let mut bundle = brief_session(cwd, provider.clone()).await;
+        let mut app = app();
+        let mut host = ConversationHost::new(cwd, None);
+        host.guide(&mut app, &mut bundle.runtime, true).await;
+        let generation = host.live().unwrap();
+        bundle.runtime.enter_incognito();
+        assert!(
+            !host
+                .choose(&mut app, &mut bundle.runtime, generation, "resume")
+                .await
+        );
+        assert!(provider.requests().is_empty());
+        assert!(timeline_has(&app, "leave incognito before resuming"));
+        assert!(!saved_plan(cwd).steps[0].done);
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn agent_exit_closes_guided_choices_without_changing_approved_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        write_route_brief(cwd);
+        let provider = scripted(&[]);
+        let mut bundle = brief_session(cwd, provider.clone()).await;
+        let mut app = app();
+        let mut host = ConversationHost::new(cwd, None);
+        host.guide(&mut app, &mut bundle.runtime, false).await;
+        let captured = host.live().unwrap();
+        execute_fullscreen_slash_action(
+            &mut app,
+            &mut bundle.runtime,
+            &localpilot_config::Config::default(),
+            cwd,
+            &mut host.stages,
+            &RefCell::new(None),
+            &host.history,
+            SlashAction::SetMode(localpilot_slash::Mode::Agent),
+        )
+        .await;
+        assert_eq!(app.mode(), localpilot_slash::Mode::Agent);
+        assert!(host.live().is_none());
+        assert!(
+            !host
+                .choose(&mut app, &mut bundle.runtime, captured, "no")
+                .await
+        );
+        assert!(provider.requests().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("brief.md")).unwrap(),
+            ROUTE_BRIEF
+        );
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn guided_invalid_briefs_diagnose_without_drafting_or_writing() {
+        for unreadable in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path();
+            if unreadable {
+                std::fs::create_dir(cwd.join("brief.md")).unwrap();
+            } else {
+                std::fs::write(cwd.join("brief.md"), "broken brief").unwrap();
+            }
+            let provider = scripted(&[]);
+            let mut bundle = brief_session(cwd, provider.clone()).await;
+            let mut app = app();
+            let mut host = ConversationHost::new(cwd, None);
+            host.guide(&mut app, &mut bundle.runtime, false).await;
+            assert!(matches!(
+                host.stages.live,
+                Some((_, LiveStage::Guide(harness_router::GuideStage::Options)))
+            ));
+            assert!(provider.requests().is_empty());
+            assert!(!cwd.join("PROGRESS.md").exists());
+            if unreadable {
+                assert!(cwd.join("brief.md").is_dir());
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(cwd.join("brief.md")).unwrap(),
+                    "broken brief"
+                );
+            }
+            bundle.runtime.close();
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_status_is_read_only_and_feature_shares_cli_transitions() {
+        let cli = tempfile::tempdir().unwrap();
+        let tui = tempfile::tempdir().unwrap();
+        for root in [cli.path(), tui.path()] {
+            write_route_brief(root);
+            std::fs::write(
+                root.join("PROGRESS.md"),
+                bound_plan(
+                    ROUTE_BRIEF,
+                    "- [x] 1. Completed work\n  - commit: abc123\n  - attempts: 2\n",
+                ),
+            )
+            .unwrap();
+        }
+        let (config, mut bundle) = single_session(tui.path()).await;
+        let mut app = app();
+        let before = std::fs::read(tui.path().join("PROGRESS.md")).unwrap();
+        execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            tui.path(),
+            slash_input("/harness-status"),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(tui.path().join("PROGRESS.md")).unwrap(),
+            before
+        );
+        crate::harness_cmd::feature(cli.path(), "add bilingual greetings").unwrap();
+        execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            tui.path(),
+            slash_input("/harness-feature add bilingual greetings"),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(cli.path().join("brief.md")).unwrap(),
+            std::fs::read(tui.path().join("brief.md")).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(cli.path().join("PROGRESS.md")).unwrap(),
+            std::fs::read(tui.path().join("PROGRESS.md")).unwrap()
+        );
+        assert!(matches!(
+            localpilot_harness::inspect(localpilot_harness::WorkspaceInputs::at(tui.path()))
+                .documents,
+            localpilot_harness::DocumentState::PlanReady { .. }
+        ));
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn harness_stop_signals_the_pump_and_awaits_cancellation() {
+        let mut app = app();
+        let _ = app.handle_input(InputAction::Paste("/harness-stop".to_string()), 80);
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse = MouseState::default();
+        let mut paste = PasteBurst::default();
+        let mut index = WorkspaceFileIndex::start(PathBuf::from("."));
+        let mut stages = StageHost::new();
+        stages.operation_active.set(true);
+        let mut io = characterization_io(
+            queued(vec![Event::Key(press(KeyCode::Enter, KeyModifiers::NONE))]),
+            cell(0),
+            cell(0),
+            None,
+        );
+        let completed = std::rc::Rc::new(Cell::new(false));
+        let operation = {
+            let completed = completed.clone();
+            let cancel = cancel.clone();
+            async move {
+                cancel.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                completed.set(true);
+            }
+        };
+        let exit = drive_command_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            Path::new("."),
+            &mut mouse,
+            &mut paste,
+            &mut index,
+            &mut stages,
+            ProgressLane::None,
+            operation,
+            |app, ()| app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done)),
+        )
+        .await
+        .unwrap();
+        assert!(!exit);
+        assert!(completed.get(), "cancelled operation was awaited");
+        assert!(cancel.is_cancelled());
+        assert!(!stages.operation_active.get());
+    }
+
+    #[test]
+    fn harness_stop_does_not_cancel_unrelated_work() {
+        for owns_harness in [false, true] {
+            let mut app = app();
+            let stages = StageHost::new();
+            stages.operation_active.set(owns_harness);
+            let cancel = CancellationToken::new();
+            assert!(!run_active_fullscreen_slash(
+                &mut app,
+                slash_input("/harness-stop"),
+                None,
+                &cancel,
+                &stages,
+                Path::new(".")
+            ));
+            assert_eq!(cancel.is_cancelled(), owns_harness);
+            assert_eq!(stages.stop_requested.get(), owns_harness);
+        }
+    }
 
     #[tokio::test]
     async fn planning_refuses_broken_or_stale_sources_without_calling_a_model() {

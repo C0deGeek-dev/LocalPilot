@@ -182,6 +182,17 @@ impl StatusReport {
 /// # Errors
 /// Returns an error if the current directory or configuration cannot be read.
 pub fn gather_status(root: &Path) -> anyhow::Result<StatusReport> {
+    gather_status_with_liveness(root, localpilot_harness::OperationLiveness::Idle)
+}
+
+/// Gather the same status with the interactive host's actual operation ownership.
+///
+/// # Errors
+/// Returns an error if gathering the project status fails.
+pub fn gather_status_with_liveness(
+    root: &Path,
+    liveness: localpilot_harness::OperationLiveness,
+) -> anyhow::Result<StatusReport> {
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
         .unwrap_or_else(|_| Config::default());
 
@@ -196,7 +207,7 @@ pub fn gather_status(root: &Path) -> anyhow::Result<StatusReport> {
     // would be a guess.
     let state = localpilot_harness::inspect(localpilot_harness::WorkspaceInputs {
         root,
-        liveness: localpilot_harness::OperationLiveness::Idle,
+        liveness,
         interrupted: recorded_interruption(root),
     });
     let (next_step, completed, total) = match state.documents.progress() {

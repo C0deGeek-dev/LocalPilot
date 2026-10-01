@@ -37,3 +37,9 @@ which maps every area to its owning doc.
 - **Topology, messaging, terminal, and security contracts** — follow the owner
   links in the
   [`docs/README.md` map](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/README.md#pair-collaboration-ownership).
+
+## Interactive harness
+
+`/harness` guides brief and plan review before confirmed execution. The direct
+`/harness-*` command family and cancellation/compatibility contract are documented
+in [the harness specification](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/06-harness-spec.md#guided-harness-and-direct-lifecycle-commands).

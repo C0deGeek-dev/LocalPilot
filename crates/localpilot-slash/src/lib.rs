@@ -133,6 +133,12 @@ pub enum SlashAction {
     /// Name (or rename) the current session (`/name` / `/rename`).
     NameSession(String),
     HarnessResume,
+    /// Read the harness lifecycle without running work.
+    HarnessStatus,
+    /// Extend an approved current brief and plan.
+    HarnessFeature(String),
+    /// Stop only harness work or its unapproved conversation.
+    HarnessStop,
     WaitResume,
     /// Start a conversation that turns an idea into a reviewed `brief.md`.
     /// `Some(idea)` supplies it up front; `None` asks for it.
@@ -367,6 +373,8 @@ impl SlashAction {
             | Self::Tree
             | Self::Sessions
             | Self::HarnessResume
+            | Self::HarnessStatus
+            | Self::HarnessStop
             | Self::WaitResume
             // Starting a brief conversation writes nothing: the draft lives in
             // the session until someone approves it. Approval is classified
@@ -411,6 +419,8 @@ impl SlashAction {
                 | ReviewAction::Reset
                 | ReviewAction::Cancel => Persistence::ReadOnly,
             },
+
+            Self::HarnessFeature(_) => Persistence::Persistent("brief.md and PROGRESS.md"),
 
             // Touch the session store only — in-memory under incognito, so these
             // leave nothing on disk there.
@@ -467,7 +477,14 @@ impl SlashAction {
                 (host, self),
                 (
                     Host::Fullscreen,
-                    Self::Exit { .. } | Self::Help | Self::Theme(_) | Self::Search(_)
+                    Self::Exit { .. }
+                        | Self::Help
+                        | Self::Theme(_)
+                        | Self::Search(_)
+                        | Self::HarnessStop
+                        | Self::HarnessStatus
+                        | Self::SetMode(Mode::Harness)
+                        | Self::SetMode(Mode::Agent)
                 )
             )
     }
@@ -660,7 +677,7 @@ slash_commands! {
         Agent, Harness, Default, Relaxed, Bypass, Unrestricted, Think, Effort,
         Model, Localbox, Selfimprove, New, Fork, Clone, Tree, Sessions, Session, Name,
         Continue, Clear, Compact, HarnessResume, WaitResume, HarnessIntake, HarnessBrief,
-        HarnessPlan, HarnessReplan,
+        HarnessPlan, HarnessReplan, HarnessStatus, HarnessFeature, HarnessStop,
         Ingest, Knowledge,
         Context, Research, Agents, Skills, Bg, Exit,
         // Full-screen/pair takeover identities: `parse_slash_for(Fullscreen|Pair)`
@@ -675,7 +692,7 @@ slash_commands! {
     spellings {
         // --- the shared full-screen rows, in the frozen order ----------------
         Agent => fullscreen_only("agent", NoArg, Reject, "Switch to agent mode"),
-        Harness => fullscreen_only("harness", NoArg, Reject, "Switch to harness mode"),
+        Harness => fullscreen_only("harness", NoArg, Reject, "Guide brief review, planning and confirmed harness execution"),
         // The four permission profiles and `/effort` are switchable in the
         // full-screen host (they update the runtime engine + projection).
         Default => fullscreen_only("default", NoArg, Reject, "Use the default permission profile"),
@@ -721,7 +738,10 @@ slash_commands! {
         Compact => fullscreen_only("compact", Optional, Fall, "Summarize and compact the context"),
         Compact => parse_forcing("compact_force", NoArg, Reject),
         Continue => fullscreen_only("resume", Optional, Fall, "Continue a previous session"),
-        HarnessResume => fullscreen_only("harness-resume", NoArg, Reject, "Resume harness plan work"),
+        HarnessResume => fullscreen_only("harness-resume", NoArg, Reject, "Review execution settings, then confirm harness resume"),
+        HarnessStatus => fullscreen_only("harness-status", NoArg, Reject, "Show harness document and operation state"),
+        HarnessFeature => fullscreen_only("harness-feature", Required, Reject, "Add a feature to the approved current brief and plan"),
+        HarnessStop => fullscreen_only("harness-stop", NoArg, Reject, "Stop harness work and discard its unapproved draft"),
         WaitResume => fullscreen_only("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
         HarnessIntake => fullscreen_only(
             "harness-intake",
@@ -901,6 +921,9 @@ impl SlashAction {
             SlashAction::Clear => C::Clear,
             SlashAction::Compact { .. } => C::Compact,
             SlashAction::HarnessResume => C::HarnessResume,
+            SlashAction::HarnessStatus => C::HarnessStatus,
+            SlashAction::HarnessFeature(_) => C::HarnessFeature,
+            SlashAction::HarnessStop => C::HarnessStop,
             SlashAction::HarnessIntake(_) => C::HarnessIntake,
             SlashAction::HarnessBrief(_) => C::HarnessBrief,
             SlashAction::HarnessPlan(_) => C::HarnessPlan,
@@ -1162,6 +1185,18 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
                         reason: "usage: /compact [force]".to_string(),
                     },
                 }
+            }
+        }
+        C::HarnessStatus => no_arg(spelling, name, args, command, SlashAction::HarnessStatus),
+        C::HarnessStop => no_arg(spelling, name, args, command, SlashAction::HarnessStop),
+        C::HarnessFeature => {
+            if args.trim().is_empty() {
+                SlashAction::Invalid {
+                    command: name.to_string(),
+                    reason: "a feature description is required".to_string(),
+                }
+            } else {
+                SlashAction::HarnessFeature(args.trim().to_string())
             }
         }
         C::HarnessResume => no_arg(spelling, name, args, command, SlashAction::HarnessResume),
@@ -1482,6 +1517,31 @@ mod tests {
     }
 
     #[test]
+    fn harness_direct_commands_have_typed_arguments_and_persistence() {
+        for name in ["harness-status", "harness-stop"] {
+            let text = format!("/{name}");
+            let action = parse_slash_for(Host::Fullscreen, &text).unwrap();
+            assert_eq!(action.persistence(), Persistence::ReadOnly);
+            assert!(matches!(
+                parse_slash_for(Host::Fullscreen, &format!("{text} extra")),
+                Some(SlashAction::Invalid { .. })
+            ));
+            assert!(specs_for(Host::Fullscreen).iter().any(|s| s.0 == name));
+        }
+        assert!(matches!(
+            parse_slash_for(Host::Fullscreen, "/harness-feature"),
+            Some(SlashAction::Invalid { .. })
+        ));
+        let feature =
+            parse_slash_for(Host::Fullscreen, "/harness-feature add two languages").unwrap();
+        assert_eq!(
+            feature,
+            SlashAction::HarnessFeature("add two languages".to_string())
+        );
+        assert!(matches!(feature.persistence(), Persistence::Persistent(_)));
+    }
+
+    #[test]
     fn the_table_identities_equal_the_generated_command_set() {
         // Structural anti-drift: the identities used by the table must be
         // exactly the identities generated into `SlashCommand::ALL`. A variant
@@ -1496,7 +1556,7 @@ mod tests {
             from_table, from_enum,
             "SLASH_SPELLINGS identities must equal SlashCommand::ALL"
         );
-        assert_eq!(from_enum.len(), 43, "expected 43 command identities");
+        assert_eq!(from_enum.len(), 46, "expected 46 command identities");
     }
 
     #[test]
@@ -1512,7 +1572,7 @@ mod tests {
         // 41→43 adds `harness-intake` and `harness-brief`, the reviewable brief
         // conversation; 43→45 adds `harness-plan` and `harness-replan`, the same
         // review conversation for `PROGRESS.md`.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 45);
+        assert_eq!(specs_for(Host::Fullscreen).len(), 48);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 

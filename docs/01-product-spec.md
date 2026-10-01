@@ -360,9 +360,14 @@ rather than entering provider input. The rest:
   for the run (`/agent` exits it) and presenting the result through the bounded
   report; a resume snapshots the live model, provider, permission profile, and
   workspace-trust at dispatch, so an in-session `/model` or profile switch is
-  honoured. Bare `/agent` and `/harness` switch the session mode in the full-screen
-  host — silent label flips (a plain prompt
-  in either mode runs an ordinary turn; the footer and settings show the mode).
+  honoured. Bare `/harness` guides the approved-document lifecycle: intake in a
+  fresh workspace; review the current brief; plan or replan when required; then
+  disclose the next step and effective execution settings and ask for resume
+  confirmation. Entering it starts no implementation, tests or commits. Harness
+  replies belong to guidance or the active document review, never an ordinary
+  agent turn. `/agent` leaves and discards only unapproved session drafts.
+  `/harness-resume` also requires review and confirmation before the existing
+  runner starts; changed documents or execution settings require a fresh confirmation.
 - `/harness-intake [idea]` starts a conversation that turns an idea into a
   reviewed `brief.md`, and
   `/harness-brief [show|no-change|approve|reject|reset|cancel]` decides what

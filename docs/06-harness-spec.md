@@ -454,7 +454,7 @@ A provider error, an unusable reply, an exhausted repair budget, or Ctrl+C does
 and `/harness-brief show` repeats the same attempt. A new message replaces its
 input — a new idea, or a different revision
 instruction. Only approving, rejecting, `no-change`, cancelling, `/agent`, a
-session change, or starting another conversation ends one.
+session/model/provider change, /harness-stop, or starting another conversation ends one.
 
 Model calls run on the operation pump, so the terminal keeps drawing while one is
 in flight and Ctrl+C reaches it. A message typed while the model is working
@@ -490,6 +490,61 @@ Approval replaces `brief.md` atomically and then appends the audit record. If th
 record cannot be appended, the brief **is** saved and the message says so: the
 two failures are reported differently because only one of them leaves anything to
 retry.
+
+### Guided `/harness` and direct lifecycle commands
+
+Bare `/harness` is a guided entry, not a cosmetic mode switch. A fresh workspace
+asks for an idea using the existing intake conversation. A parsed brief is shown
+and the user is asked whether it needs changes: `no` leaves its bytes untouched
+and inspects the plan; another message revises the brief through the shared
+review stage. Brief approval leads into planning, and plan approval leads into
+execution review. Drafts still need the explicit document approval commands.
+
+A missing plan is drafted for review. A stale plan enters evidence-preserving
+replanning. A current incomplete plan displays the exact next step, live model
+and provider, permission profile, effective quality gate, attempts and actual
+automatic commit behavior. Reply `resume`/`yes` or repeat `/harness-resume` to
+confirm. The confirmation is tied to parsed document content and the displayed
+execution inputs; changes require another review and confirmation. Entering the
+mode, approving documents and inspecting status never execute plan steps.
+
+Completed plans offer evidence/status review and feature addition. Unreadable,
+malformed, unbound and unsupported documents produce named diagnoses, never an
+automatic overwrite/adoption. After repairing a document, reply `retry` to
+inspect it again. Repeated entry focuses the existing conversation or operation.
+An unapproved draft does not survive a restart; approved documents do.
+
+| Command | Behavior |
+|---|---|
+| `/harness` | Guide the workspace's document lifecycle |
+| `/harness-intake [idea]` | Start intake and review a draft brief |
+| `/harness-brief [show|no-change|approve|reject|reset|cancel]` | Review or decide about the brief |
+| `/harness-plan [show|no-change|approve|reject|reset|cancel]` | Draft/review the plan |
+| `/harness-replan [show|no-change|approve|reject|reset|cancel]` | Replan around retained completed evidence |
+| `/harness-status` | Read document state, progress and actual host operation state |
+| `/harness-resume` | Review execution settings, then confirm the existing runner |
+| `/harness-feature <description>` | Reuse CLI feature extension on a current approved brief/plan; refuse an unapproved document conversation |
+| `/harness-stop` | Signal the active harness operation and await cancellation, or discard its idle unapproved conversation |
+
+No arguments are accepted by status, resume or stop; feature requires a
+nonempty description. Names/help/autocomplete/typed actions come from one shared
+slash catalog. Feature extension preserves completed history and updates the
+brief-plan binding through the same operation as the CLI. Its two-file failure
+ordering remains fail-closed; it is not a transaction.
+
+Queued input captures the exact conversation generation at submission. Ended
+or superseded choices cannot control another stage or become ordinary agent
+turns. `/agent`, explicit cancel and model/provider changes close idle draft
+conversations. During harness generation/execution, `/agent` or `/harness-stop`
+signals the operation's existing cancellation token; stop cannot cancel an
+unrelated agent, research or shell operation. Ctrl+C stops the current attempt
+and retains recoverable review state. A model switch waits until the operation
+finishes. Harness execution is refused in incognito because it writes files and
+commits. Tool permissions remain those of the existing runner.
+
+The runner still commits successful steps when `auto_commit = false`; execution
+review states this limitation explicitly. This router does not change the
+runner's commit semantics or add a second execution implementation.
 
 ### `/harness-plan` and `/harness-replan`
 
