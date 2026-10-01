@@ -211,6 +211,70 @@ jobs:
         name: 'linux — tests: localpilot-store'
         timeout-minutes: 6
         run: capped cargo nextest run -p localpilot-store --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-agents'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-agents --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-contextcheck'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-contextcheck --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-dist'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-dist --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-llm-anthropic'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-llm-anthropic --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-llm-core'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-llm-core --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-llm-openai'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-llm-openai --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-selfdev'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-selfdev --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-selfimprove'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-selfimprove --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-server'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-server --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-slash'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-slash --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-stack'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-stack --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-taskgraph'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-taskgraph --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-terminal-ui'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-terminal-ui --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-verify'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-verify --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-winsec'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localpilot-winsec --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localx'
+        timeout-minutes: 6
+        run: capped cargo nextest run -p localx --test-threads 2
       # The one package whose tests spawn real child processes — `run_shell`
       # (including a deliberately hung command) and the background-process
       # registry. It is also the only package that has wedged the runner since

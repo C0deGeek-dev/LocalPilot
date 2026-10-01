@@ -6,6 +6,9 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Complete Linux workspace test coverage.** Every workspace package now has
+  a named gating test step; an offline metadata guard catches future omissions.
+
 - **Windows release compiler compatibility.** Windows archives use Rust 1.95.0
   so captured child processes work under the Codex restricted-token sandbox.
   A separate Windows CI job checks that compiler; the existing Rust 1.82 MSRV

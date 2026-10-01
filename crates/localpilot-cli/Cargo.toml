@@ -143,6 +143,7 @@ unicode-width = { workspace = true, optional = true }
 localpilot-winsec = { path = "../localpilot-winsec" }
 
 [dev-dependencies]
+serde_yaml = { workspace = true }
 assert_cmd = { workspace = true }
 localmind-store = { path = "../../external/localmind/crates/localmind-store" }
 crossterm = { workspace = true }

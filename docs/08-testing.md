@@ -459,6 +459,14 @@ cargo test --workspace
 cargo check --workspace
 ```
 
+Linux executes every workspace package in a named, resource-capped nextest
+step; process-heavy tools and the harness corpus retain their serial execution.
+`cargo test -p localpilot --test linux_ci_coverage` compares the gating job's
+Linux test steps with `cargo metadata --offline --no-deps`. Adding or removing a
+workspace package requires the matching workflow change. Build-only steps,
+comments, other platforms, and the separate coverage job do not satisfy this
+guard.
+
 Supply-chain hygiene:
 
 ```powershell

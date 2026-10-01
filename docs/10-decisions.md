@@ -2,6 +2,24 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0193: Linux Test Steps Cover Every Workspace Package
+
+**Status:** Accepted
+
+**Context:** The Linux gating job isolates test execution per package to retain
+resource limits and attributable failures. Hand-maintained steps omitted
+workspace packages, even though the build step compiled their test binaries.
+
+**Decision:** Keep one named Linux nextest execution step per workspace package
+and the stricter serial execution of tools and the harness corpus. A CLI
+integration guard compares actual package names from offline Cargo metadata
+against the Linux test commands in the gating job. Compilation-only steps and
+the separate coverage job do not count as execution.
+
+**Consequences:** New workspace members cannot silently lose Linux test coverage.
+Package additions, removals, and renames must update the workflow in the same
+change. Existing build caps, watchdogs, logging and failure propagation remain.
+
 ## ADR-0192: Windows Releases Use A Compiler Compatible With Restricted Tokens
 
 **Status:** Accepted
