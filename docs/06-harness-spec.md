@@ -1256,6 +1256,21 @@ finalizes as before for read-only legacy opt-in checks. Changed bounded units
 also require this gate when the optional setting is off (ADR-0199), unless their
 harness step has an explicitly reviewed `verify: none - reason` exemption.
 
+Refused mutation attempts still consume the cumulative work envelope, but an
+unchanged readonly review is not implementation work requiring owner-style
+verification. It finalizes `Done` when no write-capable invocation ran and it
+does not own a harness checkpoint. The registry distinguishes a pre-invoke
+refusal from an authorized invocation that may have written, including errors
+and partial writes with no touch report. That obligation is monotone for the
+turn: switching to readonly afterward cannot waive required verification.
+Delegation retains its conservative obligation because a parent result cannot
+prove that a child never wrote. Observed diff changes and diff/scope inspection
+failures retain their existing checks. Refused empty harness steps still stop;
+they cannot claim a completed checkpoint. Explicit optional readonly checks
+still run through permissions and warn if unavailable. No new test grants are
+implied by review or verification. Runtime termination and a valid review
+verdict remain separate outcomes.
+
 - **Command resolution.** `[harness] verify_command` (a single command line,
   split on whitespace — no shell) wins; otherwise the command is detected from
   the workspace's marker files (`Cargo.toml` → `cargo test`, `go.mod` →

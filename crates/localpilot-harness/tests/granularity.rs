@@ -689,39 +689,42 @@ async fn unicode_and_space_paths_share_the_same_checkpoint_limits() {
 
 #[tokio::test]
 async fn refused_mutation_cannot_complete_an_empty_harness_step() {
-    let dir = tempfile::tempdir().unwrap();
-    project(dir.path());
-    let provider = Arc::new(
-        FakeProvider::new()
-            .tool_call(
-                "oversized",
-                "write_file",
-                json!({"path":"first.txt", "content":"x".repeat(20_000)}),
-            )
-            .text("done"),
-    );
-    let mut agent = runtime(dir.path(), provider, Profile::Bypass, None);
-    let outcome = resume_one_step(
-        &mut agent,
-        dir.path(),
-        &RuleEngine::with_baseline(&Default::default()),
-        None,
-        &[],
-        3,
-    )
-    .await
-    .unwrap();
-    assert!(!outcome.committed);
-    assert!(!dir.path().join("first.txt").exists());
-    let progress =
-        Progress::parse(&std::fs::read_to_string(dir.path().join("PROGRESS.md")).unwrap()).unwrap();
-    assert!(!progress.steps[0].done);
-    let events = agent.store().read_events(agent.session_id()).unwrap();
-    assert!(events.iter().any(|e| matches!(
-        &e.kind,
-        localpilot_store::SessionEventKind::TurnEnded { detail: Some(detail), .. }
-            if detail.contains("requested mutation was refused")
-    )));
+    for profile in [Profile::Bypass, Profile::ReadOnly] {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        let provider = Arc::new(
+            FakeProvider::new()
+                .tool_call(
+                    "oversized",
+                    "write_file",
+                    json!({"path":"first.txt", "content":"x".repeat(20_000)}),
+                )
+                .text("done"),
+        );
+        let mut agent = runtime(dir.path(), provider, profile, None);
+        let outcome = resume_one_step(
+            &mut agent,
+            dir.path(),
+            &RuleEngine::with_baseline(&Default::default()),
+            None,
+            &[],
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(!outcome.committed);
+        assert!(!dir.path().join("first.txt").exists());
+        let progress =
+            Progress::parse(&std::fs::read_to_string(dir.path().join("PROGRESS.md")).unwrap())
+                .unwrap();
+        assert!(!progress.steps[0].done);
+        let events = agent.store().read_events(agent.session_id()).unwrap();
+        assert!(events.iter().any(|e| matches!(
+            &e.kind,
+            localpilot_store::SessionEventKind::TurnEnded { detail: Some(detail), .. }
+                if detail.contains("requested mutation was refused")
+        )));
+    }
 }
 
 #[tokio::test]

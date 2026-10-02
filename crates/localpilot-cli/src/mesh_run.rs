@@ -1102,6 +1102,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readonly_review_denied_mutation_keeps_verdict_without_owner_verification() {
+        use localpilot_harness::StopReason;
+        use sha2::Digest as _;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "reviewed source\n").unwrap();
+        // A Python source triggers the same automatic verifier as the live review.
+        std::fs::write(dir.path().join("roman.py"), "pass\n").unwrap();
+        let before = sha2::Sha256::digest(std::fs::read(dir.path().join("a.txt")).unwrap());
+        let provider = localpilot_llm::FakeProvider::new()
+            .tool_call(
+                "denied-write",
+                "write_file",
+                serde_json::json!({"path":"a.txt", "content":"changed"}),
+            )
+            .tool_call(
+                "denied-test",
+                "run_shell",
+                serde_json::json!({"program":"python", "args":["-c", "print(123)"]}),
+            )
+            .text("{\"kind\":\"VERDICT\",\"decision\":\"AGREE\",\"body\":\"review complete\"}");
+        let mut judge = search_replay(dir.path(), vec![provider]);
+        let post = judgement(&mut judge, dir.path(), &request(Need::Review)).await;
+        assert_eq!(judge.turns[0], (StopReason::Done, 2, 2, 0, false));
+        assert_eq!(post.kind, "VERDICT");
+        assert!(post
+            .body
+            .starts_with("AGREE round=1 blocking=0 important=0"));
+        assert_eq!(judge.feedback.len(), 1);
+        assert_eq!(
+            sha2::Sha256::digest(std::fs::read(dir.path().join("a.txt")).unwrap()),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("roman.py")).unwrap(),
+            "pass\n"
+        );
+    }
+
+    #[tokio::test]
     async fn review_search_replay_variants_reach_cost_bound_then_escalate() {
         use localpilot_harness::StopReason;
         let dir = tempfile::tempdir().unwrap();

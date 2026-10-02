@@ -17,6 +17,12 @@ retained, and the model must inspect smaller logical material rather than treat 
 truncated page as complete. Permission decisions, schema validation/repair and
 verification retain their existing paths. Repairs do not establish capability.
 
+Host dispatch metadata distinguishes a pre-invoke refusal from an authorized
+write-capable invocation, including an error after a possible partial write.
+This metadata is neither a permission grant nor model-facing wire data. The
+completion gate uses it separately from attempted-operation budgets so refused
+readonly reviews can finish without waiving verification after real work.
+
 Opaque model shell/MCP writes require observed-diff checks at completion; typed
 arguments alone cannot enforce them. No repository baseline means model shell/
 background calls are refused; explicit user shell remains separately authorized.

@@ -17,6 +17,13 @@ is SemVer-stable; the configuration schema stability policy is in
   never as a result. `localpilot lab status` shows each run; a stopped run's
   finished baseline can be reused with `--resume`. Set `[lab] localbench` in
   your user config if the program is not on your PATH (ADR-0201).
+
+- **Readonly review completion.** Denied writes still spend attempted-operation
+  budgets, but unchanged readonly reviews no longer require owner verification
+  solely because of those attempts. Authorized writes, partial failures and
+  harness checkpoints retain required verification, including after a permission
+  downgrade. Reviewer test commands remain permission-gated.
+
 - **Review search-stall investigation.** Offline runtime-to-verdict replays
   cover variant-query exhaustion, productive discovery and exact-repeat
   recovery. Documented the progress heuristic's evidence limits and retained

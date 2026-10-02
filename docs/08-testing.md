@@ -534,6 +534,17 @@ These are blocking before public release and run in CI's supply-chain job.
 
 ### Review search progress and safe completion
 
+`cargo test -p localpilot-harness --test readonly_verification --test granularity --test verify_gate`
+covers refused review writes retaining their attempt-budget cost, explicit
+optional checks staying permission-gated, and authorized successful/partial
+writes retaining required verification after a readonly downgrade. The partial
+write fixture reports no touches and has no Git baseline. Existing changed-unit,
+verification-failure and refused-checkpoint controls remain required.
+`cargo test -p localpilot --bin localpilot mesh_run::tests::readonly_review_denied_mutation`
+replays refused writes/test attempts through runtime and production review
+judgement, asserting unchanged fixture SHA-256 and a valid verdict with Done.
+This is offline protocol evidence, not a live model-quality claim.
+
 `cargo test -p localpilot --bin localpilot mesh_run::tests::review_search_replay`
 runs three offline fake-provider scenarios through real readonly tool dispatch
 and production review judgement. Equivalent-query variants reach the 200-call

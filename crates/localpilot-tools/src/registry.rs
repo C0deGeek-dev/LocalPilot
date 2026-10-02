@@ -47,6 +47,10 @@ pub struct ToolDispatchResult {
     pub result: ToolResult,
     pub presentation: Option<ToolOutputPresentation>,
     pub touches: Vec<crate::touch::FileTouch>,
+    /// An authorized invocation could have written, even if it returned an
+    /// error without touches. False for pre-invoke refusals. Host accounting
+    /// only: this is not part of the model-facing or persisted wire result.
+    pub mutation_may_have_run: bool,
 }
 
 impl ToolDispatchResult {
@@ -55,6 +59,7 @@ impl ToolDispatchResult {
             result,
             presentation: None,
             touches: Vec::new(),
+            mutation_may_have_run: false,
         }
     }
 }
@@ -382,6 +387,12 @@ impl ToolRegistry {
             }
         }
 
+        let mutation_may_have_run = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::WritePath { .. } | Effect::ScratchPath { write: true, .. }
+            ) || effect.may_create_files()
+        });
         match tool
             .invoke_with_file_read_limits(call.input.clone(), ctx, self.file_read_limits)
             .await
@@ -405,15 +416,19 @@ impl ToolRegistry {
                     },
                     presentation: output.presentation.map(redact_presentation),
                     touches: output.touches,
+                    mutation_may_have_run,
                 }
             }
-            Err(err) => ToolDispatchResult::plain(unusable_result(
-                tool.name(),
-                &call.id,
-                &err.to_string(),
-                ctx,
-                self.context_output_bytes,
-            )),
+            Err(err) => ToolDispatchResult {
+                mutation_may_have_run,
+                ..ToolDispatchResult::plain(unusable_result(
+                    tool.name(),
+                    &call.id,
+                    &err.to_string(),
+                    ctx,
+                    self.context_output_bytes,
+                ))
+            },
         }
     }
 }

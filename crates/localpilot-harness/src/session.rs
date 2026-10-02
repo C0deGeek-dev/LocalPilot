@@ -1086,6 +1086,9 @@ pub struct SessionRuntime {
     unit_verification_exempt: Option<String>,
     unit_verify_command: Option<String>,
     work_mutation_refusal: Option<String>,
+    /// Authorized write-capable invocation, including errors/partial writes.
+    /// Separate from the conservative attempted-operation budget.
+    work_mutation_may_have_run: bool,
     provider: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
     /// Shared + swappable so an interactive host can change the permission
@@ -1270,6 +1273,7 @@ impl SessionRuntime {
             unit_verification_exempt: None,
             unit_verify_command: None,
             work_mutation_refusal: None,
+            work_mutation_may_have_run: false,
             provider,
             tools,
             // The incognito floor is a session property, not a profile, so it is
@@ -1642,6 +1646,7 @@ impl SessionRuntime {
         self.unit_verify_command = None;
         self.work_mutation_refusal = None;
         self.work_diff_baseline = None;
+        self.work_mutation_may_have_run = false;
         self.work_unit = crate::granularity::WorkUnit::default();
     }
 
@@ -1838,6 +1843,7 @@ impl SessionRuntime {
                         ),
                         presentation: None,
                         touches: Vec::new(),
+                        mutation_may_have_run: false,
                     },
                     true,
                 ),
@@ -2611,9 +2617,21 @@ impl SessionRuntime {
             diff_mutated = crate::resume::work_diff_baseline(&self.workspace.process_dir())
                 .is_ok_and(|after| &after != baseline);
         }
-        let bounded_mutation =
-            self.config.granularity.is_some() && (self.work_unit.has_mutations() || diff_mutated);
-        if !diff_mutated && (self.harness_checkpoint_owner || !self.work_unit.has_mutations()) {
+        // Denied review attempts spend the attempt budget, but cannot make an
+        // unchanged readonly review an implementation unit requiring tests.
+        // A permission downgrade cannot erase an earlier invocation obligation;
+        // errors may have partially written even when no touches were reported.
+        let readonly_unchanged = !self.harness_checkpoint_owner
+            && self.engine.snapshot().resolved().profile() == localpilot_sandbox::Profile::ReadOnly
+            && !self.work_mutation_may_have_run
+            && !diff_mutated;
+        let bounded_mutation = self.config.granularity.is_some()
+            && !readonly_unchanged
+            && (self.work_unit.has_mutations() || self.work_mutation_may_have_run || diff_mutated);
+        if !readonly_unchanged
+            && !diff_mutated
+            && (self.harness_checkpoint_owner || !self.work_unit.has_mutations())
+        {
             if let Some(reason) = &self.work_mutation_refusal {
                 return VerifyGate::GiveUp(format!(
                     "requested mutation was refused: {reason}; split the work and retry; completion is not recorded"
@@ -3207,6 +3225,7 @@ impl SessionRuntime {
         self.turn_files_changed.clear();
         self.work_unit = crate::granularity::WorkUnit::default();
         self.work_mutation_refusal = None;
+        self.work_mutation_may_have_run = false;
         self.active_work_profile = None;
         self.active_work_profile = self.work_profile();
         self.work_diff_baseline =
@@ -4213,6 +4232,13 @@ impl SessionRuntime {
                             // Snapshot per call: a mid-turn profile swap through
                             // the shared handle applies from the next tool call.
                             let engine = self.engine.snapshot();
+                            // Delegated child calls are authorized independently.
+                            // Keep their existing conservative verification
+                            // obligation: parent effects/touches cannot prove
+                            // that a child never partially wrote.
+                            if name == "delegate" && self.agents.is_some() {
+                                self.work_mutation_may_have_run = true;
+                            }
                             // Delegation borrows the session's own collaborators
                             // so a child is built *from* them: its tools are a
                             // filtered copy of this registry and its engine
@@ -4256,7 +4282,7 @@ impl SessionRuntime {
                                 // quiesce path below, which leaves a resumable
                                 // result for a wait-like tool rather than an abort.
                                 () = quiesce.token().cancelled() => None,
-                                result = self.tools.dispatch_reporting(
+                                result = self.tools.dispatch_detailed(
                                     &active_call,
                                     &ctx,
                                     &engine,
@@ -4283,7 +4309,10 @@ impl SessionRuntime {
                             // advisory conflict alerts — subscribes, so the
                             // tool path stays unaware of the swarm entirely.
                             match dispatched {
-                                Some((result, touched)) => {
+                                Some(dispatch) => {
+                                    self.work_mutation_may_have_run |=
+                                        dispatch.mutation_may_have_run;
+                                    let touched = dispatch.touches;
                                     // An incognito session records every
                                     // out-of-workspace write so it can be
                                     // reported when the session ends — including
@@ -4298,7 +4327,7 @@ impl SessionRuntime {
                                     if !touched.is_empty() {
                                         let _ = events.send(RuntimeEvent::FilesTouched(touched));
                                     }
-                                    Some(result)
+                                    Some(dispatch.result)
                                 }
                                 None => None,
                             }

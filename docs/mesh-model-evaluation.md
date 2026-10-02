@@ -240,3 +240,18 @@ legitimate investigation without proving the model has stalled. Keep the hard
 bound and safe escalation, and retain missing-verdict, incorrect-verdict and
 wall-timeout outcomes separately. The current model limitation remains part
 of the broader evaluation; denied automatic verification is separate work.
+
+### Readonly verification correction
+
+LocalHub#207's offline replay reproduced NoProgress after refused mutation/test
+attempts with unchanged source hashes and a valid review verdict. The completion
+gate had treated attempted-operation cost as implementation requiring tests.
+It now distinguishes refused attempts from authorized invocations that may have
+written. An unchanged readonly review can finish Done, while attempts still
+spend their budget. Authorized successful/partial writes, observed changes and
+harness checkpoints retain required verification, including after permission
+downgrade. Optional checks still obey permissions. Stop tags and protocol
+validation are unchanged; earlier live captures stay historical evidence.
+This deterministic runtime correction does not establish a live model-quality
+improvement or resolve missing JSON. See [the gate contract](06-harness-spec.md#verify-before-done-gate)
+and [offline verification tests](08-testing.md#review-search-progress-and-safe-completion).

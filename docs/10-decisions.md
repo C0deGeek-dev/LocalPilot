@@ -249,6 +249,14 @@ timely check; explicit session and ratified gates still apply. An undetectable
 target stops a changed bounded unit with an actionable durable reason; read-only
 legacy opt-in checks retain their visible warning. No missing signal is counted
 as a successful observation.
+Clarification (LocalHub#207): denied mutation attempts retain their envelope
+cost without creating an owner-style verification obligation for an unchanged
+readonly review. The exemption requires no authorized write-capable invocation,
+no observed diff change and no harness checkpoint ownership. Invocation errors
+may hide partial writes, so their obligation survives a permission downgrade;
+delegation remains conservative. Refused empty harness checkpoints still stop.
+Explicit optional checks and all real mutation verification retain their
+permission decisions. No stop tags or wire schemas change.
 Constrained runs stop only after the existing verified commit/progress/session
 checkpoint. Documentation is a bounded follow-up unit in the same plan before
 feature completion, rather than forcing another file into a one-region unit.
