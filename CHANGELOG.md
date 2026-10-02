@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Pair-seat owner results include the final journal.** Escalations and review
+  requests written just before engine exit are retained. Hidden-test rows
+  distinguish live-request observation from final-tree fallback, and protocol
+  completion comes from session state. The driver skips scripted agreement
+  after observing child exit.
+
 - **A rerun request no longer outlives its lesson.** A request about a lesson
   that was rejected, merged, rewritten or split is closed instead of being
   listed as something to start. `localpilot lab rerun` says "run again" only

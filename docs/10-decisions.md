@@ -2,6 +2,31 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0206: Owner Evaluation Reconciles Terminal Evidence Without Acting
+
+**Status:** accepted · **Date:** 2026-10-02.
+
+**Context.** An owner child can write its final journal message between polling
+iterations. Stopping polling on process exit loses submission or escalation
+facts. Testing a final tree cannot reconstruct a submitted snapshot, and exit
+zero cannot establish protocol closure.
+
+**Decision.** Read the final owner journal after waiting for or killing the
+child. Record submission and escalation independently. Reconciliation performs
+no protocol action; a live path also rechecks process liveness before delivery
+wait and scripted agreement. Preserve the first live-request observed-tree
+hidden result when available; otherwise label hidden acceptance as final-tree
+fallback. Observation phase and request identity accompany submission evidence.
+Read completion from the retained single-session record, with missing status
+represented as unknown. Ambiguous multiple sessions are an explicit driver
+failure. Historical rows and frozen fixtures remain unchanged.
+
+**Limits.** Process liveness checks and journal polling are observations, not
+atomic snapshots. The scripted agreement is evaluation plumbing, not independent
+review. Wall/grace limits and reviewer finding adjudication have separate
+contracts. Original implementation uses existing local process and mailbox
+interfaces; no provider or public configuration contract changes.
+
 ## ADR-0205: Mesh Owners Continue Through Verified Intermediate Notes
 
 **Status:** accepted · **Date:** 2026-10-02.

@@ -19,8 +19,11 @@ decides the provider; `--provider` picks another). Cells:
                 `--task`, hands the unit to localpilot, and
                 `localpilot mesh run --own` implements it. At localpilot's
                 first REVIEW_REQUEST the task's hidden test runs on the tree
-                as it is; claude then posts a scripted AGREE so the unit
-                closes. The hidden test is the measure, not claude's review.
+                as observed; while the engine remains live, claude posts a
+                scripted AGREE to let the unit close. Final journal facts are
+                reconciled after exit without acting. If no live-request check
+                ran, hidden acceptance is labeled as final-tree fallback.
+                The hidden test is the measure, not claude's review.
 - review-bad:   claude submits the roman change with a planted defect (bool
                 accepted, against the spec); localpilot reviews. REVISE is
                 expected, and an AGREE is a false AGREE.
@@ -235,15 +238,40 @@ def owner_cell(a, repo, log):
     scratch(repo, spec)
     pair(repo, "start", "--role", "claude", "--with", "localpilot", "--task", spec)
     t0 = time.monotonic()
-    r = {"hidden_ok": False, "review_requested": False, "escalated": False}
+    r = {"hidden_ok": False, "review_requested": False, "escalated": False,
+         "review_observation": None, "hidden_measure": None}
     with spawned(a, repo, ["--own", "--timeout", "120"], log) as proc:
         owner_loop(a, repo, proc, t0, r)
         r["killed"] = finish(proc, 60)
         r["engine_exit"] = proc.returncode
+    # The child can append its terminal message between polls. It is now
+    # stopped, so this read cannot initiate another protocol action.
+    owner_observation(repo, r, "after_exit")
+    sessions = [p for name in ("session.json", "session.v2.json")
+                for p in (repo / ".pair-programming" / "sessions").glob(f"*/{name}")]
+    if len(sessions) > 1:
+        raise RuntimeError("owner scratch run contains ambiguous session records")
+    r["protocol_status"] = (json.loads(sessions[0].read_text(encoding="utf-8")).get("status")
+                            if sessions else None)
+    r["protocol_completed"] = (r["protocol_status"] == "completed"
+                               if r["protocol_status"] is not None else None)
     r["wall_s"] = round(time.monotonic() - t0, 1)
-    if not r["review_requested"]:
+    if r["hidden_measure"] is None:
         r["hidden_ok"], r["hidden_tail"] = hidden(repo, a.task)
+        r["hidden_measure"] = "final_tree_after_exit"
     return r
+
+
+def owner_observation(repo, r, phase):
+    """Record journal facts independently; observing is never acknowledging."""
+    lp = journal(repo, "localpilot")
+    r["escalated"] = r["escalated"] or any(m["kind"] == "ESCALATE" for m in lp)
+    req = next((m for m in lp if m["kind"] == "REVIEW_REQUEST"), None)
+    if req is not None and not r["review_requested"]:
+        r["review_requested"] = True
+        r["review_observation"] = phase
+        r["review_request_id"] = req.get("msg_id") or f"localpilot:{req['seq']}"
+    return req
 
 
 def owner_loop(a, repo, proc, t0, r):
@@ -251,18 +279,19 @@ def owner_loop(a, repo, proc, t0, r):
     while time.monotonic() - t0 < a.wall and proc.poll() is None:
         if not offered and "localpilot: ready" in pair(repo, "status", check=False).stdout:
             offered = pair(repo, "handoff-offer", "--role", "claude", check=False).returncode == 0
-        lp = journal(repo, "localpilot")
-        if any(m["kind"] == "ESCALATE" for m in lp):
-            r["escalated"] = True
+        req = owner_observation(repo, r, "live" if proc.poll() is None else "after_exit")
+        if r["escalated"] or proc.poll() is not None:
             break
-        req = [m for m in lp if m["kind"] == "REVIEW_REQUEST"]
-        if req and not r["review_requested"]:
-            r["review_requested"] = True
-            r["hidden_ok"], r["hidden_tail"] = hidden(repo, a.task)
+        if req is not None and r["hidden_measure"] is None:
             r["request_at_s"] = round(time.monotonic() - t0, 1)
-            mid = req[0].get("msg_id") or f"localpilot:{req[0]['seq']}"
+            r["hidden_ok"], r["hidden_tail"] = hidden(repo, a.task)
+            r["hidden_measure"] = "first_request_observed_tree"
+            if proc.poll() is not None:
+                break
             pair(repo, "watch", "--role", "claude", "--timeout", "5", check=False)
-            pair(repo, "post", "--role", "claude", "--kind", "VERDICT", "--reply-to", mid,
+            if proc.poll() is not None:
+                break
+            pair(repo, "post", "--role", "claude", "--kind", "VERDICT", "--reply-to", r["review_request_id"],
                  "--body", "AGREE round=1 blocking=0 important=0\n"
                            "Scripted AGREE: the hidden test is the measure of this run.",
                  check=False)

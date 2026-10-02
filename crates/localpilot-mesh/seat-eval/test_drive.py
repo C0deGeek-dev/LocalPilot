@@ -249,6 +249,146 @@ class ChildCleanupTest(unittest.TestCase):
             self.assertEqual(row["review_fixture_hashes"]["roman.py"], drive.sha(planted / "roman.py"))
 
 
+class OwnerJournalTest(unittest.TestCase):
+    def owner(self, messages, *, live=False, exit_during=None, status="active",
+              session_name="session.v2.json", ambiguous=False):
+        drive = load(HERE)
+        calls = []
+        measurements = []
+        children = []
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d) / "repo"
+            drive.scratch = lambda *a: repo.mkdir()
+            session = repo / ".pair-programming" / "sessions" / "control"
+            record = session / session_name
+
+            def fake_engine(*a):
+                session.mkdir(parents=True)
+                if status is not None:
+                    record.write_text(json.dumps({"status": status}))
+                if ambiguous:
+                    (session / "session.json").write_text('{"status":"completed"}')
+                path = session / "journal" / "localpilot.jsonl"
+                path.parent.mkdir()
+                if live:
+                    path.write_text("".join(json.dumps(m) + "\n" for m in messages))
+                    proc = mock.Mock(returncode=None)
+                    proc.poll.side_effect = lambda: proc.returncode
+                    proc.wait.side_effect = lambda **kw: proc.returncode
+                else:
+                    # A real child writes its final journal and exits before the
+                    # next poll; exercise owner_cell rather than a parser alone.
+                    script = ("import pathlib,sys; "
+                              "pathlib.Path(sys.argv[1]).write_text(sys.argv[2], encoding='utf-8')")
+                    proc = subprocess.Popen([sys.executable, "-c", script, str(path),
+                                             "".join(json.dumps(m) + "\n" for m in (messages or []))])
+                    proc.wait(timeout=10)
+                    if messages is None:
+                        path.unlink()
+                children.append(proc)
+                return proc
+
+            def fake_pair(repo, *argv, **kw):
+                calls.append(argv)
+                if argv[0] == "post":
+                    children[0].returncode = 0
+                    record.write_text('{"status":"completed"}')
+                if argv[0] == exit_during:
+                    children[0].returncode = 0
+                return mock.Mock(stdout="localpilot: ready", returncode=0)
+
+            def fake_hidden(*a):
+                measurements.append(children[0].poll())
+                if exit_during == "hidden":
+                    children[0].returncode = 0
+                return True, "HIDDEN_OK"
+
+            drive.engine = fake_engine
+            drive.pair = fake_pair
+            drive.hidden = fake_hidden
+            with mock.patch.object(drive.time, "sleep"):
+                row = drive.owner_cell(args(pathlib.Path(d)), repo, None)
+            self.assertIsNotNone(children[0].poll())
+        return row, calls, measurements
+
+    def test_final_escalation_is_reconciled_after_real_child_exit(self):
+        row, calls, measured = self.owner([{"kind": "ESCALATE"}])
+        self.assertTrue(row["escalated"])
+        self.assertFalse(row["review_requested"])
+        self.assertFalse(row["protocol_completed"])
+        self.assertEqual(row["engine_exit"], 0)
+        self.assertEqual(row["hidden_measure"], "final_tree_after_exit")
+        self.assertEqual(measured, [0])
+        self.assertFalse(any(c[0] in ("watch", "post") for c in calls))
+
+    def test_late_request_is_observed_without_agreement_or_snapshot_claim(self):
+        row, calls, measured = self.owner([{"kind": "REVIEW_REQUEST", "seq": 3}])
+        self.assertTrue(row["review_requested"])
+        self.assertEqual(row["review_observation"], "after_exit")
+        self.assertEqual(row["review_request_id"], "localpilot:3")
+        self.assertNotIn("request_at_s", row)
+        self.assertEqual(row["hidden_measure"], "final_tree_after_exit")
+        self.assertFalse(row["protocol_completed"])
+        self.assertEqual(measured, [0])
+        self.assertFalse(any(c[0] in ("watch", "post") for c in calls))
+
+    def test_live_request_keeps_one_measurement_and_actual_completion(self):
+        row, calls, measured = self.owner(
+            [{"kind": "REVIEW_REQUEST", "msg_id": "localpilot:3"}], live=True)
+        self.assertTrue(row["review_requested"])
+        self.assertEqual(row["review_observation"], "live")
+        self.assertEqual(row["hidden_measure"], "first_request_observed_tree")
+        self.assertIn("request_at_s", row)
+        self.assertTrue(row["protocol_completed"])
+        self.assertEqual(measured, [None])
+        posts = [c for c in calls if c[0] == "post"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0][posts[0].index("--reply-to") + 1], "localpilot:3")
+
+    def test_exit_during_hidden_or_watch_never_posts_agreement(self):
+        for stage in ("hidden", "watch"):
+            with self.subTest(stage=stage):
+                row, calls, measured = self.owner(
+                    [{"kind": "REVIEW_REQUEST", "seq": 3}], live=True, exit_during=stage)
+                self.assertFalse(any(c[0] == "post" for c in calls))
+                self.assertFalse(row["protocol_completed"])
+                self.assertEqual(measured, [None])
+                self.assertEqual(row["hidden_measure"], "first_request_observed_tree")
+
+    def test_request_and_escalation_are_independent_facts(self):
+        for live in (False, True):
+            row, calls, measured = self.owner(
+                [{"kind": "REVIEW_REQUEST", "seq": 3}, {"kind": "ESCALATE"}],
+                live=live, exit_during="status" if live else None)
+            self.assertTrue(row["review_requested"])
+            self.assertTrue(row["escalated"])
+            self.assertEqual(row["hidden_measure"], "final_tree_after_exit")
+            self.assertEqual(row["review_observation"], "after_exit")
+            self.assertFalse(any(c[0] == "post" for c in calls))
+
+    def test_missing_journal_and_session_are_unknown_not_success(self):
+        row, calls, measured = self.owner(None, status=None)
+        self.assertFalse(row["review_requested"])
+        self.assertFalse(row["escalated"])
+        self.assertIsNone(row["review_observation"])
+        self.assertIsNone(row["protocol_status"])
+        self.assertIsNone(row["protocol_completed"])
+        self.assertEqual(row["hidden_measure"], "final_tree_after_exit")
+        drive = load(HERE)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(drive.journal(pathlib.Path(d), "localpilot"), [])
+
+    def test_legacy_session_record_still_reports_actual_completion(self):
+        row, calls, measured = self.owner(
+            [{"kind": "REVIEW_REQUEST", "seq": 3}], live=True, session_name="session.json")
+        self.assertTrue(row["protocol_completed"])
+        self.assertEqual(row["protocol_status"], "completed")
+
+    def test_ambiguous_layout_is_a_failure_not_guessed_completion(self):
+        with self.assertRaisesRegex(RuntimeError, "ambiguous session records"):
+            self.owner(None, ambiguous=True)
+
+
 class ReviewDiagnosticsTest(unittest.TestCase):
     def test_the_engine_receives_a_capture_path_only_on_explicit_opt_in(self):
         drive = load(HERE)

@@ -334,6 +334,15 @@ bool coverage to the clean control without changing historical fixtures. Raw
 false-revision flags compare expected decisions; finding truth/severity is
 adjudicated separately under the criteria in the driver README.
 
+Owner driver controls use real children that write their final journal and exit
+before the next poll. They cover final escalation, late submission without a
+scripted agreement, and absent journals and session records. Stub lifecycle
+controls cover normal live submission, one hidden measurement, actual session
+completion, independent escalation/request facts, and exit during hidden testing
+or delivery wait. Final-tree fallback and the first live-request observed tree
+have separate provenance; neither a passing hidden test nor exit zero implies
+protocol completion. Frozen fixtures and historical rows stay unchanged.
+
 Review diagnostic capture is opt-in. CLI tests exercise the production judgement
 and native mock-provider timeout/repair path. Resolved deadline metadata is
 tested for builtin and explicit configuration, including zero. Driver controls

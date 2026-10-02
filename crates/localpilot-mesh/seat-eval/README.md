@@ -25,7 +25,8 @@ The fixtures are frozen, so results from different dates and models stay compara
 - **owner**:
   - The driver, as `claude`, starts a pair session with the task's spec and hands the unit to `localpilot`. `mesh run --own` then implements it.
   - At localpilot's first `REVIEW_REQUEST`, the hidden test runs on the tree as it is. That result is the measure.
-  - The driver then posts a scripted `AGREE`, so the unit closes. Its review judges nothing.
+  - While the engine is still running, the driver then posts a scripted `AGREE` to let the unit close. Its review judges nothing.
+  - After the engine exits or is killed, the driver reads the final owner journal again. A late request is recorded without posting an agreement. If no live-request hidden measurement exists, the hidden test runs on the final tree; that is fallback evidence, not a captured submission snapshot. Escalation and submission are independent facts.
 - **review-bad**: the driver submits the planted defect for review. `REVISE` is expected; an `AGREE` is a **false AGREE**.
 - **review-good**: the driver submits the selected clean change. `AGREE` is expected; a `REVISE` sets the raw **false REVISE** flag. That flag compares a decision with the declared expectation; it does not adjudicate whether each finding is true.
 
@@ -111,7 +112,7 @@ done
 
 Each run leaves its scratch repository and engine log under `--out`, and appends one JSON line to `<out>/results.jsonl`. The fields are:
 
-- owner cells: `hidden_ok`, `review_requested`, `request_at_s`, `escalated`, `killed`, `wall_s`;
+- owner cells: `hidden_ok`, `review_requested`, `request_at_s`, `escalated`, `killed`, `wall_s`, plus the provenance fields below;
 - review cells: `decision`, `expected`, `false_agree`, `false_revise`, `no_verdict`, the full `verdict`, `wall_s`, `review_case`, `review_fixture_hashes`, `review_spec_hash`.
   Rows also record `review_diagnostics` (relative artifact name, or null) and
   `review_diagnostics_present` (whether the file was created); false does not
@@ -124,6 +125,19 @@ Each run leaves its scratch repository and engine log under `--out`, and appends
   Builtin/config sources come from the runtime's resolved configuration, not
   the wall cap. Config includes explicit file/environment settings. Metadata
   also survives failed rows and does not require review response capture.
+
+Owner provenance is additive; historical rows are preserved. `review_observation`
+is `live`, `after_exit`, or null, and `review_request_id` identifies the first
+observed request when present. `request_at_s` is elapsed time at live observation,
+not the journal's send time. `hidden_measure=first_request_observed_tree` means
+the check ran on the tree at the first live request observation; polling does
+not guarantee an immutable snapshot at the exact instant of submission.
+`final_tree_after_exit` means the check ran after the child stopped, including
+when a request was discovered only then. A passing fallback does not establish
+successful submission or closure. `protocol_status` comes from the single
+retained scratch session record; `protocol_completed` is true only for
+`completed`, false for other known states, and null when no status is available.
+Neither exit zero nor a posted scripted agreement establishes completion.
 
 ## Things that change the numbers
 
