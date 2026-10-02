@@ -307,3 +307,163 @@ Fixture discrimination and driver regression checks passed (12 fixtures,
 only. These six unseeded trials establish neither a causal improvement nor
 general model reliability. Owner tasks, 27B, larger samples, additional planted
 defects and the single-agreement decision remain within open LocalHub#202.
+
+## Expanded fixed-runtime evaluation (2026-10-02)
+
+Thirty-nine new trials use runtime source `65a7d01add59c31d20373abbcb5abc973fe1e8cd`
+and one unchanged binary (SHA-256
+`589f68b1a51c0767ae85f2893358e6e2aee9871a84558534ab2a98a62be88fb0`).
+LocalHub#208 supplies actual per-turn deadline and stop metadata. Existing saved
+LocalBox tunes, local OpenAI-compatible provider, server-discovered 262144-token
+context and project-isolated memory are retained. Flash uses IQ3_XXS/native;
+27B uses i1-Q4_K_M/turboquant; A3B uses apex-i-quality/turboquant. Reviews are
+readonly, with two existing attempts and opt-in bounded diagnostics. Owners use
+the existing session lease and Bypass profile. No prompt defaults, grants,
+parser, progress policy, model downloads or global configuration changed.
+
+Reviews have a 900-second driver limit and a built-in 600-second limit per turn.
+Owner loop budget is 2700 seconds plus the existing exit grace (LocalHub#209),
+so it is not a strict whole-process wall limit. Runtime timeouts, driver kills,
+missing verdicts and incorrect delivered verdicts are distinct outcomes.
+All completed trials and failures are retained, with fixture hashes and final
+participant journals checked. LocalBox is stopped between model phases.
+
+### Flash output-format comparison
+
+| Brief | Planted REVISE | Clean AGREE | Initial accepted | Final accepted | Initial literal JSON |
+|---|---|---|---|---|---|
+| Baseline | 2/3 | 3/3 | 4/6 | 5/6 | 0/6 |
+| JSON reminder | 3/3 | 2/3 | 4/6 | 5/6 | 3/6 |
+
+The reminder is inserted before fingerprints; fixtures and review criteria stay
+fixed. Three unseeded paired repeats alternate arm order. Paths visible to the
+model differ and include arm names, so this is an exploratory comparison, not
+causal evidence. The parser accepts prose before valid JSON; the reminder is
+not schema or grammar enforcement. Both arms deliver five expected verdicts
+out of six, with no observed delivery gain. No production prompt change follows.
+
+Baseline's missing planted verdict is correct initial prose without JSON, then
+NoProgress on repeated searches during repair. Reminder's missing clean verdict
+is initial prose, then an untruncated JSON candidate lacking its final closing
+brace. No output-cap warning was observed; provider termination reason was not
+captured. Another reminder clean review recovers a 600-second initial timeout.
+All ten delivered primary decisions are supported, but supplementary claims
+include a wrong manual Roman trace, a wrong table count and diagnostic-wording
+requirements absent from the task. Static analysis is not test execution.
+
+### Reviews by model and fixture
+
+| Model | Case / brief | Planted delivered REVISE | Clean delivered AGREE | Missing verdicts | Supported primary decisions |
+|---|---|---|---|---|---|
+| Flash Next | roman-cm-v1 / baseline | 1/1 | 1/1 | 0 | 2/2 |
+| Flash Next | roman-upper-v1 / baseline | 1/1 | 1/1 | 0 | 2/2 |
+| Flash Next | roman-v2 / baseline | 2/3 | 3/3 | 1 | 5/5 |
+| Flash Next | roman-v2 / json-reminder | 3/3 | 2/3 | 1 | 5/5 |
+| Qwen 27B | roman-cm-v1 / baseline | 0/1 | 1/1 | 1 | 1/1 |
+| Qwen 27B | roman-upper-v1 / baseline | 0/1 | 1/1 | 1 | 1/1 |
+| Qwen 27B | roman-v2 / baseline | 0/3 | 0/3 | 5 | 0/1 |
+| Qwen A3B | roman-cm-v1 / baseline | 1/1 | 0/1 | 0 | 1/2 |
+| Qwen A3B | roman-upper-v1 / baseline | 1/1 | 0/1 | 0 | 1/2 |
+
+27B's six roman-v2 trials deliver no correct verdict: two planted reviews and
+all three clean controls escalate without verdicts; the remaining planted review
+delivers false AGREE despite True returning I. Schema errors, invented paths,
+tool repeats and long in-flight generation appear in the retained evidence.
+Both supplemental clean controls deliver correct AGREE after repair, but the
+upper-bound answer has wrong examples and a circular proof, while CM's body
+says only "reviewed". Upper-bound planted escalates on repeated tools; CM planted
+times out initially, then its repair hits the 900-second driver limit without
+a completed answer. That killed repair has no final ESCALATE or completed
+diagnostic attempt. These observations do not identify an inherent model or
+quantization root cause.
+
+A3B delivers all four supplemental verdicts: both planted REVISE decisions are
+supported, while both clean controls are false REVISE. The clean claims invent
+missing CM mapping, subTest swallowing failures, and a greedy-divmod bug despite
+the updated remainder. No review tool calls occur; the supplied brief includes
+the frozen diff and anchors. A matching anchor authenticates source bytes, not
+the finding's reasoning. Upper-bound repair attaches whole-file hashes to
+single-line ranges; native verdict correctly marks those anchors stale. That
+answer also retains a retracted claim as blocking. CM's correct core diagnosis
+comes with confused traces, invented missing tests and unsuitable fix advice.
+Thus two correct catches do not imply consistently supported finding quality.
+
+The original frozen product fixtures remain unchanged. Supplemental upper-bound
+1999 and CM-to-MC cases are original separately frozen cases; planted visible
+suites omit directly failing examples while matching clean suites cover them.
+Keep these one-repeat cases separate from roman-v2 and historical v1 results.
+An automatic integrity REVISE without a model turn is not a model defect catch
+(LocalHub#210). No such refusal is scored as a model outcome in this fresh batch;
+an earlier instrumentation attempt was excluded and retained separately.
+
+### Owner acceptance and submission
+
+| Model | Task | Review requested | Hidden acceptance | Measure | Native stops |
+|---|---|---|---|---|---|
+| Flash Next | slug | no | pass | fallback final tree | NoProgress |
+| Flash Next | roman | yes | pass | first submitted tree | TimedOut, Done |
+| Flash Next | duration | no | fail | fallback final tree | TimedOut, NoProgress |
+| Qwen 27B | slug | no | fail | fallback final tree | NoProgress, NoProgress |
+| Qwen 27B | roman | no | fail | fallback final tree | NoProgress, NoProgress |
+| Qwen 27B | duration | no | fail | fallback final tree | NoProgress, NoProgress |
+| Qwen A3B | slug | no | pass | fallback final tree | NoProgress, NoProgress |
+| Qwen A3B | roman | yes | pass | first submitted tree | NoProgress, Done |
+| Qwen A3B | duration | no | fail | fallback final tree | NoProgress, NoProgress |
+
+Hidden acceptance is independent of the driver's scripted reviewer agreement.
+A passing fallback source check does not satisfy required visible tests or
+submission. Final journals are authoritative: LocalHub#212 tracks owner rows
+that miss a final escalation when the process exits between polling intervals.
+Original rows are preserved rather than rewritten.
+
+Fresh unknown-reliability work profiles allow one file/region. Source plus tests
+can encounter this allowance without a supported bounded checkpoint sequence;
+test-triggered repairs can also be refused after the allowance is spent
+(LocalHub#211). This integration issue qualifies owner comparisons. Slug passes
+Flash's fallback source check but has no visible tests or submission. Roman
+recovers on retry, submits with eight unrelated scratch files, and passes hidden
+acceptance; its independent post-run visible suite has 44 passes. Duration fails
+hidden acceptance, with int(None) for omitted units; its independent visible
+suite has three failures and eight passes, including one wrong expected sum.
+These independent checks do not imply model-executed verification.
+
+27B submits none of its three owner tasks and all fallback hidden checks fail:
+Slug only lowercases with no functioning test suite, Roman creates neither
+required file, and Duration lacks the required parse_duration function. A3B
+Roman submits and passes hidden acceptance; its independent visible suite has
+35 passes. A3B Slug passes fallback hidden acceptance without submitting, but
+its visible suite has 18 passes and one incorrect assertion: its zero-length
+test omits max_len=0. A3B Duration does not submit and fails hidden acceptance;
+its visible suite has six failures and 24 passes. Regex restrictions reject
+required forms and hours-only reaches an uninitialized result. Both models'
+incomplete work and the shared owner integration barrier remain visible.
+
+An isolated native fake-provider replay also shows parseable REVIEW_REQUEST
+posting after a failed required verification gate and NoProgress, then closing
+on scripted agreement (LocalHub#213). It is mechanism evidence, excluded from
+model scores. Owner submission must preserve typed verification outcomes;
+readonly review verdicts have a different contract. LocalHub#214 records that
+concise tool traces often show only a wrapper header, hiding the error reason.
+
+A separate native control confirms that valid Python unittest commands can be
+refused by Bypass's intentional permission floor for opaque file targets, while
+an echo control succeeds. Bypass does not grant arbitrary shell access. The
+required owner verification route needs explicit integration (#211); the full
+tool message already explains these refusals, but the concise trace hides it
+(#214). This control is excluded from model scores.
+
+### Runtime outcomes
+
+| Phase | Trials | Runtime turn timeouts | Driver kills | Nonzero engine exits |
+|---|---|---|---|---|
+| Flash Next | 19 | 4 | 0 | 0 |
+| Qwen 27B | 13 | 3 | 1 | 1 |
+| Qwen A3B | 7 | 0 | 0 | 0 |
+
+Flash's server was reloaded before supplemental reviews after its original
+runner exited following Duration. Same binary/driver/runner/tune and all completed
+trials were preserved. The first post-reload turn timed out during sampled slow
+prompt processing, then repair recovered at 840.4 seconds. Timing observations
+are retained without claiming a root cause. Historical and fresh batches stay
+separate. These small samples establish neither a general model ranking nor
+readiness to adopt single-agreement acceptance; broader LocalHub#202 stays open.
