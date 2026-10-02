@@ -319,7 +319,7 @@ def run_path(out, a):
         f"-{a.review_case}" if a.review_case != "roman-v1" else "")
     name = f"{a.label}-{a.cell}{suffix}-{a.run}"
     repo = (out / name).resolve()
-    if repo.parent != out:
+    if repo.parent != out.resolve():
         raise SystemExit(f"refusing a run path outside {out}: {repo}")
     return name, repo
 
