@@ -1496,7 +1496,8 @@ in a project whose committed `.localpilot.toml` sets `[lab] uplift = true`.
 - **Shown first.** The authorization screen says the run drives real model
   sessions, and lists the model, what is staged, every command and every ceiling.
   Nothing runs until it is confirmed.
-- **Ceilings.** 3 trials, 120 s per turn, at most 8 tasks, 30 minutes of wall
+- **Ceilings.** 3 trials, no limit per turn unless `--turn-timeout` sets one
+  (ADR-0208), at most 8 tasks, 30 minutes of wall
   clock and 400 000 tokens for the whole run, each changeable per run by a flag.
   The wall clock and tokens are watched while an arm runs. A breach cancels the
   run, reaps the solver's process tree, and ends `InvalidExperiment`.

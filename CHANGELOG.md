@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Slow local models are no longer cut off by default.** `localpilot print` has
+  no built-in turn time limit any more (it was 600 s), and an uplift run has no
+  per-turn limit (it was 120 s). Set one with `--turn-timeout <seconds>` on
+  either command, or with `[harness] turn_timeout_secs` for `print`. An uplift
+  run is still stopped by its wall-clock and token ceilings. When a turn or run
+  with no limit has been going for a while, a one-time note on stderr says so
+  and shows the flag and the config example (ADR-0208).
 - **Pair-seat owner deadlines report their actual scope.** The owner loop budget
   and its exit grace are separate from native turn timeouts and final assessment.
   An owner-only `--owner-exit-grace` option keeps the 60-second default and accepts

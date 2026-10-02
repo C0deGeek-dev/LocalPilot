@@ -329,9 +329,9 @@ localpilot lab tasks approve <lesson> --reviewer <your name>
 localpilot lab uplift <lesson> --model <model>
 ```
 
-The run shows its ceilings first (3 trials, 120 s per turn, 30 minutes and
-400 000 tokens by default) and is cancelled if one is passed. A slow local model
-may need `--turn-timeout`. A result of `Supported` is about those questions and
+The run shows its ceilings first (3 trials, 30 minutes and 400 000 tokens by
+default) and is cancelled if one is passed. A turn has no time limit unless you
+pass `--turn-timeout`; a slow local model may need a longer `--wall-minutes`. A result of `Supported` is about those questions and
 that model, not a general claim.
 
 Then decide: `localpilot learning review accept`, `reject`, `defer`, or rewrite

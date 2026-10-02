@@ -520,6 +520,10 @@ enum Command {
         /// Resume the given session id.
         #[arg(long)]
         resume: Option<String>,
+        /// Stop the turn after this many seconds. Without it, and without
+        /// `[harness] turn_timeout_secs`, the turn has no time limit.
+        #[arg(long)]
+        turn_timeout: Option<u64>,
     },
     /// Run the agent headless on one problem and emit the capability scorecard
     /// (JSON) to stdout — the solver entry point for an external benchmark runner.
@@ -1146,7 +1150,8 @@ enum LabCommand {
         /// Trials per task, per arm (default 3).
         #[arg(long)]
         trials: Option<u32>,
-        /// Seconds one turn may take (default 120).
+        /// Seconds one turn may take. Default: no limit per turn — a local
+        /// model can need minutes; the wall clock and token ceilings still apply.
         #[arg(long)]
         turn_timeout: Option<u64>,
         /// Minutes the whole run may take (default 30).
@@ -2545,6 +2550,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             self_review,
             continue_latest,
             resume,
+            turn_timeout,
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
@@ -2556,6 +2562,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 allow_writes,
                 self_review,
                 resume,
+                turn_timeout,
             )
             .await?;
             if outcome.consumer_gone {
@@ -2650,6 +2657,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                     allow_writes,
                     false,
                     Some(session),
+                    None,
                 )
                 .await?;
                 if outcome.consumer_gone {

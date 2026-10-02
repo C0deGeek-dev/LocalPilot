@@ -2065,6 +2065,11 @@ impl SessionRuntime {
     /// `command` (when `Some`) overrides any stack detection. Leaves the command
     /// untouched when `None`, so a config-set command survives a flag that only
     /// flips the gate on.
+    /// Set, or with `None` remove, the turn's wall-clock bound.
+    pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        self.config.turn_timeout = timeout;
+    }
+
     pub fn set_verify_before_done(&mut self, enabled: bool, command: Option<String>) {
         self.config.verify_before_done = enabled;
         if command.is_some() {

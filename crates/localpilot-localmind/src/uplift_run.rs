@@ -44,7 +44,9 @@ const SEEDED_ID: &str = "<seeded-id>";
 pub struct UpliftCeilings {
     /// Trials per task, per arm.
     pub trials: u32,
-    /// Seconds one turn may take.
+    /// Seconds one turn may take. Zero is no limit, and the default: a local
+    /// model can need minutes for one turn, so the wall clock and the token
+    /// ceiling bound the run instead.
     pub turn_timeout_secs: u64,
     /// Seconds the whole run may take.
     pub wall_secs: u64,
@@ -56,7 +58,7 @@ impl Default for UpliftCeilings {
     fn default() -> Self {
         Self {
             trials: 3,
-            turn_timeout_secs: 120,
+            turn_timeout_secs: 0,
             wall_secs: 30 * 60,
             max_tokens: 400_000,
         }
@@ -64,14 +66,21 @@ impl Default for UpliftCeilings {
 }
 
 impl UpliftCeilings {
-    /// The longest the work itself could take: every turn of both arms running
-    /// to its timeout.
+    /// How many model turns the run makes: every task, every trial, both arms.
     #[must_use]
-    pub fn worst_case_secs(&self, tasks: usize) -> u64 {
-        u64::try_from(tasks).unwrap_or(u64::MAX)
-            * u64::from(self.trials)
-            * 2
-            * self.turn_timeout_secs
+    pub fn turns(&self, tasks: usize) -> u64 {
+        u64::try_from(tasks)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::from(self.trials))
+            .saturating_mul(2)
+    }
+
+    /// The longest the work itself could take: every turn of both arms running
+    /// to its timeout. `None` when turns have no limit.
+    #[must_use]
+    pub fn worst_case_secs(&self, tasks: usize) -> Option<u64> {
+        (self.turn_timeout_secs > 0)
+            .then(|| self.turns(tasks).saturating_mul(self.turn_timeout_secs))
     }
 }
 
@@ -151,11 +160,7 @@ pub fn plan_uplift(
     if !config.lab.uplift {
         return Err(UpliftRefusal::NotEnabled);
     }
-    if ceilings.trials == 0
-        || ceilings.turn_timeout_secs == 0
-        || ceilings.wall_secs == 0
-        || ceilings.max_tokens == 0
-    {
+    if ceilings.trials == 0 || ceilings.wall_secs == 0 || ceilings.max_tokens == 0 {
         return Err(UpliftRefusal::Ceiling(
             "every ceiling must be above zero".to_string(),
         ));
@@ -269,14 +274,29 @@ pub fn authorization(plan: &UpliftPlan) -> String {
         plan.run_dir.display()
     );
     let _ = writeln!(out, "  Ceilings — the run is cancelled when one is passed:");
-    let _ = writeln!(
-        out,
-        "    work: {} task(s) x {} trial(s) x 2 arms x {} s per turn = at most {} of model time",
-        plan.tasks,
-        ceilings.trials,
-        ceilings.turn_timeout_secs,
-        minutes(ceilings.worst_case_secs(plan.tasks))
-    );
+    match ceilings.worst_case_secs(plan.tasks) {
+        Some(worst) => {
+            let _ = writeln!(
+                out,
+                "    work: {} task(s) x {} trial(s) x 2 arms x {} s per turn = at most {} of model \
+                 time",
+                plan.tasks,
+                ceilings.trials,
+                ceilings.turn_timeout_secs,
+                minutes(worst)
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "    work: {} task(s) x {} trial(s) x 2 arms = {} model turn(s), with no limit per \
+                 turn (a local model may need minutes; set one with --turn-timeout)",
+                plan.tasks,
+                ceilings.trials,
+                ceilings.turns(plan.tasks)
+            );
+        }
+    }
     let _ = writeln!(
         out,
         "    wall clock: {} for the whole run",
@@ -367,12 +387,14 @@ pub async fn run_planned(
     downweight: bool,
 ) -> Result<UpliftOutcome, UpliftRefusal> {
     let approver = PreviewedCommands::of(plan);
-    let work = Duration::from_secs(
-        plan.ceilings
-            .worst_case_secs(plan.tasks)
-            .saturating_div(2)
-            .saturating_add(60),
-    );
+    // With no per-turn limit an arm is bounded by the wall clock alone.
+    let wall = Duration::from_secs(plan.ceilings.wall_secs);
+    let work = plan
+        .ceilings
+        .worst_case_secs(plan.tasks)
+        .map_or(wall, |worst| {
+            Duration::from_secs(worst.saturating_div(2).saturating_add(60))
+        });
     let bench = LocalBenchCli {
         program: plan.tools.localbench.clone(),
         solver: plan.tools.solver.clone(),
@@ -382,7 +404,7 @@ pub async fn run_planned(
         cancel: cancel.clone(),
         // One arm's own work, plus slack; the wall-clock ceiling is the bound
         // on the whole run.
-        arm_timeout: work.min(Duration::from_secs(plan.ceilings.wall_secs)),
+        arm_timeout: work.min(wall),
         cwd: root.to_path_buf(),
     };
     run_planned_with(

@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0208: A Print Turn And An Uplift Turn Have No Time Limit By Default
+
+**Status:** accepted · **Date:** 2026-10-02. Amends ADR-0055 (headless safety
+rails) for `print` only, and ADR-0201 (uplift ceilings) for the per-turn
+ceiling only.
+
+**Context.** A headless turn took a built-in 600 s wall-clock bound, and an
+uplift run bounded each solver turn at 120 s. Both numbers were chosen without a
+slow local model in front of them. Live runs showed one model needing about
+160 s for an ordinary answer and another generating for the full 600 s; the
+limits ended runs that were only slow, and an uplift run could not complete at
+its default.
+
+**Decision.**
+- **`localpilot print` has no built-in turn limit.** `--turn-timeout <seconds>`
+  sets one; an explicit `[harness] turn_timeout_secs` still applies; a zero from
+  either means none. Every other headless path — `eval`, harness steps, the
+  mesh — keeps the 600 s built-in bound of ADR-0055.
+- **An uplift run has no per-turn limit by default.** `--turn-timeout <seconds>`
+  sets one. With none, `localbench` is started with `--timeout 0`, which it
+  reads as no bound. The wall-clock ceiling (30 minutes), the token ceiling and
+  cancellation are unchanged and still end a run.
+- **The authorization screen says so.** With no per-turn limit it shows the
+  number of model turns and that each has no limit, instead of a worst-case
+  product it can no longer compute.
+- **A long wait explains itself, once.** A `print` turn still running after two
+  minutes with no limit, and an uplift run still going after five, print a note
+  on stderr: that there is no limit, how to stop, the flag that sets one, and
+  the `[harness] turn_timeout_secs` example for `.localpilot.toml`.
+
+**Consequences.**
+- A slow model finishes instead of being cut off.
+- A `print` turn that never ends runs until someone stops it. A caller that
+  needs a bound must set one; LocalBench's own default for its other commands
+  is unchanged.
+- An uplift run with a stuck solver is stopped by the wall clock, not by a turn
+  limit, so it can spend the whole wall clock on one turn.
+
 ## ADR-0207: Seat Owner Wall Is a Loop Budget With Explicit Exit Grace
 
 **Status:** accepted · **Date:** 2026-10-02.
@@ -263,7 +301,7 @@ what a second attempt may reuse.
 | Ceiling | Default | How it binds |
 |---|---|---|
 | trials per task, per arm | 3 | part of the run's identity |
-| seconds per turn | 120 | LocalBench's own per-turn timeout |
+| seconds per turn | none (ADR-0208; was 120) | LocalBench's own per-turn timeout, when one is set |
 | tasks | at most 8 | the task-set limit |
 | wall clock, whole run | 30 min | watched while an arm runs |
 | tokens, whole run | 400 000 | read from the trial sessions while an arm runs |

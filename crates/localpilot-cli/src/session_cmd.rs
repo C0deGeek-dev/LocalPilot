@@ -136,7 +136,7 @@ pub fn workspace_with_read_roots(
 /// # Errors
 /// Returns an error if configuration, the provider registry, or the workspace
 /// cannot be set up.
-#[allow(clippy::fn_params_excessive_bools)] // distinct one-shot run toggles
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)] // distinct one-shot run toggles
 pub async fn print_mode(
     prompt: &str,
     model: &str,
@@ -145,9 +145,21 @@ pub async fn print_mode(
     allow_writes: bool,
     self_review: bool,
     resume: Option<localpilot_core::SessionId>,
+    turn_timeout_secs: Option<u64>,
 ) -> anyhow::Result<PrintOutcome> {
     let cwd = std::env::current_dir()?;
     let mut runtime = build_runtime(&cwd, model, provider_id, profile, allow_writes).await?;
+    let config = localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(&cwd),
+        &localpilot_config::CliOverrides::default(),
+    )?;
+    let turn_timeout = print_turn_timeout(turn_timeout_secs, config.harness.turn_timeout_secs);
+    runtime.set_turn_timeout(turn_timeout.map(std::time::Duration::from_secs));
+    // A turn with no limit that is still going after a while says how to set
+    // one, once, on stderr — the answer on stdout is untouched.
+    let _slow = turn_timeout
+        .is_none()
+        .then(|| SlowNotice::after(PRINT_SLOW_AFTER, print_slow_notice(PRINT_SLOW_AFTER)));
     if let Some(session) = resume {
         // Resume rebuilds the conversation from the durable event log; the
         // profile and trust just configured stay in force.
@@ -172,6 +184,58 @@ pub async fn print_mode(
         }
     }
     Ok(outcome)
+}
+
+/// The wall-clock bound of a `print` turn, in seconds.
+///
+/// `print` is run by a person, or by a caller that sets its own bound, and a
+/// local model can need many minutes for one answer — so unlike the other
+/// headless paths it takes no built-in bound. `--turn-timeout` wins, then an
+/// explicit `[harness] turn_timeout_secs`; a zero from either means no bound.
+#[must_use]
+pub fn print_turn_timeout(flag: Option<u64>, configured: Option<u64>) -> Option<u64> {
+    flag.or(configured).filter(|seconds| *seconds > 0)
+}
+
+/// How long a `print` turn with no limit runs before it says how to set one.
+pub const PRINT_SLOW_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// What a slow, unbounded `print` turn tells the person waiting.
+#[must_use]
+pub fn print_slow_notice(after: std::time::Duration) -> String {
+    format!(
+        "note: this turn has been running for {} min and has no time limit — a local model can \
+         take a while, and it will keep going. Press Ctrl+C to stop it.\n\
+         To set a limit, pass `--turn-timeout <seconds>`, or put this in `.localpilot.toml`:\n\
+         \n    [harness]\n    turn_timeout_secs = 600\n",
+        after.as_secs() / 60
+    )
+}
+
+/// Prints a note to stderr once, if it is still alive after a delay. Dropping
+/// it — which finishing the work does — cancels the note.
+pub struct SlowNotice(tokio::task::JoinHandle<()>);
+
+impl SlowNotice {
+    /// Print `message` to stderr after `delay`, unless dropped first.
+    #[must_use]
+    pub fn after(delay: std::time::Duration, message: String) -> Self {
+        Self::after_then(delay, move || eprintln!("{message}"))
+    }
+
+    /// Run `action` after `delay`, unless dropped first.
+    fn after_then(delay: std::time::Duration, action: impl FnOnce() + Send + 'static) -> Self {
+        Self(tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            action();
+        }))
+    }
+}
+
+impl Drop for SlowNotice {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// The terminal state of a `print` run a caller can act on.
@@ -789,6 +853,75 @@ async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_slow_notice_names_the_flag_and_shows_the_config_example() {
+        let notice = print_slow_notice(PRINT_SLOW_AFTER);
+        assert!(notice.contains("running for 2 min"), "{notice}");
+        assert!(notice.contains("has no time limit"), "{notice}");
+        assert!(notice.contains("--turn-timeout <seconds>"), "{notice}");
+        assert!(
+            notice.contains("[harness]\n    turn_timeout_secs = 600"),
+            "{notice}"
+        );
+        assert!(notice.contains("Ctrl+C"), "{notice}");
+    }
+
+    #[tokio::test]
+    async fn a_slow_notice_fires_once_after_its_delay_and_never_after_the_work_ends() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let delay = std::time::Duration::from_millis(200);
+        let fired = Arc::new(AtomicUsize::new(0));
+        let count = {
+            let fired = fired.clone();
+            move || {
+                fired.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+
+        let slow = SlowNotice::after_then(delay, count.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "not before the delay");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "once, however long it runs"
+        );
+        drop(slow);
+
+        // Work that finishes first cancels its note.
+        let quick = SlowNotice::after_then(delay, count);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(quick);
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "a finished turn never prints the note"
+        );
+    }
+
+    #[test]
+    fn a_print_turn_has_no_time_limit_unless_one_is_asked_for() {
+        // Neither a flag nor configuration: no bound, where the other headless
+        // paths still take the built-in one.
+        assert_eq!(print_turn_timeout(None, None), None);
+        assert_eq!(
+            localpilot_config::Config::default()
+                .harness
+                .resolved_rails(false)
+                .turn_timeout_secs,
+            Some(localpilot_config::DEFAULT_HEADLESS_TURN_TIMEOUT_SECS)
+        );
+        // Configuration bounds it; the flag wins over configuration.
+        assert_eq!(print_turn_timeout(None, Some(90)), Some(90));
+        assert_eq!(print_turn_timeout(Some(45), Some(90)), Some(45));
+        // A zero from either says "no bound" out loud.
+        assert_eq!(print_turn_timeout(Some(0), Some(90)), None);
+        assert_eq!(print_turn_timeout(None, Some(0)), None);
+    }
 
     #[test]
     fn turn_deadline_metadata_uses_resolved_headless_rails() {

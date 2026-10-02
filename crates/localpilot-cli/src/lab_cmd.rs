@@ -558,6 +558,26 @@ pub fn tasks_approve(
     Ok(())
 }
 
+/// How long an uplift run with no per-turn limit runs before it says how to
+/// set one.
+pub const UPLIFT_SLOW_AFTER: Duration = Duration::from_secs(300);
+
+/// What a long uplift run with no per-turn limit tells the person waiting.
+#[must_use]
+pub fn uplift_slow_notice(after: Duration, wall_secs: u64) -> String {
+    format!(
+        "note: this uplift run has been going for {} min. Turns have no time limit — a local \
+         model can take a while — so only the wall clock ({} min) and the token ceiling stop it. \
+         Press Ctrl+C to cancel.\n\
+         To bound it next time: `--turn-timeout <seconds>` limits each turn, and \
+         `--wall-minutes <minutes>` changes the wall clock. The solver's own turns can also be \
+         bounded in `.localpilot.toml`:\n\
+         \n    [harness]\n    turn_timeout_secs = 600\n",
+        after.as_secs() / 60,
+        wall_secs / 60
+    )
+}
+
 /// What `lab uplift` was asked for.
 #[derive(Debug, Clone, Default)]
 pub struct UpliftArgs {
@@ -708,6 +728,14 @@ pub async fn uplift(
         &localpilot_config::CliOverrides::default(),
     )?;
     let downweight = config.memory.outcome_downweight;
+    // A run with no per-turn limit that is still going after a while says how
+    // to bound it, once, on stderr.
+    let _slow = (plan.ceilings.turn_timeout_secs == 0).then(|| {
+        crate::session_cmd::SlowNotice::after(
+            UPLIFT_SLOW_AFTER,
+            uplift_slow_notice(UPLIFT_SLOW_AFTER, plan.ceilings.wall_secs),
+        )
+    });
     let ran = match bench {
         Some(bench) => {
             localpilot_localmind::run_planned_with(
@@ -1108,10 +1136,14 @@ mod tests {
         };
         let args = UpliftArgs {
             model,
-            // A local model can need minutes per turn: one trial, a long turn.
+            // A local model can need minutes per turn: one trial, no per-turn
+            // limit, and a wall clock long enough to let it finish.
             trials: Some(1),
-            turn_timeout_secs: Some(300),
-            wall_minutes: Some(25),
+            wall_minutes: Some(
+                var("LOCALPILOT_LIVE_WALL_MINUTES")
+                    .and_then(|minutes| minutes.parse().ok())
+                    .unwrap_or(120),
+            ),
             ..UpliftArgs::default()
         };
         let mut yes = std::io::Cursor::new(b"y\n".to_vec());
@@ -1414,7 +1446,9 @@ mod tests {
             run_uplift_command(root, &identity, Confirmation::Unavailable, fixture_tools()).await;
         assert!(printed.contains("real model sessions"), "{printed}");
         assert!(
-            printed.contains("1 task(s) x 3 trial(s) x 2 arms x 120 s per turn"),
+            printed.contains(
+                "1 task(s) x 3 trial(s) x 2 arms = 6 model turn(s), with no limit per turn"
+            ),
             "{printed}"
         );
         assert!(printed.contains("wall clock: 30 min"), "{printed}");
@@ -1924,6 +1958,19 @@ fi\n";
         assert!(
             show(root).contains("no longer retained; the result itself still stands"),
             "a swept detail is said in words"
+        );
+    }
+
+    #[test]
+    fn the_uplift_slow_notice_names_both_flags_and_shows_the_config_example() {
+        let notice = uplift_slow_notice(UPLIFT_SLOW_AFTER, 30 * 60);
+        assert!(notice.contains("going for 5 min"), "{notice}");
+        assert!(notice.contains("wall clock (30 min)"), "{notice}");
+        assert!(notice.contains("--turn-timeout <seconds>"), "{notice}");
+        assert!(notice.contains("--wall-minutes <minutes>"), "{notice}");
+        assert!(
+            notice.contains("[harness]\n    turn_timeout_secs = 600"),
+            "{notice}"
         );
     }
 }

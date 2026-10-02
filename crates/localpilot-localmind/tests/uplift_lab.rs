@@ -1448,9 +1448,28 @@ fn the_authorization_states_the_product_the_ceilings_and_every_command() {
         "{shown}"
     );
     assert!(
-        shown.contains("2 task(s) x 3 trial(s) x 2 arms x 120 s per turn = at most 24 min"),
-        "the product, not the per-turn timeout: {shown}"
+        shown
+            .contains("2 task(s) x 3 trial(s) x 2 arms = 12 model turn(s), with no limit per turn"),
+        "the default has no per-turn limit and says so: {shown}"
     );
+    assert!(
+        shown.contains("--timeout 0 "),
+        "the solver is told no bound: {shown}"
+    );
+    // A limit someone asks for is shown as the product, not the per-turn number.
+    let bounded = uplift_authorization(
+        &project
+            .plan_with(UpliftCeilings {
+                turn_timeout_secs: 120,
+                ..UpliftCeilings::default()
+            })
+            .unwrap(),
+    );
+    assert!(
+        bounded.contains("2 task(s) x 3 trial(s) x 2 arms x 120 s per turn = at most 24 min"),
+        "{bounded}"
+    );
+    assert!(bounded.contains("--timeout 120 "), "{bounded}");
     assert!(shown.contains("wall clock: 30 min"), "{shown}");
     assert!(shown.contains("tokens: 400000"), "{shown}");
     assert!(
