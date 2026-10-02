@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Native Python owner tests are independent of ambient pytest installations.**
+  Their fixture runner executes real unittest cases and rejects empty or failing
+  suites. Failed checkpoint assertions retain bounded, redacted verifier details.
+
 - **Mesh tool traces show actual diagnostics.** Wrapped results expose a bounded,
   redacted execution status or refusal reason instead of repeating the tool name.
   Capture defaults and permission decisions are unchanged.

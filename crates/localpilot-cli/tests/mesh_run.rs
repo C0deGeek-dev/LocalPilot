@@ -73,6 +73,53 @@ async fn chat_requests(server: &MockServer) -> Vec<MockRequest> {
         .collect()
 }
 
+/// Failure assertions keep only the verifier repair message, never a request dump.
+fn verifier_diagnostic(body: &[u8]) -> String {
+    let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let detail = request["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .filter(|text| text.starts_with("The build/test verification did not pass"))
+        .next_back()
+        .unwrap_or("no verifier diagnostic recorded");
+    let text = localpilot_config::redact::redact(detail);
+    if text.len() <= 2048 {
+        return text;
+    }
+    let mut end = 2045;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+#[test]
+fn verifier_assertions_exclude_prompts_and_bound_redacted_retry_evidence() {
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz12345678901234567890";
+    let body = json!({"messages":[
+        {"role":"system","content":"The build/test verification did not pass: system-only-marker"},
+        {"role":"user","content":"unrelated-user-marker"},
+        {"role":"user","content":"The build/test verification did not pass: previous-attempt"},
+        {"role":"user","content":format!("The build/test verification did not pass: No module named pytest {secret} {}", "字".repeat(1000))}
+    ], "tools":["private-schema-marker"]}).to_string();
+    let detail = verifier_diagnostic(body.as_bytes());
+    assert!(detail.contains("No module named pytest"));
+    assert!(!detail.contains("sk-"));
+    assert!(!detail.contains("system-only-marker"));
+    assert!(!detail.contains("unrelated-user-marker"));
+    assert!(!detail.contains("previous-attempt"));
+    assert!(!detail.contains("private-schema-marker"));
+    assert!(detail.len() <= 2048 && detail.ends_with('…'));
+    assert_eq!(
+        verifier_diagnostic(b"invalid json"),
+        "no verifier diagnostic recorded"
+    );
+    assert_eq!(verifier_diagnostic(br#"{"messages":[{"role":"assistant","content":"The build/test verification did not pass: invented"}]}"#), "no verifier diagnostic recorded");
+}
+
 impl Fixture {
     /// A Git repository with a committed `a.txt`, a schema-2 session that
     /// the reference started as claude with localpilot, and a user config
@@ -992,10 +1039,14 @@ fn python_task(f: &Fixture) {
     std::fs::write(f.session_file(), serde_json::to_vec(&session).unwrap()).unwrap();
     std::fs::write(
         f.anchor.join(".gitignore"),
-        "__pycache__/\n*.pyc\n.test-ran\n",
+        "__pycache__/\n*.pyc\n.test-ran\n.runner-ran\n",
     )
     .unwrap();
-    git(&f.anchor, &["add", ".gitignore"]);
+    // Automatic Python verification invokes this fixture-owned entry point,
+    // which runs real unittest cases without an installed third-party runner.
+    // No test file exists yet, so source-only checkpoints still use native AST.
+    std::fs::write(f.anchor.join("pytest.py"), PYTHON_TEST_ENTRY).unwrap();
+    git(&f.anchor, &["add", ".gitignore", "pytest.py"]);
     git(&f.anchor, &["commit", "-qm", "ignore Python caches"]);
     f.reference(&["handoff-offer", "--role", "claude"]);
 }
@@ -1047,6 +1098,53 @@ async fn native_tool_trace_shows_shell_status_and_opaque_target_refusal() {
 const SLUG_SOURCE: &str = "def slug(text):\n    return '-'.join(text.lower().split())\n";
 const SLUG_TEST: &str = "import unittest\nfrom pathlib import Path\nfrom slug import slug\n\nclass SlugTest(unittest.TestCase):\n    def test_slug(self):\n        Path('.test-ran').write_text('required test executed')\n        self.assertEqual(slug('Hello World'), 'hello-world')\n";
 
+const PYTHON_TEST_ENTRY: &str = "import sys\nimport unittest\nfrom pathlib import Path\n\nPath('.runner-ran').write_text('stdlib-unittest')\nsuite = unittest.defaultTestLoader.discover('.', pattern='test_*.py')\nresult = unittest.TextTestRunner(verbosity=1).run(suite)\nsys.exit(0 if result.testsRun and result.wasSuccessful() else 1)\n";
+
+#[tokio::test]
+async fn fixture_python_verifier_works_without_site_packages_and_requires_real_tests() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    python_task(&f);
+    let run = || {
+        Command::new(&f.py[0])
+            .args(&f.py[1..])
+            .args(["-S", "-m", "pytest", "-q"])
+            .current_dir(&f.anchor)
+            .output()
+            .unwrap()
+    };
+    assert!(!run().status.success(), "zero discovered tests must fail");
+    std::fs::write(f.anchor.join("slug.py"), SLUG_SOURCE).unwrap();
+    std::fs::write(f.anchor.join("test_slug.py"), SLUG_TEST).unwrap();
+    let passed = run();
+    assert!(passed.status.success(), "{}", text(&passed));
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join(".test-ran")).unwrap(),
+        "required test executed"
+    );
+    std::fs::write(
+        f.anchor.join("test_slug.py"),
+        SLUG_TEST.replace("'hello-world'", "'WRONG'"),
+    )
+    .unwrap();
+    let failed = run();
+    assert!(
+        !failed.status.success(),
+        "failed unittest must fail verification"
+    );
+    assert!(
+        text(&failed).contains("AssertionError"),
+        "{}",
+        text(&failed)
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join(".runner-ran")).unwrap(),
+        "stdlib-unittest"
+    );
+}
+
 #[tokio::test]
 async fn a_python_owner_checkpoints_source_then_runs_required_tests_before_submission() {
     let server = server().await;
@@ -1071,9 +1169,16 @@ async fn a_python_owner_checkpoints_source_then_runs_required_tests_before_submi
     };
     python_task(&f);
     let out = f.run(&["--own"]).await;
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("CHECKPOINT "), "{}", text(&out));
-    assert_eq!(f.posted("REVIEW_REQUEST").len(), 1, "{}", text(&out));
+    let requests = chat_requests(&server).await;
+    let diagnostic = requests
+        .last()
+        .map(|request| verifier_diagnostic(&request.body))
+        .unwrap_or_default();
+    let failure = format!("{}\n{diagnostic}", text(&out));
+    assert!(out.status.success(), "{failure}");
+    assert!(text(&out).contains("CHECKPOINT "), "{failure}");
+    let review_count = f.posted("REVIEW_REQUEST").len();
+    assert_eq!(review_count, 1, "{failure}");
     let notes = f.posted("NOTE");
     let checkpoint = notes
         .iter()
@@ -1095,6 +1200,10 @@ async fn a_python_owner_checkpoints_source_then_runs_required_tests_before_submi
     assert_eq!(
         std::fs::read_to_string(f.anchor.join(".test-ran")).unwrap(),
         "required test executed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join(".runner-ran")).unwrap(),
+        "stdlib-unittest"
     );
     assert_ne!(
         session_status(&f),
@@ -1167,6 +1276,18 @@ async fn a_python_checkpoint_does_not_launder_failing_required_tests() {
     assert!(f.posted("REVIEW_REQUEST").is_empty());
     assert_eq!(f.posted("ESCALATE").len(), 1);
     assert!(text(&out).contains("failed (attempt"), "{}", text(&out));
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join(".test-ran")).unwrap(),
+        "required test executed"
+    );
+    let requests = chat_requests(&server).await;
+    let diagnostic = verifier_diagnostic(&requests.last().unwrap().body);
+    assert!(diagnostic.contains("AssertionError"), "{diagnostic}");
+    assert!(diagnostic.contains("WRONG"), "{diagnostic}");
+    assert!(
+        !diagnostic.contains("No module named pytest"),
+        "{diagnostic}"
+    );
 }
 
 #[tokio::test]
