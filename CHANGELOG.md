@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The lesson lab is documented where its behaviour is owned.** The security
+  doc states what each lab tier may run, who trusts what, and what a result can
+  and cannot do. The testing doc lists the offline acceptance corpus, where each
+  situation is proven, and its limits. The wiki gains the `lab` command
+  reference and a how-to for testing a lesson before accepting it.
 - **Review now shows why a lesson was proposed and what testing found.**
   `localpilot learning review show` and the terminal review show two cards for
   each lesson: its hindsight (what was intended and observed, the facts, the

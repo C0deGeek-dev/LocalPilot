@@ -423,6 +423,65 @@ Live tests must:
 - keep prompts minimal
 - never run in default CI
 
+## Lesson Lab Acceptance Corpus
+
+The lesson lab is accepted on deterministic, offline tests. No model, network
+or download is needed to run them. Each row names the situation, where it is
+proven, and how far up the real call path the test starts.
+
+Entry points, from the outside in:
+- **run** — a real completed harness run (`harness_cmd` tests, through
+  `resume_with_provider` with a scripted provider);
+- **command** — the function behind a `localpilot lab …` or `learning review …`
+  command (`lab_cmd` tests);
+- **adapter** — the function that command calls, with the external program
+  replaced by a stand-in (`localpilot-localmind/tests/`);
+- **engine** — LocalMind's own tests at the pinned revision
+  (`external/localmind`).
+
+| Situation | Proven by | Entry |
+|---|---|---|
+| An earned lesson: facts, hindsight, candidate, Logic result, review cards | `a_completed_run_offers_an_earned_lesson_with_its_hindsight_and_facts` | run |
+| No lesson / unknown cause (safe abstention), recorded only on request | `a_completed_run_that_earns_no_lesson_queues_nothing_by_default`; `an_abstention_queues_nothing_unless_the_project_asks`; engine `case_*` in `hindsight_distillation.rs` | run, adapter, engine |
+| Needs review (a lesson over a damaged or incomplete record) | `a_lesson_over_a_damaged_log_is_kept_for_review_not_queued_as_a_lesson` | adapter |
+| Malformed or invented evidence from the model | `a_reply_that_keeps_breaking_the_contract_gets_one_repair_and_no_more`; engine `an_invented_id_is_refused_and_named_in_the_repair`, `truncated_json_twice_ends_in_a_fallback_that_invents_nothing` | adapter, engine |
+| No model or unreachable model (fallback) | `an_unreachable_model_is_recorded_for_review_with_the_facts_and_no_cause`; `a_project_with_learning_off_spends_no_model_call` | adapter |
+| Redaction | `nothing_the_logic_run_stores_carries_what_capture_redacted`; `capture_redacts_what_the_event_store_does_not_know_to` | adapter |
+| Not executable (preference, intent, unsafe, style) | `preferences_intent_unsafe_actions_and_unverifiable_style_are_honestly_not_executable`; `a_lesson_no_test_can_judge_says_why_in_review_and_keeps_its_review_path` | adapter |
+| Logic verdicts and the full reason table | `verdict_table`; `logic_can_never_claim_supported_contradicted_or_inconclusive` | adapter |
+| Replay valid, and each way it is invalid | `yes_runs_the_previewed_replay_and_the_result_reaches_review`; `replay_lab.rs` | command, adapter |
+| Supported | `a_confirmed_uplift_run_reaches_review_through_the_real_localbench` (real `localbench`, local only); `the_arms_differ_only_in_the_seeded_lesson_and_a_passing_treatment_is_supported` | command, adapter |
+| Harmful, both-pass, both-fail | `no_effect_and_harm_are_results_and_stay_distinct_from_invalid`; `a_harmful_result_routes_accepted_memory_to_review_only_when_asked`; engine `a_harmful_result_holds_a_lesson_for_a_person_in_every_mode` | adapter, engine |
+| The verdict interpretation table | `review_verdict_mapping`; engine `every_verdict_is_named_and_explained_and_no_tier_overclaims` | adapter, engine |
+| Infrastructure failure | `a_missing_program_is_an_infrastructure_failure`; `a_root_that_cannot_be_made_is_an_infrastructure_failure`; `half_a_pair_or_a_stopped_run_is_invalid_with_its_reason` | adapter |
+| Cancelled, timed out, over a ceiling | `a_cancelled_run_is_an_invalid_experiment_not_a_finding`; `a_timeout_is_a_breached_budget_and_the_worktree_goes`; `a_breached_ceiling_cancels_the_run_and_is_never_a_partial_verdict`; `a_run_cancelled_between_the_arms_is_invalid_and_its_baseline_is_only_offered` | adapter |
+| Process-tree cleanup on cancel | `cancelling_reaps_the_whole_tree_as_its_effect_shows`; `cancelling_the_real_runner_reaps_the_process_tree` | adapter |
+| Stale results, rewrite, split, history | `a_changed_candidate_leaves_its_result_stale_and_its_assignment_unusable`; `a_rewritten_lesson_is_history_to_the_lab_and_the_rewrite_starts_untested`; engine `review_cards.rs`, `experiment_persistence.rs` | adapter, command, engine |
+| A result cannot promote itself | engine `a_supported_result_cannot_promote_itself_through_any_entry_point`, `no_tool_decides_rewrites_or_promotes_a_review_item` | engine |
+| Authorization, opt-in and headless refusal | `an_uplift_run_starts_only_from_an_explicit_confirmed_command`; `nothing_runs_without_a_confirmation`; `the_permission_gate_still_decides_and_a_headless_ask_is_denied` | command, adapter |
+| A rerun request runs nothing | `a_rerun_request_is_shown_and_starts_nothing_until_a_person_runs_it` | command |
+
+Limits of this corpus, stated plainly:
+- The uplift outcomes other than `Supported` are proven at the adapter, with a
+  stand-in for the `localbench` program. Only `Supported` and a denied command
+  go through the real binary.
+- The real-binary tests run only where `LOCALPILOT_TEST_LOCALBENCH` names a
+  `localbench` with the per-arm surface. CI does not build one, so there they
+  print a notice and skip.
+- Everything here proves the contracts, the runners and the review path. None
+  of it shows that a lesson helps a model.
+
+Live, opt-in tests (they reach a model server and are never required):
+
+| Test | Environment |
+|---|---|
+| `run_hindsight_live` — the distiller over six frozen cases, both strategies, with latency | `LOCALPILOT_LIVE_TESTS`, `LOCALPILOT_LIVE_BASE_URL`, `LOCALPILOT_LIVE_MODEL` |
+| `a_live_uplift_project_is_laid_down_on_request`, `a_live_uplift_run_is_confirmed_at_the_prompt_on_request` | `LOCALPILOT_LIVE_TESTS`, `LOCALPILOT_LIVE_UPLIFT_DIR`, `LOCALPILOT_LIVE_MODEL`, `LOCALPILOT_TEST_LOCALBENCH`, `LOCALPILOT_LIVE_SOLVER` |
+
+The terminal-review tests build only with the `tui` feature. Run
+`cargo test -p localpilot --features tui --bin localpilot` as well as
+`cargo test --workspace`; the workspace run alone does not compile them.
+
 ## Fixture Policy
 
 Fixtures must be authored for this repository. Do not copy fixtures from

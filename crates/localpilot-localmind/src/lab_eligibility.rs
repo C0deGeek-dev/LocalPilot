@@ -1038,7 +1038,12 @@ pub(crate) fn test_surface(root: &Path, revision: &str) -> Option<String> {
     Some(entries.join("\n"))
 }
 
-/// Run a read-only git query in `root`. `None` on any failure.
+/// Run one of the lab's own git commands in `root`. `None` on any failure.
+///
+/// Never a command a project or a model chose. Every use is a read — a
+/// revision, a tree listing, a diff, a status — except one: Replay applies
+/// `revert --no-commit` inside the temporary worktree it created, to
+/// reintroduce a fixed failure there.
 pub(crate) fn git(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .args(args)

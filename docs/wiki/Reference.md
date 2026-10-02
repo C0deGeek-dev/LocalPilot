@@ -30,6 +30,30 @@ which maps every area to its owning doc.
   (interactive and headless) share the posture. See
   [`docs/07-security-and-privacy.md`](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/07-security-and-privacy.md).
 
+## Lesson lab
+
+Lessons that come out of a finished harness run can be tested before a person
+accepts them. Specified in
+[the harness specification](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/06-harness-spec.md#completion-hindsight);
+what each tier may do on the machine is in
+[security and privacy](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/07-security-and-privacy.md#lesson-lab-execution).
+
+| Command | What it does |
+|---|---|
+| `localpilot lab list` | The lessons the lab classified, what it can run for each, their results and open rerun requests |
+| `localpilot lab replay [<lesson>]` | Re-run the project's own check on the commits a lesson came from, in temporary worktrees. Needs `[lab] replay = true` in the committed `.localpilot.toml`; shows what will run and asks first |
+| `localpilot lab tasks draft\|show\|approve <lesson>` | A model drafts test questions for a lesson; a named person approves them. Nothing runs from a draft |
+| `localpilot lab uplift <lesson> --model <m>` | Run the approved questions with and without the lesson through LocalBench. Drives real model sessions. Needs `[lab] uplift = true` in the committed `.localpilot.toml`; shows its ceilings and commands and asks first |
+| `localpilot lab status` | Each uplift run: ended, running or interrupted |
+| `localpilot lab rerun <lesson> --tier replay\|uplift --reviewer <name>` | Record a request to run a tier again. Runs nothing |
+| `localpilot learning review show <item>` | The lesson with its hindsight and lab results, and what you can do next |
+| `localpilot learning review edit <item> --replacement "…"` | Rewrite a lesson. The original is kept as history with its results; the rewrite starts untested |
+| `localpilot learning review split draft\|show\|approve <item>` | A model drafts narrower lessons; a named person approves them |
+
+A lab result is shown to the reviewer and never accepts or changes a lesson.
+`<lesson>` is the lesson's identity from `lab list` (or a prefix of it);
+`<item>` is its id in `learning review list`.
+
 ## Pair collaboration
 
 - **Command and cost controls** — see the canonical

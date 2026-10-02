@@ -286,6 +286,58 @@ intake asks about them before writing `brief.md` instead of guessing — see
 The nine harness gates are specified in
 [06-harness-spec.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/06-harness-spec.md).
 
+## Test a lesson before accepting it
+
+A completed harness run may offer a lesson for review. Read it, and what the lab
+already knows about it:
+
+```sh
+localpilot learning review list
+localpilot learning review show <item>
+```
+
+The output has two cards. **Hindsight** shows what was intended and observed,
+the facts recorded by the run, the cause the analysis proposed, and where the
+lesson applies. **Experiments** shows each test that ran. Most lessons have none,
+and that says nothing about their quality.
+
+To re-run the project's own check on the commits the lesson came from (no model
+is used), enable Replay for the project by committing this to `.localpilot.toml`,
+then run it:
+
+```toml
+[lab]
+replay = true
+```
+
+```sh
+localpilot lab list
+localpilot lab replay <lesson>
+```
+
+It shows the command, the environment and the time limit, and runs only after
+you confirm. A check and an uplift solver run with your access to the machine: a
+temporary worktree is not a sandbox.
+
+To compare a model with and without the lesson, set `uplift = true` under
+`[lab]` as well, have a model draft test questions, read and approve them, and
+run:
+
+```sh
+localpilot lab tasks draft <lesson> --model <model>
+localpilot lab tasks approve <lesson> --reviewer <your name>
+localpilot lab uplift <lesson> --model <model>
+```
+
+The run shows its ceilings first (3 trials, 120 s per turn, 30 minutes and
+400 000 tokens by default) and is cancelled if one is passed. A slow local model
+may need `--turn-timeout`. A result of `Supported` is about those questions and
+that model, not a general claim.
+
+Then decide: `localpilot learning review accept`, `reject`, `defer`, or rewrite
+it with `edit`. A rewrite is a new lesson and starts untested. See the
+[command list](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/wiki/Reference.md#lesson-lab).
+
 ## Keep work units small
 
 Agent mode automatically uses bounded reads and edits; Harness mode validates

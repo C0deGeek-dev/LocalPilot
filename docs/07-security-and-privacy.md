@@ -872,6 +872,61 @@ So "may the agent touch the network?" has two honest answers: the research path
 is a true audited allowlist boundary; `fetch`/MCP are permission-gated but
 host-agnostic. Choose the profile and allowlist accordingly.
 
+## Lesson Lab Execution
+
+The lesson lab tests lessons that came out of finished runs. It has three tiers,
+and they differ in what they are allowed to do on the machine.
+
+| Tier | What runs | Starts | Model | Leaves the machine |
+|---|---|---|---|---|
+| Logic | Nothing is executed. The recorded run is replayed against virtual tools in memory | Automatically, when a run completes | None | Nothing |
+| Replay | The project's own ratified check, on the commits the lesson came from, in temporary git worktrees | Only from `localpilot lab replay`, in a project whose committed `.localpilot.toml` sets `[lab] replay = true`, after a preview and a confirmation | None | Nothing, unless the check itself does |
+| Uplift | `localbench`, which runs `localpilot print` on approved tasks with and without the lesson, in a throwaway workspace | Only from `localpilot lab uplift`, in a project whose committed `.localpilot.toml` sets `[lab] uplift = true`, after an authorization screen and a confirmation | The one named on the command line, on the endpoint the solver is configured for | Whatever that provider configuration sends |
+
+**What is trusted, and by whom.**
+- The enabling flags are read from the committed configuration at `HEAD`, not
+  from the working copy, so an uncommitted edit cannot turn a tier on.
+- A Replay check is a check the project already ratified. Its command is frozen
+  with the lesson; a check or a test file changed since then makes the run
+  invalid instead of running the new version.
+- The `localbench` program is named only in the user's own configuration. A
+  project cannot choose a program to run.
+- Uplift tasks are drafted by a model and are inert until a named person
+  approves them. The approved content, by hash, is what a run is judged by.
+
+**A worktree is not a sandbox.** A Replay check and an uplift solver run with
+the user's environment and the user's access to the machine. The preview and
+the authorization screen say so. Every spawn goes through the permission engine
+as a quality check does; the confirmation answers an `Ask` only for exactly the
+command that was shown, and a `Deny` is never overridden. A headless `--yes`
+run cannot answer an `Ask`, so under the default profile an uplift run must be
+confirmed at a terminal.
+
+**Bounds.** A Replay arm has a timeout. An uplift run declares its ceilings
+before it starts — trials, seconds per turn, wall clock and tokens — and is
+cancelled when one is passed. Cancelling reaps the whole process tree. Output is
+bounded and redacted. One run of each kind at a time per project.
+
+**What a result can do.** A result is attached to the lesson in review and
+shown to the reviewer. It never accepts, rewrites or promotes anything. The one
+thing review automation reads is a harmful (`Contradicted`) result, and only to
+hold the lesson for a person. Rewriting or splitting a lesson leaves the tested
+version as history; the new version starts untested.
+
+**What is sent to a model.** Hindsight drafting, uplift task drafting and split
+drafting send the lesson and its hindsight to the provider the project is
+configured to use. Task and split drafting never send the run's raw facts.
+Fact excerpts are redacted when captured and again when stored.
+
+**What is kept.** Run receipts, logs and uplift run directories live under
+`.localpilot/lab/` and are removed after 30 days, by location only and never
+through a link. A result outlives its logs and says when they are gone.
+
+**What the lab does not show.** Logic and Replay check a lesson's reasoning and
+that its situation reproduces. Only an uplift run compares a model with and
+without the lesson, and its result is about those tasks, that model and that
+revision. No lab result is a general claim that a lesson helps.
+
 ## Quota Wait/Resume Safety
 
 Automatic quota wait/resume is allowed only when it honors the provider's
