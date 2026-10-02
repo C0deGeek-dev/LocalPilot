@@ -164,7 +164,8 @@ discriminates and the v2 clean suite fails against the planted implementation.
 Run names and recorded case/fixture/spec hashes distinguish v2. All original
 fixture bytes, manifest entries and historical results remain unchanged.
 See the [driver criteria and usage](../crates/localpilot-mesh/seat-eval/README.md).
-No v2 model samples have been collected; compare future v2 trials separately.
+No v2 model samples had been collected at this calibration checkpoint; the
+later v2 trials below remain separate from historical v1 samples.
 
 ## Opt-in diagnostic continuation (2026-10-02)
 
@@ -255,3 +256,54 @@ validation are unchanged; earlier live captures stay historical evidence.
 This deterministic runtime correction does not establish a live model-quality
 improvement or resolve missing JSON. See [the gate contract](06-harness-spec.md#verify-before-done-gate)
 and [offline verification tests](08-testing.md#review-search-progress-and-safe-completion).
+
+## Calibrated Flash Next v2 reviews (2026-10-02)
+
+Six fresh, serial `roman-v2` reviews used the rebuilt LocalHub#207 runtime at
+`c9232de952d4ebee5781b022d8a76720b8404d94`. Binary identity remained unchanged
+throughout; a subsequent landing-page documentation commit did not affect it.
+Settings were the saved LocalBox IQ3_XXS / 256k / native tune, reasoning off,
+OpenAI-compatible local provider with server-discovered 262144-token context,
+project-isolated memory, readonly permissions and opt-in attempt diagnostics.
+Prompts, retries, grants and progress policy were unchanged during the batch.
+
+| Cell | Run | Final outcome | Wall time | Attempt outcomes |
+|---|---|---|---|---|
+| Planted | 1 | ESCALATE, no verdict | 82.8 s | Two prose parse failures |
+| Clean | 1 | AGREE | 666.6 s | Initial TimedOut; valid repair |
+| Planted | 2 | REVISE | 89.4 s | Initial accepted |
+| Clean | 2 | AGREE | 103.2 s | Initial accepted |
+| Planted | 3 | REVISE | 153.4 s | Initial prose parse failure; valid repair |
+| Clean | 3 | AGREE | 143.6 s | Initial accepted |
+
+The calibrated clean controls received **3/3 AGREE**; planted defects received
+**2/3 delivered REVISE**, with one missing-verdict escalation. That failed
+review's repair prose identifies the bool defect but never supplies JSON, so
+it does not count as a delivered correct verdict. The two accepted revisions
+identify the supported True-as-int violation and missing bool regression tests.
+The clean agreements have no supported blocking/important finding under the
+settled criteria. Secondary claims still need scrutiny: error-message wording
+is unspecified, one indexing complaint assumes behavior outside the stateless
+declaration-search contract, and purported exhaustive checking "in my head"
+is not execution evidence. Clean run 3 explicitly distinguishes static review
+from the author's test report; its optional subTest suggestion is minor.
+
+There were **zero 900-second driver wall kills**, but **one initial runtime
+turn timeout at the built-in 600-second limit**, recovered by repair. The
+900-second driver cap bounds the whole review and does not extend each model
+turn. LocalHub#208 records that result rows omit the effective turn deadline
+and timeout count; `killed=false` alone cannot support "no timeouts".
+Clean run 1 made 195 calls, including 179 searches (161 distinct logged query
+summaries); varying queries remain the known LocalHub#204 model limitation.
+It timed out before the 200-call ceiling rather than exhausting that budget.
+
+All six engines exited zero. Nine attempts were retained: five accepted,
+three prose parse failures and one unavailable response after timeout; all
+available samples were untruncated. Fixture hashes remained unchanged and
+all 13 successful reads had no read errors. LocalBox was stopped afterward.
+Fixture discrimination and driver regression checks passed (12 fixtures,
+13 tests). The integrated runtime previously passed the workspace gate
+(3646 tests passed, 0 failed, 7 ignored); this checkpoint changes documentation
+only. These six unseeded trials establish neither a causal improvement nor
+general model reliability. Owner tasks, 27B, larger samples, additional planted
+defects and the single-agreement decision remain within open LocalHub#202.
