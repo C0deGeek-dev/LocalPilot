@@ -334,6 +334,16 @@ bool coverage to the clean control without changing historical fixtures. Raw
 false-revision flags compare expected decisions; finding truth/severity is
 adjudicated separately under the criteria in the driver README.
 
+Review diagnostic capture is opt-in. CLI tests exercise the production judgement
+and observer seams with scripted initial/repair responses: valid repair,
+both failures, empty/syntax/schema/validation distinctions, absent turn text,
+disabled capture and injected write failure. Capture tests cover canonical
+redaction before UTF-8 truncation, prompt exclusion, fresh-file/mailbox refusal
+and the 1 MiB cap even with JSON-escaped text. Driver tests verify explicit
+forwarding, retained artifact identity on failure and refusal to reuse an
+orphan diagnostic filename. Live reruns preserve captures with each run's case
+and fixture hashes; they are not required for these offline invariants.
+
 ```powershell
 python crates/localpilot-mesh/seat-eval/drive.py check
 ```

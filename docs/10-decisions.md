@@ -8346,6 +8346,16 @@ A conservative cap is **on by default** (`[storage]`: 100 sessions, 90 days,
 in. Both limits and the auto-prune are configurable, and `0`/`false` disable
 them.
 
+**2026-10-02 clarification — explicit review diagnostic exports.** An ephemeral
+mesh reviewer may opt into a fresh external JSONL export of initial/repair
+attempt evidence. This is a bounded user-requested export, not a second session
+store or memory backend. The host uses the shared redactor before byte-limited
+sampling; each file is capped at 1 MiB and never written into the mailbox.
+It contains no separately collected prompts, tool bodies or provider payloads.
+It is disabled by default, never overwritten, manually inspected/deleted, and
+outside session pruning. Capture I/O cannot change the two-attempt protocol,
+permission boundary or safe escalation. ADR-0011's store ownership is unchanged.
+
 Reason:
 
 - unbounded growth is a real disk and inspectability problem; a default cap fixes

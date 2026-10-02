@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Opt-in review attempt diagnostics.** `mesh run --review-diagnostics <new-file>`
+  captures redacted, bounded initial/repair response samples and outcomes for
+  missing-verdict investigations. The seat-eval driver can preserve the capture
+  with its versioned run evidence. Capture stays outside the mailbox and does
+  not change permissions, retries or escalation.
+
 - **Versioned pair-seat review controls.** The evaluation driver can select
   `roman-v2`, whose clean tests cover the explicit bool requirement. Review
   rows retain case and fixture hashes; legacy fixtures and run names remain

@@ -67,6 +67,18 @@ Rows predating these fields used roman-v1. Owner cells remain unchanged and
 reject a v2 review-case option. Compare versions separately; never pool v1/v2
 clean scores or replace old rows, logs, fixtures or hashes.
 
+For new review samples, add `--review-diagnostics` to opt into the CLI's bounded
+redacted initial/repair attempt capture. The driver saves `<name>.review.jsonl`
+beside the engine log, outside the scratch repo/mailbox, and records the relative
+artifact name and `review_diagnostics_present` in success/failure rows. No
+capture flag is sent by default; owner cells reject it. An orphan capture also
+makes a run name occupied, so diagnostics cannot be silently overwritten.
+Preserve this artifact with the run's results, log, participant journal and
+fixture identity. It is a manual export (8 KiB response samples, 1 MiB file cap),
+not an exact provider wire transcript. Inspect before sharing; captured assistant
+text can quote code and canonical redaction is best-effort. See configuration
+docs for the versioned record format and null/truncation semantics.
+
 ## Running it
 
 You need Python 3.9 or newer, Git, and a `localpilot` binary built from this repository. You also need a model server that LocalPilot's configured provider reaches, serving the model you name.
@@ -80,7 +92,7 @@ Then, with the server up, run one cell at a time:
 ```sh
 python drive.py run --model <served model name> --label a3b --cell owner --task roman --run 1 --out ../../../target/seat-eval
 python drive.py run --model <served model name> --label a3b --cell review-bad --run 1 --out ../../../target/seat-eval
-python drive.py run --model <served model name> --label flash-v2 --cell review-good --review-case roman-v2 --run 1 --wall 900 --out ../../../target/seat-eval-v2
+python drive.py run --model <served model name> --label flash-v2 --cell review-good --review-case roman-v2 --review-diagnostics --run 1 --wall 900 --out ../../../target/seat-eval-v2
 ```
 
 The served model's name is the one the server lists, for example the `id` in `GET /v1/models`.
@@ -101,6 +113,9 @@ Each run leaves its scratch repository and engine log under `--out`, and appends
 
 - owner cells: `hidden_ok`, `review_requested`, `request_at_s`, `escalated`, `killed`, `wall_s`;
 - review cells: `decision`, `expected`, `false_agree`, `false_revise`, `no_verdict`, the full `verdict`, `wall_s`, `review_case`, `review_fixture_hashes`, `review_spec_hash`.
+  Rows also record `review_diagnostics` (relative artifact name, or null) and
+  `review_diagnostics_present` (whether the file was created); false does not
+  imply a successful review or complete diagnostic evidence.
 
 ## Things that change the numbers
 

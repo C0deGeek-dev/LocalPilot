@@ -100,6 +100,17 @@ Redaction applies to:
 Secret detection is best-effort. Inspect/delete controls are the backstop; the
 product must not promise perfect secret filtering.
 
+`mesh run --review-diagnostics <new-file>` explicitly exports bounded review
+attempt evidence, including refused final assistant text. Capture is off by
+default, outside the mailbox, and uses this canonical redactor before truncation.
+It never gathers prompts, raw tool bodies or provider wire payloads. Assistant
+text can still quote reviewed code; inspect before sharing. Response samples
+are at most 8 KiB; the entire export stops at 1 MiB with a limit marker. The
+chosen private parent controls Windows ACLs; Unix files start at 0600. Existing
+files are not overwritten. This manual export is outside session-prune retention;
+the user inspects/deletes it. Capture failures cannot authorize a tool or turn
+refused text into a valid verdict. See configuration docs for the record format.
+
 ## Retention
 
 The project-local `.localpilot/` state is bounded by a retention policy so it

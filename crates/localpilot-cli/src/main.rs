@@ -47,6 +47,7 @@ mod mesh_evidence;
 mod mesh_listen;
 mod mesh_mcp;
 mod mesh_push;
+mod mesh_review_diagnostics;
 mod mesh_run;
 mod mesh_wait;
 mod models_cmd;

@@ -202,6 +202,8 @@ def engine(a, repo, extra, log):
            "--model", a.model, "--poll", "2", *extra]
     if a.provider:
         cmd += ["--provider", a.provider]
+    if a.review_diagnostics:
+        cmd += ["--review-diagnostics", str(repo.parent / f"{repo.name}.review.jsonl")]
     return subprocess.Popen(cmd, cwd=repo, stdout=log, stderr=subprocess.STDOUT, env=env)
 
 
@@ -311,6 +313,8 @@ def run_path(out, a):
         raise SystemExit(f"unknown review case: {a.review_case!r}")
     if a.cell == "owner" and a.review_case != "roman-v1":
         raise SystemExit("--review-case applies only to review cells")
+    if a.cell == "owner" and a.review_diagnostics:
+        raise SystemExit("--review-diagnostics applies only to review cells")
     suffix = f"-{a.task}" if a.cell == "owner" else (
         f"-{a.review_case}" if a.review_case != "roman-v1" else "")
     name = f"{a.label}-{a.cell}{suffix}-{a.run}"
@@ -322,7 +326,7 @@ def run_path(out, a):
 
 def occupied(out, name):
     """Whether any trace of run `name` exists under `out`."""
-    if (out / name).exists() or (out / f"{name}.log").exists():
+    if (out / name).exists() or (out / f"{name}.log").exists() or (out / f"{name}.review.jsonl").exists():
         return True
     results = out / "results.jsonl"
     if results.is_file():
@@ -353,6 +357,7 @@ def run(a):
             "review_case": a.review_case,
             "review_fixture_hashes": {f: sha(src / f) for f in REVIEW_FILES},
             "review_spec_hash": sha(TASKS / "roman" / "spec.md"),
+            "review_diagnostics": f"{name}.review.jsonl" if a.review_diagnostics else None,
         }
     out.mkdir(parents=True, exist_ok=True)
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -369,6 +374,8 @@ def run(a):
             r.update({"name": name, "label": a.label, "model": a.model, "cell": a.cell,
                       "run": a.run, "started": started})
             r.update(review_identity)
+            if a.cell != "owner":
+                r["review_diagnostics_present"] = (out / f"{name}.review.jsonl").is_file() if a.review_diagnostics else False
             with open(out / "results.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(r) + "\n")
             raise
@@ -376,6 +383,8 @@ def run(a):
               "task": a.task if a.cell == "owner" else "roman", "run": a.run,
               "started": started, "wall_cap_s": a.wall})
     r.update(review_identity)
+    if a.cell != "owner":
+        r["review_diagnostics_present"] = (out / f"{name}.review.jsonl").is_file() if a.review_diagnostics else False
     with open(out / "results.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(r) + "\n")
     print(json.dumps({k: r[k] for k in r if k not in ("verdict", "hidden_tail")}))
@@ -392,6 +401,8 @@ def main():
     r.add_argument("--cell", required=True, choices=["owner", "review-bad", "review-good"])
     r.add_argument("--review-case", default="roman-v1", choices=tuple(REVIEW_CASES),
                    help="review fixture version (default: legacy roman-v1; owner cells unchanged)")
+    r.add_argument("--review-diagnostics", action="store_true",
+                   help="opt into bounded redacted attempt capture beside the engine log (review cells only)")
     r.add_argument("--task", default="roman", choices=TASK_NAMES, help="owner cell: the frozen task")
     r.add_argument("--run", type=int, required=True, help="the run's number within its cell")
     r.add_argument("--out", required=True, help="the results directory")

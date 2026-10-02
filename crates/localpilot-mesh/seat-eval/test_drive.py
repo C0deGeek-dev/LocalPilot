@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -29,7 +30,7 @@ def load(root):
 def args(out, **kw):
     a = dict(model="m", label="t", cell="owner", task="roman", run=1, out=str(out),
              wall=30, localpilot=sys.executable, provider=None, context_window=None,
-             review_case="roman-v1")
+             review_case="roman-v1", review_diagnostics=False)
     a.update(kw)
     return argparse.Namespace(**a)
 
@@ -75,7 +76,7 @@ class RerunTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d).resolve() / "results"
             name = "t-owner-roman-1"
-            for leave in ("repo", "log", "row"):
+            for leave in ("repo", "log", "row", "diagnostic"):
                 shutil.rmtree(out, ignore_errors=True)
                 out.mkdir()
                 if leave == "repo":
@@ -84,6 +85,8 @@ class RerunTest(unittest.TestCase):
                     (out / name / "evidence.txt").write_text("first run")
                 elif leave == "log":
                     (out / f"{name}.log").write_text("first run log")
+                elif leave == "diagnostic":
+                    (out / f"{name}.review.jsonl").write_text("first capture")
                 else:
                     (out / "results.jsonl").write_text(json.dumps({"name": name, "hidden_ok": True}) + "\n")
                 before = sorted((p.relative_to(out).as_posix(), p.read_bytes()) for p in out.rglob("*") if p.is_file())
@@ -244,6 +247,43 @@ class ChildCleanupTest(unittest.TestCase):
             self.assertEqual(row["review_case"], "roman-v2")
             planted = drive.REVIEW_CASES["roman-v2"]["planted"]
             self.assertEqual(row["review_fixture_hashes"]["roman.py"], drive.sha(planted / "roman.py"))
+
+
+class ReviewDiagnosticsTest(unittest.TestCase):
+    def test_the_engine_receives_a_capture_path_only_on_explicit_opt_in(self):
+        drive = load(HERE)
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d).resolve()
+            repo = out / "t-review-good-roman-v2-1"
+            for enabled in (False, True):
+                with mock.patch.object(drive.subprocess, "Popen") as spawn:
+                    drive.engine(args(out, cell="review-good", review_case="roman-v2",
+                                      review_diagnostics=enabled), repo, ["--once"], None)
+                    cmd = spawn.call_args.args[0]
+                    self.assertEqual("--review-diagnostics" in cmd, enabled)
+                    if enabled:
+                        path = pathlib.Path(cmd[cmd.index("--review-diagnostics") + 1])
+                        self.assertEqual(path, out / f"{repo.name}.review.jsonl")
+                        self.assertNotEqual(path.parent, repo)
+            with self.assertRaises(SystemExit):
+                drive.run(args(out, review_diagnostics=True))
+
+    def test_a_failed_review_preserves_and_identifies_its_capture(self):
+        drive = load(HERE)
+        def broken_review(a, repo, *other):
+            (repo.parent / f"{repo.name}.review.jsonl").write_text("retained diagnostic")
+            raise RuntimeError("injected review failure")
+        drive.review_cell = broken_review
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "results"
+            with self.assertRaises(RuntimeError):
+                drive.run(args(out, cell="review-good", review_case="roman-v2", review_diagnostics=True))
+            row = json.loads((out / "results.jsonl").read_text())
+            self.assertEqual(row["review_case"], "roman-v2")
+            self.assertTrue(row["review_diagnostics_present"])
+            capture = out / row["review_diagnostics"]
+            self.assertEqual(capture.read_text(), "retained diagnostic")
+            self.assertTrue(row["review_fixture_hashes"])
 
 
 if __name__ == "__main__":

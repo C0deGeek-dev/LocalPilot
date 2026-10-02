@@ -31,6 +31,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::mesh_cmd::{native_writer, resolve_anchor, MeshArgs};
+use crate::mesh_review_diagnostics::{Attempt, Capture, Outcome};
 
 /// How long a model turn may hold a write lease; a navigator's lease never
 /// writes anyway, and a fresh one is taken for every turn.
@@ -54,6 +55,10 @@ struct RunCli {
     /// The configured provider; the default provider when omitted.
     #[arg(long)]
     provider: Option<String>,
+    /// Opt in to bounded, redacted review-attempt JSONL. File must be new,
+    /// outside the mailbox, with an existing private parent directory.
+    #[arg(long)]
+    review_diagnostics: Option<PathBuf>,
     /// Handle one delivery, then exit.
     #[arg(long)]
     once: bool,
@@ -126,12 +131,29 @@ pub(crate) async fn run(args: MeshArgs) -> ExitCode {
         }
     }
     let mesh = Mesh::at(&anchor, source);
+    let diagnostics = match cli
+        .review_diagnostics
+        .as_deref()
+        .map(|path| Capture::create(path, &anchor))
+        .transpose()
+    {
+        Ok(capture) => capture,
+        Err(error) => {
+            eprintln!(
+                "REVIEW_DIAGNOSTICS_REFUSED {}",
+                localpilot_config::redact::redact(&error.to_string())
+            );
+            return ExitCode::from(1);
+        }
+    };
     let mut judge = ModelJudge {
         mesh: mesh.clone(),
         anchor: anchor.clone(),
         role: cli.role.clone(),
         model: cli.model.clone(),
         provider: cli.provider.clone(),
+        diagnostics,
+        review_stop: None,
     };
     let config = match localpilot_config::load(
         &localpilot_config::ConfigPaths::standard(&anchor),
@@ -479,13 +501,30 @@ fn post(
 /// then an escalation that carries none of its text.
 async fn judgement(judge: &mut dyn Judge, root: &Path, request: &Request) -> PostArgs {
     let mut feedback: Option<String> = None;
-    for _ in 0..2 {
-        let answer = judge
-            .judge(request, feedback.as_deref())
-            .await
-            .map_err(|e| format!("the model turn failed: {e}"))
-            .and_then(|text| parse_answer(&text))
-            .and_then(|answer| validate(root, request, &answer));
+    for number in 1..=2 {
+        let reply = judge.judge(request, feedback.as_deref()).await;
+        let (answer, outcome) = match &reply {
+            Err(error) => (
+                Err(format!("the model turn failed: {error}")),
+                Outcome::TurnError,
+            ),
+            Ok(text) => match parse_answer(text) {
+                Err(error) => (Err(error), Outcome::ParseError),
+                Ok(answer) => match validate(root, request, &answer) {
+                    Ok(args) => (Ok(args), Outcome::Accepted),
+                    Err(error) => (Err(error), Outcome::ValidationError),
+                },
+            },
+        };
+        if request.need == Need::Review {
+            judge.record_review_attempt(
+                request,
+                number,
+                reply.as_ref().ok().map(String::as_str),
+                outcome,
+                answer.as_ref().err().map(String::as_str),
+            );
+        }
         match answer {
             Ok(args) => return args,
             Err(why) => feedback = Some(why),
@@ -497,6 +536,16 @@ async fn judgement(judge: &mut dyn Judge, root: &Path, request: &Request) -> Pos
 /// Where a judgement comes from.
 #[async_trait::async_trait]
 pub(crate) trait Judge: Send {
+    /// Optional observer; never influences parse, validation or protocol state.
+    fn record_review_attempt(
+        &mut self,
+        _request: &Request,
+        _number: usize,
+        _text: Option<&str>,
+        _outcome: Outcome,
+        _error: Option<&str>,
+    ) {
+    }
     /// The model's final text for `request`; `feedback` says why its last
     /// answer was refused.
     async fn judge(&mut self, request: &Request, feedback: Option<&str>) -> anyhow::Result<String>;
@@ -516,11 +565,41 @@ struct ModelJudge {
     role: String,
     model: String,
     provider: Option<String>,
+    diagnostics: Option<Capture>,
+    review_stop: Option<String>,
 }
 
 #[async_trait::async_trait]
 impl Judge for ModelJudge {
+    fn record_review_attempt(
+        &mut self,
+        request: &Request,
+        number: usize,
+        text: Option<&str>,
+        outcome: Outcome,
+        error: Option<&str>,
+    ) {
+        if let Some(capture) = &mut self.diagnostics {
+            if let Err(error) = capture.record(Attempt {
+                request,
+                role: &self.role,
+                model: &self.model,
+                number,
+                stop: self.review_stop.as_deref(),
+                text,
+                outcome,
+                error,
+            }) {
+                eprintln!(
+                    "REVIEW_DIAGNOSTICS_DISABLED {}",
+                    localpilot_config::redact::redact(&error.to_string())
+                );
+                self.diagnostics = None;
+            }
+        }
+    }
     async fn judge(&mut self, request: &Request, feedback: Option<&str>) -> anyhow::Result<String> {
+        self.review_stop = None;
         let mut runtime = crate::session_cmd::build_runtime_with_store(
             &self.anchor,
             &self.model,
@@ -553,6 +632,7 @@ impl Judge for ModelJudge {
         // The runtime may hold a sender of its own; never wait on it for long.
         let _ = tokio::time::timeout(Duration::from_millis(500), tracer).await;
         println!("  TURN ended {stop:?}");
+        self.review_stop = Some(format!("{stop:?}"));
         runtime
             .current_turn_assistant_text()
             .ok_or_else(|| anyhow::anyhow!("the turn ended ({stop:?}) without an answer"))
@@ -908,6 +988,164 @@ mod tests {
     }
 
     struct Scripted(Vec<anyhow::Result<String>>, Vec<Option<String>>);
+
+    struct Observed {
+        script: Scripted,
+        observer: ModelJudge,
+    }
+
+    impl Observed {
+        fn at(root: &Path, capture: Option<Capture>, replies: Vec<anyhow::Result<String>>) -> Self {
+            Self {
+                script: Scripted(replies, Vec::new()),
+                observer: ModelJudge {
+                    mesh: Mesh::at(root, "flag"),
+                    anchor: root.to_owned(),
+                    role: "localpilot".into(),
+                    model: "fixture-model".into(),
+                    provider: None,
+                    diagnostics: capture,
+                    review_stop: None,
+                },
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Judge for Observed {
+        fn record_review_attempt(
+            &mut self,
+            r: &Request,
+            n: usize,
+            text: Option<&str>,
+            outcome: Outcome,
+            error: Option<&str>,
+        ) {
+            self.observer
+                .record_review_attempt(r, n, text, outcome, error);
+        }
+        async fn judge(&mut self, r: &Request, feedback: Option<&str>) -> anyhow::Result<String> {
+            let result = self.script.judge(r, feedback).await;
+            self.observer.review_stop = result.as_ref().ok().map(|_| "Done".into());
+            result
+        }
+        async fn implement(
+            &mut self,
+            t: &OwnerTask,
+            feedback: Option<&str>,
+        ) -> anyhow::Result<String> {
+            self.script.implement(t, feedback).await
+        }
+    }
+
+    fn diagnostic_rows(path: &Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn review_diagnostics_observe_a_failed_initial_and_valid_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.jsonl");
+        let capture = Capture::create(&path, dir.path()).unwrap();
+        let mut judge = Observed::at(
+            dir.path(),
+            Some(capture),
+            vec![
+                Ok("{\"kind\":".into()),
+                Ok("{\"kind\":\"VERDICT\",\"decision\":\"AGREE\",\"body\":\"fine\"}".into()),
+            ],
+        );
+        let post = judgement(&mut judge, dir.path(), &request(Need::Review)).await;
+        assert_eq!(post.kind, "VERDICT");
+        assert_eq!(post.body, "AGREE round=1 blocking=0 important=0\nfine");
+        let rows = diagnostic_rows(&path);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["attempt"], 1);
+        assert_eq!(rows[0]["outcome"], "parse_error");
+        assert_eq!(rows[0]["response_kind"], "unparseable_json_candidate");
+        assert_eq!(rows[1]["attempt_kind"], "repair");
+        assert_eq!(rows[1]["outcome"], "accepted");
+        assert_eq!(rows[1]["stop_reason"]["text"], "Done");
+        assert_eq!(rows[1]["session_id"]["text"], "s");
+        assert_eq!(rows[1]["request_id"]["text"], "claude:3");
+        assert!(judge.script.1[1].is_some());
+    }
+
+    #[tokio::test]
+    async fn review_diagnostics_distinguish_failures_without_posting_refused_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.jsonl");
+        let capture = Capture::create(&path, dir.path()).unwrap();
+        let mut judge = Observed::at(
+            dir.path(),
+            Some(capture),
+            vec![
+                Ok(" \n".into()),
+                Ok("{\"wrong\":\"PRIVATE REFUSED TEXT\"}".into()),
+            ],
+        );
+        let post = judgement(&mut judge, dir.path(), &request(Need::Review)).await;
+        assert_eq!(post.kind, "ESCALATE");
+        assert!(!post.body.contains("PRIVATE REFUSED TEXT"));
+        let rows = diagnostic_rows(&path);
+        assert_eq!(rows[0]["response_kind"], "empty");
+        assert_eq!(rows[1]["response_kind"], "schema_invalid");
+        assert_eq!(rows[1]["outcome"], "parse_error");
+        assert_eq!(judge.script.1.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn review_diagnostics_keep_turn_and_validation_errors_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.jsonl");
+        let capture = Capture::create(&path, dir.path()).unwrap();
+        let mut judge = Observed::at(
+            dir.path(),
+            Some(capture),
+            vec![
+                Err(anyhow::anyhow!("provider down")),
+                Ok("{\"kind\":\"VERDICT\",\"decision\":\"REVISE\",\"body\":\"x\"}".into()),
+            ],
+        );
+        let post = judgement(&mut judge, dir.path(), &request(Need::Review)).await;
+        assert_eq!(post.kind, "ESCALATE");
+        assert!(post.body.contains("REVISE needs at least one finding"));
+        let rows = diagnostic_rows(&path);
+        assert_eq!(rows[0]["response_kind"], "unavailable");
+        assert!(rows[0]["stop_reason"].is_null());
+        assert_eq!(rows[0]["outcome"], "turn_error");
+        assert_eq!(rows[1]["outcome"], "validation_error");
+    }
+
+    #[tokio::test]
+    async fn disabled_or_failed_capture_does_not_change_a_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut disabled = Observed::at(
+            dir.path(),
+            None,
+            vec![Ok("no json".into()), Ok("no json".into())],
+        );
+        let post = judgement(&mut disabled, dir.path(), &request(Need::Review)).await;
+        assert_eq!(post.kind, "ESCALATE");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        let path = dir.path().join("readonly.jsonl");
+        std::fs::write(&path, "keep").unwrap();
+        let capture = Capture::new(std::fs::File::open(&path).unwrap());
+        let mut failed = Observed::at(
+            dir.path(),
+            Some(capture),
+            vec![Ok("no json".into()), Ok("no json".into())],
+        );
+        let failed_post = judgement(&mut failed, dir.path(), &request(Need::Review)).await;
+        assert_eq!(failed_post.body, post.body);
+        assert_eq!(failed.script.1, disabled.script.1);
+        assert!(failed.observer.diagnostics.is_none());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "keep");
+    }
 
     #[async_trait::async_trait]
     impl Judge for Scripted {

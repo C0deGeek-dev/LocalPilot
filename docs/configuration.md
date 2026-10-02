@@ -325,6 +325,36 @@ model answers; if the tree moved during the review, the engine posts a
 `run` needs a schema-2 session (started with `--with`) under acknowledged
 delivery, and the native writer.
 
+For a review that fails to produce a verdict, opt into local attempt diagnostics:
+
+```powershell
+localpilot mesh --repo . run --role localpilot --model qwen3-coder --once --review-diagnostics review-attempts.jsonl
+```
+
+The file must be new, outside the mailbox, in an existing parent directory.
+Relative paths are relative to the invoking directory. No capture is written
+without this flag. JSONL format version 1 records review attempts only: session
+and request identity, role/model, initial or repair attempt, turn stop reason,
+final assistant text, and turn/parse/validation/accepted outcome. It does not
+record prompts, tool bodies, provider wire payloads or owner implementation turns.
+
+Text fields are objects with `text`, `original_bytes` and `truncated`. Null
+response/stop fields mean unavailable. Response samples are canonically redacted
+before UTF-8 truncation to 8 KiB; errors/stops are capped at 1 KiB and identity
+fields at 256/512 bytes. Classification distinguishes empty, prose, unparseable
+JSON candidates, non-object JSON, schema-invalid objects and parsed answers;
+it describes the parser boundary, not why the model generated that text.
+Redacted/truncated samples are evidence, not exact provider payloads.
+
+Each file stops at 1 MiB with a `capture_limit` marker. It is not a transcript
+store and is not removed by session pruning: inspect and delete it yourself.
+Unix files are mode 0600; Windows files inherit their parent's ACL. Choose a
+private parent, and inspect exports before sharing because redaction is
+best-effort and assistant text may quote reviewed code. Existing files are
+refused rather than appended or replaced. A write failure disables further
+capture with a warning; it does not change retries, permissions or safe
+escalation. Refused response text is never posted as a mailbox verdict.
+
 With `--own`, LocalPilot also does the owner's work when a unit is handed to
 it:
 
