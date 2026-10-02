@@ -197,6 +197,46 @@ a general reliability improvement.
 LocalHub#207 records a distinct termination question: run 1's refused mutation
 attempts led automatic verification to try denied `python`, stopping NoProgress
 while its valid verdict still posted. Preserve mutation budgets/permissions
-when investigating intended readonly review verification. LocalHub#204 remains
-open; no progress-policy changes were made during these trials. New paired v2
-reviews and the broader model evaluation remain outstanding.
+when investigating intended readonly review verification. No progress-policy
+changes were made during these trials. New paired v2 reviews and the broader
+model evaluation remain outstanding.
+
+### Search-stall investigation
+
+LocalHub#204's offline replay establishes a limit of the current heuristic,
+rather than a broken cost bound. Successful calls use tool name plus arguments
+as their novelty signature; stuck-repeat counts identical signature/output
+pairs. Over 12 successful calls the novelty floor is 0.34; an identical pair
+trips at three occurrences, followed by one grace call on the default rail.
+Different queries can therefore return identical evidence without tripping.
+Successful searches also reset the consecutive-failure streak and same-error
+breaker; initial read refusals do not classify later successful searches as
+failures. Automatic WorkProfile bounds individual reads/output and mutation
+scope, not cumulative search novelty. The review brief already supplies the
+task, diff, anchors and required JSON shape; it does not restrict discovery
+to the changed lines.
+
+Three fake-provider scenarios run real readonly dispatch with the automatic
+262,144-token envelope and default 200-call ceiling, then the production
+review parser/validator/repair boundary:
+
+- Two legitimate oversized whole-read refusals, then equivalent regex variants
+  and spaced exact repeats return one unchanged search result. The turn stops
+  at 200 calls with BudgetExceeded and no progress nudge. A malformed repair
+  leads to explicit ESCALATE, with no fabricated verdict.
+- The same initial refusals followed by 185 distinct searches reveal 185 new
+  source lines. All 187 calls finish, and a provider-authored valid AGREE posts.
+- Identical successful searches trip the existing detector: three occurrences
+  plus one grace search, six total calls including the refusals. NoProgress
+  ends the initial turn; a provider-authored valid repair still posts VERDICT.
+
+These are controlled mechanism replays, not exact reproductions of the old
+model stream: historical logs retained query summaries, not complete arguments,
+results or response text. No model reliability or verdict-quality improvement
+is claimed. No runtime policy change is warranted by this evidence: identical
+results can validate distinct boundary hypotheses, and negative searches can
+establish absence. Output deduplication or query-count limits would cut such
+legitimate investigation without proving the model has stalled. Keep the hard
+bound and safe escalation, and retain missing-verdict, incorrect-verdict and
+wall-timeout outcomes separately. The current model limitation remains part
+of the broader evaluation; denied automatic verification is separate work.

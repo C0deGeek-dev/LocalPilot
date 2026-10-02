@@ -532,6 +532,17 @@ cargo machete
 
 These are blocking before public release and run in CI's supply-chain job.
 
+### Review search progress and safe completion
+
+`cargo test -p localpilot --bin localpilot mesh_run::tests::review_search_replay`
+runs three offline fake-provider scenarios through real readonly tool dispatch
+and production review judgement. Equivalent-query variants reach the 200-call
+ceiling and malformed repair escalates; discovery of 185 new lines completes;
+exact-repeat detection stops early and a valid repair can still post a verdict.
+All start with legitimate oversized-read refusals under the automatic envelope.
+These tests pin heuristic limitations and protocol safety, not live model
+quality. See [the evaluation findings](mesh-model-evaluation.md#search-stall-investigation).
+
 ### Context metadata and budget parity
 
 `cargo test -p localpilot-llm context_` exercises mock-server props/listing

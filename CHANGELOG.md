@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Review search-stall investigation.** Offline runtime-to-verdict replays
+  cover variant-query exhaustion, productive discovery and exact-repeat
+  recovery. Documented the progress heuristic's evidence limits and retained
+  existing permissions, thresholds and safe escalation.
+
 - **Opt-in review attempt diagnostics.** `mesh run --review-diagnostics <new-file>`
   captures redacted, bounded initial/repair response samples and outcomes for
   missing-verdict investigations. The seat-eval driver can preserve the capture

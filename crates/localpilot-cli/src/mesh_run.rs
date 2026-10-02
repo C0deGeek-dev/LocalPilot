@@ -989,6 +989,227 @@ mod tests {
 
     struct Scripted(Vec<anyhow::Result<String>>, Vec<Option<String>>);
 
+    // Controlled offline replay through the real runtime and judgement boundary.
+    // This models the search-stall mechanism, not the historical provider stream:
+    // the trace retained query summaries, not complete arguments or results.
+    struct SearchReplay {
+        root: PathBuf,
+        providers: Vec<localpilot_llm::FakeProvider>,
+        turns: Vec<(localpilot_harness::StopReason, usize, usize, usize, bool)>,
+        feedback: Vec<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Judge for SearchReplay {
+        async fn judge(&mut self, r: &Request, feedback: Option<&str>) -> anyhow::Result<String> {
+            use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime};
+            use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
+            use localpilot_sandbox::{
+                Interactivity, PermissionEngine, ScriptedApprover, Workspace,
+            };
+            self.feedback.push(feedback.map(str::to_owned));
+            let mut runtime = SessionRuntime::new(
+                Arc::new(self.providers.remove(0)),
+                localpilot_tools::ToolRegistry::with_builtins(),
+                PermissionEngine::new(Profile::ReadOnly, Vec::new()),
+                Box::new(ScriptedApprover::always()),
+                Store::ephemeral(),
+                Workspace::new(&self.root).unwrap(),
+                RecoveryEngine::new(RecoveryBudget::default()),
+                SessionConfig {
+                    trusted: true,
+                    interactivity: Interactivity::NonInteractive,
+                    context_token_limit: 262_144,
+                    granularity: Some(localpilot_config::GranularityConfig::default()),
+                    tool_call_budget_max: Some(200),
+                    tool_budget_explicit: false,
+                    ..SessionConfig::default()
+                },
+                Vec::new(),
+            );
+            let (tx, mut rx) = broadcast::channel(4096);
+            let stop = runtime
+                .run_turn(
+                    &brief(&self.root, "localpilot", r, feedback),
+                    &tx,
+                    &CancellationToken::new(),
+                )
+                .await;
+            let mut calls = 0;
+            let mut errors = 0;
+            let mut outputs = std::collections::HashSet::new();
+            let mut nudged = false;
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    RuntimeEvent::ToolFinished {
+                        name,
+                        is_error,
+                        output,
+                        ..
+                    } => {
+                        calls += 1;
+                        errors += usize::from(is_error);
+                        if name == "search_text" && !is_error {
+                            outputs.insert(output);
+                        }
+                    }
+                    RuntimeEvent::Warning(text) if text.contains("not making forward progress") => {
+                        nudged = true;
+                    }
+                    _ => {}
+                }
+            }
+            self.turns
+                .push((stop, calls, errors, outputs.len(), nudged));
+            runtime
+                .current_turn_assistant_text()
+                .ok_or_else(|| anyhow::anyhow!("the turn ended ({stop:?}) without an answer"))
+        }
+
+        async fn implement(&mut self, _: &OwnerTask, _: Option<&str>) -> anyhow::Result<String> {
+            anyhow::bail!("review-only replay")
+        }
+    }
+
+    fn search_replay(root: &Path, providers: Vec<localpilot_llm::FakeProvider>) -> SearchReplay {
+        SearchReplay {
+            root: root.to_owned(),
+            providers,
+            turns: Vec::new(),
+            feedback: Vec::new(),
+        }
+    }
+
+    fn refused_reads(root: &Path) -> localpilot_llm::FakeProvider {
+        // Still legitimately outside the automatic envelope after the small-file
+        // read fix: force bounded pages without reinstating the byte/line bug.
+        std::fs::write(
+            root.join("oversized.txt"),
+            "large source line\n".repeat(20_000),
+        )
+        .unwrap();
+        localpilot_llm::FakeProvider::new()
+            .tool_call(
+                "read1",
+                "read_file",
+                serde_json::json!({"path":"oversized.txt"}),
+            )
+            .tool_call(
+                "read2",
+                "read_file",
+                serde_json::json!({"path":"oversized.txt"}),
+            )
+    }
+
+    #[tokio::test]
+    async fn review_search_replay_variants_reach_cost_bound_then_escalate() {
+        use localpilot_harness::StopReason;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("evidence")).unwrap();
+        let evidence = "roman boundary checked\n";
+        std::fs::write(dir.path().join("evidence/a.txt"), evidence).unwrap();
+        let mut provider = refused_reads(dir.path());
+        // 183 unique equivalent queries, then 15 exact repeats. Every result
+        // contains the same evidence; no pair occurs three times in a window.
+        for i in 0..199 {
+            let variant = if i < 183 { i } else { i - 183 };
+            provider = provider.tool_call(&format!("search{i}"), "search_text",
+                serde_json::json!({"query":format!("roman(?:){{{variant}}}"), "is_regex":true, "path":"evidence"}));
+        }
+        let mut judge = search_replay(
+            dir.path(),
+            vec![
+                provider.text("unreachable"),
+                localpilot_llm::FakeProvider::new().text("{\"kind\":"),
+            ],
+        );
+        let post = judgement(&mut judge, dir.path(), &request(Need::Review)).await;
+        assert_eq!(
+            judge.turns[0],
+            (StopReason::BudgetExceeded, 200, 2, 1, false)
+        );
+        assert_eq!(judge.turns[1].0, StopReason::Done);
+        assert_eq!(post.kind, "ESCALATE");
+        assert!(judge.feedback[1]
+            .as_ref()
+            .unwrap()
+            .contains("BudgetExceeded"));
+        assert!(!post.body.contains("unreachable"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("evidence/a.txt")).unwrap(),
+            evidence
+        );
+    }
+
+    #[tokio::test]
+    async fn review_search_replay_new_evidence_finishes_with_valid_verdict() {
+        use localpilot_harness::StopReason;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("evidence")).unwrap();
+        use std::fmt::Write as _;
+        let mut evidence = String::new();
+        for i in 0..185 {
+            writeln!(evidence, "evidence-{i:03}").unwrap();
+        }
+        std::fs::write(dir.path().join("evidence/a.txt"), &evidence).unwrap();
+        let mut provider = refused_reads(dir.path());
+        for i in 0..185 {
+            provider = provider.tool_call(
+                &format!("search{i}"),
+                "search_text",
+                serde_json::json!({"query":format!("evidence-{i:03}"), "path":"evidence"}),
+            );
+        }
+        let mut judge = search_replay(
+            dir.path(),
+            vec![provider.text(
+                "{\"kind\":\"VERDICT\",\"decision\":\"AGREE\",\"body\":\"review complete\"}",
+            )],
+        );
+        let post = judgement(&mut judge, dir.path(), &request(Need::Review)).await;
+        assert_eq!(judge.turns[0], (StopReason::Done, 187, 2, 185, false));
+        assert_eq!(post.kind, "VERDICT");
+        assert!(post
+            .body
+            .starts_with("AGREE round=1 blocking=0 important=0"));
+        assert_eq!(judge.feedback.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("evidence/a.txt")).unwrap(),
+            evidence
+        );
+    }
+
+    #[tokio::test]
+    async fn review_search_replay_exact_repeat_stops_and_can_repair() {
+        use localpilot_harness::StopReason;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("evidence")).unwrap();
+        std::fs::write(dir.path().join("evidence/a.txt"), "roman\n").unwrap();
+        let mut provider = refused_reads(dir.path());
+        for i in 0..10 {
+            provider = provider.tool_call(
+                &format!("search{i}"),
+                "search_text",
+                serde_json::json!({"query":"roman", "path":"evidence"}),
+            );
+        }
+        let mut judge =
+            search_replay(
+                dir.path(),
+                vec![provider.text("unreachable"),
+            localpilot_llm::FakeProvider::new().text(
+                "{\"kind\":\"VERDICT\",\"decision\":\"AGREE\",\"body\":\"review complete\"}")],
+            );
+        let post = judgement(&mut judge, dir.path(), &request(Need::Review)).await;
+        // Third repeat nudges; one grace search executes, then the next stops.
+        assert_eq!(judge.turns[0].0, StopReason::NoProgress);
+        assert_eq!(judge.turns[0].1, 6);
+        assert_eq!(judge.turns[0].2, 2);
+        assert!(judge.turns[0].4);
+        assert_eq!(post.kind, "VERDICT");
+        assert!(judge.feedback[1].as_ref().unwrap().contains("NoProgress"));
+    }
+
     struct Observed {
         script: Scripted,
         observer: ModelJudge,
