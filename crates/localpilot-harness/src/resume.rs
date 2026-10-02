@@ -795,6 +795,23 @@ pub(crate) fn work_diff_baseline(root: &Path) -> Result<WorkDiffBaseline, Harnes
     Ok(WorkDiffBaseline { head, files })
 }
 
+pub(crate) fn work_changed_paths(
+    root: &Path,
+    before: &WorkDiffBaseline,
+) -> Result<Vec<String>, HarnessError> {
+    let after = work_diff_baseline(root)?;
+    let mut paths = before
+        .files
+        .keys()
+        .chain(after.files.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths.retain(|path| before.files.get(path) != after.files.get(path));
+    Ok(paths)
+}
+
 fn work_fingerprint(root: &Path, path: &str) -> Result<String, HarnessError> {
     let candidate = root.join(path);
     match std::fs::symlink_metadata(&candidate) {

@@ -364,12 +364,29 @@ it:
   the session says LocalPilot owns the tree. That turn retains its `bypass`
   profile, workspace boundary and opaque-command permission floor; Bypass
   grants no arbitrary shell access.
+- It supports bounded intermediate units. The owner replies
+  `{"kind":"CHECKPOINT","body":"completed unit and next action"}` when
+  work remains. A checkpoint requires changed files, `Done` and a passing
+  native check. The engine posts a guarded `NOTE` with fingerprints before
+  starting the next bounded turn; the whole task and reviewer findings stay
+  in scope. Up to eight checkpoints are allowed in the current ownership,
+  counted from durable notes across restarts. Notes never complete the unit.
+  Raw model commits are refused as checkpoints.
+- A source-only Python checkpoint with no configured, planned or detected
+  verifier checks the one changed root `.py` file using the standard AST CLI
+  in isolated mode (`python -I -m ast -- file.py` on Windows, `python3` on
+  Unix). It handles spaces as one argument, rejects links and does not import
+  the project or create bytecode. This is syntax evidence for partial work;
+  final submission requires the full configured or detected verifier, such as
+  unittest once the visible test exists. Other stacks need an applicable check.
 - Before requesting review, the owner must finish `Done` with a passing
   completion-gate check. The existing permission-gated verifier runs even
   when a retry makes no new edits; `[harness] verify_command` can select the
   applicable check. Missing, denied or failing verification and scope refusals
   cannot become review-ready merely because the model returns valid JSON.
-  The engine feeds the refusal back once, then escalates with partial files
+  A no-edit retry cannot submit after a failed unit; repair that unit and pass
+  verification, or escalate. The engine feeds the refusal back once, then
+  escalates with partial files
   retained. Explicit `ESCALATE` remains available after an unsuccessful turn.
 - It builds the verified owner's review request itself. The manifest covers everything
   committed since the unit's base plus everything uncommitted, and the

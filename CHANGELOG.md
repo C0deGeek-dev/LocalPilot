@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Mesh owners can checkpoint source before adding its tests.** Verified,
+  changed intermediate units produce durable notes before a fresh bounded
+  turn. Bare Python source can receive an isolated syntax check; final review
+  still requires the full applicable test check. Restarting preserves progress
+  and the checkpoint limit. Failed, oversized or lease-lost units cannot use a
+  checkpoint or no-edit retry to submit partial work.
+
 - **The lesson lab is documented where its behaviour is owned.** The security
   doc states what each lab tier may run, who trusts what, and what a result can
   and cannot do. The testing doc lists the offline acceptance corpus, where each

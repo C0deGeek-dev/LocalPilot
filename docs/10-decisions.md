@@ -2,6 +2,39 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0205: Mesh Owners Continue Through Verified Intermediate Notes
+
+**Status:** accepted · **Date:** 2026-10-02.
+
+**Context.** Conservative unknown reliability permits one file and region in
+a turn. Source plus required tests cannot share that envelope, and a bare
+Python source file has no detected test target. A raw model commit cannot
+establish verified progress. Owner submission requires completed and verified
+work, while readonly review keeps its separate evidence contract.
+
+**Decision.** Accept an owner `CHECKPOINT` answer only with native Done, Passed
+and observed changes. Record a guarded existing NOTE with engine-generated
+fingerprints before starting another bounded turn with all original acceptance
+criteria and findings. Up to eight durable notes per ownership permit progress;
+restarts preserve the count and latest progress. A failed unit cannot submit on
+a no-edit retry. Inspect scope and HEAD again after the check, and reject model
+commits as checkpoint authority.
+
+Configured, planned and detected verification retain precedence. A host-owned
+fallback may syntax-check one changed root regular Python file with isolated
+standard-library AST parsing when a valid partial CHECKPOINT has no target.
+Use structured argv through the existing permission-gated runner. This cannot
+import a project module or certify final readiness. Final REVIEW_REQUEST still
+requires the full configured or detected check; test creation makes conventional
+Python unittest detection available.
+
+**Consequences.** No larger patch allowances, standing grants, parallel command
+engine or new protocol kind. Partial files and journal notes are recoverable;
+notes do not commit files or close the unit. Missing or denied checks still
+block. Other stacks use applicable configured or detected checks. The sequence
+adds bounded turns, each retaining existing timeout and budget rails, and
+stops when a durable post fails. It needs no stored-state migration.
+
 ## ADR-0204: Mesh Owner Submission Requires Native Completed And Verified Work
 
 **Status:** accepted · **Date:** 2026-10-02.

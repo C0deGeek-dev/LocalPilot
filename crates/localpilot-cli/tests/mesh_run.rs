@@ -897,6 +897,468 @@ async fn a_command_the_user_vetted_still_cannot_run_in_a_review_turn() {
 // --- the owner path (`--own`) ---------------------------------------------------
 
 const DONE: &str = r#"Done. {"kind": "REVIEW_REQUEST", "body": "added b.txt and checked it"}"#;
+const CHECKPOINT: &str = r#"{"kind":"CHECKPOINT","body":"source syntax checked; next create required test_slug.py and run its tests"}"#;
+
+async fn mount_owner_sequence(server: &MockServer, replies: Vec<ResponseTemplate>) {
+    for (index, reply) in replies.into_iter().enumerate() {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(reply)
+            .up_to_n_times(1)
+            .with_priority(index as u8 + 1)
+            .mount(server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(r#"{"kind":"ESCALATE","body":"script exhausted"}"#))
+        .with_priority(255)
+        .mount(server)
+        .await;
+}
+
+fn python_task(f: &Fixture) {
+    f.verifier(None);
+    let mut session: Value =
+        serde_json::from_slice(&std::fs::read(f.session_file()).unwrap()).unwrap();
+    session["task"] = json!("Create slug.py and test_slug.py. Slug lowercases words and joins them with hyphens. Preserve source and visible unittest acceptance; run required tests before review.");
+    std::fs::write(f.session_file(), serde_json::to_vec(&session).unwrap()).unwrap();
+    std::fs::write(
+        f.anchor.join(".gitignore"),
+        "__pycache__/\n*.pyc\n.test-ran\n",
+    )
+    .unwrap();
+    git(&f.anchor, &["add", ".gitignore"]);
+    git(&f.anchor, &["commit", "-qm", "ignore Python caches"]);
+    f.reference(&["handoff-offer", "--role", "claude"]);
+}
+
+const SLUG_SOURCE: &str = "def slug(text):\n    return '-'.join(text.lower().split())\n";
+const SLUG_TEST: &str = "import unittest\nfrom pathlib import Path\nfrom slug import slug\n\nclass SlugTest(unittest.TestCase):\n    def test_slug(self):\n        Path('.test-ran').write_text('required test executed')\n        self.assertEqual(slug('Hello World'), 'hello-world')\n";
+
+#[tokio::test]
+async fn a_python_owner_checkpoints_source_then_runs_required_tests_before_submission() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"slug.py","content":SLUG_SOURCE}),
+            ),
+            says(CHECKPOINT),
+            calls_tool(
+                "write_file",
+                &json!({"path":"test_slug.py","content":SLUG_TEST}),
+            ),
+            says(DONE),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    python_task(&f);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("CHECKPOINT "), "{}", text(&out));
+    assert_eq!(f.posted("REVIEW_REQUEST").len(), 1, "{}", text(&out));
+    let notes = f.posted("NOTE");
+    let checkpoint = notes
+        .iter()
+        .find(|note| {
+            note["body"].as_str().is_some_and(|body| {
+                body.starts_with(localpilot_mesh::ops::owner::OWNER_CHECKPOINT_PREFIX)
+            })
+        })
+        .unwrap();
+    let body = checkpoint["body"].as_str().unwrap();
+    assert!(body.contains("slug.py="));
+    assert!(!body.contains("test_slug.py="));
+    let review = f.posted("REVIEW_REQUEST");
+    let body = review[0]["body"].as_str().unwrap();
+    assert!(body.contains("slug.py="));
+    assert!(body.contains("test_slug.py="));
+    assert!(!body.contains(".pyc="));
+    assert!(f.posted("ESCALATE").is_empty());
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join(".test-ran")).unwrap(),
+        "required test executed"
+    );
+    assert_ne!(
+        session_status(&f),
+        "completed",
+        "checkpoint or request is not reviewer agreement"
+    );
+    let requests = chat_requests(&server).await;
+    assert!(String::from_utf8_lossy(&requests[2].body).contains("Verified checkpoint"));
+    assert!(String::from_utf8_lossy(&requests[2].body).contains("Create slug.py and test_slug.py"));
+    assert!(String::from_utf8_lossy(&requests[0].body).contains("at most 1 files"));
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join("test_slug.py")).unwrap(),
+        SLUG_TEST
+    );
+    let id = review[0]["msg_id"].as_str().unwrap();
+    verdict(
+        &f,
+        id,
+        "AGREE round=1 blocking=0 important=0\nsource and required tests reviewed",
+    );
+    let close = f.run(&["--own"]).await;
+    assert!(close.status.success(), "{}", text(&close));
+    assert_eq!(session_status(&f), "completed");
+}
+
+#[tokio::test]
+async fn a_python_syntax_checkpoint_cannot_submit_without_the_required_test() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"slug.py","content":SLUG_SOURCE}),
+            ),
+            says(CHECKPOINT),
+            says(DONE),
+            says(DONE),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    python_task(&f);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("CHECKPOINT "), "{}", text(&out));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+    assert!(!f.anchor.join("test_slug.py").exists());
+    assert_ne!(session_status(&f), "completed");
+}
+
+#[tokio::test]
+async fn a_python_checkpoint_does_not_launder_failing_required_tests() {
+    let server = server().await;
+    mount_owner_sequence(&server, vec![
+        calls_tool("write_file", &json!({"path":"slug.py","content":SLUG_SOURCE})),
+        says(CHECKPOINT),
+        calls_tool("write_file", &json!({"path":"test_slug.py","content":SLUG_TEST.replace("'hello-world'", "'WRONG'")})),
+        says(DONE), says(DONE), says(DONE), says(DONE), says(DONE), says(DONE), says(DONE),
+    ]).await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    python_task(&f);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+    assert!(text(&out).contains("failed (attempt"), "{}", text(&out));
+}
+
+#[tokio::test]
+async fn unchanged_work_cannot_create_a_verified_owner_checkpoint() {
+    let server = server().await;
+    mount_owner_sequence(&server, vec![says(CHECKPOINT), says(CHECKPOINT)]).await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("CHECKPOINT "));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert!(f.posted("ESCALATE")[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("changed=false"));
+}
+
+#[tokio::test]
+async fn invalid_python_source_cannot_record_a_checkpoint_or_continue() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"slug.py","content":"def broken(:\n"}),
+            ),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    python_task(&f);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("CHECKPOINT "));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+    assert!(text(&out).contains("failed (attempt"), "{}", text(&out));
+}
+
+#[tokio::test]
+async fn an_owner_checkpoint_keeps_the_next_unit_bounded() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"b.txt","content":"first unit\n"}),
+            ),
+            says(CHECKPOINT),
+            calls_tool(
+                "write_file",
+                &json!({"path":"c.txt","content":"oversize\n".repeat(400)}),
+            ),
+            says(DONE),
+            says(DONE),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("CHECKPOINT "), "{}", text(&out));
+    assert!(!f.anchor.join("c.txt").exists());
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+    assert!(
+        String::from_utf8_lossy(&chat_requests(&server).await[3].body).contains("work envelope")
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_answer_does_not_erase_a_failed_owner_unit() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"b.txt","content":"first unit\n"}),
+            ),
+            says(CHECKPOINT),
+            calls_tool(
+                "write_file",
+                &json!({"path":"c.txt","content":"oversize\n".repeat(400)}),
+            ),
+            says("partial work; not JSON"),
+            says(DONE),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("CHECKPOINT "));
+    assert!(!f.anchor.join("c.txt").exists());
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+}
+
+#[tokio::test]
+async fn an_owner_can_repair_a_refused_unit_after_a_verified_checkpoint() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"b.txt","content":"first unit\n"}),
+            ),
+            says(CHECKPOINT),
+            calls_tool(
+                "write_file",
+                &json!({"path":"c.txt","content":"oversize\n".repeat(400)}),
+            ),
+            says(DONE),
+            calls_tool(
+                "write_file",
+                &json!({"path":"c.txt","content":"small repaired unit\n"}),
+            ),
+            says(DONE),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join("c.txt")).unwrap(),
+        "small repaired unit\n"
+    );
+    assert_eq!(f.posted("REVIEW_REQUEST").len(), 1);
+    assert!(f.posted("ESCALATE").is_empty());
+}
+
+#[tokio::test]
+async fn a_checkpoint_cannot_verify_an_unrelated_python_file_instead_of_its_changed_unit() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"b.txt","content":"unverified text unit\n"}),
+            ),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    std::fs::write(f.anchor.join("unrelated.py"), "value = 42\n").unwrap();
+    git(&f.anchor, &["add", "unrelated.py"]);
+    git(
+        &f.anchor,
+        &["commit", "-qm", "pre-existing unrelated source"],
+    );
+    python_task(&f);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("CHECKPOINT "));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+}
+
+#[tokio::test]
+async fn a_python_checkpoint_checks_one_changed_source_with_spaces() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"source with spaces.py","content":"value = 42\n"}),
+            ),
+            says(CHECKPOINT),
+            says(r#"{"kind":"ESCALATE","body":"partial source checkpoint; tests remain"}"#),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    python_task(&f);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("CHECKPOINT "), "{}", text(&out));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+}
+
+#[tokio::test]
+async fn a_python_syntax_checkpoint_cannot_import_a_project_ast_module() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"ast.py","content":"raise SystemExit(42)\n"}),
+            ),
+            says(CHECKPOINT),
+            says(r#"{"kind":"ESCALATE","body":"partial syntax check only"}"#),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    python_task(&f);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("CHECKPOINT "), "{}", text(&out));
+    assert!(!f.anchor.join("__pycache__").exists());
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+}
+
+#[tokio::test]
+async fn a_python_checkpoint_does_not_replace_a_configured_failing_verifier() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool(
+                "write_file",
+                &json!({"path":"slug.py","content":SLUG_SOURCE}),
+            ),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+            says(CHECKPOINT),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.verifier(Some("git diff --no-index --exit-code a.txt slug.py"));
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("CHECKPOINT "));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+}
+
+#[tokio::test]
+async fn owner_checkpoints_have_a_durable_count_limit() {
+    let server = server().await;
+    let mut replies = Vec::new();
+    for n in 0..9 {
+        replies.push(calls_tool(
+            "write_file",
+            &json!({"path":format!("unit{n}.txt"), "content":"bounded\n"}),
+        ));
+        replies.push(says(CHECKPOINT));
+    }
+    mount_owner_sequence(&server, replies).await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        text(&out).matches("CHECKPOINT ").count(),
+        8,
+        "{}",
+        text(&out)
+    );
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert!(f.posted("ESCALATE")[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("checkpoint limit"));
+}
 
 /// A model that writes `b.txt` with `content`, then asks for review.
 async fn mount_owner_turn(server: &MockServer, content: &str, priority: u8) {
@@ -1219,6 +1681,149 @@ async fn a_handoff_whose_tree_moved_is_not_accepted() {
 struct LosesTheTree(PathBuf);
 
 struct RevokesOwnerBeforeVerification(PathBuf);
+
+struct CommitsBeforeCheckpoint(PathBuf);
+
+impl Respond for CommitsBeforeCheckpoint {
+    fn respond(&self, _: &MockRequest) -> ResponseTemplate {
+        git(&self.0, &["add", "b.txt"]);
+        git(&self.0, &["commit", "-qm", "unsupported model commit"]);
+        says(CHECKPOINT)
+    }
+}
+
+#[tokio::test]
+async fn a_raw_commit_cannot_reset_the_owner_checkpoint_allowance() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(calls_tool(
+            "write_file",
+            &json!({"path":"b.txt","content":"partial\n"}),
+        ))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(CommitsBeforeCheckpoint(f.anchor.clone()))
+        .up_to_n_times(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(
+            r#"{"kind":"ESCALATE","body":"raw commit needs separate review"}"#,
+        ))
+        .mount(&server)
+        .await;
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("committed before harness verification"),
+        "{}",
+        text(&out)
+    );
+    assert!(!text(&out).contains("CHECKPOINT "));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+    assert!(f.anchor.join("b.txt").exists());
+}
+
+#[tokio::test]
+async fn lease_loss_cannot_record_an_owner_checkpoint_or_authorize_more_work() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.verifier(Some("git add a.txt"));
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(calls_tool(
+            "write_file",
+            &json!({"path":"b.txt","content":"partial\n"}),
+        ))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(RevokesOwnerBeforeCheckpoint(f.session_file()))
+        .up_to_n_times(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(r#"{"kind":"ESCALATE","body":"ownership lost"}"#))
+        .mount(&server)
+        .await;
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("CHECKPOINT "));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert!(f.posted("NOTE").iter().all(|note| !note["body"]
+        .as_str()
+        .unwrap()
+        .starts_with(localpilot_mesh::ops::owner::OWNER_CHECKPOINT_PREFIX)));
+    assert!(chat_requests(&server)
+        .await
+        .iter()
+        .any(|request| String::from_utf8_lossy(&request.body).contains("Some(Denied)")));
+}
+
+#[tokio::test]
+async fn a_passing_readonly_check_after_lease_loss_cannot_record_a_checkpoint() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(calls_tool(
+            "write_file",
+            &json!({"path":"b.txt","content":"partial\n"}),
+        ))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(RevokesOwnerBeforeCheckpoint(f.session_file()))
+        .up_to_n_times(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("STALE"), "{}", text(&out));
+    assert!(!text(&out).contains("CHECKPOINT "));
+    assert_eq!(
+        chat_requests(&server).await.len(),
+        2,
+        "no further turn after failed durable post"
+    );
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+}
+
+struct RevokesOwnerBeforeCheckpoint(PathBuf);
+
+impl Respond for RevokesOwnerBeforeCheckpoint {
+    fn respond(&self, request: &MockRequest) -> ResponseTemplate {
+        RevokesOwnerBeforeVerification(self.0.clone()).respond(request);
+        says(CHECKPOINT)
+    }
+}
 
 impl Respond for RevokesOwnerBeforeVerification {
     fn respond(&self, _: &MockRequest) -> ResponseTemplate {

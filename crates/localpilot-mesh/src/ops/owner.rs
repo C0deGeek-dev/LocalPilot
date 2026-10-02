@@ -60,6 +60,9 @@ pub enum OwnerState {
 const CONTEXT_MESSAGES: usize = 4;
 const CONTEXT_CHARS: usize = 3_000;
 
+/// Engine-owned progress notes are intermediate evidence, never review requests.
+pub const OWNER_CHECKPOINT_PREFIX: &str = "Verified owner checkpoint (Done, Passed):";
+
 fn is_agree(m: &Obj) -> bool {
     str_of(m, "body")
         .and_then(|b| b.lines().next())
@@ -143,6 +146,20 @@ impl Mesh {
                 })
                 .collect();
             context.reverse();
+            if let Some(checkpoint) = mine.iter().rev().find(|m| {
+                str_of(m, "kind") == Some("NOTE")
+                    && seq_of(m) > since
+                    && str_of(m, "body").is_some_and(|b| b.starts_with(OWNER_CHECKPOINT_PREFIX))
+            }) {
+                context.push(format!(
+                    "Previous engine checkpoint (partial task; preserve acceptance criteria): {}",
+                    str_of(checkpoint, "body")
+                        .unwrap_or_default()
+                        .chars()
+                        .take(CONTEXT_CHARS)
+                        .collect::<String>()
+                ));
+            }
             OwnerState::Implement(OwnerTask {
                 task: str_of(&s, "task").unwrap_or_default().to_owned(),
                 context,
@@ -352,6 +369,48 @@ impl Mesh {
             to: Some(required.join(",")),
             ..PostArgs::default()
         }))
+    }
+
+    /// Build a durable intermediate note using the same fingerprint surface as
+    /// review requests. The caller must establish native verified completion
+    /// first and post with the owner's guarded expectation before continuing.
+    pub fn owner_checkpoint(
+        &self,
+        role: &str,
+        summary: &str,
+    ) -> Result<Result<PostArgs, String>, MeshError> {
+        Ok(self
+            .review_request(role, &format!("{OWNER_CHECKPOINT_PREFIX}\n{summary}"))?
+            .map(|mut args| {
+                args.kind = "NOTE".into();
+                args.expect_reply = false;
+                args
+            }))
+    }
+
+    /// Count durable checkpoints in this ownership, including before a restart.
+    /// A handoff ends the allowance; a raw Git commit or a new process does not.
+    pub fn owner_checkpoint_count(&self, role: &str) -> Result<usize, MeshError> {
+        let s = self.require(role, true)?;
+        let records = jsonl::records(&self.mb.journal(sid(&s), role))?;
+        let in_unit = |m: &&Obj| str_of(m, "unit_id") == str_of(&s, "unit_id");
+        let since = records
+            .iter()
+            .filter(in_unit)
+            .filter(|m| str_of(m, "kind") == Some("HANDOFF_ACCEPT"))
+            .map(seq_of)
+            .max()
+            .unwrap_or(0);
+        Ok(records
+            .iter()
+            .filter(in_unit)
+            .filter(|m| {
+                seq_of(m) > since
+                    && str_of(m, "kind") == Some("NOTE")
+                    && str_of(m, "body")
+                        .is_some_and(|body| body.starts_with(OWNER_CHECKPOINT_PREFIX))
+            })
+            .count())
     }
 }
 
@@ -599,6 +658,36 @@ mod tests {
             OwnerState::Agreed("localpilot:2".into())
         );
         assert_eq!(m.owner_state("claude").unwrap(), OwnerState::NotOwner);
+    }
+
+    #[test]
+    fn checkpoint_progress_survives_a_fresh_owner_read_without_completing_the_unit() {
+        let (_d, root) = fixture(true, true);
+        std::fs::write(root.join("b.txt"), "partial\n").unwrap();
+        let m = mesh(&root);
+        let note = m
+            .owner_checkpoint("localpilot", "source checked; required tests remain")
+            .unwrap()
+            .unwrap();
+        assert_eq!(note.kind, "NOTE");
+        assert!(!note.expect_reply);
+        assert!(note.body.contains("b.txt="));
+        journal(
+            &root,
+            "localpilot",
+            &[msg("localpilot", 1, "NOTE", &note.body, None)],
+        );
+        let fresh = mesh(&root);
+        assert_eq!(fresh.owner_checkpoint_count("localpilot").unwrap(), 1);
+        let OwnerState::Implement(task) = fresh.owner_state("localpilot").unwrap() else {
+            panic!("checkpoint completed work")
+        };
+        assert_eq!(task.task, "the task");
+        assert_eq!(task.round, 1);
+        assert!(task
+            .context
+            .iter()
+            .any(|line| line.contains("required tests remain")));
     }
 
     #[test]

@@ -1074,6 +1074,9 @@ pub enum SwitchError {
     UnknownProvider(String),
 }
 
+/// Host-owned resolution of a missing completion check, with current-turn paths.
+pub type CompletionCheckResolver = fn(&Path, &str, &[String]) -> Option<CheckConfig>;
+
 /// The agent-mode runtime.
 pub struct SessionRuntime {
     capability_evidence: crate::granularity::CapabilityEvidence,
@@ -1218,6 +1221,8 @@ pub struct SessionRuntime {
     /// The most recent verify-before-done check in this turn. A final answer
     /// or a legacy unchecked `Done` is not a passing verification signal.
     turn_verification: Option<CheckStatus>,
+    turn_has_changes: bool,
+    completion_check_fallback: Option<CompletionCheckResolver>,
     /// Per-session record of served `read_file` results and their freshness, so an
     /// already-seen, unchanged re-read can be elided to a stub (opt-in via
     /// `elide_seen_reads`). In-memory and session-scoped.
@@ -1323,6 +1328,8 @@ impl SessionRuntime {
             turn_memories_used: Vec::new(),
             last_handoff: None,
             turn_verification: None,
+            turn_has_changes: false,
+            completion_check_fallback: None,
             read_history: crate::elision::ReadHistory::default(),
             paths_in_play: crate::PathsInPlay::new(),
             incognito_ledger: crate::IncognitoLedger::default(),
@@ -1645,6 +1652,7 @@ impl SessionRuntime {
     /// Clear harness ownership when a runtime enters another session.
     fn reset_work_unit_ownership(&mut self) {
         self.harness_checkpoint_owner = false;
+        self.completion_check_fallback = None;
         self.unit_scope = None;
         self.unit_verification_exempt = None;
         self.unit_verify_command = None;
@@ -2070,15 +2078,19 @@ impl SessionRuntime {
 
     /// The reviewed step selects timely verification; a stated exemption does
     /// not waive the caller's ratified quality gate or explicit session gate.
-    pub(crate) fn set_harness_checkpoint_owner(
-        &mut self,
-        scope: Option<crate::granularity::WorkScope>,
-    ) {
+    pub fn set_harness_checkpoint_owner(&mut self, scope: Option<crate::granularity::WorkScope>) {
         self.harness_checkpoint_owner = true;
         self.unit_scope = scope;
         self.unit_verification_exempt = None;
         self.unit_verify_command = None;
         self.active_work_profile = None;
+    }
+
+    /// Install a host-owned fallback for an otherwise missing completion check.
+    /// The host receives the final text and root, not authority to skip the
+    /// permission gate. Configured, planned and detected checks take precedence.
+    pub fn set_completion_check_fallback(&mut self, resolver: CompletionCheckResolver) {
+        self.completion_check_fallback = Some(resolver);
     }
 
     pub fn set_work_unit_verification(&mut self, verification: &crate::Verification) {
@@ -2653,13 +2665,24 @@ impl SessionRuntime {
         // workspace. Detection reads marker files, which resolve the same on either
         // spelling.
         let root = self.workspace.process_dir();
+        self.turn_has_changes = diff_mutated;
         let Some(check) = crate::resolve_verify_check(
             &root,
             self.config
                 .verify_command
                 .as_deref()
                 .or(self.unit_verify_command.as_deref()),
-        ) else {
+        )
+        .or_else(|| {
+            self.completion_check_fallback.and_then(|resolver| {
+                self.current_turn_assistant_text().and_then(|text| {
+                    let paths =
+                        crate::resume::work_changed_paths(&root, self.work_diff_baseline.as_ref()?)
+                            .ok()?;
+                    resolver(&root, &text, &paths)
+                })
+            })
+        }) else {
             if bounded_mutation {
                 let detail = "bounded unit has no applicable verification target; set verify_command or review an explicit verify: none reason before completion".to_string();
                 let _ = events.send(RuntimeEvent::Warning(detail.clone()));
@@ -2692,6 +2715,29 @@ impl SessionRuntime {
         self.turn_verification = Some(outcome.status);
         match outcome.status {
             CheckStatus::Passed => {
+                if self.harness_checkpoint_owner {
+                    if let (Some(profile), Some(baseline)) =
+                        (self.work_profile(), self.work_diff_baseline.as_ref())
+                    {
+                        match crate::resume::work_diff_block(&root, profile, Some(baseline), false)
+                        {
+                            Ok(None) => {}
+                            Ok(Some(reason)) => return VerifyGate::GiveUp(reason),
+                            Err(error) => {
+                                return VerifyGate::GiveUp(format!(
+                                    "cannot inspect verified unit: {error}"
+                                ))
+                            }
+                        }
+                        if crate::resume::work_diff_baseline(&root)
+                            .is_ok_and(|after| after.head != baseline.head)
+                        {
+                            return VerifyGate::GiveUp("verification committed before the harness checkpoint; completion is not recorded".into());
+                        }
+                        self.turn_has_changes = crate::resume::work_diff_baseline(&root)
+                            .is_ok_and(|after| &after != baseline);
+                    }
+                }
                 if bounded_mutation && diff_mutated {
                     self.capability_evidence.observe_verification();
                 }
@@ -3228,6 +3274,7 @@ impl SessionRuntime {
         self.turn_in_flight = true;
         self.turn_tool_calls = 0;
         self.turn_verification = None;
+        self.turn_has_changes = false;
         self.turn_files_changed.clear();
         self.work_unit = crate::granularity::WorkUnit::default();
         self.work_mutation_refusal = None;
@@ -4694,6 +4741,13 @@ impl SessionRuntime {
     #[must_use]
     pub fn current_turn_verification(&self) -> Option<CheckStatus> {
         self.turn_verification
+    }
+
+    /// Whether completion inspection observed a diff against this turn's
+    /// baseline. A refused mutation or unchanged inherited tree is not work.
+    #[must_use]
+    pub fn current_turn_has_changes(&self) -> bool {
+        self.turn_has_changes
     }
 
     fn stop(&mut self, events: &broadcast::Sender<RuntimeEvent>, reason: StopReason) -> StopReason {

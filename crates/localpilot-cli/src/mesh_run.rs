@@ -365,22 +365,69 @@ async fn ownership(
     task: &OwnerTask,
 ) -> Result<PostArgs, Failure> {
     let mut feedback: Option<String> = None;
-    for _ in 0..2 {
+    let mut refusals = 0;
+    let mut checkpoints = mesh.owner_checkpoint_count(role)?;
+    let mut failed_unit = false;
+    while refusals < 2 {
         let answer = judge
             .implement(task, feedback.as_deref())
             .await
-            .map_err(|e| format!("the model turn failed: {e}"))
+            .map_err(|e| {
+                failed_unit = true;
+                format!("the model turn failed: {e}")
+            })
+            .inspect(|turn| {
+                // Preserve a failed native unit even if its answer is malformed.
+                failed_unit |=
+                    turn.stop != StopReason::Done || turn.verification != Some(CheckStatus::Passed);
+            })
             .and_then(|turn| parse_answer(&turn.text).map(|answer| (answer, turn)));
         let why = match answer {
             Ok((a, _)) if a.kind == "ESCALATE" && !a.body.trim().is_empty() => {
                 return owner_escalation(mesh, role, a.body.trim());
             }
+            Ok((a, turn)) if a.kind == "CHECKPOINT" && !a.body.trim().is_empty() => {
+                if turn.stop != StopReason::Done
+                    || turn.verification != Some(CheckStatus::Passed)
+                    || !turn.has_changes
+                {
+                    format!(
+                        "checkpoint requires changed, completed and verified work: turn={:?}, verification={:?}, changed={}",
+                        turn.stop, turn.verification, turn.has_changes
+                    )
+                } else if checkpoints >= 8 {
+                    return owner_escalation(mesh, role, "owner checkpoint limit reached; preserve partial work and split the remaining task");
+                } else {
+                    match mesh.owner_checkpoint(role, a.body.trim())? {
+                        Ok(args) => {
+                            // A failed or incomplete append must not authorize a
+                            // new allowance. Never swallow STALE or resend it.
+                            let note = mesh.post_guarded(role, &args, &task.expect)?;
+                            checkpoints += 1;
+                            failed_unit = false;
+                            let id = note.get("msg_id").and_then(|v| v.as_str()).unwrap_or_default();
+                            println!("CHECKPOINT {id} round={} verified", task.round);
+                            feedback = Some(format!(
+                                "Verified checkpoint {id} recorded. Continue with the next bounded unit; preserve the whole task and every acceptance criterion. Partial progress: {}",
+                                bounded(&a.body, BODY_BUDGET)
+                            ));
+                            continue;
+                        }
+                        Err(why) => why,
+                    }
+                }
+            }
             Ok((a, turn)) if a.kind == "REVIEW_REQUEST" && !a.body.trim().is_empty() => {
-                if turn.stop != StopReason::Done || turn.verification != Some(CheckStatus::Passed) {
+                if turn.stop != StopReason::Done
+                    || turn.verification != Some(CheckStatus::Passed)
+                    || (failed_unit && !turn.has_changes)
+                {
                     feedback = Some(format!(
-                        "owner work is not verified: turn={:?}, verification={:?}; complete the required check before requesting review, or ESCALATE the partial work",
-                        turn.stop, turn.verification
+                        "owner work is not verified: turn={:?}, verification={:?}, changed={}; repair the failed unit and complete the required check before requesting review, or ESCALATE the partial work",
+                        turn.stop, turn.verification, turn.has_changes
                     ));
+                    refusals += 1;
+                    failed_unit = true;
                     continue;
                 }
                 match mesh.review_request(role, &a.body)? {
@@ -389,12 +436,13 @@ async fn ownership(
                 }
             }
             Ok((a, _)) => format!(
-                "answer with kind REVIEW_REQUEST (or ESCALATE) and a non-empty body, not {}",
+                "answer with kind REVIEW_REQUEST, CHECKPOINT or ESCALATE and a non-empty body, not {}",
                 a.kind
             ),
             Err(why) => why,
         };
         feedback = Some(why);
+        refusals += 1;
     }
     owner_escalation(
         mesh,
@@ -550,6 +598,7 @@ pub(crate) struct OwnerTurn {
     text: String,
     stop: StopReason,
     verification: Option<CheckStatus>,
+    has_changes: bool,
 }
 
 /// Where a judgement comes from.
@@ -680,6 +729,8 @@ impl Judge for ModelJudge {
         // Always consult the existing permission-gated completion verifier;
         // only an actual pass can make the owner submission review-ready.
         runtime.set_verify_before_done(true, None);
+        runtime.set_harness_checkpoint_owner(None);
+        runtime.set_completion_check_fallback(owner_checkpoint_check);
         let handle = runtime.permission_engine_handle();
         let lease = SessionLease::acquire(self.mesh.clone(), &self.role, LEASE_TTL);
         handle.set(
@@ -707,8 +758,45 @@ impl Judge for ModelJudge {
             text,
             stop,
             verification: runtime.current_turn_verification(),
+            has_changes: runtime.current_turn_has_changes(),
         })
     }
+}
+
+/// A source-only Python unit has a timely syntax check before its tests exist.
+/// This host fallback cannot certify final submission or replace a real target.
+fn owner_checkpoint_check(
+    root: &Path,
+    text: &str,
+    changed: &[String],
+) -> Option<localpilot_config::CheckConfig> {
+    let answer = parse_answer(text).ok()?;
+    if answer.kind != "CHECKPOINT" || answer.body.trim().is_empty() {
+        return None;
+    }
+    let [source] = changed else {
+        return None;
+    };
+    let path = Path::new(source);
+    if path.components().count() != 1
+        || path.extension().is_none_or(|ext| ext != "py")
+        || !std::fs::symlink_metadata(root.join(path))
+            .ok()?
+            .file_type()
+            .is_file()
+    {
+        return None;
+    }
+    let mut check = localpilot_harness::resolve_verify_check(
+        root,
+        Some(if cfg!(windows) {
+            "python -I -m ast"
+        } else {
+            "python3 -I -m ast"
+        }),
+    )?;
+    check.args.extend(["--".to_owned(), source.clone()]);
+    Some(check)
 }
 
 impl ModelJudge {
@@ -767,7 +855,14 @@ Your working directory is the repository root, {}. Use paths relative to it (for
         }
     }
     out.push_str(
-        "\nWhen the work is done and checked, reply with exactly one JSON object, and nothing \
+        "\nWork in one bounded unit at a time. When a unit is ready but acceptance criteria \
+         remain, reply {\"kind\": \"CHECKPOINT\", \"body\": \"completed unit and next action\"}. \
+         The engine verifies it and records a durable intermediate note before allowing the next \
+         unit. A source-only Python checkpoint can use a syntax check until tests exist; this \
+         cannot certify the whole task. Do not commit to reset the allowance. Model shell calls \
+         retain their permission floor; use the engine's verification path. Keep every required \
+         source, test and acceptance criterion in the final task.\n\
+         When all the work is done and checked, reply with exactly one JSON object, and nothing \
          after it:\n{\"kind\": \"REVIEW_REQUEST\", \"body\": \"what you changed and how you checked it\"}\n\
          Do not list files or fingerprints; the engine adds them from the tree. If you cannot do \
          the task, reply {\"kind\": \"ESCALATE\", \"body\": \"why\"} instead.\n",
@@ -1451,6 +1546,7 @@ mod tests {
                 text,
                 stop: StopReason::Done,
                 verification: Some(CheckStatus::Passed),
+                has_changes: true,
             })
         }
     }

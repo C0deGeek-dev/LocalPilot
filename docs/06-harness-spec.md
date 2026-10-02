@@ -1286,6 +1286,27 @@ an escalation while preserving the partial tree. Explicit owner escalation
 does not require a passing verifier. No verifier engine, grants or persistent
 format are added by this boundary (ADR-0204).
 
+Mesh owners can reply `CHECKPOINT` for a verified partial unit (ADR-0205).
+The runtime's host-only missing-check resolver receives final text and the
+observed current-turn changed paths; configured, planned and detected checks
+win. Only a valid source-only Python checkpoint can select the one root regular
+`.py` file for isolated standard-library AST parsing. Final review requests do
+not receive this fallback. Every check uses the same permission-gated runner.
+The host exposes current-turn change evidence, reset between turns; owner
+completion inspects the diff and HEAD again after verification. Model commits
+cannot replace native verification or reset work scope.
+
+After `Done`, `Passed` and actual changed work, the engine builds a guarded
+`NOTE` with tree fingerprints using the review manifest path. Only a successful
+durable post permits a new bounded turn. A stale or incomplete append stops
+continuation. The next turn retains the whole task, findings and progress;
+a fresh owner read includes the latest intermediate note. The maximum eight
+checkpoints is counted from journals in the current ownership, so restarting
+does not mint more. A failed unit must be repaired before a subsequent no-edit
+answer can submit. Checkpoint notes are partial evidence, not review requests,
+reviewer agreement or work-unit completion. Scope, permissions and readonly
+semantics are unchanged; no mailbox message kind or stored format is added.
+
 - **Command resolution.** `[harness] verify_command` (a single command line,
   split on whitespace — no shell) wins; otherwise the command is detected from
   the workspace's marker files (`Cargo.toml` → `cargo test`, `go.mod` →
