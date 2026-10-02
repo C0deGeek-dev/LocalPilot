@@ -2,6 +2,34 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0207: Seat Owner Wall Is a Loop Budget With Explicit Exit Grace
+
+**Status:** accepted · **Date:** 2026-10-02.
+
+**Context.** The evaluation owner's wall setting has always been checked at
+poll boundaries, followed by a 60-second process-exit wait. Synchronous commands
+and hidden testing can exceed the nominal loop budget, while successful child
+exit during grace leaves killed=false. Describing this as a hard run cutoff
+confuses deadline observation, actual kill and native turn timeout.
+
+**Decision.** Retain the existing soft owner-loop budget and grace default.
+Expose owner-only `--owner-exit-grace`, with zero skipping grace. Clip idle poll
+sleep to remaining budget; ongoing synchronous operations remain bounded by
+their own behavior and can overrun. Name owner and review wall semantics in
+rows, measure loop budget reach and overrun separately from process exit wait,
+and measure hidden testing and post-exit assessment. Preserve legacy wall_s;
+cell_wall_s covers the timed owner cell through assessment. Retain settings on
+failed rows without inferring unobserved timings. Reject negative budgets/grace
+and the owner-only flag on reviews before creating run artifacts.
+
+**Limits.** This is no hard whole-command bound; setup and final assessment are
+outside the loop/wait budget. Budget reach reports observed elapsed loop time,
+not an inferred cause of engine exit. Review cells retain their direct engine
+wait budget. Native timeout defaults, permissions, retry policy and final journal
+reconciliation retain their contracts. Historical rows and frozen inputs are
+unchanged. Implementation and controls are original, using existing local
+process and mailbox interfaces.
+
 ## ADR-0206: Owner Evaluation Reconciles Terminal Evidence Without Acting
 
 **Status:** accepted · **Date:** 2026-10-02.

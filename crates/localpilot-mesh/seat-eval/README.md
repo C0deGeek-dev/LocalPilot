@@ -139,10 +139,34 @@ retained scratch session record; `protocol_completed` is true only for
 `completed`, false for other known states, and null when no status is available.
 Neither exit zero nor a posted scripted agreement establishes completion.
 
+`--wall` keeps its 2700-second default. For owner cells it is a **soft loop
+budget**, checked between synchronous pair commands and hidden tests. Idle poll
+sleep uses the remaining budget, but an operation already in progress can
+overrun. After the loop, `--owner-exit-grace` allows an additional engine wait
+(default 60 seconds); zero skips that grace and kills a still-running engine.
+The option is owner-only. Neither setting is a hard whole-command deadline.
+For review cells, `--wall` is the direct engine wait budget, including repair.
+Setup, journal reconciliation, and final assessment are outside that wait.
+
+New rows name this distinction with `wall_semantics`:
+`owner_loop_budget_plus_exit_grace` or `review_engine_wait`. Owner rows also
+record `owner_loop_budget_s`, `owner_exit_grace_s`, `owner_loop_s`,
+`owner_loop_deadline_reached` (observed elapsed loop time reached its budget),
+`owner_loop_overrun_s`, and `owner_exit_wait_s` (including kill/cleanup).
+`killed=false` can coexist with a reached loop deadline when the engine exits
+during grace. Neither field is a native turn timeout or a protocol outcome.
+`hidden_check_s` measures hidden testing; a live-request check is inside loop
+time, while fallback checking is inside `post_exit_s`. `cell_wall_s` measures
+the full timed owner cell from engine startup through final assessment, excluding
+scratch/session setup. Legacy `wall_s` remains elapsed time before fallback
+hidden testing, including any live-request check and journal reconciliation.
+Failed rows retain the selected settings; absent elapsed/observation fields are
+unknown. Historical rows and their meaning are unchanged.
+
 ## Things that change the numbers
 
 - **The context window.** LocalPilot probes the server's context window; a smaller configured `context_window` remains a cap. Pass `--context-window` to cap it for a run, and record the engine log's effective `context_window` and `context_source`. A provider context setting of zero removes the configured cap. Scratch repositories load their own configuration, so explicitly select the intended provider and endpoint rather than assuming the invoking project's settings carry over.
 - **Wall time includes model speed.** Time the model's loading separately, and say which server settings or profile you used.
-- **Driver and turn deadlines differ.** `--wall` bounds the whole review, including repair; it does not set the runtime's per-turn deadline. `killed=false` means the driver did not kill the process, even if an initial turn timed out and repair produced a verdict. Use `runtime_turn_timeouts` and trace completeness when reporting runtime timeouts. To select a per-turn deadline, use the existing `[harness] turn_timeout_secs` configuration (or the process-scoped `LOCALPILOT_HARNESS__TURN_TIMEOUT_SECS` environment setting); its effective value is emitted for every turn. Old rows remain unchanged (LocalHub#208).
+- **Driver and turn deadlines differ.** `--wall` selects the loop/wait budget described above; it does not set the runtime's per-turn deadline. `killed=false` means the driver did not kill the process, even if an initial turn timed out and repair produced a verdict. Use `runtime_turn_timeouts` and trace completeness when reporting runtime timeouts. To select a per-turn deadline, use the existing `[harness] turn_timeout_secs` configuration (or the process-scoped `LOCALPILOT_HARNESS__TURN_TIMEOUT_SECS` environment setting); its effective value is emitted for every turn. Old rows remain unchanged (LocalHub#208).
 - **Memory.** A large model at a long server context can leave little RAM free. Run cells in the foreground, one at a time, and stop the server when you are done.
 - **Samples are small.** One to three runs per cell describe a model; they do not rank models. Report counts, not percentages, and keep every run, including the failures.

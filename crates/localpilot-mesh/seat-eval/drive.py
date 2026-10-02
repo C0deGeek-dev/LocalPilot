@@ -240,9 +240,17 @@ def owner_cell(a, repo, log):
     t0 = time.monotonic()
     r = {"hidden_ok": False, "review_requested": False, "escalated": False,
          "review_observation": None, "hidden_measure": None}
+    r.update(wall_settings(a))
     with spawned(a, repo, ["--own", "--timeout", "120"], log) as proc:
         owner_loop(a, repo, proc, t0, r)
-        r["killed"] = finish(proc, 60)
+        loop_end = time.monotonic()
+        loop_s = loop_end - t0
+        r["owner_loop_s"] = round(loop_s, 3)
+        r["owner_loop_deadline_reached"] = loop_s >= a.wall
+        r["owner_loop_overrun_s"] = round(max(0, loop_s - a.wall), 3)
+        r["killed"] = finish(proc, r["owner_exit_grace_s"])
+        exit_at = time.monotonic()
+        r["owner_exit_wait_s"] = round(exit_at - loop_end, 3)
         r["engine_exit"] = proc.returncode
     # The child can append its terminal message between polls. It is now
     # stopped, so this read cannot initiate another protocol action.
@@ -257,9 +265,26 @@ def owner_cell(a, repo, log):
                                if r["protocol_status"] is not None else None)
     r["wall_s"] = round(time.monotonic() - t0, 1)
     if r["hidden_measure"] is None:
-        r["hidden_ok"], r["hidden_tail"] = hidden(repo, a.task)
-        r["hidden_measure"] = "final_tree_after_exit"
+        owner_hidden(a, repo, r, "final_tree_after_exit")
+    r["post_exit_s"] = round(time.monotonic() - exit_at, 3)
+    r["cell_wall_s"] = round(time.monotonic() - t0, 3)
     return r
+
+
+def wall_settings(a):
+    if getattr(a, "cell", "owner") != "owner":
+        return {"wall_semantics": "review_engine_wait"}
+    grace = getattr(a, "owner_exit_grace", None)
+    return {"wall_semantics": "owner_loop_budget_plus_exit_grace",
+            "owner_loop_budget_s": a.wall,
+            "owner_exit_grace_s": 60 if grace is None else grace}
+
+
+def owner_hidden(a, repo, r, measure):
+    started = time.monotonic()
+    r["hidden_ok"], r["hidden_tail"] = hidden(repo, a.task)
+    r["hidden_check_s"] = round(time.monotonic() - started, 3)
+    r["hidden_measure"] = measure
 
 
 def owner_observation(repo, r, phase):
@@ -284,8 +309,7 @@ def owner_loop(a, repo, proc, t0, r):
             break
         if req is not None and r["hidden_measure"] is None:
             r["request_at_s"] = round(time.monotonic() - t0, 1)
-            r["hidden_ok"], r["hidden_tail"] = hidden(repo, a.task)
-            r["hidden_measure"] = "first_request_observed_tree"
+            owner_hidden(a, repo, r, "first_request_observed_tree")
             if proc.poll() is not None:
                 break
             pair(repo, "watch", "--role", "claude", "--timeout", "5", check=False)
@@ -295,7 +319,7 @@ def owner_loop(a, repo, proc, t0, r):
                  "--body", "AGREE round=1 blocking=0 important=0\n"
                            "Scripted AGREE: the hidden test is the measure of this run.",
                  check=False)
-        time.sleep(3)
+        time.sleep(min(3, max(0, a.wall - (time.monotonic() - t0))))
 
 
 def review_cell(a, repo, log, planted):
@@ -334,6 +358,11 @@ def review_cell(a, repo, log, planted):
 def run_path(out, a):
     """The run's name and scratch path, which must be a direct child of
     `out`."""
+    grace = getattr(a, "owner_exit_grace", None)
+    if a.wall < 0 or (grace is not None and grace < 0):
+        raise SystemExit("--wall and --owner-exit-grace must be nonnegative")
+    if a.cell != "owner" and grace is not None:
+        raise SystemExit("--owner-exit-grace applies only to owner cells")
     if not LABEL.fullmatch(a.label):
         raise SystemExit(f"--label must be 1-40 of A-Z a-z 0-9 . _ - and start with a letter or digit: {a.label!r}")
     if a.run < 1:
@@ -430,6 +459,7 @@ def run(a):
             log.flush()
             r.update(turn_metadata(out / f"{name}.log", r))
             r.update(review_identity)
+            r.update(wall_settings(a))
             if a.cell != "owner":
                 r["review_diagnostics_present"] = (out / f"{name}.review.jsonl").is_file() if a.review_diagnostics else False
             with open(out / "results.jsonl", "a", encoding="utf-8") as f:
@@ -439,6 +469,7 @@ def run(a):
               "task": a.task if a.cell == "owner" else "roman", "run": a.run,
               "started": started, "wall_cap_s": a.wall})
     r.update(review_identity)
+    r.update(wall_settings(a))
     r.update(turn_metadata(out / f"{name}.log", r))
     if a.cell != "owner":
         r["review_diagnostics_present"] = (out / f"{name}.review.jsonl").is_file() if a.review_diagnostics else False
@@ -463,7 +494,12 @@ def main():
     r.add_argument("--task", default="roman", choices=TASK_NAMES, help="owner cell: the frozen task")
     r.add_argument("--run", type=int, required=True, help="the run's number within its cell")
     r.add_argument("--out", required=True, help="the results directory")
-    r.add_argument("--wall", type=int, default=2700, help="seconds before a run is cut off")
+    r.add_argument("--wall", type=int, default=2700,
+                   help="seconds of owner-loop budget (checked between synchronous operations), "
+                        "or review-engine wait budget; excludes setup and final assessment (default: 2700)")
+    r.add_argument("--owner-exit-grace", type=int,
+                   help="owner only: additional seconds to wait after the loop before killing "
+                        "the engine (default: 60; zero skips grace)")
     r.add_argument("--localpilot", default=shutil.which("localpilot") or "localpilot")
     r.add_argument("--provider", help="a configured LocalPilot provider (default: the default one)")
     r.add_argument("--context-window", type=int, help="override the provider's context window")

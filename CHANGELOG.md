@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Pair-seat owner deadlines report their actual scope.** The owner loop budget
+  and its exit grace are separate from native turn timeouts and final assessment.
+  An owner-only `--owner-exit-grace` option keeps the 60-second default and accepts
+  zero; rows expose budget reach, loop overrun and phase durations even when the
+  engine finishes cleanly during grace. Idle polling respects remaining budget.
+
 - **Pair-seat owner results include the final journal.** Escalations and review
   requests written just before engine exit are retained. Hidden-test rows
   distinguish live-request observation from final-tree fallback, and protocol

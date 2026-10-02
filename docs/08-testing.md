@@ -343,6 +343,15 @@ or delivery wait. Final-tree fallback and the first live-request observed tree
 have separate provenance; neither a passing hidden test nor exit zero implies
 protocol completion. Frozen fixtures and historical rows stay unchanged.
 
+Owner deadline controls exercise actual child completion during exit grace and
+termination with zero grace. An injected monotonic clock makes slow synchronous
+pair/hidden work and remaining-budget polling deterministic while cleanup still
+stops real children. Controls separate loop overrun, actual exit wait, live
+hidden testing and fallback assessment, verify the successful completion path,
+and preserve selected timing settings on failed rows without invented elapsed
+times. CLI help, nonnegative owner-only grace and unchanged defaults are checked;
+review wait semantics remain independent of native turn timeouts.
+
 Review diagnostic capture is opt-in. CLI tests exercise the production judgement
 and native mock-provider timeout/repair path. Resolved deadline metadata is
 tested for builtin and explicit configuration, including zero. Driver controls

@@ -5,7 +5,9 @@ changed fixtures, and never leaves an engine running. No model is needed.
 """
 
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -340,6 +342,7 @@ class OwnerJournalTest(unittest.TestCase):
         self.assertEqual(row["hidden_measure"], "first_request_observed_tree")
         self.assertIn("request_at_s", row)
         self.assertTrue(row["protocol_completed"])
+        self.assertFalse(row["owner_loop_deadline_reached"])
         self.assertEqual(measured, [None])
         posts = [c for c in calls if c[0] == "post"]
         self.assertEqual(len(posts), 1)
@@ -387,6 +390,144 @@ class OwnerJournalTest(unittest.TestCase):
     def test_ambiguous_layout_is_a_failure_not_guessed_completion(self):
         with self.assertRaisesRegex(RuntimeError, "ambiguous session records"):
             self.owner(None, ambiguous=True)
+
+
+class OwnerDeadlineTest(unittest.TestCase):
+    def owner(self, *, wall=0, grace=0, completes=False, slow=None):
+        drive = load(HERE)
+        children = []
+        sleeps = []
+        clock = [0.0]
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d)
+            drive.scratch = lambda *a: None
+
+            def engine(*a):
+                child = subprocess.Popen([sys.executable, "-c",
+                                          "import time; time.sleep(0.15)" if completes
+                                          else "import time; time.sleep(120)"])
+                children.append(child)
+                return child
+
+            def pair(*argv, **kw):
+                if slow == "pair" and argv[1] == "status":
+                    clock[0] += 4
+                return mock.Mock(stdout="", returncode=0)
+
+            def hidden(*a):
+                clock[0] += 4 if slow == "hidden" else 5
+                return True, "HIDDEN_OK"
+
+            drive.engine = engine
+            drive.pair = pair
+            drive.hidden = hidden if slow else lambda *a: (True, "HIDDEN_OK")
+            drive.journal = lambda *a: ([{"kind": "REVIEW_REQUEST", "seq": 3}]
+                                      if slow == "hidden" else [])
+
+            def sleep(seconds):
+                sleeps.append(seconds)
+                clock[0] += seconds
+
+            with contextlib.ExitStack() as patches:
+                if slow:
+                    patches.enter_context(mock.patch.object(drive.time, "monotonic", side_effect=lambda: clock[0]))
+                    patches.enter_context(mock.patch.object(drive.time, "sleep", side_effect=sleep))
+                row = drive.owner_cell(args(repo, wall=wall, owner_exit_grace=grace), repo, None)
+            self.assertIsNotNone(children[0].poll(), "the owner child was left running")
+        return row, sleeps
+
+    def test_real_child_completion_during_grace_does_not_hide_budget_reach(self):
+        row, sleeps = self.owner(grace=2, completes=True)
+        self.assertTrue(row["owner_loop_deadline_reached"])
+        self.assertFalse(row["killed"])
+        self.assertEqual(row["engine_exit"], 0)
+        self.assertEqual(row["owner_exit_grace_s"], 2)
+        self.assertGreater(row["owner_exit_wait_s"], 0)
+        self.assertGreater(row["cell_wall_s"], row["owner_loop_budget_s"])
+        self.assertEqual(row["wall_semantics"], "owner_loop_budget_plus_exit_grace")
+
+    def test_zero_grace_really_kills_a_child_after_the_loop_budget(self):
+        row, sleeps = self.owner()
+        self.assertTrue(row["owner_loop_deadline_reached"])
+        self.assertTrue(row["killed"])
+        self.assertNotEqual(row["engine_exit"], 0)
+        self.assertEqual(row["owner_exit_grace_s"], 0)
+        self.assertTrue(row["hidden_ok"])
+        self.assertEqual(row["hidden_measure"], "final_tree_after_exit")
+
+    def test_slow_live_hidden_check_reports_loop_overrun_separately(self):
+        row, sleeps = self.owner(wall=2, slow="hidden")
+        self.assertTrue(row["owner_loop_deadline_reached"])
+        self.assertTrue(row["killed"])
+        self.assertEqual(row["owner_loop_s"], 4)
+        self.assertEqual(row["owner_loop_overrun_s"], 2)
+        self.assertEqual(row["hidden_check_s"], 4)
+        self.assertEqual(row["post_exit_s"], 0)
+        self.assertEqual(row["hidden_measure"], "first_request_observed_tree")
+
+    def test_slow_pair_work_and_fallback_assessment_have_separate_timings(self):
+        row, sleeps = self.owner(wall=2, slow="pair")
+        self.assertTrue(row["owner_loop_deadline_reached"])
+        self.assertEqual(row["owner_loop_s"], 4)
+        self.assertEqual(row["owner_loop_overrun_s"], 2)
+        self.assertEqual(row["hidden_check_s"], 5)
+        self.assertEqual(row["post_exit_s"], 5)
+        self.assertEqual(row["wall_s"], 4)
+        self.assertEqual(row["cell_wall_s"], 9)
+        self.assertEqual(row["hidden_measure"], "final_tree_after_exit")
+
+    def test_poll_sleep_uses_remaining_loop_budget(self):
+        row, sleeps = self.owner(wall=2, slow="poll")
+        self.assertEqual(sleeps, [2])
+        self.assertEqual(row["owner_loop_s"], 2)
+        self.assertEqual(row["owner_loop_overrun_s"], 0)
+        self.assertTrue(row["owner_loop_deadline_reached"])
+
+    def test_defaults_and_owner_only_nonnegative_options(self):
+        drive = load(HERE)
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d)
+            self.assertEqual(drive.wall_settings(args(out))["owner_exit_grace_s"], 60)
+            self.assertEqual(drive.wall_settings(args(out, cell="review-good")),
+                             {"wall_semantics": "review_engine_wait"})
+            for overrides in ({"wall": -1}, {"owner_exit_grace": -1},
+                              {"cell": "review-good", "owner_exit_grace": 0}):
+                with self.subTest(overrides=overrides), self.assertRaises(SystemExit):
+                    drive.run_path(out, args(out, **overrides))
+            with mock.patch.object(sys, "argv", ["drive.py", "run", "--help"]), \
+                    mock.patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                with self.assertRaises(SystemExit):
+                    drive.main()
+                self.assertIn("--owner-exit-grace", output.getvalue())
+                self.assertIn("default: 2700", output.getvalue())
+                self.assertIn("default: 60", output.getvalue())
+                self.assertIn("synchronous operations", output.getvalue())
+            cli = ["drive.py", "run", "--model", "m", "--label", "t", "--cell", "owner",
+                   "--run", "1", "--out", str(out), "--localpilot", sys.executable]
+            for grace in (None, 0):
+                argv = cli if grace is None else cli + ["--owner-exit-grace", str(grace)]
+                with mock.patch.object(sys, "argv", argv), \
+                        mock.patch.object(drive, "run", return_value=0) as run:
+                    self.assertEqual(drive.main(), 0)
+                    selected = run.call_args.args[0]
+                    self.assertEqual(selected.wall, 2700)
+                    self.assertEqual(drive.wall_settings(selected)["owner_exit_grace_s"],
+                                     60 if grace is None else 0)
+
+    def test_failed_owner_row_keeps_settings_without_invented_elapsed_times(self):
+        drive = load(HERE)
+        def failure(*a):
+            raise RuntimeError("injected before loop timing")
+        drive.owner_cell = failure
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d)
+            with self.assertRaises(RuntimeError):
+                drive.run(args(out, wall=17, owner_exit_grace=3))
+            row = json.loads((out / "results.jsonl").read_text())
+            self.assertEqual(row["owner_loop_budget_s"], 17)
+            self.assertEqual(row["owner_exit_grace_s"], 3)
+            self.assertNotIn("owner_loop_deadline_reached", row)
+            self.assertNotIn("cell_wall_s", row)
 
 
 class ReviewDiagnosticsTest(unittest.TestCase):
@@ -445,6 +586,7 @@ class TurnMetadataTest(unittest.TestCase):
                 drive.run(args(out, cell="review-good", review_case="roman-v2"))
                 row = json.loads((out / "results.jsonl").read_text())
                 self.assertEqual(row["decision"], decision)
+                self.assertEqual(row["wall_semantics"], "review_engine_wait")
                 self.assertEqual(row["no_verdict"], decision is None)
                 self.assertFalse(row["killed"])
                 self.assertFalse(row["review_diagnostics_present"])
