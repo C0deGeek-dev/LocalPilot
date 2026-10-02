@@ -2,6 +2,66 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0202: A Rewrite Or Split Leaves The Tested Lesson As History, And A Rerun Is Only A Request
+
+**Status:** accepted · **Date:** 2026-10-02. Builds on ADR-0186, ADR-0187,
+ADR-0200 and ADR-0201 (the lab tiers) and uses LocalMind D-LM-0055 (rewrite and
+split make new review items; a harmful result holds a lesson back).
+
+**Context.** A lab result is bound to the exact lesson it was run against.
+Review could still change that lesson underneath the result: `learning review
+edit` accepted a lesson with replacement text while the stored lesson, and its
+green result, stayed as they were. Nothing could split a lesson. And "run it
+again" had nowhere to go except straight into a run.
+
+**Decision.**
+
+**Rewrite.** `localpilot learning review edit <item>` takes `--replacement`,
+`--cause`, `--applicability` and `--intervention` (at least one). The original
+item closes as history with its lab results; the rewrite is a new item, accepted
+in the reviewer's name, with no results and no lab record. The terminal review's
+rewrite action goes through the same path. Promoting from either id writes the
+rewrite.
+
+**Split.** A model drafts the parts, a person approves them — the shape uplift
+tasks already use (ADR-0200).
+- `learning review split draft <item> --model <m>` sends the lesson and its
+  hindsight, never the run's raw facts, to the configured provider. A reply is
+  checked (2 to 5 parts, each a sentence of its own, none the lesson unchanged,
+  no two the same) and gets one repair. The draft is a file under
+  `.localpilot/review/splits/` and changes nothing in review.
+- `split show` prints it and says whether it can be approved.
+- `split approve <item> --reviewer <name>` approves the draft as it then stands
+  on disk. Each part becomes a pending item that starts untested; the original
+  is kept as history. A draft written for a lesson that has since changed is
+  refused.
+
+**The lab runs only live lessons.** A lesson that was rejected, merged,
+rewritten or split is history: `lab replay`, `lab uplift`, `lab tasks` and `lab
+rerun` refuse it, and `lab list` shows its results marked as history. A rewrite
+or a split part has a new identity and no lab record, so it reviews as any
+untested lesson does.
+
+**Rerun is a request.** `localpilot lab rerun <lesson> --tier replay|uplift
+--reviewer <name>` writes a note under `.localpilot/lab/reruns/` and runs
+nothing. It does not enable the tier for the project and is not the
+confirmation a run needs. `lab list` shows it. It closes when a person runs that
+tier to a result, or with `--withdraw`; a run that was refused, cancelled or
+could not execute leaves it open. LocalMind has no rerun action, so a review
+decision cannot reach the runner.
+
+**Harmful results.** A lesson with a current `Contradicted` result is held for a
+person in every review mode (D-LM-0055). The opt-in down-weight of ADR-0200 is
+unchanged and stays off by default.
+
+**Consequences.**
+- A result always describes the text it sits beside. A rewritten or split
+  lesson is untested until someone tests it.
+- A rewrite does not carry a lab record forward, so a rewritten lesson cannot be
+  replayed against the original's fixture. That is deliberate: the fixture was
+  chosen for the old claim.
+- Split parts go through the ordinary review modes like any pending lesson.
+
 ## ADR-0201: An Uplift Run Starts Only From A Confirmed Command, Under Ceilings That Cancel It
 
 **Status:** accepted · **Date:** 2026-10-02. Builds on ADR-0200 (the uplift

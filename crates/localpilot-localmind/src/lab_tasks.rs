@@ -293,7 +293,7 @@ fn parse_reply(
     Ok(set)
 }
 
-async fn ask(
+pub(crate) async fn ask(
     provider: &dyn ModelProvider,
     model: &str,
     messages: &[Message],

@@ -221,6 +221,8 @@ truth this table mirrors.
 | Headless harness (`harness run`) | Yes — each step |
 | RPC / ACP serve loop | Yes — on session end |
 | `localpilot learning closeout` | Yes — explicit, on demand |
+| `localpilot learning review split draft` | No — sends a lesson and its hindsight to the configured model to draft a split; writes a draft file only (ADR-0202) |
+| `localpilot lab rerun` | No — records a request for a Replay or Uplift run; runs nothing (ADR-0202) |
 | `localpilot lab tasks draft` | No — sends a lesson and its hindsight to the configured model to draft uplift questions; writes a draft file only (ADR-0200) |
 | `localpilot lab uplift` | No — runs a lesson's approved tasks with and without it through LocalBench in a throwaway workspace and records the result on the lesson already in review; opt-in per project, confirmed per run, bounded by ceilings (ADR-0201) |
 | `localpilot lab replay` | No — runs a lesson's ratified check on its commits and records the result on the lesson already in review; opt-in per project and confirmed per run (ADR-0187) |

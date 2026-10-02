@@ -1475,6 +1475,17 @@ in a project whose committed `.localpilot.toml` sets `[lab] uplift = true`.
 - **Telemetry.** Wall time and tokens are reported apart from the result; model
   load state, RAM and GPU are reported as not measured.
 
+Review actions and the lab (ADR-0202):
+- **Rewrite.** `localpilot learning review edit <item>` closes the original as
+  history with its results and accepts a new, untested item.
+- **Split.** `learning review split draft|show|approve <item>`: a model drafts
+  the parts, a named reviewer approves them, each part is a new pending item.
+- **History.** The lab runs only live lessons; a rejected, merged, rewritten or
+  split lesson keeps its results, marked as history in `lab list`.
+- **Rerun.** `localpilot lab rerun <lesson> --tier replay|uplift --reviewer
+  <name>` records a request and runs nothing. Starting the run keeps its opt-in
+  and confirmation.
+
 ## Completion Teardown Sweep
 
 At the same completion seam, when `[harness] teardown_sweep` is enabled, the

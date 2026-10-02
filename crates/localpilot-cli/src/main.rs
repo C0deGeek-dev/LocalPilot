@@ -1167,6 +1167,25 @@ enum LabCommand {
     },
     /// Show the project's uplift runs and how each stands.
     Status,
+    /// Ask for a lesson's Replay or Uplift run to be done again. This records
+    /// a request and runs nothing: starting the run still needs the project's
+    /// opt-in and its own confirmation.
+    Rerun {
+        /// The lesson's candidate identity, or an unambiguous prefix of it.
+        candidate: String,
+        /// Which run to ask for: `replay` or `uplift`.
+        #[arg(long)]
+        tier: String,
+        /// Who is asking. Recorded with the request.
+        #[arg(long)]
+        reviewer: String,
+        /// Why.
+        #[arg(long)]
+        note: Option<String>,
+        /// Withdraw the request instead of making one.
+        #[arg(long)]
+        withdraw: bool,
+    },
     /// Uplift tasks for a lesson: a model drafts them, a person approves them.
     /// Nothing runs from a draft.
     Tasks {
@@ -1460,19 +1479,37 @@ enum ReviewCommand {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Edit a review item's summary before accepting it.
+    /// Rewrite a review item and accept the rewrite. The original is kept as
+    /// history with its lab results; the rewritten lesson is a new item that
+    /// starts untested. Give at least one thing to change.
     Edit {
         /// Review item id.
         id: String,
-        /// Replacement summary.
+        /// The rewritten lesson sentence.
         #[arg(long)]
-        replacement: String,
+        replacement: Option<String>,
+        /// Correct the cause the lesson's hindsight names.
+        #[arg(long)]
+        cause: Option<String>,
+        /// Correct where the lesson applies.
+        #[arg(long)]
+        applicability: Option<String>,
+        /// Correct the change that would have avoided the outcome.
+        #[arg(long)]
+        intervention: Option<String>,
         /// Reviewer name recorded in the audit log.
         #[arg(long, default_value = "user")]
         reviewer: String,
         /// Optional review note.
         #[arg(long)]
         note: Option<String>,
+    },
+    /// Split a review item into narrower lessons: a model drafts the parts, a
+    /// person approves them. Each part becomes its own pending item that starts
+    /// untested; the original is kept as history.
+    Split {
+        #[command(subcommand)]
+        command: ReviewSplitCommand,
     },
     /// Back up the store, then delete every pending candidate (a one-time
     /// cleanup of an un-reviewed backlog). Decided items and accepted memory are
@@ -1481,6 +1518,39 @@ enum ReviewCommand {
         /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReviewSplitCommand {
+    /// Have the configured model draft the parts. Sends the lesson and its
+    /// hindsight to the project's configured provider. Changes nothing in
+    /// review.
+    Draft {
+        /// Review item id.
+        id: String,
+        /// Model name to request.
+        #[arg(long)]
+        model: String,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Show the draft for a review item.
+    Show {
+        /// Review item id.
+        id: String,
+    },
+    /// Approve the draft as it now stands on disk and split the item.
+    Approve {
+        /// Review item id.
+        id: String,
+        /// Who is approving. Recorded on the original and in the audit log.
+        #[arg(long)]
+        reviewer: String,
+        /// Optional review note.
+        #[arg(long)]
+        note: Option<String>,
     },
 }
 
@@ -2192,18 +2262,49 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                     ReviewCommand::Edit {
                         id,
                         replacement,
+                        cause,
+                        applicability,
+                        intervention,
                         reviewer,
                         note,
                     } => {
-                        learning_cmd::review_decide(
+                        learning_cmd::review_rewrite(
                             root,
                             &id,
-                            ReviewVerdict::Edit { replacement },
+                            &localmind_core::LessonRevision {
+                                summary: replacement,
+                                cause,
+                                applicability,
+                                intervention,
+                            },
                             &reviewer,
                             note,
                             &mut stdout,
                         )?;
                     }
+                    ReviewCommand::Split { command } => match command {
+                        ReviewSplitCommand::Draft {
+                            id,
+                            model,
+                            provider,
+                        } => {
+                            let provider = harness_cmd::provider_for(root, provider.as_deref())?;
+                            learning_cmd::split_draft(
+                                root,
+                                &id,
+                                &model,
+                                provider.as_ref(),
+                                &mut stdout,
+                            )
+                            .await?;
+                        }
+                        ReviewSplitCommand::Show { id } => {
+                            learning_cmd::split_show(root, &id, &mut stdout)?;
+                        }
+                        ReviewSplitCommand::Approve { id, reviewer, note } => {
+                            learning_cmd::split_approve(root, &id, &reviewer, note, &mut stdout)?;
+                        }
+                    },
                     ReviewCommand::Purge { yes } => {
                         learning_cmd::review_purge(root, yes, &mut stdout)?;
                     }
@@ -2632,6 +2733,21 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             match command {
                 LabCommand::List => lab_cmd::list(&root, &mut stdout)?,
                 LabCommand::Status => lab_cmd::status(&root, &mut stdout)?,
+                LabCommand::Rerun {
+                    candidate,
+                    tier,
+                    reviewer,
+                    note,
+                    withdraw,
+                } => lab_cmd::rerun(
+                    &root,
+                    &candidate,
+                    &tier,
+                    &reviewer,
+                    note,
+                    withdraw,
+                    &mut stdout,
+                )?,
                 LabCommand::Uplift {
                     candidate,
                     model,

@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Rewriting or splitting a lesson no longer keeps its old test result.**
+  `localpilot learning review edit` now closes the original as history, with
+  its lab results, and accepts the rewrite as a new, untested lesson; it also
+  takes `--cause`, `--applicability` and `--intervention`. New `learning review
+  split draft|show|approve` has the configured model draft narrower lessons for
+  a reviewer to approve. `localpilot lab rerun` records a request for a Replay
+  or Uplift run without starting one. The lab no longer runs against a lesson
+  that was rejected, merged, rewritten or split. A lesson a run found harmful
+  is not auto-accepted in any review mode (ADR-0202).
 - **Seat-evaluation timeout reporting.** Native mesh logs expose resolved
   per-turn deadlines and their builtin/config source. Driver result rows retain
   observed stops, runtime timeout counts and trace completeness independently

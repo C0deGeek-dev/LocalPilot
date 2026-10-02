@@ -276,6 +276,15 @@ pub fn review_decide(
     persistence
         .record_review_item_audit(&item)
         .map_err(memory_err)?;
+    // An edit is a rewrite: the item returned is the new one. The original it
+    // closed is a decision of its own and is audited as one.
+    if item.id.as_str() != item_id {
+        if let Some(original) = queue.get(&ReviewItemId::new(item_id)).map_err(review_err)? {
+            persistence
+                .record_review_item_audit(&original)
+                .map_err(memory_err)?;
+        }
+    }
     Ok(format!("{:?}", item.state))
 }
 

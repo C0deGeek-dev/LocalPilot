@@ -302,6 +302,148 @@ pub fn review_decide(
     Ok(())
 }
 
+/// Rewrite a review item as `reviewer` and accept the rewrite.
+///
+/// # Errors
+/// The item is already decided, the change is empty, or the audit cannot be
+/// written.
+pub fn review_rewrite(
+    cwd: &std::path::Path,
+    id: &str,
+    revision: &localmind_core::LessonRevision,
+    reviewer: &str,
+    note: Option<String>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let rewritten = learning::review_rewrite(cwd, id, revision, reviewer, note)?;
+    writeln!(
+        out,
+        "{} -> rewritten as {} (accepted, untested)",
+        rewritten.original, rewritten.revised
+    )?;
+    writeln!(
+        out,
+        "  {} is kept as history; it was not changed.",
+        rewritten.original
+    )?;
+    if rewritten.results_left_behind > 0 {
+        writeln!(
+            out,
+            "  Its {} lab result(s) describe the old text and stay with it. The rewrite has none.",
+            rewritten.results_left_behind
+        )?;
+    }
+    Ok(())
+}
+
+fn print_split(draft: &learning::SplitDraft, out: &mut dyn Write) -> std::io::Result<()> {
+    for (index, part) in draft.parts.iter().enumerate() {
+        writeln!(out, "  {}. {part}", index + 1)?;
+    }
+    Ok(())
+}
+
+/// Have the configured model draft a split of a review item, and write it as a
+/// draft for a person to read, edit and approve. A draft changes nothing.
+///
+/// # Errors
+/// The item cannot be split, the model cannot draft, or the draft cannot be
+/// written.
+pub async fn split_draft(
+    cwd: &std::path::Path,
+    id: &str,
+    model: &str,
+    provider: &dyn localpilot_llm::ModelProvider,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let item = learning::splittable_item(cwd, id)?;
+    let drafted = learning::draft_split(provider, model, &item)
+        .await
+        .map_err(|failure| anyhow::anyhow!("no draft: {failure}"))?;
+    let store = localpilot_store::Store::open(cwd);
+    let path = learning::write_split_draft(store.root(), &drafted.draft)?;
+    writeln!(
+        out,
+        "Drafted {} part(s) for {id} with {model} ({} model call(s){}):",
+        drafted.draft.parts.len(),
+        drafted.model_calls,
+        if drafted.repaired { ", one repair" } else { "" }
+    )?;
+    print_split(&drafted.draft, out)?;
+    writeln!(out, "Draft: {}", path.display())?;
+    writeln!(
+        out,
+        "A draft changes nothing. Read it — is each part true on its own, and does any part say \
+         more than the lesson did? Edit the file if needed, then:"
+    )?;
+    writeln!(
+        out,
+        "  localpilot learning review split approve {id} --reviewer <your name>"
+    )?;
+    Ok(())
+}
+
+/// Show a review item's split draft and whether it can be approved.
+///
+/// # Errors
+/// The item cannot be read, or the draft file is unreadable.
+pub fn split_show(cwd: &std::path::Path, id: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+    let item = learning::splittable_item(cwd, id)?;
+    writeln!(out, "{id}: {}", item.candidate.summary())?;
+    let store = localpilot_store::Store::open(cwd);
+    match learning::read_split_draft(store.root(), id).map_err(anyhow::Error::msg)? {
+        Some(draft) => {
+            writeln!(
+                out,
+                "Draft ({} part(s){}):",
+                draft.parts.len(),
+                draft
+                    .drafted_by
+                    .as_ref()
+                    .map(|model| format!(", drafted by {model}"))
+                    .unwrap_or_default()
+            )?;
+            print_split(&draft, out)?;
+            if let Err(problems) = learning::validate_split(&draft, &item.candidate) {
+                for problem in problems {
+                    writeln!(out, "  cannot be approved: {problem}")?;
+                }
+            }
+        }
+        None => writeln!(out, "No draft.")?,
+    }
+    Ok(())
+}
+
+/// Approve a review item's split draft in `reviewer`'s name.
+///
+/// # Errors
+/// There is no usable draft, or the split is refused.
+pub fn split_approve(
+    cwd: &std::path::Path,
+    id: &str,
+    reviewer: &str,
+    note: Option<String>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let store = localpilot_store::Store::open(cwd);
+    let parts = learning::approve_split(cwd, store.root(), id, reviewer, note)?;
+    writeln!(
+        out,
+        "{id} -> split into {} pending item(s) by {}; {id} is kept as history.",
+        parts.len(),
+        reviewer.trim()
+    )?;
+    for part in &parts {
+        writeln!(out, "  {}: {}", part.id, part.summary)?;
+    }
+    writeln!(
+        out,
+        "  Each part is untested and needs its own decision. Lab results stay with {id}."
+    )?;
+    Ok(())
+}
+
 /// Promote an accepted item into durable memory.
 ///
 /// # Errors

@@ -37,6 +37,7 @@ mod replay_lab;
 mod research_chat;
 mod research_ingest;
 mod retrospective_lesson;
+mod review_actions;
 mod review_list_tool;
 mod rule_cue;
 mod run_facts;
@@ -131,6 +132,13 @@ pub use research_ingest::{
     DocIngestSummary,
 };
 pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
+pub use review_actions::{
+    approve_split, clear_rerun, draft_split, is_live as lab_lesson_is_live, lab_lesson_state,
+    read_split_draft, request_rerun, rerun_requests, review_rewrite, review_split,
+    split_draft_path, splittable_item, validate_split, write_split_draft, DraftedSplit,
+    RerunRefusal, RerunRequest, Rewritten, SplitDraft, SplitPart, SplitProblem, MAX_SPLIT_PARTS,
+    MIN_SPLIT_PARTS, RERUN_REQUESTS_DIR, SPLIT_DRAFTS_DIR,
+};
 pub use review_list_tool::ReviewList;
 pub use rule_cue::{register_rule_cues, rule_cue_ids, RULE_CUE_TAG};
 pub use run_facts::{

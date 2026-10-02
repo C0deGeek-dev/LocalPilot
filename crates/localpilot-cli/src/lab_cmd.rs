@@ -97,7 +97,121 @@ pub fn list(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
             Some(_) => writeln!(out, "    no results yet")?,
             None => writeln!(out, "    no longer in review")?,
         }
+        if let Some(state) =
+            localpilot_localmind::lab_lesson_state(root, &record.candidate_identity)?
+        {
+            if !localpilot_localmind::lab_lesson_is_live(&state) {
+                writeln!(
+                    out,
+                    "    history ({state:?}): these results describe a lesson that is no longer live"
+                )?;
+            }
+        }
+        for request in
+            localpilot_localmind::rerun_requests(store.root(), &record.candidate_identity)
+        {
+            writeln!(
+                out,
+                "    rerun requested: {:?} by {}{} — not run; start it with `localpilot lab {}`",
+                request.tier,
+                request.requested_by,
+                request
+                    .note
+                    .as_ref()
+                    .map(|note| format!(" ({note})"))
+                    .unwrap_or_default(),
+                format!("{:?}", request.tier).to_lowercase()
+            )?;
+        }
     }
+    Ok(())
+}
+
+/// Whether a run got as far as a result about the lesson. A run that was
+/// refused, cancelled or could not execute leaves a rerun request open: the
+/// thing that was asked for has not happened yet.
+fn ran_to_a_result(verdict: localmind_core::LabVerdict) -> bool {
+    !matches!(
+        verdict,
+        localmind_core::LabVerdict::InvalidExperiment | localmind_core::LabVerdict::NotExecutable
+    )
+}
+
+/// The message for a lesson the lab no longer runs.
+fn history_message(identity: &str, state: &localmind_core::ReviewState) -> String {
+    format!(
+        "{identity} is history ({state:?}): it was decided or replaced in review, and the lab \
+         runs only live lessons"
+    )
+}
+
+/// Record, or withdraw, a request that a lesson's Replay or Uplift run be done
+/// again. Nothing runs.
+///
+/// # Errors
+/// The lesson cannot be resolved, or the request is refused.
+pub fn rerun(
+    root: &Path,
+    selection: &str,
+    tier: &str,
+    reviewer: &str,
+    note: Option<String>,
+    withdraw: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let tier = match tier.trim().to_ascii_lowercase().as_str() {
+        "replay" => localmind_core::EvidenceTier::Replay,
+        "uplift" => localmind_core::EvidenceTier::Uplift,
+        other => anyhow::bail!("`{other}` is not a run a person starts; use `replay` or `uplift`"),
+    };
+    let store = Store::open(root);
+    let mut matches: Vec<_> = read_lab_records(store.root())
+        .into_iter()
+        .filter(|record| record.candidate_identity.starts_with(selection))
+        .collect();
+    let record = match matches.len() {
+        0 => {
+            anyhow::bail!("no classified lesson matches `{selection}` (see `localpilot lab list`)")
+        }
+        1 => matches.remove(0),
+        n => anyhow::bail!("`{selection}` matches {n} lessons; give more of the identity"),
+    };
+    let identity = &record.candidate_identity;
+    if withdraw {
+        if localpilot_localmind::clear_rerun(store.root(), identity, tier) {
+            writeln!(out, "Withdrew the {tier:?} rerun request for {identity}.")?;
+        } else {
+            writeln!(out, "No {tier:?} rerun request for {identity}.")?;
+        }
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        });
+    let request = localpilot_localmind::request_rerun(
+        root,
+        store.root(),
+        identity,
+        tier,
+        reviewer,
+        note,
+        now,
+    )
+    .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    writeln!(
+        out,
+        "Recorded: {} asks for {:?} to be run again for {identity}.",
+        request.requested_by, request.tier
+    )?;
+    writeln!(
+        out,
+        "Nothing ran. A request does not enable {:?} for this project and is not a confirmation: \
+         start it with `localpilot lab {} {identity}`, which shows what will run and asks.",
+        request.tier,
+        format!("{:?}", request.tier).to_lowercase()
+    )?;
     Ok(())
 }
 
@@ -150,6 +264,18 @@ pub async fn replay(
             )?;
             continue;
         };
+        if let Some(state) =
+            localpilot_localmind::lab_lesson_state(root, &record.candidate_identity)?
+        {
+            if !localpilot_localmind::lab_lesson_is_live(&state) {
+                writeln!(
+                    out,
+                    "{}; skipped",
+                    history_message(&record.candidate_identity, &state)
+                )?;
+                continue;
+            }
+        }
         for assignment in replayable {
             match plan_replay(root, &candidate, assignment, timeout) {
                 Ok(plan) => plans.push(plan),
@@ -221,11 +347,19 @@ pub async fn replay(
         if let Some(path) = &outcome.receipt_path {
             writeln!(out, "  receipt: {}", path.display())?;
         }
+        let ran = ran_to_a_result(outcome.evidence.verdict);
         if !attach_lab_evidence(root, outcome.evidence)? {
             writeln!(
                 out,
                 "  the lesson is no longer in review; the result was not kept"
             )?;
+        }
+        if ran {
+            localpilot_localmind::clear_rerun(
+                store.root(),
+                &plan.candidate_identity,
+                localmind_core::EvidenceTier::Replay,
+            );
         }
     }
     Ok(())
@@ -255,6 +389,11 @@ fn resolve(
     let Some((_, candidate)) = lab_candidate(root, &record.candidate_identity)? else {
         anyhow::bail!("{} is no longer in review", record.candidate_identity);
     };
+    if let Some(state) = localpilot_localmind::lab_lesson_state(root, &record.candidate_identity)? {
+        if !localpilot_localmind::lab_lesson_is_live(&state) {
+            anyhow::bail!("{}", history_message(&record.candidate_identity, &state));
+        }
+    }
     Ok((record, candidate))
 }
 
@@ -612,11 +751,19 @@ pub async fn uplift(
         writeln!(out, "  routed to review: accepted memory {id}")?;
     }
     writeln!(out, "  run: {}", outcome.run_dir.display())?;
+    let ran = ran_to_a_result(outcome.evidence.verdict);
     if !attach_lab_evidence(root, outcome.evidence)? {
         writeln!(
             out,
             "  the lesson is no longer in review; the result was not kept"
         )?;
+    }
+    if ran {
+        localpilot_localmind::clear_rerun(
+            Store::open(root).root(),
+            &record.candidate_identity,
+            localmind_core::EvidenceTier::Uplift,
+        );
     }
     Ok(())
 }
@@ -1393,4 +1540,257 @@ else\n\
   printf '{\"kind\":{\"type\":\"turn_done\"}}\\n' > .localpilot/sessions/turn.jsonl\n\
   echo 'I am not sure.'\n\
 fi\n";
+
+    fn printed(run: impl FnOnce(&mut Vec<u8>) -> anyhow::Result<()>) -> String {
+        let mut out = Vec::new();
+        run(&mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// Asking for a rerun writes a note. It starts nothing, it does not stand
+    /// in for the tier's opt-in or its confirmation, and it stays open until
+    /// the run it asked for has actually produced a result.
+    #[tokio::test]
+    async fn a_rerun_request_is_shown_and_starts_nothing_until_a_person_runs_it() {
+        let (dir, candidate) = project();
+        let root = dir.path();
+        let identity = candidate.content_identity();
+
+        let mut out = Vec::new();
+        assert!(
+            rerun(root, &identity, "logic", "ada", None, false, &mut out)
+                .unwrap_err()
+                .to_string()
+                .contains("use `replay` or `uplift`")
+        );
+        assert!(rerun(root, &identity, "replay", " ", None, false, &mut out)
+            .unwrap_err()
+            .to_string()
+            .contains("named reviewer"));
+
+        for tier in ["uplift", "replay"] {
+            let text = printed(|out| {
+                rerun(
+                    root,
+                    &identity,
+                    tier,
+                    "ada",
+                    Some("look again".to_string()),
+                    false,
+                    out,
+                )
+            });
+            assert!(text.contains("Nothing ran."), "{text}");
+            assert!(text.contains("is not a confirmation"), "{text}");
+        }
+        assert!(
+            results(root, &candidate).is_empty(),
+            "a request runs nothing"
+        );
+        assert!(localpilot_localmind::run_statuses(root).is_empty());
+        let listing = printed(|out| list(root, out));
+        assert!(
+            listing.contains("rerun requested: Uplift by ada (look again)"),
+            "{listing}"
+        );
+        assert!(
+            listing.contains("rerun requested: Replay by ada"),
+            "{listing}"
+        );
+
+        // The request authorizes nothing: an uplift run still needs its approved
+        // tasks, and a Replay run still needs its confirmation.
+        let refused = run_uplift_command(root, &identity, Confirmation::Yes, fixture_tools()).await;
+        assert!(refused.contains("Nothing ran"), "{refused}");
+        let unconfirmed = run(root, Confirmation::Unavailable).await;
+        assert!(unconfirmed.contains("Nothing ran"), "{unconfirmed}");
+        assert!(results(root, &candidate).is_empty());
+        let listing = printed(|out| list(root, out));
+        assert!(
+            listing.contains("rerun requested: Uplift"),
+            "a refused run leaves the request"
+        );
+        assert!(listing.contains("rerun requested: Replay"), "{listing}");
+
+        // A person runs Replay: the request for that tier is closed, the other
+        // stays.
+        let ran = run(root, Confirmation::Yes).await;
+        assert!(ran.contains("Replay Valid"), "{ran}");
+        let listing = printed(|out| list(root, out));
+        assert!(!listing.contains("rerun requested: Replay"), "{listing}");
+        assert!(listing.contains("rerun requested: Uplift"), "{listing}");
+
+        let text = printed(|out| rerun(root, &identity, "uplift", "ada", None, true, out));
+        assert!(text.contains("Withdrew the Uplift rerun request"), "{text}");
+        assert!(!printed(|out| list(root, out)).contains("rerun requested"));
+    }
+
+    /// A rewritten lesson is history to the lab: its results stay with it and
+    /// stay visible, nothing runs against it again, and the rewrite starts with
+    /// no results and no lab record.
+    #[tokio::test]
+    async fn a_rewritten_lesson_is_history_to_the_lab_and_the_rewrite_starts_untested() {
+        let (dir, candidate) = project();
+        let root = dir.path();
+        let identity = candidate.content_identity();
+        assert!(run(root, Confirmation::Yes).await.contains("Replay Valid"));
+
+        let text = printed(|out| {
+            crate::learning_cmd::review_rewrite(
+                root,
+                "retro-1",
+                &localmind_core::LessonRevision {
+                    summary: Some("Write the state file in the setup step".to_string()),
+                    cause: Some("the setup step never wrote the state file".to_string()),
+                    ..localmind_core::LessonRevision::default()
+                },
+                "ada",
+                None,
+                out,
+            )
+        });
+        assert!(
+            text.contains("retro-1 -> rewritten as retro-1-r1 (accepted, untested)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 lab result(s) describe the old text"),
+            "{text}"
+        );
+
+        // The original keeps its result, marked as history.
+        let listing = printed(|out| list(root, out));
+        assert!(listing.contains("Replay Valid"), "{listing}");
+        assert!(listing.contains("history (Merged)"), "{listing}");
+        assert_eq!(
+            results(root, &candidate),
+            vec![(LabVerdict::Valid, Vec::new())]
+        );
+
+        // The rewrite carries none, and the lab has no record of it.
+        let queue = localmind_store::ReviewQueue::open_project(root).unwrap();
+        let revised = queue
+            .get(&localmind_core::ReviewItemId::new("retro-1-r1"))
+            .unwrap()
+            .unwrap();
+        assert!(revised.candidate.experiments.is_empty());
+        assert_eq!(
+            revised.candidate.revises.as_deref(),
+            Some(identity.as_str())
+        );
+        assert!(!listing.contains(&revised.candidate.content_identity()));
+
+        // Nothing runs against history, by any lab command.
+        let replayed = run(root, Confirmation::Yes).await;
+        assert!(replayed.contains("is history (Merged)"), "{replayed}");
+        assert!(replayed.contains("Nothing to replay."), "{replayed}");
+        let mut out = Vec::new();
+        assert!(
+            rerun(root, &identity, "replay", "ada", None, false, &mut out)
+                .unwrap_err()
+                .to_string()
+                .contains("no longer a live lesson")
+        );
+        let drafted = tasks_draft(
+            root,
+            &identity,
+            "local-model",
+            &localpilot_llm::FakeProvider::new().text("{}"),
+            &mut out,
+        )
+        .await;
+        assert!(drafted.unwrap_err().to_string().contains("is history"));
+        let uplifted = uplift(
+            root,
+            &identity,
+            &uplift_args(),
+            Confirmation::Yes,
+            &engine(),
+            fixture_tools(),
+            None,
+            &CancelSignal::new(),
+            &mut out,
+        )
+        .await;
+        assert!(uplifted.unwrap_err().to_string().contains("is history"));
+        assert_eq!(results(root, &candidate).len(), 1);
+    }
+
+    /// The split commands: a model drafts, the draft changes nothing, and a
+    /// named reviewer's approval puts untested parts in review.
+    #[tokio::test]
+    async fn a_split_is_drafted_shown_and_approved_from_the_command_line() {
+        let (dir, candidate) = project();
+        let root = dir.path();
+        assert!(run(root, Confirmation::Yes).await.contains("Replay Valid"));
+        let reply = r#"{"parts":[
+            "Write the state file before running the check",
+            "Make the check fail clearly when the state file is missing"
+        ]}"#;
+
+        let mut out = Vec::new();
+        crate::learning_cmd::split_draft(
+            root,
+            "retro-1",
+            "local-model",
+            &localpilot_llm::FakeProvider::new().text(reply),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Drafted 2 part(s) for retro-1 with local-model"),
+            "{text}"
+        );
+        assert!(text.contains("A draft changes nothing."), "{text}");
+
+        let shown = printed(|out| crate::learning_cmd::split_show(root, "retro-1", out));
+        assert!(
+            shown.contains("Draft (2 part(s), drafted by local-model):"),
+            "{shown}"
+        );
+        assert!(!shown.contains("cannot be approved"), "{shown}");
+        let queue = localmind_store::ReviewQueue::open_project(root).unwrap();
+        assert_eq!(queue.list().unwrap().len(), 1, "a draft changes nothing");
+
+        let approved =
+            printed(|out| crate::learning_cmd::split_approve(root, "retro-1", "ada", None, out));
+        assert!(
+            approved.contains("retro-1 -> split into 2 pending item(s) by ada"),
+            "{approved}"
+        );
+        assert!(
+            approved.contains("Lab results stay with retro-1."),
+            "{approved}"
+        );
+
+        let items = queue.list().unwrap();
+        assert_eq!(items.len(), 3);
+        for item in items.iter().filter(|item| item.id.as_str() != "retro-1") {
+            assert_eq!(item.state, localmind_core::ReviewState::Pending);
+            assert!(
+                item.candidate.experiments.is_empty(),
+                "no result is inherited"
+            );
+            assert_eq!(
+                item.candidate.revises.as_deref(),
+                Some(candidate.content_identity().as_str())
+            );
+        }
+        assert!(printed(|out| list(root, out)).contains("history (Merged)"));
+        assert!(localpilot_localmind::memory_list_readonly(root)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The down-weight path stays off unless a project turns it on.
+    #[test]
+    fn outcome_downweighting_is_off_by_default() {
+        assert!(
+            !localpilot_config::Config::default()
+                .memory
+                .outcome_downweight
+        );
+    }
 }
