@@ -377,12 +377,34 @@ pub trait Tool: Send + Sync {
     /// Returns [`ToolError`] on invalid input or execution failure.
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError>;
 
+    /// Invoke after authorization with optional bounds on implicit file reads.
+    /// Other tools keep their ordinary invocation; the read builtin enforces
+    /// these independent limits without inspecting contents before permission.
+    ///
+    /// # Errors
+    /// Returns [`ToolError`] on invalid input, exceeded bounds or execution failure.
+    async fn invoke_with_file_read_limits(
+        &self,
+        input: Value,
+        ctx: &ToolContext<'_>,
+        _limits: Option<FileReadLimits>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.invoke(input, ctx).await
+    }
+
     /// Static discipline metadata: side effects, reversibility, pre/post-
     /// conditions, and how the result is verified. Additive and advisory — the
     /// default is an empty contract, and the permission path is unaffected by it.
     fn contract(&self) -> crate::contract::ToolContract {
         crate::contract::ToolContract::default()
     }
+}
+
+/// Independent bounds for a file read without an explicit last line.
+#[derive(Debug, Clone, Copy)]
+pub struct FileReadLimits {
+    pub max_lines: usize,
+    pub max_bytes: usize,
 }
 
 /// Parse a tool's JSON input into a typed struct.

@@ -20,6 +20,12 @@ Background tests cover cancellation during startup grace, stop and session close
 
 ## Automatic Work Sizing
 
+The production-dispatch scenarios also cover short whole-file text larger in
+bytes than its line count, byte-small files exceeding the line cap, tightened
+line configuration, and denied reads preceding content-dependent limits.
+Large files still require pages; the long-line scenario proves explicit-page
+output remains bounded and retained. No user stores or model endpoints are used.
+
 `localpilot-harness/tests/granularity.rs` drives the real shared runtime with
 fake providers: oversized/whole-file requests, explicit pages, cumulative edits,
 UTF-8 giant-line retention, unavailable verification, recorded passing checks,

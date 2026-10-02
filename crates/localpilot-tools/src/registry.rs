@@ -19,7 +19,7 @@ use crate::builtins_background::RunBackground;
 use crate::builtins_shell::RunShell;
 use crate::builtins_swarm::Swarm;
 use crate::catalog::{Catalog, ToolSource};
-use crate::tool::{ShellOutput, Tool, ToolContext, ToolOutputPresentation};
+use crate::tool::{FileReadLimits, ShellOutput, Tool, ToolContext, ToolOutputPresentation};
 
 /// Context-size bound on a tool result. Output beyond this is kept as head +
 /// tail in context, with the full text spilled to the retention store under
@@ -37,6 +37,7 @@ pub struct ToolRegistry {
     /// projection can discriminate a builtin from a specific MCP server's tool.
     sources: Vec<ToolSource>,
     context_output_bytes: usize,
+    file_read_limits: Option<FileReadLimits>,
 }
 
 /// One authorized tool dispatch with both its model-facing result and an
@@ -72,12 +73,21 @@ impl ToolRegistry {
             tools: Vec::new(),
             sources: Vec::new(),
             context_output_bytes: CONTEXT_OUTPUT_BYTES,
+            file_read_limits: None,
         }
     }
 
     /// Tighten retained output projection; full redacted output stays pageable.
     pub fn set_context_output_limit(&mut self, bytes: usize) {
         self.context_output_bytes = bytes.clamp(1024, CONTEXT_OUTPUT_BYTES);
+    }
+
+    /// Bound implicit builtin file reads after their effects are authorized.
+    pub fn set_file_read_limits(&mut self, max_lines: usize, max_bytes: usize) {
+        self.file_read_limits = Some(FileReadLimits {
+            max_lines,
+            max_bytes,
+        });
     }
 
     /// A registry with all builtin tools.
@@ -182,6 +192,7 @@ impl ToolRegistry {
             tools,
             sources,
             context_output_bytes: self.context_output_bytes,
+            file_read_limits: self.file_read_limits,
         }
     }
 
@@ -371,7 +382,10 @@ impl ToolRegistry {
             }
         }
 
-        match tool.invoke(call.input.clone(), ctx).await {
+        match tool
+            .invoke_with_file_read_limits(call.input.clone(), ctx, self.file_read_limits)
+            .await
+        {
             // Redaction happens here, for every profile including bypass.
             Ok(output) => {
                 let redacted = redact(&output.text);

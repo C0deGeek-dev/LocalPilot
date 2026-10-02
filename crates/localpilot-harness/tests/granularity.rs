@@ -71,6 +71,90 @@ async fn turn(runtime: &mut SessionRuntime) -> (StopReason, Vec<RuntimeEvent>) {
 }
 
 #[tokio::test]
+async fn short_whole_file_read_uses_line_and_byte_limits_independently() {
+    let dir = tempfile::tempdir().unwrap();
+    let short = "ordinary source line with several words\n".repeat(18);
+    assert!(short.len() > 80);
+    std::fs::write(dir.path().join("short.txt"), &short).unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("short", "read_file", json!({"path":"short.txt"}))
+            .text("reviewed the short file"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, output, .. } if id == "short" && output.contains(&short))));
+}
+
+#[tokio::test]
+async fn byte_small_whole_file_with_too_many_lines_requires_a_page() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("dense.txt"), "x\n".repeat(81)).unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("whole", "read_file", json!({"path":"dense.txt"}))
+            .tool_call(
+                "page",
+                "read_file",
+                json!({"path":"dense.txt", "start_line":1, "end_line":80}),
+            )
+            .text("used an explicit page"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "whole" && output.contains("explicit start_line"))));
+    assert!(events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "page")
+    ));
+}
+
+#[tokio::test]
+async fn whole_file_exception_keeps_byte_and_tightened_line_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("long.txt"), "z".repeat(5000)).unwrap();
+    std::fs::write(dir.path().join("three.txt"), "source line\n".repeat(3)).unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("long", "read_file", json!({"path":"long.txt"}))
+            .tool_call("three", "read_file", json!({"path":"three.txt"}))
+            .tool_call(
+                "two",
+                "read_file",
+                json!({"path":"three.txt", "start_line":1, "end_line":2}),
+            )
+            .text("used a tightened page"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
+    agent.set_granularity(GranularityConfig {
+        max_read_lines: Some(2),
+        ..GranularityConfig::default()
+    });
+    let (_, events) = turn(&mut agent).await;
+    for expected in ["long", "three"] {
+        assert!(events.iter().any(
+            |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, .. } if id == expected)
+        ));
+    }
+    assert!(events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "two")
+    ));
+}
+
+#[tokio::test]
+async fn denied_whole_file_read_is_refused_before_content_dependent_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "private-fixture\n".repeat(81)).unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("secret", "read_file", json!({"path":".env"}))
+            .text("access denied"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "secret" && output.contains("denied") && !output.contains("private-fixture") && !output.contains("explicit start_line"))));
+}
+
+#[tokio::test]
 async fn giant_whole_file_read_is_refused_but_explicit_pages_work() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

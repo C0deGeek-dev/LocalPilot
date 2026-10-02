@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Short-file reads respect separate line and byte limits.** Automatic work
+  sizing no longer compares file bytes with the line cap. Ordinary short text
+  files can be read whole after authorization; too many lines or bytes still
+  require explicit pages. Denied reads never inspect contents, and explicit
+  page output retains its existing bounds.
+
 - **Pair-seat evaluation evidence.** A current-build LocalBox A3B review
   baseline caught 3/3 planted boolean defects and accepted 2/3 clean controls.
   The remaining false revision contradicted its own blocking finding; the

@@ -15,6 +15,15 @@ malformed evidence start conservatively. Model names, parameter counts and large
 context windows never establish capability. See ADR-0199 for thresholds and
 [configuration](configuration.md#harnessgranularity) for stricter caps.
 
+Reads without an explicit last line are allowed for small text files only when
+both the active line limit and byte limit are satisfied. Before permission,
+the runtime checks metadata against the byte limit. After authorization, the
+read builtin reads at most that byte limit plus one and checks actual selected
+lines against `max_read_lines`. Larger files require explicit pages. A byte-small
+file with many lines is still refused; long-line output and retained-output
+limits continue to apply to explicit pages. Permission denial precedes any
+content inspection or content-dependent line check.
+
 New future steps declare `scope: files, regions, decisions, changed_lines` as four
 comma-separated integer counts. Approval refuses missing or oversized scope and
 returns the draft for splitting while preserving acceptance coverage and ordering.

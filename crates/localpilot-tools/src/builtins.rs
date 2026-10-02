@@ -1,5 +1,6 @@
 //! The builtin tools.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -15,7 +16,9 @@ use crate::contract::{
     Reversibility, SideEffectClass, StatePredicate, ToolContract, VerificationMethod,
 };
 use crate::error::ToolError;
-use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
+use crate::tool::{
+    detail_preview, parse_input, schema_for, FileReadLimits, Tool, ToolContext, ToolOutput,
+};
 use crate::touch::{changed_range, FileTouch, LineRange, TouchOp};
 use localpilot_core::{ToolImage, ToolOutcome};
 
@@ -612,10 +615,38 @@ impl Tool for ReadFile {
         Ok(vec![read_path_effect(ctx, Path::new(&input.path))])
     }
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        self.invoke_with_file_read_limits(input, ctx, None).await
+    }
+    async fn invoke_with_file_read_limits(
+        &self,
+        input: Value,
+        ctx: &ToolContext<'_>,
+        limits: Option<FileReadLimits>,
+    ) -> Result<ToolOutput, ToolError> {
         let input: ReadFileInput = parse_input(&input)?;
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
-        let bytes = std::fs::read(&path)
-            .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+        let limits = limits.filter(|_| input.end_line.is_none());
+        let refusal = || {
+            ToolError::Failed(
+                "work envelope: request an explicit start_line/end_line page within the read limit"
+                    .to_string(),
+            )
+        };
+        let bytes = if let Some(limits) = limits {
+            let file = std::fs::File::open(&path)
+                .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+            let mut bytes = Vec::new();
+            file.take((limits.max_bytes as u64).saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+            if bytes.len() > limits.max_bytes {
+                return Err(refusal());
+            }
+            bytes
+        } else {
+            std::fs::read(&path)
+                .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?
+        };
         // Refuse to inline binary: emit a short placeholder instead of dumping
         // lossy bytes that waste context and can derail the model.
         if looks_binary(&bytes) {
@@ -640,6 +671,9 @@ impl Tool for ReadFile {
                     .join("\n")
             }
         };
+        if limits.is_some_and(|limits| selected.lines().count() > limits.max_lines) {
+            return Err(refusal());
+        }
         // The read side is recorded too, with the range that was actually read.
         // Whether a prior *reader* is told its ground moved is a policy decision
         // taken where the index lives — not one settled here by staying silent.

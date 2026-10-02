@@ -1373,6 +1373,8 @@ impl SessionRuntime {
             let active = self.active_work_profile.get_or_insert(profile);
             active.tighten(profile);
             self.tools.set_context_output_limit(active.max_output_bytes);
+            self.tools
+                .set_file_read_limits(active.max_read_lines, active.max_output_bytes);
             if let Some(reason) = self
                 .work_unit
                 .refusal(*active, name, input, &self.workspace)

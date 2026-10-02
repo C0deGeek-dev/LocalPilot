@@ -138,7 +138,13 @@ uses unknown reliability because its future executor starts fresh; conversation
 successes cannot authorize larger fresh-runtime steps. Updated stricter caps
 are checked again at approval and execution consent includes the configuration.
 
-Builtin reads require pages; attempted edits cumulatively spend the unit's file,
+Builtin reads require pages, with an exception for text satisfying both the
+active line and byte ceilings. **2026-10-02 clarification:** metadata byte size
+is checked against the byte ceiling before permission, not against a line count.
+The authorized builtin reads at most the byte ceiling plus one and checks
+selected line count before returning implicit whole-file output. Denied reads
+do not inspect content; explicit pages retain their existing output bounds.
+Attempted edits cumulatively spend the unit's file,
 region and patch budgets before permission dispatch. Retained redacted output is
 bounded on success and failure. Delegation inherits policy and spends a region;
 model fan-out is refused because it has no single bounded mutation scope.

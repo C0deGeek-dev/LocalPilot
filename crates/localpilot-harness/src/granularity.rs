@@ -265,14 +265,16 @@ impl WorkUnit {
             let bounded =
                 end.is_some_and(|end| end >= start && end - start < profile.max_read_lines as u64);
             if !bounded {
-                // Small files can be read whole; metadata only, before permission.
+                // Only metadata before permission. The authorized read builtin
+                // checks actual lines and reads at most the byte bound + 1.
                 let tiny = name == "read_file"
+                    && end.is_none()
                     && input
                         .get("path")
                         .and_then(Value::as_str)
                         .and_then(|path| workspace.resolve(std::path::Path::new(path)).ok())
                         .and_then(|path| std::fs::metadata(path).ok())
-                        .is_some_and(|meta| meta.len() <= profile.max_read_lines as u64);
+                        .is_some_and(|meta| meta.len() <= profile.max_output_bytes as u64);
                 if !tiny {
                     return reject(
                         "request an explicit start_line/end_line page within the read limit",

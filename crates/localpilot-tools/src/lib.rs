@@ -60,9 +60,9 @@ pub use repair::{
 };
 pub use schema_intent::{field_intent, is_repair_exempt, INTENT_KEY};
 pub use tool::{
-    AgentHost, Audience, Delivered, Delivery, OutputRetention, PeerMessage, PeerSummary,
-    QuestionOption, ShellOutput, SwarmIdentity, SwarmPeers, Tool, ToolContext, ToolOutput,
-    ToolOutputPresentation, UserAnswer, UserPrompter, UserQuestion,
+    AgentHost, Audience, Delivered, Delivery, FileReadLimits, OutputRetention, PeerMessage,
+    PeerSummary, QuestionOption, ShellOutput, SwarmIdentity, SwarmPeers, Tool, ToolContext,
+    ToolOutput, ToolOutputPresentation, UserAnswer, UserPrompter, UserQuestion,
 };
 pub use validate::{
     is_input_valid, readable_input_error, required_fields_present, tool_input_issues,
