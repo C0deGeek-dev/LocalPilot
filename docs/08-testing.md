@@ -322,9 +322,17 @@ it has its own driver:
   planted defect, and the same change done correctly, and count false AGREEs
   and false REVISEs.
 
-It needs a live model and is run by hand (see its README). CI runs only
-`drive.py check`, which verifies that the fixtures are unchanged and still
-tell the good change from the bad one:
+Live evaluation is run by hand (see its README). CI runs `drive.py check`
+and the driver unittests through `mesh_seat_eval`. Checks verify frozen hashes,
+passing visible suites, hidden clean/planted discrimination, and the versioned
+control's bool assertions against the planted implementation. Driver tests
+exercise version selection, legacy run names, recorded identity on successful
+and failed reviews, refusal of unknown cases, and existing cleanup safety.
+
+Legacy `roman-v1` remains the default; explicit `--review-case roman-v2` adds
+bool coverage to the clean control without changing historical fixtures. Raw
+false-revision flags compare expected decisions; finding truth/severity is
+adjudicated separately under the criteria in the driver README.
 
 ```powershell
 python crates/localpilot-mesh/seat-eval/drive.py check

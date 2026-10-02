@@ -14,6 +14,7 @@ suite in `../conformance`.
 | `tasks/<task>/hidden.py` | Its hidden acceptance test, run on the owner's tree. It prints `HIDDEN_OK` on success. |
 | `review/planted/` | A roman change with a planted defect: `bool` is accepted, which the spec forbids. |
 | `review/clean/` | The same change done correctly: the clean control. |
+| `review/roman-v2/clean/` | A versioned clean control that also pins the explicit bool requirement in its visible tests. |
 | `FIXTURES.sha256` | The fixtures' hashes (CRLF read as LF). `check` fails if any fixture changes. |
 | `test_drive.py` | The driver's own tests (no model): it deletes only runs it made, refuses changed fixtures, and never leaves an engine running. |
 
@@ -26,9 +27,45 @@ The fixtures are frozen, so results from different dates and models stay compara
   - At localpilot's first `REVIEW_REQUEST`, the hidden test runs on the tree as it is. That result is the measure.
   - The driver then posts a scripted `AGREE`, so the unit closes. Its review judges nothing.
 - **review-bad**: the driver submits the planted defect for review. `REVISE` is expected; an `AGREE` is a **false AGREE**.
-- **review-good**: the driver submits the clean change. `AGREE` is expected; a `REVISE` is a **false REVISE**.
+- **review-good**: the driver submits the selected clean change. `AGREE` is expected; a `REVISE` sets the raw **false REVISE** flag. That flag compares a decision with the declared expectation; it does not adjudicate whether each finding is true.
 
 The clean control is what makes a false REVISE visible. Without it, a model that rejects everything would look perfect.
+
+## Review cases and severity criteria
+
+Both the implementation and submitted tests are in review scope. The evaluation
+criteria are:
+
+- **Blocking:** demonstrated behavior contradicts a required result, such as accepting True instead of raising ValueError.
+- **Important:** a required behavior or explicitly named input category has no direct regression assertion, such as omitting bool tests. REVISE is warranted even if implementation behavior is currently correct.
+- **Minor:** optional exhaustive, round-trip or additional sample coverage without a demonstrated defect or missing required category. Such suggestions alone do not require REVISE.
+
+AGREE means no supported blocking or important finding in either file. These
+criteria guide fixture design and human adjudication; they do not change the
+production review prompt, validator or permissions. Structured acceptance and
+verified anchors do not establish finding truth. Keep raw driver flags and
+adjudicated finding validity separate.
+
+`--review-case roman-v1` is the default and preserves legacy run names and all
+original fixtures. Its implementation is correct, but its clean tests omit
+True/False. Under the settled criteria, a supported coverage finding may warrant
+REVISE; historical AGREE expectations are therefore ambiguous. Retain the raw
+scores and do not relabel those samples as v2.
+
+`--review-case roman-v2` selects new clean tests that assert both True and False
+raise ValueError, with the identical clean implementation and task spec. It
+reuses the unchanged planted implementation **and its original visible tests**,
+so the planted review still needs to discover the bool defect rather than read
+a reported failing test. The two cells intentionally have different test suites.
+All submitted visible suites pass; hidden acceptance passes clean and fails
+planted. The driver's offline tests also prove the v2 clean suite fails when
+paired with the bool-accepting implementation.
+
+V2 run names include `-roman-v2-`; review rows, including driver failures, record
+`review_case`, normalized SHA-256 `review_fixture_hashes` and `review_spec_hash`.
+Rows predating these fields used roman-v1. Owner cells remain unchanged and
+reject a v2 review-case option. Compare versions separately; never pool v1/v2
+clean scores or replace old rows, logs, fixtures or hashes.
 
 ## Running it
 
@@ -43,6 +80,7 @@ Then, with the server up, run one cell at a time:
 ```sh
 python drive.py run --model <served model name> --label a3b --cell owner --task roman --run 1 --out ../../../target/seat-eval
 python drive.py run --model <served model name> --label a3b --cell review-bad --run 1 --out ../../../target/seat-eval
+python drive.py run --model <served model name> --label flash-v2 --cell review-good --review-case roman-v2 --run 1 --wall 900 --out ../../../target/seat-eval-v2
 ```
 
 The served model's name is the one the server lists, for example the `id` in `GET /v1/models`.
@@ -62,7 +100,7 @@ done
 Each run leaves its scratch repository and engine log under `--out`, and appends one JSON line to `<out>/results.jsonl`. The fields are:
 
 - owner cells: `hidden_ok`, `review_requested`, `request_at_s`, `escalated`, `killed`, `wall_s`;
-- review cells: `decision`, `expected`, `false_agree`, `false_revise`, `no_verdict`, the full `verdict`, `wall_s`.
+- review cells: `decision`, `expected`, `false_agree`, `false_revise`, `no_verdict`, the full `verdict`, `wall_s`, `review_case`, `review_fixture_hashes`, `review_spec_hash`.
 
 ## Things that change the numbers
 

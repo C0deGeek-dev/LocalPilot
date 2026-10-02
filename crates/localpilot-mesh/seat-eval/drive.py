@@ -24,8 +24,12 @@ decides the provider; `--provider` picks another). Cells:
 - review-bad:   claude submits the roman change with a planted defect (bool
                 accepted, against the spec); localpilot reviews. REVISE is
                 expected, and an AGREE is a false AGREE.
-- review-good:  the same with the correct change (the clean control). AGREE
-                is expected, and a REVISE is a false REVISE.
+- review-good:  the selected clean control. AGREE is expected; REVISE sets
+                a raw expectation-mismatch flag, not finding adjudication.
+
+`--review-case roman-v2` selects bool-covered clean tests and the unchanged
+planted case. Legacy roman-v1 remains the default. See README.md for review
+severity criteria and the legacy clean-control ambiguity.
 
 Each run leaves its scratch repository and engine log under `--out`, and
 appends one JSON line to `<out>/results.jsonl`.
@@ -54,6 +58,10 @@ REVIEW = HERE / "review"
 PAIR = HERE.parent / "conformance" / "reference" / "pair.py"
 TASK_NAMES = ("slug", "roman", "duration")
 REVIEW_FILES = ("roman.py", "test_roman.py")
+REVIEW_CASES = {
+    "roman-v1": {"clean": REVIEW / "clean", "planted": REVIEW / "planted"},
+    "roman-v2": {"clean": REVIEW / "roman-v2" / "clean", "planted": REVIEW / "planted"},
+}
 # Written into each scratch repository this driver creates; only a directory
 # carrying it is ever deleted to make room for a rerun.
 MARKER = ".seat-eval-run"
@@ -108,13 +116,18 @@ def fixture_problems():
             ok, _ = hidden(pathlib.Path(empty), task)
             if ok:
                 problems.append(f"the {task} hidden test passes on an empty tree")
-    for name, expect in (("clean", True), ("planted", False)):
-        with tempfile.TemporaryDirectory() as d:
-            for f in REVIEW_FILES:
-                shutil.copyfile(REVIEW / name / f, pathlib.Path(d) / f)
-            ok, tail = hidden(pathlib.Path(d), "roman")
-            if ok != expect:
-                problems.append(f"the roman hidden test {'fails' if expect else 'passes'} on the {name} change: {tail}")
+    for case, sources in REVIEW_CASES.items():
+        for name, expect in (("clean", True), ("planted", False)):
+            with tempfile.TemporaryDirectory() as d:
+                repo = pathlib.Path(d)
+                for f in REVIEW_FILES:
+                    shutil.copyfile(sources[name] / f, repo / f)
+                visible = run_cmd([sys.executable, "-B", "-m", "unittest"], repo, check=False)
+                if visible.returncode != 0:
+                    problems.append(f"the {case} {name} visible tests fail: {visible.stderr[-400:]}")
+                ok, tail = hidden(repo, "roman")
+                if ok != expect:
+                    problems.append(f"the roman hidden test {'fails' if expect else 'passes'} on the {case} {name} change: {tail}")
     return problems, len(have)
 
 
@@ -258,7 +271,7 @@ def review_cell(a, repo, log, planted):
     spec = (TASKS / "roman" / "spec.md").read_text(encoding="utf-8")
     scratch(repo, spec)
     pair(repo, "start", "--role", "claude", "--with", "localpilot", "--task", spec)
-    src = REVIEW / ("planted" if planted else "clean")
+    src = REVIEW_CASES[a.review_case]["planted" if planted else "clean"]
     for f in REVIEW_FILES:
         shutil.copyfile(src / f, repo / f)
     body = ("roman.py and test_roman.py implement the task spec.\n"
@@ -294,7 +307,13 @@ def run_path(out, a):
         raise SystemExit(f"--label must be 1-40 of A-Z a-z 0-9 . _ - and start with a letter or digit: {a.label!r}")
     if a.run < 1:
         raise SystemExit("--run must be 1 or more")
-    name = f"{a.label}-{a.cell}" + (f"-{a.task}" if a.cell == "owner" else "") + f"-{a.run}"
+    if a.review_case not in REVIEW_CASES:
+        raise SystemExit(f"unknown review case: {a.review_case!r}")
+    if a.cell == "owner" and a.review_case != "roman-v1":
+        raise SystemExit("--review-case applies only to review cells")
+    suffix = f"-{a.task}" if a.cell == "owner" else (
+        f"-{a.review_case}" if a.review_case != "roman-v1" else "")
+    name = f"{a.label}-{a.cell}{suffix}-{a.run}"
     repo = (out / name).resolve()
     if repo.parent != out:
         raise SystemExit(f"refusing a run path outside {out}: {repo}")
@@ -327,6 +346,14 @@ def run(a):
     # evidence for that row, so a repeat takes a new --run.
     if occupied(out, name):
         raise SystemExit(f"run {name} already exists under {out}; use another --run")
+    review_identity = {}
+    if a.cell != "owner":
+        src = REVIEW_CASES[a.review_case]["planted" if a.cell == "review-bad" else "clean"]
+        review_identity = {
+            "review_case": a.review_case,
+            "review_fixture_hashes": {f: sha(src / f) for f in REVIEW_FILES},
+            "review_spec_hash": sha(TASKS / "roman" / "spec.md"),
+        }
     out.mkdir(parents=True, exist_ok=True)
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(out / f"{name}.log", "x", encoding="utf-8") as log:
@@ -341,12 +368,14 @@ def run(a):
             r = {"driver_error": f"{type(e).__name__}: {e}"[:400]}
             r.update({"name": name, "label": a.label, "model": a.model, "cell": a.cell,
                       "run": a.run, "started": started})
+            r.update(review_identity)
             with open(out / "results.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(r) + "\n")
             raise
     r.update({"name": name, "label": a.label, "model": a.model, "cell": a.cell,
               "task": a.task if a.cell == "owner" else "roman", "run": a.run,
               "started": started, "wall_cap_s": a.wall})
+    r.update(review_identity)
     with open(out / "results.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(r) + "\n")
     print(json.dumps({k: r[k] for k in r if k not in ("verdict", "hidden_tail")}))
@@ -361,6 +390,8 @@ def main():
     r.add_argument("--model", required=True, help="the model name the server serves")
     r.add_argument("--label", required=True, help="a short name for the results")
     r.add_argument("--cell", required=True, choices=["owner", "review-bad", "review-good"])
+    r.add_argument("--review-case", default="roman-v1", choices=tuple(REVIEW_CASES),
+                   help="review fixture version (default: legacy roman-v1; owner cells unchanged)")
     r.add_argument("--task", default="roman", choices=TASK_NAMES, help="owner cell: the frozen task")
     r.add_argument("--run", type=int, required=True, help="the run's number within its cell")
     r.add_argument("--out", required=True, help="the results directory")

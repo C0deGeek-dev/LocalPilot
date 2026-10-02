@@ -135,3 +135,33 @@ this batch has two. Three unseeded samples cannot establish a causal reliability
 improvement. LocalHub#204's search investigation, fixture calibration and the
 broader evaluation remain open. The frozen fixture and historical results were
 kept unchanged throughout this rerun.
+
+## Review-control calibration (2026-10-02)
+
+LocalHub#205 settles evaluation review scope: both submitted implementation
+and tests matter. Demonstrated requirement violations are blocking; missing
+direct regression assertions for an explicitly required behavior or named
+input category are important. Optional exhaustive/property coverage is minor
+without a demonstrated defect. AGREE requires no supported blocking/important
+finding. These are evaluation/adjudication criteria, not a production prompt
+or validator change.
+
+The original control is `roman-v1`, still the driver's default. Its bool-test
+omission makes its declared AGREE expectation ambiguous under these criteria.
+The Flash Next read-fix run 2 REVISE is supported; its raw `false_revise` flag
+remains an expectation mismatch, not proof of an invented finding. Run 3's
+AGREE reports the same omission as minor and would understate its severity
+under the settled criteria. A3B's clean run 2 blocking finding still contradicts
+itself and supports no defect; the fixture omission does not justify that
+unrelated reasoning. September's clean revisions cannot be readjudicated from
+the summary alone because their raw findings were not retained here.
+
+An explicit `--review-case roman-v2` selects new clean tests with True/False
+assertions, the same implementation/spec and the unchanged planted fixture.
+The planted side retains its passing visible tests, so the two cells have
+different visible test suites. Offline checks prove hidden acceptance still
+discriminates and the v2 clean suite fails against the planted implementation.
+Run names and recorded case/fixture/spec hashes distinguish v2. All original
+fixture bytes, manifest entries and historical results remain unchanged.
+See the [driver criteria and usage](../crates/localpilot-mesh/seat-eval/README.md).
+No v2 model samples have been collected; compare future v2 trials separately.

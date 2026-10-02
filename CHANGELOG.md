@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Versioned pair-seat review controls.** The evaluation driver can select
+  `roman-v2`, whose clean tests cover the explicit bool requirement. Review
+  rows retain case and fixture hashes; legacy fixtures and run names remain
+  available. Documented severity criteria distinguish raw score mismatches
+  from supported coverage findings.
+
 - **Short-file reads respect separate line and byte limits.** Automatic work
   sizing no longer compares file bytes with the line cap. Ordinary short text
   files can be read whole after authorization; too many lines or bytes still
