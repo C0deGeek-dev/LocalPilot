@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="280" viewBox="0 0 1200 280" role="img" aria-labelledby="title desc">
+  <title id="title">LocalPilot</title>
+  <desc id="desc">Code with a model you choose. Part of the LocalX ecosystem.</desc>
+  <rect width="1200" height="280" rx="20" fill="#101827"/>
+  <path d="M0 279H1200" stroke="#7da7ff" stroke-width="4"/>
+  <path d="M870 0V280M950 0V280M1030 0V280M1110 0V280M830 60H1200M830 140H1200M830 220H1200" stroke="#243247" stroke-width="1"/>
+  <rect x="56" y="44" width="5" height="20" rx="2" fill="#7da7ff"/>
+  <text x="76" y="60" fill="#7da7ff" font-family="Segoe UI,Arial,sans-serif" font-size="15" font-weight="700" letter-spacing="3">PILOT / CODING AGENT</text>
+  <text x="56" y="137" fill="#f5f7fb" font-family="Segoe UI,Arial,sans-serif" font-size="60" font-weight="700">LocalPilot</text>
+  <text x="58" y="183" fill="#c2cddd" font-family="Segoe UI,Arial,sans-serif" font-size="25">Code with a model you choose.</text>
+  <text x="58" y="237" fill="#91a2ba" font-family="Segoe UI,Arial,sans-serif" font-size="14" letter-spacing="2">LOCAL MODELS / YOUR HARDWARE / YOUR CONTROL</text>
+  <g transform="translate(910 66)">
+    <rect width="66" height="66" rx="16" fill="#7da7ff"/>
+    <rect x="82" width="66" height="66" rx="16" fill="#1d2c43" stroke="#7da7ff" stroke-width="2"/>
+    <rect y="82" width="66" height="66" rx="16" fill="#1d2c43" stroke="#7da7ff" stroke-width="2"/>
+    <rect x="82" y="82" width="66" height="66" rx="16" fill="#1d2c43" stroke="#7da7ff" stroke-width="2"/>
+    <path d="M22 22L34 33L22 44M42 44H51" fill="none" stroke="#101827" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M101 25H129M101 33H121M101 41H125M23 125V112M33 125V102M43 125V94" stroke="#7da7ff" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="106" cy="106" r="5" fill="#7da7ff"/><circle cx="124" cy="124" r="5" fill="#7da7ff"/><path d="M110 110L120 120" stroke="#7da7ff" stroke-width="3"/>
+  </g>
+</svg>

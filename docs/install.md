@@ -76,12 +76,34 @@ Everything lands in one directory, and the installer prints it:
 | Linux / macOS | `~/.local/share/localx/bin` (or `$XDG_DATA_HOME/localx/bin`) |
 | Windows | `%LOCALAPPDATA%\localx\bin` |
 
-```sh
-export PATH="$HOME/.local/share/localx/bin:$PATH"   # add to your shell profile
+`PATH` tells your terminal where to find applications. Complete the step for
+your platform once, then verify with `localx status`.
+
+**Windows — paste into PowerShell:**
+
+```powershell
+$localxBin = Join-Path $env:LOCALAPPDATA 'localx\bin'
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $localxBin) {
+    [Environment]::SetEnvironmentVariable('Path', "$localxBin;$userPath", 'User')
+}
+$env:Path = "$localxBin;$env:Path"
 ```
 
-That entry never changes. Updates, pins, and rollbacks swap what the directory
-points at, so `PATH` is something you set once.
+This saves the directory to your user PATH and enables it in the current
+window. Close and reopen other terminals to pick up the saved setting.
+
+**Linux / macOS — paste into Terminal:**
+
+```sh
+export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/localx/bin:$PATH"
+```
+
+Add the same line to `~/.bashrc` (Bash) or `~/.zshrc` (Zsh) for future terminals.
+Use the directory printed by the installer if it differs.
+
+That entry never changes. Updates, pins, and rollbacks publish into the same
+managed directory, so `PATH` is something you set once.
 
 #### If you installed from source before this installer existed
 

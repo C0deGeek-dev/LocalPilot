@@ -1,21 +1,9 @@
-```
-╔══════╗ ╔══╗		██╗      ██████╗  ██████╗ █████╗ ██╗     ██████╗ ██╗██╗      ██████╗ ████████╗
-║ >_ █ ║ ║██║║		██║     ██╔═══██╗██╔════╝██╔══██╗██║     ██╔══██╗██║██║     ██╔═══██╗╚══██╔══╝
-╚══╦═══╝ ║██║║		██║     ██║   ██║██║     ███████║██║     ██████╔╝██║██║     ██║   ██║   ██║
- ══╩══   ╚══╝║		██║     ██║   ██║██║     ██╔══██║██║     ██╔═══╝ ██║██║     ██║   ██║   ██║
-═════════════╝		███████╗╚██████╔╝╚██████╗██║  ██║███████╗██║     ██║███████╗╚██████╔╝   ██║
-					╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚══════╝ ╚═════╝    ╚═╝
-```
+![LocalPilot — Code with a model you choose.](docs/assets/readme-banner.svg)
 
 <div align="center">
   <h1>LocalPilot</h1>
-  <p><strong>A local-first coding agent with a disciplined harness around any compatible model.</strong></p>
-  <p>
-    <a href="docs/install.md">Install</a> ·
-    <a href="docs/providers.md">Providers</a> ·
-    <a href="docs/configuration.md">Configuration</a> ·
-    <a href="https://c0degeek-dev.github.io/LocalStack/">LocalX</a>
-  </p>
+  <p><strong>A coding assistant that works with your local model or hosted provider.</strong></p>
+  <p><a href="#install-localx">Install</a> · <a href="#your-first-coding-session">First use</a> · <a href="#updates-and-troubleshooting">Updates &amp; help</a> · <a href="docs/README.md">All guides</a></p>
   <p>
     <img alt="version 5.0.0" src="https://img.shields.io/badge/version-5.0.0-7da7ff?style=flat-square">
     <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-59636e?style=flat-square">
@@ -33,9 +21,132 @@ risky parts stay behind explicit permission boundaries.
 |---|---|
 | **Use it when** | You want a coding agent you can run against your own model or provider |
 | **Connects to** | OpenAI-compatible local servers and supported official provider APIs |
-| **Works as** | Interactive terminal agent, one-shot command, rule-enforced harness, RPC service, ACP adapter, or MCP server (`localpilot mcp serve` — an MCP client/agent host drives and steers a session) |
+| **Works as** | An interactive coding assistant in your terminal; integrations and automation are available too |
 | **Remembers through** | Embedded [LocalMind](https://github.com/C0deGeek-dev/LocalMind), with review before durable memory |
-| **Status** | `5.0.0` stable; public CLI, config, and provider contract follow SemVer |
+| **Status** | `5.0.0` stable; Windows, Linux, and macOS |
+
+<a name="quick-start"></a>
+
+## Install LocalX
+
+**No programming tools or compilation required.** The installer downloads ready-to-run
+applications and checks their SHA-256 checksums. You get **LocalBox, LocalPilot,
+LocalMind, and LocalBench**, plus `localx` for managing them and the llama.cpp
+engine for running models. You do not need to clone this repository.
+
+### 1. Run the installer
+
+**Windows 10/11 (64-bit Intel or AMD):** open the Start menu, type **PowerShell**,
+and open it. Paste this command, then press **Enter**:
+
+```powershell
+irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
+```
+
+**Linux (x86-64 or ARM64) / macOS (Apple Silicon):** open **Terminal**, paste
+this command, then press **Enter**:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
+```
+
+### 2. Let your terminal find the commands
+
+`PATH` is the list of folders your terminal searches for applications. Add the
+LocalX folder once so commands such as `localx update` work from any directory.
+
+<details>
+<summary><strong>Windows — paste this into the same PowerShell window</strong></summary>
+
+```powershell
+$localxBin = Join-Path $env:LOCALAPPDATA 'localx\bin'
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $localxBin) {
+    [Environment]::SetEnvironmentVariable('Path', "$localxBin;$userPath", 'User')
+}
+$env:Path = "$localxBin;$env:Path"
+```
+
+This enables the commands in this window and saves the setting for future
+terminals. If another open terminal cannot find them, close and reopen it.
+
+</details>
+
+<details>
+<summary><strong>Linux / macOS — add LocalX to your shell's PATH</strong></summary>
+
+Paste this into your terminal:
+
+```sh
+export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/localx/bin:$PATH"
+```
+
+To keep it for future terminals, add the same line to your shell configuration:
+`~/.bashrc` for Bash or `~/.zshrc` for Zsh. Use the directory printed by the
+installer if it differs.
+
+</details>
+
+### 3. Check the installation
+
+```sh
+localx status
+```
+
+You should see the installed tools and engine. **Installing the tools does not
+download an AI model**; choose one when you start using LocalBox.
+
+Want to read the installer before running it, check platform support, or install
+a specific version? See the [installation guide](docs/install.md).
+
+## Your first coding session
+
+**For local models:** Open a terminal in the project folder you want to
+work on, then launch the guided model picker:
+
+```sh
+localbox
+```
+
+Choose or add a model, choose **LocalPilot** as the coding agent, review the
+settings, and launch. LocalBox starts the model and writes the provider
+configuration for that project, so you do not have to create it by hand.
+The first model download may be large; the picker shows hardware-fit hints.
+
+For a model already in your catalog, the direct command is:
+
+```sh
+localbox launch <model-key> --agent localpilot
+```
+
+Replace `<model-key>` with a key from `localbox info`; do not type the angle
+brackets. Once the agent opens, try: **“Explain this project and how to run it.”**
+
+**Using a hosted provider or an existing model server?** Follow the
+[provider setup guide](docs/providers.md), then run `localpilot chat` in your
+project folder. Local model use requires suitable hardware; a hosted provider
+may require its own account and API key.
+
+| Everyday task | Command |
+|---|---|
+| Continue coding with your configured provider | `localpilot chat` |
+| Find previous sessions | `localpilot session list` |
+| Diagnose provider or project configuration | `localpilot doctor` |
+| Browse all commands | `localpilot --help` |
+
+## Updates and troubleshooting
+
+| I want to… | Run |
+|---|---|
+| Update the whole stack and model engine | `localx update` |
+| See installed versions | `localx status` |
+| Diagnose installation problems | `localx doctor` |
+| Retry an incomplete installation | `localx install` |
+
+Ordinary installs use published releases; updates do not require Rust or Git.
+If a command is “not recognized” or “not found”, complete the PATH step above.
+If an older installation is taking precedence, `localx doctor` identifies it;
+review its findings before using `localx doctor --fix` to remove old copies.
 
 ## Privacy by design
 
@@ -52,82 +163,6 @@ against a model endpoint you control.
 - **You control access.** Workspace boundaries, permission gates, secret
   redaction, and review-gated memory keep sensitive actions visible and
   reversible.
-
-## Quick start
-
-```sh
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
-```
-
-```powershell
-# Windows
-irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
-```
-
-No toolchain needed. This downloads the prebuilt **`localx`** for your platform,
-checks it against the published SHA-256 before unpacking, and lets it install the
-whole stack — `localpilot`, `localmind`, `localbox`, `localbench` — and the
-llama.cpp engine, at one version. The installer prints the directory to add to
-`PATH`.
-
-`localx` is the stack's front door afterwards:
-
-```sh
-localx update              # update every tool + the engine on the current channel
-localx update --prerelease # or build each app from its latest pushed main
-localx status              # what is installed, and which channel it came from
-localx doctor              # what is wrong with the install; `--fix` removes it
-```
-
-Developing the stack? With the LocalX repositories checked out side by side,
-`localx dev use <workspace>` makes plain `localx update` build every tool from
-those working trees — uncommitted work included — and `localx dev off` goes back
-to released binaries. Every channel installs into the same managed directory, so
-switching between them changes nothing about `PATH`.
-
-PowerShell users can optionally restore the compact `llm*` compatibility
-commands after installation with `localx install powershell-shortcuts`. The
-installer respects Chris Titus Tech's separate custom `profile.ps1` convention
-and prints a manual load line instead of changing any other custom profile.
-
-Prefer to read the script first, or build from a checkout? See
-[docs/install.md](docs/install.md).
-
-Check the environment:
-
-```sh
-localpilot doctor
-```
-
-Create `.localpilot.toml` and point it at a local OpenAI-compatible server:
-
-```toml
-[provider]
-default = "local"
-
-[providers.local]
-kind = "openai-compatible"
-base_url = "http://localhost:8080/v1"
-model = "your-local-model"
-```
-
-Then start a conversation:
-
-```sh
-localpilot chat
-```
-
-Or ask one question without tools:
-
-```sh
-localpilot ask --model your-local-model "explain this repo's error handling"
-```
-
-Hosted APIs use the same configuration model; add `api_key_env` and keep the
-credential in the named environment variable. The [provider guide](docs/providers.md)
-covers local servers, hosted providers, context windows, authentication, and
-reasoning settings.
 
 ## Why the harness matters
 
@@ -146,6 +181,9 @@ comparison on one model, not a model claim.
 > Read the delta, not the absolute score. This is one model and quant; public
 > benchmark data can be contamination-prone, and the 600-second timeout counts
 > an exercise as unsolved.
+
+<details>
+<summary><strong>Explore workflows, terminal controls, learning, and multi-agent features</strong></summary>
 
 ## The core workflow
 
@@ -277,6 +315,8 @@ coordinator ──seeds──> task graph ──dispatch──> workers ──ha
       └──────────── reports, conflict alerts ──────┘
 ```
 
+</details>
+
 ## Pick the right guide
 
 | Topic | Guide |
@@ -318,6 +358,20 @@ cargo build -p localpilot --features tui,keychain
 
 </details>
 
+<details>
+<summary><strong>Development builds and optional PowerShell shortcuts</strong></summary>
+
+`localx update --prerelease` builds from the latest pushed main branches and
+requires Rust and platform build tools. For a local workspace, use
+`localx dev use <workspace>`; `localx dev off` restores the normal release
+channel for future updates. `localx update --release` explicitly installs
+published binaries. See the [installation guide](docs/install.md#developing-the-stack).
+
+Optional PowerShell `llm*` shortcuts: `localx install powershell-shortcuts`.
+See [shortcut setup](docs/install.md#quick-install) for profile handling.
+
+</details>
+
 ## Principles
 
 LocalPilot is an original implementation, not a fork or redistribution of a
@@ -325,7 +379,7 @@ vendor CLI. It uses official APIs or local servers, keeps project state local,
 and requires explicit approval for risky actions. Windows, Linux, and macOS are
 first-class platforms.
 
-Created Maintained by C0deGeek.dev (David Ben-Yishai and Bram Hammer).
+Created and maintained by C0deGeek.dev (David Ben-Yishai and Bram Hammer).
 
 ## LocalX
 
