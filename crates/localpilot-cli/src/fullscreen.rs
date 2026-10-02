@@ -20614,14 +20614,32 @@ last_seen = "2026-08-10"
         .await;
 
         assert!(matches!(outcome, LocalMindReviewOutcome::Updated(_)));
+        // The rewrite is a new item carrying the reviewer's text; the excerpt it
+        // replaced is kept as history, naming what it became.
         let updated = localpilot_localmind::review_list(dir.path()).expect("updated review list");
-        assert_eq!(updated[0].state, "Edited");
+        let original = updated
+            .iter()
+            .find(|item| item.id == candidate.id)
+            .expect("the original is kept");
+        assert_eq!(original.state, "Merged");
         assert_eq!(
-            updated[0].replacement.as_deref(),
+            original.replacement.as_deref(),
             Some("Bound a terminal report before rendering it.")
         );
+        let rewrite = updated
+            .iter()
+            .find(|item| item.state == "Edited")
+            .expect("the rewrite is its own item");
+        assert_eq!(
+            rewrite.summary,
+            "Bound a terminal report before rendering it."
+        );
+        assert!(!rewrite.requires_edit);
+        // Promoting from the id the screen still holds writes the rewrite.
         localpilot_localmind::promote(dir.path(), &candidate.id)
             .expect("a rewritten candidate promotes");
+        let memory = localpilot_localmind::memory_list_readonly(dir.path()).expect("memory");
+        assert_eq!(memory.len(), 1);
     }
 
     /// An Edit intent that arrives without a lesson is a bug, not a write: the
