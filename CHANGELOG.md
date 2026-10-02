@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A rerun request no longer outlives its lesson.** A request about a lesson
+  that was rejected, merged, rewritten or split is closed instead of being
+  listed as something to start. `localpilot lab rerun` says "run again" only
+  when that tier has already produced a result for the lesson, and the tier
+  name is written the same way in `lab list` and `learning review show`.
 - **Mesh owners can checkpoint source before adding its tests.** Verified,
   changed intermediate units produce durable notes before a fresh bounded
   turn. Bare Python source can receive an isolated syntax check; final review

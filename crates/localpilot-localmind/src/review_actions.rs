@@ -586,6 +586,31 @@ pub fn rerun_requests(localpilot_dir: &Path, candidate_identity: &str) -> Vec<Re
     requests
 }
 
+/// The rerun requests still worth showing for a lesson. A request about a
+/// lesson that is no longer live — rejected, merged, rewritten or split — asks
+/// for a run the lab will refuse, so it is closed here and not returned,
+/// whichever surface or build decided the lesson.
+#[must_use]
+pub fn open_rerun_requests(
+    root: &Path,
+    localpilot_dir: &Path,
+    candidate_identity: &str,
+) -> Vec<RerunRequest> {
+    let requests = rerun_requests(localpilot_dir, candidate_identity);
+    if requests.is_empty() {
+        return requests;
+    }
+    match lab_lesson_state(root, candidate_identity) {
+        Ok(Some(state)) if !is_live(&state) => {
+            for request in &requests {
+                clear_rerun(localpilot_dir, candidate_identity, request.tier);
+            }
+            Vec::new()
+        }
+        _ => requests,
+    }
+}
+
 /// Close a rerun request: the tier ran to a result, or the request was
 /// withdrawn. `true` when there was one.
 pub fn clear_rerun(localpilot_dir: &Path, candidate_identity: &str, tier: EvidenceTier) -> bool {
@@ -615,7 +640,7 @@ pub fn lab_notes(root: &Path, item: &ReviewQueueItem) -> String {
     let record = crate::lab_eligibility::read_records(localpilot_dir)
         .into_iter()
         .find(|record| record.candidate_identity == identity);
-    let requests = rerun_requests(localpilot_dir, &identity);
+    let requests = open_rerun_requests(root, localpilot_dir, &identity);
     let runs: Vec<_> = crate::uplift_run::run_statuses(root)
         .into_iter()
         .filter(|(_, state, _)| state.candidate_identity == identity)
@@ -664,8 +689,9 @@ pub fn lab_notes(root: &Path, item: &ReviewQueueItem) -> String {
     for request in requests {
         let tier = tier_name(request.tier);
         out.push_str(&format!(
-            "  rerun requested: {tier} by {}{} — not run. Start it with `localpilot lab {tier} \
+            "  rerun requested: {:?} by {}{} — not run. Start it with `localpilot lab {tier} \
              {identity}`; it shows what will run and asks first.\n",
+            request.tier,
             request.requested_by,
             request
                 .note

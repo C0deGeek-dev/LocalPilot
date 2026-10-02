@@ -107,9 +107,11 @@ pub fn list(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
                 )?;
             }
         }
-        for request in
-            localpilot_localmind::rerun_requests(store.root(), &record.candidate_identity)
-        {
+        for request in localpilot_localmind::open_rerun_requests(
+            root,
+            store.root(),
+            &record.candidate_identity,
+        ) {
             writeln!(
                 out,
                 "    rerun requested: {:?} by {}{} — not run; start it with `localpilot lab {}`",
@@ -200,10 +202,19 @@ pub fn rerun(
         now,
     )
     .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    // "Again" only where that tier has a result about this lesson.
+    let ran_before = lab_candidate(root, identity)?.is_some_and(|(_, candidate)| {
+        candidate
+            .experiments
+            .iter()
+            .any(|result| result.tier == tier && !result.is_stale_for(&candidate))
+    });
     writeln!(
         out,
-        "Recorded: {} asks for {:?} to be run again for {identity}.",
-        request.requested_by, request.tier
+        "Recorded: {} asks for {:?} to be run{} for {identity}.",
+        request.requested_by,
+        request.tier,
+        if ran_before { " again" } else { "" }
     )?;
     writeln!(
         out,
@@ -1582,6 +1593,9 @@ fi\n";
             });
             assert!(text.contains("Nothing ran."), "{text}");
             assert!(text.contains("is not a confirmation"), "{text}");
+            // Neither tier has run for this lesson yet, so nothing is "again".
+            assert!(text.contains("to be run for"), "{text}");
+            assert!(!text.contains("again"), "{text}");
         }
         assert!(
             results(root, &candidate).is_empty(),
@@ -1623,6 +1637,13 @@ fi\n";
         let text = printed(|out| rerun(root, &identity, "uplift", "ada", None, true, out));
         assert!(text.contains("Withdrew the Uplift rerun request"), "{text}");
         assert!(!printed(|out| list(root, out)).contains("rerun requested"));
+
+        // Replay has a result now, so asking for it is asking again.
+        let text = printed(|out| rerun(root, &identity, "replay", "ada", None, false, out));
+        assert!(
+            text.contains("asks for Replay to be run again for"),
+            "{text}"
+        );
     }
 
     /// A rewritten lesson is history to the lab: its results stay with it and
@@ -1658,8 +1679,43 @@ fi\n";
             "{text}"
         );
 
+        // A request made while the lesson was live does not outlive it: nothing
+        // tells the reviewer to start a run the lab would refuse.
+        let store = Store::open(root);
+        assert!(
+            localpilot_localmind::rerun_requests(store.root(), &identity).is_empty(),
+            "no request was open before the rewrite"
+        );
+        std::fs::create_dir_all(store.root().join("lab").join("reruns")).unwrap();
+        std::fs::write(
+            store
+                .root()
+                .join("lab")
+                .join("reruns")
+                .join(format!("{identity}.uplift.json")),
+            serde_json::json!({
+                "candidate_identity": identity,
+                "tier": "Uplift",
+                "requested_by": "ada",
+                "requested_at": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            localpilot_localmind::rerun_requests(store.root(), &identity).len(),
+            1
+        );
+        let shown = printed(|out| crate::learning_cmd::review_show(root, "retro-1", out));
+        assert!(!shown.contains("rerun requested"), "{shown}");
+        assert!(
+            localpilot_localmind::rerun_requests(store.root(), &identity).is_empty(),
+            "the stale request is closed, not just hidden"
+        );
+
         // The original keeps its result, marked as history.
         let listing = printed(|out| list(root, out));
+        assert!(!listing.contains("rerun requested"), "{listing}");
         assert!(listing.contains("Replay Valid"), "{listing}");
         assert!(listing.contains("history (Merged)"), "{listing}");
         assert_eq!(
@@ -1855,7 +1911,7 @@ fi\n";
             "the run receipt is still retained: {after}"
         );
         assert!(
-            after.contains("rerun requested: uplift by ada (check it helps) — not run."),
+            after.contains("rerun requested: Uplift by ada (check it helps) — not run."),
             "{after}"
         );
         assert!(
