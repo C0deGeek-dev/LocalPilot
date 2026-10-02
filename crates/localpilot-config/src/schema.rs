@@ -92,7 +92,7 @@ pub enum MeshWriter {
 
 /// The lesson lab's opt-in tiers. Logic validation needs no setting: it
 /// replays what a run recorded and starts nothing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LabConfig {
     /// Allow `localpilot lab replay`: run a lesson's ratified check on the
@@ -101,6 +101,26 @@ pub struct LabConfig {
     /// same boundary that makes a check ratified. Every run still needs its
     /// own confirmation.
     pub replay: bool,
+    /// Allow `localpilot lab uplift`: run a lesson's approved tasks with and
+    /// without the lesson through LocalBench, driving real model sessions. Off
+    /// by default, and honoured only from the project's committed
+    /// `.localpilot.toml`. Every run is shown first, with its ceilings, and
+    /// needs its own confirmation.
+    pub uplift: bool,
+    /// The `localbench` program uplift runs. Read from the user's own
+    /// configuration and the environment only — a repository must not choose a
+    /// program to run.
+    pub localbench: String,
+}
+
+impl Default for LabConfig {
+    fn default() -> Self {
+        Self {
+            replay: false,
+            uplift: false,
+            localbench: "localbench".to_string(),
+        }
+    }
 }
 
 /// Full-screen terminal presentation preferences.

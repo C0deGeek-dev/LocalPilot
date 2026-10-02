@@ -1440,7 +1440,21 @@ questions have to be written.
 | `Supported` / `Contradicted` / `Inconclusive` | the lesson arm did better, worse, or within noise — with the lesson shown to have reached it and nothing else |
 | `InvalidExperiment` | an arm was mis-staged or contaminated, the lesson was not observed, the pair is incomplete, or the receipt is not this run's |
 
-No command starts an uplift run yet.
+A run starts only from `localpilot lab uplift <lesson> --model <m>` (ADR-0201),
+in a project whose committed `.localpilot.toml` sets `[lab] uplift = true`.
+- **Shown first.** The authorization screen says the run drives real model
+  sessions, and lists the model, what is staged, every command and every ceiling.
+  Nothing runs until it is confirmed.
+- **Ceilings.** 3 trials, 120 s per turn, at most 8 tasks, 30 minutes of wall
+  clock and 400 000 tokens for the whole run, each changeable per run by a flag.
+  The wall clock and tokens are watched while an arm runs. A breach cancels the
+  run, reaps the solver's process tree, and ends `InvalidExperiment`.
+- **Serial, with a status.** One run at a time per project. `localpilot lab
+  status` shows each run as ended, running or interrupted.
+- **Restart.** A stopped run is not a result. A later run of the same request is
+  offered its finished baseline: `--resume` reuses it, `--restart` runs both arms.
+- **Telemetry.** Wall time and tokens are reported apart from the result; model
+  load state, RAM and GPU are reported as not measured.
 
 ## Completion Teardown Sweep
 

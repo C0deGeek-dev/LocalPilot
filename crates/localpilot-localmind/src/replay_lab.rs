@@ -353,7 +353,7 @@ pub fn plan_replay(
 
 /// The committed `.localpilot.toml`, as `HEAD` has it. The working copy must
 /// match: an uncommitted edit could otherwise change the checks it trusts.
-fn committed_config(root: &Path) -> Result<Config, ReplayRefusal> {
+pub(crate) fn committed_config(root: &Path) -> Result<Config, ReplayRefusal> {
     let committed = git(root, &["show", "HEAD:.localpilot.toml"]).ok_or_else(|| {
         ReplayRefusal::Untrusted("no committed .localpilot.toml at HEAD".to_string())
     })?;
@@ -637,19 +637,24 @@ fn base36(mut value: u128) -> String {
 /// How often a running Replay refreshes its lock, and how old a lock may get
 /// before it is taken as a killed run's.
 const LOCK_HEARTBEAT: Duration = Duration::from_secs(15);
-const LOCK_STALE: Duration = Duration::from_secs(90);
+pub(crate) const LOCK_STALE: Duration = Duration::from_secs(90);
 
 /// Serialises Replay runs in one project. The lock file is refreshed while the
 /// run is alive, so a lock nobody refreshes — a killed run's — goes stale and
 /// is taken over; a live one never does.
-struct ReplayLock {
+pub(crate) struct ReplayLock {
     path: PathBuf,
     heartbeat: tokio::task::JoinHandle<()>,
 }
 
 impl ReplayLock {
     fn acquire(root: &Path) -> Result<Self, ReplayRefusal> {
-        let path = root.join(".localpilot").join("lab").join("replay.lock");
+        Self::acquire_named(root, "replay.lock")
+    }
+
+    /// Take the lab lock called `name` under `.localpilot/lab/`.
+    pub(crate) fn acquire_named(root: &Path, name: &str) -> Result<Self, ReplayRefusal> {
+        let path = root.join(".localpilot").join("lab").join(name);
         if !resolves_inside(root, &path) {
             return Err(ReplayRefusal::Untrusted(
                 ".localpilot/lab resolves outside the repository".to_string(),
@@ -718,7 +723,7 @@ impl Drop for ReplayLock {
 /// Whether `path` — or, if it does not exist yet, its nearest existing
 /// ancestor — resolves inside the repository at `root`. A link anywhere on the
 /// way that points elsewhere fails this.
-fn resolves_inside(root: &Path, path: &Path) -> bool {
+pub(crate) fn resolves_inside(root: &Path, path: &Path) -> bool {
     let Ok(real_root) = dunce::canonicalize(root) else {
         return false;
     };

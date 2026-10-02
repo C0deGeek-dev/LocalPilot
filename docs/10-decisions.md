@@ -2,6 +2,91 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0201: An Uplift Run Starts Only From A Confirmed Command, Under Ceilings That Cancel It
+
+**Status:** accepted · **Date:** 2026-10-02. Builds on ADR-0200 (the uplift
+adapter) and ADR-0187 (Replay's opt-in, preview and gated runner). Reuses
+ADR-0009's permission gate. Uses LocalMind D-LM-0050 (lab-output retention).
+
+**Context.** ADR-0200 can run a lesson-off/on comparison and accept only its own
+receipt, but nothing could start one. A run drives real model sessions. LocalBench
+bounds it only by a per-turn timeout, which bounds nothing in aggregate: tasks,
+trials, two arms and the timeout multiply. A run also left no trace of where it
+was, could not be told from a finished one when it stopped, and had no rule for
+what a second attempt may reuse.
+
+**Decision.**
+
+**A run starts only from `localpilot lab uplift`, shown first and confirmed.**
+- The project must set `[lab] uplift = true` in its committed `.localpilot.toml`,
+  read from `HEAD` as Replay's flag is. The lesson must have an approved task set.
+- The `localbench` program comes from the user's own configuration
+  (`[lab] localbench`, default `localbench`), never the project's: a repository
+  must not choose a program to run.
+- The authorization screen states that the run drives real model sessions, the
+  model and solver, what is staged and where, every ceiling, and every command.
+- Nothing runs without a confirmation. At a prompt it answers an `Ask` for exactly
+  the previewed commands; `--yes` runs headless under the engine's headless
+  rules. A `Deny` is never overridden. The lesson arm's `--intended` value is the
+  seeded memory's id, known only once that arm is staged, so the preview shows a
+  placeholder there and the approval matches the rest of the command exactly.
+- Nothing is queued, nothing waits for capacity, and no review or navigation
+  action starts a run.
+
+**Ceilings are declared before the run and cancel it on breach.**
+
+| Ceiling | Default | How it binds |
+|---|---|---|
+| trials per task, per arm | 3 | part of the run's identity |
+| seconds per turn | 120 | LocalBench's own per-turn timeout |
+| tasks | at most 8 | the task-set limit |
+| wall clock, whole run | 30 min | watched while an arm runs |
+| tokens, whole run | 400 000 | read from the trial sessions while an arm runs |
+
+The screen shows the product — tasks × trials × 2 arms × seconds per turn — not
+the per-turn timeout alone. A breach cancels through the shared cancel signal,
+which reaps the solver's whole process tree with the shell tool's own reap. The
+result is `InvalidExperiment` / `BudgetExceeded`, never a partial verdict. Each
+flag (`--trials`, `--turn-timeout`, `--wall-minutes`, `--max-tokens`) changes one
+ceiling for one run, and the screen shows the changed value.
+
+**Runs are serial and leave a status.** A lock under `.localpilot/lab/`, refreshed
+while a run is alive, refuses a second run. Each run writes `state.json` at every
+stage: preparing, baseline, lessons, combining, then finished or invalid.
+`localpilot lab status` reads those files: a run is ended, running, or
+interrupted — stopped without recording an end, which is not a result.
+
+**A stopped run is invalid, and its baseline is only offered.** Half a pair is
+`InvalidExperiment` with `PartialPair`. When a later run of exactly the same
+request — the same lesson, assignment, approved tasks, source revision, model,
+trials and timeout — finds a finished baseline arm, it says so and asks. `--resume`
+reuses it, `--restart` runs both arms, and a headless run with neither does
+nothing. The reused arm file is checked by the same pairing and identity matching
+as any other, so a baseline of a different request cannot be combined.
+
+**What a run measured is reported apart from its result.** Wall time per arm and
+in total, and tokens as the trial sessions reported them. Model load state, RAM
+and GPU are reported as not measured: the endpoint is the solver's, and LocalPilot
+probes neither.
+
+**Old runs are swept by location.** Run directories past the lab's retention are
+removed at the start of a run, as LocalMind's plan allows: only directories
+strictly inside the project's own uplift directory, never through a link.
+
+**Consequences.**
+- An uplift result can now be produced on purpose, by a person, within bounds
+  they saw first.
+- Logic and Replay stay usable with no model at all.
+- Under the default permission profile `--yes` cannot start a run: `localbench` is
+  a command the engine asks about, and a headless run cannot answer. The run ends
+  `InvalidExperiment` and says to confirm on a terminal. Replay's `--yes` works
+  only because its checks are commands the engine allows outright.
+- A token ceiling holds only as far as the trial sessions report usage. A provider
+  that reports none is bounded by the wall clock and the product alone, and the
+  result says tokens were not reported.
+- An interrupted run's directory stays until retention removes it. It is shown as
+  interrupted, never as a result.
+
 ## ADR-0200: An Uplift Run Is Staged Per Arm, And Its Receipt Is Matched By Identity
 
 **Status:** accepted · **Date:** 2026-10-02. Builds on ADR-0185 (frozen

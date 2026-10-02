@@ -133,6 +133,12 @@ struct Script {
     /// A seed pack other than the task set's own.
     seed_pack: Option<String>,
     tamper: Option<Tamper>,
+    /// How long each arm takes, in milliseconds.
+    arm_millis: u64,
+    /// Tokens each arm's trial session reports.
+    tokens_per_arm: u64,
+    /// Cancel the run as the baseline arm finishes.
+    cancel_after_baseline: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -159,14 +165,25 @@ struct StandIn {
     script: Script,
     project: PathBuf,
     seen: RefCell<Vec<ArmSeen>>,
+    cancel: localpilot_harness::CancelSignal,
 }
 
 impl StandIn {
     fn new(project: &Path, script: Script) -> Self {
+        Self::cancellable(project, script, localpilot_harness::CancelSignal::new())
+    }
+
+    /// A stand-in that stops when `cancel` fires, as the real runner does.
+    fn cancellable(
+        project: &Path,
+        script: Script,
+        cancel: localpilot_harness::CancelSignal,
+    ) -> Self {
         Self {
             script,
             project: project.to_path_buf(),
             seen: RefCell::new(Vec::new()),
+            cancel,
         }
     }
 }
@@ -228,6 +245,34 @@ impl UpliftBench for StandIn {
             store: store.clone(),
             project_untouched: memory_list_readonly(&self.project).unwrap().is_empty(),
         });
+        if self.script.tokens_per_arm > 0 {
+            let sessions = call.workspace.join(".localpilot").join("sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            let name = if call.lesson_arm {
+                "lessons"
+            } else {
+                "baseline"
+            };
+            std::fs::write(
+                sessions.join(format!("{name}.jsonl")),
+                format!(
+                    "{{\"kind\":{{\"type\":\"usage_reported\",\"input_tokens\":{},\"output_tokens\":0}}}}\n",
+                    self.script.tokens_per_arm
+                ),
+            )
+            .unwrap();
+        }
+        let ends =
+            std::time::Instant::now() + std::time::Duration::from_millis(self.script.arm_millis);
+        while std::time::Instant::now() < ends {
+            if self.cancel.is_cancelled() {
+                return Err(BenchFailure::Cancelled);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        if self.script.cancel_after_baseline && !call.lesson_arm {
+            self.cancel.cancel();
+        }
         let in_store: Vec<String> = store.into_iter().map(|(id, _)| id).collect();
         let (passes, used) = if call.lesson_arm {
             (
@@ -1217,4 +1262,626 @@ async fn the_real_localbench_runs_both_arms_and_its_receipt_is_imported() {
     .await;
     assert_eq!(outcome.evidence.verdict, LabVerdict::InvalidExperiment);
     assert_eq!(outcome.evidence.reasons, vec![other("PermissionDenied")]);
+}
+
+// --- starting a run: authorization, ceilings, status and restart -----------
+
+use localpilot_localmind::{
+    approve_tasks, plan_uplift, read_run_state, run_planned_with, run_statuses, sweep_uplift_runs,
+    uplift_authorization, write_draft, PreviewedCommands, RunStanding, UpliftCeilings, UpliftPlan,
+    UpliftRefusal, UpliftTools,
+};
+
+fn git(root: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A project that enables uplift in its committed configuration, with a lesson
+/// whose tasks a person has approved.
+struct Enabled {
+    root: tempfile::TempDir,
+    candidate: CandidateLesson,
+    assignment: LessonAssignment,
+}
+
+fn enabled_with(config: &str) -> Enabled {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path();
+    git(path, &["init", "-q"]);
+    git(path, &["config", "user.email", "test@example.com"]);
+    git(path, &["config", "user.name", "Test"]);
+    git(path, &["config", "core.autocrlf", "false"]);
+    std::fs::write(path.join(".localpilot.toml"), config).unwrap();
+    std::fs::write(
+        path.join(".gitignore"),
+        ".localpilot/\n.localmind/\n.localmind.toml\n",
+    )
+    .unwrap();
+    std::fs::write(
+        path.join(".localmind.toml"),
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+    )
+    .unwrap();
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-q", "-m", "base"]);
+    let candidate = candidate(LESSON);
+    let mut draft = approved(&candidate);
+    draft.approved_by = None;
+    draft.approved_at = None;
+    let localpilot = path.join(".localpilot");
+    write_draft(&localpilot, &draft).unwrap();
+    let (_, assignment) = approve_tasks(&localpilot, &candidate, "reviewer", 1).unwrap();
+    Enabled {
+        root,
+        candidate,
+        assignment,
+    }
+}
+
+fn enabled() -> Enabled {
+    enabled_with("[lab]\nuplift = true\n")
+}
+
+fn tools() -> UpliftTools {
+    UpliftTools {
+        localbench: "localbench".to_string(),
+        solver: "localpilot".to_string(),
+    }
+}
+
+impl Enabled {
+    fn plan_with(&self, ceilings: UpliftCeilings) -> Result<UpliftPlan, UpliftRefusal> {
+        plan_uplift(
+            self.root.path(),
+            &self.candidate,
+            &self.assignment,
+            "fixture-model",
+            ceilings,
+            tools(),
+        )
+    }
+
+    fn plan(&self) -> UpliftPlan {
+        self.plan_with(UpliftCeilings::default()).unwrap()
+    }
+
+    async fn run(
+        &self,
+        plan: &UpliftPlan,
+        script: Script,
+        reuse_baseline: bool,
+    ) -> (UpliftOutcome, Vec<ArmSeen>) {
+        let cancel = localpilot_harness::CancelSignal::new();
+        let bench = StandIn::cancellable(self.root.path(), script, cancel.clone());
+        let outcome = run_planned_with(
+            self.root.path(),
+            &self.candidate,
+            plan,
+            &bench,
+            &cancel,
+            reuse_baseline,
+            false,
+        )
+        .await
+        .unwrap();
+        outcome.evidence.validate(&self.candidate).unwrap();
+        let seen = bench.seen.borrow().clone();
+        (outcome, seen)
+    }
+}
+
+fn passing() -> Script {
+    Script {
+        lessons_pass: true,
+        ..Script::default()
+    }
+}
+
+#[test]
+fn a_run_is_planned_only_where_the_committed_config_enables_it_and_tasks_are_approved() {
+    let off = enabled_with("[lab]\nreplay = true\n");
+    assert_eq!(
+        off.plan_with(UpliftCeilings::default()).unwrap_err(),
+        UpliftRefusal::NotEnabled
+    );
+    // Enabled only in the working copy: not the trust boundary.
+    std::fs::write(
+        off.root.path().join(".localpilot.toml"),
+        "[lab]\nuplift = true\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        off.plan_with(UpliftCeilings::default()).unwrap_err(),
+        UpliftRefusal::Untrusted(_)
+    ));
+
+    let project = enabled();
+    assert!(project.plan_with(UpliftCeilings::default()).is_ok());
+    assert!(matches!(
+        project
+            .plan_with(UpliftCeilings {
+                wall_secs: 0,
+                ..UpliftCeilings::default()
+            })
+            .unwrap_err(),
+        UpliftRefusal::Ceiling(_)
+    ));
+
+    // Stale inputs: the lesson was revised after its tasks were approved.
+    let revised = candidate("Run foo db sync before any test at all");
+    assert_eq!(
+        plan_uplift(
+            project.root.path(),
+            &revised,
+            &project.assignment,
+            "fixture-model",
+            UpliftCeilings::default(),
+            tools(),
+        )
+        .unwrap_err(),
+        UpliftRefusal::NoApprovedTasks
+    );
+    assert!(
+        run_statuses(project.root.path()).is_empty(),
+        "planning starts nothing"
+    );
+}
+
+#[test]
+fn the_authorization_states_the_product_the_ceilings_and_every_command() {
+    let project = enabled();
+    let plan = project.plan();
+    let shown = uplift_authorization(&plan);
+
+    assert!(shown.contains("real model sessions"), "{shown}");
+    assert!(
+        shown.contains("12 turns of `localpilot` with model `fixture-model`"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("2 task(s) x 3 trial(s) x 2 arms x 120 s per turn = at most 24 min"),
+        "the product, not the per-turn timeout: {shown}"
+    );
+    assert!(shown.contains("wall clock: 30 min"), "{shown}");
+    assert!(shown.contains("tokens: 400000"), "{shown}");
+    assert!(
+        shown.contains("Your project and your own memory are not touched"),
+        "{shown}"
+    );
+    assert_eq!(plan.commands.len(), 6);
+    for command in &plan.commands {
+        assert!(command.starts_with("localbench uplift "), "{command}");
+        assert!(shown.contains(command.as_str()), "{command}");
+    }
+    assert!(
+        plan.commands[4].contains("--arm lessons")
+            && plan.commands[4].ends_with("--intended <seeded-id>")
+    );
+    assert_eq!(plan.resume, None);
+    assert!(!plan.run_dir.exists(), "a preview creates nothing");
+}
+
+#[tokio::test]
+async fn the_confirmation_answers_only_the_previewed_commands() {
+    use localpilot_sandbox::{Approver, Effect, Interactivity, PermissionRequest};
+    let project = enabled();
+    let plan = project.plan();
+    let approver = PreviewedCommands::of(&plan);
+    let request = |tool: &str, detail: String| PermissionRequest {
+        tool: tool.to_string(),
+        effect: Effect::RunCommand(localpilot_sandbox::CommandClass::Unknown),
+        interactivity: Interactivity::Interactive,
+        trusted: true,
+        detail,
+    };
+    // The lesson arm's command, with the real seeded id in place.
+    let real = plan.commands[4].replace("<seeded-id>", "seed-0123456789abcdef");
+    assert!(
+        approver
+            .approve(&request("quality_check", real.clone()))
+            .await
+    );
+    assert!(
+        approver
+            .approve(&request("quality_check", plan.commands[0].clone()))
+            .await
+    );
+    // Not another tool, and not a command that was never shown.
+    assert!(!approver.approve(&request("run_shell", real.clone())).await);
+    assert!(
+        !approver
+            .approve(&request("quality_check", format!("{real} --extra")))
+            .await
+    );
+    assert!(
+        !approver
+            .approve(&request("quality_check", "localbench findbest".to_string()))
+            .await
+    );
+}
+
+#[tokio::test]
+async fn an_authorized_run_reports_its_status_and_what_it_measured() {
+    let project = enabled();
+    let plan = project.plan();
+    let (outcome, seen) = project
+        .run(
+            &plan,
+            Script {
+                lessons_pass: true,
+                tokens_per_arm: 700,
+                arm_millis: 60,
+                ..Script::default()
+            },
+            false,
+        )
+        .await;
+
+    assert_eq!(outcome.evidence.verdict, LabVerdict::Supported);
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        outcome.run_dir, plan.run_dir,
+        "the previewed directory is the one used"
+    );
+
+    // Reported separately from the result; what was not measured says so.
+    let telemetry = &outcome.telemetry;
+    assert!(telemetry.baseline_wall_ms.unwrap() >= 50);
+    assert!(telemetry.lessons_wall_ms.unwrap() >= 50);
+    assert!(telemetry.total_wall_ms >= 100);
+    assert_eq!(telemetry.tokens, Some(1_400));
+    assert_eq!(
+        (&telemetry.model_state, &telemetry.ram, &telemetry.gpu),
+        (&None, &None, &None)
+    );
+    assert!(outcome.evidence.arms.iter().all(|arm| arm.wall_ms >= 50));
+
+    let statuses = run_statuses(project.root.path());
+    assert_eq!(statuses.len(), 1);
+    let (dir, state, standing) = &statuses[0];
+    assert_eq!(dir, &plan.run_dir);
+    assert_eq!(*standing, RunStanding::Ended);
+    assert_eq!(state.stage, "finished");
+    assert_eq!(state.verdict.as_deref(), Some("Supported"));
+    assert_eq!(state.telemetry, *telemetry);
+    assert!(
+        !project
+            .root
+            .path()
+            .join(".localpilot/lab/uplift.lock")
+            .exists(),
+        "the lock is released"
+    );
+}
+
+#[tokio::test]
+async fn a_breached_ceiling_cancels_the_run_and_is_never_a_partial_verdict() {
+    let project = enabled();
+
+    // Wall clock, during the baseline arm.
+    let plan = project
+        .plan_with(UpliftCeilings {
+            wall_secs: 1,
+            ..UpliftCeilings::default()
+        })
+        .unwrap();
+    let started = std::time::Instant::now();
+    let (wall, seen) = project
+        .run(
+            &plan,
+            Script {
+                lessons_pass: true,
+                arm_millis: 20_000,
+                ..Script::default()
+            },
+            false,
+        )
+        .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "cancelled, not waited out"
+    );
+    assert_eq!(wall.evidence.verdict, LabVerdict::InvalidExperiment);
+    assert_eq!(wall.evidence.reasons, vec![VerdictReason::BudgetExceeded]);
+    assert!(wall
+        .evidence
+        .limitations
+        .iter()
+        .any(|l| l.contains("wall-clock ceiling of 1 s")));
+    assert_eq!(seen.len(), 1, "the lesson arm never started");
+    assert!(wall.evidence.receipt.is_none());
+
+    // Tokens, watched while the lesson arm runs: the baseline had finished.
+    let plan = project
+        .plan_with(UpliftCeilings {
+            max_tokens: 1_000,
+            ..UpliftCeilings::default()
+        })
+        .unwrap();
+    let (tokens, seen) = project
+        .run(
+            &plan,
+            Script {
+                lessons_pass: true,
+                arm_millis: 900,
+                tokens_per_arm: 600,
+                ..Script::default()
+            },
+            false,
+        )
+        .await;
+    assert_eq!(tokens.evidence.verdict, LabVerdict::InvalidExperiment);
+    assert_eq!(
+        tokens.evidence.reasons,
+        vec![VerdictReason::BudgetExceeded, VerdictReason::PartialPair]
+    );
+    assert!(
+        tokens
+            .evidence
+            .limitations
+            .iter()
+            .any(|l| l.contains("1200 tokens, past its ceiling of 1000")),
+        "{:?}",
+        tokens.evidence.limitations
+    );
+    assert_eq!(seen.len(), 2);
+    let state = read_run_state(&tokens.run_dir).unwrap();
+    assert_eq!(state.stage, "invalid");
+    assert_eq!(state.reasons, vec!["BudgetExceeded", "PartialPair"]);
+}
+
+#[tokio::test]
+async fn a_run_cancelled_between_the_arms_is_invalid_and_its_baseline_is_only_offered() {
+    let project = enabled();
+    let plan = project.plan();
+    assert_eq!(plan.resume, None);
+
+    let (cancelled, seen) = project
+        .run(
+            &plan,
+            Script {
+                lessons_pass: true,
+                cancel_after_baseline: true,
+                ..Script::default()
+            },
+            false,
+        )
+        .await;
+    assert_eq!(cancelled.evidence.verdict, LabVerdict::InvalidExperiment);
+    assert_eq!(
+        cancelled.evidence.reasons,
+        vec![VerdictReason::Cancelled, VerdictReason::PartialPair]
+    );
+    assert_eq!(seen.len(), 1, "the lesson arm never ran");
+    assert!(
+        cancelled.evidence.receipt.is_none(),
+        "half a pair is not a result"
+    );
+
+    // The same request again: the finished baseline is offered, not taken.
+    let again = project.plan();
+    let offer = again
+        .resume
+        .clone()
+        .expect("a finished baseline is offered");
+    assert_eq!(offer.run_dir, plan.run_dir);
+    assert!(uplift_authorization(&again).contains("can be reused instead of running it again"));
+
+    // Declined: both arms run.
+    let (fresh, seen) = project.run(&again, passing(), false).await;
+    assert_eq!(fresh.evidence.verdict, LabVerdict::Supported);
+    assert_eq!(seen.len(), 2);
+    assert!(!read_run_state(&fresh.run_dir).unwrap().baseline_reused);
+
+    // Accepted: only the lesson arm runs, and the pair still matches.
+    let resumed_plan = project.plan();
+    assert!(resumed_plan.resume.is_some());
+    let (resumed, seen) = project.run(&resumed_plan, passing(), true).await;
+    assert_eq!(
+        resumed.evidence.verdict,
+        LabVerdict::Supported,
+        "{:#?}",
+        resumed.evidence
+    );
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].lesson_arm);
+    assert!(read_run_state(&resumed.run_dir).unwrap().baseline_reused);
+    assert_eq!(
+        resumed.telemetry.baseline_wall_ms, None,
+        "not run, so not measured"
+    );
+
+    // Different inputs are a different request: nothing is offered.
+    let other_settings = project
+        .plan_with(UpliftCeilings {
+            trials: 5,
+            ..UpliftCeilings::default()
+        })
+        .unwrap();
+    assert_eq!(other_settings.resume, None);
+}
+
+#[tokio::test]
+async fn a_killed_run_reads_as_interrupted_and_a_live_one_refuses_a_second() {
+    let project = enabled();
+    let plan = project.plan();
+    let (finished, _) = project.run(&plan, passing(), false).await;
+
+    // A run killed during its lesson arm: its state never reached an end.
+    let killed = project
+        .root
+        .path()
+        .join(".localpilot/lab/uplift/killed-run");
+    std::fs::create_dir_all(&killed).unwrap();
+    let mut state = read_run_state(&finished.run_dir).unwrap();
+    state.stage = "lessons".to_string();
+    state.verdict = None;
+    state.started_at += 100;
+    std::fs::write(
+        killed.join("state.json"),
+        serde_json::to_string(&state).unwrap(),
+    )
+    .unwrap();
+    std::fs::copy(
+        finished.run_dir.join("baseline.json"),
+        killed.join("baseline.json"),
+    )
+    .unwrap();
+
+    let statuses = run_statuses(project.root.path());
+    assert_eq!(statuses.len(), 2);
+    assert_eq!(statuses[0].2, RunStanding::Ended);
+    assert_eq!(
+        statuses[1].2,
+        RunStanding::Interrupted,
+        "no live lock: not running"
+    );
+    let offer = project
+        .plan()
+        .resume
+        .expect("its finished baseline is offered");
+    assert_eq!(offer.run_dir, killed);
+    assert!(offer.ended.contains("interrupted during `lessons`"));
+
+    // While a run holds the lock, the open run reads as running and a second
+    // run is refused.
+    let lock = project.root.path().join(".localpilot/lab/uplift.lock");
+    std::fs::write(&lock, "4242 0\n").unwrap();
+    assert_eq!(run_statuses(project.root.path())[1].2, RunStanding::Running);
+    let bench = StandIn::new(project.root.path(), passing());
+    let busy = run_planned_with(
+        project.root.path(),
+        &project.candidate,
+        &project.plan(),
+        &bench,
+        &localpilot_harness::CancelSignal::new(),
+        false,
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(busy, UpliftRefusal::Busy(_)), "{busy}");
+    assert!(bench.seen.borrow().is_empty());
+}
+
+#[tokio::test]
+async fn runs_past_retention_are_swept_by_location() {
+    let project = enabled();
+    let (kept, _) = project.run(&project.plan(), passing(), false).await;
+    let old = project.root.path().join(".localpilot/lab/uplift/old-run");
+    std::fs::create_dir_all(&old).unwrap();
+    let state = old.join("state.json");
+    std::fs::write(&state, "{}").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&state)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400))
+        .unwrap();
+
+    assert_eq!(
+        sweep_uplift_runs(project.root.path()),
+        vec!["old-run".to_string()]
+    );
+    assert!(!old.exists());
+    assert!(kept.run_dir.is_dir(), "within retention");
+}
+
+/// Cancellation through the production runner reaps the whole tree: a
+/// grandchild that keeps writing stops when the run is cancelled. The effect is
+/// observed, not an exit code.
+#[tokio::test]
+async fn cancelling_the_real_runner_reaps_the_process_tree() {
+    use localpilot_localmind::LocalBenchCli;
+    use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover};
+
+    let dir = tempfile::tempdir().unwrap();
+    let heartbeat = dir.path().join("heartbeat.txt");
+    let program = if cfg!(windows) {
+        std::fs::write(
+            dir.path().join("beat.cmd"),
+            "@echo off\r\n:loop\r\necho x>>heartbeat.txt\r\nping -n 2 127.0.0.1 >nul\r\ngoto loop\r\n",
+        )
+        .unwrap();
+        let path = dir.path().join("hang.cmd");
+        std::fs::write(
+            &path,
+            "@echo off\r\nstart /b cmd /c %~dp0beat.cmd\r\nping -n 60 127.0.0.1 >nul\r\n",
+        )
+        .unwrap();
+        path
+    } else {
+        let path = dir.path().join("hang.sh");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n(while true; do echo x >> heartbeat.txt; sleep 0.2; done) &\nsleep 60\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    };
+    let engine = PermissionEngine::new(Profile::Bypass, Vec::new());
+    let approver = ScriptedApprover::always();
+    let cancel = localpilot_harness::CancelSignal::new();
+    let bench = LocalBenchCli {
+        program: program.to_string_lossy().into_owned(),
+        solver: "localpilot".to_string(),
+        engine: &engine,
+        approver: &approver,
+        interactivity: Interactivity::NonInteractive,
+        cancel: cancel.clone(),
+        arm_timeout: std::time::Duration::from_secs(120),
+        cwd: dir.path().to_path_buf(),
+    };
+    let trigger = {
+        let cancel = cancel.clone();
+        let heartbeat = heartbeat.clone();
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                if heartbeat.is_file() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            cancel.cancel();
+        })
+    };
+    let settings = settings();
+    let out = dir.path().join("arm.json");
+    let call = ArmCall {
+        lesson_arm: false,
+        task_set: &dir.path().join("tasks.json"),
+        workspace: dir.path(),
+        settings: &settings,
+        binding: "b",
+        intended: &[],
+        out: &out,
+    };
+
+    let result = bench.run_arm(&call).await;
+    trigger.await.unwrap();
+
+    assert_eq!(result, Err(BenchFailure::Cancelled));
+    assert!(heartbeat.is_file(), "the grandchild ran");
+    let settled = std::fs::metadata(&heartbeat).unwrap().len();
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert_eq!(
+        std::fs::metadata(&heartbeat).unwrap().len(),
+        settled,
+        "a reaped tree writes nothing more"
+    );
 }

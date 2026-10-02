@@ -844,9 +844,13 @@ what a run recorded and starts nothing.
 |---|---|---:|---|
 | `replay` | bool | `false` | Allow `localpilot lab replay` to run a lesson's ratified check on the commits it came from, in temporary worktrees. Honoured only from the project's **committed** `.localpilot.toml` — the same boundary that ratifies a check — and ignored when the working copy differs. Every run is previewed and needs its own confirmation (`--yes` runs headless under the permission engine's headless rules). |
 
+| `uplift` | bool | `false` | Allow `localpilot lab uplift` to run a lesson's approved tasks with and without the lesson through LocalBench. This drives real model sessions. Honoured only from the project's **committed** `.localpilot.toml`. Every run shows its ceilings and commands first and needs its own confirmation. |
+| `localbench` | string | `"localbench"` | The LocalBench program an uplift run starts. Read from your user config and the environment only; this key is ignored in a project's `.localpilot.toml`, because a repository must not choose a program to run. |
+
 ```toml
 [lab]
 replay = true
+uplift = true
 ```
 
 ### `[terminal]`

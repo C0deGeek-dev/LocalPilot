@@ -49,6 +49,7 @@ mod tool_use;
 mod transcript;
 mod uplift_downweight;
 mod uplift_lab;
+mod uplift_run;
 mod workspace;
 
 use std::fmt::Write as _;
@@ -157,10 +158,16 @@ pub use transcript::{
 };
 pub use uplift_downweight::{downweight_unhelpful_lessons, UpliftArmOutcome};
 pub use uplift_lab::{
-    import_receipt, project as project_uplift, run_uplift, stage_baseline, stage_lessons, ArmCall,
-    BenchFailure, ImportRefusal, Imported, Lineage, LocalBenchCli, Projection, ProjectionRefusal,
-    UpliftBench, UpliftOutcome, UpliftSettings, BENCH_FAILED, LAB_UPLIFT_DIR, MIS_STAGED,
-    RECEIPT_REJECTED,
+    import_receipt, project as project_uplift, read_run_state, run_uplift, run_uplift_controlled,
+    stage_baseline, stage_lessons, workspace_tokens, ArmCall, BenchFailure, ImportRefusal,
+    Imported, Lineage, LocalBenchCli, Projection, ProjectionRefusal, RunControl, RunState,
+    Telemetry, UpliftBench, UpliftOutcome, UpliftSettings, BENCH_FAILED, LAB_UPLIFT_DIR,
+    MIS_STAGED, RECEIPT_REJECTED, RUN_STATE_FILE,
+};
+pub use uplift_run::{
+    authorization as uplift_authorization, plan_uplift, run_planned, run_planned_with,
+    run_statuses, sweep_runs as sweep_uplift_runs, PreviewedCommands, ResumeOffer, RunStanding,
+    UpliftCeilings, UpliftPlan, UpliftRefusal, UpliftTools,
 };
 pub use workspace::{is_store_root, resolve_store_root, StoreRoot};
 

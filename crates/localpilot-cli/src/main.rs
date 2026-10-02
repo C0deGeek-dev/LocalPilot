@@ -1132,6 +1132,41 @@ enum LabCommand {
         #[arg(long, default_value_t = 900)]
         timeout_secs: u64,
     },
+    /// Run a lesson's approved tasks with and without the lesson through
+    /// LocalBench. Drives real model sessions. Off unless the project's
+    /// committed .localpilot.toml sets `[lab] uplift = true`; shows what will
+    /// run and its ceilings first, and runs only once confirmed. Ctrl+C
+    /// cancels.
+    Uplift {
+        /// The lesson's candidate identity, or an unambiguous prefix of it.
+        candidate: String,
+        /// Model name the solver requests.
+        #[arg(long)]
+        model: String,
+        /// Trials per task, per arm (default 3).
+        #[arg(long)]
+        trials: Option<u32>,
+        /// Seconds one turn may take (default 120).
+        #[arg(long)]
+        turn_timeout: Option<u64>,
+        /// Minutes the whole run may take (default 30).
+        #[arg(long)]
+        wall_minutes: Option<u64>,
+        /// Tokens the whole run may use (default 400000).
+        #[arg(long)]
+        max_tokens: Option<u64>,
+        /// Reuse the finished baseline an earlier, stopped run left.
+        #[arg(long)]
+        resume: bool,
+        /// Run both arms even though such a baseline exists.
+        #[arg(long)]
+        restart: bool,
+        /// Run without asking, after showing the authorization. Headless.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show the project's uplift runs and how each stands.
+    Status,
     /// Uplift tasks for a lesson: a model drafts them, a person approves them.
     /// Nothing runs from a draft.
     Tasks {
@@ -2596,6 +2631,60 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             let mut stdout = io::stdout().lock();
             match command {
                 LabCommand::List => lab_cmd::list(&root, &mut stdout)?,
+                LabCommand::Status => lab_cmd::status(&root, &mut stdout)?,
+                LabCommand::Uplift {
+                    candidate,
+                    model,
+                    trials,
+                    turn_timeout,
+                    wall_minutes,
+                    max_tokens,
+                    resume,
+                    restart,
+                    yes,
+                } => {
+                    let cancel = localpilot_harness::CancelSignal::new();
+                    let on_interrupt = {
+                        let cancel = cancel.clone();
+                        tokio::spawn(async move {
+                            if tokio::signal::ctrl_c().await.is_ok() {
+                                cancel.cancel();
+                            }
+                        })
+                    };
+                    let stdin = io::stdin();
+                    let mut input = stdin.lock();
+                    let confirmation = if yes {
+                        lab_cmd::Confirmation::Yes
+                    } else if io::IsTerminal::is_terminal(&io::stdin()) {
+                        lab_cmd::Confirmation::Prompt(&mut input)
+                    } else {
+                        lab_cmd::Confirmation::Unavailable
+                    };
+                    let engine = lab_cmd::engine(&root)?;
+                    let args = lab_cmd::UpliftArgs {
+                        model,
+                        trials,
+                        turn_timeout_secs: turn_timeout,
+                        wall_minutes,
+                        max_tokens,
+                        resume,
+                        restart,
+                    };
+                    lab_cmd::uplift(
+                        &root,
+                        &candidate,
+                        &args,
+                        confirmation,
+                        &engine,
+                        lab_cmd::uplift_tools()?,
+                        None,
+                        &cancel,
+                        &mut stdout,
+                    )
+                    .await?;
+                    on_interrupt.abort();
+                }
                 LabCommand::Tasks { command } => match command {
                     LabTasksCommand::Draft {
                         candidate,

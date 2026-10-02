@@ -408,6 +408,294 @@ pub fn tasks_approve(
     Ok(())
 }
 
+/// What `lab uplift` was asked for.
+#[derive(Debug, Clone, Default)]
+pub struct UpliftArgs {
+    pub model: String,
+    pub trials: Option<u32>,
+    pub turn_timeout_secs: Option<u64>,
+    pub wall_minutes: Option<u64>,
+    pub max_tokens: Option<u64>,
+    /// Reuse a finished baseline an earlier, stopped run of this request left.
+    pub resume: bool,
+    /// Run both arms even though such a baseline exists.
+    pub restart: bool,
+}
+
+/// The programs an uplift run starts: `localbench` from the user's own
+/// configuration (never the project's), and this `localpilot` as the solver.
+///
+/// # Errors
+/// The user configuration cannot be loaded, or this program's path is unknown.
+pub fn uplift_tools() -> anyhow::Result<localpilot_localmind::UpliftTools> {
+    let paths = localpilot_config::ConfigPaths {
+        user: localpilot_config::user_config_path(),
+        project: None,
+    };
+    let config = localpilot_config::load(&paths, &localpilot_config::CliOverrides::default())?;
+    let solver = std::env::current_exe()?;
+    Ok(localpilot_localmind::UpliftTools {
+        localbench: config.lab.localbench,
+        solver: solver.to_string_lossy().into_owned(),
+    })
+}
+
+/// Plan an uplift run for a lesson, show what it will do and what bounds it,
+/// and run it only once confirmed. The result goes onto the lesson in review.
+///
+/// `bench` stands in for LocalBench in tests; `None` runs the real program
+/// through the permission engine.
+///
+/// # Errors
+/// The lesson cannot be resolved, or output, configuration or the review queue
+/// fails.
+#[allow(clippy::too_many_arguments)] // one command's whole context, each part named
+pub async fn uplift(
+    root: &Path,
+    selection: &str,
+    args: &UpliftArgs,
+    confirmation: Confirmation<'_>,
+    engine: &PermissionEngine,
+    tools: localpilot_localmind::UpliftTools,
+    bench: Option<&dyn localpilot_localmind::UpliftBench>,
+    cancel: &CancelSignal,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    use localpilot_localmind::{UpliftCeilings, UpliftRefusal};
+
+    let (record, candidate) = resolve(root, selection)?;
+    let Some(assignment) = record.assignments.iter().find(|assignment| {
+        matches!(
+            assignment.source,
+            Some(AssignmentSource::ApprovedTaskSet { .. })
+        )
+    }) else {
+        writeln!(out, "Nothing ran: {}", UpliftRefusal::NoApprovedTasks)?;
+        return Ok(());
+    };
+    let defaults = UpliftCeilings::default();
+    let ceilings = UpliftCeilings {
+        trials: args.trials.unwrap_or(defaults.trials),
+        turn_timeout_secs: args.turn_timeout_secs.unwrap_or(defaults.turn_timeout_secs),
+        wall_secs: args
+            .wall_minutes
+            .map_or(defaults.wall_secs, |minutes| minutes.saturating_mul(60)),
+        max_tokens: args.max_tokens.unwrap_or(defaults.max_tokens),
+    };
+    let plan = match localpilot_localmind::plan_uplift(
+        root,
+        &candidate,
+        assignment,
+        &args.model,
+        ceilings,
+        tools,
+    ) {
+        Ok(plan) => plan,
+        Err(refusal) => {
+            writeln!(out, "Nothing ran: {refusal}")?;
+            return Ok(());
+        }
+    };
+    write!(out, "{}", localpilot_localmind::uplift_authorization(&plan))?;
+
+    let offered = plan.resume.is_some();
+    if args.resume && args.restart {
+        writeln!(out, "Nothing ran: pass --resume or --restart, not both.")?;
+        return Ok(());
+    }
+    let (interactivity, reuse) = match confirmation {
+        Confirmation::Unavailable => {
+            writeln!(
+                out,
+                "Nothing ran: confirm on a terminal, or pass --yes to run without asking."
+            )?;
+            return Ok(());
+        }
+        Confirmation::Yes => {
+            // Headless: an existing baseline is never reused or repeated on a
+            // guess.
+            if offered && !args.resume && !args.restart {
+                writeln!(
+                    out,
+                    "Nothing ran: an earlier baseline exists. Pass --resume to reuse it or \
+                     --restart to run both arms again."
+                )?;
+                return Ok(());
+            }
+            (Interactivity::NonInteractive, offered && args.resume)
+        }
+        Confirmation::Prompt(input) => {
+            let mut ask = |question: &str, out: &mut dyn Write| -> anyhow::Result<bool> {
+                write!(out, "{question} [y/N] ")?;
+                out.flush()?;
+                let mut answer = String::new();
+                input.read_line(&mut answer)?;
+                Ok(matches!(
+                    answer.trim().to_ascii_lowercase().as_str(),
+                    "y" | "yes"
+                ))
+            };
+            if !ask("Run this uplift run?", out)? {
+                writeln!(out, "Nothing ran.")?;
+                return Ok(());
+            }
+            let reuse = if !offered || args.restart {
+                false
+            } else if args.resume {
+                true
+            } else {
+                ask(
+                    "Reuse the finished baseline instead of running it again?",
+                    out,
+                )?
+            };
+            (Interactivity::Interactive, reuse)
+        }
+    };
+
+    let config = localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(root),
+        &localpilot_config::CliOverrides::default(),
+    )?;
+    let downweight = config.memory.outcome_downweight;
+    let ran = match bench {
+        Some(bench) => {
+            localpilot_localmind::run_planned_with(
+                root, &candidate, &plan, bench, cancel, reuse, downweight,
+            )
+            .await
+        }
+        None => {
+            localpilot_localmind::run_planned(
+                root,
+                &candidate,
+                &plan,
+                engine,
+                interactivity,
+                cancel,
+                reuse,
+                downweight,
+            )
+            .await
+        }
+    };
+    let outcome = match ran {
+        Ok(outcome) => outcome,
+        Err(refusal) => {
+            writeln!(out, "Nothing ran: {refusal}")?;
+            return Ok(());
+        }
+    };
+    writeln!(
+        out,
+        "{}: Uplift {:?}{}",
+        record.candidate_identity,
+        outcome.evidence.verdict,
+        reasons_suffix(&outcome.evidence.reasons)
+    )?;
+    for limitation in outcome.evidence.limitations.iter().skip(1) {
+        writeln!(out, "  {limitation}")?;
+    }
+    let denied = outcome.evidence.reasons.iter().any(
+        |reason| matches!(reason, localmind_core::VerdictReason::Other(name) if name == localpilot_localmind::PERMISSION_DENIED),
+    );
+    if denied && interactivity == Interactivity::NonInteractive {
+        writeln!(
+            out,
+            "  `--yes` runs headless, and a headless run cannot answer the permission question \
+             for this command. Confirm on a terminal instead, or use a permission profile that \
+             allows it without asking."
+        )?;
+    }
+    print_telemetry(&outcome.telemetry, out)?;
+    for id in &outcome.flagged_for_review {
+        writeln!(out, "  routed to review: accepted memory {id}")?;
+    }
+    writeln!(out, "  run: {}", outcome.run_dir.display())?;
+    if !attach_lab_evidence(root, outcome.evidence)? {
+        writeln!(
+            out,
+            "  the lesson is no longer in review; the result was not kept"
+        )?;
+    }
+    Ok(())
+}
+
+fn print_telemetry(
+    telemetry: &localpilot_localmind::Telemetry,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    let seconds = |millis: Option<u64>| {
+        millis.map_or_else(
+            || "not run".to_string(),
+            |millis| format!("{:.1} s", millis as f64 / 1000.0),
+        )
+    };
+    let or_unmeasured =
+        |value: &Option<String>| value.clone().unwrap_or_else(|| "not measured".to_string());
+    writeln!(
+        out,
+        "  wall time: {:.1} s (baseline {}, lesson arm {})",
+        telemetry.total_wall_ms as f64 / 1000.0,
+        seconds(telemetry.baseline_wall_ms),
+        seconds(telemetry.lessons_wall_ms)
+    )?;
+    writeln!(
+        out,
+        "  tokens: {}",
+        telemetry.tokens.map_or_else(
+            || "not reported by the sessions".to_string(),
+            |t| t.to_string()
+        )
+    )?;
+    writeln!(
+        out,
+        "  model load state: {}; RAM: {}; GPU: {}",
+        or_unmeasured(&telemetry.model_state),
+        or_unmeasured(&telemetry.ram),
+        or_unmeasured(&telemetry.gpu)
+    )
+}
+
+/// Show every uplift run kept for the project and how it stands.
+///
+/// # Errors
+/// Writing the output.
+pub fn status(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    use localpilot_localmind::RunStanding;
+    let runs = localpilot_localmind::run_statuses(root);
+    if runs.is_empty() {
+        writeln!(out, "No uplift runs.")?;
+        return Ok(());
+    }
+    for (dir, state, standing) in runs {
+        let standing = match standing {
+            RunStanding::Running => format!("running ({})", state.stage),
+            RunStanding::Interrupted => format!(
+                "interrupted during `{}` — not a result; run it again",
+                state.stage
+            ),
+            RunStanding::Ended => format!(
+                "{}{}",
+                state.verdict.clone().unwrap_or_default(),
+                if state.reasons.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", state.reasons.join(", "))
+                }
+            ),
+        };
+        writeln!(
+            out,
+            "{}  {}  model {}  {standing}",
+            dir.file_name().unwrap_or_default().to_string_lossy(),
+            state.candidate_identity,
+            state.model
+        )?;
+    }
+    Ok(())
+}
+
 fn source_name(source: Option<&AssignmentSource>) -> &'static str {
     match source {
         Some(AssignmentSource::RecordedTrajectory { .. }) => "recorded trajectory",
@@ -508,7 +796,7 @@ mod tests {
 
     fn config_text(check: &CheckConfig) -> String {
         format!(
-            "[lab]\nreplay = true\n\n[[harness.checks]]\nname = \"test\"\nprogram = {:?}\nargs = {:?}\n",
+            "[lab]\nreplay = true\nuplift = true\n\n[[harness.checks]]\nname = \"test\"\nprogram = {:?}\nargs = {:?}\n",
             check.program, check.args
         )
     }
@@ -518,7 +806,15 @@ mod tests {
     /// leaves behind.
     fn project() -> (tempfile::TempDir, CandidateLesson) {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        let candidate = project_at(
+            dir.path(),
+            "Write the state file before the check that reads it",
+            "the state file had not been written yet",
+        );
+        (dir, candidate)
+    }
+
+    fn project_at(root: &Path, lesson: &str, claim: &str) -> CandidateLesson {
         git(root, &["init", "-q"]);
         git(root, &["config", "user.email", "test@example.com"]);
         git(root, &["config", "user.name", "Test"]);
@@ -558,12 +854,11 @@ mod tests {
             .insert(RATIFIED_CHECK_KEY.to_string(), "test".to_string());
         let mut draft = HindsightDraft::new("Write the state", "The check passes").with_hypothesis(
             CausalHypothesis {
-                claim: "the state file had not been written yet".to_string(),
+                claim: claim.to_string(),
                 evidence_ids: vec![failed.id.clone()],
                 confidence: Confidence::new(0.6).unwrap(),
             },
         );
-        let lesson = "Write the state file before the check that reads it";
         draft.proposed_lesson = Some(lesson.to_string());
         let candidate = CandidateLesson::new(
             LessonId::new("retro-1"),
@@ -606,7 +901,77 @@ mod tests {
             serde_json::to_string_pretty(&record).unwrap(),
         )
         .unwrap();
-        (dir, candidate)
+        candidate
+    }
+
+    /// Lay down the project a live uplift run starts from: a lesson in review
+    /// that states a convention no model could know, so only the lesson arm
+    /// can answer. Drive it with the real commands afterwards:
+    /// `lab tasks draft`, `lab tasks approve`, `lab uplift`.
+    ///
+    /// Run with:
+    ///   `LOCALPILOT_LIVE_TESTS=1 LOCALPILOT_LIVE_UPLIFT_DIR=<empty dir> cargo test -p localpilot a_live_uplift_project -- --nocapture`
+    #[test]
+    fn a_live_uplift_project_is_laid_down_on_request() {
+        let dir = std::env::var_os("LOCALPILOT_LIVE_UPLIFT_DIR");
+        let (Ok(_), Some(dir)) = (std::env::var("LOCALPILOT_LIVE_TESTS"), dir) else {
+            eprintln!("skipping the live uplift project: set LOCALPILOT_LIVE_TESTS and LOCALPILOT_LIVE_UPLIFT_DIR");
+            return;
+        };
+        let root = Path::new(&dir);
+        std::fs::create_dir_all(root).unwrap();
+        let candidate = project_at(
+            root,
+            "In this project database migrations are applied only with `zorp migrate --apply-now`; no other command applies them",
+            "the migrations had not been applied, because the usual migrate command does nothing here",
+        );
+        println!("lesson {}", candidate.content_identity());
+    }
+
+    /// The live run itself, confirmed at the prompt as a person would, in the
+    /// project laid down above once its tasks are approved. The solver is a
+    /// real `localpilot` talking to whatever provider its environment names.
+    ///
+    /// Run with `LOCALPILOT_LIVE_TESTS=1`, `LOCALPILOT_LIVE_UPLIFT_DIR`,
+    /// `LOCALPILOT_LIVE_MODEL`, `LOCALPILOT_TEST_LOCALBENCH` and
+    /// `LOCALPILOT_LIVE_SOLVER` (a `localpilot` program) set, `--nocapture`.
+    #[tokio::test]
+    async fn a_live_uplift_run_is_confirmed_at_the_prompt_on_request() {
+        let var = |name: &str| std::env::var(name).ok();
+        let (Some(_), Some(dir), Some(model), Some(localbench), Some(solver)) = (
+            var("LOCALPILOT_LIVE_TESTS"),
+            var("LOCALPILOT_LIVE_UPLIFT_DIR"),
+            var("LOCALPILOT_LIVE_MODEL"),
+            var("LOCALPILOT_TEST_LOCALBENCH"),
+            var("LOCALPILOT_LIVE_SOLVER"),
+        ) else {
+            eprintln!("skipping the live uplift run: its environment is not set");
+            return;
+        };
+        let args = UpliftArgs {
+            model,
+            // A local model can need minutes per turn: one trial, a long turn.
+            trials: Some(1),
+            turn_timeout_secs: Some(300),
+            wall_minutes: Some(25),
+            ..UpliftArgs::default()
+        };
+        let mut yes = std::io::Cursor::new(b"y\n".to_vec());
+        let mut out = Vec::new();
+        uplift(
+            Path::new(&dir),
+            "cnd-",
+            &args,
+            Confirmation::Prompt(&mut yes),
+            &engine(),
+            localpilot_localmind::UpliftTools { localbench, solver },
+            None,
+            &CancelSignal::new(),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        println!("{}", String::from_utf8(out).unwrap());
     }
 
     fn engine() -> PermissionEngine {
@@ -817,4 +1182,215 @@ mod tests {
         let mut out = Vec::new();
         assert!(tasks_show(root, "cnd-does-not-exist", &mut out).is_err());
     }
+
+    /// Give the fixture's lesson an approved task set, as `lab tasks` would.
+    async fn approve_fixture_tasks(root: &Path, identity: &str) {
+        use localpilot_llm::FakeProvider;
+        let reply = r#"{"tasks":[
+            {"prompt":"The check reads a file that is not there yet. What should happen first?","expect":"foo db sync"}
+        ]}"#;
+        let mut out = Vec::new();
+        tasks_draft(
+            root,
+            identity,
+            "local-model",
+            &FakeProvider::new().text(reply),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        tasks_approve(root, identity, "reviewer", &mut out).unwrap();
+    }
+
+    fn uplift_args() -> UpliftArgs {
+        UpliftArgs {
+            model: "fixture-model".to_string(),
+            ..UpliftArgs::default()
+        }
+    }
+
+    fn fixture_tools() -> localpilot_localmind::UpliftTools {
+        localpilot_localmind::UpliftTools {
+            localbench: "localbench".to_string(),
+            solver: "localpilot".to_string(),
+        }
+    }
+
+    async fn run_uplift_command(
+        root: &Path,
+        identity: &str,
+        confirmation: Confirmation<'_>,
+        tools: localpilot_localmind::UpliftTools,
+    ) -> String {
+        let mut out = Vec::new();
+        uplift(
+            root,
+            identity,
+            &uplift_args(),
+            confirmation,
+            &engine(),
+            tools,
+            None,
+            &CancelSignal::new(),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_uplift_run_starts_only_from_an_explicit_confirmed_command() {
+        let (dir, candidate) = project();
+        let root = dir.path();
+        let identity = candidate.content_identity();
+
+        // No approved tasks: nothing to run.
+        let printed = run_uplift_command(root, &identity, Confirmation::Yes, fixture_tools()).await;
+        assert!(printed.contains("Nothing ran") && printed.contains("no approved task set"));
+
+        approve_fixture_tasks(root, &identity).await;
+
+        // Shown, with its ceilings, but not confirmed: nothing runs.
+        let printed =
+            run_uplift_command(root, &identity, Confirmation::Unavailable, fixture_tools()).await;
+        assert!(printed.contains("real model sessions"), "{printed}");
+        assert!(
+            printed.contains("1 task(s) x 3 trial(s) x 2 arms x 120 s per turn"),
+            "{printed}"
+        );
+        assert!(printed.contains("wall clock: 30 min"), "{printed}");
+        assert!(
+            printed.contains("Nothing ran: confirm on a terminal"),
+            "{printed}"
+        );
+        let mut declined = std::io::Cursor::new(b"n\n".to_vec());
+        let printed = run_uplift_command(
+            root,
+            &identity,
+            Confirmation::Prompt(&mut declined),
+            fixture_tools(),
+        )
+        .await;
+        assert!(printed.contains("Run this uplift run? [y/N]") && printed.contains("Nothing ran."));
+
+        assert!(results(root, &candidate).is_empty());
+        assert!(localpilot_localmind::run_statuses(root).is_empty());
+        let mut out = Vec::new();
+        status(root, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "No uplift runs.\n");
+
+        // A project that has not enabled it never gets as far as the screen.
+        commit(
+            root,
+            &[(
+                ".localpilot.toml",
+                &config_text(&check()).replace("uplift = true\n", ""),
+            )],
+            "turn uplift off",
+        );
+        let printed = run_uplift_command(root, &identity, Confirmation::Yes, fixture_tools()).await;
+        assert!(
+            printed.contains("Nothing ran: uplift is off for this project"),
+            "{printed}"
+        );
+        assert!(!printed.contains("real model sessions"));
+    }
+
+    /// The whole command through the real `localbench`, a stand-in solver and
+    /// the permission engine. Runs only when `LOCALPILOT_TEST_LOCALBENCH` names
+    /// a `localbench` with the per-arm surface.
+    #[tokio::test]
+    async fn a_confirmed_uplift_run_reaches_review_through_the_real_localbench() {
+        let Some(localbench) = std::env::var_os("LOCALPILOT_TEST_LOCALBENCH") else {
+            eprintln!(
+                "NOTICE: LOCALPILOT_TEST_LOCALBENCH is not set; the real-binary run was skipped"
+            );
+            return;
+        };
+        let (dir, candidate) = project();
+        let root = dir.path();
+        let identity = candidate.content_identity();
+        approve_fixture_tasks(root, &identity).await;
+
+        let tools_dir = tempfile::tempdir().unwrap();
+        let solver = if cfg!(windows) {
+            let path = tools_dir.path().join("solver.cmd");
+            std::fs::write(&path, WINDOWS_SOLVER).unwrap();
+            path
+        } else {
+            let path = tools_dir.path().join("solver.sh");
+            std::fs::write(&path, UNIX_SOLVER).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            path
+        };
+        let tools = localpilot_localmind::UpliftTools {
+            localbench: localbench.to_string_lossy().into_owned(),
+            solver: solver.to_string_lossy().into_owned(),
+        };
+
+        // Confirmed at a prompt, under the Default profile: every localbench
+        // command is an Ask, answered only because it was the one shown.
+        let mut yes = std::io::Cursor::new(b"y\n".to_vec());
+        let printed =
+            run_uplift_command(root, &identity, Confirmation::Prompt(&mut yes), tools).await;
+
+        assert!(printed.contains("Uplift Supported"), "{printed}");
+        assert!(
+            printed.contains("wall time:") && printed.contains("RAM: not measured"),
+            "{printed}"
+        );
+        let stored = results(root, &candidate);
+        assert_eq!(stored, vec![(LabVerdict::Supported, Vec::new())]);
+        let (_, in_review) = lab_candidate(root, &identity).unwrap().unwrap();
+        assert_eq!(
+            in_review.experiments[0].tier,
+            localmind_core::EvidenceTier::Uplift
+        );
+        in_review.experiments[0].validate(&in_review).unwrap();
+
+        let mut out = Vec::new();
+        status(root, &mut out).unwrap();
+        let shown = String::from_utf8(out).unwrap();
+        assert!(
+            shown.contains("Supported") && shown.contains("fixture-model"),
+            "{shown}"
+        );
+        let mut listing = Vec::new();
+        list(root, &mut listing).unwrap();
+        assert!(String::from_utf8(listing)
+            .unwrap()
+            .contains("Uplift Supported"));
+        assert!(localpilot_localmind::memory_list_readonly(root)
+            .unwrap()
+            .is_empty());
+    }
+
+    const WINDOWS_SOLVER: &str = "@echo off\r\n\
+if not exist .localpilot\\sessions mkdir .localpilot\\sessions\r\n\
+set ID=\r\n\
+for %%f in (.localmind\\memory\\project\\*.md) do set ID=%%~nf\r\n\
+if \"%ID%\"==\"\" goto none\r\n\
+echo {\"kind\":{\"type\":\"memories_used\",\"memories\":[{\"id\":\"%ID%\",\"score\":5,\"layer\":\"memory\"}]}}> .localpilot\\sessions\\turn.jsonl\r\n\
+echo Run foo db sync first.\r\n\
+exit /b 0\r\n\
+:none\r\n\
+echo {\"kind\":{\"type\":\"turn_done\"}}> .localpilot\\sessions\\turn.jsonl\r\n\
+echo I am not sure.\r\n";
+
+    const UNIX_SOLVER: &str = "#!/bin/sh\n\
+mkdir -p .localpilot/sessions\n\
+file=$(ls .localmind/memory/project/*.md 2>/dev/null | head -n 1)\n\
+if [ -n \"$file\" ]; then\n\
+  id=$(basename \"$file\" .md)\n\
+  printf '{\"kind\":{\"type\":\"memories_used\",\"memories\":[{\"id\":\"%s\",\"score\":5,\"layer\":\"memory\"}]}}\\n' \"$id\" > .localpilot/sessions/turn.jsonl\n\
+  echo 'Run foo db sync first.'\n\
+else\n\
+  printf '{\"kind\":{\"type\":\"turn_done\"}}\\n' > .localpilot/sessions/turn.jsonl\n\
+  echo 'I am not sure.'\n\
+fi\n";
 }

@@ -311,6 +311,15 @@ impl LocalBenchCli<'_> {
     /// The arguments of one arm's invocation.
     #[must_use]
     pub fn arm_args(&self, call: &ArmCall<'_>) -> Vec<String> {
+        localbench_arm_args(&self.solver, call)
+    }
+}
+
+/// The arguments of one arm's invocation, with `solver` as the program
+/// LocalBench drives.
+#[must_use]
+pub fn localbench_arm_args(solver: &str, call: &ArmCall<'_>) -> Vec<String> {
+    {
         let path = |path: &Path| path.to_string_lossy().into_owned();
         let mut args = vec![
             "uplift".to_string(),
@@ -332,7 +341,7 @@ impl LocalBenchCli<'_> {
             "--timeout".to_string(),
             call.settings.timeout_secs.to_string(),
             "--localpilot".to_string(),
-            self.solver.clone(),
+            solver.to_string(),
             "--binding".to_string(),
             call.binding.to_string(),
             "--out".to_string(),
@@ -416,6 +425,8 @@ pub struct UpliftOutcome {
     pub run_dir: PathBuf,
     /// Accepted memories routed to review because the lesson made things worse.
     pub flagged_for_review: Vec<String>,
+    /// What the run measured about itself, apart from its result.
+    pub telemetry: Telemetry,
 }
 
 /// Stage the baseline arm: a workspace with the baseline configuration and a
@@ -509,12 +520,216 @@ pub async fn run_uplift(
     bench: &dyn UpliftBench,
     downweight: bool,
 ) -> UpliftOutcome {
+    run_uplift_controlled(
+        root,
+        candidate,
+        projection,
+        settings,
+        bench,
+        downweight,
+        &RunControl::default(),
+    )
+    .await
+}
+
+/// What bounds and steers one run. The default bounds nothing and reuses
+/// nothing.
+#[derive(Clone, Debug, Default)]
+pub struct RunControl {
+    /// The run's directory. Chosen under `.localpilot/lab/uplift/` when `None`.
+    pub run_dir: Option<PathBuf>,
+    /// Stops the run. The bench must honour the same signal.
+    pub cancel: CancelSignal,
+    /// The whole run's wall-clock ceiling. A breach cancels the run.
+    pub wall: Option<std::time::Duration>,
+    /// The whole run's token ceiling, read from the trial sessions while an
+    /// arm runs. A breach cancels the run.
+    pub max_tokens: Option<u64>,
+    /// A finished baseline arm file of an identical request, to use instead of
+    /// running the baseline again.
+    pub reuse_baseline: Option<PathBuf>,
+}
+
+/// What a run measured about itself, apart from its result. A missing value
+/// means it was not measured — never that it was zero.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Telemetry {
+    pub baseline_wall_ms: Option<u64>,
+    pub lessons_wall_ms: Option<u64>,
+    pub total_wall_ms: u64,
+    /// Input plus output tokens the trial sessions reported.
+    pub tokens: Option<u64>,
+    /// Whether the model was already loaded. Not measured: the endpoint is the
+    /// solver's, and this adapter does not query it.
+    pub model_state: Option<String>,
+    /// Available memory at the start. Not measured.
+    pub ram: Option<String>,
+    /// GPU memory at the start. Not measured.
+    pub gpu: Option<String>,
+}
+
+/// Where a run is, kept as `state.json` in its directory so its status can be
+/// read without holding its process.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RunState {
+    pub candidate_identity: String,
+    pub binding: String,
+    pub model: String,
+    pub trials: u32,
+    pub timeout_secs: u64,
+    /// `preparing`, `baseline`, `lessons`, `combining`, then `finished` (a
+    /// verdict was reached) or `invalid`.
+    pub stage: String,
+    pub pid: u32,
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub baseline_reused: bool,
+    pub verdict: Option<String>,
+    pub reasons: Vec<String>,
+    pub telemetry: Telemetry,
+}
+
+impl RunState {
+    /// Whether the run reached an end it recorded itself.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.stage.as_str(), "finished" | "invalid")
+    }
+}
+
+/// The name of a run's state file.
+pub const RUN_STATE_FILE: &str = "state.json";
+
+/// Read a run directory's state. `None` when it has none or it does not parse.
+#[must_use]
+pub fn read_run_state(run_dir: &Path) -> Option<RunState> {
+    serde_json::from_str(&std::fs::read_to_string(run_dir.join(RUN_STATE_FILE)).ok()?).ok()
+}
+
+fn write_run_state(run_dir: &Path, state: &RunState) {
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = std::fs::write(run_dir.join(RUN_STATE_FILE), json);
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+/// Input plus output tokens reported by every trial session in `workspace`.
+/// `None` when no session reported any.
+#[must_use]
+pub fn workspace_tokens(workspace: &Path) -> Option<u64> {
+    let entries = std::fs::read_dir(workspace.join(".localpilot").join("sessions")).ok()?;
+    let mut total = None;
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let kind = &event["kind"];
+            if kind["type"] == "usage_reported" {
+                let used = kind["input_tokens"].as_u64().unwrap_or(0)
+                    + kind["output_tokens"].as_u64().unwrap_or(0);
+                total = Some(total.unwrap_or(0) + used);
+            }
+        }
+    }
+    total
+}
+
+/// How often a running arm is checked against the ceilings.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Run one arm while watching the run's ceilings. A breach cancels the run
+/// through the shared signal and is returned beside the arm's own result.
+async fn watched(
+    arm: impl std::future::Future<Output = Result<(), BenchFailure>>,
+    control: &RunControl,
+    workspace: &Path,
+    started: std::time::Instant,
+) -> (Result<(), BenchFailure>, Option<String>) {
+    tokio::pin!(arm);
+    let mut breach = None;
+    loop {
+        tokio::select! {
+            result = &mut arm => return (result, breach),
+            () = tokio::time::sleep(WATCH_INTERVAL) => {
+                if breach.is_some() {
+                    continue;
+                }
+                if let Some(wall) = control.wall {
+                    if started.elapsed() > wall {
+                        breach = Some(format!(
+                            "the run passed its wall-clock ceiling of {} s",
+                            wall.as_secs()
+                        ));
+                    }
+                }
+                if let (None, Some(max)) = (&breach, control.max_tokens) {
+                    if let Some(used) = workspace_tokens(workspace).filter(|used| *used > max) {
+                        breach = Some(format!(
+                            "the run used {used} tokens, past its ceiling of {max}"
+                        ));
+                    }
+                }
+                if breach.is_some() {
+                    control.cancel.cancel();
+                }
+            }
+        }
+    }
+}
+
+/// [`run_uplift`] under a [`RunControl`]: hard ceilings that cancel on breach,
+/// a state file updated at every stage, cancellation between and inside arms,
+/// and an optional finished baseline to reuse.
+#[allow(clippy::too_many_lines)] // one run, stage by stage, each stage's failure handled where it happens
+pub async fn run_uplift_controlled(
+    root: &Path,
+    candidate: &CandidateLesson,
+    projection: &Projection,
+    settings: &UpliftSettings,
+    bench: &dyn UpliftBench,
+    downweight: bool,
+    control: &RunControl,
+) -> UpliftOutcome {
+    let started = std::time::Instant::now();
     let binding = projection.lineage.binding();
-    let run_dir = root
-        .join(".localpilot")
-        .join(LAB_UPLIFT_DIR)
-        .join(run_name(&binding));
+    let run_dir = control.run_dir.clone().unwrap_or_else(|| {
+        root.join(".localpilot")
+            .join(LAB_UPLIFT_DIR)
+            .join(run_name(&binding))
+    });
     let workspace = run_dir.join("workspace");
+    let state = std::cell::RefCell::new(RunState {
+        candidate_identity: projection.lineage.candidate_identity.clone(),
+        binding: binding.clone(),
+        model: settings.model.clone(),
+        trials: settings.trials,
+        timeout_secs: settings.timeout_secs,
+        stage: "preparing".to_string(),
+        pid: std::process::id(),
+        started_at: unix_now(),
+        updated_at: unix_now(),
+        baseline_reused: control.reuse_baseline.is_some(),
+        verdict: None,
+        reasons: Vec::new(),
+        telemetry: Telemetry::default(),
+    });
+    let mark = |stage: &str| {
+        let mut state = state.borrow_mut();
+        state.stage = stage.to_string();
+        state.updated_at = unix_now();
+        write_run_state(&run_dir, &state);
+    };
     let invalid = |reason: VerdictReason, detail: String, expected: Option<UpliftIdentity>| {
         let mut evidence = base_evidence(projection, settings);
         evidence.verdict = LabVerdict::InvalidExperiment;
@@ -525,18 +740,24 @@ pub async fn run_uplift(
             expected,
             run_dir: run_dir.clone(),
             flagged_for_review: Vec::new(),
+            telemetry: Telemetry::default(),
         }
     };
     let other = |code: &str| VerdictReason::Other(code.to_string());
-    let failure = |failure: BenchFailure, during: &str| {
-        let reason = match &failure {
-            BenchFailure::Denied => other(PERMISSION_DENIED),
-            BenchFailure::Cancelled => VerdictReason::Cancelled,
-            BenchFailure::TimedOut => VerdictReason::BudgetExceeded,
-            BenchFailure::Failed(_) => other(BENCH_FAILED),
-        };
-        (reason, format!("{during}: {failure}"))
+    // A breach is why the run was cancelled: it is the budget, not the person.
+    let failure = |failure: BenchFailure, breach: Option<String>, during: &str| match breach {
+        Some(breach) => (VerdictReason::BudgetExceeded, format!("{during}: {breach}")),
+        None => {
+            let reason = match &failure {
+                BenchFailure::Denied => other(PERMISSION_DENIED),
+                BenchFailure::Cancelled => VerdictReason::Cancelled,
+                BenchFailure::TimedOut => VerdictReason::BudgetExceeded,
+                BenchFailure::Failed(_) => other(BENCH_FAILED),
+            };
+            (reason, format!("{during}: {failure}"))
+        }
     };
+    let done = |outcome: UpliftOutcome| finish(outcome, &workspace, &run_dir, &state, started);
 
     let task_set_path = run_dir.join("task-set.json");
     let prepared = std::fs::create_dir_all(&workspace)
@@ -553,6 +774,7 @@ pub async fn run_uplift(
             None,
         );
     }
+    mark("preparing");
 
     // What the receipt must attest, gathered before either arm runs.
     let (baseline_config, lessons_config, seed_pack) = match async {
@@ -566,35 +788,77 @@ pub async fn run_uplift(
     {
         Ok(parts) => parts,
         Err(error) => {
-            let (reason, detail) = failure(error, "preparing the arms");
-            return finish(invalid(reason, detail, None), &workspace);
+            let (reason, detail) = failure(error, None, "preparing the arms");
+            return done(invalid(reason, detail, None));
         }
     };
 
-    // Baseline: a clean store, learning off.
+    // Baseline: a clean store, learning off — or a finished one, reused.
     let baseline_out = run_dir.join("baseline.json");
-    if let Err(detail) = stage_baseline(&workspace, &baseline_config) {
-        return finish(invalid(other(MIS_STAGED), detail, None), &workspace);
+    if let Some(finished) = &control.reuse_baseline {
+        if let Err(error) = std::fs::copy(finished, &baseline_out) {
+            return done(invalid(
+                other(BENCH_FAILED),
+                format!("the finished baseline could not be reused: {error}"),
+                None,
+            ));
+        }
+    } else {
+        if control.cancel.is_cancelled() {
+            return done(invalid(
+                VerdictReason::Cancelled,
+                "cancelled before the baseline arm".to_string(),
+                None,
+            ));
+        }
+        if let Err(detail) = stage_baseline(&workspace, &baseline_config) {
+            return done(invalid(other(MIS_STAGED), detail, None));
+        }
+        mark("baseline");
+        let call = ArmCall {
+            lesson_arm: false,
+            task_set: &task_set_path,
+            workspace: &workspace,
+            settings,
+            binding: &binding,
+            intended: &[],
+            out: &baseline_out,
+        };
+        let arm_started = std::time::Instant::now();
+        let (result, breach) = watched(bench.run_arm(&call), control, &workspace, started).await;
+        state.borrow_mut().telemetry.baseline_wall_ms = Some(millis(arm_started));
+        match (result, breach) {
+            (Ok(()), None) => {}
+            (Ok(()), Some(breach)) => {
+                return done(invalid(
+                    VerdictReason::BudgetExceeded,
+                    format!("the baseline arm: {breach}"),
+                    None,
+                ));
+            }
+            (Err(error), breach) => {
+                let (reason, detail) = failure(error, breach, "the baseline arm");
+                return done(invalid(reason, detail, None));
+            }
+        }
     }
-    let call = ArmCall {
-        lesson_arm: false,
-        task_set: &task_set_path,
-        workspace: &workspace,
-        settings,
-        binding: &binding,
-        intended: &[],
-        out: &baseline_out,
-    };
-    if let Err(error) = bench.run_arm(&call).await {
-        let (reason, detail) = failure(error, "the baseline arm");
-        return finish(invalid(reason, detail, None), &workspace);
+
+    // Between the arms: the baseline exists and the lesson arm does not.
+    if control.cancel.is_cancelled() {
+        let mut outcome = invalid(
+            VerdictReason::Cancelled,
+            "cancelled between the arms".to_string(),
+            None,
+        );
+        outcome.evidence.reasons.push(VerdictReason::PartialPair);
+        return done(outcome);
     }
 
     // Lesson arm: the lesson seeded, alone, learning on.
     let intended = match stage_lessons(&workspace, &lessons_config, &seed_pack, &projection.lesson)
     {
         Ok(id) => vec![id],
-        Err(detail) => return finish(invalid(other(MIS_STAGED), detail, None), &workspace),
+        Err(detail) => return done(invalid(other(MIS_STAGED), detail, None)),
     };
     let expected = UpliftIdentity {
         binding: binding.clone(),
@@ -611,6 +875,7 @@ pub async fn run_uplift(
             ),
         ),
     };
+    mark("lessons");
     let lessons_out = run_dir.join("lessons.json");
     let call = ArmCall {
         lesson_arm: true,
@@ -621,33 +886,41 @@ pub async fn run_uplift(
         intended: &intended,
         out: &lessons_out,
     };
-    if let Err(error) = bench.run_arm(&call).await {
-        // The baseline ran and the lesson arm did not: half a pair.
-        let (reason, detail) = failure(error, "the lesson arm");
+    let arm_started = std::time::Instant::now();
+    let (result, breach) = watched(bench.run_arm(&call), control, &workspace, started).await;
+    state.borrow_mut().telemetry.lessons_wall_ms = Some(millis(arm_started));
+    let stopped = match (result, breach) {
+        (Ok(()), None) => None,
+        (Ok(()), Some(breach)) => Some((
+            VerdictReason::BudgetExceeded,
+            format!("the lesson arm: {breach}"),
+        )),
+        (Err(error), breach) => Some(failure(error, breach, "the lesson arm")),
+    };
+    if let Some((reason, detail)) = stopped {
+        // The baseline ran and the lesson arm did not finish: half a pair.
         let mut outcome = invalid(reason, detail, Some(expected));
         outcome.evidence.reasons.push(VerdictReason::PartialPair);
-        return finish(outcome, &workspace);
+        return done(outcome);
     }
 
+    mark("combining");
     let receipt_path = run_dir.join("receipt.json");
     if let Err(error) = bench
         .combine(&baseline_out, &lessons_out, &receipt_path)
         .await
     {
-        let (reason, detail) = failure(error, "combining the arms");
-        return finish(invalid(reason, detail, Some(expected)), &workspace);
+        let (reason, detail) = failure(error, None, "combining the arms");
+        return done(invalid(reason, detail, Some(expected)));
     }
     let payload = match std::fs::read_to_string(&receipt_path) {
         Ok(payload) => payload,
         Err(error) => {
-            return finish(
-                invalid(
-                    other(RECEIPT_REJECTED),
-                    format!("the receipt could not be read: {error}"),
-                    Some(expected),
-                ),
-                &workspace,
-            )
+            return done(invalid(
+                other(RECEIPT_REJECTED),
+                format!("the receipt could not be read: {error}"),
+                Some(expected),
+            ))
         }
     };
 
@@ -676,29 +949,63 @@ pub async fn run_uplift(
             evidence.limitations.push(bounded(&refusal.to_string()));
         }
     }
-    finish(
-        UpliftOutcome {
-            evidence,
-            expected: Some(expected),
-            run_dir,
-            flagged_for_review: flagged,
-        },
-        &workspace,
-    )
+    done(UpliftOutcome {
+        evidence,
+        expected: Some(expected),
+        run_dir: run_dir.clone(),
+        flagged_for_review: flagged,
+        telemetry: Telemetry::default(),
+    })
 }
 
-/// Remove the trial workspace; say so when it will not go.
-fn finish(mut outcome: UpliftOutcome, workspace: &Path) -> UpliftOutcome {
+fn millis(since: std::time::Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Close a run: take its telemetry, remove the trial workspace (saying so when
+/// it will not go), and record how it ended in its state file.
+fn finish(
+    mut outcome: UpliftOutcome,
+    workspace: &Path,
+    run_dir: &Path,
+    state: &std::cell::RefCell<RunState>,
+    started: std::time::Instant,
+) -> UpliftOutcome {
+    let mut state = state.borrow_mut();
+    state.telemetry.total_wall_ms = millis(started);
+    state.telemetry.tokens = workspace_tokens(workspace);
+    outcome.telemetry = state.telemetry.clone();
+    for (arm, wall) in outcome.evidence.arms.iter_mut().zip([
+        state.telemetry.baseline_wall_ms,
+        state.telemetry.lessons_wall_ms,
+    ]) {
+        arm.wall_ms = wall.unwrap_or(0);
+    }
     if workspace.exists() && std::fs::remove_dir_all(workspace).is_err() {
         outcome.evidence.limitations.push(bounded(&format!(
             "the trial workspace {} could not be removed",
             workspace.display()
         )));
     }
+    state.stage = if outcome.evidence.verdict == LabVerdict::InvalidExperiment {
+        "invalid"
+    } else {
+        "finished"
+    }
+    .to_string();
+    state.verdict = Some(format!("{:?}", outcome.evidence.verdict));
+    state.reasons = outcome
+        .evidence
+        .reasons
+        .iter()
+        .map(|reason| format!("{reason:?}"))
+        .collect();
+    state.updated_at = unix_now();
+    write_run_state(run_dir, &state);
     outcome
 }
 
-fn run_name(binding: &str) -> String {
+pub(crate) fn run_name(binding: &str) -> String {
     let hex = binding.trim_start_matches("sha256:");
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

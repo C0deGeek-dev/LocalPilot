@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot lab uplift` measures whether a lesson helps.** For a lesson with
+  approved test questions, it runs them with and without the lesson through
+  LocalBench and records `Supported`, `Contradicted` or `Inconclusive` on the
+  lesson in review. It drives real model sessions, so it is off unless the
+  project's committed `.localpilot.toml` sets `[lab] uplift = true`, and every
+  run first shows what it will do and what bounds it: 3 trials, 120 s per turn,
+  30 minutes and 400 000 tokens by default, each adjustable with a flag. A run
+  that passes a ceiling, is cancelled, or stops halfway is recorded as invalid,
+  never as a result. `localpilot lab status` shows each run; a stopped run's
+  finished baseline can be reused with `--resume`. Set `[lab] localbench` in
+  your user config if the program is not on your PATH (ADR-0201).
 - **Review search-stall investigation.** Offline runtime-to-verdict replays
   cover variant-query exhaustion, productive discovery and exact-repeat
   recovery. Documented the progress heuristic's evidence limits and retained
