@@ -165,3 +165,38 @@ Run names and recorded case/fixture/spec hashes distinguish v2. All original
 fixture bytes, manifest entries and historical results remain unchanged.
 See the [driver criteria and usage](../crates/localpilot-mesh/seat-eval/README.md).
 No v2 model samples have been collected; compare future v2 trials separately.
+
+## Opt-in diagnostic continuation (2026-10-02)
+
+Three fresh Flash Next reviews used source
+`0163a0856fef7b7dfe10c9d86a0d55ef84f96f5e`, rebuilt after committing,
+with explicit review-attempt capture (LocalHub#206). They reused **roman-v1**,
+the saved LocalBox IQ3_XXS / 256k / native tune, reasoning off, server-discovered
+262144-token context, isolated memory, read-only permissions and 900-second cap.
+Prompt, retry count, fixtures and progress policy were unchanged.
+
+| Run | Raw outcome | Wall time | Captured attempts |
+|---|---|---|---|
+| 1 | AGREE | 265.1 s | Initial accepted; runtime stop NoProgress |
+| 2 | AGREE | 92.7 s | Initial prose refused; valid repair accepted |
+| 3 | AGREE | 106.1 s | Initial accepted; runtime stop Done |
+
+All engines exited zero; no timeouts, final missing verdicts or tool-budget
+exhaustion. Four untruncated attempt samples were captured and fixture hashes
+remained unchanged. LocalBox was stopped afterward. These are legacy expected
+decision matches; the bool-test omission and severity caveat from LocalHub#205
+still apply, so they do not establish three adjudicated correct reviews.
+
+Run 2's initial parser input was exactly "Looking at the diff." (20 bytes),
+without a JSON object. The engine correctly refused it and repaired successfully.
+This proves premature prose completion in that attempt; prior two-attempt
+failures lack captured response text, so their exact cause remains unknown.
+No two-attempt failure reproduced here; three unseeded samples cannot establish
+a general reliability improvement.
+
+LocalHub#207 records a distinct termination question: run 1's refused mutation
+attempts led automatic verification to try denied `python`, stopping NoProgress
+while its valid verdict still posted. Preserve mutation budgets/permissions
+when investigating intended readonly review verification. LocalHub#204 remains
+open; no progress-policy changes were made during these trials. New paired v2
+reviews and the broader model evaluation remain outstanding.
