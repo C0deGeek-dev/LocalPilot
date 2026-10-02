@@ -2,6 +2,33 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0204: Mesh Owner Submission Requires Native Completed And Verified Work
+
+**Status:** accepted · **Date:** 2026-10-02.
+
+**Context.** Assistant text can remain available after a turn stops with
+NoProgress, including a failed required verification gate. Parsing that text as
+REVIEW_REQUEST does not establish that the work is review-ready. A fresh owner
+retry can also inherit partial files without editing them and finish Done
+without running an optional check. Readonly verdicts have a different contract:
+their valid evidence must not be discarded merely because a turn stopped.
+
+**Decision.** Preserve typed native stop and completion-gate check status with
+the owner's text. Submit only when the turn ends Done and that turn's actual
+verifier reports Passed. Force the existing permission-gated completion
+verifier for mesh owner turns, preserving a configured command, including
+no-edit retries. The shared runtime exposes the most recent completion-gate
+status, reset at turn start; other checks or previous turns cannot supply it.
+Feed refusal back once, then durably escalate with the partial tree retained.
+Explicit owner ESCALATE is accepted after failed turns. Readonly judgement,
+permissions, cumulative scope limits and mailbox formats remain unchanged.
+
+**Consequences.** No detected verifier or a denied/unavailable check cannot
+authorize owner submission. A passing source-only fallback or scripted reviewer
+agreement is not verification. Projects can configure an applicable verifier;
+source/test checkpoint integration remains separate. The change adds no grants
+or parallel command engine, and requires no stored-state migration.
+
 ## ADR-0203: Review Shows The Hindsight And Lab Cards Everywhere, And Lab Runs Start Only From The Command Line
 
 **Status:** accepted · **Date:** 2026-10-02. Builds on ADR-0202 (review actions

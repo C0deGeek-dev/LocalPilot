@@ -94,7 +94,7 @@ impl Fixture {
         std::fs::write(
             config.join("localpilot").join("config.toml"),
             format!(
-                "[provider]\ndefault = \"local\"\n\n[providers.local]\nkind = \"openai-compatible\"\nbase_url = \"{}\"\n",
+                "[provider]\ndefault = \"local\"\n\n[providers.local]\nkind = \"openai-compatible\"\nbase_url = \"{}\"\n\n[harness]\nverify_command = \"git diff --check\"\n",
                 server.uri()
             ),
         )
@@ -115,6 +115,24 @@ impl Fixture {
             "run test",
         ]);
         Some(f)
+    }
+
+    /// Toy text owners have an explicit whitespace verifier, not a fabricated
+    /// build target. Failure controls can replace or remove it per fixture.
+    fn verifier(&self, command: Option<&str>) {
+        let path = self.config.join("localpilot").join("config.toml");
+        let config = std::fs::read_to_string(&path).unwrap();
+        let original = "verify_command = \"git diff --check\"";
+        assert!(config.contains(original));
+        let replacement = command
+            .map(|command| {
+                format!(
+                    "verify_command = {}",
+                    serde_json::to_string(command).unwrap()
+                )
+            })
+            .unwrap_or_default();
+        std::fs::write(path, config.replace(original, &replacement)).unwrap();
     }
 
     fn reference(&self, args: &[&str]) -> String {
@@ -907,6 +925,131 @@ fn session_status(f: &Fixture) -> String {
     s["status"].as_str().unwrap_or_default().to_owned()
 }
 
+#[tokio::test]
+async fn an_owner_cannot_submit_an_unverified_partial_tree_on_a_no_edit_retry() {
+    let server = server().await;
+    mount_owner_turn(&server, "partial\n", 1).await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.verifier(None);
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("TURN ended NoProgress"),
+        "{}",
+        text(&out)
+    );
+    // The fresh retry is Done without a verifier, which is still not verified.
+    assert!(text(&out).contains("TURN ended Done"), "{}", text(&out));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+    assert_ne!(session_status(&f), "completed");
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join("b.txt")).unwrap(),
+        "partial\n"
+    );
+    let requests = chat_requests(&server).await;
+    assert!(String::from_utf8_lossy(&requests.last().unwrap().body)
+        .contains("owner work is not verified"));
+}
+
+#[tokio::test]
+async fn an_owner_cannot_submit_after_its_required_verifier_fails() {
+    let server = server().await;
+    mount_owner_turn(&server, "beta\n", 1).await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.verifier(Some("git diff --no-index --exit-code a.txt b.txt"));
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("TURN ended NoProgress"),
+        "{}",
+        text(&out)
+    );
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    let escalation = f.posted("ESCALATE");
+    assert_eq!(escalation.len(), 1);
+    assert!(escalation[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Some(Failed)"));
+    assert_ne!(session_status(&f), "completed");
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join("b.txt")).unwrap(),
+        "beta\n"
+    );
+}
+
+#[tokio::test]
+async fn an_owner_can_escalate_partial_work_after_a_failed_gate() {
+    let server = server().await;
+    mount_owner_turn(&server, "partial\n", 1).await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(
+            r#"{"kind":"ESCALATE","body":"preserve partial work; verifier unavailable"}"#,
+        ))
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.verifier(None);
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    let escalation = f.posted("ESCALATE");
+    assert_eq!(escalation.len(), 1);
+    assert!(escalation[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("preserve partial work"));
+    assert!(f.anchor.join("b.txt").is_file());
+}
+
+#[tokio::test]
+async fn a_scope_refused_owner_answer_cannot_submit_or_close() {
+    let server = server().await;
+    mount_owner_turn(&server, &"too large\n".repeat(400), 1).await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .mount(&server)
+        .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("work envelope"), "{}", text(&out));
+    assert!(
+        text(&out).contains("TURN ended NoProgress"),
+        "{}",
+        text(&out)
+    );
+    assert!(!f.anchor.join("b.txt").exists());
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+    assert_ne!(session_status(&f), "completed");
+}
+
 fn verdict(f: &Fixture, request: &str, body: &str) {
     f.reference(&[
         "post",
@@ -1074,6 +1217,62 @@ async fn a_handoff_whose_tree_moved_is_not_accepted() {
 /// A model that, while it works, loses the tree: the session's owner moves
 /// back before its write lands.
 struct LosesTheTree(PathBuf);
+
+struct RevokesOwnerBeforeVerification(PathBuf);
+
+impl Respond for RevokesOwnerBeforeVerification {
+    fn respond(&self, _: &MockRequest) -> ResponseTemplate {
+        let mut session: Value =
+            serde_json::from_str(&std::fs::read_to_string(&self.0).unwrap()).unwrap();
+        session["owner"] = json!("claude");
+        session["ownership_epoch"] = json!(session["ownership_epoch"].as_i64().unwrap_or(0) + 1);
+        std::fs::write(&self.0, session.to_string()).unwrap();
+        says(DONE)
+    }
+}
+
+#[tokio::test]
+async fn a_denied_owner_verifier_cannot_authorize_submission_of_partial_work() {
+    let server = server().await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.verifier(Some("git add a.txt"));
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(calls_tool(
+            "write_file",
+            &json!({"path":"b.txt","content":"partial\n"}),
+        ))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(RevokesOwnerBeforeVerification(f.session_file()))
+        .up_to_n_times(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(says(DONE))
+        .mount(&server)
+        .await;
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("(Denied)"), "{}", text(&out));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_ne!(session_status(&f), "completed");
+    assert_eq!(
+        std::fs::read_to_string(f.anchor.join("b.txt")).unwrap(),
+        "partial\n"
+    );
+    let requests = chat_requests(&server).await;
+    assert!(String::from_utf8_lossy(&requests.last().unwrap().body).contains("Some(Denied)"));
+}
 
 impl Respond for LosesTheTree {
     fn respond(&self, _: &MockRequest) -> ResponseTemplate {

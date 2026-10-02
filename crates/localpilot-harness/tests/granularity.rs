@@ -5,8 +5,8 @@ use localpilot_config::GranularityConfig;
 use localpilot_harness::{
     draft_plan_with_profile,
     granularity::{ContextCapacity, Reliability, WorkProfile},
-    persist_approved_plan, resume_one_step, Brief, BriefRevision, PlanApproval, Progress,
-    RuleEngine, RuntimeEvent, SessionConfig, SessionRuntime, StopReason,
+    persist_approved_plan, resume_one_step, Brief, BriefRevision, CheckStatus, PlanApproval,
+    Progress, RuleEngine, RuntimeEvent, SessionConfig, SessionRuntime, StopReason,
 };
 use localpilot_llm::{FakeProvider, ModelEvent, ProviderError};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -308,6 +308,10 @@ async fn unavailable_immediate_verification_cannot_finalize_a_changed_unit() {
     let (reason, events) = turn(&mut agent).await;
     assert!(dir.path().join("a.txt").exists());
     assert_eq!(reason, StopReason::NoProgress);
+    assert!(matches!(
+        agent.current_turn_verification(),
+        Some(CheckStatus::Denied | CheckStatus::Errored)
+    ));
     assert!(events
         .iter()
         .any(|e| matches!(e, RuntimeEvent::Warning(text) if text.contains("remains unverified"))));
@@ -466,7 +470,8 @@ async fn immediate_verification_is_durably_recorded_without_opt_in() {
                 "write_file",
                 json!({"path":"first.txt","content":"small"}),
             )
-            .text("done"),
+            .text("done")
+            .text("next turn without another mutation"),
     );
     let mut agent = runtime(
         dir.path(),
@@ -475,6 +480,7 @@ async fn immediate_verification_is_durably_recorded_without_opt_in() {
         Some("git status --short".to_string()),
     );
     assert_eq!(turn(&mut agent).await.0, StopReason::Done);
+    assert_eq!(agent.current_turn_verification(), Some(CheckStatus::Passed));
     let events = agent.store().read_events(agent.session_id()).unwrap();
     assert!(events.iter().any(|e| matches!(&e.kind, localpilot_store::SessionEventKind::CheckRan { status, .. } if status == "passed")));
     assert_eq!(
@@ -482,6 +488,28 @@ async fn immediate_verification_is_durably_recorded_without_opt_in() {
         Reliability::Unknown,
         "one passing check cannot establish strong capability"
     );
+    assert_eq!(turn(&mut agent).await.0, StopReason::Done);
+    assert_eq!(
+        agent.current_turn_verification(),
+        None,
+        "a later unchecked turn cannot inherit a passing signal"
+    );
+}
+
+#[tokio::test]
+async fn a_denied_legacy_check_is_observed_separately_from_done() {
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path());
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let mut agent = runtime(
+        dir.path(),
+        provider,
+        Profile::ReadOnly,
+        Some("git add first.txt".to_string()),
+    );
+    agent.set_verify_before_done(true, None);
+    assert_eq!(turn(&mut agent).await.0, StopReason::Done);
+    assert_eq!(agent.current_turn_verification(), Some(CheckStatus::Denied));
 }
 
 #[tokio::test]
@@ -824,6 +852,7 @@ async fn failed_changed_unit_verification_narrows_reliability() {
     );
     assert_eq!(turn(&mut agent).await.0, StopReason::NoProgress);
     assert_eq!(agent.work_profile().unwrap().reliability, Reliability::Weak);
+    assert_eq!(agent.current_turn_verification(), Some(CheckStatus::Failed));
     assert!(dir.path().join("small.txt").exists());
     let events = agent.store().read_events(agent.session_id()).unwrap();
     assert!(events.iter().any(|event| matches!(

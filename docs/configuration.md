@@ -361,10 +361,17 @@ it:
 - It accepts the handoff through the protocol operation, which refuses if
   the tree moved since the offer.
 - It has the model implement the task in a turn that may write only while
-  the session says LocalPilot owns the tree. That turn runs with `bypass`
-  so the model can run tests headless. File tools keep the workspace
-  boundary; shell commands are not contained.
-- It builds the review request itself. The manifest covers everything
+  the session says LocalPilot owns the tree. That turn retains its `bypass`
+  profile, workspace boundary and opaque-command permission floor; Bypass
+  grants no arbitrary shell access.
+- Before requesting review, the owner must finish `Done` with a passing
+  completion-gate check. The existing permission-gated verifier runs even
+  when a retry makes no new edits; `[harness] verify_command` can select the
+  applicable check. Missing, denied or failing verification and scope refusals
+  cannot become review-ready merely because the model returns valid JSON.
+  The engine feeds the refusal back once, then escalates with partial files
+  retained. Explicit `ESCALATE` remains available after an unsuccessful turn.
+- It builds the verified owner's review request itself. The manifest covers everything
   committed since the unit's base plus everything uncommitted, and the
   engine fingerprints each path.
 - It answers `REVISE` findings in further rounds, and escalates after three

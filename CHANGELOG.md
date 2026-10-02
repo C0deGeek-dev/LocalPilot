@@ -11,6 +11,13 @@ is SemVer-stable; the configuration schema stability policy is in
   and cannot do. The testing doc lists the offline acceptance corpus, where each
   situation is proven, and its limits. The wiki gains the `lab` command
   reference and a how-to for testing a lesson before accepting it.
+
+- **Mesh owners verify before submitting work.** `mesh run --own` requires a
+  completed turn and a passing native verification check before REVIEW_REQUEST,
+  including retries that make no new edits. Missing, failed or denied checks
+  retain partial files and lead to escalation after one retry. Valid readonly
+  verdicts retain their separate contract; no permission grants change.
+
 - **Review now shows why a lesson was proposed and what testing found.**
   `localpilot learning review show` and the terminal review show two cards for
   each lesson: its hindsight (what was intended and observed, the facts, the

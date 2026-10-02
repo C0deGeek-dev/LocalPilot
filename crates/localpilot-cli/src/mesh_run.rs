@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use localpilot_harness::{CheckStatus, StopReason};
 use localpilot_mesh::ops::engine::{escalation, parse_answer, validate, Need, Request, Step};
 use localpilot_mesh::ops::owner::{OwnerState, OwnerTask};
 use localpilot_mesh::ops::{Expect, PostArgs, SessionLease};
@@ -369,18 +370,25 @@ async fn ownership(
             .implement(task, feedback.as_deref())
             .await
             .map_err(|e| format!("the model turn failed: {e}"))
-            .and_then(|text| parse_answer(&text));
+            .and_then(|turn| parse_answer(&turn.text).map(|answer| (answer, turn)));
         let why = match answer {
-            Ok(a) if a.kind == "ESCALATE" && !a.body.trim().is_empty() => {
+            Ok((a, _)) if a.kind == "ESCALATE" && !a.body.trim().is_empty() => {
                 return owner_escalation(mesh, role, a.body.trim());
             }
-            Ok(a) if a.kind == "REVIEW_REQUEST" && !a.body.trim().is_empty() => {
+            Ok((a, turn)) if a.kind == "REVIEW_REQUEST" && !a.body.trim().is_empty() => {
+                if turn.stop != StopReason::Done || turn.verification != Some(CheckStatus::Passed) {
+                    feedback = Some(format!(
+                        "owner work is not verified: turn={:?}, verification={:?}; complete the required check before requesting review, or ESCALATE the partial work",
+                        turn.stop, turn.verification
+                    ));
+                    continue;
+                }
                 match mesh.review_request(role, &a.body)? {
                     Ok(args) => return Ok(args),
                     Err(why) => why,
                 }
             }
-            Ok(a) => format!(
+            Ok((a, _)) => format!(
                 "answer with kind REVIEW_REQUEST (or ESCALATE) and a non-empty body, not {}",
                 a.kind
             ),
@@ -536,6 +544,14 @@ async fn judgement(judge: &mut dyn Judge, root: &Path, request: &Request) -> Pos
     escalation(request, feedback.as_deref().unwrap_or("no answer"))
 }
 
+/// Assistant text and native completion evidence are separate facts. Only the
+/// owner submission path requires a completed turn with a passing gate check.
+pub(crate) struct OwnerTurn {
+    text: String,
+    stop: StopReason,
+    verification: Option<CheckStatus>,
+}
+
 /// Where a judgement comes from.
 #[async_trait::async_trait]
 pub(crate) trait Judge: Send {
@@ -553,13 +569,13 @@ pub(crate) trait Judge: Send {
     /// answer was refused.
     async fn judge(&mut self, request: &Request, feedback: Option<&str>) -> anyhow::Result<String>;
 
-    /// The model's final text after implementing `task` as the owner;
+    /// The model's final text and native completion outcome as the owner;
     /// `feedback` says why its last answer or request was refused.
     async fn implement(
         &mut self,
         task: &OwnerTask,
         feedback: Option<&str>,
-    ) -> anyhow::Result<String>;
+    ) -> anyhow::Result<OwnerTurn>;
 }
 
 struct ModelJudge {
@@ -646,13 +662,10 @@ impl Judge for ModelJudge {
         &mut self,
         task: &OwnerTask,
         feedback: Option<&str>,
-    ) -> anyhow::Result<String> {
-        // `bypass` so the owner can run its tests headless (every shell call
-        // otherwise waits for a confirmation nobody can give). The session's
-        // lease still decides: the moment this participant stops owning the
-        // tree, every write and command above read-only is denied. File
-        // tools keep the workspace boundary; shell commands are not
-        // contained (see the docs). No standing grants and no MCP servers.
+    ) -> anyhow::Result<OwnerTurn> {
+        // The existing profile and lease authorize every action; Bypass does
+        // not waive opaque-target or workspace permission floors. No standing
+        // command grants and no MCP servers.
         let (mut runtime, deadline) = crate::session_cmd::build_runtime_with_store_and_deadline(
             &self.anchor,
             &self.model,
@@ -663,6 +676,10 @@ impl Judge for ModelJudge {
             false,
         )
         .await?;
+        // A fresh retry may inherit unverified files without making new edits.
+        // Always consult the existing permission-gated completion verifier;
+        // only an actual pass can make the owner submission review-ready.
+        runtime.set_verify_before_done(true, None);
         let handle = runtime.permission_engine_handle();
         let lease = SessionLease::acquire(self.mesh.clone(), &self.role, LEASE_TTL);
         handle.set(
@@ -683,9 +700,14 @@ impl Judge for ModelJudge {
         // The runtime may hold a sender of its own; never wait on it for long.
         let _ = tokio::time::timeout(Duration::from_millis(500), tracer).await;
         println!("  TURN ended {stop:?}");
-        runtime
+        let text = runtime
             .current_turn_assistant_text()
-            .ok_or_else(|| anyhow::anyhow!("the turn ended ({stop:?}) without an answer"))
+            .ok_or_else(|| anyhow::anyhow!("the turn ended ({stop:?}) without an answer"))?;
+        Ok(OwnerTurn {
+            text,
+            stop,
+            verification: runtime.current_turn_verification(),
+        })
     }
 }
 
@@ -1071,7 +1093,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("the turn ended ({stop:?}) without an answer"))
         }
 
-        async fn implement(&mut self, _: &OwnerTask, _: Option<&str>) -> anyhow::Result<String> {
+        async fn implement(&mut self, _: &OwnerTask, _: Option<&str>) -> anyhow::Result<OwnerTurn> {
             anyhow::bail!("review-only replay")
         }
     }
@@ -1298,7 +1320,7 @@ mod tests {
             &mut self,
             t: &OwnerTask,
             feedback: Option<&str>,
-        ) -> anyhow::Result<String> {
+        ) -> anyhow::Result<OwnerTurn> {
             self.script.implement(t, feedback).await
         }
     }
@@ -1423,9 +1445,13 @@ mod tests {
             &mut self,
             _t: &OwnerTask,
             feedback: Option<&str>,
-        ) -> anyhow::Result<String> {
+        ) -> anyhow::Result<OwnerTurn> {
             self.1.push(feedback.map(str::to_owned));
-            self.0.remove(0)
+            self.0.remove(0).map(|text| OwnerTurn {
+                text,
+                stop: StopReason::Done,
+                verification: Some(CheckStatus::Passed),
+            })
         }
     }
 

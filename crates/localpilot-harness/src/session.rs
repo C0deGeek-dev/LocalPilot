@@ -800,7 +800,7 @@ const UNPRODUCTIVE_CALL_LIMIT: usize = 12;
 /// single turn before the turn finalizes anyway. A conservative, fixed safety
 /// cap so the gate can never loop forever on its own — independent of the
 /// budget/timeout rails, which also bound it. After this many failed
-/// verifications the turn ends `Done` with the failing state recorded.
+/// verifications the turn stops with `NoProgress` and the failing state recorded.
 const VERIFY_GATE_MAX_ATTEMPTS: usize = 3;
 
 /// How the verify-before-done gate ends (or extends) a turn that would finalize.
@@ -1215,6 +1215,9 @@ pub struct SessionRuntime {
     /// single exit (`stop`). Read by a non-interactive caller for a terminal
     /// state even when the turn timed out.
     last_handoff: Option<TurnHandoff>,
+    /// The most recent verify-before-done check in this turn. A final answer
+    /// or a legacy unchecked `Done` is not a passing verification signal.
+    turn_verification: Option<CheckStatus>,
     /// Per-session record of served `read_file` results and their freshness, so an
     /// already-seen, unchanged re-read can be elided to a stub (opt-in via
     /// `elide_seen_reads`). In-memory and session-scoped.
@@ -1319,6 +1322,7 @@ impl SessionRuntime {
             turn_stuck_tools: Vec::new(),
             turn_memories_used: Vec::new(),
             last_handoff: None,
+            turn_verification: None,
             read_history: crate::elision::ReadHistory::default(),
             paths_in_play: crate::PathsInPlay::new(),
             incognito_ledger: crate::IncognitoLedger::default(),
@@ -2685,6 +2689,7 @@ impl SessionRuntime {
             .run_gate_checks(std::slice::from_ref(&check), Trigger::PhaseComplete, &root)
             .await
             .remove(0);
+        self.turn_verification = Some(outcome.status);
         match outcome.status {
             CheckStatus::Passed => {
                 if bounded_mutation && diff_mutated {
@@ -3222,6 +3227,7 @@ impl SessionRuntime {
         // only ever re-pointed at a turn boundary.
         self.turn_in_flight = true;
         self.turn_tool_calls = 0;
+        self.turn_verification = None;
         self.turn_files_changed.clear();
         self.work_unit = crate::granularity::WorkUnit::default();
         self.work_mutation_refusal = None;
@@ -4679,6 +4685,15 @@ impl SessionRuntime {
     #[must_use]
     pub fn last_turn_handoff(&self) -> Option<&TurnHandoff> {
         self.last_handoff.as_ref()
+    }
+
+    /// The actual completion-gate check status for this turn, if a check ran.
+    /// Reset at each turn start; callers must also require `StopReason::Done`
+    /// before treating a pass as completed work. Other quality checks do not
+    /// supply this signal, and unchecked legacy finalization returns `None`.
+    #[must_use]
+    pub fn current_turn_verification(&self) -> Option<CheckStatus> {
+        self.turn_verification
     }
 
     fn stop(&mut self, events: &broadcast::Sender<RuntimeEvent>, reason: StopReason) -> StopReason {

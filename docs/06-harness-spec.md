@@ -1275,6 +1275,17 @@ still run through permissions and warn if unavailable. No new test grants are
 implied by review or verification. Runtime termination and a valid review
 verdict remain separate outcomes.
 
+The native mesh owner's submission has a stricter contract than a readonly
+verdict: the implementation turn must end `Done` and its actual completion-gate
+check must be `Passed`. The runtime exposes that check status separately from
+assistant text and resets it at every turn start. A mesh owner always enables
+the existing verifier, including fresh retries that inherit partial files but
+make no new edits. Unchecked or unavailable legacy `Done` is not a verified
+owner submission. Refusal feedback is retried once, then the protocol records
+an escalation while preserving the partial tree. Explicit owner escalation
+does not require a passing verifier. No verifier engine, grants or persistent
+format are added by this boundary (ADR-0204).
+
 - **Command resolution.** `[harness] verify_command` (a single command line,
   split on whitespace — no shell) wins; otherwise the command is detected from
   the workspace's marker files (`Cargo.toml` → `cargo test`, `go.mod` →
