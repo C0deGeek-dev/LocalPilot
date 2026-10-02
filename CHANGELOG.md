@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Pair-seat evaluation evidence.** A current-build LocalBox A3B review
+  baseline caught 3/3 planted boolean defects and accepted 2/3 clean controls.
+  The remaining false revision contradicted its own blocking finding; the
+  evaluation report records settings, timings and the limits of these samples.
+
 - **Lessons can get approved test questions for an uplift comparison.**
   `localpilot lab tasks draft <lesson> --model <m>` has your configured model
   draft questions a model should get wrong without the lesson and right with it.

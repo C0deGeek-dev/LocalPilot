@@ -66,7 +66,7 @@ Each run leaves its scratch repository and engine log under `--out`, and appends
 
 ## Things that change the numbers
 
-- **The context window.** LocalPilot budgets against its provider's configured `context_window`, not the server's real window. Pass `--context-window` to set it for a run, and record what you used.
+- **The context window.** LocalPilot probes the server's context window; a smaller configured `context_window` remains a cap. Pass `--context-window` to cap it for a run, and record the engine log's effective `context_window` and `context_source`. A provider context setting of zero removes the configured cap. Scratch repositories load their own configuration, so explicitly select the intended provider and endpoint rather than assuming the invoking project's settings carry over.
 - **Wall time includes model speed.** Time the model's loading separately, and say which server settings or profile you used.
 - **Memory.** A large model at a long server context can leave little RAM free. Run cells in the foreground, one at a time, and stop the server when you are done.
 - **Samples are small.** One to three runs per cell describe a model; they do not rank models. Report counts, not percentages, and keep every run, including the failures.

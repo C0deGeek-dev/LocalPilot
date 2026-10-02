@@ -32,3 +32,36 @@ Further runs, additional planted defects, the proposed review-brief change,
 and whether a LocalPilot agreement may be the only agreement remain unresolved.
 This report summarizes existing evidence; it neither runs nor closes that
 evaluation.
+
+## Current-build review baseline (2026-10-02)
+
+Six serial reviews ran on Windows against source revision
+`22f007c7551ae169bf4f60c849745b2fe25213f2`, using Qwen 3.6 A3B APEX's
+saved LocalBox profile: APEX-I-Quality, 256k context, turboquant, reasoning
+off. The direct OpenAI-compatible LocalBox endpoint reported a 262144-token
+window (`context_source=server_props`); no smaller configured cap applied.
+Global memory was isolated to each scratch project with
+`LOCALMIND_GLOBAL_ROOT=@project`. Each review had a 180-second wall cap.
+
+| Cell | Decisions, in run order | Correct | Wall time per run |
+|---|---|---|---|
+| Planted boolean defect | REVISE, REVISE, REVISE | 3/3 | 29.8, 8.6, 8.8 s |
+| Clean control | AGREE, REVISE, AGREE | 2/3 | 6.9, 11.9, 29.3 s |
+
+All six produced verdicts and exited normally; none timed out. Each planted
+defect finding identified the missing boolean exclusion. The false revision
+on clean run 2 concluded "No actual bug found" and "Verdict should be AGREE"
+inside a blocking finding, yet still emitted REVISE. Structural verdict
+validation therefore still permits a finding that contradicts its decision.
+Read requests without explicit page bounds were refused; one planted review
+also attempted a patch and an unapproved verification command. Those refusals
+are visible in its retained engine log; they did not prevent the final verdict.
+
+An initial 8k-context review correctly revised the planted defect but is
+excluded from these six samples and retained separately. These are descriptive
+samples, not evidence of improvement over September: the source revision,
+context budget and provider route changed together. No review prompt or
+semantic verdict guard was changed. Flash Next, 27B, owner-task reruns, larger
+samples and additional defect cases remain unevaluated in this batch. Future
+Flash Next reviews need a larger wall cap; 900 seconds per review is the
+declared follow-up budget, not a measured result.
