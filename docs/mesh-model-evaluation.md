@@ -101,3 +101,37 @@ This closes the six-sample Flash Next review batch, not the broader evaluation.
 The September false agreement and this batch use different builds, contexts and
 provider routes; do not combine them into one success rate or infer a causal
 improvement. Larger samples, 27B, owner reruns and controlled interventions remain.
+
+## Clean controls after the read correction (2026-10-02)
+
+Three fresh clean reviews used source revision
+`e25af739ece0fde81a662aca987c896ffe3bcc9c` after fixing LocalHub#203's separate
+byte/line bounds. The saved Flash Next LocalBox tune, frozen fixtures, request,
+server-discovered 262144-token context, isolated memory, permissions and
+900-second wall cap stayed the same. No prompt or progress-policy change applied.
+
+| Run | Outcome | Wall time | Tool calls | Successful reads / read errors |
+|---|---|---|---|---|
+| 1 | ESCALATE: no JSON verdict after repair | 153.2 s | 5 | 2 / 0 |
+| 2 | REVISE: important bool-test coverage gap | 101.5 s | 5 | 1 / 0 |
+| 3 | AGREE: minor bool-test coverage gap | 164.3 s | 25 | 3 / 0 |
+
+The driver records 1/3 expected agreements, one false revision and one missing
+verdict. All engines exited zero; none timed out or exhausted the tool budget.
+All logged reads succeeded; page arguments are absent from trace summaries,
+so these traces alone do not prove which reads were whole-file reads. The
+production-dispatch regressions establish that behavior and permission ordering.
+Shell attempts remained refused. LocalBox was stopped after the batch.
+
+The revision's factual finding is supported: the nominal clean tests omit
+True/False even though the implementation correctly rejects bool. Run 3 identifies
+the same omission at minor severity and agrees. LocalHub#205 records this
+fixture/severity ambiguity; preserve raw driver classifications while adjudicating
+finding validity separately. Run 3's proposed monotonic-length check is invalid
+for Roman numerals (III to IV decreases length), despite its correct agreement.
+
+The prior clean batch also had 1/3 agreements, but only one completed verdict;
+this batch has two. Three unseeded samples cannot establish a causal reliability
+improvement. LocalHub#204's search investigation, fixture calibration and the
+broader evaluation remain open. The frozen fixture and historical results were
+kept unchanged throughout this rerun.
