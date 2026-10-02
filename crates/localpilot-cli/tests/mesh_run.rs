@@ -1000,6 +1000,50 @@ fn python_task(f: &Fixture) {
     f.reference(&["handoff-offer", "--role", "claude"]);
 }
 
+#[tokio::test]
+async fn native_tool_trace_shows_shell_status_and_opaque_target_refusal() {
+    let server = server().await;
+    mount_owner_sequence(
+        &server,
+        vec![
+            calls_tool("run_shell", &json!({"command":"echo trace-control"})),
+            calls_tool(
+                "run_shell",
+                &json!({"program":"python","args":["-m","unittest","-q"]}),
+            ),
+            says(r#"{"kind":"ESCALATE","body":"diagnostic control complete"}"#),
+        ],
+    )
+    .await;
+    let Some(f) = Fixture::new(&server) else {
+        return;
+    };
+    f.reference(&["handoff-offer", "--role", "claude"]);
+    let out = f.run(&["--own"]).await;
+    assert!(out.status.success(), "{}", text(&out));
+    let output = text(&out);
+    let lines: Vec<_> = output
+        .lines()
+        .filter(|line| line.starts_with("  TOOL run_shell "))
+        .collect();
+    assert_eq!(lines.len(), 2, "{output}");
+    assert!(
+        lines[0].contains(" ok ") && lines[0].ends_with("exit: 0"),
+        "{output}"
+    );
+    assert!(
+        lines[1].contains(" error ") && lines[1].contains("permission denied for run_shell"),
+        "{output}"
+    );
+    assert!(
+        lines[1].contains("file targets cannot be inspected"),
+        "{output}"
+    );
+    assert!(!lines.iter().any(|line| line.contains("tool: run_shell")));
+    assert!(f.posted("REVIEW_REQUEST").is_empty());
+    assert_eq!(f.posted("ESCALATE").len(), 1);
+}
+
 const SLUG_SOURCE: &str = "def slug(text):\n    return '-'.join(text.lower().split())\n";
 const SLUG_TEST: &str = "import unittest\nfrom pathlib import Path\nfrom slug import slug\n\nclass SlugTest(unittest.TestCase):\n    def test_slug(self):\n        Path('.test-ran').write_text('required test executed')\n        self.assertEqual(slug('Hello World'), 'hello-world')\n";
 

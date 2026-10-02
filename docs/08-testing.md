@@ -1,5 +1,10 @@
 # Test Plan
 
+Mesh tool trace controls exercise wrapped success/error, raw predispatch refusal,
+nonrecursive envelope handling, multiline output, control characters, sensitive
+values and Unicode byte bounds. A native owner replay verifies an echo execution
+and an opaque Python command refusal under the unchanged permission floor.
+
 Session scratch behavior is pinned through the sandbox profile/lease matrix,
 canonical symlink/junction escapes and owned-directory lifecycle, real file and
 foreground/background shell dispatch, exact structured-command grants, child

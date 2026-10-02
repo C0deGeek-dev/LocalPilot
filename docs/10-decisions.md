@@ -2,6 +2,25 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0210: Mesh Tool Traces Summarize the Registry Diagnostic
+
+**Status:** accepted · **Date:** 2026-10-03.
+
+**Context.** Registry results carry tool/status/output headers. Printing their
+first line hides the actual refusal or execution result while the model still
+receives it. Raw predispatch refusals lack that envelope.
+
+**Decision.** Mesh ToolFinished traces recognize only the exact registry envelope
+for the event's tool name and matching success/error status. Summarize the first
+nonempty diagnostic line, redact before truncation, replace control characters
+and bound it to 160 UTF-8 bytes with an ellipsis when truncated. Raw results use
+the same summary boundary; do not search or recursively unwrap source text.
+
+**Consequences.** Capture-off traces show actionable refusal text or execution
+status without dumping full output. Display does not change grants, outcome
+classification, model-visible results, retries or output retention. A summary
+may omit later context; it is diagnostic evidence, not permission authority.
+
 ## ADR-0209: Review Quality Credit Requires Native Posted-Verdict Provenance
 
 **Status:** accepted · **Date:** 2026-10-03.

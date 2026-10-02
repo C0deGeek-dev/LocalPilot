@@ -602,6 +602,13 @@ Tool result text must be:
 - explicit about truncation
 - free of secrets where redaction is possible
 
+Mesh `ToolFinished` traces show a compact diagnostic rather than the registry's
+tool header. Only the exact tool/status/output envelope matching the event is
+unwrapped; raw refusals use the same path. The first nonempty diagnostic line is
+redacted, stripped of control characters and capped at 160 UTF-8 bytes, including
+a truncation ellipsis. Later lines and full output remain outside the trace.
+This works with capture disabled and grants no additional tool authority.
+
 A result carries a three-state **outcome**, not a boolean (ADR-0116):
 
 - `Ok` — the tool ran and the work it wrapped succeeded.

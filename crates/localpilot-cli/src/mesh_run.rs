@@ -930,13 +930,7 @@ async fn trace(mut rx: broadcast::Receiver<localpilot_harness::RuntimeEvent>) {
                 duration_ms,
                 ..
             }) => {
-                let first: String = output
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(160)
-                    .collect();
+                let first = tool_summary(&name, is_error, &output);
                 let status = if is_error { "error" } else { "ok" };
                 println!("  TOOL {name} {status} {duration_ms}ms {first}");
             }
@@ -952,6 +946,29 @@ async fn trace(mut rx: broadcast::Receiver<localpilot_harness::RuntimeEvent>) {
             Err(broadcast::error::RecvError::Closed) => return,
         }
     }
+}
+
+/// Recognize only the registry's exact envelope, never markers inside output.
+/// Redact before choosing/truncating one diagnostic line for the native trace.
+fn tool_summary(name: &str, is_error: bool, output: &str) -> String {
+    let status = if is_error { "error" } else { "success" };
+    let prefix = format!("tool: {name}\nstatus: {status}\noutput:\n");
+    let text = localpilot_config::redact::redact(output.strip_prefix(&prefix).unwrap_or(output));
+    let line: String = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    if line.len() <= 160 {
+        return line;
+    }
+    let mut end = 157;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &line[..end])
 }
 
 fn bounded(text: &str, budget: usize) -> String {
@@ -1122,6 +1139,50 @@ fn review_diff(anchor: &Path, files: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_trace_exposes_wrapped_diagnostics_without_dumping_output() {
+        assert_eq!(tool_summary("run_shell", true,
+            "tool: run_shell\nstatus: error\noutput:\npermission denied: opaque file targets\nprivate detail"),
+            "permission denied: opaque file targets");
+        assert_eq!(
+            tool_summary(
+                "read_file",
+                false,
+                "tool: read_file\nstatus: success\noutput:\n\nvisible first line\nother source"
+            ),
+            "visible first line"
+        );
+        assert_eq!(
+            tool_summary("write_file", true, "work-envelope refused: readonly\nother"),
+            "work-envelope refused: readonly"
+        );
+        for mismatched in [
+            "tool: other\nstatus: error\noutput:\nreason",
+            "tool: run_shell\nstatus: success\noutput:\nreason",
+        ] {
+            assert_eq!(
+                tool_summary("run_shell", true, mismatched),
+                mismatched.lines().next().unwrap()
+            );
+        }
+        assert_eq!(tool_summary("read_file", false,
+            "tool: read_file\nstatus: success\noutput:\ntool: read_file\nstatus: success\noutput:\nsource"), "tool: read_file");
+    }
+
+    #[test]
+    fn tool_trace_redacts_before_byte_bound_and_scrubs_controls() {
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz12345678901234567890";
+        let text = format!("{} {secret}\u{1b} hidden\nsecond", "é".repeat(65));
+        let summary = tool_summary("run_shell", true, &text);
+        assert!(!summary.contains(secret));
+        assert!(!summary.contains("sk-"));
+        assert!(!summary.chars().any(char::is_control));
+        assert!(summary.len() <= 160);
+        assert!(!summary.contains("second"));
+        assert!(tool_summary("read_file", false, &"字".repeat(200)).ends_with('…'));
+        assert!(tool_summary("read_file", false, "\n \n").is_empty());
+    }
 
     #[test]
     fn review_provenance_is_bounded_and_redacts_identity_values() {

@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Mesh tool traces show actual diagnostics.** Wrapped results expose a bounded,
+  redacted execution status or refusal reason instead of repeating the tool name.
+  Capture defaults and permission decisions are unchanged.
+
 - **Pair-seat review scores distinguish model judgement from integrity refusals.**
   A bounded native post trace records verdict origin even with capture disabled.
   Evaluation rows preserve raw protocol decisions and expose separate model-only
