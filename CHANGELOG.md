@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Pair-seat review scores distinguish model judgement from integrity refusals.**
+  A bounded native post trace records verdict origin even with capture disabled.
+  Evaluation rows preserve raw protocol decisions and expose separate model-only
+  scoring; automatic refusals and unknown or incomplete evidence earn no quality
+  credit. Changed-tree rechecks retain their automatic origin.
+
+
 - **Slow local models are no longer cut off by default.** `localpilot print` has
   no built-in turn time limit any more (it was 600 s), and an uplift run has no
   per-turn limit (it was 120 s). Set one with `--turn-timeout <seconds>` on

@@ -2,6 +2,32 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0209: Review Quality Credit Requires Native Posted-Verdict Provenance
+
+**Status:** accepted · **Date:** 2026-10-03.
+
+**Context.** A protocol REVISE can be generated automatically before any model
+judgement, or replace a judged answer when the tree moves. Raw expected-match
+flags alone would credit a guard refusal as model defect detection. Zero tools
+do not imply zero model turns, and missing historical traces prove no origin.
+
+**Decision.** Emit a bounded, redacted native trace after a confirmed guarded
+verdict append, identifying verdict, request, session, unit, model/automatic
+source, and a fixed automatic reason (request integrity or changed tree). The
+trace contains no response or refusal prose and is independent of optional
+attempt capture. Skipped or unconfirmed posts emit no provenance. Match one
+valid trace to the evaluation's final journal verdict; ambiguous, malformed,
+oversized, absent or mismatched records remain unknown. A model verdict from
+an incomplete engine run retains its origin without quality credit.
+
+**Consequences.** Preserve raw protocol decision and expectation flags; expose
+separate eligible model-only comparisons, with excluded comparisons null.
+Report invalid/unknown samples separately. Historical inputs and rows remain
+unchanged; no inference from tool counts or legacy traces. Integrity guards,
+retry policy, grants and actual verdict validation retain authority. Local
+trace/journal evidence is not authenticated attestation. Implementation uses
+original code and existing native process/mailbox boundaries.
+
 ## ADR-0208: A Print Turn And An Uplift Turn Have No Time Limit By Default
 
 **Status:** accepted · **Date:** 2026-10-02. Amends ADR-0055 (headless safety

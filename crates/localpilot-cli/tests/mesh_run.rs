@@ -363,6 +363,17 @@ fn text(o: &Output) -> String {
 
 const AGREE: &str = r#"Looks right. {"kind": "VERDICT", "decision": "AGREE", "findings": [], "body": "The change is what the request says."}"#;
 
+fn provenance(out: &Output) -> Vec<Value> {
+    text(out)
+        .lines()
+        .filter_map(|line| line.strip_prefix("REVIEW_PROVENANCE "))
+        .map(|line| {
+            assert!(line.len() + "REVIEW_PROVENANCE ".len() <= 2048);
+            serde_json::from_str(line).unwrap()
+        })
+        .collect()
+}
+
 struct TimeoutThenRepair {
     calls: std::sync::atomic::AtomicUsize,
     accepted: bool,
@@ -481,6 +492,12 @@ async fn a_review_request_gets_a_verdict_with_the_engines_header_and_is_acknowle
     let verdicts = f.posted("VERDICT");
     assert_eq!(verdicts.len(), 1, "{}", text(&out));
     assert_eq!(verdicts[0]["reply_to"], asked.as_str());
+    let origins = provenance(&out);
+    assert_eq!(origins.len(), 1);
+    assert_eq!(origins[0]["source"], "model");
+    assert!(origins[0]["reason"].is_null());
+    assert_eq!(origins[0]["verdict_id"], verdicts[0]["msg_id"]);
+    assert_eq!(origins[0]["request_id"], verdicts[0]["reply_to"]);
     assert_eq!(
         verdicts[0]["body"],
         "AGREE round=1 blocking=0 important=0\nThe change is what the request says."
@@ -531,6 +548,12 @@ async fn a_request_whose_manifest_does_not_hold_is_revised_without_the_model() {
         "{body}"
     );
     assert!(body.contains("a.txt: fingerprint"), "{body}");
+    let origins = provenance(&out);
+    assert_eq!(origins.len(), 1);
+    assert_eq!(origins[0]["source"], "automatic");
+    assert_eq!(origins[0]["reason"], "request_integrity");
+    assert_eq!(origins[0]["verdict_id"], verdicts[0]["msg_id"]);
+    assert!(chat_requests(&server).await.is_empty());
 }
 
 #[tokio::test]
@@ -556,6 +579,44 @@ async fn two_invalid_answers_escalate_and_never_post_the_models_text() {
     assert_eq!(escalations[0]["reply_to"], asked.as_str());
     let body = escalations[0]["body"].as_str().unwrap();
     assert!(!body.contains("ship it"), "{body}");
+}
+
+#[tokio::test]
+async fn malformed_and_stale_manifests_report_automatic_provenance_without_capture() {
+    for malformed in [true, false] {
+        let server = server().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(says(AGREE))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let Some(f) = Fixture::new(&server) else {
+            return;
+        };
+        let old = f.fingerprint("a.txt");
+        std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
+        let secret = "sk-provenance-private-marker-12345678901234567890";
+        let manifest = if malformed {
+            format!("a.txt={old}\nextra instruction {secret}")
+        } else {
+            format!("a.txt={old}")
+        };
+        let asked = f.request_review(&manifest);
+        let out = f.run(&[]).await;
+        assert!(out.status.success(), "{}", text(&out));
+        let verdicts = f.posted("VERDICT");
+        assert_eq!(verdicts.len(), 1);
+        let origins = provenance(&out);
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0]["source"], "automatic");
+        assert_eq!(origins[0]["reason"], "request_integrity");
+        assert_eq!(origins[0]["verdict_id"], verdicts[0]["msg_id"]);
+        assert_eq!(origins[0]["request_id"], asked);
+        assert!(!text(&out).contains(secret));
+        assert!(!text(&out).contains("TURN_RAILS"));
+        assert!(chat_requests(&server).await.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -683,6 +744,7 @@ async fn a_verdict_for_a_unit_that_moved_on_is_not_posted() {
     let out = f.run(&[]).await;
     assert!(out.status.success(), "{}", text(&out));
     assert!(f.posted("VERDICT").is_empty(), "{}", text(&out));
+    assert!(provenance(&out).is_empty());
     assert!(
         text(&out).contains(&format!("SKIPPED {asked}: STALE the work unit changed")),
         "{}",
@@ -767,6 +829,11 @@ async fn a_tree_that_changes_during_the_review_gets_no_agree() {
     let body = verdicts[0]["body"].as_str().unwrap();
     assert!(body.starts_with("REVISE round=1 blocking=1"), "{body}");
     assert!(body.contains("a.txt: fingerprint"), "{body}");
+    let origins = provenance(&out);
+    assert_eq!(origins.len(), 1);
+    assert_eq!(origins[0]["source"], "automatic");
+    assert_eq!(origins[0]["reason"], "tree_changed");
+    assert_eq!(origins[0]["verdict_id"], verdicts[0]["msg_id"]);
     assert!(
         text(&out).contains("the tree moved during review"),
         "{}",

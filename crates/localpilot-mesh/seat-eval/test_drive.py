@@ -202,6 +202,9 @@ class ReviewCaseTest(unittest.TestCase):
                 self.assertEqual(row["expected"], expected)
                 self.assertEqual(row["false_revise"], cell == "review-good")
                 self.assertFalse(row["false_agree"])
+                self.assertEqual(row["review_source"], "unknown")
+                self.assertFalse(row["model_quality_eligible"])
+                self.assertIsNone(row["model_expected_match"])
                 self.assertEqual(row["review_spec_hash"], drive.sha(drive.TASKS / "roman" / "spec.md"))
                 repo = out / row["name"]
                 selected = drive.REVIEW_CASES["roman-v2"][source]
@@ -565,6 +568,79 @@ class ReviewDiagnosticsTest(unittest.TestCase):
             capture = out / row["review_diagnostics"]
             self.assertEqual(capture.read_text(), "retained diagnostic")
             self.assertTrue(row["review_fixture_hashes"])
+
+
+class ReviewProvenanceTest(unittest.TestCase):
+    def evidence(self, source="model", reason=None, decision="AGREE", planted=False,
+                 records=None, changes=None, engine_ok=True):
+        drive = load(HERE)
+        verdict = {"msg_id": "localpilot:2", "reply_to": "claude:1", "unit_id": "unit-1",
+                   "body": decision + " round=1 blocking=0 important=0"}
+        record = {"schema": 1, "source": source, "reason": reason, "session_id": "session-1",
+                  "unit_id": "unit-1", "request_id": "claude:1", "verdict_id": "localpilot:2"}
+        record.update(changes or {})
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "log"
+            lines = [record] if records is None else records
+            path.write_text("\n".join("REVIEW_PROVENANCE " + (r if isinstance(r, str) else json.dumps(r))
+                                      for r in lines), encoding="utf-8")
+            return drive.review_provenance(path, verdict, "session-1", planted, engine_ok)
+
+    def test_typed_model_verdict_is_scored_without_tools_or_attempt_capture(self):
+        for planted in (False, True):
+            for decision in ("AGREE", "REVISE"):
+                row = self.evidence(planted=planted, decision=decision)
+                self.assertTrue(row["model_quality_eligible"])
+                self.assertEqual(row["review_source"], "model")
+                self.assertEqual(row["review_sample_status"], "model_judged")
+                self.assertEqual(row["model_decision"], decision)
+                self.assertEqual(row["model_expected_match"], decision == ("REVISE" if planted else "AGREE"))
+                self.assertEqual(row["model_false_agree"], planted and decision == "AGREE")
+                self.assertEqual(row["model_false_revise"], not planted and decision == "REVISE")
+
+    def test_automatic_refusals_preserve_origin_and_exclude_quality_counts(self):
+        for reason in ("request_integrity", "tree_changed"):
+            for planted in (False, True):
+                row = self.evidence("automatic", reason, "REVISE", planted)
+                self.assertEqual(row["review_source"], "automatic")
+                self.assertEqual(row["review_sample_status"], "invalid_sample")
+                self.assertEqual(row["review_refusal_reason"], reason)
+                self.assertFalse(row["model_quality_eligible"])
+                for key in ("model_decision", "model_expected_match", "model_false_agree", "model_false_revise"):
+                    self.assertIsNone(row[key])
+
+    def test_missing_legacy_or_invalid_trace_is_unknown(self):
+        oversized = {"schema": 1, "source": "model", "reason": None, "session_id": "session-1",
+                     "unit_id": "unit-1", "request_id": "claude:1", "verdict_id": "localpilot:2",
+                     "padding": "x" * 2049}
+        for records in ([], ["broken JSON"], ["[]"], ['{"verdict_id":"localpilot:2"}'],
+                        [oversized]):
+            row = self.evidence(records=records)
+            self.assertEqual(row["review_source"], "unknown")
+            self.assertFalse(row["model_quality_eligible"])
+            self.assertIsNone(row["model_expected_match"])
+
+    def test_wrong_request_session_unit_or_schema_cannot_qualify_final_verdict(self):
+        for changes in ({"session_id": "other"}, {"unit_id": "other"}, {"request_id": "other"},
+                        {"verdict_id": "other"}, {"schema": 2}, {"schema": True},
+                        {"source": "invented"}, {"reason": "invented"}):
+            row = self.evidence(changes=changes)
+            self.assertEqual(row["review_source"], "unknown")
+            self.assertFalse(row["model_quality_eligible"])
+
+    def test_duplicate_final_provenance_is_unknown(self):
+        record = {"schema": 1, "source": "model", "reason": None, "session_id": "session-1",
+                  "unit_id": "unit-1", "request_id": "claude:1", "verdict_id": "localpilot:2"}
+        row = self.evidence(records=[record, record])
+        self.assertEqual(row["review_source"], "unknown")
+        self.assertFalse(row["model_quality_eligible"])
+
+    def test_failed_engine_keeps_known_origin_without_quality_credit(self):
+        row = self.evidence(engine_ok=False)
+        self.assertEqual(row["review_source"], "model")
+        self.assertEqual(row["review_sample_status"], "incomplete")
+        self.assertFalse(row["model_quality_eligible"])
+        self.assertIsNone(row["model_expected_match"])
 
 
 class TurnMetadataTest(unittest.TestCase):

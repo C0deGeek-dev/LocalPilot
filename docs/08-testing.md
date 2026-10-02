@@ -352,6 +352,16 @@ and preserve selected timing settings on failed rows without invented elapsed
 times. CLI help, nonnegative owner-only grace and unchanged defaults are checked;
 review wait semantics remain independent of native turn timeouts.
 
+Review provenance controls cover native malformed, wrong and stale manifests
+without a model turn, valid zero-tool model judgement, integrity recheck after
+tree mutation, and skipped stale-unit posts. Capture remains disabled in these
+controls. Fixed-category traces are redacted and bounded; privacy/bounds controls
+exercise the production formatter. Driver controls reject missing/legacy,
+malformed, oversized, duplicate and mismatched post evidence, preserve raw
+protocol scoring, and exclude unknown/incomplete origins from model-only counts.
+The full driver/native replay verifies actual rows for clean and planted
+automatic refusals; these controls are plumbing evidence, not model quality.
+
 Review diagnostic capture is opt-in. CLI tests exercise the production judgement
 and native mock-provider timeout/repair path. Resolved deadline metadata is
 tested for builtin and explicit configuration, including zero. Driver controls

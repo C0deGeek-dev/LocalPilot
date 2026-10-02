@@ -491,7 +491,10 @@ async fn execute(
             println!("STOPPED by {msg_id}: {reason}");
             return Ok(false);
         }
-        Step::Post { args, expect, ack } => post(mesh, role, &args, &expect, &ack)?,
+        Step::Post { args, expect, ack } => {
+            let origin = (args.kind == "VERDICT").then_some(ReviewOrigin::RequestIntegrity);
+            post(mesh, role, &args, &expect, &ack, origin)?;
+        }
         Step::Accept { msg_id } => match mesh.handoff_accept(role) {
             Ok(out) => {
                 print!("{}", out.stdout);
@@ -515,33 +518,72 @@ async fn execute(
         },
         Step::Judge(request) => {
             let mut args = judgement(judge, mesh.root(), &request).await;
+            let mut origin = (request.need == Need::Review && args.kind == "VERDICT")
+                .then_some(ReviewOrigin::Model);
             // The tree may have moved while the model judged it: a verdict
             // is posted only on the manifest it was asked about.
             if request.need == Need::Review {
                 if let Some(revise) = mesh.recheck_review(role, &request)? {
                     println!("CHANGED {}: the tree moved during review", request.msg_id);
                     args = revise;
+                    origin = Some(ReviewOrigin::TreeChanged);
                 }
             }
-            post(mesh, role, &args, &request.expect, &request.msg_id)?;
+            post(mesh, role, &args, &request.expect, &request.msg_id, origin)?;
         }
     }
     Ok(true)
 }
 
-/// Post, then acknowledge what it answers. A post the session no longer
-/// wants (a later unit, a lost reviewer seat) is acknowledged unanswered.
+/// Native decision boundary, independent of optional response capture.
+#[derive(Clone, Copy)]
+enum ReviewOrigin {
+    Model,
+    RequestIntegrity,
+    TreeChanged,
+}
+
+fn review_provenance(
+    origin: ReviewOrigin,
+    message: &serde_json::Value,
+    expect: &Expect,
+    request: &str,
+) -> Option<String> {
+    let (source, reason) = match origin {
+        ReviewOrigin::Model => ("model", None),
+        ReviewOrigin::RequestIntegrity => ("automatic", Some("request_integrity")),
+        ReviewOrigin::TreeChanged => ("automatic", Some("tree_changed")),
+    };
+    let trace = serde_json::json!({"schema": 1, "source": source, "reason": reason,
+        "verdict_id": message.get("msg_id"), "request_id": request,
+        "session_id": expect.session_id, "unit_id": expect.unit_id})
+    .to_string();
+    let trace = localpilot_config::redact::redact(&trace);
+    (trace.len() + "REVIEW_PROVENANCE ".len() <= 2048).then_some(trace)
+}
+
+/// Post, then acknowledge; only a confirmed guarded append emits provenance.
 fn post(
     mesh: &Mesh,
     role: &str,
     args: &PostArgs,
     expect: &Expect,
     ack: &str,
+    origin: Option<ReviewOrigin>,
 ) -> Result<(), Failure> {
     match mesh.post_guarded(role, args, expect) {
         Ok(m) => {
             let id = m.get("msg_id").and_then(|v| v.as_str()).unwrap_or_default();
             println!("POSTED {} {id} reply_to={ack}", args.kind);
+            if let Some(origin) = origin {
+                if let Some(trace) =
+                    review_provenance(origin, &serde_json::Value::Object(m), expect, ack)
+                {
+                    println!("REVIEW_PROVENANCE {trace}");
+                } else {
+                    println!("REVIEW_PROVENANCE_UNAVAILABLE oversized_identity");
+                }
+            }
         }
         Err(MeshError::Refused(why)) if why.starts_with("STALE") => {
             println!("SKIPPED {ack}: {why}");
@@ -1080,6 +1122,31 @@ fn review_diff(anchor: &Path, files: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_provenance_is_bounded_and_redacts_identity_values() {
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz12345678901234567890";
+        let message = serde_json::json!({"msg_id":"localpilot:2"});
+        let mut expect = Expect {
+            session_id: "session-1".into(),
+            unit_id: Some(secret.into()),
+            reviewer: true,
+            owner: false,
+        };
+        let trace = review_provenance(ReviewOrigin::Model, &message, &expect, "claude:1").unwrap();
+        assert!(!trace.contains(secret));
+        let row: serde_json::Value = serde_json::from_str(&trace).unwrap();
+        assert_eq!(row["source"], "model");
+        assert!(row["reason"].is_null());
+        expect.session_id = "x".repeat(3000);
+        assert!(review_provenance(
+            ReviewOrigin::RequestIntegrity,
+            &message,
+            &expect,
+            "claude:1"
+        )
+        .is_none());
+    }
     use localpilot_mesh::ops::Expect;
 
     #[test]

@@ -1307,6 +1307,17 @@ answer can submit. Checkpoint notes are partial evidence, not review requests,
 reviewer agreement or work-unit completion. Scope, permissions and readonly
 semantics are unchanged; no mailbox message kind or stored format is added.
 
+The native review loop emits bounded `REVIEW_PROVENANCE` trace records after
+confirmed guarded verdict posts. They identify model judgement versus automatic
+request-integrity refusal or changed-tree recheck, using fixed categories and
+protocol identifiers. They contain no answer/refusal prose, use canonical
+redaction and a 2,048-byte line cap, and do not require optional attempt capture.
+Evaluation matches the final journal verdict to one valid trace before granting
+model-quality credit. Missing or ambiguous provenance remains unknown; automatic
+or incomplete results retain their protocol outcomes without quality credit.
+These are local observations, not authenticated attestations. Protocol guards,
+permissions and the single repair attempt remain unchanged.
+
 - **Command resolution.** `[harness] verify_command` (a single command line,
   split on whitespace — no shell) wins; otherwise the command is detected from
   the workspace's marker files (`Cargo.toml` → `cargo test`, `go.mod` →

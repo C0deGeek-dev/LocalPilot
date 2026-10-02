@@ -126,6 +126,33 @@ Each run leaves its scratch repository and engine log under `--out`, and appends
   the wall cap. Config includes explicit file/environment settings. Metadata
   also survives failed rows and does not require review response capture.
 
+Review scoring now separates protocol outcomes from model-quality evidence.
+`decision`, `expected`, `false_agree`, `false_revise` and `no_verdict` keep their
+raw protocol meanings. An automatic integrity `REVISE` can set `false_revise`
+on a clean request; it is not a model judging the clean change incorrectly.
+Use `model_quality_eligible` to select model-quality samples, and report excluded
+samples separately. For eligible rows, `model_decision`, `model_expected_match`,
+`model_false_agree` and `model_false_revise` carry the model-only comparison.
+Unknown/ineligible comparisons are null, not a successful expected match.
+
+`review_source` is `model`, `automatic` or `unknown`. Automatic final verdicts
+have a bounded `review_refusal_reason`: `request_integrity` for manifest checks
+before judgement, or `tree_changed` for the integrity recheck after judgement.
+`review_sample_status` is `model_judged`, `invalid_sample`, `incomplete` (known
+model origin but engine exit/kill incomplete), or `unknown`. Model origin is
+identified by the engine's successful native post boundary, never by tool counts,
+absence of diagnostic capture, verdict prose or inferred legacy runtime traces.
+The driver requires one valid native provenance record matching the final
+verdict, request, session and unit. Missing, malformed, oversized, duplicate or
+mismatched records leave origin unknown; final decisions remain visible.
+Historical rows remain unchanged and missing provenance is never backfilled.
+
+Native `REVIEW_PROVENANCE` trace records contain fixed categories and protocol
+identifiers only, are redacted and limited to 2,048 UTF-8 bytes per line, and
+remain available with review capture disabled. Oversized identities produce
+an unavailable notice; partial/unconfirmed posts do not emit provenance. These
+records are local observation evidence, not authenticated attestations.
+
 Owner provenance is additive; historical rows are preserved. `review_observation`
 is `live`, `after_exit`, or null, and `review_request_id` identifies the first
 observed request when present. `request_at_s` is elapsed time at live observation,

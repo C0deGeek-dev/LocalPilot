@@ -341,7 +341,7 @@ def review_cell(a, repo, log, planted):
     lp = journal(repo, "localpilot")
     verdicts = [m for m in lp if m["kind"] == "VERDICT"]
     decision = verdicts[-1]["body"].split()[0] if verdicts else None
-    return {
+    result = {
         "decision": decision,
         "expected": "REVISE" if planted else "AGREE",
         "false_agree": planted and decision == "AGREE",
@@ -353,6 +353,59 @@ def review_cell(a, repo, log, planted):
         "engine_exit": proc.returncode,
         "wall_s": round(time.monotonic() - t0, 1),
     }
+    log.flush()
+    sessions = [p.name for p in (repo / ".pair-programming" / "sessions").glob("*") if p.is_dir()]
+    result.update(review_provenance(pathlib.Path(log.name), verdicts[-1] if verdicts else None,
+                                    sessions[0] if len(sessions) == 1 else None, planted,
+                                    engine_ok=not killed and proc.returncode == 0))
+    return result
+
+
+def review_provenance(log_path, verdict, session_id, planted, engine_ok=True):
+    """Only exact native post evidence can qualify a model-quality sample."""
+    result = {"review_source": "unknown", "review_sample_status": "unknown", "review_refusal_reason": None,
+              "model_quality_eligible": False, "model_decision": None,
+              "model_expected_match": None, "model_false_agree": None,
+              "model_false_revise": None}
+    if not verdict or not all(verdict.get(k) for k in ("msg_id", "reply_to", "unit_id")) or not session_id:
+        return result
+    decision = verdict.get("body", "").split()[0] if verdict.get("body", "").split() else None
+    if decision not in ("AGREE", "REVISE"):
+        return result
+    candidates = []
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith("REVIEW_PROVENANCE "):
+            continue
+        try:
+            if len(line.encode("utf-8")) > 2048:
+                return result
+            record = json.loads(line[len("REVIEW_PROVENANCE "):])
+            if not isinstance(record, dict):
+                return result
+        except ValueError:
+            return result
+        if record.get("verdict_id") == verdict["msg_id"]:
+            candidates.append(record)
+    if len(candidates) != 1:
+        return result
+    record = candidates[0]
+    if (type(record.get("schema")) is not int or record["schema"] != 1
+            or record.get("request_id") != verdict["reply_to"]
+            or record.get("unit_id") != verdict["unit_id"]
+            or record.get("session_id") != session_id):
+        return result
+    if record.get("source") == "automatic" and record.get("reason") in ("request_integrity", "tree_changed"):
+        result.update(review_source="automatic", review_sample_status="invalid_sample",
+                      review_refusal_reason=record["reason"])
+    elif record.get("source") == "model" and record.get("reason") is None:
+        result.update(review_source="model", model_decision=decision,
+                      review_sample_status="model_judged" if engine_ok else "incomplete")
+        if engine_ok:
+            result.update(model_quality_eligible=True,
+                      model_expected_match=decision == ("REVISE" if planted else "AGREE"),
+                      model_false_agree=planted and decision == "AGREE",
+                      model_false_revise=(not planted) and decision == "REVISE")
+    return result
 
 
 def run_path(out, a):
@@ -459,6 +512,8 @@ def run(a):
             log.flush()
             r.update(turn_metadata(out / f"{name}.log", r))
             r.update(review_identity)
+            if a.cell != "owner":
+                r.update(review_provenance(out / f"{name}.log", None, None, a.cell == "review-bad"))
             r.update(wall_settings(a))
             if a.cell != "owner":
                 r["review_diagnostics_present"] = (out / f"{name}.review.jsonl").is_file() if a.review_diagnostics else False

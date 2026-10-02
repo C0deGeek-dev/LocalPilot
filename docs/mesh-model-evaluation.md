@@ -28,6 +28,13 @@ Raw runs were retained only on the original machine and are not available in
 this repository. Cloud models were not evaluated. Missing cells are unknown,
 not passes.
 
+For new runs, model-quality comparisons use the driver's
+`model_quality_eligible` and `model_*` fields. Automatic manifest refusals or
+changed-tree rechecks retain their protocol verdict without model-quality
+credit. Missing provenance remains unknown; zero tool calls do not establish
+that no model judged. The historical tables here remain unchanged. See the
+driver README for origin categories and evidence limits.
+
 Further runs, additional planted defects, the proposed review-brief change,
 and whether a LocalPilot agreement may be the only agreement remain unresolved.
 This report summarizes existing evidence; it neither runs nor closes that
