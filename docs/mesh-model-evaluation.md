@@ -65,3 +65,39 @@ semantic verdict guard was changed. Flash Next, 27B, owner-task reruns, larger
 samples and additional defect cases remain unevaluated in this batch. Future
 Flash Next reviews need a larger wall cap; 900 seconds per review is the
 declared follow-up budget, not a measured result.
+
+## Flash Next review batch (2026-10-02)
+
+Six serial reviews ran on Windows at source revision
+`c9c268c292cef61ae3b9ca1eaab7d6ea27e3d6cb` with the saved LocalBox Flash Next
+heretic 2 tune: IQ3_XXS, 256k, native, reasoning off. The runtime and frozen
+fixtures were unchanged from the preceding A3B batch. The direct endpoint,
+server-discovered 262144-token window, scratch memory isolation and review
+permissions were the same; the wall cap was **900 seconds per review**.
+Available RAM after loading was about 5.2 GiB; loading was not included in
+review wall times and no GPU-memory measurement was captured.
+
+| Cell | Outcomes, in run order | Correct | Wall time per run |
+|---|---|---|---|
+| Planted boolean defect | REVISE, REVISE, REVISE | 3/3 | 143.5, 58.7, 92.6 s |
+| Clean control | ESCALATE, ESCALATE, AGREE | 1/3 | 72.5, 613.4, 132.1 s |
+
+The escalations contain no verdict: they are failed completions, not false
+revisions or timeouts. All six engine exits were zero; none hit the wall cap.
+Each planted review identified the true missing boolean exclusion. Secondary
+claims still need checking: bad run 1 incorrectly claimed that `False` returns
+an empty string, although the fixture's range guard raises `ValueError`.
+
+Two harness follow-ups are recorded. The whole-file read exception compares
+file bytes with `max_read_lines`, so these 18/25-line files exceed the small-file
+exception (LocalHub#203). Clean run 2 then made 200 tool calls, including 185
+searches with 170 distinct arguments, before its tool budget stopped the turn.
+The subsequent repair produced no JSON verdict, so the engine escalated
+(LocalHub#204). The hard budget and safe escalation worked; investigate read
+guidance and progress detection before attributing this outcome solely to
+model judgement. Reviewer edits and unsafe commands remain deliberately refused.
+
+This closes the six-sample Flash Next review batch, not the broader evaluation.
+The September false agreement and this batch use different builds, contexts and
+provider routes; do not combine them into one success rate or infer a causal
+improvement. Larger samples, 27B, owner reruns and controlled interventions remain.

@@ -10,6 +10,9 @@ is SemVer-stable; the configuration schema stability policy is in
   baseline caught 3/3 planted boolean defects and accepted 2/3 clean controls.
   The remaining false revision contradicted its own blocking finding; the
   evaluation report records settings, timings and the limits of these samples.
+  A Flash Next batch caught 3/3 planted defects and accepted 1/3 clean controls;
+  two clean reviews escalated without a verdict. Read-guard and search-loop
+  follow-ups are recorded separately from model judgement.
 
 - **Lessons can get approved test questions for an uplift comparison.**
   `localpilot lab tasks draft <lesson> --model <m>` has your configured model
