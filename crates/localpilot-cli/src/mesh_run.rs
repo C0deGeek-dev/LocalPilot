@@ -170,7 +170,8 @@ pub(crate) async fn run(args: MeshArgs) -> ExitCode {
     if let Some(warning) = resolution.warning_once() {
         eprintln!("{warning}");
     }
-    match engine(&mesh, &cli, &mut judge, resolution.window).await {
+    let deadline = crate::session_cmd::TurnDeadline::from_config(&config);
+    match engine(&mesh, &cli, &mut judge, resolution.window, &deadline).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Refused(msg)) => {
             eprintln!("{msg} [anchor={}]", anchor.display());
@@ -202,6 +203,7 @@ async fn engine(
     cli: &RunCli,
     judge: &mut dyn Judge,
     window: crate::context_window::Window,
+    deadline: &crate::session_cmd::TurnDeadline,
 ) -> Result<(), Failure> {
     let poll = cli.poll();
     let joined = {
@@ -223,10 +225,11 @@ async fn engine(
         mesh.owner_supported(&cli.role)?;
     }
     println!(
-        "ENGINE role={} session={sid} context_window={} context_source={}",
+        "ENGINE role={} session={sid} context_window={} context_source={} {}",
         cli.role,
         window.tokens,
-        window.source.as_str()
+        window.source.as_str(),
+        deadline.log_fields(),
     );
     let wake = std::sync::Arc::new(tokio::sync::Notify::new());
     let listening = if cli.listen {
@@ -600,7 +603,7 @@ impl Judge for ModelJudge {
     }
     async fn judge(&mut self, request: &Request, feedback: Option<&str>) -> anyhow::Result<String> {
         self.review_stop = None;
-        let mut runtime = crate::session_cmd::build_runtime_with_store(
+        let (mut runtime, deadline) = crate::session_cmd::build_runtime_with_store_and_deadline(
             &self.anchor,
             &self.model,
             self.provider.as_deref(),
@@ -626,6 +629,7 @@ impl Judge for ModelJudge {
         let cancel = CancellationToken::new();
         let prompt = brief(&self.anchor, &self.role, request, feedback);
         let usage_scope = self.mesh.usage_scope(&self.role)?;
+        println!("  TURN_RAILS {}", deadline.log_fields());
         let stop = runtime.run_turn(&prompt, &events, &cancel).await;
         self.record_turn_usage(runtime.current_turn_usage(), &usage_scope);
         drop(events);
@@ -649,7 +653,7 @@ impl Judge for ModelJudge {
         // tree, every write and command above read-only is denied. File
         // tools keep the workspace boundary; shell commands are not
         // contained (see the docs). No standing grants and no MCP servers.
-        let mut runtime = crate::session_cmd::build_runtime_with_store(
+        let (mut runtime, deadline) = crate::session_cmd::build_runtime_with_store_and_deadline(
             &self.anchor,
             &self.model,
             self.provider.as_deref(),
@@ -672,6 +676,7 @@ impl Judge for ModelJudge {
         let cancel = CancellationToken::new();
         let prompt = owner_brief(&self.anchor, &self.role, task, feedback);
         let usage_scope = self.mesh.usage_scope(&self.role)?;
+        println!("  TURN_RAILS {}", deadline.log_fields());
         let stop = runtime.run_turn(&prompt, &events, &cancel).await;
         self.record_turn_usage(runtime.current_turn_usage(), &usage_scope);
         drop(events);

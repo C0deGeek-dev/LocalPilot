@@ -339,6 +339,31 @@ def occupied(out, name):
     return False
 
 
+def turn_metadata(log_path, result):
+    """Observed public trace metadata, independent of response capture/scoring.
+
+    A killed/failed or legacy trace is explicitly incomplete. Never substitute
+    a built-in default for an effective value missing from the runtime log.
+    """
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    deadlines = [{"seconds": None if seconds == "none" else int(seconds),
+                  "source": source}
+                 for seconds, source in re.findall(
+                     r"^  TURN_RAILS turn_timeout_secs=(none|[0-9]+) "
+                     r"turn_timeout_source=(builtin|config)$", text, re.M)]
+    stops = re.findall(r"^  TURN ended ([A-Za-z]+)$", text, re.M)
+    return {
+        "runtime_turn_deadlines": deadlines,
+        "runtime_turn_stops": stops,
+        "runtime_turn_timeouts": stops.count("TimedOut") if deadlines or stops else None,
+        "runtime_trace_complete": bool(deadlines)
+            and len(deadlines) == len(stops)
+            and not result.get("killed", False)
+            and result.get("engine_exit") == 0
+            and "driver_error" not in result,
+    }
+
+
 def run(a):
     out = pathlib.Path(a.out).resolve()
     name, repo = run_path(out, a)
@@ -372,7 +397,9 @@ def run(a):
             # engine has already been stopped.
             r = {"driver_error": f"{type(e).__name__}: {e}"[:400]}
             r.update({"name": name, "label": a.label, "model": a.model, "cell": a.cell,
-                      "run": a.run, "started": started})
+                      "run": a.run, "started": started, "wall_cap_s": a.wall})
+            log.flush()
+            r.update(turn_metadata(out / f"{name}.log", r))
             r.update(review_identity)
             if a.cell != "owner":
                 r["review_diagnostics_present"] = (out / f"{name}.review.jsonl").is_file() if a.review_diagnostics else False
@@ -383,6 +410,7 @@ def run(a):
               "task": a.task if a.cell == "owner" else "roman", "run": a.run,
               "started": started, "wall_cap_s": a.wall})
     r.update(review_identity)
+    r.update(turn_metadata(out / f"{name}.log", r))
     if a.cell != "owner":
         r["review_diagnostics_present"] = (out / f"{name}.review.jsonl").is_file() if a.review_diagnostics else False
     with open(out / "results.jsonl", "a", encoding="utf-8") as f:

@@ -286,5 +286,84 @@ class ReviewDiagnosticsTest(unittest.TestCase):
             self.assertTrue(row["review_fixture_hashes"])
 
 
+class TurnMetadataTest(unittest.TestCase):
+    def test_repaired_timeout_and_exhausted_repair_are_separate_from_final_scoring(self):
+        for decision in ("AGREE", None):
+            drive = load(HERE)
+            def fake_engine(a, repo, extra, log):
+                log.write("ENGINE role=localpilot turn_timeout_secs=600 turn_timeout_source=builtin\n"
+                          "  TURN_RAILS turn_timeout_secs=43 turn_timeout_source=config\n"
+                          "  TURN ended TimedOut\n"
+                          "  TURN_RAILS turn_timeout_secs=43 turn_timeout_source=config\n"
+                          "  TURN ended Done\n")
+                log.flush()
+                return subprocess.Popen([sys.executable, "-c", "pass"])
+            drive.engine = fake_engine
+            drive.journal = lambda *a: [{"kind": "VERDICT", "body": "AGREE round=1"}] if decision else [{"kind": "ESCALATE"}]
+            with tempfile.TemporaryDirectory() as d:
+                out = pathlib.Path(d) / "results"
+                drive.run(args(out, cell="review-good", review_case="roman-v2"))
+                row = json.loads((out / "results.jsonl").read_text())
+                self.assertEqual(row["decision"], decision)
+                self.assertEqual(row["no_verdict"], decision is None)
+                self.assertFalse(row["killed"])
+                self.assertFalse(row["review_diagnostics_present"])
+                self.assertEqual(row["runtime_turn_timeouts"], 1)
+                self.assertTrue(row["runtime_trace_complete"])
+                self.assertEqual(row["runtime_turn_deadlines"], [{"seconds": 43, "source": "config"}] * 2)
+
+    def test_actual_driver_kill_is_an_incomplete_trace_not_a_runtime_timeout(self):
+        drive = load(HERE)
+        children = []
+        def fake_engine(a, repo, extra, log):
+            log.write("  TURN_RAILS turn_timeout_secs=600 turn_timeout_source=builtin\n")
+            log.flush()
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+            children.append(child)
+            return child
+        drive.engine = fake_engine
+        drive.journal = lambda *a: []
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "results"
+            drive.run(args(out, cell="review-good", wall=0.05))
+            row = json.loads((out / "results.jsonl").read_text())
+            self.assertTrue(row["killed"])
+            self.assertEqual(row["runtime_turn_timeouts"], 0)
+            self.assertFalse(row["runtime_trace_complete"])
+            self.assertEqual(row["runtime_turn_stops"], [])
+            self.assertIsNotNone(children[0].poll())
+
+    def test_failed_rows_keep_observed_metadata_and_wall_cap(self):
+        drive = load(HERE)
+        def broken_review(a, repo, log, planted):
+            log.write("  TURN_RAILS turn_timeout_secs=0 turn_timeout_source=config\n"
+                      "  TURN ended TimedOut\n")
+            raise RuntimeError("failed after runtime stop")
+        drive.review_cell = broken_review
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "results"
+            with self.assertRaises(RuntimeError):
+                drive.run(args(out, cell="review-good", wall=900))
+            row = json.loads((out / "results.jsonl").read_text())
+            self.assertEqual(row["wall_cap_s"], 900)
+            self.assertEqual(row["runtime_turn_timeouts"], 1)
+            self.assertFalse(row["runtime_trace_complete"])
+            self.assertEqual(row["runtime_turn_deadlines"], [{"seconds": 0, "source": "config"}])
+
+    def test_legacy_or_missing_metadata_is_unknown_not_an_inferred_default(self):
+        drive = load(HERE)
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "log"
+            path.write_text("ENGINE turn_timeout_secs=900 turn_timeout_source=config\n")
+            metadata = drive.turn_metadata(path, {"engine_exit": 0})
+            self.assertEqual(metadata["runtime_turn_deadlines"], [])
+            self.assertIsNone(metadata["runtime_turn_timeouts"])
+            self.assertFalse(metadata["runtime_trace_complete"])
+            path.write_text("  TURN ended TimedOut\n  TURN ended Done\n")
+            metadata = drive.turn_metadata(path, {"engine_exit": 0})
+            self.assertEqual(metadata["runtime_turn_timeouts"], 1)
+            self.assertFalse(metadata["runtime_trace_complete"])
+
+
 if __name__ == "__main__":
     unittest.main()

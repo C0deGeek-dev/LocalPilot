@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Seat-evaluation timeout reporting.** Native mesh logs expose resolved
+  per-turn deadlines and their builtin/config source. Driver result rows retain
+  observed stops, runtime timeout counts and trace completeness independently
+  of verdicts and driver kills, including failed rows without response capture.
+  Existing timeout selection, defaults and review retry policy are unchanged.
+
 - **`localpilot lab uplift` measures whether a lesson helps.** For a lesson with
   approved test questions, it runs them with and without the lesson through
   LocalBench and records `Supported`, `Contradicted` or `Inconclusive` on the

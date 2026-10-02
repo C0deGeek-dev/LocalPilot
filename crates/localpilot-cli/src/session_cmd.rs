@@ -264,6 +264,58 @@ pub async fn build_runtime_with_store(
     store: Store,
     start_mcp_servers: bool,
 ) -> anyhow::Result<SessionRuntime> {
+    build_runtime_with_store_and_deadline(
+        cwd,
+        model,
+        provider_id,
+        profile,
+        trusted,
+        store,
+        start_mcp_servers,
+    )
+    .await
+    .map(|(runtime, _)| runtime)
+}
+
+/// Metadata resolved from the same configuration used to build a headless turn.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TurnDeadline {
+    pub(crate) seconds: Option<u64>,
+    pub(crate) source: &'static str,
+}
+
+impl TurnDeadline {
+    pub(crate) fn from_config(config: &localpilot_config::Config) -> Self {
+        Self {
+            seconds: config.harness.resolved_rails(false).turn_timeout_secs,
+            source: if config.harness.turn_timeout_secs.is_some() {
+                "config"
+            } else {
+                "builtin"
+            },
+        }
+    }
+
+    pub(crate) fn log_fields(&self) -> String {
+        format!(
+            "turn_timeout_secs={} turn_timeout_source={}",
+            self.seconds
+                .map_or_else(|| "none".into(), |s| s.to_string()),
+            self.source,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // same shared session inputs, with resolved metadata
+pub(crate) async fn build_runtime_with_store_and_deadline(
+    cwd: &std::path::Path,
+    model: &str,
+    provider_id: Option<&str>,
+    profile: Profile,
+    trusted: bool,
+    store: Store,
+    start_mcp_servers: bool,
+) -> anyhow::Result<(SessionRuntime, TurnDeadline)> {
     let config = localpilot_config::load(&ConfigPaths::standard(cwd), &CliOverrides::default())?;
     let registry = ProviderRegistry::from_config(&config)?;
     let provider = match provider_id {
@@ -273,7 +325,8 @@ pub async fn build_runtime_with_store(
     .cloned()
     .ok_or_else(|| anyhow::anyhow!("no provider is configured"))?;
 
-    build_runtime_with_provider(
+    let deadline = TurnDeadline::from_config(&config);
+    let runtime = build_runtime_with_provider(
         cwd,
         model,
         profile,
@@ -283,7 +336,8 @@ pub async fn build_runtime_with_store(
         &config,
         provider,
     )
-    .await
+    .await?;
+    Ok((runtime, deadline))
 }
 
 #[allow(clippy::too_many_arguments)] // explicit session inputs, with config/provider injectable
@@ -735,6 +789,28 @@ async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_deadline_metadata_uses_resolved_headless_rails() {
+        let mut config = localpilot_config::Config::default();
+        assert_eq!(
+            TurnDeadline::from_config(&config).log_fields(),
+            "turn_timeout_secs=600 turn_timeout_source=builtin"
+        );
+        for seconds in [0, 43, 900] {
+            config.harness.turn_timeout_secs = Some(seconds);
+            let deadline = TurnDeadline::from_config(&config);
+            assert_eq!(
+                deadline.seconds,
+                config.harness.resolved_rails(false).turn_timeout_secs
+            );
+            assert_eq!(deadline.source, "config");
+            assert_eq!(
+                deadline.log_fields(),
+                format!("turn_timeout_secs={seconds} turn_timeout_source=config")
+            );
+        }
+    }
 
     #[tokio::test]
     async fn context_headless_runtime_uses_server_window_instead_of_default_budget() {

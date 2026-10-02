@@ -345,6 +345,72 @@ fn text(o: &Output) -> String {
 
 const AGREE: &str = r#"Looks right. {"kind": "VERDICT", "decision": "AGREE", "findings": [], "body": "The change is what the request says."}"#;
 
+struct TimeoutThenRepair {
+    calls: std::sync::atomic::AtomicUsize,
+    accepted: bool,
+}
+
+impl Respond for TimeoutThenRepair {
+    fn respond(&self, _request: &MockRequest) -> ResponseTemplate {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            says(AGREE).set_delay(std::time::Duration::from_secs(3))
+        } else {
+            says(if self.accepted {
+                AGREE
+            } else {
+                "prose without JSON"
+            })
+        }
+    }
+}
+
+#[tokio::test]
+async fn runtime_timeout_is_visible_without_capture_after_valid_or_malformed_repair() {
+    for accepted in [true, false] {
+        let server = server().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(TimeoutThenRepair {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                accepted,
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let Some(f) = Fixture::new(&server) else {
+            return;
+        };
+        std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
+        let asked = f.request_review(&format!("a.txt={}", f.fingerprint("a.txt")));
+        let mut command = f.engine(
+            &["--once"],
+            &[("LOCALPILOT_HARNESS__TURN_TIMEOUT_SECS", "1")],
+        );
+        let out = tokio::task::spawn_blocking(move || command.output().unwrap())
+            .await
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        let trace = text(&out);
+        assert!(
+            trace.contains("turn_timeout_secs=1 turn_timeout_source=config"),
+            "{trace}"
+        );
+        assert_eq!(
+            trace
+                .matches("  TURN_RAILS turn_timeout_secs=1 turn_timeout_source=config")
+                .count(),
+            2,
+            "{trace}"
+        );
+        assert_eq!(trace.matches("  TURN ended TimedOut").count(), 1, "{trace}");
+        assert_eq!(trace.matches("  TURN ended Done").count(), 1, "{trace}");
+        let posts = f.posted(if accepted { "VERDICT" } else { "ESCALATE" });
+        assert_eq!(posts.len(), 1, "{trace}");
+        assert_eq!(posts[0]["reply_to"], asked);
+        assert_eq!(f.status(), " M a.txt\n");
+    }
+}
+
 #[tokio::test]
 async fn a_review_request_gets_a_verdict_with_the_engines_header_and_is_acknowledged() {
     let server = server().await;
@@ -373,6 +439,11 @@ async fn a_review_request_gets_a_verdict_with_the_engines_header_and_is_acknowle
 
     let out = f.run(&[]).await;
     assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("  TURN_RAILS turn_timeout_secs=600 turn_timeout_source=builtin"),
+        "{}",
+        text(&out)
+    );
     assert!(
         text(&out).contains("context_window=262144 context_source=server_props"),
         "{}",

@@ -116,11 +116,19 @@ Each run leaves its scratch repository and engine log under `--out`, and appends
   Rows also record `review_diagnostics` (relative artifact name, or null) and
   `review_diagnostics_present` (whether the file was created); false does not
   imply a successful review or complete diagnostic evidence.
+- all cells: `wall_cap_s`, `runtime_turn_deadlines` (one `{seconds, source}`
+  per started model turn), `runtime_turn_stops`, `runtime_turn_timeouts`
+  (observed TimedOut count, null when no turn trace exists), and
+  `runtime_trace_complete`. Complete means matched starts/stops, clean engine
+  exit, no driver error and no kill; otherwise counts are partial observations.
+  Builtin/config sources come from the runtime's resolved configuration, not
+  the wall cap. Config includes explicit file/environment settings. Metadata
+  also survives failed rows and does not require review response capture.
 
 ## Things that change the numbers
 
 - **The context window.** LocalPilot probes the server's context window; a smaller configured `context_window` remains a cap. Pass `--context-window` to cap it for a run, and record the engine log's effective `context_window` and `context_source`. A provider context setting of zero removes the configured cap. Scratch repositories load their own configuration, so explicitly select the intended provider and endpoint rather than assuming the invoking project's settings carry over.
 - **Wall time includes model speed.** Time the model's loading separately, and say which server settings or profile you used.
-- **Driver and turn deadlines differ.** `--wall` bounds the whole review, including repair; it does not set the runtime's per-turn deadline. `killed=false` means the driver did not kill the process, even if an initial turn timed out and repair produced a verdict. Inspect engine stop tags and attempt diagnostics when reporting runtime timeouts. Rows currently omit the resolved per-turn deadline and timeout count (LocalHub#208).
+- **Driver and turn deadlines differ.** `--wall` bounds the whole review, including repair; it does not set the runtime's per-turn deadline. `killed=false` means the driver did not kill the process, even if an initial turn timed out and repair produced a verdict. Use `runtime_turn_timeouts` and trace completeness when reporting runtime timeouts. To select a per-turn deadline, use the existing `[harness] turn_timeout_secs` configuration (or the process-scoped `LOCALPILOT_HARNESS__TURN_TIMEOUT_SECS` environment setting); its effective value is emitted for every turn. Old rows remain unchanged (LocalHub#208).
 - **Memory.** A large model at a long server context can leave little RAM free. Run cells in the foreground, one at a time, and stop the server when you are done.
 - **Samples are small.** One to three runs per cell describe a model; they do not rank models. Report counts, not percentages, and keep every run, including the failures.

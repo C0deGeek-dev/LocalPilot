@@ -1147,7 +1147,11 @@ conservative bound. Rollback/tuning is config — raise or set the explicit
 > `SessionConfig` leaves `tool_call_budget`, `tool_call_budget_max`, and
 > `turn_timeout` at `None`; the caller resolves the profile-aware defaults from
 > config and passes them in. The harness enforces the bound it is handed — it
-> does not own the numbers.
+> does not own the numbers. Native mesh logs report the startup resolved deadline and
+> emit `TURN_RAILS turn_timeout_secs=<seconds> turn_timeout_source=builtin|config`
+> from each runtime's construction configuration immediately before its turn.
+> Per-turn records are authoritative if configuration changes after startup;
+> stop tags remain separate from the final verdict and process exit.
 
 ## Per-Turn Tool-Call Budget
 

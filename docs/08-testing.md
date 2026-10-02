@@ -335,7 +335,12 @@ false-revision flags compare expected decisions; finding truth/severity is
 adjudicated separately under the criteria in the driver README.
 
 Review diagnostic capture is opt-in. CLI tests exercise the production judgement
-and observer seams with scripted initial/repair responses: valid repair,
+and native mock-provider timeout/repair path. Resolved deadline metadata is
+tested for builtin and explicit configuration, including zero. Driver controls
+separate a repaired runtime timeout, exhausted repair and a real child-process
+wall kill, preserve failed-row metadata, and mark legacy/incomplete traces.
+These checks do not require response capture or a live model. CLI tests also
+exercise the production judgement and observer seams with scripted initial/repair responses: valid repair,
 both failures, empty/syntax/schema/validation distinctions, absent turn text,
 disabled capture and injected write failure. Capture tests cover canonical
 redaction before UTF-8 truncation, prompt exclusion, fresh-file/mailbox refusal
