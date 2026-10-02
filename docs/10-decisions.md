@@ -2,6 +2,58 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0203: Review Shows The Hindsight And Lab Cards Everywhere, And Lab Runs Start Only From The Command Line
+
+**Status:** accepted · **Date:** 2026-10-02. Builds on ADR-0202 (review actions
+and the lab) and uses LocalMind D-LM-0056 (one card renderer, hindsight
+provenance, a barer copy is a repeat).
+
+**Context.** A lesson in review could carry a hindsight draft, lab results, a
+rewrite lineage and open rerun requests. `learning review show` printed the
+summary and little else, and the terminal review showed only the carried
+evidence text. The lab's own commands existed only on the command line, and the
+plan asked whether the terminal UI should start runs too.
+
+**Decision.**
+
+**The cards.** `localpilot learning review show <item>` and the terminal review
+both show LocalMind's two cards — hindsight and experiments — from the one
+renderer, so the wording is identical on every surface, including LocalMind's
+own CLI and web review. The terminal review's reader shows the cards first and
+then whatever the item carries (source evidence, a replacement, a note), each
+under its own heading.
+
+**The lab's part.** Under the cards LocalPilot adds what only it knows:
+- the lesson's content identity, which is what the lab commands take;
+- what the lab can run for it (Logic, Replay, Uplift), or that no mechanical
+  test exists, worded as a property of the lesson;
+- that a history item is not run against;
+- each uplift run of this lesson and how it stands;
+- each open rerun request, with the command that would start it and the
+  statement that it has not run.
+
+**How a hindsight was produced is recorded.** A completed run's lesson now
+carries the decided outcome and whether a model or the no-model fallback wrote
+the draft, so the card can say so. A record of `UnknownCause` or `NoLesson`
+(kept only when the project asks for abstentions) reads as a safe outcome.
+
+**One route into review.** A lesson with hindsight reaches review only through
+the completion retrospective. If the same sentence later arrives by plain
+extraction, the queue counts it as a repeat: one row, the analysis kept. A test
+drives a real completed run and checks both.
+
+**Lab runs start only from the command line.** `lab replay`, `lab uplift`,
+cancelling with Ctrl+C and `lab rerun` stay CLI commands. The terminal UI shows
+status, results and requests read-only. A run needs its preview and its own
+confirmation in front of the person starting it, and a second way to start one
+is a second place for that to go wrong.
+
+**Consequences.**
+- A reviewer reads the same text wherever they review.
+- Someone working only in the terminal UI must switch to a shell to run the lab.
+- The cards add no new decision path: they describe, and the closing line lists
+  options without preselecting one.
+
 ## ADR-0202: A Rewrite Or Split Leaves The Tested Lesson As History, And A Rerun Is Only A Request
 
 **Status:** accepted · **Date:** 2026-10-02. Builds on ADR-0186, ADR-0187,

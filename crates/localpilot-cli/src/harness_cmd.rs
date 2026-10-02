@@ -2756,6 +2756,48 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
             .unwrap()
             .is_empty());
 
+        // What the reviewer is shown for it, through the command a person runs:
+        // both cards, the lab's part, and nothing preselected.
+        let id = candidate["id"].as_str().unwrap();
+        let mut shown = Vec::new();
+        crate::learning_cmd::review_show(root, id, &mut shown).unwrap();
+        let shown = String::from_utf8(shown).unwrap();
+        for expected in [
+            "Hindsight\n",
+            "outcome: Candidate — the evidence supports a lesson worth reviewing.",
+            "analysis: drafted by a model in 2 call(s)",
+            "cause: ",
+            "Experiments\n  1. Logic Valid",
+            "Logic checks the lesson's reasoning against what the run recorded; it does not measure whether the lesson helps.",
+            "Lab\n",
+            "can run: Logic, against the recorded run",
+            "Next\n  You can accept, rewrite, split, reject or defer.",
+        ] {
+            assert!(shown.contains(expected), "missing `{expected}` in\n{shown}");
+        }
+
+        // One route into review, exactly once: the same sentence arriving again
+        // by plain extraction neither adds a row nor replaces this one.
+        let queue = localmind_store::ReviewQueue::open_project(root).unwrap();
+        let rows_before = queue.list().unwrap().len();
+        let extracted = localmind_core::CandidateLesson::new(
+            localmind_core::LessonId::new("extracted-again"),
+            LESSON,
+            localmind_core::LessonCategory::Process,
+            localmind_core::Confidence::new(0.5).unwrap(),
+            localmind_core::SuggestedAction::PromoteToMemory,
+        );
+        queue
+            .enqueue_candidates(
+                &localmind_core::SessionId::new(session.as_str()),
+                &[extracted],
+            )
+            .unwrap();
+        let after = retrospective_rows(root);
+        assert_eq!(after.len(), 1, "still exactly one candidate");
+        assert_eq!(after[0]["hindsight"], candidate["hindsight"]);
+        assert_eq!(queue.list().unwrap().len(), rows_before, "no row was added");
+
         // The review output: the original trace beside what was drawn from it.
         let store = Store::open(root);
         let trace = store
@@ -2804,6 +2846,20 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0]["requires_edit_before_promotion"], true);
                 assert!(printed.contains("recorded for review"), "{printed}");
+                // Shown as a safe outcome, not as a fault.
+                let mut shown = Vec::new();
+                crate::learning_cmd::review_show(root, rows[0]["id"].as_str().unwrap(), &mut shown)
+                    .unwrap();
+                let shown = String::from_utf8(shown).unwrap();
+                assert!(
+                    shown.contains("outcome: NoLesson — the cause is clear"),
+                    "{shown}"
+                );
+                assert!(
+                    shown.contains("A safe outcome: nothing is proposed for memory."),
+                    "{shown}"
+                );
+                assert!(shown.contains("Not tested."), "{shown}");
             } else {
                 assert!(rows.is_empty(), "{printed}");
             }

@@ -18,7 +18,7 @@ use std::path::Path;
 
 use localmind_core::{
     CandidateLesson, Confidence, EvidenceKind, EvidenceRef, HindsightDraft, HindsightOutcome,
-    LessonCategory, LessonId, SessionId as LearningSessionId, SuggestedAction,
+    HindsightProvenance, LessonCategory, LessonId, SessionId as LearningSessionId, SuggestedAction,
 };
 use localmind_inference::ConstraintDisposition;
 use localmind_store::{Distillation, ReviewQueue};
@@ -135,6 +135,9 @@ pub struct RetrospectiveLesson {
     /// The evidence-linked hindsight the lesson came out of. Its hypotheses cite
     /// the facts above by id.
     hindsight: Option<HindsightDraft>,
+    /// How that hindsight was produced: the decided outcome, and whether a
+    /// model or the no-model fallback wrote the draft. For the reviewer.
+    hindsight_provenance: Option<HindsightProvenance>,
     /// Not a lesson: a record of an analysis that could not, or chose not to,
     /// propose one. Queued so a person can see it, and never promotable as is.
     review_only: bool,
@@ -153,6 +156,7 @@ impl RetrospectiveLesson {
             requires_edit: false,
             facts: Vec::new(),
             hindsight: None,
+            hindsight_provenance: None,
             review_only: false,
         }
     }
@@ -174,6 +178,7 @@ impl RetrospectiveLesson {
             requires_edit: false,
             facts: Vec::new(),
             hindsight: None,
+            hindsight_provenance: None,
             review_only: false,
         }
     }
@@ -195,6 +200,7 @@ impl RetrospectiveLesson {
             requires_edit: false,
             facts: Vec::new(),
             hindsight: None,
+            hindsight_provenance: None,
             review_only: false,
         }
     }
@@ -269,6 +275,19 @@ impl RetrospectiveLesson {
             None => account,
         });
         lesson.hindsight = Some(distillation.draft.clone());
+        lesson.hindsight_provenance = Some(HindsightProvenance {
+            outcome: distillation.outcome,
+            reasons: distillation
+                .reasons
+                .iter()
+                .map(localmind_store::OutcomeReason::describe)
+                .collect(),
+            model_calls: distillation.trace.model_calls,
+            repaired: distillation.trace.repair_spent,
+            fallback: distillation.trace.fallback,
+            excerpts_dropped: u32::try_from(distillation.trace.excerpts_dropped)
+                .unwrap_or(u32::MAX),
+        });
         lesson.review_only = review_only;
         Some(lesson)
     }
@@ -373,6 +392,10 @@ pub fn write_retrospective_lesson(
             })?;
             candidate
         }
+        None => candidate,
+    };
+    let candidate = match &lesson.hindsight_provenance {
+        Some(provenance) => candidate.with_hindsight_provenance(provenance.clone()),
         None => candidate,
     };
     // Carried source evidence rides its own candidate field: review surfaces

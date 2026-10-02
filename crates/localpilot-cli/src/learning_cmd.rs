@@ -279,6 +279,7 @@ pub fn review_show(cwd: &std::path::Path, id: &str, out: &mut dyn Write) -> anyh
 {evidence}"
                 )?;
             }
+            write!(out, "{}", item.cards)?;
         }
         None => writeln!(out, "review item not found")?,
     }

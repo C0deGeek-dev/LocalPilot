@@ -1793,4 +1793,81 @@ fi\n";
                 .outcome_downweight
         );
     }
+
+    /// `learning review show` is where a reviewer reads a lesson: both cards,
+    /// then the lab's part — what can run, open rerun requests, and that
+    /// starting a run is a separate, confirmed command.
+    #[tokio::test]
+    async fn review_show_carries_the_cards_and_the_labs_part() {
+        let (dir, candidate) = project();
+        let root = dir.path();
+        let identity = candidate.content_identity();
+        let show =
+            |root: &Path| printed(|out| crate::learning_cmd::review_show(root, "retro-1", out));
+
+        let before = show(root);
+        assert!(
+            before.contains("Hindsight\n  intended: Write the state"),
+            "{before}"
+        );
+        assert!(
+            before.contains("cause: the state file had not been written yet"),
+            "{before}"
+        );
+        assert!(
+            before.contains("Not tested. Most lessons are not"),
+            "{before}"
+        );
+        assert!(
+            before.contains(&format!("Lab\n  lesson identity: {identity}")),
+            "{before}"
+        );
+        assert!(
+            before.contains("can run: Replay, on the failing commit and its fix"),
+            "{before}"
+        );
+
+        assert!(run(root, Confirmation::Yes).await.contains("Replay Valid"));
+        printed(|out| {
+            rerun(
+                root,
+                &identity,
+                "uplift",
+                "ada",
+                Some("check it helps".to_string()),
+                false,
+                out,
+            )
+        });
+        let after = show(root);
+        assert!(after.contains("1. Replay Valid"), "{after}");
+        assert!(
+            after.contains("Replay re-runs the project's own check on the commits the lesson came from; it does not measure whether the lesson helps."),
+            "{after}"
+        );
+        assert!(
+            after.contains("from: a failing commit and the commit that fixed it"),
+            "{after}"
+        );
+        assert!(after.contains("existed before the lesson"), "{after}");
+        assert!(
+            after.contains("— available"),
+            "the run receipt is still retained: {after}"
+        );
+        assert!(
+            after.contains("rerun requested: uplift by ada (check it helps) — not run."),
+            "{after}"
+        );
+        assert!(
+            after.contains("it shows what will run and asks first"),
+            "{after}"
+        );
+
+        // Retention removes the receipt; the result stands and says so.
+        std::fs::remove_dir_all(root.join(".localpilot").join("lab").join("runs")).unwrap();
+        assert!(
+            show(root).contains("no longer retained; the result itself still stands"),
+            "a swept detail is said in words"
+        );
+    }
 }

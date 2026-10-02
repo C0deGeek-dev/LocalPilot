@@ -1486,6 +1486,21 @@ Review actions and the lab (ADR-0202):
   <name>` records a request and runs nothing. Starting the run keeps its opt-in
   and confirmation.
 
+What a reviewer sees (ADR-0203):
+- **Two cards.** `localpilot learning review show <item>` and the terminal
+  review show the lesson's hindsight (intended and observed outcome, the facts,
+  the cause and alternatives, intervention, where it applies, and whether a
+  model or the fallback drafted it) and each lab result (tier, what was run and
+  what decided it, the arms, the verdict named and explained, limits, staleness,
+  and whether its retained details can still be opened).
+- **The lab's part.** What the lab can run for the lesson, its uplift runs, and
+  open rerun requests, each read-only.
+- **Wording.** Logic and Replay are never worded as showing a lesson helps;
+  `Supported` is worded as narrow; an untested lesson, an unknown cause and "no
+  lesson" are worded as ordinary. Nothing is preselected.
+- **Lab runs start only from the command line.** The terminal UI shows them and
+  never starts one.
+
 ## Completion Teardown Sweep
 
 At the same completion seam, when `[harness] teardown_sweep` is enabled, the

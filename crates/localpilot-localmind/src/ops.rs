@@ -40,6 +40,10 @@ pub struct ReviewSummary {
     pub requires_edit: bool,
     /// Whether this accepted/edited candidate already exists as durable memory.
     pub promoted: bool,
+    /// The hindsight and experiment cards, as the plain text every review
+    /// surface shows, followed by what the lab can run for this lesson and any
+    /// open rerun request.
+    pub cards: String,
 }
 
 /// A reviewer's verdict on a queue item.
@@ -122,8 +126,15 @@ pub struct AuditEntry {
     pub at: String,
 }
 
-fn summarize(item: &ReviewQueueItem, promoted: &HashSet<String>) -> ReviewSummary {
+fn summarize(
+    project_root: &Path,
+    item: &ReviewQueueItem,
+    promoted: &HashSet<String>,
+) -> ReviewSummary {
+    let mut cards = localmind_store::render_review_cards(&item.cards(project_root));
+    cards.push_str(&crate::review_actions::lab_notes(project_root, item));
     ReviewSummary {
+        cards,
         id: item.id.to_string(),
         state: format!("{:?}", item.state),
         session_id: item.session_id.to_string(),
@@ -159,7 +170,7 @@ pub fn review_list(project_root: &Path) -> Result<Vec<ReviewSummary>, LearningEr
     let items = queue.list().map_err(review_err)?;
     Ok(items
         .iter()
-        .map(|item| summarize(item, &promoted))
+        .map(|item| summarize(project_root, item, &promoted))
         .collect())
 }
 
@@ -180,7 +191,7 @@ pub fn review_list_readonly(project_root: &Path) -> Result<Vec<ReviewSummary>, L
     let items = queue.list().map_err(review_err)?;
     Ok(items
         .iter()
-        .map(|item| summarize(item, &promoted))
+        .map(|item| summarize(project_root, item, &promoted))
         .collect())
 }
 
@@ -196,7 +207,9 @@ pub fn review_show(
     let item = queue.get(&ReviewItemId::new(item_id)).map_err(review_err)?;
     let persistence = open_memory(project_root)?;
     let promoted = promoted_ids(&persistence)?;
-    Ok(item.as_ref().map(|item| summarize(item, &promoted)))
+    Ok(item
+        .as_ref()
+        .map(|item| summarize(project_root, item, &promoted)))
 }
 
 /// Delete every pending review candidate, returning how many rows were removed.

@@ -591,3 +591,88 @@ pub fn rerun_requests(localpilot_dir: &Path, candidate_identity: &str) -> Vec<Re
 pub fn clear_rerun(localpilot_dir: &Path, candidate_identity: &str, tier: EvidenceTier) -> bool {
     std::fs::remove_file(rerun_path(localpilot_dir, candidate_identity, tier)).is_ok()
 }
+
+fn lab_source(source: Option<&localmind_core::AssignmentSource>) -> &'static str {
+    use localmind_core::AssignmentSource;
+    match source {
+        Some(AssignmentSource::RecordedTrajectory { .. }) => "Logic, against the recorded run",
+        Some(AssignmentSource::FailFixPair { .. }) => "Replay, on the failing commit and its fix",
+        Some(AssignmentSource::RatifiedCheck { .. }) => "Replay, with a ratified check",
+        Some(AssignmentSource::ControlledMutation { .. }) => "Replay, on a controlled change",
+        Some(AssignmentSource::ApprovedTaskSet { .. }) => "Uplift, on its approved task set",
+        None => "a test",
+    }
+}
+
+/// The lab's part of a review item's cards: what it can run for this lesson
+/// and any open rerun request. Empty when the lab has nothing to say, which is
+/// the ordinary case — most lessons were never classified.
+#[must_use]
+pub fn lab_notes(root: &Path, item: &ReviewQueueItem) -> String {
+    let localpilot_dir = localpilot_store::Store::open(root);
+    let localpilot_dir = localpilot_dir.root();
+    let identity = item.candidate.content_identity();
+    let record = crate::lab_eligibility::read_records(localpilot_dir)
+        .into_iter()
+        .find(|record| record.candidate_identity == identity);
+    let requests = rerun_requests(localpilot_dir, &identity);
+    let runs: Vec<_> = crate::uplift_run::run_statuses(root)
+        .into_iter()
+        .filter(|(_, state, _)| state.candidate_identity == identity)
+        .collect();
+    if record.is_none() && requests.is_empty() && runs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("Lab\n");
+    out.push_str(&format!("  lesson identity: {identity}\n"));
+    if let Some(record) = &record {
+        if record.assignments.is_empty() {
+            out.push_str(
+                "  No mechanical test exists for this lesson. That describes the lesson and is \
+                 not a mark against it.\n",
+            );
+        }
+        for assignment in &record.assignments {
+            out.push_str(&format!(
+                "  can run: {}\n",
+                lab_source(assignment.source.as_ref())
+            ));
+        }
+    }
+    if !is_live(&item.state) {
+        out.push_str("  This item is history: the lab runs nothing against it.\n");
+    }
+    for (dir, state, standing) in runs {
+        use crate::uplift_run::RunStanding;
+        let name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let standing = match standing {
+            RunStanding::Running => format!("running ({})", state.stage),
+            RunStanding::Interrupted => {
+                format!("interrupted during `{}` — not a result", state.stage)
+            }
+            RunStanding::Ended => state.verdict.clone().unwrap_or_default(),
+        };
+        out.push_str(&format!(
+            "  uplift run {name}: {standing} (model {})\n",
+            state.model
+        ));
+    }
+    for request in requests {
+        let tier = tier_name(request.tier);
+        out.push_str(&format!(
+            "  rerun requested: {tier} by {}{} — not run. Start it with `localpilot lab {tier} \
+             {identity}`; it shows what will run and asks first.\n",
+            request.requested_by,
+            request
+                .note
+                .as_ref()
+                .map(|note| format!(" ({note})"))
+                .unwrap_or_default(),
+        ));
+    }
+    out
+}

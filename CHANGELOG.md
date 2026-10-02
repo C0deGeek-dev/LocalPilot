@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Review now shows why a lesson was proposed and what testing found.**
+  `localpilot learning review show` and the terminal review show two cards for
+  each lesson: its hindsight (what was intended and observed, the facts, the
+  cause, where it applies, and whether a model or the fallback wrote it) and
+  each lab result (what was run, the verdict in plain words, its limits, and
+  whether it is stale). Below them: what the lab can run for the lesson, its
+  uplift runs, and open rerun requests. A result is described, never applied —
+  nothing is preselected. Lab runs still start only from the command line
+  (ADR-0203).
 - **Rewriting or splitting a lesson no longer keeps its old test result.**
   `localpilot learning review edit` now closes the original as history, with
   its lab results, and accepts the rewrite as a new, untested lesson; it also

@@ -291,6 +291,9 @@ pub struct LocalMindReviewRow {
     pub evidence: Option<String>,
     pub requires_edit: bool,
     pub promoted: bool,
+    /// The hindsight and experiment cards as plain text — the same text the
+    /// command line prints. `None` when the row is not a real review item.
+    pub cards: Option<String>,
 }
 
 /// The carried text a review row can show under its summary, with the name of
@@ -307,6 +310,29 @@ pub(crate) fn review_detail(row: &LocalMindReviewRow) -> Option<(&'static str, V
             .filter(|text| !text.trim().is_empty())
             .map(str::to_string)
     };
+    // A real review item shows its cards first, then whatever it carries, each
+    // under its own heading so source evidence, a replacement and a note are
+    // never mistaken for one another.
+    if let Some(cards) = carried(&row.cards) {
+        let mut lines = plain_lines(&cards);
+        for (heading, body) in [
+            (
+                "Evidence (review-only, never promoted)",
+                carried(&row.evidence).map(|text| evidence_body_lines(&text)),
+            ),
+            (
+                "Replacement",
+                carried(&row.replacement).map(|text| plain_lines(&text)),
+            ),
+            ("Note", carried(&row.note).map(|text| plain_lines(&text))),
+        ] {
+            if let Some(body) = body {
+                lines.push(heading.to_string());
+                lines.extend(body.into_iter().map(|line| format!("  {line}")));
+            }
+        }
+        return Some(("Review", lines));
+    }
     if let Some(evidence) = carried(&row.evidence) {
         return Some(("Evidence", evidence_body_lines(&evidence)));
     }
@@ -405,6 +431,7 @@ impl LocalMindData {
                     evidence: row.evidence.map(|value| sanitize_text(&value)),
                     requires_edit: row.requires_edit,
                     promoted: row.promoted,
+                    cards: row.cards.map(|value| sanitize_text(&value)),
                 })
                 .collect(),
             skills: lines(self.skills),
@@ -9873,6 +9900,7 @@ mod tests {
             evidence: Some("A large report stayed responsive.".to_string()),
             requires_edit,
             promoted,
+            cards: None,
         }
     }
 
@@ -10565,5 +10593,29 @@ mod tests {
             .lines
             .last()
             .is_some_and(|line| line.contains("more rows omitted")));
+    }
+
+    #[test]
+    fn a_review_item_shows_its_cards_first_and_each_carried_text_under_its_own_heading() {
+        let mut row = review_row("Pending", false, false);
+        row.cards = Some("Hindsight\n  cause: x\nNext\n  You can accept".to_string());
+        row.note = Some("looks right".to_string());
+
+        let (label, lines) = review_detail(&row).expect("detail");
+
+        assert_eq!(label, "Review");
+        assert_eq!(
+            &lines[..4],
+            ["Hindsight", "  cause: x", "Next", "  You can accept"]
+        );
+        assert_eq!(lines[4], "Evidence (review-only, never promoted)");
+        assert_eq!(lines[5], "  A large report stayed responsive.");
+        assert_eq!(lines[6], "Note");
+        assert_eq!(lines[7], "  looks right");
+
+        // A row that is not a review item (the queue was unavailable) keeps the
+        // older single-field detail.
+        row.cards = None;
+        assert_eq!(review_detail(&row).expect("detail").0, "Evidence");
     }
 }

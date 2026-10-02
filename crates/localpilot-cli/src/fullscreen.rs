@@ -2313,6 +2313,7 @@ fn localmind_review_rows(
                 evidence: row.evidence_text,
                 requires_edit: row.requires_edit,
                 promoted: row.promoted,
+                cards: Some(row.cards),
             })
             .collect(),
         Err(error) => vec![LocalMindReviewRow {
@@ -2328,6 +2329,7 @@ fn localmind_review_rows(
             evidence: None,
             requires_edit: true,
             promoted: false,
+            cards: None,
         }],
     }
 }
@@ -20568,6 +20570,41 @@ last_seen = "2026-08-10"
     /// that write goes through the same permission seam as the other verdicts
     /// (ADR-0181 amending ADR-0153). After it lands, the candidate is `Edited`
     /// and carries the reviewer's text — the state the store will promote.
+    /// The terminal review and `learning review show` print the same cards:
+    /// one renderer, so their wording cannot drift.
+    #[test]
+    fn the_terminal_review_row_carries_the_same_cards_the_command_line_prints() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let lesson = localpilot_localmind::RetrospectiveLesson::new(
+            "Bound a terminal report before rendering it",
+        );
+        localpilot_localmind::write_retrospective_lesson(dir.path(), &lesson)
+            .expect("enqueue candidate");
+
+        let rows = localmind_review_rows(localpilot_localmind::review_list(dir.path()));
+        let cards = rows[0]
+            .cards
+            .clone()
+            .expect("a review item carries its cards");
+        assert!(cards.contains("Hindsight\n"), "{cards}");
+        assert!(
+            cards.contains("Not tested. Most lessons are not"),
+            "{cards}"
+        );
+        assert!(
+            cards.contains("Next\n  You can accept, rewrite, split, reject or defer."),
+            "{cards}"
+        );
+
+        let mut shown = Vec::new();
+        crate::learning_cmd::review_show(dir.path(), &rows[0].id, &mut shown).expect("show");
+        let shown = String::from_utf8(shown).expect("utf8");
+        assert!(
+            shown.ends_with(&cards),
+            "the command line ends with exactly the same cards"
+        );
+    }
+
     #[tokio::test]
     async fn an_approved_edit_writes_the_lesson_and_unblocks_promotion() {
         let dir = tempfile::tempdir().expect("temporary workspace");
