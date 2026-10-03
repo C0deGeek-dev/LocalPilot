@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Record pair-seat evaluation close-out, independent review authority and
+  scoring boundaries in ADR-0212. Reconcile the completed matrix and verify an
+  opt-in concrete-defect brief with synthetic native controls; larger live
+  samples and A3B treatment effects remain explicitly deferred.
+
 - **Answer-only lesson uplift uses project context beside the question.**
   `print --answer-only` offers and executes no tools, preserves the stored
   question and attachments, and keeps retrieved context request-only. Lab

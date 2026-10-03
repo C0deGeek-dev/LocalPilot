@@ -474,3 +474,48 @@ prompt processing, then repair recovered at 840.4 seconds. Timing observations
 are retained without claiming a root cause. Historical and fresh batches stay
 separate. These small samples establish neither a general model ranking nor
 readiness to adopt single-agreement acceptance; broader LocalHub#202 stays open.
+
+## Evaluation close-out and acceptance decisions (2026-10-03)
+
+The 39-trial matrix above is complete. Reconciliation verifies phase counts
+19/13/7, each adjudication and both participant journals, request-body and frozen
+fixture hashes, retained owner-tree manifests, shared historical runtime identity
+and descriptive totals. Original rows and earlier conclusions remain unchanged.
+
+Encountered runtime/scoring follow-ups LocalHub#209 through LocalHub#214 are now
+closed: owner loop/exit timing, review provenance, bounded owner checkpoints,
+final-journal reconciliation, typed verification before submission and useful
+tool diagnostics shipped separately. Their regression tests pass on the current
+runtime. This does not turn earlier model trials into post-fix measurements;
+the matrix still uses the recorded historical build and its limitations.
+
+An opt-in research brief now asks each blocking/important finding to state its
+requirement, a concrete trigger, the observed and required results, remove
+retracted claims and avoid unsupported execution claims. Eight **synthetic native
+controls**, with ten provider requests, verify baseline/treatment wiring on clean
+and planted fixtures and preserve the fingerprint manifest. Structural
+AGREE-with-blocking contradictions repair correctly; semantically contradictory
+REVISE text is accepted in both arms. These controls measure instrumentation and
+the validator boundary, with **zero new live-model trials**. They establish no
+A3B false-REVISE improvement. The prior Flash format experiment remains distinct.
+
+ADR-0212 retains participant-neutral review authority. The evidence does not
+qualify a tested local model as sole acceptance authority for consequential
+work. Such work should declare another independent required reviewer and keep
+task-owned verification; the engine already enforces every required vote in a
+larger session. A rule keyed to a participant name would not establish judgment
+quality or independence. The engine's two-party protocol and production review
+prompt remain unchanged. Semantic finding truth continues to need adjudication.
+
+Seat rows remain separate from harness `Scorecard`: review disposition, response
+provenance and independent finding quality differ from task-owned test results,
+and a fallback final tree differs from a submitted tree. An adapter that invents
+missing quality/process facts would make comparisons worse. No adapter ships.
+
+Larger ten-per-cell samples and a paired live A3B concrete-defect experiment are
+**DEFERRED**, not measured, under the workspace's opportunistic-live-validation
+policy. A follow-on experiment must freeze the current runtime/tune/context,
+counterbalance arm order, retain missing/wrong verdicts and adjudicate both the
+primary decision and every finding. Cloud comparison remains optional. Engineering
+calibration and policy decisions are complete; the descriptive matrix establishes
+neither broad reliability nor a model ranking.

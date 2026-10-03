@@ -32,6 +32,27 @@ The fixtures are frozen, so results from different dates and models stay compara
 
 The clean control is what makes a false REVISE visible. Without it, a model that rejects everything would look perfect.
 
+These cells measure model behavior independently of unit-closure authority.
+A scripted owner-cell agreement is a control, not an independent judgment.
+For consequential acceptance, use task-owned verification and another
+independent required reviewer in a larger session; the engine enforces each
+required reviewer's standing agreement. A participant name is not a reliability
+or independence certificate. ADR-0212 records the policy decision.
+
+Opt-in concrete-defect brief experiments can ask for the requirement, concrete
+trigger, observed/required results and removal of retracted claims within the
+existing finding text. Insert treatment instructions before `Fingerprints:` and
+keep manifest bytes unchanged. Native fake-provider controls verify wiring and
+structural repair; they cannot measure semantic improvement. Generic prose
+contradiction refusal and a new production prompt are not adopted. Keep synthetic
+controls separate from live trials and freeze runtime/fixtures/tune/context and
+arm order before a live comparison.
+
+Seat JSON rows retain their own provenance and adjudication rather than being
+converted to harness `Scorecard` with invented quality/process data. Larger
+samples and live treatment effects remain explicit deferred research when
+unmeasured; small mixed cells do not establish a model ranking.
+
 ## Review cases and severity criteria
 
 Both the implementation and submitted tests are in review scope. The evaluation

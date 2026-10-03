@@ -1,5 +1,12 @@
 # Harness Specification
 
+Pair-seat review authority and model-quality evidence are separate (ADR-0212).
+A larger session requires every declared required reviewer's standing agreement;
+adviser votes do not replace required votes. For consequential acceptance, retain
+task-owned verification and an independent required reviewer. Protocol closure,
+valid response structure and matching source anchors do not validate finding
+truth. The two-party engine contract and production review prompt are unchanged.
+
 ## Definition
 
 The harness is a deterministic workflow layer around an LLM agent. It controls

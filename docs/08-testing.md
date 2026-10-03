@@ -262,6 +262,13 @@ added behind credentials. The scorecard should be tracked over time.
 
 #### Machine-readable scorecard
 
+Pair-seat evaluation retains its own result rows and independent adjudication;
+it does not emit this harness scorecard (ADR-0212). Review delivery/provenance,
+missing verdicts and submitted versus fallback trees need distinct fields.
+Unavailable harness quality/process facts must not be substituted with verdict
+acceptance or scripted agreement. Synthetic native controls are excluded from
+live model-quality counts. See [mesh-model-evaluation.md](mesh-model-evaluation.md).
+
 Each golden-task run emits a structured `Scorecard` (JSON) so a benchmark can
 grade the *harness* on more than a single pass/fail bit. It is the cross-corpus
 contract: an in-repo runner and an external runner both produce the same shape.

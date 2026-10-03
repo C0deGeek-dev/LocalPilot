@@ -2,6 +2,45 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0212: Pair-Seat Quality Evidence And Review Authority Stay Separate
+
+**Status:** accepted · **Date:** 2026-10-03.
+
+The fixed 39-trial matrix contains false agreement, false revision, missing
+verdicts and owner integration failures. A valid response and matching source
+anchor establish protocol and source identity; neither establishes a finding's
+truth. The samples do not qualify any tested model as the sole acceptance
+authority for consequential changes.
+
+Retain the participant-neutral engine contract. A two-party unit can close on
+its peer's standing agreement; a larger session enforces every declared required
+reviewer's standing agreement. Add an independent required reviewer and retain
+task-owned verification when consequential acceptance needs independent judgment.
+Advisers do not supply that required vote. Participant names do not identify
+model reliability or independence, so no LocalPilot-name-specific quorum rule
+is introduced. Scripted benchmark agreement remains a harness control rather
+than independent acceptance.
+
+Keep structural validation deterministic. Existing incompatible decision/finding
+combinations are refused and retried. A concrete-defect review brief can ask
+for the requirement, triggering input/action, observed and required outcomes,
+and removal of retracted claims, within existing finding text. It is an opt-in
+research treatment. Eight synthetic native controls verify request placement,
+unchanged fingerprints and structural repair; semantically self-contradictory
+REVISE text remains accepted in both arms. A generic prose heuristic would not
+establish truth and is not added. No production prompt, schema or permission
+change follows; live A3B treatment effects remain unmeasured.
+
+Retain seat result rows and adjudication separately from harness `Scorecard`.
+Seat evidence distinguishes protocol disposition, verdict provenance, delivered
+quality, missing verdicts, submitted-tree measurements and fallback trees.
+The harness scorecard's task/quality/process fields cannot be populated from
+these rows without unavailable facts or misleading substitutions. A future
+adapter must preserve these distinctions and explicit unknowns before adoption.
+Do not pool synthetic controls, historical builds or different fixture/brief
+groups into model reliability estimates. Larger live samples remain explicitly
+deferred; no general ranking or semantic improvement is inferred.
+
 ## ADR-0211: Answer-Only Uplift Places Retrieved Context Beside The Question
 
 **Status:** accepted · **Date:** 2026-10-03.
