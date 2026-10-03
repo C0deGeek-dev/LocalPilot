@@ -176,6 +176,7 @@ pub fn plan_uplift(
         )));
     }
     let settings = UpliftSettings {
+        answer_only: true,
         model: model.to_string(),
         trials: ceilings.trials,
         timeout_secs: ceilings.turn_timeout_secs,
@@ -255,6 +256,10 @@ pub fn authorization(plan: &UpliftPlan) -> String {
     let ceilings = &plan.ceilings;
     let turns = plan.tasks * ceilings.trials as usize * 2;
     let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Solver mode: answer-only; project context beside the question; no tools."
+    );
     let _ = writeln!(
         out,
         "Uplift run for lesson {}: {} approved task(s), with and without the lesson.",
@@ -475,6 +480,7 @@ fn find_resume(root: &Path, binding: &str, settings: &UpliftSettings) -> Option<
         .filter_map(|run_dir| {
             let state = read_run_state(&run_dir)?;
             let same = state.binding == binding
+                && state.answer_only == settings.answer_only
                 && state.model == settings.model
                 && state.trials == settings.trials
                 && state.timeout_secs == settings.timeout_secs;

@@ -902,6 +902,11 @@ command that was shown, and a `Deny` is never overridden. A headless `--yes`
 run cannot answer an `Ask`, so under the default profile an uplift run must be
 confirmed at a terminal.
 
+Lab uplift uses answer-only solver turns: no tool schemas or dispatch, and no
+code verification. Context beside the question is reference data; system
+instructions retain authority. This limits the solver's agent actions but does
+not sandbox the provider or approved host processes or relax run authorization.
+
 **Bounds.** A Replay arm has a timeout. An uplift run declares its ceilings
 before it starts — trials, seconds per turn, wall clock and tokens — and is
 cancelled when one is passed. Cancelling reaps the whole process tree. Output is

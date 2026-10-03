@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Answer-only lesson uplift uses project context beside the question.**
+  `print --answer-only` offers and executes no tools, preserves the stored
+  question and attachments, and keeps retrieved context request-only. Lab
+  uplift uses this mode in both arms and refuses baselines from another mode.
+  Ordinary coding sessions retain their existing context placement and tools.
+
 - **Native Python owner tests are independent of ambient pytest installations.**
   Their fixture runner executes real unittest cases and rejects empty or failing
   suites. Failed checkpoint assertions retain bounded, redacted verifier details.

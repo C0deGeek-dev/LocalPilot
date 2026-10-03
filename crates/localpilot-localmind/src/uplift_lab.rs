@@ -63,6 +63,8 @@ pub const BENCH_FAILED: &str = "BenchFailed";
 /// both arms.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpliftSettings {
+    /// Answer from adjacent retrieved context without tools in both arms.
+    pub answer_only: bool,
     pub model: String,
     pub trials: u32,
     /// Per-turn timeout, in seconds.
@@ -347,6 +349,9 @@ pub fn localbench_arm_args(solver: &str, call: &ArmCall<'_>) -> Vec<String> {
             "--out".to_string(),
             path(call.out),
         ];
+        if call.settings.answer_only {
+            args.push("--answer-only".to_string());
+        }
         if call.lesson_arm {
             args.push("--intended".to_string());
             args.push(call.intended.join(","));
@@ -572,6 +577,8 @@ pub struct Telemetry {
 /// read without holding its process.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RunState {
+    #[serde(default)]
+    pub answer_only: bool,
     pub candidate_identity: String,
     pub binding: String,
     pub model: String,
@@ -710,6 +717,7 @@ pub async fn run_uplift_controlled(
     });
     let workspace = run_dir.join("workspace");
     let state = std::cell::RefCell::new(RunState {
+        answer_only: settings.answer_only,
         candidate_identity: projection.lineage.candidate_identity.clone(),
         binding: binding.clone(),
         model: settings.model.clone(),
@@ -1026,11 +1034,23 @@ fn arm_identity(
     ArmIdentity {
         arm: if lesson_arm { "lessons" } else { "baseline" }.to_string(),
         is_lesson_arm: lesson_arm,
-        config_digest: text_digest(config.replace("\r\n", "\n").as_bytes()),
+        config_digest: solver_config_digest(
+            &text_digest(config.replace("\r\n", "\n").as_bytes()),
+            settings.answer_only,
+        ),
         model: settings.model.clone(),
         trials: settings.trials,
         timeout_secs: settings.timeout_secs,
         injection,
+    }
+}
+
+// Same versioned contract as the LocalBench solver configuration digest.
+fn solver_config_digest(memory_digest: &str, answer_only: bool) -> String {
+    if answer_only {
+        text_digest(format!("answer-only-context-v1:{memory_digest}").as_bytes())
+    } else {
+        memory_digest.to_string()
     }
 }
 
@@ -1275,7 +1295,11 @@ fn base_evidence(projection: &Projection, settings: &UpliftSettings) -> Experime
             source_revision: projection.lineage.source_revision.clone(),
             model: Some(settings.model.clone()),
             runtime: Some(format!("localpilot-uplift/{}", env!("CARGO_PKG_VERSION"))),
-            settings_digest: Some(content_digest(&(settings.trials, settings.timeout_secs))),
+            settings_digest: Some(content_digest(&(
+                settings.trials,
+                settings.timeout_secs,
+                settings.answer_only,
+            ))),
             seed: None,
             budgets_digest: None,
             tool_versions,

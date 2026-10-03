@@ -771,6 +771,10 @@ pub async fn uplift(
         outcome.evidence.verdict,
         reasons_suffix(&outcome.evidence.reasons)
     )?;
+    writeln!(
+        out,
+        "  Solver mode: answer-only; project context beside the question; no tools."
+    )?;
     for limitation in outcome.evidence.limitations.iter().skip(1) {
         writeln!(out, "  {limitation}")?;
     }

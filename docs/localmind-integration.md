@@ -884,6 +884,11 @@ Notes:
   `GET /models` endpoint. A local model wired through the Anthropic-compatible
   no-think proxy (the LocalBox default) is not listable that way; set
   `[providers.local].model` so the configured model is explicit.
+- **`localpilot print --answer-only`** places retrieved project context beside
+  the question as reference data, offers and executes no tools, and skips
+  automatic code verification. Lab uplift uses it in both arms. Retrieval
+  stays request-only and budgeted; normal coding sessions retain their current
+  behavior. `memories_used` proves injection, not semantic use.
 - **`localpilot print` always returns a readable terminal state.** A reader that
   closes stdout mid-stream (a closed pipe) is a clean stop, not a crash — `print`
   exits `141` (the SIGPIPE convention) so a wrapper can tell "the reader left" from

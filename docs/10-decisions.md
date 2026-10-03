@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0211: Answer-Only Uplift Places Retrieved Context Beside The Question
+
+**Status:** accepted · **Date:** 2026-10-03.
+
+**Context.** Captured requests prove accepted lessons reach print's long system
+prompt, yet two local models ignored them in a small project-convention probe.
+Removing tools alone did not help. Adjacent context with no tools produced the
+expected answer in all ten observed samples; that narrow evidence does not
+justify a default change to every coding session.
+
+**Decision.** Add explicit `print --answer-only` turns. Place bounded hook context
+as reference data beside the actual user question in the provider request,
+retain session instructions in system context, and keep retrieval out of stored
+history. Preserve question text, attachments, and context-budget reservation.
+Advertise no tools; unsolicited tool calls fail before dispatch, and tool reveal
+and automatic code verification are disabled for the turn. Lab uplift requests
+this mode in both arms; ordinary sessions retain their current behavior.
+
+Bind mode into the existing configuration digest: legacy digests remain the
+normalized memory-configuration digest; answer-only uses SHA-256 of the UTF-8
+text `answer-only-context-v1:<memory-digest>`. Arm/receipt mode fields default
+false for historical files. Reject mixed modes and configuration/mode mismatch.
+Restart matching includes the persisted mode; historical baselines cannot be
+reused as answer-only evidence. Settings provenance also includes the mode.
+
+**Consequences.** Uplift now measures use of supplied memory without inviting
+unavailable lookup tools. `MemoriesUsed` remains an injection audit, not evidence
+of semantic use or a guaranteed score improvement. Model-quality claims require
+actual answer grading and broader samples. This uses original prompts, existing
+provider-neutral hooks and receipt seams, with no new dependency or service.
+
 ## ADR-0210: Mesh Tool Traces Summarize the Registry Diagnostic
 
 **Status:** accepted · **Date:** 2026-10-03.

@@ -1504,6 +1504,15 @@ questions have to be written.
 
 A run starts only from `localpilot lab uplift <lesson> --model <m>` (ADR-0201),
 in a project whose committed `.localpilot.toml` sets `[lab] uplift = true`.
+
+Both arms use `print --answer-only` (ADR-0211): retrieved project context is
+reference data beside the question, no tools are offered or executed, and
+code verification is skipped. Context remains budgeted and request-only;
+stored question text and attachments are unchanged. Unsolicited calls fail
+before dispatch. The receipt binds this mode; an older coding-agent baseline
+cannot be reused. Ordinary sessions retain system-context placement and tools.
+An injection audit proves delivery, not semantic use or guaranteed uplift.
+
 - **Shown first.** The authorization screen says the run drives real model
   sessions, and lists the model, what is staged, every command and every ceiling.
   Nothing runs until it is confirmed.

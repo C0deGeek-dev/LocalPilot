@@ -85,6 +85,7 @@ fn approved(candidate: &CandidateLesson) -> LabTaskSet {
 
 fn settings() -> UpliftSettings {
     UpliftSettings {
+        answer_only: false,
         model: "fixture-model".to_string(),
         trials: 3,
         timeout_secs: 120,
@@ -302,7 +303,14 @@ impl UpliftBench for StandIn {
                 }
                 .to_string(),
                 is_lesson_arm: call.lesson_arm,
-                config_digest: text_digest(config.as_bytes()),
+                config_digest: if call.settings.answer_only {
+                    text_digest(
+                        format!("answer-only-context-v1:{}", text_digest(config.as_bytes()))
+                            .as_bytes(),
+                    )
+                } else {
+                    text_digest(config.as_bytes())
+                },
                 model: call.settings.model.clone(),
                 trials: call.settings.trials,
                 timeout_secs: call.settings.timeout_secs,
@@ -1236,12 +1244,45 @@ async fn the_real_localbench_runs_both_arms_and_its_receipt_is_imported() {
     assert_eq!(receipt["uplift"]["verdict"], "uplift");
     assert_eq!(
         receipt["arms"][1]["injection"]["injected"],
-        serde_json::json!(outcome.expected.unwrap().lessons.injection.intended)
+        serde_json::json!(
+            outcome
+                .expected
+                .as_ref()
+                .unwrap()
+                .lessons
+                .injection
+                .intended
+        )
     );
     assert!(!outcome.run_dir.join("workspace").exists());
     assert!(memory_list_readonly(fixture.root.path())
         .unwrap()
         .is_empty());
+
+    let mut answer_settings = settings();
+    answer_settings.answer_only = true;
+    let answer = run_uplift(
+        fixture.root.path(),
+        &fixture.candidate,
+        &fixture.projection,
+        &answer_settings,
+        &bench,
+        false,
+    )
+    .await;
+    assert_eq!(
+        answer.evidence.verdict,
+        LabVerdict::Supported,
+        "{:?}",
+        answer.evidence
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_str(&answer.evidence.receipt.as_ref().unwrap().payload).unwrap();
+    assert_eq!(receipt["answer_only"], true);
+    assert_ne!(
+        answer.expected.as_ref().unwrap().baseline.config_digest,
+        outcome.expected.as_ref().unwrap().baseline.config_digest
+    );
 
     // A denied command never reaches LocalBench: the run is invalid, not a verdict.
     let strict = PermissionEngine::new(Profile::Default, Vec::new());
@@ -1694,6 +1735,16 @@ async fn a_run_cancelled_between_the_arms_is_invalid_and_its_baseline_is_only_of
         .expect("a finished baseline is offered");
     assert_eq!(offer.run_dir, plan.run_dir);
     assert!(uplift_authorization(&again).contains("can be reused instead of running it again"));
+
+    // A historical coding-agent baseline (including a state without the new
+    // field) cannot be offered to an answer-only run of the same tasks.
+    let state_path = cancelled.run_dir.join("state.json");
+    let original_state = std::fs::read_to_string(&state_path).unwrap();
+    let mut legacy_state: serde_json::Value = serde_json::from_str(&original_state).unwrap();
+    legacy_state.as_object_mut().unwrap().remove("answer_only");
+    std::fs::write(&state_path, serde_json::to_string(&legacy_state).unwrap()).unwrap();
+    assert_eq!(project.plan().resume, None);
+    std::fs::write(&state_path, original_state).unwrap();
 
     // Declined: both arms run.
     let (fresh, seen) = project.run(&again, passing(), false).await;

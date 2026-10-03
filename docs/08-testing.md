@@ -1,5 +1,13 @@
 # Test Plan
 
+Answer-only regressions in `localpilot-harness/tests/answer_only.rs` verify
+adjacent current-turn context, stored-history isolation, audit equality,
+attachments, repair retries, normal-session compatibility and unsolicited
+tool refusal under bypass. Uplift tests verify real LocalBench receipt import
+when `LOCALPILOT_TEST_LOCALBENCH` points at its binary, solver-mode binding,
+and refusal to resume an answer-only run from a historical baseline.
+
+
 Mesh tool trace controls exercise wrapped success/error, raw predispatch refusal,
 nonrecursive envelope handling, multiline output, control characters, sensitive
 values and Unicode byte bounds. A native owner replay verifies an echo execution

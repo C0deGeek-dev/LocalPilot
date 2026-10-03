@@ -146,6 +146,7 @@ pub async fn print_mode(
     self_review: bool,
     resume: Option<localpilot_core::SessionId>,
     turn_timeout_secs: Option<u64>,
+    answer_only: bool,
 ) -> anyhow::Result<PrintOutcome> {
     let cwd = std::env::current_dir()?;
     let mut runtime = build_runtime(&cwd, model, provider_id, profile, allow_writes).await?;
@@ -155,6 +156,7 @@ pub async fn print_mode(
     )?;
     let turn_timeout = print_turn_timeout(turn_timeout_secs, config.harness.turn_timeout_secs);
     runtime.set_turn_timeout(turn_timeout.map(std::time::Duration::from_secs));
+    runtime.set_answer_only(answer_only);
     // A turn with no limit that is still going after a while says how to set
     // one, once, on stderr — the answer on stdout is untouched.
     let _slow = turn_timeout

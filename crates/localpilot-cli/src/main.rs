@@ -493,6 +493,10 @@ enum Command {
     /// run to learn. Pass `--self-review` for an advisory repo-health pass after the
     /// run.
     Print {
+        /// Answer from supplied project context beside the question, without
+        /// offering or executing tools. Ordinary print behavior is unchanged.
+        #[arg(long)]
+        answer_only: bool,
         /// The prompt text.
         prompt: String,
         /// Model name to request.
@@ -2541,6 +2545,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             exit_code = finish_chat(pair_cmd::run(args).await?)?;
         }
         Command::Print {
+            answer_only,
             prompt,
             model,
             provider,
@@ -2563,6 +2568,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 self_review,
                 resume,
                 turn_timeout,
+                answer_only,
             )
             .await?;
             if outcome.consumer_gone {
@@ -2658,6 +2664,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                     false,
                     Some(session),
                     None,
+                    false,
                 )
                 .await?;
                 if outcome.consumer_gone {
@@ -3440,6 +3447,35 @@ mod tests {
             cli.command,
             Some(Command::Print {
                 self_review: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn print_answer_only_is_explicit_and_defaults_off() {
+        let normal =
+            Cli::try_parse_from(["localpilot", "print", "question", "--model", "m"]).unwrap();
+        assert!(matches!(
+            normal.command,
+            Some(Command::Print {
+                answer_only: false,
+                ..
+            })
+        ));
+        let answer = Cli::try_parse_from([
+            "localpilot",
+            "print",
+            "question",
+            "--model",
+            "m",
+            "--answer-only",
+        ])
+        .unwrap();
+        assert!(matches!(
+            answer.command,
+            Some(Command::Print {
+                answer_only: true,
                 ..
             })
         ));
