@@ -156,6 +156,143 @@ step for it.\n\
 Respond with ONLY the complete Markdown plan, in the shape you were given, and \
 nothing else.";
 
+/// What an automatic work profile adds to a planning request.
+///
+/// The planner and replan prompts show a step with three metadata lines and say
+/// every step carries "all three". A model told both that and "declare scope" in
+/// a sentence that never says where, follows the template. So this message
+/// restates the shape — the line, where it goes, a whole step — and says it
+/// overrides the template. It is sent after the template, not before it, so the
+/// last word on the shape is the right one.
+fn scope_addendum(profile: crate::granularity::WorkProfile, tail: &str) -> Message {
+    let line = crate::plan_review::scope_line_example(profile);
+    Message::text(
+        Role::System,
+        format!(
+            "{instruction}\n\n\
+Because work is sized in advance, a step gains a fourth metadata line, and this \
+overrides 'all three metadata lines'. Every step that is not finished carries a \
+scope line of its own, indented like the other metadata lines, between verify and \
+depends:\n\
+\n\
+- [ ] 1. <small, verifiable step>\n  \
+- covers: AC1\n  \
+- verify: <command>\n\
+{line}\n  \
+- depends: none\n\
+\n\
+A scope is four integers separated by commas: files, regions, decisions, \
+changed_lines. Decisions is at least 1, and regions is at least files. A step may \
+touch at most {files} files, {regions} regions, {decisions} decisions and \
+{lines} changed lines. Split anything larger into several steps, keeping every \
+acceptance criterion covered and every dependency pointing at an earlier step.\n\
+{tail}",
+            instruction = profile.instruction(),
+            files = profile.max_files,
+            regions = profile.max_regions,
+            decisions = profile.max_decisions,
+            lines = profile.max_changed_lines,
+        ),
+    )
+}
+
+/// How many times a plan that parses but cannot be approved is sent back.
+const PLAN_REPAIRS: usize = 2;
+
+/// The defects that would stop `plan` being approved: criteria without an owner
+/// or with metadata missing (when the brief is at hand to judge them against),
+/// then the work envelope. Criteria come first because splitting a step to fit
+/// the envelope is where a criterion most easily loses its owner.
+fn repairable_defects(
+    plan: &Progress,
+    profile: crate::granularity::WorkProfile,
+    brief: Option<&Brief>,
+) -> Vec<PlanDefect> {
+    let mut defects = brief
+        .and_then(|brief| validate_for_approval(plan, brief).err())
+        .unwrap_or_default();
+    defects.extend(
+        crate::plan_review::validate_work_scope(plan, profile)
+            .err()
+            .unwrap_or_default(),
+    );
+    defects
+}
+
+/// Generate a plan and, when a work profile applies, send it back with the
+/// defects that would block its approval until there are none or the repair
+/// budget is spent.
+///
+/// A plan is already retried when it does not parse; this is the same idea one
+/// level up, for a plan that parses but is missing a scope line, declares a step
+/// too large, or leaves an acceptance criterion without an owner. The budget is
+/// separate from the parse retries so a malformed reply cannot use up the chance
+/// to fix an oversized one. `brief` is given only for a fresh draft: a revision
+/// has no brief to judge criteria against, and a replan carries finished steps
+/// whose metadata is not the model's to change.
+///
+/// Running out of budget is not an error. The last plan is returned with its
+/// defects intact, because a reviewer who can see a nearly-right draft and say
+/// "split step 1" is better served than one handed a refusal. Likewise a repair
+/// reply that cannot be parsed falls back to the plan before it: the repair is
+/// best effort and must not lose a plan that was usable.
+async fn generate_fitted(
+    provider: &dyn ModelProvider,
+    model: &str,
+    seed: Vec<Message>,
+    work_profile: Option<crate::granularity::WorkProfile>,
+    brief: Option<&Brief>,
+) -> Result<Progress, HarnessError> {
+    let mut messages = seed;
+    let mut progress = generate(
+        provider,
+        model,
+        messages.clone(),
+        "PROGRESS.md",
+        Progress::parse,
+    )
+    .await?;
+    let Some(profile) = work_profile else {
+        return Ok(progress);
+    };
+    for _ in 0..PLAN_REPAIRS {
+        let defects = repairable_defects(&progress, profile, brief);
+        if defects.is_empty() {
+            break;
+        }
+        let listed = defects
+            .iter()
+            .map(|defect| format!("- {defect}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        messages.push(Message::text(Role::Assistant, progress.render()));
+        messages.push(Message::text(
+            Role::User,
+            format!(
+                "That plan cannot be approved yet:\n{listed}\n\n\
+Reply again with ONLY the complete corrected Markdown plan. Fix exactly these \
+defects: give every acceptance criterion at least one step that covers it, add or \
+correct scope lines, and split any oversized step into several, renumbering from \
+1 with no gaps. Keep every dependency pointing at an earlier step, and leave \
+everything else as it is."
+            ),
+        ));
+        match generate(
+            provider,
+            model,
+            messages.clone(),
+            "PROGRESS.md",
+            Progress::parse,
+        )
+        .await
+        {
+            Ok(next) => progress = next,
+            Err(_) => break,
+        }
+    }
+    Ok(progress)
+}
+
 /// Draft a plan from an approved brief, writing nothing.
 ///
 /// # Errors
@@ -187,14 +324,12 @@ pub async fn draft_plan_with_profile(
         "Project brief:\n\n{}\n\nRepository summary:\n\n{repo_summary}",
         brief.render()
     );
-    let mut seed = vec![
-        Message::text(Role::System, PLANNER_PROMPT),
-        Message::text(Role::User, user),
-    ];
+    let mut seed = vec![Message::text(Role::System, PLANNER_PROMPT)];
     if let Some(profile) = work_profile {
-        seed.insert(0, Message::text(Role::System, format!("{}\nEvery future step must declare scope: files, regions, decisions, changed_lines as four comma-separated integer counts. Split oversized work without dropping coverage or ordering.", profile.instruction())));
+        seed.push(scope_addendum(profile, ""));
     }
-    let mut progress = generate(provider, model, seed, "PROGRESS.md", Progress::parse).await?;
+    seed.push(Message::text(Role::User, user));
+    let mut progress = generate_fitted(provider, model, seed, work_profile, Some(brief)).await?;
     progress.bind_to_brief(brief_revision);
     Ok(PlanDraft {
         progress,
@@ -269,12 +404,15 @@ Finished steps, to reproduce verbatim:\n\n{finished}",
     let mut seed = vec![
         Message::text(Role::System, PLANNER_PROMPT),
         Message::text(Role::System, REPLAN_PROMPT),
-        Message::text(Role::User, user),
     ];
     if let Some(profile) = work_profile {
-        seed.insert(0, Message::text(Role::System, format!("{}\nEvery future step must declare scope: files, regions, decisions, changed_lines as four comma-separated integer counts. Split oversized work without dropping coverage or ordering.", profile.instruction())));
+        seed.push(scope_addendum(
+            profile,
+            "Finished steps are reproduced exactly as given and carry no scope line.\n",
+        ));
     }
-    let mut progress = generate(provider, model, seed, "PROGRESS.md", Progress::parse).await?;
+    seed.push(Message::text(Role::User, user));
+    let mut progress = generate_fitted(provider, model, seed, work_profile, None).await?;
     progress.bind_to_brief(brief_revision);
     Ok(PlanDraft {
         progress,
@@ -327,23 +465,15 @@ pub async fn revise_plan(
         "Current plan:\n\n{}\n\nInstruction:\n\n{instruction}",
         draft.progress.render()
     );
-    let mut seed = vec![
-        Message::text(Role::System, REVISE_PROMPT),
-        Message::text(Role::User, user),
-    ];
+    let mut seed = vec![Message::text(Role::System, REVISE_PROMPT)];
     if let Some(profile) = draft.work_profile {
-        seed.insert(
-            0,
-            Message::text(
-                Role::System,
-                format!(
-                    "{}\nPreserve scope metadata and split oversized future work.",
-                    profile.instruction()
-                ),
-            ),
-        );
+        seed.push(scope_addendum(
+            profile,
+            "Keep the scope line of every step you are not changing. Give a scope line to any step that lacks one and to every step you add.\n",
+        ));
     }
-    let mut progress = generate(provider, model, seed, "PROGRESS.md", Progress::parse).await?;
+    seed.push(Message::text(Role::User, user));
+    let mut progress = generate_fitted(provider, model, seed, draft.work_profile, None).await?;
     progress.bind_to_brief(&draft.brief_revision);
     Ok(PlanDraft {
         progress,
@@ -614,5 +744,305 @@ mod tests {
             "{error}"
         );
         assert!(!dir.path().join("PROGRESS.md").exists());
+    }
+
+    fn profile_with(
+        caps: &localpilot_config::GranularityConfig,
+    ) -> crate::granularity::WorkProfile {
+        use crate::granularity::{ContextCapacity, ContextProvenance, Reliability, WorkProfile};
+        WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 262_144,
+                provenance: ContextProvenance::RuntimeUsage,
+            },
+            Reliability::Unknown,
+            caps,
+        )
+    }
+
+    /// The role and text of each message of the only request the provider saw.
+    fn request_texts(provider: &FakeProvider) -> Vec<(bool, String)> {
+        use localpilot_core::ContentBlock;
+        let requests = provider.requests();
+        let request = requests.first().expect("a request");
+        request
+            .messages
+            .iter()
+            .map(|message| {
+                let text = message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (matches!(message.role, Role::System), text)
+            })
+            .collect()
+    }
+
+    const SCOPED: &str = "# Progress: thing\nBranch: feature/thing\n\n## Steps\n\n\
+- [ ] 1. Write the parser\n  - covers: AC1\n  - verify: cargo test parser\n  - scope: 1, 1, 1, 80\n  - depends: none\n";
+
+    #[tokio::test]
+    async fn a_profiled_draft_shows_the_scope_line_after_the_template_it_overrides() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let provider = FakeProvider::new().text(SCOPED);
+        draft_plan_with_profile(&provider, "m", &brief(), "rev", "repo", Some(profile))
+            .await
+            .unwrap();
+
+        let texts = request_texts(&provider);
+        assert_eq!(texts.len(), 3, "planner, scope addendum, user");
+        assert!(texts[0].1.contains("exactly this shape"));
+        assert!(
+            texts[1]
+                .1
+                .contains(&crate::plan_review::scope_line_example(profile)),
+            "{}",
+            texts[1].1
+        );
+        assert!(texts[1].1.contains("overrides 'all three metadata lines'"));
+        assert!(!texts[2].0, "the user turn comes last");
+    }
+
+    #[tokio::test]
+    async fn without_a_profile_the_request_is_the_plain_template() {
+        let provider = FakeProvider::new().text(PLAN);
+        draft_plan(&provider, "m", &brief(), "rev", "repo")
+            .await
+            .unwrap();
+        let texts = request_texts(&provider);
+        assert_eq!(texts.len(), 2, "planner and user only");
+        assert!(texts.iter().all(|(_, text)| !text.contains("scope")));
+    }
+
+    #[tokio::test]
+    async fn a_profiled_replan_and_revision_carry_the_scope_line_after_their_own_prompt() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+
+        let provider = FakeProvider::new().text(SCOPED);
+        draft_replan_with_profile(&provider, "m", &brief(), "rev", "repo", &[], Some(profile))
+            .await
+            .unwrap();
+        let texts = request_texts(&provider);
+        assert_eq!(texts.len(), 4, "planner, replan, scope addendum, user");
+        assert!(texts[1].1.contains("replanning"));
+        assert!(texts[2]
+            .1
+            .contains(&crate::plan_review::scope_line_example(profile)));
+        assert!(texts[2].1.contains("carry no scope line"));
+
+        let draft = draft_plan_with_profile(
+            &FakeProvider::new().text(SCOPED),
+            "m",
+            &brief(),
+            "rev",
+            "repo",
+            Some(profile),
+        )
+        .await
+        .unwrap();
+        let provider = FakeProvider::new().text(SCOPED);
+        revise_plan(&provider, "m", &draft, "rename the step")
+            .await
+            .unwrap();
+        let texts = request_texts(&provider);
+        assert_eq!(texts.len(), 3, "revise, scope addendum, user");
+        assert!(texts[0].1.contains("revising"));
+        assert!(texts[1]
+            .1
+            .contains(&crate::plan_review::scope_line_example(profile)));
+        assert!(texts[1]
+            .1
+            .contains("Give a scope line to any step that lacks one"));
+        assert!(
+            texts[2].1.contains("scope: 1, 1, 1, 80"),
+            "the plan shown keeps its scope"
+        );
+    }
+
+    #[test]
+    fn the_example_line_is_accepted_by_the_profile_it_was_derived_from() {
+        for cap in [None, Some(200), Some(80), Some(10), Some(1)] {
+            let caps = localpilot_config::GranularityConfig {
+                max_changed_lines: cap,
+                ..Default::default()
+            };
+            let profile = profile_with(&caps);
+            let plan = format!(
+                "# Progress: t\nBranch: feature/t\n\n## Steps\n\n- [ ] 1. Do it\n{}\n",
+                crate::plan_review::scope_line_example(profile)
+            );
+            let progress = Progress::parse(&plan).unwrap();
+            assert!(
+                crate::plan_review::validate_work_scope(&progress, profile).is_ok(),
+                "cap {cap:?}: {plan}"
+            );
+        }
+    }
+
+    const OVERSIZED: &str = "# Progress: thing\nBranch: feature/thing\n\n## Steps\n\n\
+- [ ] 1. Write the parser\n  - covers: AC1\n  - verify: cargo test parser\n  - scope: 2, 2, 1, 300\n  - depends: none\n";
+
+    fn fits(progress: &Progress, profile: crate::granularity::WorkProfile) -> bool {
+        crate::plan_review::validate_work_scope(progress, profile).is_ok()
+    }
+
+    #[tokio::test]
+    async fn an_oversized_plan_is_sent_back_with_its_defects_and_the_fixed_plan_is_kept() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let provider = FakeProvider::new().text(OVERSIZED).text(SCOPED);
+        let draft = draft_plan_with_profile(&provider, "m", &brief(), "rev", "repo", Some(profile))
+            .await
+            .unwrap();
+
+        assert!(fits(&draft.progress, profile));
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2, "one draft, one repair");
+        let second = &requests[1].messages;
+        let text_of = |message: &Message| {
+            message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    localpilot_core::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let feedback = text_of(second.last().unwrap());
+        assert!(feedback.contains("2 files (at most 1)"), "{feedback}");
+        assert!(
+            feedback.contains("300 changed lines (at most 200)"),
+            "{feedback}"
+        );
+        assert!(matches!(second[second.len() - 2].role, Role::Assistant));
+        assert!(
+            text_of(&second[second.len() - 2]).contains("scope: 2, 2, 1, 300"),
+            "the model is shown the plan it wrote"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_criterion_left_without_an_owner_is_sent_back_even_when_the_scope_fits() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let orphaned = "# Progress: thing\nBranch: feature/thing\n\n## Steps\n\n\
+- [ ] 1. Write the parser\n  - covers: none\n  - verify: cargo test parser\n  - scope: 1, 1, 1, 50\n  - depends: none\n";
+        let provider = FakeProvider::new().text(orphaned).text(SCOPED);
+        let draft = draft_plan_with_profile(&provider, "m", &brief(), "rev", "repo", Some(profile))
+            .await
+            .unwrap();
+
+        assert_eq!(provider.requests().len(), 2);
+        assert_eq!(draft.progress.steps[0].covers, Some(vec![1]));
+        let sent = &provider.requests()[1].messages;
+        let last = format!("{:?}", sent.last().unwrap().content);
+        assert!(last.contains("no step covers AC1"), "{last}");
+    }
+
+    #[tokio::test]
+    async fn a_revision_is_not_judged_against_a_brief_it_does_not_have() {
+        // Only the work envelope can be repaired on a revision. A plan whose
+        // criteria are unowned is the reviewer's to see, not a reason to resend.
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let draft = draft_plan_with_profile(
+            &FakeProvider::new().text(SCOPED),
+            "m",
+            &brief(),
+            "rev",
+            "repo",
+            Some(profile),
+        )
+        .await
+        .unwrap();
+        let orphaned = "# Progress: thing\nBranch: feature/thing\n\n## Steps\n\n\
+- [ ] 1. Write the parser\n  - covers: none\n  - verify: cargo test parser\n  - scope: 1, 1, 1, 50\n  - depends: none\n";
+        let provider = FakeProvider::new().text(orphaned);
+        revise_plan(&provider, "m", &draft, "drop the criterion")
+            .await
+            .unwrap();
+        assert_eq!(provider.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn repair_is_bounded_and_the_last_plan_is_returned_with_its_defects() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let provider = FakeProvider::new()
+            .text(OVERSIZED)
+            .text(OVERSIZED)
+            .text(OVERSIZED);
+        let draft = draft_plan_with_profile(&provider, "m", &brief(), "rev", "repo", Some(profile))
+            .await
+            .expect("a draft with defects is still a draft");
+
+        assert_eq!(provider.requests().len(), 1 + PLAN_REPAIRS);
+        assert!(
+            !fits(&draft.progress, profile),
+            "defects stay visible to the reviewer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repair_reply_that_cannot_be_parsed_keeps_the_plan_before_it() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let provider = FakeProvider::new()
+            .text(OVERSIZED)
+            .text("not a plan")
+            .text("still not")
+            .text("nope");
+        let draft = draft_plan_with_profile(&provider, "m", &brief(), "rev", "repo", Some(profile))
+            .await
+            .expect("a failed repair must not lose a usable draft");
+
+        assert_eq!(draft.progress.steps[0].scope.map(|s| s.files), Some(2));
+    }
+
+    #[tokio::test]
+    async fn without_a_profile_nothing_is_sent_back() {
+        let provider = FakeProvider::new().text(PLAN);
+        let draft = draft_plan(&provider, "m", &brief(), "rev", "repo")
+            .await
+            .unwrap();
+        assert_eq!(provider.requests().len(), 1);
+        assert!(draft.progress.steps[0].scope.is_none());
+    }
+
+    #[test]
+    fn an_oversized_step_is_reported_with_what_it_declared_and_which_limits_it_broke() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let plan = "# Progress: t\nBranch: feature/t\n\n## Steps\n\n\
+- [ ] 1. Do a lot\n  - scope: 2, 2, 1, 300\n- [ ] 2. Do a little\n  - scope: 1, 1, 1, 50\n";
+        let progress = Progress::parse(plan).unwrap();
+        let defects = crate::plan_review::validate_work_scope(&progress, profile).unwrap_err();
+        assert_eq!(defects.len(), 1, "only step 1 is over: {defects:?}");
+        let text = defects[0].to_string();
+        assert!(text.contains("step 1"), "{text}");
+        assert!(text.contains("2 files (at most 1)"), "{text}");
+        assert!(text.contains("2 regions (at most 1)"), "{text}");
+        assert!(text.contains("300 changed lines (at most 200)"), "{text}");
+        assert!(
+            !text.contains("1 decisions"),
+            "within its limit, so not named: {text}"
+        );
+        assert!(text.contains("split"), "{text}");
+    }
+
+    #[test]
+    fn a_missing_scope_is_reported_with_the_line_to_add_and_not_as_a_split() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let progress = Progress::parse(PLAN).unwrap();
+        let defects = crate::plan_review::validate_work_scope(&progress, profile).unwrap_err();
+        let text = defects[0].to_string();
+        assert!(
+            matches!(defects[0], PlanDefect::MissingScope { step: 1, .. }),
+            "{text}"
+        );
+        assert!(text.contains("  - scope: 1, 1, 1, 80"), "{text}");
+        assert!(!text.contains("split"), "{text}");
     }
 }

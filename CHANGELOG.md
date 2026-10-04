@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Planning now says exactly how to declare a step's scope.** A plan with an
+  automatic work profile was rejected for "no scope" on every step, because the
+  planner template showed three metadata lines and the instruction to add a
+  fourth never said where it goes. The instruction now follows the template,
+  shows the line and a whole step, and applies to drafting, replanning and
+  revising. A missing scope names the line to add; an oversized step names what
+  it declared and which limit it broke.
+
 - **`localpilot print` can read a folder you have trusted.** It used to refuse
   every tool, file reads included, unless `--allow-writes` was passed. In a
   folder trusted with `localpilot trust add` it now reads, searches and runs

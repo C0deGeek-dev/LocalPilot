@@ -19,16 +19,14 @@ use crate::progress::{Progress, Step, Verification};
 /// that says "invalid" is a review nobody can act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanDefect {
-    WorkEnvelope {
-        step: usize,
-        detail: String,
-    },
+    /// A step declares more work than the automatic work profile allows.
+    WorkEnvelope { step: usize, detail: String },
+    /// A step declares no scope at all. Carries a line the profile accepts, so
+    /// the message shows the exact shape instead of describing it.
+    MissingScope { step: usize, example: String },
     /// A step is missing one of the three planning fields. Absence is unknown,
     /// and a plan approved with unknowns is a plan nobody decided.
-    MissingMetadata {
-        step: usize,
-        field: &'static str,
-    },
+    MissingMetadata { step: usize, field: &'static str },
     /// A step claims a criterion the bound brief does not have.
     UnknownCriterion {
         step: usize,
@@ -36,27 +34,22 @@ pub enum PlanDefect {
         criteria: usize,
     },
     /// A criterion no step owns. The plan would ship without doing it.
-    OrphanCriterion {
-        criterion: usize,
-        text: String,
-    },
+    OrphanCriterion { criterion: usize, text: String },
     /// A dependency on a step that does not exist.
-    UnknownDependency {
-        step: usize,
-        depends_on: usize,
-    },
+    UnknownDependency { step: usize, depends_on: usize },
     /// A dependency on a later step, or on itself. Declared order that points
     /// forward is not an order, and it is how a cycle gets in.
-    ForwardDependency {
-        step: usize,
-        depends_on: usize,
-    },
+    ForwardDependency { step: usize, depends_on: usize },
 }
 
 impl std::fmt::Display for PlanDefect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WorkEnvelope { step, detail } => write!(f, "step {step}: {detail}; split it while preserving acceptance coverage and dependency order"),
+            Self::MissingScope { step, example } => write!(
+                f,
+                "step {step} has no scope line; add one as its own indented line under the step, four integers for files, regions, decisions, changed_lines, for example `{example}`"
+            ),
             Self::MissingMetadata { step, field } => write!(
                 f,
                 "step {step} does not say '{field}'; an approved plan states all three of covers, verify and depends"
@@ -84,6 +77,41 @@ impl std::fmt::Display for PlanDefect {
     }
 }
 
+/// A scope line as it is written in `PROGRESS.md` that `profile` accepts.
+///
+/// Derived from the profile's own limits rather than a literal, because a user
+/// cap can push a limit below any fixed example, and an example the validator
+/// rejects would send the planner round the same loop it is meant to end.
+#[must_use]
+pub(crate) fn scope_line_example(profile: crate::granularity::WorkProfile) -> String {
+    format!("  - scope: 1, 1, 1, {}", profile.max_changed_lines.min(80))
+}
+
+/// What an oversized step declared against what the profile allows, naming only
+/// the limits it went over. The full profile text says what the limits are in
+/// general; this says which one this step broke, which is what a reviewer or a
+/// planner needs in order to split it.
+fn oversized_detail(
+    scope: crate::granularity::WorkScope,
+    profile: crate::granularity::WorkProfile,
+) -> String {
+    let over: Vec<String> = [
+        ("files", scope.files, profile.max_files),
+        ("regions", scope.regions, profile.max_regions),
+        ("decisions", scope.decisions, profile.max_decisions),
+        (
+            "changed lines",
+            scope.changed_lines,
+            profile.max_changed_lines,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, declared, allowed)| declared > allowed)
+    .map(|(name, declared, allowed)| format!("{declared} {name} (at most {allowed})"))
+    .collect();
+    format!("declares too much for one unit: {}", over.join(", "))
+}
+
 /// New adaptive plans declare their decision/material scope before approval.
 /// Historical completed work is never retroactively sized or rewritten.
 ///
@@ -93,13 +121,22 @@ pub fn validate_work_scope(
     progress: &Progress,
     profile: crate::granularity::WorkProfile,
 ) -> Result<(), Vec<PlanDefect>> {
-    let defects: Vec<_> = progress.steps.iter().filter(|step| !step.done).filter_map(|step| {
-        match step.scope {
+    let defects: Vec<_> = progress
+        .steps
+        .iter()
+        .filter(|step| !step.done)
+        .filter_map(|step| match step.scope {
             Some(scope) if profile.accepts(scope) => None,
-            Some(_) => Some(PlanDefect::WorkEnvelope { step: step.number, detail: profile.instruction() }),
-            None => Some(PlanDefect::WorkEnvelope { step: step.number, detail: "declare scope: files, regions, decisions, changed_lines (four comma-separated counts)".to_string() }),
-        }
-    }).collect();
+            Some(scope) => Some(PlanDefect::WorkEnvelope {
+                step: step.number,
+                detail: oversized_detail(scope, profile),
+            }),
+            None => Some(PlanDefect::MissingScope {
+                step: step.number,
+                example: scope_line_example(profile),
+            }),
+        })
+        .collect();
     if defects.is_empty() {
         Ok(())
     } else {
