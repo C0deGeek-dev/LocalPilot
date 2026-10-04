@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot print` can read a folder you have trusted.** It used to refuse
+  every tool, file reads included, unless `--allow-writes` was passed. In a
+  folder trusted with `localpilot trust add` it now reads, searches and runs
+  read-only commands, and still writes nothing without `--allow-writes`. In an
+  untrusted folder nothing changed, but `print` now says up front that no tool
+  can run and how to allow it (ADR-0213).
 - Record pair-seat evaluation close-out, independent review authority and
   scoring boundaries in ADR-0212. Reconcile the completed matrix and verify an
   opt-in concrete-defect brief with synthetic native controls; larger live

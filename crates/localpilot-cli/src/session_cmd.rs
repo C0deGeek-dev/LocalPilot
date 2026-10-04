@@ -3,7 +3,8 @@
 //! Print mode runs the shared session loop once, streams the answer to stdout,
 //! and makes no workspace mutations by default: it runs non-interactively, so the
 //! permission engine denies write/destructive effects unless writes are
-//! explicitly enabled.
+//! explicitly enabled. In a folder the user has trusted it can read; in one
+//! they have not, no tool runs at all (see [`print_access`]).
 
 use std::io::Write;
 
@@ -47,6 +48,66 @@ pub fn resolve_profile(permission: Option<&str>, bypass: bool) -> Profile {
         Some(_) => Profile::ReadOnly,
     }
 }
+
+/// The access one `print` turn runs with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrintAccess {
+    /// The permission profile in force for the turn.
+    pub profile: Profile,
+    /// Whether the session treats the workspace as trusted.
+    pub trusted: bool,
+    /// The folder is not trusted and nothing else grants access, so the
+    /// untrusted floor denies every tool call in this non-interactive turn.
+    pub tools_blocked: bool,
+}
+
+/// Decide a `print` turn's access from the profile asked for, `--allow-writes`,
+/// and whether the folder is in the trusted-folders store.
+///
+/// - `--allow-writes` trusts the workspace for the turn, as it always has.
+/// - `bypass` and `unrestricted` do not consult workspace trust; they are left
+///   as asked.
+/// - A trusted folder without `--allow-writes` runs trusted and read-only:
+///   files can be read and searched and read-only commands run, and nothing is
+///   written, whichever of `default`, `relaxed` or `readonly` was asked for.
+/// - An untrusted folder without `--allow-writes` stays untrusted. Every tool
+///   call is then denied, and `tools_blocked` says so.
+#[must_use]
+pub fn print_access(profile: Profile, allow_writes: bool, folder_trusted: bool) -> PrintAccess {
+    if allow_writes {
+        return PrintAccess {
+            profile,
+            trusted: true,
+            tools_blocked: false,
+        };
+    }
+    if matches!(profile, Profile::Bypass | Profile::Unrestricted) {
+        return PrintAccess {
+            profile,
+            trusted: false,
+            tools_blocked: false,
+        };
+    }
+    if folder_trusted {
+        return PrintAccess {
+            profile: Profile::ReadOnly,
+            trusted: true,
+            tools_blocked: false,
+        };
+    }
+    PrintAccess {
+        profile,
+        trusted: false,
+        tools_blocked: true,
+    }
+}
+
+/// What `print` says on stderr before a turn in which no tool can run.
+pub const PRINT_UNTRUSTED_NOTICE: &str = "\
+print: this folder is not trusted, so no tool can run in this turn — the model cannot read \
+files, search, or run commands here.
+  To let it read: localpilot trust add   (then run this again)
+  To let it read and write: pass --allow-writes";
 
 /// The user's exact command list, for the permission engine.
 #[must_use]
@@ -149,7 +210,13 @@ pub async fn print_mode(
     answer_only: bool,
 ) -> anyhow::Result<PrintOutcome> {
     let cwd = std::env::current_dir()?;
-    let mut runtime = build_runtime(&cwd, model, provider_id, profile, allow_writes).await?;
+    let access = print_access(profile, allow_writes, crate::trust::is_trusted(&cwd));
+    // An answer-only turn offers no tools, so there is nothing to warn about.
+    if access.tools_blocked && !answer_only {
+        eprintln!("{PRINT_UNTRUSTED_NOTICE}");
+    }
+    let mut runtime =
+        build_runtime(&cwd, model, provider_id, access.profile, access.trusted).await?;
     let config = localpilot_config::load(
         &localpilot_config::ConfigPaths::standard(&cwd),
         &localpilot_config::CliOverrides::default(),
@@ -855,6 +922,95 @@ async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use localpilot_sandbox::{Decision, Effect, PermissionRequest};
+
+    fn decide(access: PrintAccess, effect: Effect) -> Decision {
+        PermissionEngine::new(access.profile, Vec::new()).decide(&PermissionRequest {
+            tool: "test".to_string(),
+            effect,
+            interactivity: Interactivity::NonInteractive,
+            trusted: access.trusted,
+            detail: String::new(),
+        })
+    }
+
+    const READ: Effect = Effect::ReadPath {
+        inside_workspace: true,
+        secret_like: false,
+    };
+
+    fn write() -> Effect {
+        Effect::WritePath {
+            inside_workspace: true,
+            overwrite: true,
+            secret_like: false,
+        }
+    }
+
+    #[test]
+    fn print_in_a_trusted_folder_reads_but_does_not_write() {
+        for profile in [Profile::Default, Profile::Relaxed, Profile::ReadOnly] {
+            let access = print_access(profile, false, true);
+            assert_eq!(
+                access,
+                PrintAccess {
+                    profile: Profile::ReadOnly,
+                    trusted: true,
+                    tools_blocked: false
+                },
+                "{profile:?}"
+            );
+            assert_eq!(decide(access, READ), Decision::Allow, "{profile:?}");
+            assert_eq!(decide(access, write()), Decision::Deny, "{profile:?}");
+        }
+    }
+
+    #[test]
+    fn print_in_an_untrusted_folder_runs_no_tool_and_says_so() {
+        for profile in [Profile::Default, Profile::Relaxed, Profile::ReadOnly] {
+            let access = print_access(profile, false, false);
+            assert!(access.tools_blocked, "{profile:?}");
+            assert!(!access.trusted);
+            assert_eq!(access.profile, profile);
+            assert_eq!(decide(access, READ), Decision::Deny, "{profile:?}");
+            assert_eq!(decide(access, write()), Decision::Deny, "{profile:?}");
+        }
+        assert!(PRINT_UNTRUSTED_NOTICE.contains("localpilot trust add"));
+        assert!(PRINT_UNTRUSTED_NOTICE.contains("--allow-writes"));
+    }
+
+    #[test]
+    fn allow_writes_and_the_trust_free_profiles_are_left_as_asked() {
+        for folder_trusted in [false, true] {
+            for profile in [Profile::Default, Profile::Relaxed, Profile::ReadOnly] {
+                let access = print_access(profile, true, folder_trusted);
+                assert_eq!(
+                    access,
+                    PrintAccess {
+                        profile,
+                        trusted: true,
+                        tools_blocked: false
+                    }
+                );
+                assert_eq!(decide(access, READ), Decision::Allow, "{profile:?}");
+            }
+            let access = print_access(Profile::Default, true, folder_trusted);
+            assert_eq!(decide(access, write()), Decision::Allow);
+            for profile in [Profile::Bypass, Profile::Unrestricted] {
+                let access = print_access(profile, false, folder_trusted);
+                assert_eq!(
+                    access,
+                    PrintAccess {
+                        profile,
+                        trusted: false,
+                        tools_blocked: false
+                    }
+                );
+                assert_eq!(decide(access, READ), Decision::Allow, "{profile:?}");
+            }
+        }
+    }
 
     #[test]
     fn the_slow_notice_names_the_flag_and_shows_the_config_example() {

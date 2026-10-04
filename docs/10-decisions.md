@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0213: Print Reads In A Trusted Folder, And Says So When It Cannot
+
+**Status:** accepted · **Date:** 2026-10-04.
+
+**Context.** A non-interactive run in an untrusted workspace has every `Allow`
+turned into a `Deny`: there is nobody to answer the workspace-trust prompt.
+`print` took its trust only from `--allow-writes` and never read the
+trusted-folders store, so under `default`, `relaxed` and `readonly` it could not
+read a file unless the caller also granted writes — in a folder the user had
+already trusted, too. A model in such a turn spent a dozen tool calls
+discovering that each was denied, then answered that it could not inspect the
+project.
+
+**Decision.**
+- `print` consults the trusted-folders store.
+- A trusted folder without `--allow-writes` runs trusted and read-only: reads,
+  searches and read-only commands run; nothing is written. `default` and
+  `relaxed` are held to the read-only table for that turn, so writes stay off
+  unless `--allow-writes` is passed.
+- `--allow-writes` is unchanged, and so are `bypass` and `unrestricted`, which
+  do not consult workspace trust.
+- An untrusted folder without `--allow-writes` is unchanged — no tool runs —
+  but `print` says so on stderr before the turn and names the two remedies:
+  `localpilot trust add`, or `--allow-writes`. An answer-only turn, which
+  offers no tools, prints nothing.
+
+**Consequences.**
+- `localpilot trust add` now means the same thing to `print` as to an
+  interactive session: the folder's ordinary files may be read.
+- The untrusted floor is not weakened: trust still comes only from the user's
+  own store or an explicit flag on the run.
+- A caller that relied on `print` denying reads in a trusted folder must run it
+  from a folder that is not trusted.
+
 ## ADR-0212: Pair-Seat Quality Evidence And Review Authority Stay Separate
 
 **Status:** accepted · **Date:** 2026-10-03.

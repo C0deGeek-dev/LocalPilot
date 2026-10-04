@@ -511,7 +511,10 @@ enum Command {
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
         bypass: bool,
-        /// Allow the run to write to the workspace (off by default).
+        /// Allow the run to write to the workspace (off by default). Without
+        /// it the run can read a folder you have trusted (`localpilot trust
+        /// add`) and write nothing; in a folder you have not trusted no tool
+        /// runs at all.
         #[arg(long)]
         allow_writes: bool,
         /// After the run, print an advisory `self-review` of the workspace to

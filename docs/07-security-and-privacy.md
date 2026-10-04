@@ -43,6 +43,13 @@ re-prompt, its project-local skills and skill sources are loaded and visible, an
 its project skill state may be modified. An untrusted folder is served the
 user-global skill baseline only.
 
+A non-interactive run has nobody to answer a trust prompt, so in an untrusted
+folder it is denied every tool call. `localpilot print` therefore reads the
+trusted-folders store (ADR-0213): in a trusted folder it can read, search and
+run read-only commands, and writes nothing unless `--allow-writes` is passed;
+in an untrusted folder it says on stderr that no tool can run and how to
+change that.
+
 ### The trusted-folders store
 
 Trusted folders are recorded one canonical absolute path per line in a small
