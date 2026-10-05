@@ -708,6 +708,18 @@ pub async fn plan(root: &Path, model: &str, provider_id: Option<&str>) -> anyhow
         provider.declaration().max_context_tokens,
     )
     .await;
+    if let Some(warning) = resolution.warning_once() {
+        eprintln!("{warning}");
+    }
+    if let Some(warning) = crate::context_window::capacity_warning_once(
+        &provider.declaration().id,
+        model,
+        resolution.window,
+        config.harness.context_token_limit,
+        provider.declaration().max_output_tokens,
+    ) {
+        eprintln!("{warning}");
+    }
     let profile = localpilot_harness::granularity::WorkProfile::resolve(
         localpilot_harness::granularity::ContextCapacity {
             used: 0,
@@ -1164,6 +1176,15 @@ where
         )
         .await;
         if let Some(warning) = resolution.warning_once() {
+            writeln!(out, "{warning}")?;
+        }
+        if let Some(warning) = crate::context_window::capacity_warning_once(
+            &provider.declaration().id,
+            model,
+            resolution.window,
+            config.harness.context_token_limit,
+            provider.declaration().max_output_tokens,
+        ) {
             writeln!(out, "{warning}")?;
         }
         let mut runtime = build_runtime(

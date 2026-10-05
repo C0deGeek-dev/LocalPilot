@@ -49,6 +49,10 @@ fn doctor_does_not_print_secret_values() {
         resolved_context_window: None,
         context_window_source: None,
         context_warning: None,
+        reply_cap: None,
+        input_room: None,
+        input_budget: None,
+        capacity_warning: None,
     }];
 
     let rendered = doctor::render(&report);
@@ -73,6 +77,10 @@ fn doctor_renders_google_adc_source_without_file_contents() {
         resolved_context_window: None,
         context_window_source: None,
         context_warning: None,
+        reply_cap: None,
+        input_room: None,
+        input_budget: None,
+        capacity_warning: None,
     }];
 
     let rendered = doctor::render(&report);
@@ -183,6 +191,10 @@ fn report() -> DoctorReport {
                 resolved_context_window: None,
                 context_window_source: None,
                 context_warning: None,
+                reply_cap: None,
+                input_room: None,
+                input_budget: None,
+                capacity_warning: None,
             },
             ProviderStatus {
                 name: "openai".to_string(),
@@ -196,6 +208,10 @@ fn report() -> DoctorReport {
                 resolved_context_window: None,
                 context_window_source: None,
                 context_warning: None,
+                reply_cap: None,
+                input_room: None,
+                input_budget: None,
+                capacity_warning: None,
             },
             ProviderStatus {
                 name: "anthropic".to_string(),
@@ -209,6 +225,10 @@ fn report() -> DoctorReport {
                 resolved_context_window: None,
                 context_window_source: None,
                 context_warning: None,
+                reply_cap: None,
+                input_room: None,
+                input_budget: None,
+                capacity_warning: None,
             },
         ],
         tools: vec![

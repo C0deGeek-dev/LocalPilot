@@ -2974,9 +2974,26 @@ fn status_right(app: &AppModel) -> String {
         } else {
             used.saturating_mul(100) / limit
         };
-        parts.push(format!("{percentage}% context"));
+        // The denominator is the input budget (the window less the reply
+        // reserve), not the model's whole window, so say so and show it.
+        parts.push(format!(
+            "{}/{} input ({percentage}%)",
+            compact_tokens(used),
+            compact_tokens(limit)
+        ));
     }
     parts.join(" · ")
+}
+
+/// A token count in a few characters: `950`, `2.6k`, `128k`.
+fn compact_tokens(tokens: usize) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else if tokens < 10_000 {
+        format!("{}.{}k", tokens / 1_000, (tokens % 1_000) / 100)
+    } else {
+        format!("{}k", tokens / 1_000)
+    }
 }
 
 const fn peer_label(peer: crate::PeerPane) -> &'static str {
@@ -7527,7 +7544,7 @@ mod tests {
             let status_right = buffer_line(buffer, layout.status.bottom() - 1);
             let footer_context = buffer_line(buffer, layout.footer.bottom() - 1);
 
-            assert!(status_right.contains("46 tokens · 25% context"));
+            assert!(status_right.contains("46 tokens · 2.5k/10k input (25%)"));
             assert!(footer_context.contains("agent · relaxed → model"));
             if width == 120 {
                 assert!(status_left.contains("D:\\repos\\LocalX\\LocalPilot"));

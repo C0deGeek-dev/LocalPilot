@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A warning when `max_tokens` leaves no room for input.** With a reply cap
+  close to the context window (for example `max_tokens = 16384` on a
+  16,384-token window) the input budget fell back to its 4,096-token minimum
+  and the context gauge measured against that, so a short exchange could read
+  as nearly full. Every session start now warns once with the numbers and a
+  suggested `max_tokens`, `localpilot doctor` shows the reply cap, input room
+  and input budget per provider, and the footer gauge reads
+  `used/budget input (N%)` so it is clear what the percentage is of.
+
 - **A shorter agent system prompt.** The default prompt is about half its
   former size (6,246 to 3,093 bytes in an empty workspace, work-unit limits
   included) with the same rules: it no longer repeats the list of tool names

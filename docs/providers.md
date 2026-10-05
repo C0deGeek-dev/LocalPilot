@@ -342,7 +342,17 @@ on every response.
 
 The session budget is the model's real context window minus the provider's
 output cap when the window is known (config `context_window` or discovery), and
-the global `[harness] context_token_limit` otherwise. If a provider returns a
+the global `[harness] context_token_limit` otherwise. It never drops below
+4,096 tokens, so a reply cap close to the window leaves the budget larger than
+the room the window really has for input. When that happens LocalPilot warns
+once at session start with the numbers — for example `max_tokens 16384 leaves
+no room for input in the 16384-token context window, but LocalPilot budgets
+4096 input tokens` — and suggests a smaller `max_tokens`; a window below 4,096
+tokens is reported as too small instead. `localpilot doctor` shows each
+provider's reply cap, the input room beside it, and the input budget (all
+estimates). The full-screen footer shows usage against that input budget,
+labelled `input` (for example `2.5k/10k input (25%)`), not against the whole
+window. If a provider returns a
 length stop while its usage shows `prompt + output` filled the declared window
 and output remained below half the configured cap, LocalPilot reports context
 exhaustion with the actual numbers and compacts before retrying once. It does

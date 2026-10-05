@@ -494,6 +494,15 @@ async fn build_runtime_with_provider(
     if let Some(warning) = resolution.warning_once() {
         eprintln!("{warning}");
     }
+    if let Some(warning) = crate::context_window::capacity_warning_once(
+        &provider.declaration().id,
+        model,
+        resolution.window,
+        config.harness.context_token_limit,
+        provider.declaration().max_output_tokens,
+    ) {
+        eprintln!("{warning}");
+    }
     let context_token_limit = resolution.window.budget(
         config.harness.context_token_limit,
         provider.declaration().max_output_tokens,

@@ -338,6 +338,19 @@ pub struct ProviderStatus {
     pub context_window_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_warning: Option<String>,
+    /// The reply cap configured for requests (`max_tokens` or
+    /// `max_completion_tokens`, the larger), when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_cap: Option<u64>,
+    /// Estimated tokens left for input beside the reply in the known window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_room: Option<u64>,
+    /// The input budget LocalPilot plans compaction with (estimated tokens).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_budget: Option<u64>,
+    /// Set when that budget exceeds the window's real input room.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_warning: Option<String>,
     /// The provider's declared vision (image-input) capability, when set in
     /// config. `doctor` reads config offline, so this is the *declared* value;
     /// the discovery probe (and the full config-or-probe resolution) surfaces in
@@ -648,6 +661,16 @@ fn research_docs() -> Option<ResearchDocsStatus> {
     })
 }
 
+/// The reply cap a session's requests carry for a provider: read from the
+/// provider as the session builds it, so each adapter's own default and keys
+/// apply. `None` when the provider could not be built or sets no cap.
+fn provider_reply_cap(
+    registry: Option<&localpilot_llm::ProviderRegistry>,
+    name: &str,
+) -> Option<u64> {
+    registry?.get(name)?.declaration().max_output_tokens
+}
+
 /// Gather a diagnostics report including a bounded live MCP probe.
 pub async fn report_with_mcp() -> DoctorReport {
     let mut report = report();
@@ -656,6 +679,9 @@ pub async fn report_with_mcp() -> DoctorReport {
         if let Ok(config) =
             localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())
         {
+            // Building providers is offline (no request is sent); a failure
+            // only leaves the reply cap unknown.
+            let registry = localpilot_llm::ProviderRegistry::from_config(&config).ok();
             for provider in &mut report.providers {
                 if let Some(model) = provider.model.as_deref() {
                     let resolution = crate::context_window::resolve(
@@ -665,10 +691,33 @@ pub async fn report_with_mcp() -> DoctorReport {
                         provider.context_window,
                     )
                     .await;
-                    provider.resolved_context_window = Some(resolution.window.tokens);
+                    // A default is the input-budget fallback, not a window
+                    // anyone discovered: report the window as unknown.
+                    provider.resolved_context_window = resolution.window.known_window();
                     provider.context_window_source =
                         Some(resolution.window.source.as_str().to_owned());
                     provider.context_warning = resolution.warning_once();
+                    // The reply cap the adapter will put on the wire, from the
+                    // same provider construction a session uses.
+                    let reply_cap = provider_reply_cap(registry.as_ref(), &provider.name);
+                    provider.reply_cap = reply_cap;
+                    provider.input_budget = Some(
+                        u64::try_from(
+                            resolution
+                                .window
+                                .budget(config.harness.context_token_limit, reply_cap),
+                        )
+                        .unwrap_or(u64::MAX),
+                    );
+                    if let Some(capacity) = resolution
+                        .window
+                        .capacity(config.harness.context_token_limit, reply_cap)
+                    {
+                        provider.input_room = Some(capacity.remaining);
+                    }
+                    provider.capacity_warning = resolution
+                        .window
+                        .capacity_warning(config.harness.context_token_limit, reply_cap);
                 }
             }
         }
@@ -832,6 +881,23 @@ pub fn render(report: &DoctorReport) -> String {
             p.name, p.kind, p.credential_env
         );
         if let Some(warning) = &p.context_warning {
+            let _ = writeln!(s, "    {warning}");
+        }
+        if let Some(budget) = p.input_budget {
+            let reply = p.reply_cap.map_or_else(
+                || "reply cap unknown".to_string(),
+                |cap| format!("max_tokens {cap}"),
+            );
+            let room = p.input_room.map_or_else(
+                || "window unknown".to_string(),
+                |room| format!("~{room} tokens beside the reply"),
+            );
+            let _ = writeln!(
+                s,
+                "    input: {room} ({reply}); budget ~{budget} (estimates)"
+            );
+        }
+        if let Some(warning) = &p.capacity_warning {
             let _ = writeln!(s, "    {warning}");
         }
     }
@@ -1211,6 +1277,10 @@ fn providers() -> Vec<ProviderStatus> {
         resolved_context_window: None,
         context_window_source: None,
         context_warning: None,
+        reply_cap: None,
+        input_room: None,
+        input_budget: None,
+        capacity_warning: None,
     })
     .collect()
 }
@@ -1263,6 +1333,10 @@ fn configured_providers() -> Option<Vec<ProviderStatus>> {
                     resolved_context_window: None,
                     context_window_source: None,
                     context_warning: None,
+                    reply_cap: None,
+                    input_room: None,
+                    input_budget: None,
+                    capacity_warning: None,
                 }
             })
             .collect(),
@@ -1478,6 +1552,66 @@ fn executable_extensions() -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn reply_cap_for(kind: &str, options: &[(&str, u64)]) -> Option<u64> {
+        let mut config = localpilot_config::Config::default();
+        let mut entry = localpilot_config::ProviderConfig {
+            kind: kind.to_string(),
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            ..localpilot_config::ProviderConfig::default()
+        };
+        for (key, value) in options {
+            entry
+                .options
+                .insert((*key).to_string(), serde_json::json!(value));
+        }
+        config.providers.insert("p".to_string(), entry);
+        let registry = localpilot_llm::ProviderRegistry::from_config(&config).unwrap();
+        provider_reply_cap(Some(&registry), "p")
+    }
+
+    #[test]
+    fn the_reply_cap_is_the_one_the_adapter_sends() {
+        // Anthropic: its own default without a configured cap, `max_tokens`
+        // when set, and `max_completion_tokens` is not an Anthropic key.
+        let anthropic_default = reply_cap_for("anthropic", &[]);
+        assert!(anthropic_default.is_some_and(|cap| cap > 0));
+        assert_eq!(
+            reply_cap_for("anthropic", &[("max_tokens", 16_384)]),
+            Some(16_384)
+        );
+        assert_eq!(
+            reply_cap_for("anthropic", &[("max_completion_tokens", 1_000)]),
+            anthropic_default
+        );
+        // OpenAI-compatible: no cap unless configured; the larger of both keys.
+        assert_eq!(reply_cap_for("openai-compatible", &[]), None);
+        assert_eq!(
+            reply_cap_for(
+                "openai-compatible",
+                &[("max_tokens", 2_000), ("max_completion_tokens", 3_000)]
+            ),
+            Some(3_000)
+        );
+        assert_eq!(provider_reply_cap(None, "p"), None);
+    }
+
+    #[test]
+    fn an_unknown_window_is_reported_as_unknown_with_its_input_budget() {
+        let mut report = fixture();
+        report.providers[0].resolved_context_window = None;
+        report.providers[0].context_window = None;
+        report.providers[0].input_budget = Some(24_000);
+        let text = render(&report);
+        assert!(text.contains("context window unknown"), "{text}");
+        assert!(
+            text.contains("input: window unknown (reply cap unknown); budget ~24000 (estimates)"),
+            "{text}"
+        );
+        let json = render_json(&report);
+        assert!(!json.contains("resolved_context_window"), "{json}");
+        assert!(json.contains("\"input_budget\": 24000"), "{json}");
+    }
+
     fn fixture() -> DoctorReport {
         DoctorReport {
             version: "0.0.0-test".to_string(),
@@ -1509,6 +1643,10 @@ mod tests {
                     resolved_context_window: None,
                     context_window_source: None,
                     context_warning: None,
+                    reply_cap: None,
+                    input_room: None,
+                    input_budget: None,
+                    capacity_warning: None,
                 },
                 ProviderStatus {
                     name: "openai".to_string(),
@@ -1522,6 +1660,10 @@ mod tests {
                     resolved_context_window: None,
                     context_window_source: None,
                     context_warning: None,
+                    reply_cap: None,
+                    input_room: None,
+                    input_budget: None,
+                    capacity_warning: None,
                 },
             ],
             memory_root: Some("/work/.localmind".to_string()),

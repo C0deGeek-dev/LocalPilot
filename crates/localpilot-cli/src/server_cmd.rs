@@ -292,6 +292,15 @@ impl SessionSetup {
                     self.config.harness.context_token_limit,
                 )
             });
+        if let Some(warning) = crate::context_window::capacity_warning_once(
+            &provider.declaration().id,
+            model,
+            window,
+            self.config.harness.context_token_limit,
+            provider.declaration().max_output_tokens,
+        ) {
+            eprintln!("{warning}");
+        }
         let context_token_limit = window.budget(
             self.config.harness.context_token_limit,
             provider.declaration().max_output_tokens,

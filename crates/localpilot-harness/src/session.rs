@@ -388,7 +388,7 @@ impl Default for SessionConfig {
 
 /// Tokens held back from the model's context window for the response and
 /// protocol overhead when deriving the session budget from a real window.
-const CONTEXT_RESERVE_TOKENS: usize = 4_096;
+pub const CONTEXT_RESERVE_TOKENS: usize = 4_096;
 
 /// Leave a small cushion after converting the provider-calibrated context
 /// budget back into the local estimator's units. One observed ratio cannot

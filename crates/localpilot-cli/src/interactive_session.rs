@@ -519,6 +519,16 @@ impl InteractiveSessionSetup {
         // The output cap the request will reserve, captured before `provider` is
         // moved into the runtime, so the session budget subtracts it.
         let max_output = provider.declaration().max_output_tokens;
+        if let Some(warning) = crate::context_window::capacity_warning_once(
+            provider_id,
+            model,
+            resolution.window,
+            self.config.harness.context_token_limit,
+            max_output,
+        ) {
+            eprintln!("{warning}");
+            tracing::warn!(provider = provider_id, model, "{warning}");
+        }
 
         let (approval_tx, approvals) = mpsc::unbounded_channel::<ApprovalCall>();
         let (question_tx, questions) = mpsc::unbounded_channel::<QuestionCall>();

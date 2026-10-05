@@ -118,7 +118,7 @@ pub use session::{
     check_command_digest, effective_context_limit, CompletionCheckResolver, ManualCompaction,
     PlanStep, QuiesceSignal, RuntimeEvent, SessionConfig, SessionRecovery, SessionRuntime,
     SoftInterrupt, SoftInterruptSource, SteerQueue, StopReason, SwitchError, SwitchOutcome,
-    TurnHandoff,
+    TurnHandoff, CONTEXT_RESERVE_TOKENS,
 };
 pub use summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 pub use system_prompt::{
