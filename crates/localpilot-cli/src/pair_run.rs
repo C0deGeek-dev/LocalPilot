@@ -1354,6 +1354,9 @@ mod tests {
         let mut declaration = seed.declaration().clone();
         declaration.id = id.to_string();
         declaration.display_name = id.to_string();
+        // A realistic window: the built-in tool specs alone exceed the fake's
+        // default 8k budget, which would compact away the steering under test.
+        declaration.max_context_tokens = Some(65_536);
         declaration
     }
 

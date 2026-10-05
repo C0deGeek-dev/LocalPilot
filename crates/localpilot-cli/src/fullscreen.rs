@@ -10879,6 +10879,9 @@ mod tests {
             let mut declaration = seed.declaration().clone();
             declaration.id = id.to_string();
             declaration.display_name = id.to_string();
+            // A realistic window: the built-in tool specs alone exceed the
+            // fake's default 8k budget, leaving no room for the peer exchange.
+            declaration.max_context_tokens = Some(65_536);
             Arc::new(
                 FakeProvider::new()
                     .with_declaration(declaration)

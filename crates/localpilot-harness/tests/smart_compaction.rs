@@ -49,7 +49,28 @@ struct Harness {
     cancel: CancellationToken,
 }
 
+/// Fixture limits below pin a *history* boundary. Every request also carries
+/// the built-in tool specs, which the compactor reserves out of the budget, so
+/// the configured limit adds that reserve — scaled by the compactor's 5%
+/// calibration cushion, since the reserve is in raw-estimator units.
+fn with_tool_reserve(limit: usize) -> usize {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = SessionRuntime::new(
+        Arc::new(FakeProvider::new()),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    limit + probe.advertised_tool_estimate() * 105 / 100
+}
+
 fn smart_runtime(provider: Arc<FakeProvider>, limit: usize) -> Harness {
+    let limit = with_tool_reserve(limit);
     let dir = tempfile::tempdir().unwrap();
     let runtime = SessionRuntime::new(
         provider,
@@ -77,6 +98,7 @@ fn smart_runtime(provider: Arc<FakeProvider>, limit: usize) -> Harness {
 }
 
 fn det_runtime(provider: Arc<FakeProvider>, limit: usize) -> Harness {
+    let limit = with_tool_reserve(limit);
     let dir = tempfile::tempdir().unwrap();
     let runtime = SessionRuntime::new(
         provider,

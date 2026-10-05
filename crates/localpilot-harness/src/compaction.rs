@@ -27,6 +27,20 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages.iter().map(message_chars).sum::<usize>() / 4
 }
 
+/// The same ~4-characters-per-token estimate over the tool specs a request
+/// advertises. Providers count these schemas as prompt input, so a budget that
+/// ignores them believes a request fits when it does not, and a calibration that
+/// pairs the provider's full input count with a messages-only estimate inflates
+/// every later history estimate by the fixed schema overhead.
+#[must_use]
+pub fn estimate_tool_spec_tokens(tools: &[localpilot_llm::ToolSpec]) -> usize {
+    tools
+        .iter()
+        .map(|tool| tool.name.len() + tool.description.len() + tool.input_schema.to_string().len())
+        .sum::<usize>()
+        / 4
+}
+
 fn message_chars(message: &Message) -> usize {
     message
         .content

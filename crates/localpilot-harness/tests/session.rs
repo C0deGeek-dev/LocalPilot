@@ -8,7 +8,8 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use localpilot_core::{ContentBlock, Message, TokenUsage};
 use localpilot_harness::{
-    estimate_tokens, RuntimeEvent, SessionConfig, SessionRuntime, StopReason,
+    estimate_tokens, estimate_tool_spec_tokens, RuntimeEvent, SessionConfig, SessionRuntime,
+    StopReason,
 };
 use localpilot_llm::{
     FakeProvider, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderDeclaration,
@@ -49,6 +50,15 @@ impl Approver for PendingApprover {
 
 fn build(provider: FakeProvider, files: &[(&str, &str)], config: SessionConfig) -> Harness {
     build_with(provider, files, config, Profile::Default)
+}
+
+/// The estimated prompt cost of the built-in tool specs every request in these
+/// fixtures advertises. Compaction budgets reserve it, so a fixture that pins a
+/// history boundary adds it to the limit it configures.
+fn tool_reserve() -> usize {
+    build(FakeProvider::new(), &[], SessionConfig::default())
+        .runtime
+        .advertised_tool_estimate()
 }
 
 fn build_with(
@@ -149,6 +159,8 @@ fn build_from_provider(provider: Arc<dyn ModelProvider>, config: SessionConfig) 
 
 struct CalibratingProvider {
     declaration: ProviderDeclaration,
+    /// Percent of the complete-input estimate the first call reports.
+    first_report_percent: u64,
     calls: AtomicUsize,
     requests: Mutex<Vec<ModelRequest>>,
 }
@@ -160,8 +172,18 @@ impl CalibratingProvider {
         declaration.max_output_tokens = Some(2_000);
         Self {
             declaration,
+            first_report_percent: 115,
             calls: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A provider whose tokenizer agrees exactly with the complete-input
+    /// estimate (messages plus advertised tool specs) on every call.
+    fn exact() -> Self {
+        Self {
+            first_report_percent: 100,
+            ..Self::new()
         }
     }
 
@@ -177,11 +199,14 @@ impl ModelProvider for CalibratingProvider {
     }
 
     async fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
-        let estimated = estimate_tokens(&request.messages);
+        let estimated =
+            estimate_tokens(&request.messages) + estimate_tool_spec_tokens(&request.tools);
         self.requests.lock().unwrap().push(request);
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let reported = if call == 0 {
-            (estimated as u64).saturating_mul(115).div_ceil(100)
+            (estimated as u64)
+                .saturating_mul(self.first_report_percent)
+                .div_ceil(100)
         } else {
             estimated as u64
         };
@@ -843,8 +868,10 @@ async fn compaction_summary_does_not_produce_two_system_messages() {
         SessionConfig {
             // The calibrated compactor keeps a 5% safety cushion, so 1,470
             // preserves this fixture's former ~1,400 raw-estimator boundary.
-            // Include headroom for the owned scratch authority cue.
-            context_token_limit: 1_726,
+            // Include headroom for the owned scratch authority cue. The tool
+            // reserve is raw-estimator units, so it is scaled by the same 5%
+            // cushion before it joins the calibrated limit.
+            context_token_limit: 1_726 + tool_reserve() * 105 / 100,
             ..SessionConfig::default()
         },
         Profile::Default,
@@ -1022,14 +1049,19 @@ async fn context_exhaustion_compacts_without_appending_a_chunked_write_steer() {
         Arc::clone(&provider),
         &[],
         SessionConfig {
-            // The declared 10k window minus the 2k output reserve.
-            context_token_limit: 8_000,
+            // The declared 10k window minus the 2k output reserve, plus the
+            // advertised tool specs the budget reserves.
+            context_token_limit: 8_000 + tool_reserve(),
             ..SessionConfig::default()
         },
         Profile::Default,
     );
     let (base, _) = h.runtime.context_usage();
-    let prior = "x".repeat(7_000usize.saturating_sub(base).saturating_mul(4));
+    let prior = "x".repeat(
+        (7_000 + tool_reserve())
+            .saturating_sub(base)
+            .saturating_mul(4),
+    );
     assert_eq!(
         h.runtime.run_turn(&prior, &h.events, &h.cancel).await,
         StopReason::Done
@@ -1338,7 +1370,7 @@ async fn provider_prompt_usage_calibrates_the_next_compaction_threshold() {
     let mut h = build_from_provider(
         provider.clone(),
         SessionConfig {
-            context_token_limit: 10_000,
+            context_token_limit: 10_000 + tool_reserve(),
             ..SessionConfig::default()
         },
     );
@@ -1346,14 +1378,19 @@ async fn provider_prompt_usage_calibrates_the_next_compaction_threshold() {
     // The first request is under the raw 10k budget (and its 5% safety
     // discount) but just above the budget after a real tokenizer reports a 15%
     // underestimate. That reported/request-estimate pair must shape turn two.
-    let prompt = "x".repeat(8_500usize.saturating_sub(base).saturating_mul(4));
+    let prompt = "x".repeat(
+        (8_500 + tool_reserve())
+            .saturating_sub(base)
+            .saturating_mul(4),
+    );
     assert_eq!(
         h.runtime.run_turn(&prompt, &h.events, &h.cancel).await,
         StopReason::Done
     );
     let first_request = provider.requests().remove(0);
-    let first_estimate = estimate_tokens(&first_request.messages);
-    assert!(first_estimate < 10_000);
+    let first_estimate =
+        estimate_tokens(&first_request.messages) + estimate_tool_spec_tokens(&first_request.tools);
+    assert!(first_estimate < 10_000 + tool_reserve());
 
     let mut rx = h.events.subscribe();
     assert_eq!(
@@ -1369,6 +1406,111 @@ async fn provider_prompt_usage_calibrates_the_next_compaction_threshold() {
     assert!(drain(&mut rx)
         .iter()
         .any(|event| matches!(event, RuntimeEvent::Compacted { .. })));
+}
+
+#[tokio::test]
+async fn advertised_tool_specs_count_toward_context_usage() {
+    let h = build(FakeProvider::new(), &[], SessionConfig::default());
+    let tools = h.runtime.advertised_tool_estimate();
+    assert!(tools > 0, "the built-in tools are advertised");
+    let (used, _) = h.runtime.context_usage();
+    assert!(
+        used > tools,
+        "the gauge counts the system prompt and the tool specs"
+    );
+
+    let answer_only = build(
+        FakeProvider::new(),
+        &[],
+        SessionConfig {
+            answer_only: true,
+            ..SessionConfig::default()
+        },
+    );
+    assert_eq!(
+        answer_only.runtime.advertised_tool_estimate(),
+        0,
+        "an answer-only session sends no tools, so reserves none"
+    );
+}
+
+#[tokio::test]
+async fn a_budget_smaller_than_the_fixed_overhead_still_sends_the_only_instruction() {
+    // The system prompt and tool specs alone exceed this budget, but
+    // compaction always keeps the newest exchange, so the user's single
+    // instruction is never lost and the request still goes out.
+    let provider = Arc::new(FakeProvider::new().text("sent"));
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[],
+        SessionConfig {
+            context_token_limit: tool_reserve() / 2,
+            ..SessionConfig::default()
+        },
+        Profile::Default,
+    );
+
+    let reason = h.runtime.run_turn("hello", &h.events, &h.cancel).await;
+
+    assert_eq!(reason, StopReason::Done);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(message_text(&requests[0].messages).contains("hello"));
+}
+
+#[tokio::test]
+async fn a_steer_that_no_longer_fits_stops_the_turn_instead_of_being_dropped() {
+    // The input fits beside the fixed overhead, but an admitted steering
+    // message does not. Compaction would keep only the newest exchange and
+    // silently lose one of them, so the turn stops before dispatch.
+    let base = build(FakeProvider::new(), &[], SessionConfig::default())
+        .runtime
+        .context_usage()
+        .0;
+    let provider = Arc::new(FakeProvider::new().text("never sent"));
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[],
+        SessionConfig {
+            context_token_limit: (base + 200) * 105 / 100,
+            ..SessionConfig::default()
+        },
+        Profile::Default,
+    );
+    h.runtime.steer_queue().push("x".repeat(4_000));
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("hello", &h.events, &h.cancel).await;
+
+    assert_eq!(reason, StopReason::ProviderError);
+    assert!(provider.requests().is_empty(), "no request is dispatched");
+    assert!(drain(&mut rx).iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Warning(text) if text.contains("drop your instructions")
+    )));
+}
+
+#[tokio::test]
+async fn tool_spec_overhead_does_not_inflate_the_calibrated_history_estimate() {
+    // The provider counts the tool schemas as prompt input. When its count
+    // agrees with the complete-input estimate the calibration ratio is 1, so
+    // the gauge stays at the request size instead of multiplying the history
+    // by the fixed schema overhead.
+    let provider = Arc::new(CalibratingProvider::exact());
+    let mut h = build_from_provider(provider.clone(), SessionConfig::default());
+    assert_eq!(
+        h.runtime.run_turn("go", &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let request = provider.requests().remove(0);
+    assert!(!request.tools.is_empty());
+    let complete = estimate_tokens(&request.messages) + estimate_tool_spec_tokens(&request.tools);
+
+    let (used, _) = h.runtime.context_usage();
+    assert!(
+        used >= complete && used <= complete + 16,
+        "gauge {used} should track the complete request estimate {complete}"
+    );
 }
 
 #[tokio::test]
@@ -1472,7 +1614,7 @@ async fn manual_compaction_stores_a_summary_for_future_turns() {
         &[],
         SessionConfig {
             // Include headroom for the owned scratch authority cue.
-            context_token_limit: 1_656,
+            context_token_limit: 1_656 + tool_reserve(),
             ..SessionConfig::default()
         },
         Profile::Default,
@@ -1988,6 +2130,7 @@ async fn transcript_is_derivable_from_the_event_log() {
     // pressure that forces compaction, then a clean answer.
     let provider = Arc::new(
         FakeProvider::new()
+            .text("noted")
             .tool_call(
                 "c1",
                 "run_shell",
@@ -1996,21 +2139,34 @@ async fn transcript_is_derivable_from_the_event_log() {
             .malformed()
             .text("recovered and done"),
     );
+    // Room for the fixed prompt overhead plus this turn's exchanges, but not
+    // for the large earlier turn as well.
+    let base = build(FakeProvider::new(), &[], SessionConfig::default())
+        .runtime
+        .context_usage()
+        .0;
     let mut h = build_from_arc(
         Arc::clone(&provider),
         &[],
         SessionConfig {
             interactivity: Interactivity::NonInteractive,
-            context_token_limit: 600,
+            context_token_limit: (base + 700) * 105 / 100,
             ..SessionConfig::default()
         },
         Profile::Default,
     );
 
-    // A large prompt pushes the history over the small limit so compaction
-    // runs while shaping the request.
-    let prompt = format!("clean up {}", "context ".repeat(500));
-    let reason = h.runtime.run_turn(&prompt, &h.events, &h.cancel).await;
+    // A large earlier turn pushes the history over the limit, so compaction
+    // runs while shaping the next turn's requests.
+    let earlier = format!("remember {}", "context ".repeat(500));
+    assert_eq!(
+        h.runtime.run_turn(&earlier, &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let reason = h
+        .runtime
+        .run_turn("clean up the workspace", &h.events, &h.cancel)
+        .await;
     assert_eq!(reason, StopReason::Done);
 
     let session = h.runtime.session_id();

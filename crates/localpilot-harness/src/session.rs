@@ -37,8 +37,8 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::compaction::{
-    apply_smart_digest, compact_plan, estimate_tokens, CompactionMetadata, CompactionMode,
-    CompactionResult,
+    apply_smart_digest, compact_plan, estimate_tokens, estimate_tool_spec_tokens,
+    CompactionMetadata, CompactionMode, CompactionResult,
 };
 use crate::dispatch_gate::{pre_dispatch_decision, PreDispatch};
 use crate::hooks::HookFabric;
@@ -1153,6 +1153,10 @@ pub struct SessionRuntime {
     /// Converts the bytes/4 estimate into the active provider/model tokenizer's
     /// units using the most recent request for which usage was reported.
     prompt_token_calibration: PromptTokenCalibration,
+    /// The instructions admitted this turn — the user's input plus every
+    /// injected steering message. A request projection that lost one of them
+    /// would silently ignore it, so none may be dropped before dispatch.
+    turn_instructions: Vec<Message>,
     /// Steering input queued by the host while a turn runs.
     steer: SteerQueue,
     /// A graceful-shutdown request the host can raise while a turn runs, honoured
@@ -1320,6 +1324,7 @@ impl SessionRuntime {
             history_generation: 0,
             compaction_cache: None,
             prompt_token_calibration: PromptTokenCalibration::default(),
+            turn_instructions: Vec::new(),
             steer: SteerQueue::default(),
             quiesce: QuiesceSignal::default(),
             hooks: HookFabric::default(),
@@ -2369,12 +2374,14 @@ impl SessionRuntime {
     pub async fn compact_conversation(&mut self) -> ManualCompaction {
         let cancel = CancellationToken::new();
         // Manual compaction shapes stored history only; no per-turn request
-        // context is injected here, so nothing is reserved. The caller renders
-        // its own notice, so the newly-compacted flag is unused here.
-        let (result, _) = self.compacted_history(0, &cancel).await;
+        // context is injected here, so only the advertised tool specs — which
+        // every request carries — are reserved. The caller renders its own
+        // notice, so the newly-compacted flag is unused here.
+        let tools_reserve = self.advertised_tool_estimate();
+        let (result, _) = self.compacted_history(tools_reserve, &cancel).await;
         let context_used = self
             .prompt_token_calibration
-            .calibrated_estimate(estimate_tokens(&result.messages));
+            .calibrated_estimate(estimate_tokens(&result.messages) + tools_reserve);
         let fallback_reason = result.metadata.fallback_reason.clone();
         let (requested_mode, used_mode) =
             (result.metadata.requested_mode, result.metadata.used_mode);
@@ -2396,9 +2403,11 @@ impl SessionRuntime {
     /// a model's real tokenizer can reject a request the budget believes fits;
     /// this lets the user shrink the conversation on demand and keep going.
     pub async fn compact_conversation_force(&mut self) -> ManualCompaction {
+        let tools_reserve = self.advertised_tool_estimate();
         let target = (self
             .prompt_token_calibration
             .raw_budget(self.config.context_token_limit)
+            .saturating_sub(tools_reserve)
             / 2)
         .max(FORCE_COMPACT_FLOOR);
         let cancel = CancellationToken::new();
@@ -2411,7 +2420,7 @@ impl SessionRuntime {
         }
         let context_used = self
             .prompt_token_calibration
-            .calibrated_estimate(estimate_tokens(&result.messages));
+            .calibrated_estimate(estimate_tokens(&result.messages) + tools_reserve);
         let fallback_reason = result.metadata.fallback_reason.clone();
         let (requested_mode, used_mode) =
             (result.metadata.requested_mode, result.metadata.used_mode);
@@ -2428,14 +2437,63 @@ impl SessionRuntime {
         }
     }
 
-    /// Estimated context usage for the currently stored runtime history.
+    /// Estimated context usage for the currently stored runtime history plus
+    /// the tool specs the next request will advertise.
     #[must_use]
     pub fn context_usage(&self) -> (usize, usize) {
         (
-            self.prompt_token_calibration
-                .calibrated_estimate(estimate_tokens(&self.messages)),
+            self.prompt_token_calibration.calibrated_estimate(
+                estimate_tokens(&self.messages) + self.advertised_tool_estimate(),
+            ),
             self.config.context_token_limit,
         )
+    }
+
+    /// Estimated prompt cost of the tool specs the next request advertises:
+    /// zero for an answer-only session, which sends no tools.
+    #[must_use]
+    pub fn advertised_tool_estimate(&self) -> usize {
+        if self.config.answer_only {
+            0
+        } else {
+            estimate_tool_spec_tokens(&self.tool_specs())
+        }
+    }
+
+    /// The reason a projected request cannot be sent: it no longer carries
+    /// every instruction admitted this turn, because the system prompt, the
+    /// advertised tool specs, and the per-turn context left the input budget
+    /// too little room. Figures are raw-estimator units, like the budget.
+    fn dropped_instruction_detail(
+        &self,
+        projected: &[Message],
+        tools_reserve: usize,
+        context_reserve: usize,
+    ) -> Option<String> {
+        if self
+            .turn_instructions
+            .iter()
+            .all(|instruction| projected.contains(instruction))
+        {
+            return None;
+        }
+        let system_count = projected
+            .iter()
+            .take_while(|message| message.role == Role::System)
+            .count();
+        let system = estimate_tokens(&projected[..system_count]);
+        let instructions = estimate_tokens(&self.turn_instructions);
+        let budget = self
+            .prompt_token_calibration
+            .raw_budget(self.config.context_token_limit);
+        Some(format!(
+            "the context budget is too small for this request: the system prompt \
+             (~{system} tokens), tool definitions (~{tools_reserve}), turn context \
+             (~{context_reserve}) and this turn's instructions (~{instructions}) do not \
+             fit a ~{budget}-token input budget, so sending it would drop your \
+             instructions; use a larger context window or a smaller max_tokens, or \
+             start a new session"
+        ))
     }
 
     /// Inspect the active envelope. Outside a turn, derive the next unit from
@@ -2570,7 +2628,9 @@ impl SessionRuntime {
                 SoftInterruptSource::System => "system",
                 SoftInterruptSource::BackgroundTask => "background_task",
             };
-            self.append(interrupt.into_message());
+            let message = interrupt.into_message();
+            self.turn_instructions.push(message.clone());
+            self.append(message);
             self.record_event(SessionEventKind::SoftInterruptInjected {
                 point: point.to_string(),
                 source: source.to_string(),
@@ -2927,9 +2987,9 @@ impl SessionRuntime {
             }
             self.record_compaction_attempt("overflow_retry", &result.metadata);
             let dropped_exchanges = result.metadata.dropped_exchanges;
-            let context_used = self
-                .prompt_token_calibration
-                .calibrated_estimate(estimate_tokens(&result.messages));
+            let context_used = self.prompt_token_calibration.calibrated_estimate(
+                estimate_tokens(&result.messages) + self.advertised_tool_estimate(),
+            );
             self.messages = result.messages;
             self.history_generation += 1;
             self.compaction_cache = None;
@@ -3380,14 +3440,16 @@ impl SessionRuntime {
                 self.named_targets.push(target);
             }
         }
-        if attachments.is_empty() {
-            self.append(Message::text(Role::User, user_input));
+        let input_message = if attachments.is_empty() {
+            Message::text(Role::User, user_input)
         } else {
             let mut blocks = Vec::with_capacity(attachments.len() + 1);
             blocks.push(ContentBlock::text(user_input));
             blocks.extend(attachments.iter().cloned());
-            self.append(Message::new(Role::User, blocks));
-        }
+            Message::new(Role::User, blocks)
+        };
+        self.turn_instructions = vec![input_message.clone()];
+        self.append(input_message);
         self.last_quota = None;
         self.tool_failure_guard.reset();
         self.error_breaker.reset();
@@ -3460,8 +3522,28 @@ impl SessionRuntime {
                 );
             }
 
-            let (compacted, newly_compacted) =
-                self.compacted_history(context_reserve, cancel).await;
+            // The advertised tool specs are prompt input on every request, and
+            // the broker's working set can change between iterations, so they are
+            // resolved first and reserved out of the history budget.
+            let tools = if tools_enabled {
+                self.tool_specs()
+            } else {
+                Vec::new()
+            };
+            let tools_reserve = estimate_tool_spec_tokens(&tools);
+            let (compacted, newly_compacted) = self
+                .compacted_history(context_reserve + tools_reserve, cancel)
+                .await;
+            // Fixed overhead (system prompt, tool specs, turn context) can leave
+            // so little room that the projection drops one of this turn's
+            // instructions. Sending it would silently ignore the user, so stop
+            // before dispatch with the numbers instead.
+            if let Some(detail) =
+                self.dropped_instruction_detail(&compacted.messages, tools_reserve, context_reserve)
+            {
+                let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                return self.stop_with_detail(events, StopReason::ProviderError, Some(detail));
+            }
             // Surface automatic compaction so a host can show why the context
             // gauge dropped. Only on a fresh projection — a cached reuse this
             // turn is not a new compaction.
@@ -3470,15 +3552,10 @@ impl SessionRuntime {
                     dropped_exchanges: compacted.metadata.dropped_exchanges,
                     context_used: self
                         .prompt_token_calibration
-                        .calibrated_estimate(estimate_tokens(&compacted.messages)),
+                        .calibrated_estimate(estimate_tokens(&compacted.messages) + tools_reserve),
                     limit: self.config.context_token_limit,
                 });
             }
-            let tools = if tools_enabled {
-                self.tool_specs()
-            } else {
-                Vec::new()
-            };
             // Inject the per-turn retrieval context after the leading system
             // prompt, then fold consecutive system blocks so the provider sees a
             // single leading system message (and never two in a row). The token
@@ -3493,7 +3570,7 @@ impl SessionRuntime {
             // Estimate after the image trim, so the calibrated total describes
             // the request actually sent rather than the images the recovery rung
             // just dropped.
-            let request_estimate = estimate_tokens(&request_messages);
+            let request_estimate = estimate_tokens(&request_messages) + tools_reserve;
             let used = self
                 .prompt_token_calibration
                 .calibrated_estimate(request_estimate);

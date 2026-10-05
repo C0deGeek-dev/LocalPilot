@@ -323,9 +323,19 @@ session runtime.
 
 Before the first provider response, context usage is a bytes/4 heuristic rather
 than a tokenizer count: it over-counts CJK text (up to ~3x) and under-counts
-dense code. The TUI footer marks an estimated figure with `~`. Once the provider
-reports prompt usage, the session pairs that authoritative count with the local
-estimate for the exact same request. Later compaction thresholds use that ratio
+dense code. The TUI footer marks an estimated figure with `~`. The estimate
+covers the complete input a request carries: its messages plus the JSON schemas
+of the tools it advertises, which providers count as prompt input and which
+alone can be several thousand tokens. Compaction reserves the advertised tool
+specs out of the history budget (an answer-only turn advertises none). Once the
+provider reports prompt usage, the session pairs that authoritative count with
+the complete-input estimate for the exact same request, so the fixed schema
+overhead is never mistaken for a tokenizer correction to the history. If the
+budget left after that fixed overhead is so small that compaction would drop
+one of the current turn's instructions (the user's input or an admitted
+steering message), the turn stops before dispatch with the per-part estimates
+rather than sending a request that ignores the instruction. Later
+compaction thresholds use that ratio
 (never less conservative than bytes/4), with a 5% cushion for changes in the
 code/JSON/prose mix; the context gauge is corrected to the reported prompt count
 on every response.

@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The context gauge and compaction count the tool schemas.** Every request
+  carries the JSON schemas of its advertised tools — about 7,000 estimated
+  tokens for the built-in set — but the estimate only counted messages. The
+  provider's prompt count includes the schemas, so pairing it with the
+  messages-only estimate turned that fixed overhead into a "tokenizer
+  correction" of about 6x applied to all later history: on a small window the
+  gauge read nearly full after one short exchange and compaction trimmed far
+  too early. The estimate now covers messages plus advertised tool specs,
+  compaction reserves the specs out of the history budget, and calibration
+  compares like with like. When the remaining budget is so small that
+  compaction would drop the user's input or a steering message from the
+  current turn, the turn now stops before sending and says how much each part
+  of the prompt needs, instead of sending a request that silently ignores the
+  instruction.
+
 - **Planning now says exactly how to declare a step's scope.** A plan with an
   automatic work profile was rejected for "no scope" on every step, because the
   planner template showed three metadata lines and the instruction to add a

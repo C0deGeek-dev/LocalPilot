@@ -51,7 +51,8 @@ mod workspace_state;
 pub use binding::BriefRevision;
 pub use brief::Brief;
 pub use compaction::{
-    compact, compact_with_summary, estimate_tokens, CompactionMetadata, CompactionMode,
+    compact, compact_with_summary, estimate_tokens, estimate_tool_spec_tokens, CompactionMetadata,
+    CompactionMode,
 };
 pub use decisions::{today, Decision, Decisions};
 pub use error::HarnessError;
