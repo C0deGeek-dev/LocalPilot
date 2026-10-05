@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A shorter agent system prompt.** The default prompt is about half its
+  former size (6,246 to 3,093 bytes in an empty workspace, work-unit limits
+  included) with the same rules: it no longer repeats the list of tool names
+  the provider already receives, drops hints that only restated a tool's own
+  description (`remember`, `skill_drafts`, `active_skills`), states each rule
+  once, and names each write tool only when the agent has it. The automatic
+  work-unit instruction keeps its limits, verification and stop rule — and
+  that the limits hold through shell and MCP commands and across compaction —
+  without the profile's internal provenance. `ask_user` now says in its own
+  description what to do when no user can answer.
+
 - **Smaller tool schemas in every request.** Built-in tool schemas are sent
   without the annotations the schema generator adds (the `$schema` URL, type
   titles, integer-width formats, `default: null`, and LocalPilot's internal

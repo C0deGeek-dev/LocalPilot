@@ -49,11 +49,12 @@ struct Harness {
     cancel: CancellationToken,
 }
 
-/// Fixture limits below pin a *history* boundary. Every request also carries
-/// the built-in tool specs, which the compactor reserves out of the budget, so
-/// the configured limit adds that reserve — scaled by the compactor's 5%
-/// calibration cushion, since the reserve is in raw-estimator units.
-fn with_tool_reserve(limit: usize) -> usize {
+/// Fixture limits below pin a *history* boundary: the room left for the
+/// conversation after the fixed overhead every request carries — the system
+/// prompt and the built-in tool specs — measured from a fresh runtime so a
+/// change to either does not move the boundary. The compactor applies a 5%
+/// calibration cushion, so the total is scaled by it.
+fn with_fixed_overhead(history: usize) -> usize {
     let dir = tempfile::tempdir().unwrap();
     let probe = SessionRuntime::new(
         Arc::new(FakeProvider::new()),
@@ -66,11 +67,11 @@ fn with_tool_reserve(limit: usize) -> usize {
         SessionConfig::default(),
         Vec::new(),
     );
-    limit + probe.advertised_tool_estimate() * 105 / 100
+    (history + probe.context_usage().0) * 105 / 100
 }
 
-fn smart_runtime(provider: Arc<FakeProvider>, limit: usize) -> Harness {
-    let limit = with_tool_reserve(limit);
+fn smart_runtime(provider: Arc<FakeProvider>, history: usize) -> Harness {
+    let limit = with_fixed_overhead(history);
     let dir = tempfile::tempdir().unwrap();
     let runtime = SessionRuntime::new(
         provider,
@@ -97,8 +98,8 @@ fn smart_runtime(provider: Arc<FakeProvider>, limit: usize) -> Harness {
     }
 }
 
-fn det_runtime(provider: Arc<FakeProvider>, limit: usize) -> Harness {
-    let limit = with_tool_reserve(limit);
+fn det_runtime(provider: Arc<FakeProvider>, history: usize) -> Harness {
+    let limit = with_fixed_overhead(history);
     let dir = tempfile::tempdir().unwrap();
     let runtime = SessionRuntime::new(
         provider,
@@ -191,7 +192,7 @@ async fn smart_cutover_replaces_the_deterministic_summary() {
     );
     // 1,470 preserves this fixture's former ~1,400 raw-estimator boundary
     // after the compactor's 5% safety cushion.
-    let mut h = smart_runtime(Arc::clone(&provider), 1_726); // Headroom for session scratch metadata.
+    let mut h = smart_runtime(Arc::clone(&provider), 664);
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Ok(smart_summary(
             "SMART_MARKER",
@@ -218,7 +219,7 @@ async fn smart_failure_falls_back_to_the_deterministic_projection() {
             .text("three")
             .text("after"),
     );
-    let mut h = smart_runtime(Arc::clone(&provider), 1_201); // Headroom for session scratch metadata.
+    let mut h = smart_runtime(Arc::clone(&provider), 164);
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Err(FallbackReason::Timeout))));
 
@@ -248,7 +249,7 @@ async fn malformed_smart_output_leaves_active_history_unchanged() {
             .text("three")
             .text("after"),
     );
-    let mut h = smart_runtime(Arc::clone(&provider), 1_201); // Headroom for session scratch metadata.
+    let mut h = smart_runtime(Arc::clone(&provider), 164);
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Err(FallbackReason::Malformed))));
 
@@ -293,7 +294,7 @@ async fn long_session_with_repeated_failures_is_digested_under_budget() {
     );
     // Budget leaves headroom for the agent system prompt (which carries the
     // tool-discipline guidance) on top of the digested content.
-    let mut h = smart_runtime(Arc::clone(&provider), 1_537); // Headroom for session scratch metadata.
+    let mut h = smart_runtime(Arc::clone(&provider), 484);
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Ok(smart_summary(
             "rewrite the tokenizer",
@@ -388,7 +389,7 @@ async fn a_provider_overflow_triggers_one_safe_compaction_retry() {
             })])
             .text("recovered after compaction"),
     );
-    let mut h = det_runtime(Arc::clone(&provider), 4_096);
+    let mut h = det_runtime(Arc::clone(&provider), 2_921);
     let reason = h
         .runtime
         .run_turn("do the thing", &h.events, &h.cancel)
@@ -410,7 +411,7 @@ async fn a_multi_image_overflow_retries_with_only_the_newest_image() {
             })])
             .text("recovered after lowering the image count"),
     );
-    let mut h = det_runtime(Arc::clone(&provider), 4_096);
+    let mut h = det_runtime(Arc::clone(&provider), 2_921);
     let attachments = vec![
         ContentBlock::image("image/png", "first"),
         ContentBlock::image("image/png", "second"),
@@ -453,7 +454,7 @@ async fn a_second_provider_overflow_is_terminal() {
                 message: "still too large".to_string(),
             })]),
     );
-    let mut h = det_runtime(Arc::clone(&provider), 4_096);
+    let mut h = det_runtime(Arc::clone(&provider), 2_921);
     let reason = h
         .runtime
         .run_turn("do the thing", &h.events, &h.cancel)
@@ -469,7 +470,7 @@ async fn non_context_invalid_request_does_not_retry_as_overflow() {
             message: "messages[2].role is unsupported".to_string(),
         })]),
     );
-    let mut h = det_runtime(Arc::clone(&provider), 4_096);
+    let mut h = det_runtime(Arc::clone(&provider), 2_921);
     let reason = h
         .runtime
         .run_turn("do the thing", &h.events, &h.cancel)
@@ -492,7 +493,7 @@ async fn repeated_compaction_folds_the_previous_summary_once() {
     );
     // Budget leaves headroom for the agent system prompt (which carries the
     // tool-discipline guidance) on top of the digested content.
-    let mut h = det_runtime(Arc::clone(&provider), 1_537); // Headroom for session scratch metadata.
+    let mut h = det_runtime(Arc::clone(&provider), 484);
     let filler = "context ".repeat(150); // Still force both compaction rounds with metadata present.
 
     for label in ["alpha keep src/keep.rs", "beta"] {

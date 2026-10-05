@@ -81,7 +81,8 @@ impl Tool for AskUser {
         "Ask the user to choose between 2-4 concrete options (they can also answer freely). \
          Only when different readings of the request lead to materially different work, or \
          before something hard to undo — not for an obvious default, permission for work \
-         already asked for, or progress reports."
+         already asked for, or progress reports. If no user can answer, the tool says so: \
+         choose and state your assumption."
     }
 
     fn schema(&self) -> Value {

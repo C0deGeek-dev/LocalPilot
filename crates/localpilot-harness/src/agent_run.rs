@@ -510,14 +510,15 @@ mod tests {
         let full = localpilot_tools::ToolRegistry::with_builtins();
         let child = full.narrowed(&["read_file".to_string()]);
         let prompt = child_prompt(&definition(&["read_file"]), &child, false, &workspace);
-        assert!(
-            prompt.contains("Available tools: read_file"),
-            "the child is told about its own tools: {prompt}"
-        );
-        assert!(
-            !prompt.contains("run_shell"),
-            "and never about tools it does not have: {prompt}"
-        );
+        // The child's tools reach the provider as its request's tool specs;
+        // the prompt never names a tool the child does not have.
+        assert_eq!(child.names(), vec!["read_file"]);
+        for absent in ["run_shell", "replace_in_file", "apply_patch", "write_file"] {
+            assert!(
+                !prompt.contains(absent),
+                "never told about {absent}, which it does not have: {prompt}"
+            );
+        }
         assert!(
             prompt.contains("Do probe work."),
             "the definition's own prompt is appended with placeholders resolved: {prompt}"

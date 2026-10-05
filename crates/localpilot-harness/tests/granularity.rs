@@ -193,7 +193,7 @@ async fn giant_whole_file_read_is_refused_but_explicit_pages_work() {
         .unwrap()
         .messages
         .iter()
-        .any(|m| format!("{m:?}").contains("Automatic work profile")));
+        .any(|m| format!("{m:?}").contains("Work unit: change at most")));
 }
 
 #[tokio::test]

@@ -63,48 +63,9 @@ pub fn composed_system_prompt(
 /// preloaded into context.
 const KNOWLEDGE_SEARCH_CUE: &str = concat!(
     "\n\n",
-    "The project has a searchable knowledge base. When a task depends on project ",
-    "facts you have not already read — conventions, where something lives, prior ",
-    "decisions — call `knowledge_search` to pull relevant indexed knowledge on ",
-    "demand. It is not preloaded into the conversation, so search it instead of ",
-    "guessing.",
-);
-
-/// The cue, appended only when the `remember` tool is registered, that tells the
-/// model it can propose a durable lesson for human review as it works.
-const REMEMBER_CUE: &str = concat!(
-    "\n\n",
-    "When you learn something durable about this project — a convention, a pitfall, ",
-    "a decision worth keeping — call `remember` to propose it for human review. It ",
-    "enqueues a review candidate; it never writes accepted memory directly. Use it ",
-    "sparingly, not for transient notes.",
-);
-
-/// The cue, appended only when the `skill_drafts` tool is registered, that tells
-/// the model candidate skill drafts may exist and that surfacing one never
-/// activates it. This is the LocalMind-derived disabled-candidate lane — separate
-/// from the installed SKILL.md package lane (`skill_list`/`skill_search`).
-const SKILL_DRAFTS_CUE: &str = concat!(
-    "\n\n",
-    "LocalMind may have generated skill drafts — candidate reusable workflows distilled ",
-    "from accepted project memory. These are a different lane from installed SKILL.md skill ",
-    "packages (`skill_list`/`skill_search`); a draft says nothing about which packages are ",
-    "installed. When a task resembles a recurring workflow, call `skill_drafts` to list or ",
-    "inspect them. They are always disabled; surface a relevant one and propose it to the user, ",
-    "but never apply or enable a draft yourself and never assume a draft is active — enabling ",
-    "stays a human step.",
-);
-
-/// The cue, appended only when the `active_skills` tool is registered, that tells
-/// the model human-enabled LocalMind-derived advisory workflows may exist —
-/// distinct from installed SKILL.md packages.
-const ACTIVE_SKILLS_CUE: &str = concat!(
-    "\n\n",
-    "LocalMind may have active skills — human-enabled advisory workflows distilled from ",
-    "accepted project memory. Call `active_skills` to list or read them and apply their guidance ",
-    "yourself; reading enables and runs nothing. These are a different lane from installed ",
-    "SKILL.md skill packages (`skill_list`/`skill_search`), and their presence or absence says ",
-    "nothing about which packages are installed.",
+    "Project facts are not preloaded: when a task depends on conventions, locations, \
+    or past decisions you have not read, search with `knowledge_search` instead of \
+    guessing.",
 );
 
 /// The cue, appended only when the `skill_search` tool is registered (autonomous
@@ -113,13 +74,10 @@ const ACTIVE_SKILLS_CUE: &str = concat!(
 /// than carried in context.
 const SKILL_SEARCH_CUE: &str = concat!(
     "\n\n",
-    "Installed SKILL.md skill packages — from your user-global directory and this workspace's ",
-    "trusted overlay — are advisory prompt modules for recurring tasks, reachable on demand rather ",
-    "than loaded into context. Call `skill_list` to page the whole installed catalog, or ",
-    "`skill_search` to find relevant ones (both return names and one-line summaries), then ",
-    "`skill_load` to read one by exact name and apply its guidance yourself. This is the installed ",
-    "package lane — separate from LocalMind's `active_skills`/`skill_drafts`. Loading a skill runs ",
-    "nothing; any action it suggests still goes through the normal permission gate.",
+    "Installed SKILL.md skill packages are reachable on demand: call `skill_list` or \
+    `skill_search` to find relevant ones, then `skill_load` to read one and apply \
+    its guidance yourself. Loading runs nothing; any action still goes through the \
+    normal permission gate.",
 );
 
 /// The cue, emitted only when installed skill packages exist on disk but
@@ -130,13 +88,12 @@ const SKILL_SEARCH_CUE: &str = concat!(
 /// [`crate::SessionRuntime::note_package_discovery_disabled_but_present`].
 const PACKAGE_DISCOVERY_DISABLED_BUT_PRESENT_CUE: &str = concat!(
     "\n\n",
-    "Installed SKILL.md skill packages are available in this session's readable catalog, but ",
-    "model-facing skill discovery is disabled, so the `skill_list`/`skill_search`/`skill_load` ",
-    "tools are not registered this session. This means package discovery is off, not that there ",
-    "are no skills — do not conclude that no skills are installed, and do not infer package ",
-    "presence or absence from LocalMind's `active_skills`/`skill_drafts` (a different lane). The ",
-    "user can list installed packages in chat with `/skills list` (or `localpilot skills list` ",
-    "outside chat), or enable model discovery by setting `[skills] autonomous_discovery = true`.",
+    "Installed SKILL.md skill packages exist, but model-facing skill discovery is off \
+    this session, so `skill_list`, `skill_search` and `skill_load` are not \
+    available. This means discovery is off, not that there are no skills: do not \
+    infer package presence or absence from LocalMind's `active_skills` or \
+    `skill_drafts`. The user can list packages with `/skills list` (or `localpilot \
+    skills list`), or enable discovery with `[skills] autonomous_discovery = true`.",
 );
 
 /// The single definition of the package-discovery-disabled cue, exposed so the
@@ -151,13 +108,11 @@ pub(crate) fn package_discovery_disabled_but_present_cue() -> &'static str {
 /// is a working subset and the rest are reachable on demand by search.
 const TOOL_SEARCH_CUE: &str = concat!(
     "\n\n",
-    "The tools listed above are a working subset, not every tool available. When you need a ",
-    "capability you do not see advertised, call `tool_search` to find the right tool (you get back ",
-    "names and one-line summaries), then `tool_load` with a name to reveal its schema and call it. ",
-    "If you call a tool that is not currently advertised, the system resolves it to the closest ",
-    "available tool, reveals it, and asks you to retry. Revealing a tool only changes what is ",
-    "advertised — it runs nothing and grants nothing, so any action still goes through the normal ",
-    "permission gate.",
+    "The advertised tools are a working subset. For a capability you do not see, call \
+    `tool_search` (it returns names and one-line summaries), then `tool_load` to \
+    reveal one, and call it normally; calling a tool that is not advertised reveals \
+    the closest match and asks you to retry. Revealing runs and grants nothing: any \
+    action still goes through the normal permission gate.",
 );
 
 /// The marker nudge, appended only when the marker trigger is enabled *and* the
@@ -166,10 +121,8 @@ const TOOL_SEARCH_CUE: &str = concat!(
 /// proactively (ADR-0031). Off by default — the marker needs new model behaviour.
 const TOOL_MARKER_CUE: &str = concat!(
     "\n\n",
-    "If you realize you need a capability you do not have advertised, you may write a line ",
-    "`NEED: <capability>` (for example `NEED: fetch a web page`) and stop; the system will reveal ",
-    "the closest available tool so you can call it on your next turn. This is optional — you can ",
-    "also just call `tool_search` directly.",
+    "You may also write `NEED: <capability>` (for example `NEED: fetch a web page`) \
+    on a line of its own and stop; the closest tool is revealed for your next turn.",
 );
 
 /// The cue, appended only when `ask_user` is registered, that tells the model it
@@ -177,50 +130,41 @@ const TOOL_MARKER_CUE: &str = concat!(
 /// threshold is part of the text: without it a model starts asking permission
 /// for everything, which is worse than the silent guess this replaces.
 const ASK_USER_CUE: &str = concat!(
-    "
-
-",
-    "You can ask the user a question with `ask_user`. Ask when different readings of the request ",
-    "would lead to materially different work, or before something hard to undo. Otherwise pick the ",
-    "obvious option and state the assumption in your answer — do not ask for permission to do work ",
-    "you were already asked to do, and do not ask to report progress. Where no user is reachable ",
-    "the tool says so; then choose and say what you assumed.",
+    "\n\n",
+    "Ask the user with `ask_user` only when different readings of the request lead to \
+    materially different work, or before something hard to undo; otherwise choose \
+    the obvious option and state your assumption.",
 );
 
 /// The documentation policy for a session that advertises its full tool set: the
 /// suitable tool is already visible, so the guidance is to call it directly and
 /// never mentions the broker's discovery surface.
 const DOCUMENTATION_CUE_DIRECT: &str = concat!(
-    "
-
-",
-    "When a task depends on current or version-specific behaviour of an external library, ",
-    "framework, SDK, API, CLI, or cloud service, consult current documentation rather than ",
-    "relying on what you remember. Upgrade errors, migration failures, deprecated APIs, changed ",
-    "configuration shapes, and version mismatches are strong signals that your prior knowledge is ",
-    "stale. Inspect the project first to identify the dependency, its installed version, its ",
-    "configuration, and the exact error, then call the most suitable documentation tool listed ",
-    "above. Stable local implementation questions need no documentation lookup. If no suitable ",
-    "tool can answer, continue from local evidence and say that current documentation could not ",
-    "be verified.",
+    "\n\n",
+    "For current or version-specific behaviour of an external library, framework, \
+    SDK, API, CLI, or cloud service, check current documentation rather than memory: \
+    upgrade errors, migration failures, deprecated APIs, changed configuration and \
+    version mismatches are signs your knowledge is stale. First identify the \
+    dependency, its installed version and the exact error, then call the most \
+    suitable documentation tool. Stable local implementation questions need no \
+    documentation lookup. If no tool can answer, continue from local evidence and \
+    say that current documentation could not be verified.",
 );
 
 /// The documentation policy for a brokered session, where a suitable tool may be
 /// hidden behind discovery: the same threshold, routed through the reveal flow.
 const DOCUMENTATION_CUE_BROKERED: &str = concat!(
-    "
-
-",
-    "When a task depends on current or version-specific behaviour of an external library, ",
-    "framework, SDK, API, CLI, or cloud service, consult current documentation rather than ",
-    "relying on what you remember. Upgrade errors, migration failures, deprecated APIs, changed ",
-    "configuration shapes, and version mismatches are strong signals that your prior knowledge is ",
-    "stale. Inspect the project first to identify the dependency, its installed version, its ",
-    "configuration, and the exact error, then call `tool_search` with the capability you need ",
-    "(for example `current documentation for a library version`), reveal the best match with ",
-    "`tool_load`, and call it normally. Stable local implementation questions need no ",
-    "documentation lookup. If no suitable tool can answer, continue from local evidence and say ",
-    "that current documentation could not be verified.",
+    "\n\n",
+    "For current or version-specific behaviour of an external library, framework, \
+    SDK, API, CLI, or cloud service, check current documentation rather than memory: \
+    upgrade errors, migration failures, deprecated APIs, changed configuration and \
+    version mismatches are signs your knowledge is stale. First identify the \
+    dependency, its installed version and the exact error, then call `tool_search` \
+    with the capability you need (for example `current documentation for a library \
+    version`), reveal the best match with `tool_load`, and call it normally. Stable \
+    local implementation questions need no documentation lookup. If no tool can \
+    answer, continue from local evidence and say that current documentation could \
+    not be verified.",
 );
 
 /// Render the prompt from the sorted tool names with the marker nudge off. A
@@ -246,69 +190,83 @@ fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
 
 /// The agent-mode opening. Always present when `include_base` is on; it is the
 /// only section that establishes what the model is.
-const BASE_SECTION: &str = "You are LocalPilot's coding agent running in agent mode.
+const BASE_SECTION: &str =
+    "You are LocalPilot's coding agent. Work inside the current workspace: read the \
+    relevant files before changing them, make precise edits rather than broad \
+    rewrites, and verify each change with the smallest useful command before you \
+    finish.";
 
-Work inside the current workspace. Read relevant files before changing them,
-prefer precise edits over broad rewrites, and verify changes with the smallest
-useful command before you finish.";
+/// Which write tool to reach for, and the modular-file preference. Each
+/// clause names one write tool and is rendered only when that tool is
+/// registered, so an agent is never told to call a tool it does not have.
+const EDITING_CLAUSES: &[(&str, &str)] = &[
+    (
+        "replace_in_file",
+        "To change an existing file use `replace_in_file`.",
+    ),
+    (
+        "apply_patch",
+        "Use `apply_patch` for changes across several files or to create or delete files.",
+    ),
+    (
+        "write_file",
+        "Use `write_file` only for a new file or a full rewrite.",
+    ),
+];
 
-/// Which write tool to reach for, and the modular-file preference.
-const EDITING_SECTION: &str = "To change an existing file, default to
-`replace_in_file` (replace an exact block of old text with new text — it may
-span multiple lines); use `apply_patch` for changes across several files or
-that create and delete files. Reserve `write_file` for a brand-new file or a
-full rewrite of one file — do not use it to make a small edit.
+/// The modular-file preference, for any agent that can write files.
+const MODULAR_FILES: &str = "Split large work into small, focused files (for a web app, \
+    separate HTML, CSS, and JS files) so each tool call stays small enough to send reliably.";
 
-Split a large implementation across several small, focused files rather than
-emitting one enormous file — modular files read better and keep each tool call
-small enough to send reliably. Treat 'keep it in one file' as a preference, not
-a hard rule: split a web app into separate HTML, CSS, and JS files once one file
-would grow too large.";
+/// The editing guidance for the registered write tools, or `None` when the
+/// agent has none of them.
+fn editing_section(names: &[&str]) -> Option<String> {
+    let clauses: Vec<&str> = EDITING_CLAUSES
+        .iter()
+        .filter(|(tool, _)| names.contains(tool))
+        .map(|(_, clause)| *clause)
+        .collect();
+    if clauses.is_empty() {
+        return None;
+    }
+    Some(format!("{} {MODULAR_FILES}", clauses.join(" ")))
+}
 
 /// Permission-profile framing and commit etiquette. Turning this off is a
 /// deliberate choice a definition has to make explicitly.
-const SAFETY_SECTION: &str = "Respect the
-permission profile: reads, writes, commands, and network effects may be denied
-or require approval.
-
-Even when running under `bypass` (which grants technical allow-all on commands
-and file effects), do not commit or push changes unless the user explicitly asks
-for it — `bypass` lifts the permission gate, but does not imply permission to
-mutate history or share work without being told to.";
+const SAFETY_SECTION: &str =
+    "Respect the permission profile: reads, writes, commands, and network effects may \
+    be denied or need approval. Even under `bypass`, do not commit or push unless \
+    the user asks.";
 
 /// Inspect-before-launch.
 const LOOK_BEFORE_LAUNCH_SECTION: &str =
-    "Look before you launch. If a task names an existing target you can reach — a URL,
-a running service, a `host:port` — inspect or probe it first (for example fetch or
-curl it) before assuming you must create or launch your own. Only stand up your
-own server, or scaffold a competing entry page, if that target turns out to be
-absent.";
+    "Look before you launch: if a task names a target you can reach (a URL, a running \
+    service, a `host:port`), probe it first, for example with fetch or curl, and \
+    start your own server or scaffold a competing page only if it is absent.";
 
 /// The tool-use loop and shell discipline.
-const TOOL_LOOP_SECTION: &str = "Tool use loop:
-- inspect before acting;
-- call one or more tools with valid JSON inputs;
-- read tool results, including error results;
-- repair malformed or incomplete tool calls instead of repeating them;
-- if a call returns the same result for the same input twice in a row, do not
-  send it again: change the input or the approach, or say what blocks you (a
-  third identical result stops the turn). Repeating a call after something
-  changed — an edit, a job that advances — is fine;
-- continue until the task is complete, blocked by a concrete reason, or the user
-  cancels.
-
-Shell discipline. For a multiline or heavily-quoted command, do not fight inline
-quote escaping across the shell-to-interpreter boundary: write the body to a
-script file (`.py`, `.ps1`, or `.sh`) and run that file instead. If a needed command-line tool is
-missing, say so plainly and surface the gap instead of silently working around
-it.";
+const TOOL_LOOP_SECTION: &str = concat!(
+    "Tool use loop: inspect before acting; call tools with valid JSON inputs; read \
+    every result, including errors; repair a malformed call instead of repeating it. \
+    If a call returns the same result for the same input twice in a row, do not send \
+    it again: change the input or the approach, or say what blocks you (a third \
+    identical result stops the turn). Repeating a call after something changed — an \
+    edit, a job that advances — is fine. Continue until the task is done, a concrete \
+    reason blocks it, or the user cancels.",
+    "\n\n",
+    "Shell discipline: for a multiline or heavily-quoted command, write it to a \
+    script file (`.py`, `.ps1`, or `.sh`) and run that instead of fighting inline \
+    quoting. If a needed command-line tool is missing, say so instead of silently \
+    working around it.",
+);
 
 /// The closing instruction. Always present: without it a model has no contract
 /// for how to end a turn.
 const CLOSING_SECTION: &str =
-    "Keep reasoning separate from the final answer. When no more tool calls are
-needed, respond with a concise final answer that states what changed and how it
-was verified. If stuck, say exactly what blocks progress.";
+    "Keep reasoning separate from the final answer. When no more tool calls are \
+    needed, answer concisely: what changed and how it was verified, or exactly what \
+    blocks progress.";
 
 /// Assemble the selected sections plus the tool list and its cues.
 fn compose_with(
@@ -324,7 +282,9 @@ fn compose_with(
         sections.push(BASE_SECTION.to_string());
     }
     if parts.include_editing_guidance {
-        sections.push(EDITING_SECTION.to_string());
+        if let Some(editing) = editing_section(names) {
+            sections.push(editing);
+        }
     }
     if parts.include_safety {
         sections.push(SAFETY_SECTION.to_string());
@@ -350,7 +310,7 @@ fn compose_with(
     )
 }
 
-/// The available-tools line plus every cue gated on a registered tool name.
+/// The tool-use line plus every cue gated on a registered tool name.
 fn tools_section(
     names: &[&str],
     marker_enabled: bool,
@@ -360,21 +320,6 @@ fn tools_section(
 ) -> String {
     let knowledge_cue = if names.contains(&"knowledge_search") {
         KNOWLEDGE_SEARCH_CUE
-    } else {
-        ""
-    };
-    let remember_cue = if names.contains(&"remember") {
-        REMEMBER_CUE
-    } else {
-        ""
-    };
-    let skill_drafts_cue = if names.contains(&"skill_drafts") {
-        SKILL_DRAFTS_CUE
-    } else {
-        ""
-    };
-    let active_skills_cue = if names.contains(&"active_skills") {
-        ACTIVE_SKILLS_CUE
     } else {
         ""
     };
@@ -421,9 +366,10 @@ fn tools_section(
     } else {
         ""
     };
+    // The provider receives every advertised tool with its name and schema,
+    // so the prompt does not list them again.
     format!(
-        "Use tools when local information or side effects are needed. Available tools: {tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{active_skills_cue}{skill_search_cue}{package_discovery_disabled_cue}{tool_search_cue}{tool_marker_cue}{ask_user_cue}{documentation_cue}",
-        tools = names.join(", ")
+        "Use tools when local information or side effects are needed.{knowledge_cue}{skill_search_cue}{package_discovery_disabled_cue}{tool_search_cue}{tool_marker_cue}{ask_user_cue}{documentation_cue}"
     )
 }
 
@@ -435,8 +381,8 @@ mod cue_tests {
     fn the_prompt_steers_toward_splitting_large_work_into_modular_files() {
         let prompt = build_prompt(&["write_file", "replace_in_file"]);
         assert!(
-            prompt.contains("Split a large implementation"),
-            "always-on modular-file guidance must be present"
+            prompt.contains("Split large work into small, focused files"),
+            "modular-file guidance must be present for an agent that edits"
         );
         assert!(prompt.contains("separate HTML, CSS, and JS files"));
     }
@@ -445,52 +391,26 @@ mod cue_tests {
     fn the_knowledge_search_cue_appears_only_when_the_tool_is_registered() {
         let with = build_prompt(&["knowledge_search", "read_file"]);
         assert!(
-            with.contains("searchable knowledge base"),
+            with.contains("Project facts are not preloaded"),
             "the cue must be present when knowledge_search is registered"
         );
         assert!(with.contains("knowledge_search"));
 
         let without = build_prompt(&["read_file", "write_file"]);
         assert!(
-            !without.contains("searchable knowledge base"),
+            !without.contains("Project facts are not preloaded"),
             "the cue must be absent when knowledge_search is not registered"
         );
     }
 
     #[test]
-    fn the_remember_cue_appears_only_when_the_tool_is_registered() {
-        let with = build_prompt(&["remember", "read_file"]);
-        assert!(
-            with.contains("call `remember` to propose it"),
-            "the cue must be present when remember is registered"
-        );
-        let without = build_prompt(&["read_file", "write_file"]);
-        assert!(
-            !without.contains("call `remember`"),
-            "the cue must be absent when remember is not registered"
-        );
-    }
-
-    #[test]
-    fn the_skill_drafts_cue_appears_only_when_the_tool_is_registered() {
-        let with = build_prompt(&["skill_drafts", "read_file"]);
-        assert!(
-            with.contains("call `skill_drafts`"),
-            "the cue must be present when skill_drafts is registered"
-        );
-        assert!(
-            with.contains("enabling stays a human step"),
-            "the cue must keep activation a human step"
-        );
-        assert!(
-            with.contains("different lane from installed SKILL.md"),
-            "the draft cue must distinguish itself from installed packages"
-        );
-        let without = build_prompt(&["read_file", "write_file"]);
-        assert!(
-            !without.contains("skill drafts"),
-            "the cue must be absent when skill_drafts is not registered"
-        );
+    fn tools_whose_description_carries_their_usage_get_no_cue() {
+        // `remember`, `skill_drafts` and `active_skills` explain themselves in
+        // their own descriptions; repeating that here only costs context.
+        let prompt = build_prompt(&["remember", "skill_drafts", "active_skills", "read_file"]);
+        for name in ["`remember`", "`skill_drafts`", "`active_skills`"] {
+            assert!(!prompt.contains(name), "no cue for {name}: {prompt}");
+        }
     }
 
     #[test]
@@ -568,26 +488,6 @@ mod cue_tests {
     }
 
     #[test]
-    fn the_active_skills_cue_appears_only_when_that_tool_is_registered() {
-        let with = build_prompt(&["active_skills", "read_file"]);
-        // Case-stable distinctive phrase unique to the active-skills cue (so an
-        // accidental cue cannot slip past a lowercased check).
-        assert!(
-            with.contains("human-enabled advisory workflows"),
-            "the active-skills cue must be present when the tool is registered"
-        );
-        assert!(
-            with.contains("different lane from") && with.contains("SKILL.md"),
-            "the active-skills cue must distinguish itself from installed packages"
-        );
-        let without = build_prompt(&["read_file", "write_file"]);
-        assert!(
-            !without.contains("human-enabled advisory workflows"),
-            "the cue must be absent when active_skills is not registered"
-        );
-    }
-
-    #[test]
     fn the_disabled_but_present_cue_appears_only_when_hinted_and_search_absent() {
         // Hint true + skill_search absent ⇒ the truthful "disabled, not empty" cue.
         let hinted = compose_with(&["read_file"], false, PromptParts::all(), false, true);
@@ -642,12 +542,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_names_every_builtin_tool() {
+    fn the_prompt_does_not_repeat_the_tool_list() {
+        // Every advertised tool reaches the provider with its name and schema;
+        // listing the names here again only costs context.
         let tools = ToolRegistry::with_builtins();
         let prompt = agent_system_prompt(&tools, false, false);
-        for name in tools.names() {
-            assert!(prompt.contains(name), "prompt omitted {name}");
-        }
+        assert!(!prompt.contains("Available tools:"), "{prompt}");
+        assert!(!prompt.contains("git_log"), "{prompt}");
         assert!(!prompt.contains("-Plan.md"));
         assert!(!prompt.contains("tasks/"));
     }
@@ -708,16 +609,16 @@ mod composition_tests {
     /// all-parts composition must still contain all of them: the split changed
     /// where paragraph boundaries fall, never what the model is told.
     const ORIGINAL_OPENERS: &[&str] = &[
-        "You are LocalPilot's coding agent running in agent mode.",
-        "Work inside the current workspace.",
-        "To change an existing file, default to",
-        "Respect the\npermission profile:",
-        "Split a large implementation",
-        "Even when running under `bypass`",
+        "You are LocalPilot's coding agent.",
+        "Work inside the current workspace",
+        "To change an existing file use",
+        "Respect the permission profile:",
+        "Split large work into small, focused files",
+        "Even under `bypass`",
         "Use tools when local information or side effects are needed.",
-        "Look before you launch.",
+        "Look before you launch",
         "Tool use loop:",
-        "Shell discipline.",
+        "Shell discipline:",
         "Keep reasoning separate from the final answer.",
     ];
 
@@ -727,7 +628,7 @@ mod composition_tests {
 
     #[test]
     fn selecting_every_part_keeps_all_of_the_original_guidance() {
-        let prompt = all_parts(&["read_file", "write_file"]);
+        let prompt = all_parts(&["read_file", "write_file", "replace_in_file"]);
         for opener in ORIGINAL_OPENERS {
             assert!(
                 prompt.contains(opener),
@@ -764,12 +665,12 @@ mod composition_tests {
             "shell discipline dropped"
         );
         assert!(
-            prompt.contains("Respect the\npermission profile"),
+            prompt.contains("Respect the permission profile"),
             "safety is still on: {prompt}"
         );
         assert!(
-            prompt.contains("Available tools: read_file"),
-            "the tool list is never optional: {prompt}"
+            prompt.contains("Use tools when"),
+            "the tool-use line is never optional: {prompt}"
         );
     }
 
@@ -789,9 +690,9 @@ mod composition_tests {
             prompt.contains("Keep reasoning separate"),
             "a model with no closing contract has no way to end a turn: {prompt}"
         );
-        assert!(prompt.contains("Available tools: read_file"), "{prompt}");
+        assert!(prompt.contains("Use tools when"), "{prompt}");
         assert!(
-            !prompt.contains("agent mode"),
+            !prompt.contains("coding agent"),
             "base really is off: {prompt}"
         );
     }
@@ -814,9 +715,39 @@ mod composition_tests {
     #[test]
     fn the_cues_still_gate_on_registered_tool_names_after_the_split() {
         let with = all_parts(&["knowledge_search"]);
-        assert!(with.contains("searchable knowledge base"));
+        assert!(with.contains("Project facts are not preloaded"));
         let without = all_parts(&["read_file"]);
-        assert!(!without.contains("searchable knowledge base"));
+        assert!(!without.contains("Project facts are not preloaded"));
+    }
+
+    #[test]
+    fn editing_guidance_names_only_the_write_tools_the_agent_has() {
+        const WRITE_TOOLS: [&str; 3] = ["replace_in_file", "apply_patch", "write_file"];
+        let read_only = all_parts(&["read_file", "search_text"]);
+        for name in WRITE_TOOLS {
+            assert!(
+                !read_only.contains(name),
+                "{name} is not registered: {read_only}"
+            );
+        }
+        assert!(
+            !read_only.contains("Split large work"),
+            "a read-only agent gets no editing guidance: {read_only}"
+        );
+        for only in WRITE_TOOLS {
+            let prompt = all_parts(&["read_file", only]);
+            assert!(prompt.contains(only), "{only} is registered: {prompt}");
+            for absent in WRITE_TOOLS.iter().filter(|name| **name != only) {
+                assert!(
+                    !prompt.contains(absent),
+                    "{absent} is not registered alongside {only}: {prompt}"
+                );
+            }
+            assert!(
+                prompt.contains("Split large work into small, focused files"),
+                "any editing-capable agent keeps the modular guidance: {prompt}"
+            );
+        }
     }
 
     #[test]
@@ -873,12 +804,13 @@ mod composition_tests {
             "the version-sensitive documentation policy must be present"
         );
         assert!(
-            prompt.contains("Upgrade errors, migration failures"),
+            prompt.contains("upgrade errors, migration failures"),
             "the policy must name the signals that trigger it"
         );
         assert!(
-            prompt.contains("call the most suitable documentation tool listed above"),
-            "with the full tool set advertised the guidance is direct use"
+            prompt.contains("call the most suitable documentation tool")
+                && !prompt.contains("listed above"),
+            "with the full tool set advertised the guidance is direct use: {prompt}"
         );
         assert!(
             !prompt.contains("tool_search"),

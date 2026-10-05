@@ -19,12 +19,13 @@ use tokio_util::sync::CancellationToken;
 /// the compact JSON of the request's `ToolSpec` list (an internal measure: a
 /// provider adapter adds its own wrapper around each schema). A component
 /// check; the CLI's default registry, LocalMind tools included, has its own
-/// gate. Measured at 15,553 bytes once generated annotations were removed and
+/// gate. Measured at 15,628 bytes once generated annotations were removed and
 /// the longest descriptions tightened.
 const TOOL_SPEC_CEILING: usize = 16_000;
 /// Ceiling for the agent system prompt of a default session in an empty
-/// workspace (no instruction files, no hooks). Measured at 3,919 bytes.
-const SYSTEM_PROMPT_CEILING: usize = 4_100;
+/// workspace (no instruction files, no hooks). Measured at 2,499 bytes after
+/// the prompt was rewritten (3,919 before).
+const SYSTEM_PROMPT_CEILING: usize = 2_700;
 
 #[tokio::test]
 async fn the_fixed_request_overhead_stays_under_its_ceiling() {

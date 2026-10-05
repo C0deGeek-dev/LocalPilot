@@ -499,12 +499,13 @@ mod tests {
     /// builtins plus the LocalMind tools, skill discovery off — measured as the
     /// compact JSON of the request's `ToolSpec` list (an internal measure: a
     /// provider adapter adds its own wrapper around each schema). Measured at
-    /// 21,055 bytes for 34 tools once generated schema annotations were
+    /// 21,130 bytes for 34 tools once generated schema annotations were
     /// removed and the longest descriptions tightened.
     const DEFAULT_TOOL_SPEC_CEILING: usize = 21_600;
     /// Ceiling for the agent system prompt that registry produces in an empty
-    /// workspace. Measured at 5,616 bytes.
-    const DEFAULT_SYSTEM_PROMPT_CEILING: usize = 5_900;
+    /// workspace. Measured at 2,669 bytes after the prompt was rewritten
+    /// (5,616 before).
+    const DEFAULT_SYSTEM_PROMPT_CEILING: usize = 2_900;
 
     #[tokio::test]
     async fn the_default_request_overhead_stays_under_its_ceiling() {

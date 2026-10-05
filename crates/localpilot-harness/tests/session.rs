@@ -862,7 +862,7 @@ async fn first_request_carries_the_agent_system_prompt_once() {
             _ => None,
         })
         .unwrap();
-    assert!(system_text.contains("Available tools:"));
+    assert!(system_text.contains("Use tools when local information"));
     assert_eq!(
         messages
             .iter()
@@ -929,7 +929,7 @@ async fn compaction_summary_does_not_produce_two_system_messages() {
     let combined = system_messages.join("\n");
     assert_eq!(combined.matches("<session-scratch>").count(), 1);
     assert!(
-        combined.contains("Available tools:"),
+        combined.contains("Use tools when local information"),
         "system block keeps the agent prompt"
     );
     assert!(

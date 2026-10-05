@@ -207,11 +207,18 @@ impl WorkProfile {
 
     #[must_use]
     pub fn instruction(&self) -> String {
+        // Only what the model acts on: the limits, that they hold through
+        // shell/MCP and across compaction, verification, and the stop rule.
+        // How the profile was derived stays in the session's events.
+        let stop = if self.stop_after_checkpoint {
+            " Then stop at that verified checkpoint and describe the next action."
+        } else {
+            ""
+        };
         format!(
-            "Automatic work profile: context={}, reliability={:?} (session-local observations; unknown is conservative). One coherent unit: at most {} files, {} regions, {} decisions and {} changed lines. Read explicit pages of at most {} lines. Prefer exact edits; do not rewrite large files. Verify the unit with the smallest relevant check before completion; preserve all acceptance criteria and full quality gates. Stop at a verified durable checkpoint when required ({}); describe the next action. Compaction cannot enlarge this unit. Shell/MCP permissions do not authorize a larger patch. Provenance: {:?}, {:?}.",
-            if self.constrained_context { "constrained" } else { "sufficient" }, self.reliability,
+            "Work unit: change at most {} files, {} regions, {} decisions and {} lines; read at most {} lines at a time; prefer exact edits to rewriting large files. These limits also apply through shell and MCP commands, and compaction does not reset them. Verify the unit with the smallest relevant check, keeping every acceptance criterion and required quality gate.{stop}",
             self.max_files, self.max_regions, self.max_decisions, self.max_changed_lines,
-            self.max_read_lines, self.stop_after_checkpoint, self.context_provenance, self.capability_provenance,
+            self.max_read_lines,
         )
     }
 }
