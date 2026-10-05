@@ -223,6 +223,25 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// The specs as a model is shown them: a builtin's schema without its
+    /// generated annotations ([`crate::advertised_schema`]); an MCP tool's
+    /// schema exactly as its server sent it. Dispatch, validation and repair
+    /// keep using the full schema from [`Self::specs`].
+    #[must_use]
+    pub fn advertised_specs(&self) -> Vec<(&str, &str, Value)> {
+        self.tools
+            .iter()
+            .zip(&self.sources)
+            .map(|(tool, source)| {
+                let schema = match source {
+                    ToolSource::Builtin => crate::advertised_schema(&tool.schema()),
+                    ToolSource::Mcp(_) => tool.schema(),
+                };
+                (tool.name(), tool.description(), schema)
+            })
+            .collect()
+    }
+
     /// Dispatch a tool call: authorize every effect, invoke, then redact. A
     /// failure or denial is returned as an error [`ToolResult`], never a panic.
     pub async fn dispatch(

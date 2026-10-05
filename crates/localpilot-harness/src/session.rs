@@ -3153,7 +3153,7 @@ impl SessionRuntime {
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
         self.tools
-            .specs()
+            .advertised_specs()
             .into_iter()
             // The advertise lever: with the broker on, only the working set's
             // schemas reach the provider (core ∪ broker tools ∪ revealed); with it

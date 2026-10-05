@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Smaller tool schemas in every request.** Built-in tool schemas are sent
+  without the annotations the schema generator adds (the `$schema` URL, type
+  titles, integer-width formats, `default: null`, and LocalPilot's internal
+  repair markers), cutting the advertised tool definitions from 27,550 to
+  23,236 bytes of JSON for the built-in set. Nothing that decides which inputs
+  a tool accepts changes, MCP tool schemas are sent exactly as their server
+  provides them, and a test now fails if the fixed prompt overhead grows past a
+  recorded ceiling.
+
 - **Repeating a call that just returned stops quickly.** When a tool call has
   the same input and returns the same result as the call right before it, the
   result now says so and asks the model to change the input or approach; a

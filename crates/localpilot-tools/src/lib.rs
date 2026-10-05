@@ -7,6 +7,7 @@
 //! `localpilot-sandbox`, and the registry never bypasses them.
 #![forbid(unsafe_code)]
 
+mod advertise;
 mod broker;
 mod builtins;
 mod builtins_ask;
@@ -25,6 +26,7 @@ mod tool;
 pub mod touch;
 mod validate;
 
+pub use advertise::advertised_schema;
 pub use broker::{
     describes_documentation, learned_boost, resolve, Broker, BrokerConfig, Locator, Resolution,
     ResolutionRecord, RevealOutcome, ToolLoad, ToolSearch, DEFAULT_GRADUATION_THRESHOLD, TOOL_LOAD,

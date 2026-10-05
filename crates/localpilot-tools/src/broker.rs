@@ -655,7 +655,13 @@ fn render_reveal(entry: &CatalogEntry, overlay: &DeprecationOverlay) -> String {
             entry.name
         );
     }
-    let _ = write!(out, "schema: {}", entry.schema);
+    // The schema a request would advertise for this tool, so a revealed
+    // builtin reads the same here as in the next request's tool list.
+    let schema = match entry.source {
+        ToolSource::Builtin => crate::advertised_schema(&entry.schema),
+        ToolSource::Mcp(_) => entry.schema.clone(),
+    };
+    let _ = write!(out, "schema: {schema}");
     out
 }
 

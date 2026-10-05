@@ -494,4 +494,86 @@ mod tests {
             "the shared connection survives one session's teardown"
         );
     }
+
+    /// Ceiling for the default no-server registry's advertised tool specs —
+    /// builtins plus the LocalMind tools, skill discovery off — measured as the
+    /// compact JSON of the request's `ToolSpec` list (an internal measure: a
+    /// provider adapter adds its own wrapper around each schema). Measured at
+    /// 23,270 bytes for 34 tools once generated schema annotations were
+    /// removed.
+    const DEFAULT_TOOL_SPEC_CEILING: usize = 23_800;
+    /// Ceiling for the agent system prompt that registry produces in an empty
+    /// workspace. Measured at 5,616 bytes.
+    const DEFAULT_SYSTEM_PROMPT_CEILING: usize = 5_900;
+
+    #[tokio::test]
+    async fn the_default_request_overhead_stays_under_its_ceiling() {
+        use localpilot_core::{ContentBlock, Role};
+        use localpilot_harness::{SessionConfig, SessionRuntime, StopReason};
+        use localpilot_llm::FakeProvider;
+        use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
+        use localpilot_sandbox::{PermissionEngine, Profile, ScriptedApprover, Workspace};
+        use localpilot_store::Store;
+
+        let dir = tempfile::tempdir().unwrap();
+        let registry = McpTools::without_servers(&localpilot_config::Config::default()).registry();
+        let provider = Arc::new(FakeProvider::new().text("ok"));
+        let mut runtime = SessionRuntime::new(
+            provider.clone(),
+            registry,
+            PermissionEngine::new(Profile::Default, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::open(dir.path()),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig::default(),
+            Vec::new(),
+        );
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let reason = runtime
+            .run_turn("hi", &events, &tokio_util::sync::CancellationToken::new())
+            .await;
+        assert_eq!(reason, StopReason::Done);
+
+        let request = provider.requests().remove(0);
+        let system: usize = request
+            .messages
+            .iter()
+            .take_while(|message| message.role == Role::System)
+            .flat_map(|message| &message.content)
+            .map(|block| match block {
+                ContentBlock::Text { text } => text.len(),
+                _ => 0,
+            })
+            .sum();
+        let tools = serde_json::to_string(&request.tools).unwrap().len();
+        let mut per_tool: Vec<(usize, &str)> = request
+            .tools
+            .iter()
+            .map(|tool| {
+                (
+                    serde_json::to_string(tool).unwrap().len(),
+                    tool.name.as_str(),
+                )
+            })
+            .collect();
+        per_tool.sort_unstable_by(|a, b| b.cmp(a));
+        let largest: Vec<String> = per_tool
+            .iter()
+            .take(5)
+            .map(|(bytes, name)| format!("{name}={bytes}"))
+            .collect();
+        eprintln!(
+            "default request: {} tools, specs {tools} B, system {system} B; largest {largest:?}",
+            request.tools.len()
+        );
+        assert!(
+            tools <= DEFAULT_TOOL_SPEC_CEILING,
+            "default tool specs grew to {tools} bytes (ceiling {DEFAULT_TOOL_SPEC_CEILING});              largest: {largest:?}"
+        );
+        assert!(
+            system <= DEFAULT_SYSTEM_PROMPT_CEILING,
+            "default system prompt grew to {system} bytes (ceiling {DEFAULT_SYSTEM_PROMPT_CEILING})"
+        );
+    }
 }

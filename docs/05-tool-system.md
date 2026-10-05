@@ -80,6 +80,22 @@ Builtin tools normally return static string literals. Dynamically discovered
 tools, such as MCP tools, may return borrowed metadata from owned registry
 entries; dynamic metadata must not be forced into a static lifetime.
 
+### Advertised Schemas
+
+A request shows the model each builtin's schema without the annotations
+`schemars` generates and the model cannot act on: the root `$schema` URL, a
+`title` per type, Rust integer widths as `format` on numeric types, `default:
+null`, and LocalPilot's own `x-localpilot-intent` repair marker
+(`ToolRegistry::advertised_specs`, `localpilot_tools::advertised_schema`). The
+rewrite walks schema positions only — a property *named* `title`, or an `enum`
+value containing such a key, is untouched — and keeps everything that decides
+which inputs are accepted: nullable type unions, `required`, `enum`/`const`,
+bounds, `additionalProperties`, `$ref` and non-null defaults. For the built-in
+set this cut the advertised specs from 27,550 to 23,236 bytes of JSON. MCP
+schemas are forwarded exactly as their server sent them. A broker reveal shows
+the same advertised schema; validation, readable errors and argument repair
+keep using the full schema.
+
 ## Builtin Tools
 
 File tools and supported literal shell targets share normalized path effects.
