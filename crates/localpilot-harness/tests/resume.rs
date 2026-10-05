@@ -712,6 +712,131 @@ async fn dirty_worktree_blocks_resume_before_provider_work() {
     );
 }
 
+// --- plan documents -----------------------------------------------------------
+
+/// A repository with a git identity and nothing committed.
+fn empty_repo(root: &Path) {
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+}
+
+/// A provider that does the sample plan's one step.
+fn hello_provider() -> Arc<FakeProvider> {
+    Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "hello.txt", "content": "hello" }),
+            )
+            .text("done"),
+    )
+}
+
+/// The files one commit touched, sorted.
+fn files_of(root: &Path, commit: &str) -> Vec<String> {
+    let mut files: Vec<String> = git_output(root, &["show", "--name-only", "--format=", commit])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    files.sort();
+    files
+}
+
+#[tokio::test]
+async fn a_fresh_plan_in_a_repository_with_no_commits_is_committed_and_resumes() {
+    // The state `intake` and `plan` leave: both documents written, nothing committed.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    empty_repo(root);
+    write_bound_project(root, PROGRESS);
+
+    let mut rt = runtime(root, hello_provider());
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    let subjects = git_output(root, &["log", "--format=%s"]);
+    let subjects: Vec<&str> = subjects.lines().collect();
+    assert_eq!(
+        subjects,
+        [
+            "harness: update progress",
+            "harness: Create hello.txt",
+            "harness: add brief and plan"
+        ]
+    );
+    let first = git_output(root, &["rev-list", "--max-parents=0", "HEAD"]);
+    assert_eq!(files_of(root, first.trim()), ["PROGRESS.md", "brief.md"]);
+}
+
+#[tokio::test]
+async fn a_fresh_plan_in_a_repository_with_history_is_committed_apart_from_the_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    empty_repo(root);
+    std::fs::write(root.join("README.md"), "existing work").unwrap();
+    git(root, &["add", "README.md"]);
+    git(root, &["commit", "-m", "existing"]);
+    write_bound_project(root, PROGRESS);
+
+    let mut rt = runtime(root, hello_provider());
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    let subjects = git_output(root, &["log", "--format=%s"]);
+    let subjects: Vec<&str> = subjects.lines().collect();
+    assert_eq!(
+        subjects,
+        [
+            "harness: update progress",
+            "harness: Create hello.txt",
+            "harness: add brief and plan",
+            "existing"
+        ]
+    );
+    // The plan is its own commit, so the step's commit holds only the step's work.
+    assert_eq!(files_of(root, "HEAD~2"), ["PROGRESS.md", "brief.md"]);
+    assert_eq!(files_of(root, "HEAD~1"), ["hello.txt"]);
+}
+
+#[tokio::test]
+async fn another_uncommitted_file_still_blocks_and_nothing_is_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    empty_repo(root);
+    std::fs::write(root.join("README.md"), "existing work").unwrap();
+    git(root, &["add", "README.md"]);
+    git(root, &["commit", "-m", "existing"]);
+    write_bound_project(root, PROGRESS);
+    std::fs::write(root.join("user-note.txt"), "not the harness's").unwrap();
+
+    let provider = hello_provider();
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+
+    assert!(!outcome.committed);
+    assert!(outcome
+        .blocked_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("no_stale_uncommitted"));
+    assert_eq!(provider.requests().len(), 0, "provider must not be called");
+    assert_eq!(commit_count(root), 1, "the plan documents are left alone");
+    let status = git_output(root, &["status", "--porcelain"]);
+    assert!(status.contains("?? brief.md"), "{status}");
+    assert!(status.contains("?? PROGRESS.md"), "{status}");
+}
+
 #[tokio::test]
 async fn mid_stream_quota_error_persists_a_paused_resume_state() {
     let dir = sample_repo();

@@ -119,6 +119,9 @@ pub async fn resume_one_step_with_events(
         .next_incomplete()
         .ok_or(crate::workspace_state::NotResumable::Complete)?
         .clone();
+    // Before the baseline is recorded: the baseline is a commit, and the plan
+    // documents must be part of it rather than counted as the step's own work.
+    commit_plan_documents(root)?;
     let work_baseline = runtime
         .work_profile()
         .and_then(|_| work_diff_baseline(root).ok());
@@ -705,6 +708,36 @@ pub(crate) fn work_diff_block(
         }
     }
     Ok(None)
+}
+
+/// The documents `intake` and `plan` write and nothing commits.
+const PLAN_DOCUMENTS: [&str; 2] = ["brief.md", "PROGRESS.md"];
+
+/// Commit `brief.md` and `PROGRESS.md` when they are all that is uncommitted.
+///
+/// A project that has just been through `intake` and `plan` has exactly these two
+/// files uncommitted, and they are the harness's own: leaving them would make the
+/// first `resume` stop on `no_stale_uncommitted` over files it wrote itself.
+/// Ignoring them in that rule is not enough, because the same status feeds a
+/// step's work-envelope check, where an untracked `brief.md` would count as an
+/// extra file.
+///
+/// Anything else uncommitted means the working tree holds changes that are not
+/// the harness's, and then nothing is committed here: the rule blocks as before,
+/// and the user's changes are never swept into a harness commit. The commit holds
+/// only these two paths, so it is its own commit and never part of a step's.
+fn commit_plan_documents(root: &Path) -> Result<(), HarnessError> {
+    let dirty = committable_status_paths(root)?;
+    if dirty.is_empty()
+        || !dirty
+            .iter()
+            .all(|path| PLAN_DOCUMENTS.contains(&path.as_str()))
+    {
+        return Ok(());
+    }
+    git_add_paths(root, &dirty)?;
+    git(root, &["commit", "-m", "harness: add brief and plan"])?;
+    Ok(())
 }
 
 fn has_unrelated_uncommitted_changes(root: &Path) -> Result<bool, HarnessError> {

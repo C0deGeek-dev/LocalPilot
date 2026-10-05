@@ -870,6 +870,13 @@ At session start, block if unrelated uncommitted files exist.
 
 Rationale: the harness must not mix user changes with agent changes.
 
+`brief.md` and `PROGRESS.md` are the harness's own documents, written by `intake`
+and `plan` and committed by nothing, so they are not unrelated. When they are the
+only uncommitted files, `resume` commits them first as their own commit
+(`harness: add brief and plan`), which also gives a repository with no commits its
+first one. Any other uncommitted file still blocks, and then the documents are
+left uncommitted so nothing of the user's is swept into a harness commit.
+
 #### `suite_green`
 
 Before step completion, configured tests must pass. `suite_green` is the

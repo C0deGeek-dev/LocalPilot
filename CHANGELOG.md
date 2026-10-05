@@ -53,6 +53,12 @@ is SemVer-stable; the configuration schema stability policy is in
   of the prompt needs, instead of sending a request that silently ignores the
   instruction (ADR-0214).
 
+- **The first `harness resume` is no longer blocked by its own plan.** After
+  `intake` and `plan` the only uncommitted files are `brief.md` and
+  `PROGRESS.md`, and `no_stale_uncommitted` stopped the run over them. `resume`
+  now commits those two as their own commit before the first step. Any other
+  uncommitted file still blocks, and then nothing is committed.
+
 - **Planning now says exactly how to declare a step's scope.** A plan with an
   automatic work profile was rejected for "no scope" on every step, because the
   planner template showed three metadata lines and the instruction to add a
