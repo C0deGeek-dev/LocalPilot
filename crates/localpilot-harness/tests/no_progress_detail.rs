@@ -245,11 +245,14 @@ fn assert_exact_surface(
 
 #[tokio::test]
 async fn stuck_repeat_stop_persists_the_exact_detail_notice_and_warning() {
-    // 3 identical reads trip; the 1 grace dispatch is a fourth identical read
-    // whose observation updates the count to 4 before the stop.
+    // Reads cycling f,g (never repeating the previous call, so only the
+    // windowed detector sees them): the third f trips on call 5; the 1 grace
+    // dispatch is the third g, whose observation keeps the signal active and
+    // supplies the stop's count.
     let mut provider = FakeProvider::new();
-    for _ in 0..10 {
-        provider = provider.tool_call("c", "read_file", json!({ "path": "f.txt" }));
+    for i in 0..10 {
+        let path = if i % 2 == 0 { "f.txt" } else { "g.txt" };
+        provider = provider.tool_call(&format!("c{i}"), "read_file", json!({ "path": path }));
     }
     provider = provider.text("done");
 
@@ -257,13 +260,13 @@ async fn stuck_repeat_stop_persists_the_exact_detail_notice_and_warning() {
         provider,
         ToolRegistry::with_builtins(),
         default_rail(),
-        &[("f.txt", "x\n")],
+        &[("f.txt", "x\n"), ("g.txt", "y\n")],
     );
     let r = run_and_read(runtime, &dir, "spin").await;
     assert_exact_surface(
         &r,
-        r#"signal=stuck_repeat tool="read_file" count=4"#,
-        4,
+        r#"signal=stuck_repeat tool="read_file" count=3"#,
+        6,
         1,
         1,
     );
@@ -271,9 +274,15 @@ async fn stuck_repeat_stop_persists_the_exact_detail_notice_and_warning() {
 
 #[tokio::test]
 async fn consecutive_failures_stop_persists_the_exact_detail() {
+    // Each read names a different missing file, so no failure repeats its
+    // predecessor exactly and only the consecutive-failure backstop applies.
     let mut provider = FakeProvider::new();
-    for _ in 0..20 {
-        provider = provider.tool_call("c", "read_file", json!({ "path": "missing.txt" }));
+    for i in 0..20 {
+        provider = provider.tool_call(
+            &format!("c{i}"),
+            "read_file",
+            json!({ "path": format!("missing{i}.txt") }),
+        );
     }
     provider = provider.text("gave up");
 
@@ -303,26 +312,32 @@ async fn novelty_decay_stop_persists_the_exact_detail() {
 
 #[tokio::test]
 async fn failing_grace_keeps_the_trip_tool_provenance() {
-    // read_file trips (X); the grace dispatch is a different tool that FAILS (Y),
-    // so no successful observation replaces the signal — the stop names X/count 3,
-    // never Y.
+    // read_file trips (X) on the cycle f,g,f,g,f; the grace dispatch is a
+    // different tool that FAILS (Y), so no successful observation replaces the
+    // signal — the stop names X/count 3, never Y.
     let provider = FakeProvider::new()
         .tool_call("c1", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c2", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c2", "read_file", json!({ "path": "g.txt" }))
         .tool_call("c3", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c4", "boom", json!({}))
+        .tool_call("c4", "read_file", json!({ "path": "g.txt" }))
         .tool_call("c5", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c6", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c6", "boom", json!({}))
+        .tool_call("c7", "read_file", json!({ "path": "f.txt" }))
         .text("done");
 
     let mut registry = ToolRegistry::with_builtins();
     registry.register(Box::new(BoomTool));
-    let (runtime, dir) = build(provider, registry, default_rail(), &[("f.txt", "x\n")]);
+    let (runtime, dir) = build(
+        provider,
+        registry,
+        default_rail(),
+        &[("f.txt", "x\n"), ("g.txt", "y\n")],
+    );
     let r = run_and_read(runtime, &dir, "grace fails").await;
     assert_exact_surface(
         &r,
         r#"signal=stuck_repeat tool="read_file" count=3"#,
-        4,
+        6,
         1,
         1,
     );
@@ -334,29 +349,37 @@ async fn failing_grace_keeps_the_trip_tool_provenance() {
 
 #[tokio::test]
 async fn explicit_budget_persists_the_original_stuck_repeat_cause() {
-    // Explicit soft=5: read_file trips below the soft start; two novel reads
-    // clear the DYNAMIC signal, but the persisted detail is the MONOTONE
-    // first-since-reset cause — the original stuck-repeat, count 3.
+    // Explicit soft=7: read_file trips below the soft start on the cycle
+    // f,g,f,g,f; two novel reads clear the DYNAMIC signal, but the persisted
+    // detail is the MONOTONE first-since-reset cause — the original
+    // stuck-repeat, count 3.
     let provider = FakeProvider::new()
         .tool_call("c1", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c2", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c2", "read_file", json!({ "path": "g.txt" }))
         .tool_call("c3", "read_file", json!({ "path": "f.txt" }))
         .tool_call("c4", "read_file", json!({ "path": "g.txt" }))
-        .tool_call("c5", "read_file", json!({ "path": "h.txt" }))
-        .tool_call("c6", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c5", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c6", "read_file", json!({ "path": "h.txt" }))
+        .tool_call("c7", "read_file", json!({ "path": "i.txt" }))
+        .tool_call("c8", "read_file", json!({ "path": "f.txt" }))
         .text("done");
 
     let (runtime, dir) = build(
         provider,
         ToolRegistry::with_builtins(),
-        explicit(5, 50),
-        &[("f.txt", "x\n"), ("g.txt", "y\n"), ("h.txt", "z\n")],
+        explicit(7, 50),
+        &[
+            ("f.txt", "x\n"),
+            ("g.txt", "y\n"),
+            ("h.txt", "z\n"),
+            ("i.txt", "w\n"),
+        ],
     );
     let r = run_and_read(runtime, &dir, "explicit").await;
     assert_exact_surface(
         &r,
         r#"signal=stuck_repeat tool="read_file" count=3"#,
-        5,
+        7,
         1,
         1,
     );

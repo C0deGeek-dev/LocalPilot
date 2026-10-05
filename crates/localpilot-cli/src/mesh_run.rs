@@ -1490,9 +1490,9 @@ mod tests {
                 "{\"kind\":\"VERDICT\",\"decision\":\"AGREE\",\"body\":\"review complete\"}")],
             );
         let post = judgement(&mut judge, dir.path(), &request(Need::Review)).await;
-        // Third repeat nudges; one grace search executes, then the next stops.
+        // The second identical search is nudged and the third stops the turn.
         assert_eq!(judge.turns[0].0, StopReason::NoProgress);
-        assert_eq!(judge.turns[0].1, 6);
+        assert_eq!(judge.turns[0].1, 5);
         assert_eq!(judge.turns[0].2, 2);
         assert!(judge.turns[0].4);
         assert_eq!(post.kind, "VERDICT");

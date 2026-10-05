@@ -1250,6 +1250,34 @@ still means no *cost* ceiling. Pinned by the `localpilot-harness` budget tests
 (a spinning loop and a run of failing calls both halt with the budget off; a long
 productive turn is not).
 
+### Repeated-Observation Guard
+
+Doing the same thing again and expecting a different result is caught directly
+(ADR-0215). Every executed call yields an *observation*: the tool and its
+dispatched arguments (JSON with keys sorted at every level), the outcome class,
+and the tool's own result — taken before read elision rewrites it and before any
+harness notice is appended. When an observation is identical to the one
+immediately before it, the result carries a model-visible `[repeated call]`
+notice: the same input returned the same result, so change the input or the
+approach, or say what blocks you. A third identical observation in a row stops
+the turn with `NoProgress` and the detail `signal=repeated_observation
+tool="…" outcome=… count=3 call=<fingerprint> result=<fingerprint>` (16-hex
+SHA-256 prefixes, frozen at the trip). Any remaining calls in that model
+response are answered with a skipped result and never run, and no further
+provider request is made.
+
+The guard never prevents a call: every call runs and only what it returned is
+judged, so polling that advances, a re-run after an edit, or a change made
+outside the session never matches. Only *consecutive* observations count —
+anything different in between, or a user steer admitted at a safe boundary,
+restarts the run — because identical results also recur during real progress
+(edit, re-run the same failing build, edit again); interleaved cycles stay with
+the windowed no-progress detector above. The guard applies whether or not an
+operator budget is configured: a cost budget bounds spending, not repetition.
+Only a scripted actor replaying a recorded trajectory verbatim (the lesson lab's
+Logic tier) turns it off, since its repeats are the recording rather than a
+model's choice. Pinned by the `localpilot-harness` `repeat_guard` tests.
+
 ## Verify-Before-Done Gate
 
 A solve loop ends when the model stops calling tools — it "submits" by replying

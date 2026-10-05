@@ -468,6 +468,9 @@ async fn run_arm(
             trusted: false,
             tool_call_budget: Some(options.max_tool_calls),
             tool_call_budget_max: Some(options.max_tool_calls),
+            // The actor replays a recorded trajectory verbatim; a repeat in it
+            // is part of the recording, not a model failing to change course.
+            stop_repeated_observations: false,
             tool_budget_explicit: true,
             ..SessionConfig::default()
         },

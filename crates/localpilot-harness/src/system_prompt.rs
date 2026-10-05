@@ -290,14 +290,16 @@ const TOOL_LOOP_SECTION: &str = "Tool use loop:
 - call one or more tools with valid JSON inputs;
 - read tool results, including error results;
 - repair malformed or incomplete tool calls instead of repeating them;
+- if a call returns the same result for the same input twice in a row, do not
+  send it again: change the input or the approach, or say what blocks you (a
+  third identical result stops the turn). Repeating a call after something
+  changed — an edit, a job that advances — is fine;
 - continue until the task is complete, blocked by a concrete reason, or the user
   cancels.
 
 Shell discipline. For a multiline or heavily-quoted command, do not fight inline
 quote escaping across the shell-to-interpreter boundary: write the body to a
-script file (`.py`, `.ps1`, or `.sh`) and run that file instead. If a command
-fails the same way twice, stop and change approach rather than re-sending it — a
-repeated identical error will keep failing. If a needed command-line tool is
+script file (`.py`, `.ps1`, or `.sh`) and run that file instead. If a needed command-line tool is
 missing, say so plainly and surface the gap instead of silently working around
 it.";
 
@@ -678,10 +680,17 @@ mod tests {
             prompt.contains(".ps1"),
             "missing concrete script extensions"
         );
-        // Stop repeating an identical failing command.
+        // Stop repeating a call only once it has returned the same result
+        // twice in a row; repeating after a change stays allowed.
         assert!(
-            prompt.contains("same way twice"),
-            "missing repeated-error guidance"
+            prompt.contains("same result for the same input twice in a row"),
+            "missing repeated-call guidance"
+        );
+        assert!(
+            prompt.contains("after something")
+                && prompt.contains("changed")
+                && !prompt.contains("the same input gives the same"),
+            "the guidance must not claim input alone determines the result"
         );
         // Surface a missing tool instead of working around it.
         assert!(

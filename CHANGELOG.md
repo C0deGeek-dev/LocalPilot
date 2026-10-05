@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Repeating a call that just returned stops quickly.** When a tool call has
+  the same input and returns the same result as the call right before it, the
+  result now says so and asks the model to change the input or approach; a
+  third identical repeat stops the turn (`NoProgress`, with the tool and
+  fingerprints in the session log) and skips any further copies queued in the
+  same response. Every call still runs, so polling that advances or a re-run
+  after an edit is never treated as a repeat, and the stop applies with or
+  without an operator tool budget (ADR-0215).
+
 - **The context gauge and compaction count the tool schemas.** Every request
   carries the JSON schemas of its advertised tools — about 7,000 estimated
   tokens for the built-in set — but the estimate only counted messages. The
@@ -19,7 +28,7 @@ is SemVer-stable; the configuration schema stability policy is in
   compaction would drop the user's input or a steering message from the
   current turn, the turn now stops before sending and says how much each part
   of the prompt needs, instead of sending a request that silently ignores the
-  instruction.
+  instruction (ADR-0214).
 
 - **Planning now says exactly how to declare a step's scope.** A plan with an
   automatic work profile was rejected for "no scope" on every step, because the

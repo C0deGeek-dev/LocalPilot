@@ -2,6 +2,81 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0215: The Same Call Returning The Same Result Is Nudged Once, Then Stopped
+
+**Status:** accepted · **Date:** 2026-10-05. Amends ADR-0052 and ADR-0146.
+
+**Context.** Local models repeat one tool call until a limit stops them. The
+existing guards stop late and are partly switched off: the same-error breaker
+only nudges at the third identical error, the consecutive-failure backstop
+stops at twelve, the windowed detector allows a nudge plus a grace call, and an
+explicit operator budget hands the no-progress stop to the cost controller,
+which waits for its soft start. A prompt rule alone does not change a weak
+model's behaviour.
+
+**Decision.**
+- Every executed call yields an observation: tool plus dispatched arguments
+  (keys sorted at every level), outcome class, and the tool's own result,
+  captured before read elision or any harness notice.
+- The second consecutive identical observation gets a model-visible
+  `[repeated call]` notice; the third stops the turn with `NoProgress`
+  (`signal=repeated_observation tool="…" outcome=… count=3 call=… result=…`,
+  SHA-256 prefixes frozen at the trip). Remaining calls in that response are
+  answered as skipped; no further dispatch or provider request happens.
+- Calls are never suppressed or answered from a cache: identical input without
+  a local change does not imply an identical result (polling, background work,
+  external changes), so only the observed result is judged.
+- Only consecutive observations count. Anything different in between, or an
+  admitted user steer, restarts the run; interleaved cycles stay with the
+  windowed detector (ADR-0146), whose behaviour is unchanged for them.
+- The guard is always on for model-driven sessions, explicit budget or not.
+  Thresholds are constants. The one exception is a scripted actor replaying a
+  recorded trajectory verbatim (the lesson lab's Logic tier): its repeats are
+  the recording, so it runs with `SessionConfig::stop_repeated_observations`
+  off.
+- The agent prompt states the rule once, in the tool-use loop.
+
+**Consequences.**
+- A model re-sending one call stops after three executions instead of twelve
+  or the budget's soft start; the first repeat tells it why.
+- Re-reading an unchanged file twice in a row is nudged.
+- Tests that drove the windowed detector or the failure breakers with
+  back-to-back identical calls now interleave calls or vary arguments, so each
+  mechanism keeps its own coverage.
+
+## ADR-0214: Requests Count Their Tool Schemas, And Never Drop A Turn Instruction
+
+**Status:** accepted · **Date:** 2026-10-05. Refines ADR-0158 and ADR-0159.
+
+**Context.** Each request carries the JSON schemas of its advertised tools —
+about 7,000 estimated tokens for the built-in set — but the context estimate
+counted messages only. The provider's prompt count includes the schemas, so the
+calibration ratio absorbed that fixed overhead and multiplied all later history
+by about six: on a small window the gauge read nearly full after one exchange
+and compaction trimmed far too early. Counting the schemas honestly then exposed
+a second fault: with the overhead reserved, a small budget made compaction keep
+only the newest exchange and silently drop the user's input or a steering
+message, and the request went out without it.
+
+**Decision.**
+- The estimate is messages plus the tool specs the request actually advertises,
+  resolved before compaction (a broker reveal counts; an answer-only turn
+  advertises none). Compaction reserves the specs out of the history budget;
+  the gauge, compaction events and calibration all use the complete estimate.
+- After compaction and before dispatch, the projected request must still
+  contain every instruction admitted this turn — the input and each injected
+  steering message. Otherwise the turn stops before sending, with the
+  estimated size of the system prompt, tool definitions, turn context and
+  instructions against the input budget.
+
+**Consequences.**
+- Calibration now corrects tokenizer drift only, not fixed overhead.
+- A single oversized instruction is still sent (compaction keeps the newest
+  exchange whole); only a projection that lost an instruction is refused.
+- A long turn on a normal window now stops, instead of silently dropping an
+  early steering message, when compaction would remove it. Keeping current-turn
+  instructions through compaction is future work.
+
 ## ADR-0213: Print Reads In A Trusted Folder, And Says So When It Cannot
 
 **Status:** accepted · **Date:** 2026-10-04.

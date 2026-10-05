@@ -22,7 +22,8 @@ use localpilot_llm::{
 };
 use localpilot_recovery::{
     detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, NoProgressSignal,
-    RecoveryAction, RecoveryEngine, RepeatedErrorBreaker, StreamMonitor,
+    RecoveryAction, RecoveryEngine, RepeatedErrorBreaker, RepeatedObservation,
+    RepeatedObservationGuard, StreamMonitor,
 };
 use localpilot_sandbox::{
     Approver, Interactivity, PermissionEngine, PermissionEngineHandle, Profile,
@@ -338,6 +339,11 @@ pub struct SessionConfig {
     /// elide_seen_reads`. Conservative — a changed file (or any doubt) always
     /// returns full content.
     pub elide_seen_reads: bool,
+    /// Stop a turn whose model repeats one call with the same result three
+    /// times in a row (ADR-0215). On for every model-driven session; a
+    /// scripted actor that replays a recorded trajectory verbatim turns it off,
+    /// because its repeats are the recording, not a model's choice.
+    pub stop_repeated_observations: bool,
     /// Incognito session: nothing is persisted (the store is in-memory, prompt
     /// history is off, closeout/knowledge-indexing/notify-hooks are skipped by
     /// the host), and every file a tool creates is gated behind an interactive
@@ -374,6 +380,7 @@ impl Default for SessionConfig {
             verify_before_done: false,
             verify_command: None,
             elide_seen_reads: false,
+            stop_repeated_observations: true,
             incognito: false,
         }
     }
@@ -954,6 +961,79 @@ fn same_failure_hint(tool: &str) -> String {
 /// forward progress — the same successful calls repeating, or a tiny cycle of
 /// calls — so the model breaks out before the budget controller stops the turn.
 /// First-party text; mirrors [`same_error_hint`].
+/// The model-visible notice appended to a result that repeats the previous
+/// call's input and result exactly.
+fn repeated_observation_hint(count: usize) -> String {
+    format!(
+        "\n\n[repeated call] This call had the same input as the previous one and \
+         returned the same result ({count} times in a row). Repeating it will not change \
+         the outcome: change the input, take a different approach, or state what is \
+         blocking you. Another identical repeat stops the turn."
+    )
+}
+
+/// What a call observed, for the repeated-observation guard: the outcome
+/// class, the raw text, and — framed so an absent image never equals a present
+/// one — the image's media type and a digest of its bytes. The text alone is not
+/// enough: an image tool can return the same description over a changed image.
+fn observation_identity(result: &ToolResult) -> String {
+    format!(
+        "{:?}\u{1f}{}",
+        result.outcome,
+        observed_output(&result.output, result)
+    )
+}
+
+/// A result's text plus its image identity, framed so an absent image never
+/// equals a present one. Both repeat detectors compare this, not the text
+/// alone, so a changed image behind an unchanged description is progress.
+fn observed_output(text: &str, result: &ToolResult) -> String {
+    match &result.image {
+        None => format!("{text}\u{1f}none"),
+        Some(image) => format!(
+            "{text}\u{1f}some\u{1e}{}\u{1e}{}",
+            image.media_type,
+            short_fingerprint(&image.data)
+        ),
+    }
+}
+
+/// JSON with object keys sorted at every level, so two calls with the same
+/// arguments in a different key order are the same call.
+fn canonical_json(value: &serde_json::Value) -> String {
+    fn sorted(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                serde_json::Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key.clone(), sorted(value)))
+                        .collect(),
+                )
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(sorted).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    sorted(value).to_string()
+}
+
+/// The first 16 hex digits of a string's SHA-256: a stable, value-free
+/// fingerprint for a persisted diagnostic.
+fn short_fingerprint(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(16);
+    for byte in Sha256::digest(text.as_bytes()).iter().take(8) {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 fn no_progress_hint() -> String {
     "\n\n[recovery] These tool calls are not making forward progress — the same \
      calls keep returning the same results. Do not repeat them: either act on \
@@ -967,9 +1047,27 @@ fn no_progress_hint() -> String {
 /// successful observation that produced the signal (provenance).
 #[derive(Debug, Clone)]
 enum NoProgressDiagnostic {
-    StuckRepeat { tool: String, count: usize },
-    NoveltyDecay { window: usize, distinct: usize },
-    ConsecutiveFailures { count: usize },
+    StuckRepeat {
+        tool: String,
+        count: usize,
+    },
+    NoveltyDecay {
+        window: usize,
+        distinct: usize,
+    },
+    ConsecutiveFailures {
+        count: usize,
+    },
+    /// The same call (tool and arguments) returned the same outcome and result
+    /// `count` times in a row. `call` and `result` are short SHA-256
+    /// fingerprints of the two observed strings, frozen at the trip.
+    RepeatedObservation {
+        tool: String,
+        outcome: String,
+        count: usize,
+        call: String,
+        result: String,
+    },
 }
 
 /// Map the detector's typed signal (plus the tool that produced it) to a
@@ -1006,6 +1104,19 @@ fn no_progress_notice(diagnostic: &NoProgressDiagnostic) -> (String, String) {
         }
         NoProgressDiagnostic::ConsecutiveFailures { count } => {
             format!("signal=consecutive_failures count={count}")
+        }
+        NoProgressDiagnostic::RepeatedObservation {
+            tool,
+            outcome,
+            count,
+            call,
+            result,
+        } => {
+            let tool = serde_json::Value::String(tool.clone()).to_string();
+            format!(
+                "signal=repeated_observation tool={tool} outcome={outcome} count={count} \
+                 call={call} result={result}"
+            )
         }
     };
     let notice = format!("no forward progress this turn ({detail}); stopping instead of spinning");
@@ -1170,6 +1281,8 @@ pub struct SessionRuntime {
     /// so the model is nudged to change approach before the failure budget is
     /// spent. Reset each turn alongside `tool_failure_guard`.
     error_breaker: RepeatedErrorBreaker,
+    /// Consecutive identical observations (same call, same result) this turn.
+    repeat_guard: RepeatedObservationGuard,
     /// Optional injected smart summarizer. When unset and smart mode is active,
     /// a provider-backed summarizer is built on demand from `provider`.
     summarizer: Option<Arc<dyn Summarizer>>,
@@ -1330,6 +1443,7 @@ impl SessionRuntime {
             hooks: HookFabric::default(),
             tool_failure_guard: ToolFailureGuard::default(),
             error_breaker: RepeatedErrorBreaker::default(),
+            repeat_guard: RepeatedObservationGuard::default(),
             summarizer: None,
             rule_engine,
             named_targets: Vec::new(),
@@ -2665,6 +2779,7 @@ impl SessionRuntime {
         *dynamic_diagnostic = None;
         *monotone_diagnostic = None;
         self.error_breaker.reset();
+        self.repeat_guard.reset();
         self.tool_failure_guard.reset();
     }
 
@@ -3453,6 +3568,7 @@ impl SessionRuntime {
         self.last_quota = None;
         self.tool_failure_guard.reset();
         self.error_breaker.reset();
+        self.repeat_guard.reset();
         let mut tools_enabled = !self.config.answer_only;
         // A provider may reject a request as too large even when the local
         // estimate believed it fit. The first overflow forces tighter
@@ -4653,6 +4769,18 @@ impl SessionRuntime {
                 }
                 self.capability_evidence.observe_outcome(!result.is_error());
 
+                // Same input, same result: judge what this call observed before
+                // any harness rewrite (read elision names the prior call, so its
+                // stub differs every time) or appended notice, over the arguments
+                // actually dispatched.
+                let observed_call = format!("{name}\u{1f}{}", canonical_json(projected_input));
+                let observed_result = observation_identity(&result);
+                let repeat = if self.config.stop_repeated_observations {
+                    self.repeat_guard.observe(&observed_call, &observed_result)
+                } else {
+                    RepeatedObservation::Fresh
+                };
+
                 // Every workspace file a call named is now "in play", whether the
                 // call read it, wrote it, or failed on it: a path-scoped
                 // instruction file is about the file, not about the outcome.
@@ -4802,7 +4930,8 @@ impl SessionRuntime {
                         // arguments; the output is the observable state, so a re-read
                         // after a real change (different output) is not flagged.
                         let signature = format!("{name}\u{1f}{input}");
-                        if no_progress.observe(&signature, &result.output) {
+                        let observed = observed_output(&result.output, &result);
+                        if no_progress.observe(&signature, &observed) {
                             let _ = events.send(RuntimeEvent::Warning(
                                 "tool calls are not making forward progress; nudging a strategy change"
                                     .to_string(),
@@ -4821,6 +4950,28 @@ impl SessionRuntime {
                         }
                     }
                 }
+                let repeated_stop = match repeat {
+                    RepeatedObservation::Fresh => None,
+                    RepeatedObservation::Nudge { count } => {
+                        let _ = events.send(RuntimeEvent::Warning(format!(
+                            "tool `{name}` returned the same result for the same input \
+                             {count} times in a row; nudging a change of approach"
+                        )));
+                        result.output.push_str(&repeated_observation_hint(count));
+                        None
+                    }
+                    // Frozen at the trip: tool, outcome, count and fingerprints of
+                    // the observation that tripped, not of anything later.
+                    RepeatedObservation::Stop { count } => {
+                        Some(NoProgressDiagnostic::RepeatedObservation {
+                            tool: name.clone(),
+                            outcome: format!("{:?}", result.outcome),
+                            count,
+                            call: short_fingerprint(&observed_call),
+                            result: short_fingerprint(&observed_result),
+                        })
+                    }
+                };
                 let _ = events.send(RuntimeEvent::ToolFinished {
                     id: result.id.to_string(),
                     name: name.clone(),
@@ -4847,6 +4998,20 @@ impl SessionRuntime {
                     Role::Tool,
                     vec![ContentBlock::ToolResult(result)],
                 ));
+                // The same call produced the same result again after the nudge:
+                // answer every remaining tool_use in this batch without running
+                // it (the wire contract needs one result per tool_use) and stop
+                // before any further dispatch or provider request.
+                if let Some(diagnostic) = repeated_stop {
+                    for (skip_id, _, _, _) in &calls[call_index + 1..] {
+                        self.append(tool_error_message(
+                            skip_id,
+                            "skipped: the turn stopped because the same call kept \
+                             returning the same result",
+                        ));
+                    }
+                    return self.stop_no_progress(events, &diagnostic);
+                }
             }
         }
     }
@@ -5314,6 +5479,19 @@ mod tests {
     use localpilot_llm::{FakeProvider, ProviderDeclaration};
     use localpilot_recovery::RecoveryBudget;
     use localpilot_sandbox::{ScriptedApprover, Workspace};
+
+    #[test]
+    fn canonical_json_is_independent_of_key_order() {
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"b":{"y":2,"x":1},"a":[{"d":4,"c":3}]}"#).unwrap();
+        let b: serde_json::Value =
+            serde_json::from_str(r#"{"a":[{"c":3,"d":4}],"b":{"x":1,"y":2}}"#).unwrap();
+        assert_eq!(canonical_json(&a), canonical_json(&b));
+        assert_eq!(
+            canonical_json(&a),
+            r#"{"a":[{"c":3,"d":4}],"b":{"x":1,"y":2}}"#
+        );
+    }
 
     #[test]
     fn overflow_image_limit_counts_tool_results_and_keeps_the_newest_image() {

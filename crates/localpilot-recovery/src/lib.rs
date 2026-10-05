@@ -12,7 +12,8 @@ mod engine;
 pub use detect::{
     detect, error_signature, is_repeated_token_loop, is_slash_flood, BadOutputKind,
     BudgetController, BudgetDecision, NoProgressDetector, NoProgressSignal, RepeatedErrorBreaker,
-    StreamMonitor, NO_PROGRESS_DISTINCT_FLOOR, NO_PROGRESS_GRACE_CALLS,
-    NO_PROGRESS_REPEAT_THRESHOLD, NO_PROGRESS_WINDOW, SAME_ERROR_THRESHOLD,
+    RepeatedObservation, RepeatedObservationGuard, StreamMonitor, NO_PROGRESS_DISTINCT_FLOOR,
+    NO_PROGRESS_GRACE_CALLS, NO_PROGRESS_REPEAT_THRESHOLD, NO_PROGRESS_WINDOW,
+    REPEATED_OBSERVATION_NUDGE, REPEATED_OBSERVATION_STOP, SAME_ERROR_THRESHOLD,
 };
 pub use engine::{ModelHealth, RecoveryAction, RecoveryBudget, RecoveryDiagnostic, RecoveryEngine};

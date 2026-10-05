@@ -407,8 +407,8 @@ async fn elision_off_by_default_returns_full_content_on_a_reread() {
     let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
     let outputs = tool_result_outputs(&transcript);
     assert_eq!(outputs.len(), 2);
-    assert_eq!(
-        outputs[0], outputs[1],
+    assert!(
+        outputs[1].starts_with(outputs[0].as_str()),
         "with elision off both reads return full content"
     );
     assert!(!outputs[1].contains("elided"));
@@ -637,10 +637,13 @@ impl ModelProvider for SteerAfterNProvider {
         }
         if n < self.total {
             Ok(Box::pin(futures::stream::iter([
+                // Cycle two files: no call repeats its predecessor, so the
+                // windowed no-progress detector (not the consecutive repeat
+                // guard) is the breaker these spins exercise.
                 Ok(ModelEvent::ToolCall {
                     id: format!("c{n}"),
                     name: "read_file".to_string(),
-                    input_json: json!({ "path": "f.txt" }),
+                    input_json: json!({ "path": if n % 2 == 0 { "f.txt" } else { "g.txt" } }),
                     provider_metadata: None,
                 }),
                 Ok(ModelEvent::Done),
@@ -688,15 +691,16 @@ fn steer_counts(events: &[RuntimeEvent]) -> (usize, usize, usize) {
 #[tokio::test]
 async fn a_user_steer_mid_spin_resets_the_progress_breakers_for_a_fresh_round() {
     use localpilot_harness::SoftInterruptSource;
-    // Spin on identical reads; a User steer is pushed during the third call (the
-    // call that trips the detector) and admitted at the next safe boundary, which
-    // resets the progress breakers. The same repetition then takes a fresh full
-    // round to re-trip: 3 calls trip, reset, 3 more re-trip, and the 7th is
-    // stopped — 6 executed calls, versus the un-steered 4. The preserved per-turn
-    // nudge means no second Warning/hint/grace.
-    let provider = Arc::new(SteerAfterNProvider::new(2, SoftInterruptSource::User, 20));
+    // Spin on reads cycling f,g; a User steer is pushed during the fifth call
+    // (the call that trips the detector) and admitted at the next safe
+    // boundary, which resets the progress breakers. The same repetition then
+    // takes a fresh full round to re-trip: 5 calls trip, reset, 5 more re-trip,
+    // and the 11th is stopped — 10 executed calls, versus the un-steered 6. The
+    // preserved per-turn nudge means no second Warning/hint/grace.
+    let provider = Arc::new(SteerAfterNProvider::new(4, SoftInterruptSource::User, 30));
     let mut h = build_from_provider(provider.clone(), steer_spin_config());
     std::fs::write(h._dir.path().join("f.txt"), "x\n").unwrap();
+    std::fs::write(h._dir.path().join("g.txt"), "y\n").unwrap();
     provider.set_queue(h.runtime.steer_queue());
     let mut rx = h.events.subscribe();
 
@@ -705,7 +709,7 @@ async fn a_user_steer_mid_spin_resets_the_progress_breakers_for_a_fresh_round() 
 
     assert_eq!(reason, StopReason::NoProgress);
     assert_eq!(
-        tool_calls, 6,
+        tool_calls, 10,
         "the user steer reset the detector, buying a fresh round before the re-trip"
     );
     assert_eq!(
@@ -719,11 +723,12 @@ async fn a_user_steer_mid_spin_resets_the_progress_breakers_for_a_fresh_round() 
 async fn a_system_steer_mid_spin_does_not_reset_the_progress_breakers() {
     use localpilot_harness::SoftInterruptSource;
     // The same script, but the mid-spin interrupt is a System source: it is
-    // admitted but resets nothing, so the turn stops after the normal 4 calls
-    // (3 trip + 1 grace), exactly like the un-steered spin.
-    let provider = Arc::new(SteerAfterNProvider::new(2, SoftInterruptSource::System, 20));
+    // admitted but resets nothing, so the turn stops after the normal 6 calls
+    // (5 trip + 1 grace), exactly like the un-steered spin.
+    let provider = Arc::new(SteerAfterNProvider::new(4, SoftInterruptSource::System, 30));
     let mut h = build_from_provider(provider.clone(), steer_spin_config());
     std::fs::write(h._dir.path().join("f.txt"), "x\n").unwrap();
+    std::fs::write(h._dir.path().join("g.txt"), "y\n").unwrap();
     provider.set_queue(h.runtime.steer_queue());
     let mut rx = h.events.subscribe();
 
@@ -732,7 +737,7 @@ async fn a_system_steer_mid_spin_does_not_reset_the_progress_breakers() {
 
     assert_eq!(reason, StopReason::NoProgress);
     assert_eq!(
-        tool_calls, 4,
+        tool_calls, 6,
         "a system steer does not reset the breakers; the spin stops at the normal boundary"
     );
     assert_eq!(warnings, 1);
@@ -766,10 +771,24 @@ async fn a_repeated_identical_tool_error_injects_a_strategy_change_hint() {
     // The same failing call three times in a row: the same-error breaker appends
     // a strategy-change hint to the third tool result — before the per-tool
     // failure budget (6) is spent — so a weak model stops re-sending it.
+    // The ranges differ, so no call repeats its predecessor exactly; the error
+    // is the same each time, which is what this breaker keys on.
     let provider = FakeProvider::new()
-        .tool_call("c1", "read_file", json!({ "path": "missing.txt" }))
-        .tool_call("c2", "read_file", json!({ "path": "missing.txt" }))
-        .tool_call("c3", "read_file", json!({ "path": "missing.txt" }))
+        .tool_call(
+            "c1",
+            "read_file",
+            json!({ "path": "missing.txt", "start_line": 1 }),
+        )
+        .tool_call(
+            "c2",
+            "read_file",
+            json!({ "path": "missing.txt", "start_line": 2 }),
+        )
+        .tool_call(
+            "c3",
+            "read_file",
+            json!({ "path": "missing.txt", "start_line": 3 }),
+        )
         .text("giving up");
     let mut h = build(provider, &[], SessionConfig::default());
 
@@ -2566,10 +2585,12 @@ async fn a_malfunctioning_tool_still_trips_the_stuck_guard_at_six() {
     // exactly at the threshold.
     let mut provider = FakeProvider::new();
     for i in 0..8 {
+        // A different range each time: the same malfunction, never an exact
+        // repeat of the previous call.
         provider = provider.tool_call(
             &format!("c{i}"),
             "read_file",
-            json!({ "path": "missing.txt" }),
+            json!({ "path": "missing.txt", "start_line": i + 1 }),
         );
     }
     let provider = provider.text("giving up");
@@ -2593,10 +2614,12 @@ async fn identical_reported_failures_get_the_failing_work_hint() {
     // Three identical failing runs with nothing landing in between: the nudge
     // fires, but with the failing-work wording — not the malfunction-shaped
     // "write it to a script file" advice.
+    // Whitespace variants of one command: the same failure each time, never an
+    // exact repeat of the previous call.
     let provider = FakeProvider::new()
-        .tool_call("c1", "run_shell", failing_command())
-        .tool_call("c2", "run_shell", failing_command())
-        .tool_call("c3", "run_shell", failing_command())
+        .tool_call("c1", "run_shell", json!({ "command": "exit 7" }))
+        .tool_call("c2", "run_shell", json!({ "command": "exit  7" }))
+        .tool_call("c3", "run_shell", json!({ "command": "exit   7" }))
         .text("giving up");
     let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
 
@@ -2657,10 +2680,12 @@ async fn the_handoff_counts_both_failure_kinds_and_reads_zero_when_clean() {
 async fn a_stuck_tool_is_named_in_the_handoff() {
     let mut provider = FakeProvider::new();
     for i in 0..6 {
+        // A different range each time: the same malfunction, never an exact
+        // repeat of the previous call.
         provider = provider.tool_call(
             &format!("c{i}"),
             "read_file",
-            json!({ "path": "missing.txt" }),
+            json!({ "path": "missing.txt", "start_line": i + 1 }),
         );
     }
     let provider = provider.text("giving up");

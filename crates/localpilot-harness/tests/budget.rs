@@ -103,14 +103,12 @@ fn a_runaway_tool_loop_hits_the_budget_and_stops() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join("f.txt"), "x\n").unwrap();
+    std::fs::write(root.join("g.txt"), "y\n").unwrap();
 
     // Five scripted read calls against a budget of three: the loop runs three,
-    // then stops at the fourth before it executes.
-    let mut provider = FakeProvider::new();
-    for _ in 0..5 {
-        provider = provider.tool_call("c", "read_file", json!({ "path": "f.txt" }));
-    }
-    provider = provider.text("done");
+    // then stops at the fourth before it executes. The reads alternate so no
+    // call repeats its predecessor; the budget, not a repeat guard, stops it.
+    let provider = cycling_reads_of(&["f.txt", "g.txt"], 5);
 
     let mut runtime = runtime(root, provider, 3);
     let (events, _rx) = broadcast::channel(64);
@@ -421,15 +419,24 @@ fn distinct_reads(root: &std::path::Path, count: usize) -> FakeProvider {
     provider.text("read them all")
 }
 
-/// A provider that reads the *same* file `count` times — a spinning turn that
-/// makes no forward progress.
-fn identical_reads(root: &std::path::Path, count: usize) -> FakeProvider {
-    std::fs::write(root.join("f.txt"), "x\n").unwrap();
+/// A provider that cycles through `paths` for `count` reads, then answers. No
+/// read repeats the one before it, so the consecutive repeated-observation
+/// guard never engages and only the windowed no-progress detector can see the
+/// spin.
+fn cycling_reads_of(paths: &[&str], count: usize) -> FakeProvider {
     let mut provider = FakeProvider::new();
-    for _ in 0..count {
-        provider = provider.tool_call("c", "read_file", json!({ "path": "f.txt" }));
+    for i in 0..count {
+        let path = paths[i % paths.len()];
+        provider = provider.tool_call(&format!("c{i}"), "read_file", json!({ "path": path }));
     }
     provider.text("done")
+}
+
+/// A spinning turn that makes no forward progress: two files read in turn.
+fn cycling_reads(root: &std::path::Path, count: usize) -> FakeProvider {
+    std::fs::write(root.join("f.txt"), "x\n").unwrap();
+    std::fs::write(root.join("g.txt"), "y\n").unwrap();
+    cycling_reads_of(&["f.txt", "g.txt"], count)
 }
 
 /// Compare the adaptive controller against the flat fixed ceiling across three
@@ -450,11 +457,11 @@ fn adaptive_vs_fixed_ceiling_ab() {
     let fixed_prod = run_ab(&prod_root, distinct_reads(&prod_root, 12), SOFT, SOFT);
     let adaptive_prod = run_ab(&prod_root, distinct_reads(&prod_root, 12), SOFT, MAX);
 
-    // (b) Spinning: 12 identical reads — no forward progress.
+    // (b) Spinning: 12 reads cycling two files — no forward progress.
     let spin_root = dir.path().join("spinning");
     std::fs::create_dir_all(&spin_root).unwrap();
-    let fixed_spin = run_ab(&spin_root, identical_reads(&spin_root, 12), SOFT, SOFT);
-    let adaptive_spin = run_ab(&spin_root, identical_reads(&spin_root, 12), SOFT, MAX);
+    let fixed_spin = run_ab(&spin_root, cycling_reads(&spin_root, 12), SOFT, SOFT);
+    let adaptive_spin = run_ab(&spin_root, cycling_reads(&spin_root, 12), SOFT, MAX);
 
     // (c) Runaway that defeats the no-progress signal: 60 distinct reads.
     let run_root = dir.path().join("runaway");
@@ -467,7 +474,7 @@ fn adaptive_vs_fixed_ceiling_ab() {
         fixed_prod.reason, adaptive_prod.reason
     );
     eprintln!(
-        "  spinning(12 identical):  fixed={:?} adaptive={:?} (nudged={})",
+        "  spinning(12 cycling):    fixed={:?} adaptive={:?} (nudged={})",
         fixed_spin.reason, adaptive_spin.reason, adaptive_spin.nudged
     );
     eprintln!(
@@ -563,15 +570,19 @@ fn default_rail_trips_then_a_novel_call_recovers_and_finishes() {
     std::fs::write(root.join("f.txt"), "x\n").unwrap();
     std::fs::write(root.join("g.txt"), "y\n").unwrap();
 
-    // Three identical reads trip the detector (one Warning + one model-visible
-    // hint + one grace dispatch); the grace call is a genuinely NOVEL read that
-    // recomputes the dynamic signal to clear, so the turn recovers and finishes
-    // on its own answer — trip → nudge → novel → Done.
+    std::fs::write(root.join("h.txt"), "z\n").unwrap();
+
+    // A cycle f,g,f,g,f trips the detector on the third identical f read (one
+    // Warning + one model-visible hint + one grace dispatch); the grace call is
+    // a genuinely NOVEL read that recomputes the dynamic signal to clear, so the
+    // turn recovers and finishes on its own answer — trip → nudge → novel → Done.
     let provider = FakeProvider::new()
         .tool_call("c1", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c2", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c2", "read_file", json!({ "path": "g.txt" }))
         .tool_call("c3", "read_file", json!({ "path": "f.txt" }))
         .tool_call("c4", "read_file", json!({ "path": "g.txt" }))
+        .tool_call("c5", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c6", "read_file", json!({ "path": "h.txt" }))
         .text("done");
 
     let obs = observe_turn(runtime_no_budget(root, provider), "read then recover");
@@ -579,8 +590,8 @@ fn default_rail_trips_then_a_novel_call_recovers_and_finishes() {
     assert_eq!(obs.warnings, 1, "exactly one strategy-change Warning");
     assert_eq!(obs.hints, 1, "exactly one model-visible hint");
     assert_eq!(
-        obs.tool_calls, 4,
-        "three identical reads + the one novel grace dispatch execute; then Done"
+        obs.tool_calls, 6,
+        "five cycling reads + the one novel grace dispatch execute; then Done"
     );
 }
 
@@ -589,15 +600,13 @@ fn default_rail_trips_then_stays_stuck_stops_after_exactly_one_grace() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join("f.txt"), "x\n").unwrap();
+    std::fs::write(root.join("g.txt"), "y\n").unwrap();
 
-    // Ten identical reads: the detector trips at the third (Warning + hint +
-    // grace), the fourth is the single grace dispatch, and the fifth call is
-    // stopped before it executes — trip → nudge → still-stuck → NoProgress.
-    let mut provider = FakeProvider::new();
-    for _ in 0..10 {
-        provider = provider.tool_call("c", "read_file", json!({ "path": "f.txt" }));
-    }
-    provider = provider.text("done");
+    // Ten reads cycling f,g: the detector trips on the fifth (the third f —
+    // Warning + hint + grace), the sixth (the third g) is the single grace
+    // dispatch and keeps the signal active, and the seventh call is stopped
+    // before it executes — trip → nudge → still-stuck → NoProgress.
+    let provider = cycling_reads_of(&["f.txt", "g.txt"], 10);
 
     let obs = observe_turn(runtime_no_budget(root, provider), "spin forever");
     assert_eq!(
@@ -608,8 +617,8 @@ fn default_rail_trips_then_stays_stuck_stops_after_exactly_one_grace() {
     assert_eq!(obs.warnings, 1, "exactly one Warning, never a second");
     assert_eq!(obs.hints, 1, "exactly one model-visible hint");
     assert_eq!(
-        obs.tool_calls, 4,
-        "3 to trip + exactly 1 grace dispatch; the 5th is stopped before executing"
+        obs.tool_calls, 6,
+        "5 to trip + exactly 1 grace dispatch; the 7th is stopped before executing"
     );
 }
 
@@ -619,16 +628,20 @@ fn default_rail_failing_grace_call_stops_before_another_call() {
     let root = dir.path();
     std::fs::write(root.join("f.txt"), "x\n").unwrap();
 
-    // Three identical successful reads trip/nudge (Warning + hint + grace); the
-    // fourth is the grace dispatch but it FAILS (missing file), so it never
-    // observes and cannot clear the signal — the next guard stops before a fifth
-    // call. NoProgress, exactly four executed calls, exactly one Warning + hint.
+    std::fs::write(root.join("g.txt"), "y\n").unwrap();
+
+    // A cycle f,g,f,g,f trips/nudges (Warning + hint + grace); the sixth call
+    // is the grace dispatch but it FAILS (missing file), so it never observes
+    // and cannot clear the signal — the next guard stops before a seventh call.
+    // NoProgress, exactly six executed calls, exactly one Warning + hint.
     let provider = FakeProvider::new()
         .tool_call("c1", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c2", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c2", "read_file", json!({ "path": "g.txt" }))
         .tool_call("c3", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c4", "read_file", json!({ "path": "missing.txt" }))
+        .tool_call("c4", "read_file", json!({ "path": "g.txt" }))
         .tool_call("c5", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c6", "read_file", json!({ "path": "missing.txt" }))
+        .tool_call("c7", "read_file", json!({ "path": "f.txt" }))
         .text("done");
 
     let obs = observe_turn(runtime_no_budget(root, provider), "grace then fail");
@@ -640,8 +653,8 @@ fn default_rail_failing_grace_call_stops_before_another_call() {
     assert_eq!(obs.warnings, 1, "exactly one Warning");
     assert_eq!(obs.hints, 1, "exactly one model-visible hint");
     assert_eq!(
-        obs.tool_calls, 4,
-        "3 to trip + the 1 failing grace dispatch; the 5th is stopped before executing"
+        obs.tool_calls, 6,
+        "5 to trip + the 1 failing grace dispatch; the 7th is stopped before executing"
     );
 }
 
@@ -652,17 +665,21 @@ fn default_rail_recovered_then_retripped_stops_normally() {
     std::fs::write(root.join("f.txt"), "x\n").unwrap();
     std::fs::write(root.join("g.txt"), "y\n").unwrap();
 
-    // Trip on three identical reads (Warning + hint + grace), recover on a novel
+    std::fs::write(root.join("h.txt"), "z\n").unwrap();
+
+    // Trip on the cycle f,g,f,g,f (Warning + hint + grace), recover on a novel
     // read (the grace dispatch clears the dynamic signal), then re-trip on the
-    // same repeated read. Because the nudge and grace are already spent, the next
+    // repeated f read. Because the nudge and grace are already spent, the next
     // offered call is stopped normally — no second Warning/hint, no second grace.
     let provider = FakeProvider::new()
         .tool_call("c1", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c2", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c2", "read_file", json!({ "path": "g.txt" }))
         .tool_call("c3", "read_file", json!({ "path": "f.txt" }))
         .tool_call("c4", "read_file", json!({ "path": "g.txt" }))
         .tool_call("c5", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c6", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c6", "read_file", json!({ "path": "h.txt" }))
+        .tool_call("c7", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c8", "read_file", json!({ "path": "g.txt" }))
         .text("done");
 
     let obs = observe_turn(runtime_no_budget(root, provider), "recover then re-trip");
@@ -674,8 +691,8 @@ fn default_rail_recovered_then_retripped_stops_normally() {
     assert_eq!(obs.warnings, 1, "the spent nudge never re-fires");
     assert_eq!(obs.hints, 1, "the spent hint never re-fires");
     assert_eq!(
-        obs.tool_calls, 5,
-        "3 trip + 1 novel grace (recover) + 1 re-trip; the 6th is stopped before executing"
+        obs.tool_calls, 7,
+        "5 trip + 1 novel grace (recover) + 1 re-trip; the 8th is stopped before executing"
     );
 }
 
@@ -684,13 +701,18 @@ fn default_rail_consecutive_failures_get_no_grace() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
 
-    // A run of failing calls (reading a missing file). The no-progress detector
+    // A run of failing calls (reading missing files). The no-progress detector
     // is fed only by successful calls, so it never warns and never mints a grace
     // here — the consecutive-failure backstop stops the turn on its own limit,
-    // with zero Warnings/hints and no extra grace dispatch.
+    // with zero Warnings/hints and no extra grace dispatch. Each read names a
+    // different file, so no failure repeats its predecessor exactly.
     let mut provider = FakeProvider::new();
-    for _ in 0..40 {
-        provider = provider.tool_call("c", "read_file", json!({ "path": "missing.txt" }));
+    for i in 0..40 {
+        provider = provider.tool_call(
+            &format!("c{i}"),
+            "read_file",
+            json!({ "path": format!("missing{i}.txt") }),
+        );
     }
     provider = provider.text("gave up");
 
@@ -714,26 +736,30 @@ fn explicit_budget_trip_below_soft_start_still_stops_like_the_latch() {
     std::fs::write(root.join("f.txt"), "x\n").unwrap();
     std::fs::write(root.join("g.txt"), "y\n").unwrap();
     std::fs::write(root.join("h.txt"), "z\n").unwrap();
+    std::fs::write(root.join("i.txt"), "w\n").unwrap();
 
     // The compatibility case the recompute must not break: an EXPLICIT budget
-    // (soft 5, max 50) with the trip happening BELOW the soft start. The cost
-    // controller continues while calls_used < soft_start, so calls 4 and 5 (novel
-    // reads) DO dispatch after the trip and clear the DYNAMIC signal — but the
-    // monotone since-reset view the controller reads stays set, so at calls_used
-    // == 5 the turn still stops NoProgress before a sixth call, exactly as the old
-    // irreversible latch did. (With a naive recoverable `is_tripped`, calls 4/5
-    // would clear it and the turn would run on — the regression this pins.)
+    // (soft 7, max 50) with the trip happening BELOW the soft start (the cycle
+    // f,g,f,g,f trips on call 5). The cost controller continues while
+    // calls_used < soft_start, so calls 6 and 7 (novel reads) DO dispatch after
+    // the trip and clear the DYNAMIC signal — but the monotone since-reset view
+    // the controller reads stays set, so at calls_used == 7 the turn still stops
+    // NoProgress before an eighth call, exactly as the old irreversible latch
+    // did. (With a naive recoverable `is_tripped`, calls 6/7 would clear it and
+    // the turn would run on — the regression this pins.)
     let provider = FakeProvider::new()
         .tool_call("c1", "read_file", json!({ "path": "f.txt" }))
-        .tool_call("c2", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c2", "read_file", json!({ "path": "g.txt" }))
         .tool_call("c3", "read_file", json!({ "path": "f.txt" }))
         .tool_call("c4", "read_file", json!({ "path": "g.txt" }))
-        .tool_call("c5", "read_file", json!({ "path": "h.txt" }))
-        .tool_call("c6", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c5", "read_file", json!({ "path": "f.txt" }))
+        .tool_call("c6", "read_file", json!({ "path": "h.txt" }))
+        .tool_call("c7", "read_file", json!({ "path": "i.txt" }))
+        .tool_call("c8", "read_file", json!({ "path": "f.txt" }))
         .text("done");
 
     let obs = observe_turn(
-        runtime_budgets(root, provider, 5, 50),
+        runtime_budgets(root, provider, 7, 50),
         "explicit trip below soft",
     );
     assert_eq!(
@@ -742,8 +768,8 @@ fn explicit_budget_trip_below_soft_start_still_stops_like_the_latch() {
         "the explicit controller still stops on no-progress at the soft start"
     );
     assert_eq!(
-        obs.tool_calls, 5,
-        "5 calls execute (trip below soft, novel calls clear the dynamic signal), \
-         then the 6th is stopped — matching the old latch"
+        obs.tool_calls, 7,
+        "7 calls execute (trip below soft, novel calls clear the dynamic signal), \
+         then the 8th is stopped — matching the old latch"
     );
 }

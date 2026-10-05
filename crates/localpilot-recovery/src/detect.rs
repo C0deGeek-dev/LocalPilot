@@ -321,6 +321,68 @@ impl RepeatedErrorBreaker {
     }
 }
 
+/// Consecutive identical observations — same call, same outcome, same result —
+/// at which the model is told that repeating the call will not change it.
+pub const REPEATED_OBSERVATION_NUDGE: usize = 2;
+/// Consecutive identical observations at which the turn stops: the nudge was
+/// ignored and the same input produced the same result once more.
+pub const REPEATED_OBSERVATION_STOP: usize = 3;
+
+/// What one observation means for the repeated-observation guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatedObservation {
+    /// Not a repeat of the previous observation (or not yet at a threshold).
+    Fresh,
+    /// The previous `count - 1` observations were identical to this one: tell
+    /// the model that the same input keeps producing the same result.
+    Nudge { count: usize },
+    /// The repeat continued past the nudge: stop the turn.
+    Stop { count: usize },
+}
+
+/// Catches a model doing the same thing again and expecting a different
+/// result: the same tool call (tool and canonical arguments) producing the same
+/// outcome and the same result several times *in a row*. It never prevents a
+/// call — every call runs and only its observed result is judged, so a call
+/// whose result legitimately changes (polling, a re-run after an edit, external
+/// state) never matches. Only consecutive observations count: any different
+/// observation in between restarts the count, because identical results also
+/// recur during real progress (edit, rerun the same failing build, edit again),
+/// and interleaved cycles belong to [`NoProgressDetector`]'s window.
+#[derive(Debug, Clone, Default)]
+pub struct RepeatedObservationGuard {
+    last: Option<(u64, u64)>,
+    count: usize,
+}
+
+impl RepeatedObservationGuard {
+    /// Record one executed call. `call` identifies the call (tool plus
+    /// canonical arguments); `result` identifies what it observed (outcome
+    /// class plus raw output, taken before any harness notice is appended).
+    pub fn observe(&mut self, call: &str, result: &str) -> RepeatedObservation {
+        let key = (digest(call), digest(result));
+        if self.last == Some(key) {
+            self.count += 1;
+        } else {
+            self.last = Some(key);
+            self.count = 1;
+        }
+        if self.count >= REPEATED_OBSERVATION_STOP {
+            RepeatedObservation::Stop { count: self.count }
+        } else if self.count >= REPEATED_OBSERVATION_NUDGE {
+            RepeatedObservation::Nudge { count: self.count }
+        } else {
+            RepeatedObservation::Fresh
+        }
+    }
+
+    /// Forget the run — at a turn boundary or when the user steers.
+    pub fn reset(&mut self) {
+        self.last = None;
+        self.count = 0;
+    }
+}
+
 /// Default sliding-window size for the novelty signal: distinct successful-call
 /// signatures are counted over this many recent successful calls.
 pub const NO_PROGRESS_WINDOW: usize = 12;
@@ -725,6 +787,57 @@ impl BudgetController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identical_observations_nudge_on_the_second_and_stop_on_the_third() {
+        let mut guard = RepeatedObservationGuard::default();
+        assert_eq!(
+            guard.observe("run_shell{x}", "fail:boom"),
+            RepeatedObservation::Fresh
+        );
+        assert_eq!(
+            guard.observe("run_shell{x}", "fail:boom"),
+            RepeatedObservation::Nudge { count: 2 }
+        );
+        assert_eq!(
+            guard.observe("run_shell{x}", "fail:boom"),
+            RepeatedObservation::Stop { count: 3 }
+        );
+    }
+
+    #[test]
+    fn a_changed_result_is_not_a_repeat() {
+        let mut guard = RepeatedObservationGuard::default();
+        guard.observe("poll", "pending");
+        assert_eq!(
+            guard.observe("poll", "pending"),
+            RepeatedObservation::Nudge { count: 2 }
+        );
+        assert_eq!(guard.observe("poll", "ready"), RepeatedObservation::Fresh);
+    }
+
+    #[test]
+    fn a_different_call_in_between_restarts_the_count() {
+        // edit, rerun the same failing build, edit, rerun: identical build
+        // results, but never consecutively, so never a nudge or a stop.
+        let mut guard = RepeatedObservationGuard::default();
+        for _ in 0..4 {
+            assert_eq!(guard.observe("edit{a}", "ok"), RepeatedObservation::Fresh);
+            assert_eq!(
+                guard.observe("build", "fail:missing dep"),
+                RepeatedObservation::Fresh
+            );
+        }
+    }
+
+    #[test]
+    fn reset_forgets_the_run() {
+        let mut guard = RepeatedObservationGuard::default();
+        guard.observe("c", "r");
+        guard.observe("c", "r");
+        guard.reset();
+        assert_eq!(guard.observe("c", "r"), RepeatedObservation::Fresh);
+    }
 
     #[test]
     fn empty_turn_with_no_tool_calls_is_bad() {
