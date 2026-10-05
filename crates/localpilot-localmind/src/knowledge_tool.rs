@@ -63,13 +63,11 @@ impl Tool for KnowledgeSearch {
     }
 
     fn description(&self) -> &str {
-        "Search the project's knowledge base for text relevant to a query, returning ranked \
-         locators across ingested files, accepted project memory, recent-session facts, and code \
-         structure. Each result carries its id, path (with line range for file chunks), \
-         normalized relevance, approximate token cost, and whether the id is fetchable — pass a \
-         fetchable id to knowledge_expand/knowledge_fetch for neighbours or the full body. \
-         Read-only. Use it to pull project facts on demand instead of relying on always-on \
-         context."
+        "Search the project's knowledge base (ingested files, accepted memory, \
+         recent-session facts, code structure) and return ranked locators: id, path and \
+         line range, relevance, approximate token cost, and whether the id is fetchable. \
+         Pass fetchable ids to `knowledge_expand` for neighbours or `knowledge_fetch` for \
+         full bodies. Read-only."
     }
 
     fn schema(&self) -> Value {

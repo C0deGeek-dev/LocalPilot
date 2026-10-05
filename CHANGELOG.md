@@ -13,7 +13,10 @@ is SemVer-stable; the configuration schema stability policy is in
   23,236 bytes of JSON for the built-in set. Nothing that decides which inputs
   a tool accepts changes, MCP tool schemas are sent exactly as their server
   provides them, and a test now fails if the fixed prompt overhead grows past a
-  recorded ceiling.
+  recorded ceiling. The longest tool descriptions (the LocalMind tools, `swarm`,
+  `delegate`, `ask_user`, `search_definitions`, `replace_in_file`) were also
+  tightened to what each tool does and when to use it, bringing the default
+  set's tool definitions to about 21,000 bytes.
 
 - **Repeating a call that just returned stops quickly.** When a tool call has
   the same input and returns the same result as the call right before it, the

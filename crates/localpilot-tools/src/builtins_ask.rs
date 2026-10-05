@@ -78,10 +78,10 @@ impl Tool for AskUser {
     }
 
     fn description(&self) -> &str {
-        "Ask the user to decide between concrete options when different readings of the request \
-         would lead to materially different work, or before something hard to undo. Each question \
-         offers 2-4 options; the user can also answer freely. Do not use it for choices with an \
-         obvious default, for permission to do work already asked for, or to report progress."
+        "Ask the user to choose between 2-4 concrete options (they can also answer freely). \
+         Only when different readings of the request lead to materially different work, or \
+         before something hard to undo — not for an obvious default, permission for work \
+         already asked for, or progress reports."
     }
 
     fn schema(&self) -> Value {

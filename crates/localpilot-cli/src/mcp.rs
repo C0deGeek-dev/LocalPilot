@@ -499,9 +499,9 @@ mod tests {
     /// builtins plus the LocalMind tools, skill discovery off — measured as the
     /// compact JSON of the request's `ToolSpec` list (an internal measure: a
     /// provider adapter adds its own wrapper around each schema). Measured at
-    /// 23,270 bytes for 34 tools once generated schema annotations were
-    /// removed.
-    const DEFAULT_TOOL_SPEC_CEILING: usize = 23_800;
+    /// 21,055 bytes for 34 tools once generated schema annotations were
+    /// removed and the longest descriptions tightened.
+    const DEFAULT_TOOL_SPEC_CEILING: usize = 21_600;
     /// Ceiling for the agent system prompt that registry produces in an empty
     /// workspace. Measured at 5,616 bytes.
     const DEFAULT_SYSTEM_PROMPT_CEILING: usize = 5_900;

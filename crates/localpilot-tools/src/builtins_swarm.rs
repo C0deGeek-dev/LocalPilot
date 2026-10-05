@@ -89,12 +89,11 @@ impl Tool for Swarm {
     }
 
     fn description(&self) -> &str {
-        "Talk to the other agents working on this repository. `send` messages one peer by name or \
-         id; `broadcast` reaches the agents you spawned (the whole swarm if you are the \
-         coordinator); `roster` lists who is here and what they are doing. Use it to hand over a \
-         finding another agent needs, to warn about a file you are changing, or to ask a peer \
-         something only it knows — not to narrate progress. Long messages need a one-line `tldr`, \
-         because the recipient is mid-task and has to decide whether to break off."
+        "Message the other agents on this repository: `send` to one peer, `broadcast` to \
+         the agents you spawned (the whole swarm if you are the coordinator), or `roster` \
+         to see who is here and what they are doing. Use it to hand over a finding, warn \
+         about a file you are changing, or ask a peer something only it knows — not to \
+         narrate progress. A long message needs a one-line `tldr`."
     }
 
     fn schema(&self) -> Value {

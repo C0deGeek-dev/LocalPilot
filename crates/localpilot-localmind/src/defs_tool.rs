@@ -93,11 +93,10 @@ impl Tool for SearchDefinitions {
     }
 
     fn description(&self) -> &str {
-        "Search workspace code and return the enclosing declarations — function, type, module, or \
-         test — with their symbol path, signature, and location, respecting ignore files. Use it \
-         for \"where is X defined\", \"which function handles Y\", or \"what implements Z\". Use \
-         `search_text` instead for prose, configuration, non-code files, or when you want every \
-         matching line; use `find_files` to locate files by name. Read-only."
+        "Find code declarations (function, type, module, test) matching a query and return \
+         each with its symbol path, signature and location, respecting ignore files — for \
+         \"where is X defined\" or \"what implements Y\". Use `search_text` for prose, \
+         configuration, or every matching line. Read-only."
     }
 
     fn schema(&self) -> Value {

@@ -41,10 +41,9 @@ impl Tool for MemorySearch {
     }
 
     fn description(&self) -> &str {
-        "Search the project's accepted LocalMind memory — durable facts a human reviewed and \
-         promoted — for a query, returning ranked path/snippet hits. Read-only. Use it to check \
-         what the project already knows before acting; unlike `knowledge_search` it searches only \
-         accepted memory, not ingested files or session history."
+        "Search the project's accepted LocalMind memory (facts a human reviewed and kept) \
+         and return ranked path/snippet hits. Read-only. Unlike `knowledge_search`, it \
+         skips ingested files and session history."
     }
 
     fn schema(&self) -> Value {

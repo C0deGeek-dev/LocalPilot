@@ -80,9 +80,9 @@ impl Tool for KnowledgeExpand {
     }
 
     fn description(&self) -> &str {
-        "Expand knowledge-base chunk ids (from knowledge_search) into their document neighbours — \
-         the other chunks of the same file — so you can locate adjacent context before fetching \
-         full bodies. Read-only and cheap; returns neighbour ids, not bodies."
+        "List the neighbouring chunks (same file) of knowledge-base ids from \
+         `knowledge_search`, to locate adjacent context before fetching. Cheap: returns \
+         ids, not bodies. Read-only."
     }
 
     fn schema(&self) -> Value {
@@ -135,9 +135,9 @@ impl Tool for KnowledgeFetch {
     }
 
     fn description(&self) -> &str {
-        "Fetch the full bodies of specific knowledge-base chunk ids (from knowledge_search or \
-         knowledge_expand). This is the only expensive retrieval layer — call it once you know \
-         which ids are worth the tokens. Read-only; returns only the ids you ask for."
+        "Return the full bodies of chosen knowledge-base ids (from `knowledge_search` or \
+         `knowledge_expand`). The only expensive layer: fetch just the ids you need. \
+         Read-only."
     }
 
     fn schema(&self) -> Value {

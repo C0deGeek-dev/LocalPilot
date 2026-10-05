@@ -43,11 +43,9 @@ impl Tool for ReviewList {
     }
 
     fn description(&self) -> &str {
-        "List the project's LocalMind review queue: pending candidate lessons awaiting human \
-         review, plus a count of each state (pending/accepted/rejected/edited/deferred). Optional \
-         `state` filter and `limit`. Read-only — it never accepts, rejects, or promotes anything; \
-         reviewing stays a human step (`localpilot learning review`). Use it to see what is already \
-         queued before proposing a new lesson with `remember`."
+        "List the project's LocalMind review queue — candidate lessons awaiting a human \
+         decision — with a count per state; optional `state` and `limit`. Read-only. Check \
+         it before proposing a lesson with `remember`."
     }
 
     fn schema(&self) -> Value {

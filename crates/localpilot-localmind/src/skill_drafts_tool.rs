@@ -37,14 +37,11 @@ impl Tool for SkillDrafts {
     }
 
     fn description(&self) -> &str {
-        "List LocalMind's generated skill drafts for this project, or show one draft's body by id. \
-         Drafts are LocalMind-derived candidate reusable workflows distilled from accepted project \
-         memory; they are always disabled and never auto-installed. This is a different lane from \
-         installed SKILL.md skill packages (`skill_search`/`skill_list`): its results do not \
-         establish which packages are installed — package presence or absence cannot be inferred \
-         from them. Read-only: surfacing a draft does not enable it — enabling stays a human step \
-         (`localpilot learning skills`). Use it to notice a relevant existing workflow and propose \
-         it to the user, never to apply or enable one yourself."
+        "List this project's LocalMind skill drafts — candidate workflows distilled from \
+         accepted memory — or show one by `draft_id`. Drafts are always disabled: propose a \
+         relevant one to the user; enabling stays a human step (`localpilot learning \
+         skills`). These are not installed SKILL.md packages, and this list says nothing \
+         about which packages are installed."
     }
 
     fn schema(&self) -> Value {
@@ -297,16 +294,16 @@ mod tests {
     fn the_description_distinguishes_itself_from_installed_packages_and_stays_human_only() {
         let desc = SkillDrafts.description();
         assert!(
-            desc.contains("different lane from") && desc.contains("SKILL.md"),
+            desc.contains("not installed SKILL.md packages"),
             "must distinguish itself from installed SKILL.md packages: {desc}"
         );
         assert!(
-            desc.contains("cannot be inferred") || desc.contains("do not establish"),
+            desc.contains("says nothing about which packages are installed"),
             "must say its results do not establish package presence/absence: {desc}"
         );
         assert!(
-            desc.contains("always disabled") && desc.contains("never to apply or enable"),
-            "must keep drafts disabled/human-only: {desc}"
+            desc.contains("always disabled") && desc.contains("human step"),
+            "must keep drafts disabled and enabling human-only: {desc}"
         );
     }
 }

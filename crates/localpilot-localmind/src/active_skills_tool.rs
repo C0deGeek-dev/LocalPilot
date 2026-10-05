@@ -40,14 +40,11 @@ impl Tool for ActiveSkills {
     }
 
     fn description(&self) -> &str {
-        "List LocalMind's active (human-enabled) skills for this project, or show one skill's body \
-         by id. Active skills are LocalMind-derived advisory workflows distilled from accepted \
-         project memory, carrying provenance to their source. This is a different lane from \
-         installed SKILL.md skill packages (`skill_search`/`skill_list`): its results do not \
-         establish which packages are installed — package presence or absence cannot be inferred \
-         from them. Read-only guidance: reading a skill does not run, install, enable, or disable \
-         anything — apply its guidance yourself and let the user manage the skill lifecycle with \
-         `localpilot learning skills`."
+        "List this project's active LocalMind skills — human-enabled advisory workflows \
+         distilled from accepted memory — or show one by `skill_id`, then apply its \
+         guidance yourself. Reading runs and changes nothing; the user manages them with \
+         `localpilot learning skills`. These are not installed SKILL.md packages, and this \
+         list says nothing about which packages are installed."
     }
 
     fn schema(&self) -> Value {
@@ -260,19 +257,21 @@ mod tests {
 
     #[test]
     fn the_description_distinguishes_itself_from_installed_packages() {
+        // The model must not read an empty list here as "no skills installed",
+        // and must know reading one changes nothing. It need not name the
+        // package tools, which are only registered when discovery is on.
         let desc = ActiveSkills.description();
         assert!(
-            desc.contains("different lane from") && desc.contains("SKILL.md"),
+            desc.contains("not installed SKILL.md packages"),
             "must distinguish itself from installed SKILL.md packages: {desc}"
         );
         assert!(
-            desc.contains("skill_search") || desc.contains("skill_list"),
-            "must cross-reference the package tools: {desc}"
+            desc.contains("says nothing about which packages are installed"),
+            "must say its results do not establish package presence/absence: {desc}"
         );
         assert!(
-            desc.contains("do not establish which packages are installed")
-                || desc.contains("cannot be inferred"),
-            "must say its results do not establish package presence/absence: {desc}"
+            desc.contains("human-enabled") && desc.contains("changes nothing"),
+            "must say these are human-enabled and reading is inert: {desc}"
         );
     }
 }

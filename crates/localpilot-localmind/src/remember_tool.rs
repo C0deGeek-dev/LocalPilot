@@ -45,10 +45,9 @@ impl Tool for Remember {
     }
 
     fn description(&self) -> &str {
-        "Propose a durable project lesson for human review (LocalMind). Enqueues a review \
-         candidate — it never writes accepted memory directly; a human accepts or rejects it \
-         later. Use sparingly, for genuinely durable conventions, pitfalls, or decisions worth \
-         keeping — not transient notes."
+        "Propose a durable project lesson (a convention, pitfall or decision) for human \
+         review. It is queued, never written to accepted memory directly. Use sparingly, \
+         not for transient notes."
     }
 
     fn schema(&self) -> Value {

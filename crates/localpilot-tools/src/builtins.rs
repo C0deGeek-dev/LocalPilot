@@ -1802,7 +1802,9 @@ impl Tool for ReplaceInFile {
         string_field_detail(input, "path")
     }
     fn description(&self) -> &'static str {
-        "Edit a file by replacing an exact block of text with another (literal by default; the block may span multiple lines). Runs through the platform stream editor (PowerShell on Windows, Perl on Unix). Use this as the default way to modify an existing file instead of rewriting it with write_file."
+        "Replace an exact block of text in a file (literal unless `regex`; it may span \
+         lines). The default way to change an existing file — do not rewrite it with \
+         write_file."
     }
     fn schema(&self) -> Value {
         schema_for::<ReplaceInFileInput>()
@@ -2338,12 +2340,10 @@ impl Tool for Delegate {
         string_field_detail(input, "task")
     }
     fn description(&self) -> &'static str {
-        "Delegate a bounded, self-contained task to a subagent, which runs in its own context \
-         with its own narrower tool set and returns a summary. Use it to keep this conversation \
-         clean when a task needs a lot of reading to produce a small answer. Do NOT delegate work \
-         that is cheaper to do directly, work that needs this conversation's context (the agent \
-         cannot see it), or work you would have to re-explain in full. List available agents with \
-         `localpilot agents list`."
+        "Hand a bounded, self-contained task to a subagent, which works in its own context \
+         with a narrower tool set and returns a summary. Use it when a task needs a lot of \
+         reading for a small answer. The agent cannot see this conversation, so do not \
+         delegate work that needs it or that is cheaper to do yourself."
     }
     fn schema(&self) -> Value {
         schema_for::<DelegateInput>()
