@@ -1560,6 +1560,7 @@ fn build_runtime(
             rules,
             enforce_claim_gate,
             tool_marker_enabled: tools.marker,
+            tool_prompt_reveal: tools.prompt_reveal,
             enforce_readable_errors: tools.readable_errors,
             repair_mode: tools.repair,
             elide_seen_reads: tools.elide_seen_reads,

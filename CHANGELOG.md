@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The tool broker reveals the tools a request names.** With `[tools] broker =
+  true`, each user request (and user steer) is ranked against the tool catalog
+  before it is sent, and up to three strongly matching hidden tools are revealed,
+  so a model that never calls `tool_search` still sees them. On by default with
+  the broker (`[tools] prompt_reveal`); revealing grants nothing. In a 16k-window
+  pilot with a small local model the broker now solved 28 of 36 tasks against 27
+  of 36 with the full tool set (18 of 36 without request reveal), with a median
+  first request of about 3,700 instead of 8,000 prompt tokens. It was not faster
+  overall, and the broker stays off by default.
+- **A stable tool order with the broker on.** Always-advertised tools come
+  first and revealed tools follow in reveal order, so a new reveal no longer
+  reshuffles the tools a prompt cache could reuse.
+- **A clearer `git_diff` description.** It now says it shows uncommitted
+  changes: unstaged by default, staged with `staged`, optionally for given paths.
+
 - **A warning when `max_tokens` leaves no room for input.** With a reply cap
   close to the context window (for example `max_tokens = 16384` on a
   16,384-token window) the input budget fell back to its 4,096-token minimum

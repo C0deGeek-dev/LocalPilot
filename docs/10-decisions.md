@@ -2,6 +2,51 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0216: The Broker Reveals Tools For The User's Request, In A Stable Order
+
+**Status:** accepted · **Date:** 2026-10-05. Amends ADR-0031.
+
+**Context.** With the broker on, a small local model rarely calls
+`tool_search` for a tool it cannot see. In a matched 16k-window pilot (one small
+local model, twelve tasks, three runs each) the broker solved 18 of 36 tasks
+against 27 of 36 with the full tool set: tasks that needed a git, plan, fetch or
+MCP tool mostly failed. Revealed tools were also advertised in registry order, so
+a reveal changed the tool list in the middle and a server's prompt cache had to
+reprocess everything after that point.
+
+**Decision.**
+- Before a user request (and a user steer) is sent, the broker ranks the
+  catalog against the request's content words (common words removed) and reveals
+  up to three tools that are not advertised yet and score at least 4 (or the
+  configured floor, if higher), never more than the working set holds. The
+  ranking for this reveal is not truncated before the advertised tools are
+  removed, so visible tools cannot crowd a hidden match out. Each reveal is
+  recorded as a `tool_resolution` with trigger `request`.
+- `[tools] prompt_reveal` controls it; the default is `true` and it has no
+  effect while the broker is off. Answer-only turns, system notices and
+  sub-agents without a broker reveal nothing.
+- With the broker on, requests list the always-advertised tools (the broker's
+  own tools, the core set and graduated tools) first in registry order, then the
+  revealed tools in working-set order. While stable membership and tool specs are
+  unchanged, a new reveal leaves the bytes before the revealed tools as they
+  were. Graduation, eviction, a re-reveal and catalog changes can still change
+  the order. With the broker off the order is unchanged.
+- Revealing still grants nothing: dispatch, permissions and gates are unchanged.
+
+**Consequences.**
+- In a rerun of the same pilot with request reveal and the stable order, the
+  broker solved 28 of 36 tasks against 27 of 36 with the full tool set, with a
+  median first request of about 3,700 instead of 8,000 prompt tokens. That is a
+  comparable solved-task count in a one-model, twelve-task pilot, not proof of
+  better success.
+- No overall speedup was observed in that pilot. Within a session, cached
+  prompt reuse with the broker was broadly similar to the full tool set; the
+  first request of each new session was seldom served from cache. The broker
+  stays off by default.
+- A request that produces no sufficiently strong catalog match reveals
+  nothing, and the model can still use `tool_search` or the failure-driven
+  trigger.
+
 ## ADR-0215: The Same Call Returning The Same Result Is Nudged Once, Then Stopped
 
 **Status:** accepted · **Date:** 2026-10-05. Amends ADR-0052 and ADR-0146.

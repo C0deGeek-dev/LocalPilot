@@ -201,6 +201,7 @@ pub async fn run_agent(
         tool_call_budget: ctx.config.tool_call_budget,
         tool_call_budget_max: ctx.config.tool_call_budget_max,
         tool_marker_enabled: ctx.config.tool_marker_enabled,
+        tool_prompt_reveal: ctx.config.tool_prompt_reveal,
         enforce_readable_errors: ctx.config.enforce_readable_errors,
         repair_mode: ctx.config.repair_mode,
         elide_seen_reads: ctx.config.elide_seen_reads,

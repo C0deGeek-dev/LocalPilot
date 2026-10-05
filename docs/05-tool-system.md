@@ -829,6 +829,17 @@ When `[tools] broker = true`:
   `unknown tool` error. The broker resolves the attempt to the closest available
   tool, reveals it, and asks the model to retry. The attempted call **does not
   run**.
+- **Request-driven reveal (on with the broker, `[tools] prompt_reveal`).** Before
+  each user request or user steer is sent, the broker ranks the catalog against
+  the request's content words and reveals up to three strongly matching tools
+  that are not advertised yet, so a model that never calls `tool_search` still
+  sees the tool its request names (ADR-0216).
+- **Stable order.** The always-advertised tools (core, the broker's own tools,
+  graduates) come first in registry order and revealed tools follow in the order
+  they were revealed. While the always-advertised set is unchanged, a new reveal
+  leaves that part of the request byte-identical, which gives a provider's prompt
+  cache the chance to reuse it; graduation, eviction and catalog changes can
+  still change the order.
 - **Loose `NEED:` marker (opt-in, `[tools] marker = true`).** The model may write a
   `NEED: <capability>` line; the harness reveals the closest tool proactively.
 - **Reveal-never-grant.** Revealing changes *visibility only*. Dispatch is

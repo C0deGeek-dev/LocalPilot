@@ -28,8 +28,9 @@ mod validate;
 
 pub use advertise::advertised_schema;
 pub use broker::{
-    describes_documentation, learned_boost, resolve, Broker, BrokerConfig, Locator, Resolution,
-    ResolutionRecord, RevealOutcome, ToolLoad, ToolSearch, DEFAULT_GRADUATION_THRESHOLD, TOOL_LOAD,
+    describes_documentation, learned_boost, resolve, AdvertisedTiers, Broker, BrokerConfig,
+    Locator, Resolution, ResolutionRecord, RevealOutcome, ToolLoad, ToolSearch,
+    DEFAULT_GRADUATION_THRESHOLD, PROMPT_REVEAL_MAX, PROMPT_REVEAL_MIN_SCORE, TOOL_LOAD,
     TOOL_SEARCH,
 };
 pub use builtins::{

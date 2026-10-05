@@ -1968,7 +1968,8 @@ impl Tool for GitDiff {
         paths_detail(input, "git diff")
     }
     fn description(&self) -> &'static str {
-        "Show unstaged or staged git diff output for optional paths."
+        "Show the uncommitted changes in the repository (git diff): unstaged by default, or \
+         the staged changes with `staged`, optionally for given paths."
     }
     fn schema(&self) -> Value {
         schema_for::<GitDiffInput>()

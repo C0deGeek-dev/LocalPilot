@@ -566,6 +566,13 @@ pub struct ToolsConfig {
     /// Enable the loose `NEED: <capability>` marker trigger. Default `false` — the
     /// always-on failure-driven trigger does not need it.
     pub marker: bool,
+    /// Reveal tools for the user's own request: when the broker is on, rank the
+    /// catalog against each user prompt (and each admitted user steer) and
+    /// reveal the best-matching tools that are not advertised yet, before the
+    /// request is sent. A model that never calls `tool_search` still sees the
+    /// tool the request names. Reveal-never-grant holds. Default `true`; it has
+    /// no effect while the broker is off (every tool is already advertised).
+    pub prompt_reveal: bool,
     /// Enable broker learning: re-rank by past success, graduate hot tools into the
     /// always-advertised set, and record redacted resolution telemetry. Default
     /// `false` — the broker still works (mechanical freshness) without it.
@@ -605,6 +612,7 @@ impl Default for ToolsConfig {
             working_set_cap: 24,
             score_floor: 1,
             marker: false,
+            prompt_reveal: true,
             learning: false,
             graduation_threshold: 3,
             readable_errors: true,

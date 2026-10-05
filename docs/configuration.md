@@ -1273,6 +1273,7 @@ broker is off and the full tool set is advertised.
 | `working_set_cap` | int | `24` | Maximum revealed tools retained before LRU eviction. |
 | `score_floor` | int | `1` | Minimum resolution score to reveal; below it a miss is a clean "no match". |
 | `marker` | bool | `false` | Enable the loose `NEED: <capability>` marker trigger. Off by default; the always-on failure-driven trigger does not need it. |
+| `prompt_reveal` | bool | `true` | With the broker on, rank the tool catalog against each user request (and each user steer) and reveal up to three strongly matching tools that are not advertised yet, before the request is sent — so a model that never calls `tool_search` still sees the tool its request names. Common words are ignored; nothing is revealed for a weak match. Revealing grants nothing. No effect while the broker is off. |
 | `learning` | bool | `false` | Re-rank by past success, graduate hot tools into the always-advertised set, and record redacted resolution telemetry. Off keeps the broker working with mechanical freshness only. |
 | `graduation_threshold` | int | `3` | Reveals of one tool before it graduates into the always-advertised set (when `learning`). |
 | `readable_errors` | bool | `true` | When a tool call's arguments do not match the tool schema, hand the model a concise, schema-aware error (the offending field, the expected shape, and a valid example) instead of the raw deserializer string, so it can self-correct on the next turn. Set `false` to restore the raw message (the rollback). The raw detail is always kept in the logs/telemetry. |
@@ -1284,18 +1285,21 @@ broker is off and the full tool set is advertised.
 keeps working unchanged. Opt in with `[tools] broker = true`; see
 [05-tool-system.md](05-tool-system.md) §Pull-Discovery Broker.
 
-**Prefill lever.** With the broker off, every builtin tool's full JSON schema is
-re-sent each turn — the dominant per-turn prefill weight. Turning the broker on
-narrows the advertised set to a lean working set and reveals the rest on demand,
-cutting that prefill substantially (measured ~35% of the tool-schema bytes on the
-default builtin set — 21→12 advertised tools), which leaves more of a fixed token
-budget for actual work. This is the recommended lever for a headless/benchmark run
-under a tight budget: enable it per run with `[tools] broker = true`. Defaulting
-the broker **on** is deferred pending a corpus ablation that measures the
-solve-rate effect, not just the token saving. (The per-turn system prompt is
-already small — under ~1k tokens — and compaction trims to the live transcript
-rather than padding to `context_token_limit`, so the tool schemas are the lever
-worth pulling.)
+**Prefill lever.** With the broker off, every advertised tool's JSON schema is
+sent with every request; for the default tool set that is most of the fixed
+prompt. Turning the broker on sends only the core working set plus
+`tool_search`/`tool_load`, reveals the tools a user request names before it is
+sent (`prompt_reveal`), and reveals other tools on demand. In a 16k-window pilot
+(one small local model, Bonsai 27B at 1 bit, twelve tasks, three runs each) the
+broker with request reveal solved 28 of 36 tasks against 27 of 36 with the full
+tool set, and cut the median first request from about 8,000 to 3,700 prompt
+tokens, which leaves more of a small window for the task. It was not faster
+overall in that pilot, and a request that produces no sufficiently strong
+catalog match reveals nothing. The broker stays off by default; enable it with
+`[tools] broker = true` on a small window, and add tools a workload always needs
+to `core`. Without `prompt_reveal` the tested model rarely searched for tools it
+could not see and solved 18 of 36. Each reveal adds its schema to later
+requests.
 
 `readable_errors` defaults **on** — a pure message improvement with no behaviour
 change beyond the text the model reads — so a shape-invalid tool call is answered

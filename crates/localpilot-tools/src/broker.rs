@@ -361,6 +361,13 @@ pub fn describes_documentation(name: &str, description: &str) -> bool {
 /// non-deprecated tool wins, ties broken by name. Capped to `MAX_LOCATORS`.
 #[must_use]
 pub fn resolve(catalog: &Catalog, overlay: &DeprecationOverlay, need: &str) -> Vec<Locator> {
+    let mut hits = rank_all(catalog, overlay, need);
+    hits.truncate(MAX_LOCATORS);
+    hits
+}
+
+/// Every scoring catalog entry for `need`, in [`resolve`] order, uncapped.
+fn rank_all(catalog: &Catalog, overlay: &DeprecationOverlay, need: &str) -> Vec<Locator> {
     let need_lower = need.to_ascii_lowercase();
     let words = need_words(&need_lower);
     let mut hits: Vec<Locator> = catalog
@@ -390,7 +397,6 @@ pub fn resolve(catalog: &Catalog, overlay: &DeprecationOverlay, need: &str) -> V
             .then_with(|| a.deprecated.cmp(&b.deprecated))
             .then_with(|| a.name.cmp(&b.name))
     });
-    hits.truncate(MAX_LOCATORS);
     hits
 }
 
@@ -426,6 +432,34 @@ impl WorkingSet {
 
     fn names(&self) -> Vec<String> {
         self.revealed.clone()
+    }
+}
+
+/// One snapshot of the advertised set, split so a request can keep a stable
+/// prefix: the always-advertised tier (the broker's own tools, core and
+/// graduates) and the revealed-only tail in working-set order (least recently
+/// revealed first). While stable membership and tool specs are unchanged, a
+/// new reveal only appends to the tail, so the stable tier serializes
+/// identically. Graduation, eviction, a re-reveal and catalog changes can still
+/// change the order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdvertisedTiers {
+    stable: Vec<String>,
+    revealed: Vec<String>,
+}
+
+impl AdvertisedTiers {
+    /// Whether `name` is in the always-advertised tier.
+    #[must_use]
+    pub fn is_stable(&self, name: &str) -> bool {
+        self.stable.iter().any(|n| n == name)
+    }
+
+    /// The revealed tools that are not already in the stable tier, in
+    /// working-set order. Never contains a stable name or a duplicate.
+    #[must_use]
+    pub fn revealed_tail(&self) -> &[String] {
+        &self.revealed
     }
 }
 
@@ -469,6 +503,22 @@ struct BrokerState {
 }
 
 impl BrokerState {
+    fn tiers(&self) -> AdvertisedTiers {
+        let mut stable = vec![TOOL_SEARCH.to_string(), TOOL_LOAD.to_string()];
+        for name in self.config.core.iter().chain(&self.graduated) {
+            if !stable.contains(name) {
+                stable.push(name.clone());
+            }
+        }
+        let revealed = self
+            .revealed
+            .names()
+            .into_iter()
+            .filter(|name| !stable.contains(name))
+            .collect();
+        AdvertisedTiers { stable, revealed }
+    }
+
     fn is_advertised(&self, name: &str) -> bool {
         name == TOOL_SEARCH
             || name == TOOL_LOAD
@@ -513,7 +563,20 @@ impl BrokerState {
     /// learning is on so a tool with past successful resolutions outranks an
     /// equal-text peer. Pure given the state.
     fn ranked(&self, need: &str) -> Vec<Locator> {
-        let mut hits = resolve(&self.catalog, &self.overlay, need);
+        // Cap first, then apply learning: a learned boost reorders the top
+        // candidates but never pulls a tool in from beyond the cap.
+        self.with_learning(resolve(&self.catalog, &self.overlay, need))
+    }
+
+    /// [`Self::ranked`] without the locator cap, for the request-driven reveal,
+    /// which filters out visible tools before choosing so they cannot crowd a
+    /// hidden match out.
+    fn ranked_uncapped(&self, need: &str) -> Vec<Locator> {
+        self.with_learning(rank_all(&self.catalog, &self.overlay, need))
+    }
+
+    /// Apply the learned re-rank boost (when learning is on) and re-sort.
+    fn with_learning(&self, mut hits: Vec<Locator>) -> Vec<Locator> {
         if self.config.learning_enabled {
             for hit in &mut hits {
                 hit.score += learned_boost(&self.history, &hit.name);
@@ -721,6 +784,13 @@ impl Broker {
         self.0.lock().is_advertised(name)
     }
 
+    /// The advertised set as one consistent snapshot, split into the stable tier
+    /// and the revealed-only tail. The session orders `tool_specs` by it.
+    #[must_use]
+    pub fn advertised_tiers(&self) -> AdvertisedTiers {
+        self.0.lock().tiers()
+    }
+
     /// Resolve a need to ranked locators over the current catalog, with the
     /// learned re-rank applied when learning is on.
     #[must_use]
@@ -775,6 +845,47 @@ impl Broker {
         self.0.lock().reresolve(attempted)
     }
 
+    /// Reveal the tools that best match a user's request and are not advertised
+    /// yet: up to [`PROMPT_REVEAL_MAX`] of them, each scoring at least
+    /// [`PROMPT_REVEAL_MIN_SCORE`] (and the configured floor). Ranking only the
+    /// unadvertised tools keeps an already-visible core tool from using a slot.
+    /// Reveals through the ordinary working set, so the LRU cap and
+    /// reveal-never-grant apply; nothing matching well enough reveals nothing.
+    pub fn reveal_for_request(&self, request: &str) -> Vec<Resolution> {
+        let mut state = self.0.lock();
+        let floor = state.config.score_floor.max(PROMPT_REVEAL_MIN_SCORE);
+        let need = request_need(request);
+        // Never pick more than the working set can hold, or the later reveals
+        // would evict the best one (0 means unbounded).
+        let cap = state.config.working_set_cap;
+        let limit = if cap == 0 {
+            PROMPT_REVEAL_MAX
+        } else {
+            PROMPT_REVEAL_MAX.min(cap)
+        };
+        let picks: Vec<Locator> = state
+            .ranked_uncapped(&need)
+            .into_iter()
+            .filter(|hit| hit.score >= floor && !state.is_advertised(&hit.name))
+            .take(limit)
+            .collect();
+        // Reveal the weakest pick first, so the strongest is the most recently
+        // used if anything is ever evicted.
+        picks
+            .into_iter()
+            .rev()
+            .filter_map(|hit| match state.reveal(&hit.name) {
+                RevealOutcome::Revealed { name, .. } => Some(Resolution {
+                    message: format!("revealed `{name}` for the request"),
+                    revealed: Some(name),
+                    need: request.to_string(),
+                    score: hit.score,
+                }),
+                RevealOutcome::NotInCatalog => None,
+            })
+            .collect()
+    }
+
     /// The revealed tool names, most-recently-revealed last (for tests/inspection).
     #[must_use]
     pub fn revealed_names(&self) -> Vec<String> {
@@ -794,6 +905,40 @@ struct ToolSearchInput {
     /// catalog of available tools.
     need: String,
 }
+
+/// Common English function words. A request is prose, and these match almost
+/// every tool description (and, by substring, many other words), so they are
+/// dropped before a request is ranked. Only the request-driven reveal uses this
+/// list; `tool_search` needs are short capability phrases and keep their words.
+const REQUEST_STOP_WORDS: &[&str] = &[
+    "about", "after", "all", "also", "and", "any", "are", "been", "before", "being", "both", "but",
+    "can", "could", "did", "does", "done", "each", "for", "from", "get", "give", "got", "had",
+    "has", "have", "her", "here", "his", "how", "into", "its", "just", "let", "like", "made",
+    "make", "may", "not", "only", "our", "out", "over", "please", "say", "see", "she", "should",
+    "some", "such", "tell", "than", "that", "the", "their", "them", "then", "there", "these",
+    "they", "this", "those", "too", "use", "used", "using", "very", "was", "way", "were", "what",
+    "when", "where", "which", "while", "who", "why", "will", "with", "would", "you", "your",
+];
+
+/// The words of a user request worth ranking against tool descriptions: each
+/// distinct word longer than two characters that is not a common function word.
+fn request_need(request: &str) -> String {
+    let lower = request.to_ascii_lowercase();
+    let mut words: Vec<&str> = Vec::new();
+    for word in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if word.len() > 2 && !REQUEST_STOP_WORDS.contains(&word) && !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    words.join(" ")
+}
+
+/// Most tools a user's request reveals at once.
+pub const PROMPT_REVEAL_MAX: usize = 3;
+/// Lowest resolver score a request-driven reveal accepts. Higher than the
+/// failure-path floor: a whole request shares common words with many tool
+/// descriptions, and a weak match costs a schema in every later request.
+pub const PROMPT_REVEAL_MIN_SCORE: u32 = 4;
 
 /// `tool_search`: find available tools relevant to a need, returning lean ranked
 /// locators (tool name, one-line summary, score) — no schemas. Read-only.
@@ -992,6 +1137,148 @@ mod tests {
         let broker = Broker::new(BrokerConfig::default());
         broker.set_catalog(catalog());
         broker
+    }
+
+    // --- request-driven reveal ---
+
+    #[test]
+    fn a_request_reveals_only_unadvertised_strong_matches() {
+        let broker = Broker::new(BrokerConfig {
+            core: vec!["read_file".to_string()],
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(catalog());
+        // read_file matches but is already advertised, so it takes no slot.
+        let revealed = broker.reveal_for_request("read the file, then fetch the http url");
+        let names: Vec<_> = revealed.iter().filter_map(|r| r.revealed.clone()).collect();
+        assert!(!names.contains(&"read_file".to_string()), "{names:?}");
+        assert!(names.contains(&"fetch".to_string()), "{names:?}");
+        assert!(revealed.iter().all(|r| r.score >= PROMPT_REVEAL_MIN_SCORE));
+        assert!(broker.is_advertised("fetch"));
+    }
+
+    /// Equally strong entries: every name shares the "deploy" bonus and the
+    /// same description, so ties break by name and the hidden tool, named to
+    /// sort last, falls beyond the locator cap of an ordinary search.
+    fn wide_catalog(visible: usize) -> Catalog {
+        let mut names: Vec<String> = (0..visible).map(|i| format!("deploy_a{i:02}")).collect();
+        names.push("deploy_z_hidden".to_string());
+        Catalog::project(names.into_iter().map(|name| {
+            (
+                name,
+                "deploy the release bundle".to_string(),
+                schema(&[]),
+                ToolSource::Builtin,
+            )
+        }))
+    }
+
+    #[test]
+    fn visible_tools_cannot_crowd_a_hidden_match_out_of_a_request_reveal() {
+        let core: Vec<String> = (0..12).map(|i| format!("deploy_a{i:02}")).collect();
+        let broker = Broker::new(BrokerConfig {
+            core,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(wide_catalog(12));
+        // Precondition: an ordinary, capped search never reaches the hidden tool.
+        let searched: Vec<String> = broker
+            .resolve("deploy the release bundle")
+            .into_iter()
+            .map(|hit| hit.name)
+            .collect();
+        assert_eq!(searched.len(), MAX_LOCATORS);
+        assert!(
+            !searched.contains(&"deploy_z_hidden".to_string()),
+            "{searched:?}"
+        );
+        // The request reveal ranks past the visible tools and finds it.
+        let revealed: Vec<_> = broker
+            .reveal_for_request("deploy the release bundle")
+            .into_iter()
+            .filter_map(|r| r.revealed)
+            .collect();
+        assert_eq!(revealed, vec!["deploy_z_hidden".to_string()]);
+    }
+
+    #[test]
+    fn learning_never_pulls_a_tool_in_from_beyond_the_search_cap() {
+        let broker = Broker::new(BrokerConfig {
+            learning_enabled: true,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(wide_catalog(12));
+        {
+            let mut state = broker.0.lock();
+            for _ in 0..5 {
+                state.history.push(ResolutionRecord {
+                    chosen: "deploy_z_hidden".to_string(),
+                    succeeded: true,
+                });
+            }
+        }
+        let searched: Vec<String> = broker
+            .resolve("deploy the release bundle")
+            .into_iter()
+            .map(|hit| hit.name)
+            .collect();
+        assert_eq!(searched.len(), MAX_LOCATORS);
+        assert!(
+            !searched.contains(&"deploy_z_hidden".to_string()),
+            "a learned boost must not widen the ordinary candidate set: {searched:?}"
+        );
+    }
+
+    #[test]
+    fn a_request_reveal_never_picks_more_than_the_working_set_holds() {
+        let hidden = |n: usize| {
+            Catalog::project((0..n).map(|i| {
+                (
+                    format!("deploy_tool_{i}"),
+                    format!("deploy the release bundle {i}"),
+                    schema(&[]),
+                    ToolSource::Builtin,
+                )
+            }))
+        };
+        for (cap, expected) in [(1, 1), (2, 2), (3, 3), (24, 3), (0, 3)] {
+            let broker = Broker::new(BrokerConfig {
+                working_set_cap: cap,
+                ..BrokerConfig::default()
+            });
+            broker.set_catalog(hidden(5));
+            let picked = broker.reveal_for_request("deploy the release bundle");
+            assert_eq!(picked.len(), expected, "cap {cap}");
+            // Everything reported as revealed is advertised to the model.
+            for resolution in &picked {
+                let name = resolution.revealed.as_ref().unwrap();
+                assert!(broker.is_advertised(name), "cap {cap}: {name} was evicted");
+            }
+        }
+    }
+
+    #[test]
+    fn a_request_is_ranked_on_its_content_words() {
+        assert_eq!(
+            request_need("Please fetch the URL and tell me what it returns, then fetch it again"),
+            "fetch url returns again"
+        );
+        // A prose request whose only overlap is function words reveals nothing.
+        let broker = broker();
+        assert!(broker
+            .reveal_for_request("What is this and where does it go with that?")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_weak_request_reveals_nothing_and_never_more_than_the_cap() {
+        let broker = broker();
+        assert!(broker.reveal_for_request("hello there").is_empty());
+        assert!(broker.revealed_names().is_empty());
+        let many = broker.reveal_for_request(
+            "fetch the http url, commit the staged git changes, read the workspace file",
+        );
+        assert!(many.len() <= PROMPT_REVEAL_MAX);
     }
 
     // --- resolution ---
@@ -1293,6 +1580,58 @@ mod tests {
         assert!(broker.is_advertised(TOOL_SEARCH), "broker's own search");
         assert!(broker.is_advertised(TOOL_LOAD), "broker's own reveal");
         assert!(!broker.is_advertised("git_commit"), "non-core, unrevealed");
+    }
+
+    #[test]
+    fn the_tiers_split_stable_tools_from_the_revealed_tail_without_overlap() {
+        let broker = Broker::new(BrokerConfig {
+            core: vec!["a".to_string()],
+            working_set_cap: 3,
+            learning_enabled: true,
+            graduation_threshold: 2,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(Catalog::project([
+            ("a", "alpha", schema(&[]), ToolSource::Builtin),
+            ("b", "beta", schema(&[]), ToolSource::Builtin),
+            ("c", "gamma", schema(&[]), ToolSource::Builtin),
+            ("d", "delta", schema(&[]), ToolSource::Builtin),
+        ]));
+        broker.reveal("c");
+        broker.reveal("a"); // a core tool revealed stays in the stable tier only
+        broker.reveal("b");
+        let tiers = broker.advertised_tiers();
+        assert!(tiers.is_stable("a") && tiers.is_stable(TOOL_SEARCH) && tiers.is_stable(TOOL_LOAD));
+        assert_eq!(
+            tiers.revealed_tail(),
+            ["c", "b"],
+            "reveal order, core excluded"
+        );
+
+        broker.reveal("c"); // second reveal graduates c: it leaves the tail
+        let tiers = broker.advertised_tiers();
+        assert!(tiers.is_stable("c"), "graduate is stable");
+        assert_eq!(tiers.revealed_tail(), ["b"], "no graduate in the tail");
+    }
+
+    #[test]
+    fn an_evicted_tool_leaves_the_tail_and_a_re_reveal_appends_it() {
+        let broker = Broker::new(BrokerConfig {
+            core: Vec::new(),
+            working_set_cap: 2,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(Catalog::project([
+            ("a", "alpha", schema(&[]), ToolSource::Builtin),
+            ("b", "beta", schema(&[]), ToolSource::Builtin),
+            ("c", "gamma", schema(&[]), ToolSource::Builtin),
+        ]));
+        broker.reveal("a");
+        broker.reveal("b");
+        broker.reveal("c"); // evicts a
+        assert_eq!(broker.advertised_tiers().revealed_tail(), ["b", "c"]);
+        broker.reveal("a"); // evicts b; a returns at the end
+        assert_eq!(broker.advertised_tiers().revealed_tail(), ["c", "a"]);
     }
 
     // --- read-only effect ---

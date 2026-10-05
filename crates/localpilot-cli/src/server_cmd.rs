@@ -334,6 +334,7 @@ impl SessionSetup {
                 rules: self.config.harness.rules.clone(),
                 enforce_claim_gate: self.config.harness.claim_gate.is_enabled(),
                 tool_marker_enabled: self.config.tools.marker,
+                tool_prompt_reveal: self.config.tools.prompt_reveal,
                 enforce_readable_errors: self.config.tools.readable_errors,
                 repair_mode: self.config.tools.repair,
                 elide_seen_reads: self.config.tools.elide_seen_reads,

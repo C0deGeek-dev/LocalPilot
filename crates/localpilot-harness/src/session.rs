@@ -303,6 +303,10 @@ pub struct SessionConfig {
     /// it ships opt-in (ADR-0031); failure-driven re-resolution carries the feature
     /// without it.
     pub tool_marker_enabled: bool,
+    /// Reveal the tools that best match each user request (and admitted user
+    /// steer) before it is sent, when the broker is on. Maps
+    /// `[tools] prompt_reveal`; on by default (inert without a broker).
+    pub tool_prompt_reveal: bool,
     /// Bounded per-turn wall-clock timeout. When set, a turn that runs longer is
     /// stopped with [`StopReason::TimedOut`] and a parseable handoff instead of
     /// hanging — the bound a non-interactive caller relies on. `None` (the
@@ -374,6 +378,7 @@ impl Default for SessionConfig {
             enforce_claim_gate: false,
             rules: IndexMap::new(),
             tool_marker_enabled: false,
+            tool_prompt_reveal: true,
             turn_timeout: None,
             enforce_readable_errors: false,
             repair_mode: localpilot_config::RepairMode::Off,
@@ -1626,6 +1631,29 @@ impl SessionRuntime {
         Some(broker.reresolve(name))
     }
 
+    /// Request-driven reveal: rank the catalog against text the user wrote and
+    /// reveal the best unadvertised matches before the next request is built.
+    /// A no-op without a broker, when disabled, or for an answer-only turn.
+    fn reveal_for_request(&mut self, text: &str) {
+        if !self.config.tool_prompt_reveal || self.config.answer_only {
+            return;
+        }
+        let Some(broker) = self.broker.as_ref() else {
+            return;
+        };
+        let resolutions = broker.reveal_for_request(text);
+        for resolution in resolutions {
+            // The need is the user's own text, already in the transcript; the
+            // event names what was revealed and why.
+            self.record_event(SessionEventKind::ToolResolution {
+                need: "user request".to_string(),
+                chosen: resolution.revealed.clone(),
+                score: resolution.score,
+                trigger: "request".to_string(),
+            });
+        }
+    }
+
     /// Loose NL marker trigger (ADR-0031), gated on `tool_marker_enabled` and a
     /// live broker: parse assistant `text` for `NEED: <capability>` markers and
     /// reveal the closest tool for each, returning the revealed names. A no-op
@@ -2737,6 +2765,7 @@ impl SessionRuntime {
             let source = match interrupt.source {
                 SoftInterruptSource::User => {
                     admission.user = true;
+                    self.reveal_for_request(&interrupt.content);
                     "user"
                 }
                 SoftInterruptSource::System => "system",
@@ -3152,22 +3181,40 @@ impl SessionRuntime {
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
-            .advertised_specs()
-            .into_iter()
-            // The advertise lever: with the broker on, only the working set's
-            // schemas reach the provider (core ∪ broker tools ∪ revealed); with it
-            // off, every registered tool is advertised (today's behaviour).
-            .filter(|(name, _, _)| match &self.broker {
-                Some(broker) => broker.is_advertised(name),
-                None => true,
-            })
-            .map(|(name, description, input_schema)| ToolSpec {
+        let specs = self.tools.advertised_specs();
+        let to_spec =
+            |(name, description, input_schema): (&str, &str, serde_json::Value)| ToolSpec {
                 name: name.to_string(),
                 description: description.to_string(),
                 input_schema,
-            })
-            .collect()
+            };
+        // The advertise lever: with the broker off, every registered tool is
+        // advertised in registry order (today's behaviour).
+        let Some(broker) = &self.broker else {
+            return specs.into_iter().map(to_spec).collect();
+        };
+        // With it on, only the working set reaches the provider: the
+        // always-advertised tier in registry order, then the revealed tools in
+        // working-set order. While stable membership and specs are unchanged, a
+        // new reveal leaves the stable tier's bytes as they were, which gives a
+        // provider's prefix cache the chance to reuse them.
+        let tiers = broker.advertised_tiers();
+        let mut stable = Vec::new();
+        let mut revealed = Vec::new(); // registered, not stable: advertised only if in the tail
+        for spec in specs {
+            if tiers.is_stable(spec.0) {
+                stable.push(spec);
+            } else {
+                revealed.push(spec);
+            }
+        }
+        let mut ordered = stable;
+        for name in tiers.revealed_tail() {
+            if let Some(at) = revealed.iter().position(|(n, _, _)| n == name) {
+                ordered.push(revealed.swap_remove(at));
+            }
+        }
+        ordered.into_iter().map(to_spec).collect()
     }
 
     /// Tool calls made during the most recent turn.
@@ -3565,6 +3612,7 @@ impl SessionRuntime {
         };
         self.turn_instructions = vec![input_message.clone()];
         self.append(input_message);
+        self.reveal_for_request(user_input);
         self.last_quota = None;
         self.tool_failure_guard.reset();
         self.error_breaker.reset();

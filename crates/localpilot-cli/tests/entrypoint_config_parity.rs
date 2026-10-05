@@ -26,6 +26,7 @@ const PARITY_KEYS: &[&str] = &[
     "rules: config.harness.rules.clone()",
     "enforce_claim_gate: config.harness.claim_gate.is_enabled()",
     "tool_marker_enabled: config.tools.marker",
+    "tool_prompt_reveal: config.tools.prompt_reveal",
     "enforce_readable_errors: config.tools.readable_errors",
     "repair_mode: config.tools.repair",
     "elide_seen_reads: config.tools.elide_seen_reads",

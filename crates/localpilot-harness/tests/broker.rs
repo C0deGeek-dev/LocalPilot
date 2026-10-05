@@ -537,3 +537,331 @@ async fn with_no_broker_every_tool_is_advertised() {
     assert!(names.contains(&"git_commit".to_string()), "{names:?}");
     assert!(names.contains(&"fetch".to_string()), "{names:?}");
 }
+
+// --- request-driven reveal ---
+
+fn build_with_session_config(provider: FakeProvider, session: SessionConfig) -> BrokerHarness {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(provider);
+    let broker = Broker::new(BrokerConfig::default());
+    let mut registry = ToolRegistry::with_builtins();
+    registry.register(Box::new(ToolSearch::new(broker.clone())));
+    registry.register(Box::new(ToolLoad::new(broker.clone())));
+    broker.set_catalog(registry.catalog());
+    let mut runtime = SessionRuntime::new(
+        provider.clone(),
+        registry,
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        session,
+        Vec::new(),
+    );
+    runtime.set_broker(Some(broker.clone()));
+    let (events, _rx) = broadcast::channel(256);
+    BrokerHarness {
+        store: Store::open(dir.path()),
+        _dir: dir,
+        runtime,
+        broker,
+        provider,
+        events,
+        cancel: CancellationToken::new(),
+    }
+}
+
+fn reveal_on() -> SessionConfig {
+    SessionConfig {
+        tool_prompt_reveal: true,
+        ..SessionConfig::default()
+    }
+}
+
+const PLAN_REQUEST: &str =
+    "First record a two-step task plan with the plan tool, then read README.md.";
+
+#[tokio::test]
+async fn a_request_naming_a_hidden_capability_reveals_it_before_the_first_request() {
+    let mut h = build_with_session_config(FakeProvider::new().text("done"), reveal_on());
+    let _ = h.runtime.run_turn(PLAN_REQUEST, &h.events, &h.cancel).await;
+    let names = advertised(&h.provider.requests());
+    assert!(names.contains(&"update_plan".to_string()), "{names:?}");
+    // The reveal is recorded with its origin.
+    let events = h.store.read_events(h.runtime.session_id()).unwrap();
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        localpilot_store::SessionEventKind::ToolResolution { chosen: Some(name), trigger, .. }
+            if name == "update_plan" && trigger == "request"
+    )));
+}
+
+#[tokio::test]
+async fn request_reveal_can_be_turned_off() {
+    let session = SessionConfig {
+        tool_prompt_reveal: false,
+        ..SessionConfig::default()
+    };
+    let mut h = build_with_session_config(FakeProvider::new().text("done"), session);
+    let _ = h.runtime.run_turn(PLAN_REQUEST, &h.events, &h.cancel).await;
+    let names = advertised(&h.provider.requests());
+    assert!(!names.contains(&"update_plan".to_string()), "{names:?}");
+}
+
+#[tokio::test]
+async fn a_request_with_no_strong_match_reveals_nothing() {
+    let mut h = build_with_session_config(FakeProvider::new().text("done"), reveal_on());
+    let _ = h.runtime.run_turn("hello", &h.events, &h.cancel).await;
+    assert!(
+        h.broker.revealed_names().is_empty(),
+        "{:?}",
+        h.broker.revealed_names()
+    );
+}
+
+#[tokio::test]
+async fn an_answer_only_turn_reveals_nothing() {
+    let session = SessionConfig {
+        answer_only: true,
+        ..reveal_on()
+    };
+    let mut h = build_with_session_config(FakeProvider::new().text("done"), session);
+    let _ = h.runtime.run_turn(PLAN_REQUEST, &h.events, &h.cancel).await;
+    assert!(h.broker.revealed_names().is_empty());
+}
+
+#[tokio::test]
+async fn a_user_steer_reveals_but_a_system_notice_does_not() {
+    use localpilot_harness::{SoftInterrupt, SoftInterruptSource};
+    let mut system = build_with_session_config(FakeProvider::new().text("done"), reveal_on());
+    system.runtime.steer_queue().push_interrupt(SoftInterrupt {
+        content: "record a two-step task plan with the plan tool".to_string(),
+        source: SoftInterruptSource::System,
+        urgent: false,
+    });
+    let _ = system
+        .runtime
+        .run_turn("hello", &system.events, &system.cancel)
+        .await;
+    assert!(
+        system.broker.revealed_names().is_empty(),
+        "system text never reveals"
+    );
+
+    let mut user = build_with_session_config(FakeProvider::new().text("done"), reveal_on());
+    user.runtime
+        .steer_queue()
+        .push("record a two-step task plan with the plan tool");
+    let _ = user
+        .runtime
+        .run_turn("hello", &user.events, &user.cancel)
+        .await;
+    assert!(
+        user.broker
+            .revealed_names()
+            .contains(&"update_plan".to_string()),
+        "{:?}",
+        user.broker.revealed_names()
+    );
+}
+
+#[tokio::test]
+async fn a_narrowed_catalog_never_reveals_a_tool_outside_it() {
+    // A narrowed registry (as a subagent gets) whose catalog lacks update_plan:
+    // a request naming the plan tool reveals nothing it does not have.
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let broker = Broker::new(BrokerConfig::default());
+    let full = ToolRegistry::with_builtins();
+    let registry = full.narrowed(&["read_file".to_string(), "search_text".to_string()]);
+    broker.set_catalog(registry.catalog());
+    let mut runtime = SessionRuntime::new(
+        provider.clone(),
+        registry,
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        reveal_on(),
+        Vec::new(),
+    );
+    runtime.set_broker(Some(broker.clone()));
+    let (events, _rx) = broadcast::channel(64);
+    let _ = runtime
+        .run_turn(PLAN_REQUEST, &events, &CancellationToken::new())
+        .await;
+    assert!(!broker.revealed_names().contains(&"update_plan".to_string()));
+    let names = advertised(&provider.requests());
+    assert!(!names.contains(&"update_plan".to_string()), "{names:?}");
+}
+
+#[tokio::test]
+async fn a_catalog_change_is_respected_by_the_next_request_reveal() {
+    let mut h = build_with_session_config(
+        FakeProvider::new().text("first").text("second"),
+        reveal_on(),
+    );
+    // The plan tool leaves the catalog before the first turn.
+    let without_plan = ToolRegistry::with_builtins()
+        .narrowed(&["read_file".to_string(), "search_text".to_string()])
+        .catalog();
+    h.broker.set_catalog(without_plan);
+    let _ = h.runtime.run_turn(PLAN_REQUEST, &h.events, &h.cancel).await;
+    assert!(!h
+        .broker
+        .revealed_names()
+        .contains(&"update_plan".to_string()));
+    // It comes back; the next request that names it reveals it.
+    h.broker
+        .set_catalog(ToolRegistry::with_builtins().catalog());
+    let _ = h.runtime.run_turn(PLAN_REQUEST, &h.events, &h.cancel).await;
+    assert!(
+        h.broker
+            .revealed_names()
+            .contains(&"update_plan".to_string()),
+        "{:?}",
+        h.broker.revealed_names()
+    );
+}
+
+// --- a cache-stable tool order ---
+
+/// The tool names advertised in every recorded request.
+fn advertised_per_request(requests: &[ModelRequest]) -> Vec<Vec<String>> {
+    requests
+        .iter()
+        .map(|request| request.tools.iter().map(|t| t.name.clone()).collect())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_reveal_appends_to_the_tools_without_changing_the_bytes_before_it() {
+    let provider = FakeProvider::new().text("one").text("two").text("three");
+    let mut h = build_broker_harness(provider, BrokerConfig::default());
+    let _ = h.runtime.run_turn("hello", &h.events, &h.cancel).await;
+    // Reveal against registry order: git_commit is registered after fetch.
+    h.broker.reveal("git_commit");
+    h.broker.reveal("fetch");
+    let _ = h
+        .runtime
+        .run_turn("hello again", &h.events, &h.cancel)
+        .await;
+    h.broker.reveal("git_log");
+    let _ = h.runtime.run_turn("and again", &h.events, &h.cancel).await;
+
+    let requests = h.provider.requests();
+    let names = advertised_per_request(&requests);
+    let stable = names[0].len();
+    assert_eq!(&names[1][stable..], ["git_commit", "fetch"], "reveal order");
+    assert_eq!(&names[2][stable..], ["git_commit", "fetch", "git_log"]);
+    // The prefix is byte-identical as the provider would serialize it.
+    let bytes = |tools: &[localpilot_llm::ToolSpec]| serde_json::to_vec(tools).unwrap();
+    assert_eq!(
+        bytes(&requests[1].tools[..stable]),
+        bytes(&requests[0].tools)
+    );
+    assert_eq!(
+        bytes(&requests[2].tools[..stable]),
+        bytes(&requests[0].tools)
+    );
+    assert_eq!(
+        bytes(&requests[2].tools[..stable + 2]),
+        bytes(&requests[1].tools),
+        "a later reveal keeps the earlier tail too"
+    );
+}
+
+#[tokio::test]
+async fn a_graduated_or_core_tool_is_advertised_once_in_the_stable_tier() {
+    let provider = FakeProvider::new().text("one").text("two");
+    let mut h = build_broker_harness(
+        provider,
+        BrokerConfig {
+            learning_enabled: true,
+            graduation_threshold: 2,
+            ..BrokerConfig::default()
+        },
+    );
+    let _ = h.runtime.run_turn("hello", &h.events, &h.cancel).await;
+    h.broker.reveal("read_file"); // core: already stable
+    h.broker.reveal("git_commit");
+    h.broker.reveal("fetch");
+    h.broker.reveal("git_commit"); // second reveal graduates it
+    let _ = h
+        .runtime
+        .run_turn("hello again", &h.events, &h.cancel)
+        .await;
+
+    let names = advertised_per_request(&h.provider.requests());
+    for name in ["read_file", "git_commit", "fetch"] {
+        assert_eq!(
+            names[1].iter().filter(|n| *n == name).count(),
+            1,
+            "{name} once: {:?}",
+            names[1]
+        );
+    }
+    // The graduate joins the stable tier at its registry position, before the
+    // broker's own tools; only the plain reveal forms the tail.
+    let at = |name: &str| names[1].iter().position(|n| n == name).unwrap();
+    assert!(at("git_commit") < at("tool_search"), "{:?}", names[1]);
+    assert_eq!(names[1].last().map(String::as_str), Some("fetch"));
+    assert_eq!(names[1].len(), names[0].len() + 2);
+}
+
+#[tokio::test]
+async fn an_evicted_tool_leaves_the_request_and_returns_at_the_end() {
+    let provider = FakeProvider::new().text("one").text("two");
+    let mut h = build_broker_harness(
+        provider,
+        BrokerConfig {
+            working_set_cap: 2,
+            ..BrokerConfig::default()
+        },
+    );
+    for name in ["fetch", "git_log", "git_commit"] {
+        h.broker.reveal(name); // the third evicts fetch
+    }
+    let _ = h.runtime.run_turn("hello", &h.events, &h.cancel).await;
+    h.broker.reveal("fetch"); // evicts git_log; fetch returns last
+    let _ = h
+        .runtime
+        .run_turn("hello again", &h.events, &h.cancel)
+        .await;
+
+    let names = advertised_per_request(&h.provider.requests());
+    let tail = |names: &[String]| names[names.len() - 2..].to_vec();
+    assert_eq!(tail(&names[0]), ["git_log", "git_commit"]);
+    assert_eq!(tail(&names[1]), ["git_commit", "fetch"]);
+    assert!(!names[1].contains(&"git_log".to_string()));
+}
+
+#[tokio::test]
+async fn without_the_broker_the_tools_keep_registry_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let registry = ToolRegistry::with_builtins();
+    let expected: Vec<String> = registry
+        .advertised_specs()
+        .into_iter()
+        .map(|(name, _, _)| name.to_string())
+        .collect();
+    let mut runtime = SessionRuntime::new(
+        provider.clone(),
+        registry,
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    let (events, _rx) = broadcast::channel(256);
+    let _ = runtime
+        .run_turn("hello", &events, &CancellationToken::new())
+        .await;
+    assert_eq!(advertised(&provider.requests()), expected);
+}
