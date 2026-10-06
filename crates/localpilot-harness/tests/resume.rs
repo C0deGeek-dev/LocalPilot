@@ -838,6 +838,53 @@ async fn another_uncommitted_file_still_blocks_and_nothing_is_committed() {
 }
 
 #[tokio::test]
+async fn a_step_cannot_edit_the_plan_progress_the_harness_maintains() {
+    // The harness ticks the step and commits PROGRESS.md itself. A model that
+    // edits it anyway is told so, and the document is not changed by it.
+    let dir = sample_repo();
+    let root = dir.path();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "edit_file",
+                json!({
+                    "path": "PROGRESS.md",
+                    "old_text": "Create hello.txt",
+                    "new_text": "Tampered"
+                }),
+            )
+            .tool_call(
+                "c2",
+                "write_file",
+                json!({ "path": "hello.txt", "content": "hello" }),
+            )
+            .text("done"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    let requests = provider.requests();
+    let sent_back = format!("{:?}", requests[1].messages);
+    assert!(
+        sent_back.contains("PROGRESS.md is maintained by the harness"),
+        "the model must be told why: {sent_back}"
+    );
+    let progress = std::fs::read_to_string(root.join("PROGRESS.md")).unwrap();
+    assert!(progress.contains("- [x] 1. Create hello.txt"), "{progress}");
+    assert!(!progress.contains("Tampered"), "{progress}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("hello.txt")).unwrap(),
+        "hello",
+        "the step's own work still goes through"
+    );
+}
+
+#[tokio::test]
 async fn mid_stream_quota_error_persists_a_paused_resume_state() {
     let dir = sample_repo();
     let root = dir.path();

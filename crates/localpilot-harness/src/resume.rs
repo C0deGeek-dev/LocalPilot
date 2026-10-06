@@ -28,7 +28,8 @@ const WORKER_PROMPT: &str = "\
 You are completing exactly one step of an implementation plan. Make the change \
 using the available tools, then briefly confirm completion. If the change alters \
 observable behaviour, configuration, or interfaces, update the matching \
-documentation in a bounded follow-up step in this plan before completing the feature. Do not start any other step.\n\nStep: ";
+documentation in a bounded follow-up step in this plan before completing the feature. Do not start any other step. \
+Do not edit PROGRESS.md: the harness marks the step complete and commits it.\n\nStep: ";
 
 /// The store key under which a paused run is persisted (an inspectable file
 /// under `.localpilot/cache/`).

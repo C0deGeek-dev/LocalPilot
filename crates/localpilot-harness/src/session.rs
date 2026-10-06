@@ -1551,6 +1551,11 @@ impl SessionRuntime {
     /// this can only refuse a call, never grant one). Projects the evidence
     /// ledger from this session's own event log.
     fn precondition_block(&mut self, name: &str, input: &serde_json::Value) -> Option<String> {
+        if self.harness_checkpoint_owner && self.edits_plan_progress(name, input) {
+            return Some(
+                "PROGRESS.md is maintained by the harness, which marks this step complete and commits it once the step passes; leave it alone and finish only the step's own work".to_string(),
+            );
+        }
         if let Some(profile) = self.work_profile() {
             let active = self.active_work_profile.get_or_insert(profile);
             active.tighten(profile);
@@ -1584,6 +1589,35 @@ impl SessionRuntime {
             self.config.enforce_prior_read,
         )
         .err()
+    }
+
+    /// Whether a file-mutating call targets the project's `PROGRESS.md`.
+    ///
+    /// During a harness step that file is the harness's to write: it ticks the step
+    /// and commits the update itself after the step passes. A model that edits it
+    /// anyway spends the step's file budget on a document the harness overwrites.
+    fn edits_plan_progress(&self, name: &str, input: &serde_json::Value) -> bool {
+        let Ok(progress) = self.workspace.resolve(std::path::Path::new("PROGRESS.md")) else {
+            return false;
+        };
+        let targets = |path: Option<&str>| {
+            path.and_then(|path| self.workspace.resolve(std::path::Path::new(path)).ok())
+                .is_some_and(|resolved| resolved == progress)
+        };
+        match name {
+            "write_file" | "append_file" | "edit_file" | "multi_edit" | "replace_in_file" => {
+                targets(input.get("path").and_then(serde_json::Value::as_str))
+            }
+            "apply_patch" => input
+                .get("operations")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|operations| {
+                    operations.iter().any(|operation| {
+                        targets(operation.get("path").and_then(serde_json::Value::as_str))
+                    })
+                }),
+            _ => false,
+        }
     }
 
     /// Spend an attempted dispatch only after redirect/schema/contract/rule
