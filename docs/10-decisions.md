@@ -2,6 +2,53 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0217: Ordinary Sessions Place Retrieved Context Beside The Question, On By Default
+
+**Status:** accepted · **Date:** 2026-10-06. Amends ADR-0211.
+
+**Context.** ADR-0211 moved retrieved context beside the question for
+answer-only turns and left ordinary sessions as they were, because the evidence
+was ten samples without tools. The with-tools case has since been measured. In
+real `print` turns with working read and search tools (five invented project
+conventions that contradict what the files suggest, ten questions, three samples
+per placement, 60 turns per model), the convention was used in 5 of 30 turns with
+the context in the system prompt and 23 of 30 beside the question for
+`qwen3-8-flash-next-gsq-rco-coder-gguf`, and in 0 of 30 and 8 of 30 for
+`ornith35hapex`. For the same question and sample, 18 (qwen) and 8 (ornith) turns
+used it only beside the question and none only in the system prompt. With the
+context only in the system prompt, the qwen model read the repository and answered
+from the files in every injected turn where it did not also find the lesson
+through the memory-search tool. Turn cost was about the same. Accepted memory
+exists to carry what the repository does not say, which is exactly when a model
+with tools trusts the files over a line at the end of a 6,000-character prompt.
+
+**Decision.** Add `[context] retrieved_beside_question`, default on. When on, an
+ordinary session places the text of context hooks that declare
+`ContextPlacement::BesideQuestion` (LocalMind memory, primers, rule cues) before
+the turn's real question in the user message, with the framing and the
+real-question rule of the answer-only path: the text is re-derived every turn,
+never written to history, never attached to a repair or steering message, and
+reserved out of the history budget. Hooks that declare `ContextPlacement::System`
+stay in the system prompt: the project's instruction files, the project-facts
+block and, as before, the automatic work profile. If the real question is not in
+a request to carry the text, it goes into the system message instead of being
+dropped, so a memory audited as used is always delivered. Set to `false`, every
+hook's text goes in the system prompt in registration order, exactly as before.
+Answer-only turns are unchanged: all retrieved context goes beside the question,
+and the `answer-only-context-v1` digest and its receipts keep their meaning.
+
+**Consequences.** Every ordinary turn of every host that registers the hooks now
+sends a different request than before, which is why the switch exists. The system
+prompt no longer varies with retrieval, so a provider-side prompt cache over the
+system prompt has more to reuse; this was not measured and is not claimed. Not
+measured either: long sessions, compaction, a question that arrives after many
+tool results, more than two models, and a split that moves only retrieved context
+(the measurement moved all hook text, layout facts included). The evidence is two
+local models, one small project and exact-token scoring, which understates a model
+that paraphrases. Uplift receipts that predate ADR-0211 were produced with
+ordinary turns; the same digest now describes a different placement for a run made
+after this change. `MemoriesUsed` remains an injection audit, not evidence of use.
+
 ## ADR-0216: The Broker Reveals Tools For The User's Request, In A Stable Order
 
 **Status:** accepted · **Date:** 2026-10-05. Amends ADR-0031.
@@ -197,7 +244,8 @@ deferred; no general ranking or semantic improvement is inferred.
 
 ## ADR-0211: Answer-Only Uplift Places Retrieved Context Beside The Question
 
-**Status:** accepted · **Date:** 2026-10-03.
+**Status:** accepted · **Date:** 2026-10-03. Amended by ADR-0217: ordinary
+sessions now place retrieved context beside the question too, by default.
 
 **Context.** Captured requests prove accepted lessons reach print's long system
 prompt, yet two local models ignored them in a small project-convention probe.

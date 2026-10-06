@@ -580,6 +580,7 @@ impl InteractiveSessionSetup {
             self.config.context.instruction_char_budget,
             &mut runtime,
         );
+        runtime.set_retrieved_beside_question(self.config.context.retrieved_beside_question);
         localpilot_localmind::register_context_hook(&self.cwd, &mut runtime);
 
         Ok(InteractiveSessionBundle {

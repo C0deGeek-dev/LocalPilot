@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use localpilot_config::LookupPolicy;
 
-use crate::{ContextHook, SessionRuntime};
+use crate::{ContextHook, ContextPlacement, SessionRuntime};
 
 const MANIFESTS: &[&str] = &[
     "package.json",
@@ -131,6 +131,11 @@ impl ProjectAnalysisContext {
 impl ContextHook for ProjectAnalysisContext {
     fn name(&self) -> &str {
         "project-analysis"
+    }
+
+    /// Facts about the project's layout hold whatever the question is.
+    fn placement(&self) -> ContextPlacement {
+        ContextPlacement::System
     }
 
     fn context_for(&self, _prompt: &str) -> Option<String> {

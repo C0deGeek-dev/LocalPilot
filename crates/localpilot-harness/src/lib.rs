@@ -64,7 +64,7 @@ pub use handoff::{
     check_handoff, evaluate_resume, write_handoff, Handoff, HandoffHeader, HandoffSummary,
     ResumeEnv, ResumeFinding, ResumeReport, HANDOFF_SCHEMA,
 };
-pub use hooks::{ContextContribution, ContextHook, HookFabric};
+pub use hooks::{ContextContribution, ContextHook, ContextPlacement, HookFabric};
 pub use incognito::IncognitoLedger;
 pub use intake::{
     append_intake_record, draft_brief, draft_with_answers, persist_approved, question_for,

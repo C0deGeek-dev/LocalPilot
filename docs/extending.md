@@ -103,9 +103,13 @@ logs.
 The hook fabric (`localpilot-harness::HookFabric`) has two typed internal
 extension surfaces:
 
-- **Context hooks** — may contribute system context before a turn, through
-  the same seeded-system path a host uses. LocalMind memory injection is the
-  built-in consumer.
+- **Context hooks** — may contribute context before a turn. A hook says where
+  its text goes (`ContextPlacement`): beside the question in the turn's user
+  message (the default, for context retrieved for the prompt), or in the system
+  prompt (standing instructions and layout facts). LocalMind memory injection is
+  the built-in retrieval consumer; project instructions and project analysis are
+  the built-in system-prompt ones. `[context] retrieved_beside_question = false`
+  puts every hook's text in the system prompt.
 - **Tool gates** — tighten-only checks consulted *after* the permission
   engine on every dispatch. A gate can block a call with a model-visible
   reason; it can never grant what the engine refused. The permission engine

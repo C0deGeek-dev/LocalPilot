@@ -1239,6 +1239,7 @@ where
             config.context.instruction_char_budget,
             &mut runtime,
         );
+        runtime.set_retrieved_beside_question(config.context.retrieved_beside_question);
         localpilot_localmind::register_context_hook(root, &mut runtime);
         let outcome = resume_one_step_with_events(
             &mut runtime,

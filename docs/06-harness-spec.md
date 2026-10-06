@@ -854,7 +854,9 @@ advertised surface.
 > async confirmation flow it was intended to replace. Pre-dispatch workflow
 > policy is explicit runtime logic; permission decisions stay centralized in
 > `PermissionEngine`. `ContextHook` remains the supported, live context-injection
-> extension in `HookFabric`.
+> extension in `HookFabric`. Each hook declares a `ContextPlacement`: retrieved
+> context sits beside the question in the turn's user message by default, standing
+> instructions in the system prompt (ADR-0217; `[context] retrieved_beside_question`).
 >
 > One further live-path caveat: `decision_logged` is not implemented as a rule —
 > a deviation auto-appends to `DECISIONS.md` on replan, but nothing gates on it.

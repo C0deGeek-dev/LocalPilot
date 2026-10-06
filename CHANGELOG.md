@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Retrieved memory now sits beside the question in ordinary sessions.** Project
+  memory, primers and rule cues used to end up at the end of a long system
+  prompt, where the models measured so far passed over them: in tool-using turns
+  a convention was used 5 of 30 times there against 23 of 30 beside the question
+  (a second model: 0 against 8). They now go in front of the question in the
+  turn's user message, as `print --answer-only` already did. The project's
+  instruction files, the project-facts block and the work profile stay in the
+  system prompt. The text is rebuilt every turn, never stored in history and not
+  attached to a repair or steering message. Set `[context]
+  retrieved_beside_question = false` to restore the earlier placement (ADR-0217).
+
 - **Git tools no longer hang under `localpilot rpc`.** `git_status`, `git_log`
   and the other git tools started git with the caller's stdin, which under
   `rpc` is the protocol pipe; on Windows the git process then never exited and

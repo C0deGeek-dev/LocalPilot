@@ -2,9 +2,9 @@
 //!
 //! Extensibility is part of the safety model rather than a way around it:
 //!
-//! - **Context hooks** may inject system context before a turn — the one
-//!   sanctioned "rewrite context" mutation, applied through the same
-//!   `seed_system` path a host would use.
+//! - **Context hooks** may inject context before a turn — the one sanctioned
+//!   "rewrite context" mutation. Each hook says whether its text belongs in
+//!   the system prompt or beside the question ([`ContextPlacement`]).
 //!
 //! Hook code is in-process, compiled-in Rust: trusted by construction.
 //! Third-party extension code never loads in-process — it integrates
@@ -14,9 +14,20 @@
 
 use std::sync::Arc;
 
-/// A pre-turn context hook: may contribute system context for the upcoming
-/// turn (the sanctioned context mutation). Returning `None` contributes
-/// nothing.
+/// Where a context hook's text goes in an ordinary session's request.
+///
+/// Retrieved context that sits at the end of a long system prompt is passed over
+/// by the models measured so far (ADR-0217). Standing orientation that holds
+/// whatever the question is belongs in the system prompt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ContextPlacement {
+    /// Beside the question it was retrieved for, in the turn's user message.
+    #[default]
+    BesideQuestion,
+    /// In the system prompt: standing instructions and layout facts.
+    System,
+}
+
 /// What a context hook contributes for one turn: the system-context text that is
 /// injected, and the exact memory records that text represents (for the
 /// "memories used" inspector). Deriving both from one value is what keeps the
@@ -36,6 +47,14 @@ pub trait ContextHook: Send + Sync {
     fn name(&self) -> &str;
     /// Optional system context for a turn that starts with `prompt`.
     fn context_for(&self, prompt: &str) -> Option<String>;
+    /// Where this hook's text goes when the session places retrieved context
+    /// beside the question. Default beside the question, which suits context
+    /// retrieved for the prompt; a hook that contributes standing instructions
+    /// returns [`ContextPlacement::System`]. With that placement switched off
+    /// every hook's text goes in the system prompt, as before.
+    fn placement(&self) -> ContextPlacement {
+        ContextPlacement::BesideQuestion
+    }
     /// The memories this hook contributed for `prompt`, for the "memories used
     /// this turn" inspector. Default none; a hook that retrieves memory
     /// overrides it. Reporting these never changes what is injected — it only
@@ -61,6 +80,38 @@ pub trait ContextHook: Send + Sync {
     fn record_usage(&self, _memories: &[localpilot_store::MemoryUsed]) {}
 }
 
+/// Every hook's contribution for one turn: the text segments in registration
+/// order, each with its placement, and the memories they represent.
+///
+/// Segments stay in order, rather than being split by placement up front, so
+/// that placing everything in the system prompt reproduces the request exactly
+/// as it was before placement existed.
+pub(crate) struct TurnContribution {
+    pub(crate) segments: Vec<(ContextPlacement, String)>,
+    pub(crate) memories: Vec<localpilot_store::MemoryUsed>,
+}
+
+impl TurnContribution {
+    /// All segments joined in registration order, wherever they were placed.
+    pub(crate) fn all(&self) -> String {
+        self.segments
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The segments with one placement, joined in registration order.
+    pub(crate) fn placed(&self, placement: ContextPlacement) -> String {
+        self.segments
+            .iter()
+            .filter(|(at, _)| *at == placement)
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 /// The registered hooks for one session runtime.
 #[derive(Default, Clone)]
 pub struct HookFabric {
@@ -76,20 +127,17 @@ impl HookFabric {
     /// Collect every hook's contribution for a turn as one value — the merged
     /// injected text and the exact memories that text represents — in a single
     /// pass, so the audit and the injection are derived from the same retrieval.
-    pub(crate) fn contribute(&self, prompt: &str) -> ContextContribution {
-        let mut texts = Vec::new();
+    pub(crate) fn contribute(&self, prompt: &str) -> TurnContribution {
+        let mut segments = Vec::new();
         let mut memories = Vec::new();
         for hook in &self.context_hooks {
             let contribution = hook.contribute(prompt);
             if let Some(text) = contribution.text {
-                texts.push(text);
+                segments.push((hook.placement(), text));
             }
             memories.extend(contribution.memories);
         }
-        ContextContribution {
-            text: (!texts.is_empty()).then(|| texts.join("\n")),
-            memories,
-        }
+        TurnContribution { segments, memories }
     }
 
     /// Deliver this turn's injected-memory set to every context hook for usage

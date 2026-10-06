@@ -75,6 +75,8 @@ async fn context_hooks_contribute_system_context_for_the_turn() {
         SessionConfig::default(),
         Vec::new(),
     );
+    // The rollback placement: everything in the system prompt.
+    runtime.set_retrieved_beside_question(false);
     runtime
         .hooks_mut()
         .register_context_hook(Arc::new(StaticContext));
@@ -117,6 +119,8 @@ async fn per_turn_retrieval_context_is_replaced_not_accumulated() {
         SessionConfig::default(),
         Vec::new(),
     );
+    // The rollback placement: everything in the system prompt.
+    runtime.set_retrieved_beside_question(false);
     runtime
         .hooks_mut()
         .register_context_hook(Arc::new(StaticContext));
@@ -183,6 +187,72 @@ async fn per_turn_retrieval_context_is_replaced_not_accumulated() {
                     .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("hook-contributed project context")))),
         "ephemeral retrieval context must not be persisted to the transcript"
     );
+}
+
+#[tokio::test]
+async fn context_beside_the_question_is_replaced_each_turn_not_accumulated() {
+    // By default retrieved context rides the latest question. Across turns only
+    // that question carries the block: earlier questions stay as they were asked.
+    let provider = Arc::new(FakeProvider::new().text("ok").text("ok").text("ok"));
+    let dir = tempfile::tempdir().unwrap();
+    let mut runtime = SessionRuntime::new(
+        Arc::clone(&provider) as Arc<dyn localpilot_llm::ModelProvider>,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    runtime
+        .hooks_mut()
+        .register_context_hook(Arc::new(StaticContext));
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+
+    for question in ["first", "second", "third"] {
+        assert_eq!(
+            runtime.run_turn(question, &events, &cancel).await,
+            StopReason::Done
+        );
+    }
+
+    let request = provider.requests().pop().unwrap();
+    let block = "hook-contributed project context";
+    let users: Vec<String> = request
+        .messages
+        .iter()
+        .filter(|m| m.role == localpilot_core::Role::User)
+        .map(|m| {
+            m.content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                )
+        })
+        .collect();
+    assert_eq!(users.len(), 3, "{users:?}");
+    assert_eq!(users[0], "first");
+    assert_eq!(users[1], "second");
+    assert!(users[2].contains(block), "{}", users[2]);
+    assert!(users[2].ends_with("third"), "{}", users[2]);
+    assert_eq!(users.iter().filter(|u| u.contains(block)).count(), 1);
+    assert!(request
+        .messages
+        .iter()
+        .filter(|m| m.role == localpilot_core::Role::System)
+        .all(|m| !m
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.contains(block)))));
 }
 
 #[tokio::test]

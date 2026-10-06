@@ -23,7 +23,7 @@ use std::sync::Arc;
 use localpilot_config::redact;
 use localpilot_config::{ContextDiscovery, ProjectContext};
 
-use crate::{ContextHook, PathsInPlay, SessionRuntime};
+use crate::{ContextHook, ContextPlacement, PathsInPlay, SessionRuntime};
 
 /// A context hook that contributes the merged, bounded, redacted project
 /// instruction text before each turn.
@@ -106,6 +106,11 @@ fn prompt_path_candidates(prompt: &str) -> Vec<String> {
 impl ContextHook for ProjectInstructionsContext {
     fn name(&self) -> &str {
         "project-instructions"
+    }
+
+    /// The project's instructions are standing rules for every question.
+    fn placement(&self) -> ContextPlacement {
+        ContextPlacement::System
     }
 
     fn context_for(&self, prompt: &str) -> Option<String> {

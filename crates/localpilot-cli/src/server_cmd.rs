@@ -362,6 +362,7 @@ impl SessionSetup {
             self.config.context.instruction_char_budget,
             &mut runtime,
         );
+        runtime.set_retrieved_beside_question(self.config.context.retrieved_beside_question);
         Ok(runtime)
     }
 }

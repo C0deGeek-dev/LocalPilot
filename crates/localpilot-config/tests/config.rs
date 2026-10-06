@@ -226,6 +226,30 @@ fn the_mesh_writer_defaults_to_native_and_takes_an_exact_delegate_argv() -> Test
 }
 
 #[test]
+fn retrieved_context_goes_beside_the_question_unless_switched_off() -> TestResult {
+    isolated(|jail| {
+        let cfg = load(&ConfigPaths::default(), &CliOverrides::default())?;
+        assert!(cfg.context.retrieved_beside_question, "on by default");
+
+        let project = write(
+            jail,
+            "project.toml",
+            "[context]\nretrieved_beside_question = false\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        assert!(!cfg.context.retrieved_beside_question);
+        // Setting one context key leaves the others at their defaults.
+        assert!(cfg.context.project_analysis);
+        assert!(cfg.context.inject_instructions);
+        Ok(())
+    })
+}
+
+#[test]
 fn project_analysis_and_lookup_policy_parse() -> TestResult {
     isolated(|jail| {
         let project = write(

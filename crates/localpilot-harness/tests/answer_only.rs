@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use localpilot_core::{ContentBlock, Role};
-use localpilot_harness::{ContextHook, SessionConfig, SessionRuntime, StopReason};
+use localpilot_harness::{
+    ContextHook, ContextPlacement, SessionConfig, SessionRuntime, StopReason,
+};
 use localpilot_llm::FakeProvider;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
@@ -171,11 +173,215 @@ async fn unadvertised_tool_calls_never_execute_even_under_bypass() {
     assert_eq!(runtime.turn_tool_calls(), 0);
 }
 
+/// A hook that contributes standing instructions, which stay in the system
+/// prompt wherever retrieved context goes.
+struct StandingRule;
+
+impl ContextHook for StandingRule {
+    fn name(&self) -> &str {
+        "standing-rule"
+    }
+
+    fn context_for(&self, _prompt: &str) -> Option<String> {
+        Some("Standing rule: indent with tabs.".to_string())
+    }
+
+    fn placement(&self) -> ContextPlacement {
+        ContextPlacement::System
+    }
+}
+
+/// An ordinary session with a standing-rule hook registered before the
+/// retrieval hook, so hook order is observable.
+fn with_standing_rule_first(root: &std::path::Path, provider: Arc<FakeProvider>) -> SessionRuntime {
+    let mut runtime = SessionRuntime::new(
+        provider,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(root),
+        Workspace::new(root).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    runtime.seed_system("Session instructions remain authoritative.");
+    runtime
+        .hooks_mut()
+        .register_context_hook(Arc::new(StandingRule));
+    runtime
+        .hooks_mut()
+        .register_context_hook(Arc::new(ProjectContext));
+    runtime
+}
+
+fn system_text(request: &localpilot_llm::ModelRequest) -> String {
+    request
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::System)
+        .map(text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[tokio::test]
-async fn ordinary_sessions_keep_system_context_and_tool_schemas() {
+async fn ordinary_sessions_place_retrieved_context_beside_the_question_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FakeProvider::new().text("answer"));
+    let mut runtime = with_standing_rule_first(dir.path(), provider.clone());
+    let session = runtime.session_id();
+    let (events, _) = broadcast::channel(64);
+    assert_eq!(
+        runtime
+            .run_turn("question", &events, &CancellationToken::new())
+            .await,
+        StopReason::Done
+    );
+    let request = &provider.requests()[0];
+    assert!(
+        !request.tools.is_empty(),
+        "an ordinary session keeps its tools"
+    );
+    let system = system_text(request);
+    assert!(
+        system.contains("Standing rule: indent with tabs."),
+        "{system}"
+    );
+    assert!(!system.contains("convention for"), "{system}");
+    let user = request
+        .messages
+        .iter()
+        .find(|message| message.role == Role::User)
+        .unwrap();
+    assert!(
+        text(user).contains("convention for question"),
+        "{}",
+        text(user)
+    );
+    assert!(!text(user).contains("Standing rule"));
+    assert_eq!(user.content.last(), Some(&ContentBlock::text("question")));
+    let logged =
+        serde_json::to_string(&Store::open(dir.path()).read_events(session).unwrap()).unwrap();
+    assert!(
+        !logged.contains("convention for"),
+        "retrieval must never accumulate in stored history"
+    );
+}
+
+#[tokio::test]
+async fn switching_the_placement_off_reproduces_the_single_system_block_in_hook_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FakeProvider::new().text("answer"));
+    let mut runtime = with_standing_rule_first(dir.path(), provider.clone());
+    runtime.set_retrieved_beside_question(false);
+    let (events, _) = broadcast::channel(64);
+    assert_eq!(
+        runtime
+            .run_turn("question", &events, &CancellationToken::new())
+            .await,
+        StopReason::Done
+    );
+    let request = &provider.requests()[0];
+    let system: Vec<String> = request
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::System)
+        .map(text)
+        .collect();
+    assert_eq!(system.len(), 1, "one leading system message");
+    assert!(
+        system[0].contains(
+            "Standing rule: indent with tabs.\nRelevant accepted project memory: convention for question"
+        ),
+        "hook order is kept: {}",
+        system[0]
+    );
+    let user = request
+        .messages
+        .iter()
+        .find(|message| message.role == Role::User)
+        .unwrap();
+    assert_eq!(text(user), "question");
+}
+
+#[tokio::test]
+async fn context_is_sent_again_after_a_tool_call_and_never_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("c1", "list_files", serde_json::json!({ "path": "." }))
+            .text("answer"),
+    );
+    let mut runtime = with_standing_rule_first(dir.path(), provider.clone());
+    let session = runtime.session_id();
+    let (events, _) = broadcast::channel(64);
+    assert_eq!(
+        runtime
+            .run_turn("question", &events, &CancellationToken::new())
+            .await,
+        StopReason::Done
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2, "the tool result needs a second request");
+    for request in &requests {
+        let question = request
+            .messages
+            .iter()
+            .find(|message| message.role == Role::User && !message.is_synthetic())
+            .unwrap();
+        assert!(text(question).contains("convention for question"));
+        assert!(request
+            .messages
+            .iter()
+            .filter(|message| message.role != Role::User)
+            .all(|message| !text(message).contains("convention for")));
+    }
+    let logged =
+        serde_json::to_string(&Store::open(dir.path()).read_events(session).unwrap()).unwrap();
+    assert!(!logged.contains("convention for"));
+}
+
+#[tokio::test]
+async fn ordinary_context_stays_with_the_real_question_through_a_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FakeProvider::new().malformed().text("answer"));
+    let mut runtime = with_standing_rule_first(dir.path(), provider.clone());
+    let (events, _) = broadcast::channel(64);
+    assert_eq!(
+        runtime
+            .run_turn("question", &events, &CancellationToken::new())
+            .await,
+        StopReason::Done
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        let question = request
+            .messages
+            .iter()
+            .find(|message| message.role == Role::User && !message.is_synthetic())
+            .unwrap();
+        assert!(text(question).contains("convention for question"));
+        assert!(!request
+            .messages
+            .iter()
+            .filter(|message| message.is_synthetic())
+            .any(|message| text(message).contains("convention for")));
+    }
+}
+
+#[tokio::test]
+async fn with_the_placement_off_ordinary_sessions_keep_system_context_and_tool_schemas() {
+    // The rollback path: `[context] retrieved_beside_question = false`.
     let dir = tempfile::tempdir().unwrap();
     let provider = Arc::new(FakeProvider::new().text("answer"));
     let mut runtime = runtime(dir.path(), provider.clone(), false);
+    runtime.set_retrieved_beside_question(false);
     let (events, _) = broadcast::channel(64);
     assert_eq!(
         runtime

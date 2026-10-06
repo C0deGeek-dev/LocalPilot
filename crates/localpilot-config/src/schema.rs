@@ -474,6 +474,14 @@ pub struct ContextConfig {
     /// budget the text is truncated with a marker rather than dropped. Keeps a
     /// large instruction set from crowding out the per-turn token budget.
     pub instruction_char_budget: usize,
+    /// Place context retrieved for the question (project memory, primers, rule
+    /// cues) beside the question in the turn's user message instead of at the
+    /// end of the system prompt. The project's instruction files, layout facts
+    /// and the work profile stay in the system prompt. Models measured so far
+    /// act on retrieved memory next to the question and pass over it in a long
+    /// system prompt (ADR-0217). Default on; `false` restores the earlier
+    /// placement, with everything in the system prompt.
+    pub retrieved_beside_question: bool,
 }
 
 impl Default for ContextConfig {
@@ -482,6 +490,7 @@ impl Default for ContextConfig {
             project_analysis: true,
             inject_instructions: true,
             instruction_char_budget: 8_000,
+            retrieved_beside_question: true,
         }
     }
 }
