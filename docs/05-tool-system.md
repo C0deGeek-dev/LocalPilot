@@ -833,7 +833,9 @@ When `[tools] broker = true`:
   each user request or user steer is sent, the broker ranks the catalog against
   the request's content words and reveals up to three strongly matching tools
   that are not advertised yet, so a model that never calls `tool_search` still
-  sees the tool its request names (ADR-0216).
+  sees the tool its request names (ADR-0216). A tool's name only adds to its
+  score when the request names it — exactly, or with every word of a multi-word
+  name — not when one generic word happens to occur in it (ADR-0218).
 - **Stable order.** The always-advertised tools (core, the broker's own tools,
   graduates) come first in registry order and revealed tools follow in the order
   they were revealed. While the always-advertised set is unchanged, a new reveal

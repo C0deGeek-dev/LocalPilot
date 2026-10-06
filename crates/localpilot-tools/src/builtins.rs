@@ -2009,7 +2009,8 @@ impl Tool for GitLog {
         "git log".to_string()
     }
     fn description(&self) -> &'static str {
-        "Show recent git commits in one-line form."
+        "Show the most recent commits of the repository's history, newest first, one line \
+         each (hash and subject)."
     }
     fn schema(&self) -> Value {
         schema_for::<GitLogInput>()
@@ -2150,7 +2151,8 @@ impl Tool for GitCommit {
         paths_detail(input, "git commit")
     }
     fn description(&self) -> &'static str {
-        "Create a commit from intended files; rejects secret-bearing messages."
+        "Commit changes with a message: records the staged changes, or the given paths, as a new \
+         commit; rejects secret-bearing messages."
     }
     fn schema(&self) -> Value {
         schema_for::<GitCommitInput>()

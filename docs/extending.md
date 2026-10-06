@@ -80,8 +80,10 @@ integration point**, not a third-party surface — it is wired in-process from
 `[tools]` config (see [configuration.md](configuration.md)); revealing a tool
 changes visibility only and never bypasses the permission engine (ADR-0031).
 
-Resolution ranks a tool by **its own words** — name plus description, with the
-exact-name bonus. When those match nothing, a bounded fallback can still surface
+Resolution ranks a tool by **its own words** — name plus description, with a
+name bonus when the need names the tool: its exact name, or every word of a
+multi-word name written separately (one word that merely occurs in a name earns
+nothing; ADR-0218). When those match nothing, a bounded fallback can still surface
 it: the MCP server name and the schema's property names and descriptions are
 indexed, and a first-party capability vocabulary bridges words that mean the same
 thing (`upgrade`/`migration`/`version` ↔ `docs`/`documentation`/`reference`,

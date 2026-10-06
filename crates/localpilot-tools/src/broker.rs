@@ -286,13 +286,11 @@ fn match_reason(haystack: &str, words: &[&str], capability_hits: &[&str]) -> Str
 /// otherwise be invisible but can never re-rank tools that already matched.
 /// That keeps every existing ranking intact while letting a generically
 /// described documentation tool be found by what it does.
-fn score_entry(entry: &CatalogEntry, words: &[&str], need_lower: &str) -> (u32, String) {
+fn score_entry(entry: &CatalogEntry, words: &[&str], explicit: &[String]) -> (u32, String) {
     let primary = entry_primary_text(entry);
     let word_hits = word_overlap(&primary, words);
     let name_lower = entry.name.to_ascii_lowercase();
-    let name_bonus = u32::from(
-        need_lower.contains(&name_lower) || words.iter().any(|w| name_lower.contains(*w)),
-    ) * 2;
+    let name_bonus = u32::from(names_tool(&name_lower, explicit)) * 2;
     let direct = word_hits + name_bonus;
     if direct > 0 {
         return (direct, match_reason(&primary, words, &[]));
@@ -333,6 +331,42 @@ fn score_entry(entry: &CatalogEntry, words: &[&str], need_lower: &str) -> (u32, 
     (score, match_reason(&haystack, words, &capability_hits))
 }
 
+/// Identifier-shaped tokens of `text`, lower-cased: how an explicit mention of a
+/// tool looks (`git_log`, `release-codename`, `server.tool`). Trailing sentence
+/// punctuation is not part of the token.
+fn identifier_tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')))
+        .map(|token| {
+            token
+                .trim_matches(|c: char| matches!(c, '-' | '.' | ':'))
+                .to_ascii_lowercase()
+        })
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+/// Whether the text names this tool: its exact name as an identifier, or every
+/// part of a multi-part name written as separate words (`release codename` for
+/// `release_codename`). One word that merely occurs in a name (`file` in
+/// `read_file`, `commit` in `git_commit`) is not a mention of the tool, and
+/// neither is a longer identifier that contains it (`not_git_log`). A name with
+/// a part shorter than a ranked word (`aws_s3_get`, `fetch_a`) can only be named
+/// exactly: its separate-word form would rest on a fragment like `s3` or `a`.
+fn names_tool(name_lower: &str, explicit: &[String]) -> bool {
+    if explicit.iter().any(|token| token == name_lower) {
+        return true;
+    }
+    let parts: Vec<&str> = name_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.len() > 1
+        && parts.iter().all(|part| part.len() > 2)
+        && parts
+            .iter()
+            .all(|part| explicit.iter().any(|token| token == part))
+}
+
 /// The most a capability-only match can contribute, so it never outweighs an
 /// exact-name hit.
 const CAPABILITY_SCORE_CAP: u32 = 2;
@@ -361,20 +395,29 @@ pub fn describes_documentation(name: &str, description: &str) -> bool {
 /// non-deprecated tool wins, ties broken by name. Capped to `MAX_LOCATORS`.
 #[must_use]
 pub fn resolve(catalog: &Catalog, overlay: &DeprecationOverlay, need: &str) -> Vec<Locator> {
-    let mut hits = rank_all(catalog, overlay, need);
+    let mut hits = rank_all(catalog, overlay, need, need);
     hits.truncate(MAX_LOCATORS);
     hits
 }
 
 /// Every scoring catalog entry for `need`, in [`resolve`] order, uncapped.
-fn rank_all(catalog: &Catalog, overlay: &DeprecationOverlay, need: &str) -> Vec<Locator> {
+/// Explicit tool names are read from `named_in`: the need itself for a search or
+/// a failed call, the user's original words for a request-driven reveal (whose
+/// need has had its identifiers split into words).
+fn rank_all(
+    catalog: &Catalog,
+    overlay: &DeprecationOverlay,
+    need: &str,
+    named_in: &str,
+) -> Vec<Locator> {
     let need_lower = need.to_ascii_lowercase();
     let words = need_words(&need_lower);
+    let explicit = identifier_tokens(named_in);
     let mut hits: Vec<Locator> = catalog
         .entries()
         .iter()
         .filter_map(|entry| {
-            let (score, reason) = score_entry(entry, &words, &need_lower);
+            let (score, reason) = score_entry(entry, &words, &explicit);
             if score == 0 {
                 return None;
             }
@@ -571,8 +614,8 @@ impl BrokerState {
     /// [`Self::ranked`] without the locator cap, for the request-driven reveal,
     /// which filters out visible tools before choosing so they cannot crowd a
     /// hidden match out.
-    fn ranked_uncapped(&self, need: &str) -> Vec<Locator> {
-        self.with_learning(rank_all(&self.catalog, &self.overlay, need))
+    fn ranked_uncapped(&self, need: &str, named_in: &str) -> Vec<Locator> {
+        self.with_learning(rank_all(&self.catalog, &self.overlay, need, named_in))
     }
 
     /// Apply the learned re-rank boost (when learning is on) and re-sort.
@@ -864,7 +907,7 @@ impl Broker {
             PROMPT_REVEAL_MAX.min(cap)
         };
         let picks: Vec<Locator> = state
-            .ranked_uncapped(&need)
+            .ranked_uncapped(&need, request)
             .into_iter()
             .filter(|hit| hit.score >= floor && !state.is_advertised(&hit.name))
             .take(limit)
@@ -1157,16 +1200,16 @@ mod tests {
         assert!(broker.is_advertised("fetch"));
     }
 
-    /// Equally strong entries: every name shares the "deploy" bonus and the
-    /// same description, so ties break by name and the hidden tool, named to
-    /// sort last, falls beyond the locator cap of an ordinary search.
+    /// Equally strong entries: every name has the same description, so ties
+    /// break by name and the hidden tool, named to sort last, falls beyond the
+    /// locator cap of an ordinary search.
     fn wide_catalog(visible: usize) -> Catalog {
         let mut names: Vec<String> = (0..visible).map(|i| format!("deploy_a{i:02}")).collect();
         names.push("deploy_z_hidden".to_string());
         Catalog::project(names.into_iter().map(|name| {
             (
                 name,
-                "deploy the release bundle".to_string(),
+                "deploy the release bundle to staging".to_string(),
                 schema(&[]),
                 ToolSource::Builtin,
             )
@@ -1183,7 +1226,7 @@ mod tests {
         broker.set_catalog(wide_catalog(12));
         // Precondition: an ordinary, capped search never reaches the hidden tool.
         let searched: Vec<String> = broker
-            .resolve("deploy the release bundle")
+            .resolve("deploy the release bundle to staging")
             .into_iter()
             .map(|hit| hit.name)
             .collect();
@@ -1194,7 +1237,7 @@ mod tests {
         );
         // The request reveal ranks past the visible tools and finds it.
         let revealed: Vec<_> = broker
-            .reveal_for_request("deploy the release bundle")
+            .reveal_for_request("deploy the release bundle to staging")
             .into_iter()
             .filter_map(|r| r.revealed)
             .collect();
@@ -1218,7 +1261,7 @@ mod tests {
             }
         }
         let searched: Vec<String> = broker
-            .resolve("deploy the release bundle")
+            .resolve("deploy the release bundle to staging")
             .into_iter()
             .map(|hit| hit.name)
             .collect();
@@ -1235,7 +1278,7 @@ mod tests {
             Catalog::project((0..n).map(|i| {
                 (
                     format!("deploy_tool_{i}"),
-                    format!("deploy the release bundle {i}"),
+                    format!("deploy the release bundle to staging {i}"),
                     schema(&[]),
                     ToolSource::Builtin,
                 )
@@ -1247,7 +1290,7 @@ mod tests {
                 ..BrokerConfig::default()
             });
             broker.set_catalog(hidden(5));
-            let picked = broker.reveal_for_request("deploy the release bundle");
+            let picked = broker.reveal_for_request("deploy the release bundle to staging");
             assert_eq!(picked.len(), expected, "cap {cap}");
             // Everything reported as revealed is advertised to the model.
             for resolution in &picked {
@@ -1572,6 +1615,31 @@ mod tests {
     }
 
     // --- advertised set composition ---
+
+    #[test]
+    fn a_tool_is_named_only_by_its_whole_name() {
+        let named = |name: &str, text: &str| names_tool(name, &identifier_tokens(text));
+        // Exact identifiers, including namespaced dotted/colon/hyphen names.
+        assert!(named("git_log", "use git_log now"));
+        assert!(named("docs.query", "call docs.query."));
+        assert!(named("server:lookup", "try server:lookup"));
+        assert!(named("release-codename", "the release-codename tool"));
+        // Every part written as separate words.
+        assert!(named("release_codename", "the release codename"));
+        assert!(named("git_log", "show the git log"));
+        // A part missing, or only inside a longer identifier, is not a mention.
+        assert!(!named("git_commit", "which commit changed this"));
+        assert!(!named("read_file", "give the file path"));
+        assert!(!named("git_log", "rename not_git_log"));
+        assert!(!named("git_log", "configure git_logger"));
+        assert!(!named("docs.query", "query the docs.query_v2 index"));
+        // A short part is never satisfied by separate words.
+        assert!(!named("aws_s3_get", "aws get the object"));
+        assert!(!named("aws_s3_get", "aws s3 get"));
+        assert!(named("aws_s3_get", "use aws_s3_get"));
+        assert!(!named("release_v2_codename", "release codename"));
+        assert!(!named("fetch_a", "fetch a url"));
+    }
 
     #[test]
     fn core_and_broker_tools_are_always_advertised() {

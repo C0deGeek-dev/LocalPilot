@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The tool broker ranks by intent, not by a word that happens to be in a tool
+  name.** A tool's name now adds to its score only when a request names it —
+  exactly (`git_log`), or with every word of a multi-word name ("release
+  codename") — so "which commit last changed this" no longer surfaces
+  `git_commit` (it does not reveal `git_log` either), and "where is the class X
+  defined? give the file path" now surfaces `search_definitions`. Explicit tool
+  names in a request are recognised by the request-driven reveal. The `git_log`,
+  `git_commit` and `search_definitions` descriptions say more precisely what
+  they do (ADR-0218).
 - **Retrieved memory now sits beside the question in ordinary sessions.** Project
   memory, primers and rule cues used to end up at the end of a long system
   prompt, where the models measured so far passed over them: in tool-using turns

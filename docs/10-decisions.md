@@ -2,6 +2,46 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0218: A Tool Name Earns Its Ranking Bonus Only When It Is Named
+
+**Status:** accepted · **Date:** 2026-10-06. Amends ADR-0031 and ADR-0120.
+
+**Context.** The broker ranks a tool by overlap between the need and the tool's
+own name and description, plus a name bonus. The bonus fired whenever any need
+word occurred inside a tool name, so a generic word decided the ranking: "which
+commit last changed the value" ranked `git_commit` (3) above `git_log` (1), and
+"where is the class defined? give the file path" gave every `*_file` tool 3 while
+`search_definitions` lost the tie. The request-driven reveal (ADR-0216) also
+split identifiers into words before ranking, so an explicit `git_log` in a
+request could not be recognised as a name.
+
+**Decision.**
+- The name bonus applies only when the text names the tool: its exact name as
+  an identifier (case-insensitive, with identifier boundaries, so `not_git_log`
+  and `git_logger` do not count), or every word of a multi-word name written as
+  separate words (`release codename` for `release_codename`). A single word that
+  merely occurs in a name scores like any other word, and a name with a part
+  shorter than three characters (`aws_s3_get`) can only be named exactly.
+- The request-driven reveal reads explicit names from the user's original text,
+  not from its word-split need; `tool_search` and failed-call re-resolution read
+  them from their own need.
+- Tool descriptions state their purpose: `git_log` describes the commit history
+  it lists, `git_commit` that it commits changes with a message, and
+  `search_definitions` that a declaration type includes a class or struct.
+- Unchanged: the reveal floor and cap, metadata and capability fallback,
+  learning, reveal-never-grant, and broker-off behaviour.
+
+**Consequences.**
+- A request about history no longer reveals or ranks `git_commit` first. It
+  does not reveal `git_log` either: `git_log` lists recent commits and cannot by
+  itself find the commit that changed a value, and its description is not padded
+  to reach the reveal floor.
+- The reproduced request "Where is the class X defined? Give the file path."
+  reveals `search_definitions` (class, defined, file, path). A shorter definition
+  question can still score below the reveal floor and rely on `tool_search` or
+  the failure-driven trigger; this is not a general guarantee.
+- A regression table over the real tool catalog pins requests to the tools they
+  must and must not reveal, including the requests the reveal already handled.
 ## ADR-0217: Ordinary Sessions Place Retrieved Context Beside The Question, On By Default
 
 **Status:** accepted · **Date:** 2026-10-06. Amends ADR-0211.

@@ -93,7 +93,8 @@ impl Tool for SearchDefinitions {
     }
 
     fn description(&self) -> &str {
-        "Find code declarations (function, type, module, test) matching a query and return \
+        "Find code declarations (function, type such as a class or struct, module, test) \
+         matching a query and return \
          each with its symbol path, signature and location, respecting ignore files — for \
          \"where is X defined\" or \"what implements Y\". Use `search_text` for prose, \
          configuration, or every matching line. Read-only."
