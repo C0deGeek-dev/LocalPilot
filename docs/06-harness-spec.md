@@ -1151,8 +1151,8 @@ is watching:
   **no** default wall-clock — a long interactive turn is legitimate and the user
   can cancel it; the ceiling still stops an unattended runaway.
 
-This is a safety default, not a feature lever: unlike the verify gate (opt-in) or
-the broker (opt-in), an unbounded loop is a defect, so the rails ship on with a
+This is a safety default, not a feature lever: unlike the verify gate (opt-in), an
+unbounded loop is a defect, so the rails ship on with a
 conservative bound. Rollback/tuning is config — raise or set the explicit
 `tool_call_budget`/`turn_timeout_secs`.
 

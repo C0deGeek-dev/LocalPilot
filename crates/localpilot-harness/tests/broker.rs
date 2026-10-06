@@ -865,3 +865,57 @@ async fn without_the_broker_the_tools_keep_registry_order() {
         .await;
     assert_eq!(advertised(&provider.requests()), expected);
 }
+
+// --- a small window ---
+
+/// The context used by the first request of a turn, as the runtime reports it.
+fn first_context_used(rx: &mut broadcast::Receiver<RuntimeEvent>) -> usize {
+    while let Ok(event) = rx.try_recv() {
+        if let RuntimeEvent::ContextUsage { used, .. } = event {
+            return used;
+        }
+    }
+    0
+}
+
+#[tokio::test]
+async fn on_a_small_window_the_broker_leaves_more_of_the_budget_free() {
+    // Same small budget, same request; the advertised specs are counted in the
+    // reported context use, so the narrowed set shows up as headroom.
+    let small = SessionConfig {
+        context_token_limit: 8_192,
+        ..SessionConfig::default()
+    };
+    let mut on = build_with_session_config(FakeProvider::new().text("done"), small.clone());
+    let mut on_rx = on.events.subscribe();
+    let _ = on.runtime.run_turn("hello", &on.events, &on.cancel).await;
+    let on_used = first_context_used(&mut on_rx);
+
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let mut off = SessionRuntime::new(
+        provider.clone(),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        small,
+        Vec::new(),
+    );
+    let (events, mut off_rx) = broadcast::channel(256);
+    let _ = off
+        .run_turn("hello", &events, &CancellationToken::new())
+        .await;
+    let off_used = first_context_used(&mut off_rx);
+
+    assert!(on_used > 0 && off_used > 0, "on {on_used}, off {off_used}");
+    assert!(
+        on_used < off_used,
+        "the broker's narrowed set should use less of the budget: on {on_used}, off {off_used}"
+    );
+    let on_tools = advertised(&on.provider.requests()).len();
+    let off_tools = advertised(&provider.requests()).len();
+    assert!(on_tools < off_tools, "on {on_tools} tools, off {off_tools}");
+}

@@ -2048,23 +2048,22 @@ mod tests {
         let mut declaration = seed.declaration().clone();
         declaration.id = "first".to_string();
         declaration.display_name = "first".to_string();
+        let question_input = json!({
+            "questions": [{
+                "header": "Database",
+                "question": "Which database?",
+                "options": [
+                    {"label": "Postgres"},
+                    {"label": "SQLite"}
+                ]
+            }]
+        });
         let scripted: Arc<dyn ModelProvider> = Arc::new(
             FakeProvider::new()
                 .with_declaration(declaration)
-                .tool_call(
-                    "question",
-                    "ask_user",
-                    json!({
-                        "questions": [{
-                            "header": "Database",
-                            "question": "Which database?",
-                            "options": [
-                                {"label": "Postgres"},
-                                {"label": "SQLite"}
-                            ]
-                        }]
-                    }),
-                )
+                // Retry after the default broker reveals this non-core tool.
+                .tool_call("reveal-question", "ask_user", question_input.clone())
+                .tool_call("question", "ask_user", question_input)
                 .tool_call(
                     "write",
                     "write_file",

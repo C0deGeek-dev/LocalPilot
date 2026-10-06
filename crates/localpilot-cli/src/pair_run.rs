@@ -1645,30 +1645,28 @@ mod tests {
     #[tokio::test]
     async fn active_peer_steering_lands_at_the_existing_after_tool_safe_point() {
         let directory = tempfile::tempdir().unwrap();
+        let question_input = json!({
+            "questions": [{
+                "header": "Choice",
+                "question": "Continue?",
+                "options": [
+                    {
+                        "label": "yes",
+                        "description": "Continue the fixture."
+                    },
+                    {
+                        "label": "no",
+                        "description": "Stop the fixture."
+                    }
+                ],
+                "multi_select": false
+            }]
+        });
         let first = Arc::new(
             FakeProvider::new()
                 .with_declaration(declaration("first"))
-                .tool_call(
-                    "question-a",
-                    "ask_user",
-                    json!({
-                        "questions": [{
-                            "header": "Choice",
-                            "question": "Continue?",
-                            "options": [
-                                {
-                                    "label": "yes",
-                                    "description": "Continue the fixture."
-                                },
-                                {
-                                    "label": "no",
-                                    "description": "Stop the fixture."
-                                }
-                            ],
-                            "multi_select": false
-                        }]
-                    }),
-                )
+                .tool_call("reveal-question-a", "ask_user", question_input.clone())
+                .tool_call("question-a", "ask_user", question_input)
                 .text(A_PROPOSAL),
         );
         let second = fake("second", B_PROPOSAL);
@@ -2041,6 +2039,9 @@ mod tests {
         let first = Arc::new(
             FakeProvider::new()
                 .with_declaration(declaration("first"))
+                // The default broker reveals ask_user on the first attempt;
+                // retry the revealed tool to exercise its real question path.
+                .tool_call("reveal-question-a", "ask_user", ask.clone())
                 .tool_call("question-a", "ask_user", ask.clone())
                 .tool_call(
                     "write-a",
@@ -2052,6 +2053,7 @@ mod tests {
         let second = Arc::new(
             FakeProvider::new()
                 .with_declaration(declaration("second"))
+                .tool_call("reveal-question-b", "ask_user", ask.clone())
                 .tool_call("question-b", "ask_user", ask)
                 .tool_call(
                     "write-b",

@@ -1263,13 +1263,13 @@ when off, guidance to `/skills list` or the `autonomous_discovery` switch.
 ### `[tools]`
 
 The pull-discovery broker (ADR-0031): narrow each turn's advertised tool schemas
-to a small working set and resolve a need to the right tool on demand. Every key
-defaults so an absent `[tools]` block reproduces prior behaviour exactly — the
-broker is off and the full tool set is advertised.
+to a small working set and resolve a need to the right tool on demand. The
+broker is on by default (ADR-0219); `broker = false` advertises the full
+available tool set.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `broker` | bool | `false` | Enable the broker. Off advertises the full registry (the rollback path); on narrows advertised schemas to the working set and resolves/reveals on a miss. |
+| `broker` | bool | `true` | Enable the broker. On narrows advertised schemas to the working set, reveals tools a request names and resolves/reveals on a miss; `false` advertises the full available registry (the rollback path). |
 | `core` | array of string | `[]` | The core working set always advertised when the broker is on. Empty uses the built-in default (a lean read/edit/search/shell set). |
 | `working_set_cap` | int | `24` | Maximum revealed tools retained before LRU eviction. |
 | `score_floor` | int | `1` | Minimum resolution score to reveal; below it a miss is a clean "no match". |
@@ -1282,8 +1282,8 @@ broker is off and the full tool set is advertised.
 | `repair_learning` | bool | `false` | Offer the session's argument-repair patterns to LocalMind as aggregate, redacted, **review-gated** candidates at session close (which model needed which repair on which tool). Reuse-only: it stores no raw inputs/paths/content, writes no accepted memory, and adds no new store — a human promotes a candidate or it expires in review. Off by default. |
 | `elide_seen_reads` | bool | `false` | Elide a `read_file` result whose file+range was already read this session and is unchanged since (same mtime **and** length): return a compact stub pointing at the earlier read instead of the full body, cutting context waste on read-heavy loops. Conservative — a changed file, a coarse-mtime same-length overwrite, or any unreadable stat always returns full content, never a stale stub; the model can re-page any range with `read_file` start_line/end_line. The elided read still records as a successful `read_file`, so nothing that depends on "was this read" changes. Off by default; in-memory, so a resumed session serves full content until it re-reads. |
 
-**Migration:** these defaults reproduce prior behaviour, so an existing config
-keeps working unchanged. Opt in with `[tools] broker = true`; see
+**Migration:** a configuration that does not set `broker` now runs with the
+broker on. Set `[tools] broker = false` to keep advertising the full tool set; see
 [05-tool-system.md](05-tool-system.md) §Pull-Discovery Broker.
 
 **Prefill lever.** With the broker off, every advertised tool's JSON schema is
@@ -1296,9 +1296,9 @@ broker with request reveal solved 28 of 36 tasks against 27 of 36 with the full
 tool set, and cut the median first request from about 8,000 to 3,700 prompt
 tokens, which leaves more of a small window for the task. It was not faster
 overall in that pilot, and a request that produces no sufficiently strong
-catalog match reveals nothing. The broker stays off by default; enable it with
-`[tools] broker = true` on a small window, and add tools a workload always needs
-to `core`. Without `prompt_reveal` the tested model rarely searched for tools it
+catalog match reveals nothing. Longer evaluations were mixed (ADR-0219); the
+broker is on by default as a product decision. Add tools a workload always needs
+to `core`, or set `broker = false` to advertise everything. Without `prompt_reveal` the tested model rarely searched for tools it
 could not see and solved 18 of 36. Each reveal adds its schema to later
 requests.
 

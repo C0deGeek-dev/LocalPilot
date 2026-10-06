@@ -2,6 +2,57 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0219: The Broker Is On By Default
+
+**Status:** accepted · **Date:** 2026-10-06. Amends ADR-0031 and ADR-0216.
+A product decision by the owner; it overrides the evaluation gate that was set
+before the long-task measurements.
+
+**Context.** The pull broker (ADR-0031) was opt-in, with an evaluation gate for
+turning it on: more tasks solved than the full tool set, no task lost by two or
+more of three runs, no new class of invalid call, and every hidden-tool task
+solved in at least two of three runs. Six long-task cohorts (one model per
+cohort, 8 tasks x 3 runs per arm, one shared fixture, the executable before the
+ranking change of ADR-0218) gave mixed results:
+
+| Cohort | Full tool set | Broker | Gate |
+| --- | --- | --- | --- |
+| Bonsai 27B 1-bit, 16k | 11/24 | 15/24 | fails a hidden-tool task (both arms 0/3) |
+| Bonsai 27B 1-bit, 32k | 11/24 | 20/24 | fails a hidden-tool task (broker 1/3) |
+| Bonsai 27B 1-bit, 64k | 17/24 | 12/24 | fails: fewer solved, two tasks lost by two runs, a hidden-tool task 0/3 |
+| Qwen 3.6 35B-A3B, 16k | 17/24 | 18/24 | +1, needed confirmation |
+| Same, confirmation | 19/24 | 17/24 | not confirmed |
+| Qwen 3.6 35B-A3B, 64k | 17/24 | 22/24 | passes |
+
+Differences between cohorts of the same model were often larger than the
+differences between arms, so three runs per arm do not separate a few-task
+effect from noise.
+
+**Decision.**
+- `[tools] broker` defaults to `true`. `[tools] broker = false` restores the full
+  available tool set (the rollback); it does not change permissions or add tools
+  that are not registered. Configurations that set `broker` explicitly keep
+  their value; configurations that omit it now get the broker.
+- The owner accepts the mixed evidence: the Bonsai 64k regression, the
+  hidden-tool failures, the unconfirmed Qwen 16k result, and that other models,
+  windows and providers are untested. There is no window, provider or model
+  heuristic.
+- Sub-agents keep their existing policy of running without a broker.
+
+**Consequences.**
+- On the tested 16k configurations the first request was about 3,600 instead of
+  about 8,000 prompt tokens. This is a measured result for those runs, not a
+  guaranteed saving: a large configured `core` or long tool schemas still count
+  against the window, and the instruction-loss guard still applies.
+- A request that does not match a tool strongly enough reveals nothing; the
+  model can still use `tool_search`, or call the tool and be redirected by the
+  failure-driven trigger.
+- If a non-core tool is still hidden when first called, that call reveals it
+  instead of dispatching; the model must retry. This includes `ask_user`, so a
+  clarifying question can cost an extra model request. Workflows that depend on
+  it can include it in their configured `core` alongside their other core tools.
+- The six cohorts predate ADR-0218; its effect on these scores is not measured.
+
 ## ADR-0218: A Tool Name Earns Its Ranking Bonus Only When It Is Named
 
 **Status:** accepted · **Date:** 2026-10-06. Amends ADR-0031 and ADR-0120.

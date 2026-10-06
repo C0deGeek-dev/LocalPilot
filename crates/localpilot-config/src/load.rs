@@ -625,6 +625,68 @@ profile = \"readonly\"
     }
 
     #[test]
+    fn the_broker_is_on_unless_a_layer_sets_it_off() {
+        // No [tools] anywhere: on.
+        let on = load(&ConfigPaths::default(), &CliOverrides::default()).expect("load defaults");
+        assert!(on.tools.broker);
+
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join(".localpilot.toml");
+        // A [tools] block that does not mention the broker keeps it on.
+        std::fs::write(
+            &project,
+            "[tools]
+learning = false
+",
+        )
+        .unwrap();
+        let partial = load(
+            &ConfigPaths {
+                user: None,
+                project: Some(project.clone()),
+            },
+            &CliOverrides::default(),
+        )
+        .expect("load config");
+        assert!(partial.tools.broker);
+        // An explicit `false` in the user file turns it off ...
+        std::fs::write(
+            &user,
+            "[tools]
+broker = false
+",
+        )
+        .unwrap();
+        let off = load(
+            &ConfigPaths {
+                user: Some(user.clone()),
+                project: None,
+            },
+            &CliOverrides::default(),
+        )
+        .expect("load config");
+        assert!(!off.tools.broker);
+        // ... and a project layer setting it explicitly wins over the user layer.
+        std::fs::write(
+            &project,
+            "[tools]
+broker = true
+",
+        )
+        .unwrap();
+        let back_on = load(
+            &ConfigPaths {
+                user: Some(user),
+                project: Some(project),
+            },
+            &CliOverrides::default(),
+        )
+        .expect("load config");
+        assert!(back_on.tools.broker);
+    }
+
+    #[test]
     fn prompt_history_path_sits_beside_the_user_config() {
         // The store lives in the same per-user localpilot dir as config.toml.
         match (prompt_history_path(), user_config_path()) {

@@ -314,6 +314,36 @@ mod tests {
     }
 
     #[test]
+    fn the_default_config_installs_the_broker_and_narrows_the_tools() {
+        let mut registry = McpTools::default().registry();
+        let broker = install_broker(&ToolsConfig::default(), &mut registry)
+            .expect("the broker is on by default");
+        let names = registry.names();
+        assert!(
+            names.contains(&"tool_search") && names.contains(&"tool_load"),
+            "{names:?}"
+        );
+        // Narrowed: a core tool is advertised, a non-core tool is not until revealed.
+        assert!(broker.is_advertised("read_file"));
+        assert!(!broker.is_advertised("git_commit"));
+        assert!(broker.is_advertised("tool_search"));
+    }
+
+    #[test]
+    fn an_explicit_false_installs_no_broker_and_keeps_the_full_set() {
+        let mut registry = McpTools::default().registry();
+        let before = registry.names().len();
+        let off = ToolsConfig {
+            broker: false,
+            ..ToolsConfig::default()
+        };
+        assert!(install_broker(&off, &mut registry).is_none());
+        let names = registry.names();
+        assert_eq!(names.len(), before);
+        assert!(!names.contains(&"tool_search"), "{names:?}");
+    }
+
+    #[test]
     fn colliding_mcp_tool_is_prefixed_and_builtin_remains_reachable() {
         let registry = McpTools {
             entries: vec![mcp_entry("duckduckgo", "fetch")],

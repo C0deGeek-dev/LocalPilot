@@ -553,16 +553,15 @@ impl RepairMode {
 
 /// Pull-discovery broker configuration (ADR-0031). The broker narrows each turn's
 /// advertised tool *schemas* to a small working set and resolves a need to the
-/// right tool on demand, revealing its schema. Every field defaults so an absent
-/// `[tools]` block reproduces today's behaviour exactly: `broker = false`
-/// advertises the full registry (the rollback path), and the marker/learning
-/// triggers are off. The numeric defaults mirror `localpilot-tools`' own
-/// `BrokerConfig` defaults.
+/// right tool on demand, revealing its schema. The broker is on by default
+/// (ADR-0219); `broker = false` advertises the full available registry (the
+/// rollback path). The marker/learning triggers are off by default. The numeric
+/// defaults mirror `localpilot-tools`' own `BrokerConfig` defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {
     /// Enable the broker (narrow advertised schemas + resolve/reveal on miss).
-    /// Default `false` — the full tool set is advertised, as before.
+    /// Default `true`; `false` advertises the full available tool set.
     pub broker: bool,
     /// The core working set always advertised when the broker is on, in addition
     /// to the broker's own `tool_search`/`tool_load`. Empty uses the built-in
@@ -616,7 +615,7 @@ pub struct ToolsConfig {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
-            broker: false,
+            broker: true,
             core: Vec::new(),
             working_set_cap: 24,
             score_floor: 1,
@@ -1817,11 +1816,28 @@ mod tests {
     }
 
     #[test]
-    fn tools_config_defaults_reproduce_prior_behaviour() {
-        // Absent [tools] block ⇒ broker off ⇒ the full tool set is advertised,
-        // exactly as before, and the marker/learning triggers are off.
+    fn tools_config_turns_the_broker_on_unless_set_false() {
+        // A missing key, an empty block or a block without `broker` turns it on;
+        // only an explicit `broker = false` turns it off.
+        for (block, on) in [
+            (json!({}), true),
+            (json!({ "learning": false, "prompt_reveal": false }), true),
+            (json!({ "broker": true }), true),
+            (json!({ "broker": false }), false),
+        ] {
+            let parsed: ToolsConfig = serde_json::from_value(block.clone()).unwrap();
+            assert_eq!(parsed.broker, on, "{block}");
+        }
+        // The serialized default carries the same value.
+        let written = serde_json::to_value(ToolsConfig::default()).unwrap();
+        assert_eq!(written["broker"], json!(true));
+    }
+
+    #[test]
+    fn tools_config_defaults() {
+        // Broker on; the marker/learning triggers are off.
         let tools = ToolsConfig::default();
-        assert!(!tools.broker);
+        assert!(tools.broker);
         assert!(!tools.marker);
         assert!(!tools.learning);
         assert!(tools.core.is_empty());

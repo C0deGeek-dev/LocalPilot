@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The tool broker is on by default.** Sessions now advertise a lean core tool
+  set plus `tool_search`/`tool_load` and reveal other tools when a request names
+  them or a call needs them, instead of sending every tool's schema with every
+  request. On the tested 16k configurations the first request was about 3,600
+  instead of 8,000 prompt tokens. Longer evaluations were mixed — better in four
+  of six cohorts, worse in two — and this default is a product decision
+  (ADR-0219). To keep the previous behaviour, set `[tools] broker = false`.
+  Sub-agents still run without a broker.
+
 - **The tool broker ranks by intent, not by a word that happens to be in a tool
   name.** A tool's name now adds to its score only when a request names it —
   exactly (`git_log`), or with every word of a multi-word name ("release
@@ -42,7 +51,7 @@ is SemVer-stable; the configuration schema stability policy is in
   pilot with a small local model the broker now solved 28 of 36 tasks against 27
   of 36 with the full tool set (18 of 36 without request reveal), with a median
   first request of about 3,700 instead of 8,000 prompt tokens. It was not faster
-  overall, and the broker stays off by default.
+  overall in that pilot.
 - **A stable tool order with the broker on.** Always-advertised tools come
   first and revealed tools follow in reveal order, so a new reveal no longer
   reshuffles the tools a prompt cache could reuse.

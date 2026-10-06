@@ -809,11 +809,11 @@ the proposals and delegates any resulting mutation back to `skills repo add` /
 ## Pull-Discovery Broker
 
 The tool surface can be made **pull-based** instead of advertising every tool's
-schema every turn (ADR-0031). It is **off by default** (`[tools] broker = false`),
-in which case the full registry is advertised exactly as before — the rollback
-path.
+schema every turn (ADR-0031). It is **on by default** (ADR-0219); with
+`[tools] broker = false` the full available registry is advertised — the rollback
+path. Sub-agents run without a broker.
 
-When `[tools] broker = true`:
+With the broker on:
 
 - **Working set.** Each turn advertises only a small **working set** of tool
   schemas — a configurable core default (a lean read/edit/search/shell set) plus
