@@ -415,6 +415,9 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(root)
+        // `output()` already closes the child's stdin; kept explicit so a later
+        // switch to `spawn()` cannot hand git the caller's stdin.
+        .stdin(std::process::Stdio::null())
         .output()
         .ok()?;
     if output.status.success() {

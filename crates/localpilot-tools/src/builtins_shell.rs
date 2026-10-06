@@ -59,7 +59,7 @@ struct NormalizedRunShellInput {
 /// Owns the spawned command's process tree until the child has been reaped.
 /// Dropping an in-flight `run_shell` future must not orphan a shell wrapper's
 /// grandchildren. Windows owns a kernel job; Unix signals the process group.
-struct ProcessTreeGuard {
+pub(crate) struct ProcessTreeGuard {
     #[cfg(not(windows))]
     pid: Option<u32>,
     #[cfg(windows)]
@@ -67,7 +67,7 @@ struct ProcessTreeGuard {
 }
 
 impl ProcessTreeGuard {
-    fn spawn(
+    pub(crate) fn spawn(
         command: &mut tokio::process::Command,
     ) -> std::io::Result<(tokio::process::Child, Self)> {
         #[cfg(windows)]
@@ -83,7 +83,7 @@ impl ProcessTreeGuard {
         }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         #[cfg(not(windows))]
         {
             self.pid = None;
@@ -96,7 +96,7 @@ impl ProcessTreeGuard {
         }
     }
 
-    async fn kill(&mut self) {
+    pub(crate) async fn kill(&mut self) {
         #[cfg(windows)]
         {
             self.job = None;
@@ -611,6 +611,7 @@ pub async fn kill_process_tree(pid: u32) {
     {
         let _ = tokio::process::Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -623,6 +624,7 @@ pub async fn kill_process_tree(pid: u32) {
         // nothing at all — a silent no-op that left every timed-out tree alive.
         let _ = tokio::process::Command::new("kill")
             .args(["-s", "KILL", "--", &format!("-{pid}")])
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

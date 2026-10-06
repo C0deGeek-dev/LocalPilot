@@ -2175,21 +2175,83 @@ impl Tool for GitCommit {
     }
 }
 
+/// How long one git tool call may run before its process tree is stopped.
+const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+
 async fn run_git(ctx: &ToolContext<'_>, args: &[&str]) -> Result<String, ToolError> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        // De-verbatim spawn cwd (see `Workspace::process_dir`): git on Windows
-        // misbehaves with a verbatim `\\?\` working directory.
-        .current_dir(ctx.workspace.process_dir())
-        .output()
-        .await
-        .map_err(|e| ToolError::Failed(format!("git: {e}")))?;
+    // De-verbatim spawn cwd (see `Workspace::process_dir`): git on Windows
+    // misbehaves with a verbatim `\\?\` working directory.
+    let output = run_bounded(
+        Path::new("git"),
+        args,
+        &ctx.workspace.process_dir(),
+        &[],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| match e {
+        BoundedRunError::Spawn(e) => ToolError::Failed(format!("git: {e}")),
+        BoundedRunError::TimedOut => ToolError::Failed(format!(
+            "git {} did not finish within {}s and was stopped. A command that changes \
+             the repository may have partly completed; check `git status` before \
+             trying again.",
+            args.first().copied().unwrap_or_default(),
+            GIT_TIMEOUT.as_secs()
+        )),
+    })?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if output.status.success() {
         Ok(stdout.into_owned())
     } else {
         Err(ToolError::Failed(format!("git failed: {stderr}")))
+    }
+}
+
+#[derive(Debug)]
+enum BoundedRunError {
+    Spawn(std::io::Error),
+    TimedOut,
+}
+
+/// Run a program to completion with captured output, a closed stdin and a
+/// deadline. The child must not inherit the caller's stdin: under `localpilot
+/// rpc` that is the protocol pipe, and a child holding it can wait forever.
+/// At the deadline the whole process tree is stopped (hooks, pagers and
+/// credential helpers included), not only the immediate child.
+async fn run_bounded(
+    program: &Path,
+    args: &[&str],
+    cwd: &Path,
+    envs: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<std::process::Output, BoundedRunError> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .envs(envs.iter().copied())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let (child, mut tree) = crate::builtins_shell::ProcessTreeGuard::spawn(&mut command)
+        .map_err(BoundedRunError::Spawn)?;
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            tree.disarm();
+            Ok(output)
+        }
+        Ok(Err(e)) => {
+            tree.kill().await;
+            Err(BoundedRunError::Spawn(e))
+        }
+        Err(_) => {
+            tree.kill().await;
+            Err(BoundedRunError::TimedOut)
+        }
     }
 }
 
@@ -2238,6 +2300,208 @@ impl Tool for UpdatePlan {
     }
     async fn invoke(&self, _input: Value, _ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::ok("plan updated"))
+    }
+}
+
+#[cfg(test)]
+mod bounded_run_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{run_bounded, BoundedRunError};
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    /// The test that dispatches subprocess roles; spawned copies of this test
+    /// binary run only it.
+    const ROLE_TEST: &str = "builtins::bounded_run_tests::subprocess_role";
+    const ROLE: &str = "LOCALPILOT_BOUNDED_RUN_ROLE";
+
+    fn me() -> PathBuf {
+        std::env::current_exe().unwrap()
+    }
+
+    fn role_args() -> Vec<&'static str> {
+        vec!["--exact", ROLE_TEST, "--nocapture", "--test-threads=1"]
+    }
+
+    fn pid_alive(pid: u32) -> bool {
+        #[cfg(windows)]
+        {
+            let out = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+    }
+
+    /// Not a test of its own: a no-op unless this binary was started in a role.
+    #[test]
+    fn subprocess_role() {
+        let Ok(role) = std::env::var(ROLE) else {
+            return;
+        };
+        match role.as_str() {
+            // Started with an open, never-written stdin pipe, as `localpilot rpc`
+            // is: run a reader through `run_bounded` and report what it saw.
+            "stdin-host" => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let args = role_args();
+                let result = rt.block_on(run_bounded(
+                    &me(),
+                    &args,
+                    &std::env::temp_dir(),
+                    &[(ROLE, "stdin-reader")],
+                    Duration::from_secs(20),
+                ));
+                match result {
+                    Ok(out) if String::from_utf8_lossy(&out.stdout).contains("reader-saw-eof") => {
+                        println!("host-ok");
+                        std::process::exit(0);
+                    }
+                    other => {
+                        println!("host-failed: {other:?}");
+                        std::process::exit(3);
+                    }
+                }
+            }
+            // Reads stdin to the end: returns at once on a closed stdin, blocks
+            // forever on an inherited pipe nobody writes to.
+            "stdin-reader" => {
+                let mut buf = Vec::new();
+                let _ = std::io::stdin().read_to_end(&mut buf);
+                println!("reader-saw-eof");
+                std::process::exit(0);
+            }
+            // Hangs with a descendant, recording the descendant's pid.
+            "hang" => {
+                let pid_file = std::env::var("LOCALPILOT_BOUNDED_RUN_PID_FILE").unwrap();
+                let child = std::process::Command::new(me())
+                    .args(role_args())
+                    .env(ROLE, "sleep")
+                    // Not holding the caller's output pipe, so a surviving
+                    // descendant fails the assertion instead of hanging the read.
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                std::fs::write(&pid_file, child.id().to_string()).unwrap();
+                std::thread::sleep(Duration::from_secs(600));
+                std::process::exit(0);
+            }
+            // Outlives the 20 s liveness check by far, but not the whole suite, so
+            // a descendant that escaped the deadline fails the test instead of
+            // holding inherited handles open indefinitely.
+            "sleep" => {
+                std::thread::sleep(Duration::from_secs(90));
+                std::process::exit(0);
+            }
+            other => panic!("unknown role {other}"),
+        }
+    }
+
+    #[test]
+    fn a_child_never_inherits_the_callers_stdin() {
+        // The caller's stdin is an open pipe that is never written or closed,
+        // the way `localpilot rpc` holds its protocol pipe.
+        let mut host = std::process::Command::new(me())
+            .args(role_args())
+            .env(ROLE, "stdin-host")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _held_open = host.stdin.take();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = host.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() > deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let Some(status) = status else {
+            let _ = host.kill();
+            panic!("the host never finished: the reader inherited its stdin");
+        };
+        let mut out = String::new();
+        host.stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        assert!(status.success() && out.contains("host-ok"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_hung_child_and_its_descendants_are_stopped_at_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let pid_text = pid_file.to_string_lossy().into_owned();
+        let args = role_args();
+        let started = Instant::now();
+        let result = run_bounded(
+            &me(),
+            &args,
+            dir.path(),
+            &[
+                (ROLE, "hang"),
+                ("LOCALPILOT_BOUNDED_RUN_PID_FILE", pid_text.as_str()),
+            ],
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BoundedRunError::TimedOut)),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(60));
+        let grandchild: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let gone = Instant::now() + Duration::from_secs(20);
+        while pid_alive(grandchild) && Instant::now() < gone {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            !pid_alive(grandchild),
+            "descendant {grandchild} outlived the deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_git_error_is_reported_as_before_and_quickly() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let out = run_bounded(
+            Path::new("git"),
+            &["log"],
+            dir.path(),
+            &[],
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("not a git repository"));
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 }
 

@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Git tools no longer hang under `localpilot rpc`.** `git_status`, `git_log`
+  and the other git tools started git with the caller's stdin, which under
+  `rpc` is the protocol pipe; on Windows the git process then never exited and
+  the turn waited until it was cancelled. Git now gets a closed stdin, and a
+  git call that runs longer than 120 seconds is stopped together with any
+  process it started. A stopped command that changes the repository may have
+  partly completed, and the message says to check `git status` first.
+
 - **The tool broker reveals the tools a request names.** With `[tools] broker =
   true`, each user request (and user steer) is ranked against the tool catalog
   before it is sent, and up to three strongly matching hidden tools are revealed,
