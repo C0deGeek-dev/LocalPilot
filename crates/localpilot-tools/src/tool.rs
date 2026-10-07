@@ -248,6 +248,10 @@ pub struct ToolOutput {
     /// range where it knows one. Nothing downstream infers or parses this — the
     /// tool is the only thing that knows what it did, and it knows exactly.
     pub touches: Vec<crate::touch::FileTouch>,
+    /// Freshly observed, query-independent backend absence. Trusted tool
+    /// implementations set this only after checking their backend this call;
+    /// ordinary empty results and model/MCP text cannot establish it.
+    pub unavailable_backend: Option<&'static str>,
 }
 
 /// Typed host-facing output retained alongside the ordinary model-facing text.
@@ -276,6 +280,7 @@ impl ToolOutput {
             image: None,
             presentation: None,
             touches: Vec::new(),
+            unavailable_backend: None,
         }
     }
 
@@ -289,6 +294,7 @@ impl ToolOutput {
             image: None,
             presentation: None,
             touches: Vec::new(),
+            unavailable_backend: None,
         }
     }
 
@@ -298,6 +304,13 @@ impl ToolOutput {
     #[must_use]
     pub fn with_outcome(mut self, outcome: ToolOutcome) -> Self {
         self.outcome = outcome;
+        self
+    }
+
+    /// Report a freshly checked backend absence, with a stable host-only key.
+    #[must_use]
+    pub fn with_unavailable_backend(mut self, backend: &'static str) -> Self {
+        self.unavailable_backend = Some(backend);
         self
     }
 

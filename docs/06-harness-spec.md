@@ -1756,3 +1756,17 @@ using its concurrency. A chain runs one worker at a time no matter how large the
 budget; that is not a fault, but a run four times slower than the budget
 suggested with nothing anywhere saying why is the most disappointing possible
 outcome.
+
+### Authoritative backend absence
+
+The existing consecutive observation guard also recognizes fresh typed backend
+absence from trusted tools (ADR-0222). This identity is tool plus backend key,
+independent of query arguments/text; nudge on observation two, stop on three
+with `signal=backend_unavailable tool="…" backend="…" count=3` in TurnEnded.detail.
+Each observation follows an actual permission-gated invocation. No calls are
+suppressed or served from availability caches. `knowledge_search` marks only
+absence of both ingest and session-span indexes. Restored/unmarked results,
+unrelated calls, admitted steer and turn resets clear the consecutive run.
+Ordinary emptiness, corrupt-index messages and MCP text keep full call/result
+identity. Scripted replay opt-out remains; interleaved cycles stay with existing
+windowed policy. Host metadata introduces no serialized event/schema change.

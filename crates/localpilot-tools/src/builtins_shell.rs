@@ -594,6 +594,7 @@ impl Tool for RunShell {
                 stderr: presentation_stderr,
             })),
             touches: Vec::new(),
+            unavailable_backend: None,
         })
     }
 }

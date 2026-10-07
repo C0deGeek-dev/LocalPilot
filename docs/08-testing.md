@@ -716,3 +716,13 @@ content-dependent read refusals, custom limits, legal retries and denied-secret
 ordering. Native synthetic-provider recovery copies the refusal JSON and
 advances explicit pages; this is protocol evidence, not live model quality.
 A provider that blindly repeats the refused call can still hit the repeat guard.
+
+### Backend availability observations
+
+`cargo test -p localpilot-harness --test repeat_guard` includes varied queries
+and varied messages for a freshly absent backend, actual invocation counts,
+restoration, ordinary empty queries followed by a hit and scripted-replay opt-out.
+`cargo test -p localpilot-localmind knowledge_tool::tests` verifies missing,
+present/corrupt and genuinely newly created indexes. Native absent-index replay
+must execute three knowledge_search calls and persist the backend_unavailable
+stop; no result-text matching or live model-quality claim is involved.

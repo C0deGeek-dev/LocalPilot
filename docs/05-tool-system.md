@@ -962,3 +962,17 @@ always recorded so its false-positive rate can be measured.
   interpreted as consent or as an implicit option selection.
 - Revealing a tool (pull-discovery broker) changes only what is advertised; it
   grants no authority, so a revealed tool still passes the full permission gate.
+
+### Fresh backend availability
+
+A trusted tool can report a host-only unavailable-backend key after checking
+availability in its actual invocation. `knowledge_search` uses this only when
+both ingest and session-span indexes are absent; run `localpilot ingest run`
+to build the project index or use another source. The second consecutive absence
+gets a recovery notice and the third stops with `NoProgress` and
+`signal=backend_unavailable`. Varying queries does not reset that run.
+Every retry still invokes the tool and rechecks; restored indexes, unmarked
+results and unrelated observations break the run. Corrupt/present indexes and
+ordinary empty matches are not authoritative absence, and plain MCP output text
+never supplies this metadata. Generic identical-call and windowed guards retain
+their existing policy (ADR-0222).

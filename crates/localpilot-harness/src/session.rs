@@ -1097,6 +1097,11 @@ enum NoProgressDiagnostic {
         call: String,
         result: String,
     },
+    BackendUnavailable {
+        tool: String,
+        backend: String,
+        count: usize,
+    },
 }
 
 /// Map the detector's typed signal (plus the tool that produced it) to a
@@ -1146,6 +1151,15 @@ fn no_progress_notice(diagnostic: &NoProgressDiagnostic) -> (String, String) {
                 "signal=repeated_observation tool={tool} outcome={outcome} count={count} \
                  call={call} result={result}"
             )
+        }
+        NoProgressDiagnostic::BackendUnavailable {
+            tool,
+            backend,
+            count,
+        } => {
+            let tool = serde_json::Value::String(tool.clone());
+            let backend = serde_json::Value::String(backend.clone());
+            format!("signal=backend_unavailable tool={tool} backend={backend} count={count}")
         }
     };
     let notice = format!("no forward progress this turn ({detail}); stopping instead of spinning");
@@ -2080,6 +2094,7 @@ impl SessionRuntime {
                         presentation: None,
                         touches: Vec::new(),
                         mutation_may_have_run: false,
+                        unavailable_backend: None,
                     },
                     true,
                 ),
@@ -4592,6 +4607,7 @@ impl SessionRuntime {
                 let mut launch_warn: Option<String> = None;
                 let mut readable_error_sent = false;
                 let mut repaired_dispatched = false;
+                let mut unavailable_backend = None;
                 let result = match decision {
                     PreDispatch::Redirect(resolution) => {
                         // The broker narrowed the surface and this tool is not
@@ -4759,6 +4775,7 @@ impl SessionRuntime {
                             // tool path stays unaware of the swarm entirely.
                             match dispatched {
                                 Some(dispatch) => {
+                                    unavailable_backend = dispatch.unavailable_backend;
                                     self.work_mutation_may_have_run |=
                                         dispatch.mutation_may_have_run;
                                     let touched = dispatch.touches;
@@ -4916,12 +4933,19 @@ impl SessionRuntime {
                 }
                 self.capability_evidence.observe_outcome(!result.is_error());
 
-                // Same input, same result: judge what this call observed before
+                // Judge what this call freshly observed before
                 // any harness rewrite (read elision names the prior call, so its
                 // stub differs every time) or appended notice, over the arguments
-                // actually dispatched.
-                let observed_call = format!("{name}\u{1f}{}", canonical_json(projected_input));
-                let observed_result = observation_identity(&result);
+                // actually dispatched. Authoritative backend absence is keyed
+                // independently of queries; ordinary results keep full identity.
+                let observed_call = match unavailable_backend {
+                    Some(backend) => format!("{name}\u{1f}backend_unavailable:{backend}"),
+                    None => format!("{name}\u{1f}{}", canonical_json(projected_input)),
+                };
+                let observed_result = match unavailable_backend {
+                    Some(_) => "backend unavailable".to_string(),
+                    None => observation_identity(&result),
+                };
                 let repeat = if self.config.stop_repeated_observations {
                     self.repeat_guard.observe(&observed_call, &observed_result)
                 } else {
@@ -5100,22 +5124,37 @@ impl SessionRuntime {
                 let repeated_stop = match repeat {
                     RepeatedObservation::Fresh => None,
                     RepeatedObservation::Nudge { count } => {
-                        let _ = events.send(RuntimeEvent::Warning(format!(
-                            "tool `{name}` returned the same result for the same input \
-                             {count} times in a row; nudging a change of approach"
-                        )));
-                        result.output.push_str(&repeated_observation_hint(count));
+                        let hint = if let Some(backend) = unavailable_backend {
+                            format!("\n\n[backend unavailable] Tool `{name}` freshly reported backend `{backend}` unavailable {count} times in a row. Changing queries cannot restore it: use another source or arrange backend setup. Another unavailable observation stops the turn; every retry still executes and rechecks availability.")
+                        } else {
+                            repeated_observation_hint(count)
+                        };
+                        let warning = if unavailable_backend.is_some() {
+                            hint.trim().to_string()
+                        } else {
+                            format!("tool `{name}` returned the same result for the same input {count} times in a row; nudging a change of approach")
+                        };
+                        let _ = events.send(RuntimeEvent::Warning(warning));
+                        result.output.push_str(&hint);
                         None
                     }
                     // Frozen at the trip: tool, outcome, count and fingerprints of
                     // the observation that tripped, not of anything later.
                     RepeatedObservation::Stop { count } => {
-                        Some(NoProgressDiagnostic::RepeatedObservation {
-                            tool: name.clone(),
-                            outcome: format!("{:?}", result.outcome),
-                            count,
-                            call: short_fingerprint(&observed_call),
-                            result: short_fingerprint(&observed_result),
+                        Some(if let Some(backend) = unavailable_backend {
+                            NoProgressDiagnostic::BackendUnavailable {
+                                tool: name.clone(),
+                                backend: backend.to_string(),
+                                count,
+                            }
+                        } else {
+                            NoProgressDiagnostic::RepeatedObservation {
+                                tool: name.clone(),
+                                outcome: format!("{:?}", result.outcome),
+                                count,
+                                call: short_fingerprint(&observed_call),
+                                result: short_fingerprint(&observed_result),
+                            }
                         })
                     }
                 };

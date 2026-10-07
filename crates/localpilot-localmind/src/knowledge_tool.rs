@@ -112,7 +112,8 @@ impl Tool for KnowledgeSearch {
         if !crate::ingest::has_chunk_index(root) && !crate::span_store::has_span_index(root) {
             return Ok(ToolOutput::ok(
                 "no indexed project knowledge yet (run `localpilot ingest` to build it)",
-            ));
+            )
+            .with_unavailable_backend("project_knowledge_indexes"));
         }
         // Compute a ranked cross-source pack on demand (read-only). Exclude the
         // live/in-progress session so the current conversation is not served back
@@ -273,6 +274,41 @@ mod tests {
 
         assert!(!out.is_error(), "a missing index must not be an error");
         assert!(out.text.contains("no indexed project knowledge"));
+        assert_eq!(out.unavailable_backend, Some("project_knowledge_indexes"));
+    }
+
+    #[tokio::test]
+    async fn an_index_created_between_queries_clears_backend_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        for query in ["first", "second"] {
+            let out = KnowledgeSearch
+                .invoke(json!({"query":query}), &context(&ws))
+                .await
+                .unwrap();
+            assert_eq!(out.unavailable_backend, Some("project_knowledge_indexes"));
+        }
+        std::fs::write(
+            dir.path().join("marker.rs"),
+            "pub fn restored_index_marker() {}\n",
+        )
+        .unwrap();
+        crate::ingest::run(
+            dir.path(),
+            &IngestConfig::default(),
+            crate::ingest::RunMode::Full,
+        )
+        .unwrap();
+        let out = KnowledgeSearch
+            .invoke(json!({"query":"restored_index_marker"}), &context(&ws))
+            .await
+            .unwrap();
+        assert_eq!(out.unavailable_backend, None);
+        assert!(
+            out.text.contains("marker.rs"),
+            "restored index must actually be queried: {}",
+            out.text
+        );
     }
 
     #[tokio::test]
@@ -293,6 +329,7 @@ mod tests {
             .unwrap();
 
         assert!(!out.is_error(), "a corrupt index must not break the turn");
+        assert_eq!(out.unavailable_backend, None);
         assert!(
             out.text.contains("unreadable"),
             "a corrupt index must be reported distinctly, got: {}",

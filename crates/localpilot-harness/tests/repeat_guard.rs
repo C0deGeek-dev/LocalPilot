@@ -27,6 +27,124 @@ use tokio_util::sync::CancellationToken;
 /// The model-visible notice appended to a repeated observation.
 const REPEAT_MARKER: &str = "[repeated call]";
 
+struct AvailabilityTool {
+    calls: Arc<AtomicUsize>,
+    absent: Vec<bool>,
+}
+
+#[async_trait]
+impl Tool for AvailabilityTool {
+    fn name(&self) -> &str {
+        "availability"
+    }
+    fn description(&self) -> &str {
+        "freshly checked fixture backend"
+    }
+    fn schema(&self) -> Value {
+        json!({"type":"object", "additionalProperties":true})
+    }
+    fn effects(&self, _: &Value, _: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        Ok(Vec::new())
+    }
+    async fn invoke(&self, _: Value, _: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.absent.get(n).copied().unwrap_or(false) {
+            Ok(
+                ToolOutput::ok(format!("missing fixture index on observation {n}"))
+                    .with_unavailable_backend("fixture_index"),
+            )
+        } else {
+            Ok(ToolOutput::ok(if n + 1 == self.absent.len() {
+                "valid hit"
+            } else {
+                "no data"
+            }))
+        }
+    }
+}
+
+fn availability_runtime(
+    absent: Vec<bool>,
+    config: SessionConfig,
+) -> (SessionRuntime, tempfile::TempDir, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut provider = FakeProvider::new();
+    for i in 0..absent.len() {
+        provider = provider.tool_call(
+            &format!("q{i}"),
+            "availability",
+            json!({"query":format!("different{i}")}),
+        );
+    }
+    provider = provider.text("finished");
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(AvailabilityTool {
+        calls: Arc::clone(&calls),
+        absent,
+    }));
+    let (runtime, dir) = build(provider, registry, config, &[]);
+    (runtime, dir, calls)
+}
+
+#[tokio::test]
+async fn fresh_backend_absence_counts_varied_queries_and_varied_text() {
+    let (runtime, dir, calls) = availability_runtime(vec![true; 5], default_rail());
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::NoProgress);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "each counted observation invokes the tool"
+    );
+    assert_eq!(r.executed, 3);
+    assert_eq!(
+        r.detail.as_deref(),
+        Some(r#"signal=backend_unavailable tool="availability" backend="fixture_index" count=3"#)
+    );
+    assert!(!r.results[0].1.contains("[backend unavailable]"));
+    assert!(r.results[1].1.contains("[backend unavailable]"));
+    assert!(r.results[1]
+        .1
+        .contains("Changing queries cannot restore it"));
+}
+
+#[tokio::test]
+async fn a_freshly_restored_backend_breaks_the_unavailable_run() {
+    let (runtime, dir, calls) =
+        availability_runtime(vec![true, true, false, true, true, false], default_rail());
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    assert!(!r.results[2].1.contains("[backend unavailable]"));
+    assert!(!r.results[3].1.contains("[backend unavailable]"));
+    assert!(r.results[4].1.contains("[backend unavailable]"));
+    assert!(r.results[5].1.contains("valid hit"));
+}
+
+#[tokio::test]
+async fn distinct_empty_queries_and_a_hit_do_not_mean_backend_absence() {
+    let (runtime, dir, calls) = availability_runtime(vec![false; 5], default_rail());
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    assert!(r.results[..4]
+        .iter()
+        .all(|(_, text)| text.contains("no data") && !text.contains("[backend unavailable]")));
+    assert!(r.results[4].1.contains("valid hit"));
+}
+
+#[tokio::test]
+async fn scripted_replay_opt_out_also_preserves_unavailable_observations() {
+    let config = SessionConfig {
+        stop_repeated_observations: false,
+        ..default_rail()
+    };
+    let (runtime, dir, calls) = availability_runtime(vec![true; 5], config);
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+}
+
 /// A tool whose output changes on every call, like polling a job that advances.
 struct PollTool {
     calls: AtomicUsize,

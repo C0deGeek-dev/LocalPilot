@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Repeated calls to an absent knowledge backend stop early.** When
+  `knowledge_search` freshly finds neither knowledge index, changing queries
+  does not reset the consecutive-observation guard: the second call explains
+  recovery, and the third stops with a backend-unavailable detail. Every retry
+  still executes; a newly created index restores ordinary searches immediately.
+  Empty results and plain MCP text do not count as backend absence.
+
 - **Read-limit refusals include a copyable paging call.** Whole-file or oversized
   requests name exact `start_line`/`end_line` arguments under the active line
   bound, including custom bounds. Permission gates and read caps are unchanged.

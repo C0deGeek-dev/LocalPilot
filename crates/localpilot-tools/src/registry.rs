@@ -51,6 +51,8 @@ pub struct ToolDispatchResult {
     /// error without touches. False for pre-invoke refusals. Host accounting
     /// only: this is not part of the model-facing or persisted wire result.
     pub mutation_may_have_run: bool,
+    /// Fresh backend absence reported by the invoked tool, never parsed from text.
+    pub unavailable_backend: Option<&'static str>,
 }
 
 impl ToolDispatchResult {
@@ -60,6 +62,7 @@ impl ToolDispatchResult {
             presentation: None,
             touches: Vec::new(),
             mutation_may_have_run: false,
+            unavailable_backend: None,
         }
     }
 }
@@ -436,6 +439,7 @@ impl ToolRegistry {
                     presentation: output.presentation.map(redact_presentation),
                     touches: output.touches,
                     mutation_may_have_run,
+                    unavailable_backend: output.unavailable_backend,
                 }
             }
             Err(err) => ToolDispatchResult {

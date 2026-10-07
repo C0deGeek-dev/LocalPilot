@@ -2,6 +2,35 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0222: Fresh Backend Absence Is Independent Of Search Arguments
+
+**Status:** accepted · **Date:** 2026-10-07. Refines ADR-0215; preserves ADR-0146.
+
+A trusted tool may attach a host-only unavailable-backend key after checking its
+backend during the actual invocation. Only this typed metadata changes the
+repeat identity to tool plus backend key, independent of arguments and rendered
+text. The existing consecutive guard nudges on the second observation and stops
+on the third with `NoProgress` and
+`signal=backend_unavailable tool="…" backend="…" count=3`. Every counted call
+actually executes; no cache, disabled tool or pre-dispatch suppression is added.
+
+`knowledge_search` reports this only when both its ingest and session-span
+indexes are absent. A corrupt/present index, low relevance, ordinary empty
+matches, permission refusal or plain MCP "no data" does not establish absence.
+Each invocation rechecks index presence. A restored/unmarked result, unrelated
+observation, admitted user steer or turn reset breaks the consecutive run. A
+restored backend can be queried immediately; no availability TTL is needed.
+The nudge asks the model to use another source or arrange backend setup rather
+than vary a query against an absent index. Interleaved cycles retain existing
+windowed policy; scripted replay retains its existing observation-guard opt-out.
+
+This metadata is neither a permission grant nor persisted wire data. Existing
+result redaction, output retention, call accounting, verification and durable
+turn recording remain in place. Ordinary identical-call identity and the
+rejection of generic identical-result/empty-query rules are unchanged. The new
+stop detail uses the existing string field; no event-format migration is needed.
+Rollback is a code revert; existing observations remain readable.
+
 ## ADR-0221: Evidence-Based Python Completion Checks
 
 **Status:** accepted · **Date:** 2026-10-07. Extends automatic verification
