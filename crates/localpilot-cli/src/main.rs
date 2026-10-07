@@ -562,14 +562,14 @@ enum Command {
         /// Path to a gold unified diff, for the vs-gold ratio.
         #[arg(long)]
         gold_diff: Option<PathBuf>,
-        /// Verify-before-done is **on by default** for `eval`: a turn that would
-        /// finalize re-runs a build/test verification first and continues on a
-        /// failure, so the benchmark measures compiled+tested solves. This flag is
-        /// accepted for back-compat but is now redundant (the gate is already on).
+        /// Require verification even for unchanged read-only work. The automatic
+        /// default verifies changed or potentially mutating work; this flag also
+        /// checks a turn that only inspects files and answers.
         #[arg(long)]
         verify: bool,
         /// Opt out of the default-on verify-before-done gate for this run, so the
-        /// turn finalizes without a build/test check (the pre-default behaviour).
+        /// turn omits the optional automatic check. Required bounded-work checks
+        /// and configured verification still apply.
         #[arg(long, conflicts_with = "verify")]
         no_verify: bool,
         /// Verification command for the gate (a single command line). Overrides
@@ -2588,7 +2588,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             task,
             test,
             gold_diff,
-            verify: _verify,
+            verify,
             no_verify,
             verify_command,
             learn,
@@ -2603,11 +2603,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 task: &task,
                 test_command: test.as_deref(),
                 gold_diff: gold_diff.as_deref(),
-                // Verify-before-done is on by default for `eval`: the benchmark
-                // measures compiled+tested solves. `--no-verify` opts out,
-                // reproducing the pre-default behaviour byte-for-byte. The legacy
-                // `--verify` flag is redundant (the gate is already on).
+                // Automatic completion checks distinguish unchanged read-only
+                // answers from possible implementation work. Explicit --verify
+                // retains its all-turn contract.
                 verify: !no_verify,
+                force_verify: verify,
                 verify_command: verify_command.as_deref(),
                 learn,
             })
@@ -3543,7 +3543,7 @@ mod tests {
             })
         ));
 
-        // The legacy `--verify` flag still parses (now redundant — gate is on).
+        // Explicit --verify retains the all-turn verification request.
         let cli = Cli::try_parse_from(["localpilot", "eval", "fix it", "--model", "m", "--verify"])
             .unwrap();
         assert!(matches!(

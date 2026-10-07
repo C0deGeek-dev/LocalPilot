@@ -1390,6 +1390,15 @@ or incomplete results retain their protocol outcomes without quality credit.
 These are local observations, not authenticated attestations. Protocol guards,
 permissions and the single repair attempt remain unchanged.
 
+- **Automatic eval versus explicit verification.** The default `eval` completion
+  policy exempts known unchanged read-only work only with a valid bounded Git
+  baseline, no deliverable delta, no possible mutation/opaque invocation, no
+  unresolved mutation refusal, and no owner checkpoint. It uses the existing
+  effect and diff evidence. Explicit `--verify`, `--verify-command`, configured
+  `verify_before_done` or a configured verification command keep their all-turn
+  contract. `--no-verify` omits the optional automatic policy; required bounded
+  verification and configured checks still apply. No-VCS and opaque effects gain
+  no new exemption. A read-only answer need not repair an unrelated failing test.
 - **Command resolution.** `[harness] verify_command` (a single command line,
   split on whitespace — no shell) wins; otherwise the command is detected from
   the workspace's marker files (`Cargo.toml` → `cargo test`, `go.mod` →
@@ -1431,10 +1440,12 @@ permissions and the single repair attempt remain unchanged.
 - **Default: off interactively, on for `eval`.** As a config lever
   (`[harness] verify_before_done`) it ships **off** for extra checks on read-only
   turns; changed bounded work still verifies. For `localpilot eval` it is **on by default**: a benchmark
-  must measure compiled+tested solves, not code that was never built. Opt out
+  verifies implementation work before completion. Known unchanged read-only
+  answers are exempt from the automatic policy; explicit requests retain checks
+  on those turns. Opt out
   with `localpilot eval --no-verify` for that extra check; bounded-unit checks
   remain required. `--verify-command <cmd>` overrides the detected command. The legacy
-  `--verify` flag is accepted but redundant. The per-call `localpilot-verify`
+  `--verify` flag explicitly checks unchanged read-only work. The per-call `localpilot-verify`
   contract verifier is a separate mechanism.
 
 ## Anti-Sunk-Cost Loop

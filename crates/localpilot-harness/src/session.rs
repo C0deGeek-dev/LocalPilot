@@ -1311,6 +1311,9 @@ pub struct SessionRuntime {
     /// injected steering message. A request projection that lost one of them
     /// would silently ignore it, so none may be dropped before dispatch.
     turn_instructions: Vec<Message>,
+    /// A host's automatic completion check may exempt positively known unchanged
+    /// read-only work. Explicit verification requests never use this policy.
+    verify_changed_work_only: bool,
     /// Steering input queued by the host while a turn runs.
     steer: SteerQueue,
     /// A graceful-shutdown request the host can raise while a turn runs, honoured
@@ -1481,6 +1484,7 @@ impl SessionRuntime {
             compaction_cache: None,
             prompt_token_calibration: PromptTokenCalibration::default(),
             turn_instructions: Vec::new(),
+            verify_changed_work_only: false,
             steer: SteerQueue::default(),
             quiesce: QuiesceSignal::default(),
             hooks: HookFabric::default(),
@@ -2318,10 +2322,21 @@ impl SessionRuntime {
     /// overriding the verification command. Answer-only turns skip this gate.
     /// An explicit command overrides stack detection; `None` retains it.
     pub fn set_verify_before_done(&mut self, enabled: bool, command: Option<String>) {
+        self.verify_changed_work_only = false;
         self.config.verify_before_done = enabled;
         if command.is_some() {
             self.config.verify_command = command;
         }
+    }
+
+    /// Enable automatic completion verification while allowing known unchanged
+    /// read-only work to finish. An existing configured opt-in or command retains
+    /// its explicit verification contract; opaque effects still require checks.
+    pub fn set_automatic_verify_before_done(&mut self) {
+        if !self.config.verify_before_done && self.config.verify_command.is_none() {
+            self.verify_changed_work_only = true;
+        }
+        self.config.verify_before_done = true;
     }
 
     pub fn set_granularity(&mut self, caps: localpilot_config::GranularityConfig) {
@@ -2965,7 +2980,16 @@ impl SessionRuntime {
                 ));
             }
         }
-        if self.config.answer_only
+        let known_unchanged_readonly = self.verify_changed_work_only
+            && self.config.granularity.is_some()
+            && self.work_diff_baseline.is_some()
+            && !self.harness_checkpoint_owner
+            && !diff_mutated
+            && !self.work_unit.has_mutations()
+            && !self.work_mutation_may_have_run
+            && self.work_mutation_refusal.is_none();
+        if known_unchanged_readonly
+            || self.config.answer_only
             || !self.config.verify_before_done
                 && (!bounded_mutation || self.unit_verification_exempt.is_some())
         {

@@ -32,10 +32,12 @@ pub struct EvalOptions<'a> {
     /// Path to a gold unified diff, for the vs-gold ratio.
     pub gold_diff: Option<&'a Path>,
     /// Enable the verify-before-done gate for this run, overriding config. On by
-    /// default for `eval` (the caller passes `!--no-verify`) so a turn re-runs a
-    /// build/test verification before finalizing and the benchmark measures
-    /// compiled+tested solves.
+    /// default for `eval` (the caller passes `!--no-verify`); known unchanged
+    /// read-only answers can finish without a check. Potentially mutating work
+    /// still requires verification, and explicit requests check unchanged work.
     pub verify: bool,
+    /// Explicit `--verify` keeps checks on unchanged read-only work as well.
+    pub force_verify: bool,
     /// Verification command override for the gate (a single command line). When
     /// `None` the gate detects a command from the workspace stack.
     pub verify_command: Option<&'a str>,
@@ -59,10 +61,14 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
     let mut runtime =
         crate::session_cmd::build_runtime(&cwd, opts.model, opts.provider_id, opts.profile, true)
             .await?;
-    // `--verify` opts this run into the verify-before-done gate regardless of
-    // config, so a benchmark arm can enable it without writing a config file.
+    // Explicit verification keeps its all-turn contract. The automatic default
+    // can exempt known unchanged read-only work using the harness's evidence.
     if opts.verify {
-        runtime.set_verify_before_done(true, opts.verify_command.map(str::to_string));
+        if opts.force_verify || opts.verify_command.is_some() {
+            runtime.set_verify_before_done(true, opts.verify_command.map(str::to_string));
+        } else {
+            runtime.set_automatic_verify_before_done();
+        }
     }
     let session = runtime.session_id();
 

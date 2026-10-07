@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Automatic eval checks distinguish read-only answers from implementation.**
+  With a valid bounded-work baseline, pure inspection can finish without running
+  unrelated project tests. Explicit `--verify`, command overrides and configured
+  checks still run; edits and opaque/partial effects retain verification.
+
 - **Context compaction keeps runtime feedback with the user request.** Synthetic
   verification and repair messages no longer start a new user exchange that can
   cause the actual instruction to be dropped under context pressure. Tool-call

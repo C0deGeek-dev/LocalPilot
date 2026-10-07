@@ -7639,6 +7639,12 @@ guarded so containment and no-regression hold:
    on (opt out `--no-verify`, byte-identical to the prior behaviour), so the
    benchmark measures compiled+tested solves. Interactive and `print` are
    unchanged (the `[harness] verify_before_done` config default stays `false`).
+   Amendment (2026-10-07): automatic eval verification exempts positively known
+   unchanged read-only work using bounded baseline/effect evidence. Explicit
+   `--verify`, command overrides and configured verification retain their
+   all-turn contract. Opaque/partial effects, edits and checkpoint ownership
+   remain guarded; an empty Git diff alone cannot discharge them. This prevents
+   unrelated existing test failures from turning a question into an edit task.
    Stack detection gains a C++ branch: C++ sources at the root are compile-checked
    with an artifact-free `g++ -std=c++17 -I. -fsyntax-only <sources>` — a single
    `CheckRunner` program+args that writes no build artifacts (so it never pollutes
