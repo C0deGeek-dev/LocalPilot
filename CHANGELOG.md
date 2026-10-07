@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Python completion checks use evidence to select a runner.** Explicit pytest
+  configuration selects pytest; other Python projects and `tests/test_*.py`
+  layouts use available pytest or standard-library unittest discovery. Automatic
+  checks refuse zero tests and report missing/imported dependencies rather than
+  treating them as a pass. Configured commands, reviewed exemptions and the
+  permission gate retain precedence. An unchanged Git diff still does not
+  discharge an opaque command's verification obligation.
+
 - **Bounded completion inspection handles binary files and Python artifacts.**
   Untracked `.pyc` and `.pyo` files (including those in `__pycache__/`) are excluded and reported in
   inspection evidence; staged or tracked versions still count. Binary changes

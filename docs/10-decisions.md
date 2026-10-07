@@ -2,6 +2,51 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0221: Evidence-Based Python Completion Checks
+
+**Status:** accepted · **Date:** 2026-10-07. Extends automatic verification
+resolution without changing permission, work-budget or exemption policy.
+
+**Context.** Conventional Python project markers selected pytest whether it was
+installed or applicable; a plain tests/test_*.py unittest layout could lack a
+verification target altogether. Standard unittest discovery can exit successfully
+with zero tests, so substituting its CLI alone would create false verification.
+
+**Decision.** Extend LocalPilot's shared verification adapter, retaining pinned
+core detection for other stacks and explicit command precedence. Regular pytest
+configuration (pytest.ini/.pytest.ini, root/tests conftest.py or a parsed
+pyproject.toml tool.pytest table) selects pytest, without falling back when it is
+missing or broken. Otherwise a core-identified Python project or regular
+tests/test_*.py layout selects available pytest in the chosen Python interpreter,
+then standard-library unittest discovery when pytest is absent. Test-file naming
+alone never proves pytest. Parse TOML using the already-pinned workspace library;
+read at most 64 KiB and inspect at most 4,096 direct test-directory entries. Linked
+markers/directories are not new layout evidence.
+
+Detection does not launch a process or import project code. A repository-owned
+inline Python adapter executes only as the existing permission-gated quality
+check. It probes module availability in that same interpreter, preserving Python
+module lookup semantics, runs pytest conventionally, or runs unittest discovery
+and explicitly refuses an empty suite. Import failures, missing dependencies and
+nonzero exits remain failures. No helper is written into the user's project and
+no second command runner or retry loop is added. The command remains classified
+Unknown; it receives no automatic permission grant. Configured verify_command and
+reviewed verify:none remain authoritative.
+
+**Boundary.** A no-change Git snapshot does not erase an opaque invocation's
+partial/external effect obligation. Read-only/no-dispatch units retain existing
+completion behavior; changed source/docs/config/data/tests/dependencies still
+require a check or reviewed exemption. Ordinary and checkpoint callers retain
+existing verification timing. This decision addresses target selection, not
+an unproven generic no-change exemption.
+
+**Verification and reversal.** Actual Python controls disable site packages to
+prove unittest pass/fail/import/zero behavior and explicit missing-pytest failure.
+A controlled discoverable module proves selection and exit propagation, without
+claiming to implement pytest. Native eval fixtures establish dispatched edits,
+passing checks and stop outcomes. No live model-quality claim. No persisted format
+change; reverting the adapter restores the previous conservative target behavior.
+
 ## ADR-0220: Artifact-Aware, Binary-Bounded Unit Inspection
 
 **Status:** accepted · **Date:** 2026-10-07. Amends ADR-0199's observed-material

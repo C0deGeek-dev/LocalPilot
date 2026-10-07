@@ -16,11 +16,19 @@ and an opaque Python command refusal under the unchanged permission floor.
 Native Python owner fixtures commit a small original `pytest.py` entry point
 that discovers and runs their actual standard-library unittest cases. This is a
 fixture adapter for the automatic verification command, not a pytest
-implementation or a change to production stack detection. Source-only units
+implementation. Automatic production selection now uses layout evidence and
+interpreter module availability; a discoverable fixture adapter follows the
+same module lookup semantics as `python -m pytest`. Source-only units
 still use native syntax fallback; final verification rejects zero discovered
 tests and failing assertions. Runner/test markers prove execution. A control
 disables site packages to prove the fixture needs no ambient pytest installation.
 Real Python projects still need the dependencies required by their verifier.
+Verification-target tests run actual Python with site packages disabled to prove
+unittest pass, failure, missing imports and zero-case refusal, plus configured
+missing-pytest failure. Parsed configuration distinguishes actual pytest tables
+from comments. A controlled local module proves installed-module selection and
+nonzero-exit propagation; it does not substitute for a real pytest quality run.
+Stack/override precedence and the unchanged Unknown command class are pinned.
 Failure assertions extract only the latest native verifier-retry message,
 redact before a 2,048-byte UTF-8 cap, and exclude prompts and tool schemas.
 

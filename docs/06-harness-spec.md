@@ -1387,11 +1387,22 @@ permissions and the single repair attempt remain unchanged.
   split on whitespace — no shell) wins; otherwise the command is detected from
   the workspace's marker files (`Cargo.toml` → `cargo test`, `go.mod` →
   `go test ./...`, `pom.xml` → `mvn test`, `build.gradle` → `gradle test`,
-  `package.json` → `npm test`, a Python project → `python -m pytest`, a
+  `package.json` → `npm test`, a Python project → an evidence-selected pytest or
+  unittest check (see below), a
   `Makefile` → `make`, otherwise C++ sources at the root → an artifact-free
   `g++ -std=c++17 -I. -fsyntax-only <sources>` compile check). A workspace with
   no detectable target and no override stops changed bounded work with a durable
   next action. Legacy read-only opt-in checks emit a warning and finalize.
+- **Python evidence and empty suites.** Explicit pytest configuration
+  (`pytest.ini`/`.pytest.ini`, root or `tests/conftest.py`, parsed `[tool.pytest]`
+  or `[tool.pytest.ini_options]`) selects pytest and reports missing dependencies.
+  Otherwise a detected Python project or regular `tests/test_*.py` layout selects
+  pytest if available in the check's interpreter, then unittest discovery if
+  absent. Naming alone does not imply pytest. The automatic Python check rejects
+  zero unittest cases; pytest's no-collection exit remains failure. Installed
+  module probing occurs inside the permission-gated check, never during marker
+  detection. The inline adapter remains an opaque command with no extra grant.
+  Failed imports and checks are surfaced through the existing bounded retry.
 - **Reuses the quality-gate runner.** The command runs through the same
   permission-gated [`CheckRunner`](05-tool-system.md) the step-cadence quality
   gate and `harness resume` use — there is no second command engine and no second
