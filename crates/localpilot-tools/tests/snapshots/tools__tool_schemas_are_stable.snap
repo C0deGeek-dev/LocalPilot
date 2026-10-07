@@ -320,7 +320,7 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
           "x-localpilot-intent": "path"
         },
         "query": {
-          "description": "Text or regular expression to search for.",
+          "description": "Literal text to search for by default. Set `is_regex` to true for a regular expression.",
           "type": "string"
         }
       },
