@@ -9,6 +9,9 @@ use localpilot_sandbox::Workspace;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Aggregate old + new material in a binary work unit, independent of text lines.
+pub(crate) const MAX_BINARY_CHANGE_BYTES: u64 = 64 * 1024;
+
 /// Context usage supplied by the calibrated runtime, not a model's claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextCapacity {

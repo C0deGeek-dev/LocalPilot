@@ -2,6 +2,56 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0220: Artifact-Aware, Binary-Bounded Unit Inspection
+
+**Status:** accepted · **Date:** 2026-10-07. Amends ADR-0199's observed-material
+inspection; permission, attempted-mutation and verification policy remain intact.
+
+**Context.** Repository inspection decoded new files as UTF-8 and rejected binary
+Git numstat rows. A Python import could therefore fail completion on untracked
+bytecode before reaching its required check. Git already excludes ignored
+untracked paths; tracked or staged binaries can be legitimate deliverables.
+
+**Decision.** Keep one shared Git status/content inspection for ordinary
+completion and checkpoint boundaries. Exclude only untracked Python artifacts
+(`.pyc`, `.pyo`, including compiled files under `__pycache__/`), retaining Git's ignore handling
+and owned runtime-state exclusions. Staged and tracked artifact-shaped paths
+still count, including deletions. Excluded generated paths are evidence, not
+proof of intent: report them for review and preserve all attempted-write and
+opaque-invocation obligations.
+An unignored non-compiled deliverable inside `__pycache__/` remains material;
+the directory name alone is insufficient evidence of generation.
+Discard cleanup uses this same material path set rather than a broad untracked
+tree sweep, preserving excluded artifacts and owned execution records.
+Treat status file names as literal Git paths, so pathspec syntax cannot redirect
+diff accounting, staging or cleanup onto a different file.
+
+Represent changed binaries by byte length and SHA-256. Each consumes one file
+and one region, with a fixed 64 KiB aggregate old-plus-new byte ceiling per unit.
+An addition counts new bytes, a deletion old bytes; a 40 KiB replacement of a
+40 KiB asset is over budget. Bound size before payload access and hash binary
+files/blobs in chunks. Keep text line/material limits, dirty-file baselines,
+rename source/destination accounting and existing pre/post-check timing. Never
+follow links/junctions for binary content or ancestor-linked fingerprints.
+Oversized or uninspectable work stays on disk with an explicit review/split
+reason; a wider declared scope does not raise the binary ceiling.
+
+**Evidence and compatibility.** Durable `WorkUnitInspected` events carry the
+filtered path set, binary size/hash and refusal metadata, with a visible notice
+when material is excluded or binary. Event-log format advances from 8 to 9;
+versions 0–8 migrate on read without rewriting event payloads or identities.
+Older binaries reject v9 logs as unsupported: rollback uses the previous binary
+with older session logs or a fresh session, rather than editing new audit logs.
+No config or WorkProfile schema changes. Without Git, the existing lack of a
+repository baseline and refusal of model shell/background commands remain;
+a filesystem-baseline engine needs separate evidence and design.
+
+**Boundary.** Exclusion/representation never substitutes for a passing check or
+a reviewed exemption. Deterministic native fixtures verify dispatch, inspection,
+checks and stop outcomes; they make no claim about live model quality. Reverting
+the code restores conservative binary/artifact refusals while leaving produced
+work and event records available to a compatible reader.
+
 ## ADR-0219: The Broker Is On By Default
 
 **Status:** accepted · **Date:** 2026-10-06. Amends ADR-0031 and ADR-0216.

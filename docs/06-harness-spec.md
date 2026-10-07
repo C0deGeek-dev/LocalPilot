@@ -59,6 +59,27 @@ model shell/background calls are refused; file tools and permission-gated
 verification remain available. Explicit user shell retains its authorization.
 This policy does not add permissions or claim to be a filesystem security boundary.
 
+Repository inspection excludes only untracked generated Python paths
+(`.pyc`, `.pyo`, including those under `__pycache__/`), in addition to Git's ignored
+untracked paths and the owned runtime state above. Staged additions and tracked
+files count even when they match artifact or ignore rules. The inspection event
+records filtered generated paths so an artifact-shaped deliverable is visible
+for review; exclusion never refunds attempted writes or removes an opaque
+command's verification obligation.
+An unignored non-compiled file inside `__pycache__/` still counts as material.
+Discarding an attempt removes only material untracked paths; excluded generated
+files and owned execution evidence remain, even without Git ignore rules.
+
+Binary changes are represented by size and SHA-256, never decoded as UTF-8.
+Each changed binary consumes one file and one region. The unit also has a fixed
+64 KiB aggregate binary-material budget, counting old plus new bytes (addition:
+new; deletion: old). Updating a 40 KiB binary therefore exceeds this budget even
+when its replacement is also 40 KiB. Text limits remain independent. Over-budget
+work is preserved for splitting or a separate explicit review; a larger context
+or a wider declared scope does not raise the binary ceiling. These inspections
+run before verification and at the existing checkpoint reinspection boundaries;
+they do not replace a passing applicable check.
+
 Compaction remains reactive recovery. It neither refunds work already attempted
 nor widens an active unit. Capability counters are not persisted; restarting,
 loading/forking a session or switching identity resets to unknown while completed

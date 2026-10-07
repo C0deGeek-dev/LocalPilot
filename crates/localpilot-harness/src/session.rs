@@ -2904,17 +2904,20 @@ impl SessionRuntime {
             }
         }
         if let (Some(profile), Some(baseline)) =
-            (self.work_profile(), self.work_diff_baseline.as_ref())
+            (self.work_profile(), self.work_diff_baseline.clone())
         {
-            match crate::resume::work_diff_block(
+            match crate::resume::inspect_work_diff(
                 &self.workspace.process_dir(),
                 profile,
-                Some(baseline),
+                Some(&baseline),
                 false,
             ) {
-                Ok(Some(reason)) => {
-                    let _ = events.send(RuntimeEvent::Warning(reason.clone()));
-                    return VerifyGate::GiveUp(reason);
+                Ok(inspection) => {
+                    inspection.record(self, events);
+                    if let Some(reason) = inspection.blocked {
+                        let _ = events.send(RuntimeEvent::Warning(reason.clone()));
+                        return VerifyGate::GiveUp(reason);
+                    }
                 }
                 Err(error) => {
                     let _ = events.send(RuntimeEvent::Warning(format!(
@@ -2922,10 +2925,9 @@ impl SessionRuntime {
                     )));
                     return VerifyGate::GiveUp(format!("cannot inspect bounded unit: {error}"));
                 }
-                Ok(None) => {}
             }
             diff_mutated = crate::resume::work_diff_baseline(&self.workspace.process_dir())
-                .is_ok_and(|after| &after != baseline);
+                .is_ok_and(|after| after != baseline);
         }
         // Denied review attempts spend the attempt budget, but cannot make an
         // unchanged readonly review an implementation unit requiring tests.
@@ -3012,12 +3014,20 @@ impl SessionRuntime {
             CheckStatus::Passed => {
                 if self.harness_checkpoint_owner {
                     if let (Some(profile), Some(baseline)) =
-                        (self.work_profile(), self.work_diff_baseline.as_ref())
+                        (self.work_profile(), self.work_diff_baseline.clone())
                     {
-                        match crate::resume::work_diff_block(&root, profile, Some(baseline), false)
-                        {
-                            Ok(None) => {}
-                            Ok(Some(reason)) => return VerifyGate::GiveUp(reason),
+                        match crate::resume::inspect_work_diff(
+                            &root,
+                            profile,
+                            Some(&baseline),
+                            false,
+                        ) {
+                            Ok(inspection) => {
+                                inspection.record(self, events);
+                                if let Some(reason) = inspection.blocked {
+                                    return VerifyGate::GiveUp(reason);
+                                }
+                            }
                             Err(error) => {
                                 return VerifyGate::GiveUp(format!(
                                     "cannot inspect verified unit: {error}"
@@ -3030,7 +3040,7 @@ impl SessionRuntime {
                             return VerifyGate::GiveUp("verification committed before the harness checkpoint; completion is not recorded".into());
                         }
                         self.turn_has_changes = crate::resume::work_diff_baseline(&root)
-                            .is_ok_and(|after| &after != baseline);
+                            .is_ok_and(|after| after != baseline);
                     }
                 }
                 if bounded_mutation && diff_mutated {

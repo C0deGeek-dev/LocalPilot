@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 pub use atomic::{append_line, append_line_durable, atomic_write};
 pub use error::StoreError;
 pub use events::{
-    origin_for, transcript_from_events, MemoryUsed, MessageOrigin, OpenReason, SessionEvent,
-    SessionEventKind, SESSION_EVENT_FORMAT_VERSION,
+    origin_for, transcript_from_events, BinaryChange, BinaryMaterial, MemoryUsed, MessageOrigin,
+    OpenReason, SessionEvent, SessionEventKind, SESSION_EVENT_FORMAT_VERSION,
 };
 pub use history::{
     all_texts, project_entries, project_texts, HistoryEntry, HistoryPaste, PromptHistory,

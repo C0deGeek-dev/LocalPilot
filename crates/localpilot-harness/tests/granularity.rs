@@ -861,3 +861,139 @@ async fn failed_changed_unit_verification_narrows_reliability() {
             if status == "failed"
     )));
 }
+
+fn binary_and_artifact_command() -> &'static str {
+    if cfg!(windows) {
+        "[IO.File]::WriteAllBytes('asset.bin', [byte[]](0,255,7)); [IO.Directory]::CreateDirectory('__pycache__'); [IO.File]::WriteAllBytes('__pycache__/fixture.pyc', [byte[]](0,255))"
+    } else {
+        "printf '\\000\\377\\007' > asset.bin; mkdir -p __pycache__; printf '\\000\\377' > __pycache__/fixture.pyc"
+    }
+}
+
+fn binary_check(root: &Path, produce_artifact: bool) -> String {
+    let artifact = if produce_artifact {
+        "\nPath('__pycache__').mkdir(exist_ok=True)\nPath('__pycache__/from_check.pyc').write_bytes(bytes([0, 255]))\n"
+    } else {
+        ""
+    };
+    std::fs::write(root.join("check.py"), format!(
+        "from pathlib import Path\nassert Path('asset.bin').read_bytes() == bytes([0, 255, 7])\n{artifact}"
+    )).unwrap();
+    git(root, &["add", "check.py"]);
+    git(root, &["commit", "-m", "fixture verifier"]);
+    format!(
+        "{} -B check.py",
+        if cfg!(windows) { "python" } else { "python3" }
+    )
+}
+
+#[tokio::test]
+async fn binary_and_generated_artifact_reach_explicit_verification_and_durable_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path());
+    let verify = binary_check(dir.path(), false);
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "binary",
+                "run_shell",
+                json!({"command": binary_and_artifact_command()}),
+            )
+            .text("done"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Unrestricted, Some(verify));
+    let (stop, notices) = turn(&mut agent).await;
+    assert_eq!(stop, StopReason::Done);
+    assert_eq!(agent.current_turn_verification(), Some(CheckStatus::Passed));
+    assert!(notices
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::Warning(detail)
+        if detail.contains("__pycache__/fixture.pyc") && detail.contains("old + new bytes"))));
+    let durable = agent.store().read_events(agent.session_id()).unwrap();
+    assert!(durable.iter().any(|event| matches!(&event.kind,
+        localpilot_store::SessionEventKind::WorkUnitInspected { ignored_generated, binary_changes, binary_bytes: 3, blocked: None }
+        if ignored_generated == &["__pycache__/fixture.pyc"] && binary_changes.len() == 1
+            && binary_changes[0].path == "asset.bin"
+            && binary_changes[0].after.as_ref().unwrap().sha256.len() == 64)));
+}
+
+#[tokio::test]
+async fn generated_only_opaque_invocation_still_requires_verification() {
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path());
+    let command = if cfg!(windows) {
+        "[IO.Directory]::CreateDirectory('__pycache__'); [IO.File]::WriteAllBytes('__pycache__/fixture.pyc', [byte[]](0,255))"
+    } else {
+        "mkdir -p __pycache__; printf '\\000\\377' > __pycache__/fixture.pyc"
+    };
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("artifact", "run_shell", json!({"command":command}))
+            .text("done"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Unrestricted, None);
+    assert_eq!(turn(&mut agent).await.0, StopReason::NoProgress);
+    let durable = agent.store().read_events(agent.session_id()).unwrap();
+    assert!(durable.iter().any(|event| matches!(&event.kind,
+        localpilot_store::SessionEventKind::WorkUnitInspected { ignored_generated, binary_changes, .. }
+        if ignored_generated == &["__pycache__/fixture.pyc"] && binary_changes.is_empty())));
+    assert!(durable.iter().any(|event| matches!(&event.kind,
+        localpilot_store::SessionEventKind::TurnEnded { detail: Some(detail), .. }
+        if detail.contains("no applicable verification target"))));
+}
+
+#[tokio::test]
+async fn checkpoint_reinspection_excludes_artifacts_from_the_passing_check_and_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    // A real binary task, with an explicit content check rather than an exemption.
+    let plan = PLAN
+        .replace("Create first.txt", "Create asset.bin")
+        .replace(
+            "verify: none - prose fixture",
+            &format!(
+                "verify: {} -B check.py",
+                if cfg!(windows) { "python" } else { "python3" }
+            ),
+        );
+    project_with_plan(dir.path(), &plan);
+    let verify = binary_check(dir.path(), true);
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "binary",
+                "run_shell",
+                json!({"command":binary_and_artifact_command()}),
+            )
+            .text("done"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Unrestricted, Some(verify));
+    let outcome = resume_one_step(
+        &mut agent,
+        dir.path(),
+        &RuleEngine::with_baseline(&Default::default()),
+        None,
+        &[],
+        3,
+    )
+    .await
+    .unwrap();
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    assert_eq!(agent.current_turn_verification(), Some(CheckStatus::Passed));
+    assert_eq!(
+        std::fs::read(dir.path().join("asset.bin")).unwrap(),
+        [0, 255, 7]
+    );
+    assert!(dir.path().join("__pycache__/from_check.pyc").exists());
+    let tracked = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "HEAD"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let tracked = String::from_utf8(tracked.stdout).unwrap();
+    assert!(tracked.lines().any(|path| path == "asset.bin"));
+    assert!(!tracked.contains("__pycache__"));
+    let durable = agent.store().read_events(agent.session_id()).unwrap();
+    assert!(durable.iter().any(|event| matches!(&event.kind,
+        localpilot_store::SessionEventKind::WorkUnitInspected { ignored_generated, binary_changes, .. }
+        if ignored_generated.contains(&"__pycache__/from_check.pyc".to_string()) && binary_changes.len() == 1)));
+}

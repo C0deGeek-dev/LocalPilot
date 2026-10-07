@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Bounded completion inspection handles binary files and Python artifacts.**
+  Untracked `.pyc` and `.pyo` files (including those in `__pycache__/`) are excluded and reported in
+  inspection evidence; staged or tracked versions still count. Binary changes
+  carry size and SHA-256, consume one file and region, and require the existing
+  verification signal. Their aggregate limit is 64 KiB of old plus new bytes,
+  so replacing a 40 KiB asset exceeds it; refused work stays on disk for splitting
+  or separate explicit review. Text limits and opaque-command verification
+  obligations remain in force. Inspection evidence advances the session-log
+  format to v9; older logs remain readable, while older binaries explicitly
+  refuse v9 logs (use an older log or a fresh session when rolling back).
+  Non-compiled, unignored files inside `__pycache__/` still count as deliverables.
+  Discard cleanup also preserves excluded artifacts and owned execution evidence.
+
 - **The tool broker is on by default.** Sessions now advertise a lean core tool
   set plus `tool_search`/`tool_load` and reveal other tools when a request names
   them or a call needs them, instead of sending every tool's schema with every

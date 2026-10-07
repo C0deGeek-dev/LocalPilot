@@ -2,6 +2,7 @@
 //! the session loop, run configured tests, evaluate the completion rules, then
 //! commit the step and the progress update.
 
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
@@ -13,6 +14,7 @@ use localpilot_core::StructuredSummary;
 use localpilot_llm::QuotaInfo;
 use localpilot_quota::{estimate_window, PausedRun};
 use localpilot_store::SessionEventKind;
+use sha2::{Digest, Sha256};
 
 use crate::decisions::{today, Decisions};
 use crate::error::HarnessError;
@@ -264,7 +266,9 @@ pub async fn resume_one_step_with_events(
         // Inspect the actual diff before any quality auto-fix or commit. Refusal
         // keeps the work and session evidence for an explicit split/review.
         if let Some(profile) = runtime.work_profile() {
-            if let Some(reason) = work_diff_block(root, profile, work_baseline.as_ref(), true)? {
+            let inspection = inspect_work_diff(root, profile, work_baseline.as_ref(), true)?;
+            inspection.record(runtime, events);
+            if let Some(reason) = inspection.blocked {
                 return Ok(ResumeOutcome {
                     step_number: step.number,
                     committed: false,
@@ -409,7 +413,9 @@ pub async fn resume_one_step_with_events(
         }
     }
     if let Some(profile) = runtime.work_profile() {
-        if let Some(reason) = work_diff_block(root, profile, work_baseline.as_ref(), true)? {
+        let inspection = inspect_work_diff(root, profile, work_baseline.as_ref(), true)?;
+        inspection.record(runtime, events);
+        if let Some(reason) = inspection.blocked {
             return Ok(ResumeOutcome {
                 step_number: step.number,
                 committed: false,
@@ -561,18 +567,38 @@ fn legacy_test_check(command: &str) -> Option<CheckConfig> {
 }
 
 /// Restore the working tree to committed state after a discarded attempt:
-/// tracked files reset to `HEAD`, files the attempt created removed. Ignored
-/// files (the `.localpilot/` execution record) are untouched (`clean`
-/// without `-x`), and a resume refuses to start over unrelated uncommitted
-/// changes, so everything removed here belongs to the discarded attempt.
+/// tracked files reset to `HEAD`, material untracked files the attempt created
+/// removed. Use the same material path policy as inspection/commit, preserving
+/// excluded generated paths and owned execution records even without Git ignore
+/// rules. Resume refuses unrelated material before starting the attempt.
 fn restore_committed_state(root: &Path) -> Result<(), HarnessError> {
+    let paths = committable_status_paths(root)?;
     git(root, &["reset", "--hard", "HEAD"])?;
-    git(root, &["clean", "-fd"])?;
+    let mut args = vec!["clean", "-fd", "--"];
+    let mut argument_bytes = 0usize;
+    for path in &paths {
+        // Leave ample room below Windows' command-line limit, including quotes,
+        // escaped backslashes and UTF-16 expansion. A rejected large attempt can
+        // contain far more untracked material than an admitted work unit.
+        let path_bytes = path.len().saturating_mul(2).saturating_add(3);
+        if args.len() > 3 && argument_bytes.saturating_add(path_bytes) > 8192 {
+            git(root, &args)?;
+            args.truncate(3);
+            argument_bytes = 0;
+        }
+        args.push(path.as_str());
+        argument_bytes = argument_bytes.saturating_add(path_bytes);
+    }
+    if args.len() > 3 {
+        git(root, &args)?;
+    }
     Ok(())
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String, HarnessError> {
     let output = Command::new("git")
+        // Status paths are literal file names, including Git pathspec syntax.
+        .arg("--literal-pathspecs")
         .args(args)
         .current_dir(root)
         // `output()` already closes the child's stdin; kept explicit so a later
@@ -596,14 +622,56 @@ fn git_add_paths(root: &Path, paths: &[String]) -> Result<(), HarnessError> {
     git(root, &args).map(|_| ())
 }
 
-pub(crate) fn work_diff_block(
+#[derive(Debug, Default)]
+pub(crate) struct WorkDiffInspection {
+    pub(crate) blocked: Option<String>,
+    ignored_generated: Vec<String>,
+    binary_changes: Vec<localpilot_store::BinaryChange>,
+    binary_bytes: u64,
+}
+
+impl WorkDiffInspection {
+    fn refuse(mut self, reason: impl Into<String>) -> Self {
+        self.blocked = Some(reason.into());
+        self
+    }
+
+    pub(crate) fn record(
+        &self,
+        runtime: &mut SessionRuntime,
+        events: &broadcast::Sender<RuntimeEvent>,
+    ) {
+        runtime.record_event(SessionEventKind::WorkUnitInspected {
+            ignored_generated: self.ignored_generated.clone(),
+            binary_changes: self.binary_changes.clone(),
+            binary_bytes: self.binary_bytes,
+            blocked: self.blocked.clone(),
+        });
+        if !self.ignored_generated.is_empty() || !self.binary_changes.is_empty() {
+            let notice = format!(
+                "work unit inspection: excluded generated untracked paths {:?}; binary changes {:?} ({} old + new bytes / {}); verification obligations remain",
+                self.ignored_generated,
+                self.binary_changes,
+                self.binary_bytes,
+                crate::granularity::MAX_BINARY_CHANGE_BYTES,
+            );
+            let _ = events.send(RuntimeEvent::Warning(notice));
+        }
+    }
+}
+
+pub(crate) fn inspect_work_diff(
     root: &Path,
     profile: crate::granularity::WorkProfile,
     baseline: Option<&WorkDiffBaseline>,
     ignore_progress: bool,
-) -> Result<Option<String>, HarnessError> {
+) -> Result<WorkDiffInspection, HarnessError> {
     let base = baseline.map_or("HEAD", |before| before.head.trim());
-    let mut paths = committable_status_paths(root)?;
+    let (mut paths, ignored_generated) = work_status_paths(root)?;
+    let mut inspection = WorkDiffInspection {
+        ignored_generated,
+        ..WorkDiffInspection::default()
+    };
     paths.extend(
         git(
             root,
@@ -624,12 +692,20 @@ pub(crate) fn work_diff_block(
     );
     paths.sort();
     paths.dedup();
-    paths.retain(|p| {
-        !is_runtime_state_path(p)
-            && (!ignore_progress || p != "PROGRESS.md")
-            && baseline
-                .is_none_or(|before| before.files.get(p) != work_fingerprint(root, p).ok().as_ref())
-    });
+    let mut changed = Vec::new();
+    for path in paths {
+        if is_runtime_state_path(&path) || (ignore_progress && path == "PROGRESS.md") {
+            continue;
+        }
+        if let Some(old) = baseline.and_then(|before| before.files.get(&path)) {
+            // An inspection failure is not evidence of unchanged content.
+            if old == &work_fingerprint(root, &path)? {
+                continue;
+            }
+        }
+        changed.push(path);
+    }
+    let paths = changed;
     let mut lines = 0usize;
     let mut regions = 0usize;
     for path in &paths {
@@ -646,7 +722,34 @@ pub(crate) fn work_diff_block(
                 path,
             ],
         )?;
-        if stat.is_empty() {
+        let binary_stat = stat.lines().any(|row| row.starts_with("-\t-\t"));
+        if binary_stat {
+            let before = baseline_blob(root, base, path)?;
+            let after = working_material(root, path)?;
+            let bytes = before
+                .as_ref()
+                .map_or(0, |m| m.bytes)
+                .saturating_add(after.as_ref().map_or(0, |m| m.bytes));
+            inspection.binary_bytes = inspection.binary_bytes.saturating_add(bytes);
+            if inspection.binary_bytes > crate::granularity::MAX_BINARY_CHANGE_BYTES {
+                let total = inspection.binary_bytes;
+                return Ok(inspection.refuse(binary_budget_refusal(total)));
+            }
+            // Immutable baseline content and working bytes, never text decoding.
+            let before = before.map(|m| m.finish()).transpose()?;
+            let after = after.map(|m| m.finish()).transpose()?;
+            if before == after {
+                continue;
+            }
+            inspection
+                .binary_changes
+                .push(localpilot_store::BinaryChange {
+                    path: path.clone(),
+                    before,
+                    after,
+                });
+            regions += 1;
+        } else if stat.is_empty() {
             // New files have no tracked diff. Bound bytes before reading and
             // reject opaque/binary material rather than treating it as zero.
             let candidate = root.join(path);
@@ -655,16 +758,38 @@ pub(crate) fn work_diff_block(
                     path: path.clone(),
                     source,
                 })?;
-            if !metadata.is_file()
-                || metadata.len() > profile.max_changed_lines.saturating_mul(80) as u64
-            {
-                return Ok(Some("work envelope: new/opaque file exceeds bounded material; preserve the work and split the step before committing".to_string()));
+            if !metadata.is_file() || path_has_link(root, path)? {
+                return Ok(inspection.refuse("work envelope: new/opaque link or special file requires explicit review; preserve the work"));
             }
-            let body = std::fs::read_to_string(&candidate).map_err(|source| HarnessError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            lines = lines.saturating_add(body.lines().count().max(body.len().div_ceil(80)));
+            let read_limit = crate::granularity::MAX_BINARY_CHANGE_BYTES
+                .max(profile.max_changed_lines.saturating_mul(80) as u64);
+            if metadata.len() > read_limit {
+                return Ok(inspection.refuse(format!("work envelope: new file of {} bytes exceeds bounded inspection material; split or request explicit review", metadata.len())));
+            }
+            let bytes = bounded_file_bytes(&candidate, read_limit)?;
+            match std::str::from_utf8(&bytes)
+                .ok()
+                .filter(|_| !bytes.contains(&0))
+            {
+                Some(body) => {
+                    lines = lines.saturating_add(body.lines().count().max(body.len().div_ceil(80)));
+                }
+                None => {
+                    inspection.binary_bytes =
+                        inspection.binary_bytes.saturating_add(bytes.len() as u64);
+                    if inspection.binary_bytes > crate::granularity::MAX_BINARY_CHANGE_BYTES {
+                        let total = inspection.binary_bytes;
+                        return Ok(inspection.refuse(binary_budget_refusal(total)));
+                    }
+                    inspection
+                        .binary_changes
+                        .push(localpilot_store::BinaryChange {
+                            path: path.clone(),
+                            before: None,
+                            after: Some(binary_material(&bytes)),
+                        });
+                }
+            }
             regions += 1;
         } else {
             for row in stat.lines() {
@@ -672,7 +797,9 @@ pub(crate) fn work_diff_block(
                 if let [Ok(added), Ok(removed)] = counts.as_slice() {
                     lines = lines.saturating_add(*added).saturating_add(*removed);
                 } else {
-                    return Ok(Some("work envelope: binary/unknown diff requires an explicit smaller reviewed unit".to_string()));
+                    return Ok(inspection.refuse(
+                        "work envelope: unknown diff requires an explicit smaller reviewed unit",
+                    ));
                 }
             }
             // First reject a huge diff before materializing its patch.
@@ -699,7 +826,7 @@ pub(crate) fn work_diff_block(
                     .map(|line| line.len().saturating_sub(1).div_ceil(80))
                     .sum::<usize>();
                 if material > profile.max_changed_lines {
-                    return Ok(Some("work envelope: changed byte material exceeds the profile (including giant single lines); preserve and split the work".to_string()));
+                    return Ok(inspection.refuse("work envelope: changed byte material exceeds the profile (including giant single lines); preserve and split the work"));
                 }
                 regions += diff.lines().filter(|line| line.starts_with("@@ ")).count();
             }
@@ -708,10 +835,199 @@ pub(crate) fn work_diff_block(
             || lines > profile.max_changed_lines
             || regions > profile.max_regions
         {
-            return Ok(Some("work envelope: observed files, regions or changed lines exceed the effective profile; work is preserved, split/review it before committing".to_string()));
+            return Ok(inspection.refuse("work envelope: observed files, regions or changed lines exceed the effective profile; work is preserved, split/review it before committing"));
         }
     }
-    Ok(None)
+    Ok(inspection)
+}
+
+fn binary_budget_refusal(bytes: u64) -> String {
+    format!("work envelope: binary change material of {bytes} bytes exceeds the unit's {} byte budget (old + new); preserve the work and split it or request a separate explicit review", crate::granularity::MAX_BINARY_CHANGE_BYTES)
+}
+
+fn binary_material(bytes: &[u8]) -> localpilot_store::BinaryMaterial {
+    localpilot_store::BinaryMaterial {
+        bytes: bytes.len() as u64,
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+    }
+}
+
+fn bounded_file_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, HarnessError> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(limit.saturating_add(1)).read_to_end(&mut bytes))
+        .map_err(|source| HarnessError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(HarnessError::Provider("work envelope: file grew beyond bounded inspection material; preserve and review the work".into()));
+    }
+    Ok(bytes)
+}
+
+enum MaterialSource {
+    File(std::path::PathBuf),
+    Blob {
+        root: std::path::PathBuf,
+        oid: String,
+    },
+}
+
+struct SizedMaterial {
+    bytes: u64,
+    source: MaterialSource,
+}
+
+impl SizedMaterial {
+    fn finish(self) -> Result<localpilot_store::BinaryMaterial, HarnessError> {
+        match self.source {
+            MaterialSource::File(path) => {
+                let file = std::fs::File::open(&path).map_err(|source| HarnessError::Io {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+                hash_bounded_reader(file, self.bytes)
+            }
+            MaterialSource::Blob { root, oid } => {
+                // The immutable object's size was checked against the unit budget
+                // before this child can return any payload bytes.
+                let mut child = Command::new("git")
+                    .args(["cat-file", "blob", &oid])
+                    .current_dir(root)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|e| HarnessError::Provider(format!("git cat-file: {e}")))?;
+                let result = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| HarnessError::Provider("baseline blob has no stdout".into()))
+                    .and_then(|stdout| hash_bounded_reader(stdout, self.bytes));
+                if result.is_err() {
+                    let _ = child.kill();
+                }
+                let status = child
+                    .wait()
+                    .map_err(|e| HarnessError::Provider(format!("git cat-file: {e}")))?;
+                if !status.success() {
+                    return Err(HarnessError::Provider(
+                        "cannot inspect bounded baseline blob".into(),
+                    ));
+                }
+                result
+            }
+        }
+    }
+}
+
+fn hash_bounded_reader(
+    reader: impl Read,
+    expected: u64,
+) -> Result<localpilot_store::BinaryMaterial, HarnessError> {
+    let mut reader = reader.take(expected.saturating_add(1));
+    let mut hash = Sha256::new();
+    let mut chunk = [0u8; 8192];
+    let mut bytes = 0u64;
+    loop {
+        let n = reader
+            .read(&mut chunk)
+            .map_err(|e| HarnessError::Provider(format!("cannot hash bounded binary: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        bytes = bytes.saturating_add(n as u64);
+        if bytes > expected {
+            return Err(HarnessError::Provider(
+                "work envelope: binary grew beyond inspected size; preserve and review the work"
+                    .into(),
+            ));
+        }
+        hash.update(&chunk[..n]);
+    }
+    if bytes != expected {
+        return Err(HarnessError::Provider(
+            "work envelope: binary size changed during inspection; preserve and review the work"
+                .into(),
+        ));
+    }
+    Ok(localpilot_store::BinaryMaterial {
+        bytes,
+        sha256: format!("{:x}", hash.finalize()),
+    })
+}
+
+fn baseline_blob(
+    root: &Path,
+    base: &str,
+    path: &str,
+) -> Result<Option<SizedMaterial>, HarnessError> {
+    let spec = format!("{base}:{path}");
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", &spec])
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| HarnessError::Provider(format!("git rev-parse: {e}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let bytes = git(root, &["cat-file", "-s", &oid])?
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| HarnessError::Provider(format!("invalid baseline blob size: {e}")))?;
+    Ok(Some(SizedMaterial {
+        bytes,
+        source: MaterialSource::Blob {
+            root: root.to_path_buf(),
+            oid,
+        },
+    }))
+}
+
+fn working_material(root: &Path, path: &str) -> Result<Option<SizedMaterial>, HarnessError> {
+    let candidate = root.join(path);
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(meta) if meta.is_file() && !path_has_link(root, path)? =>
+            Ok(Some(SizedMaterial { bytes: meta.len(), source: MaterialSource::File(candidate) })),
+        Ok(_) => Err(HarnessError::Provider("work envelope: binary link/special file requires explicit review; no linked content inspected".into())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(HarnessError::Io { path: path.to_string(), source }),
+    }
+}
+
+fn path_has_link(root: &Path, path: &str) -> Result<bool, HarnessError> {
+    let mut candidate = root.to_path_buf();
+    for component in Path::new(path).components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Ok(true);
+        }
+        candidate.push(component);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(meta) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    if meta.file_attributes() & 0x400 != 0 {
+                        return Ok(true);
+                    }
+                }
+                if meta.file_type().is_symlink() {
+                    return Ok(true);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(source) => {
+                return Err(HarnessError::Io {
+                    path: candidate.display().to_string(),
+                    source,
+                })
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// The documents `intake` and `plan` write and nothing commits.
@@ -749,22 +1065,35 @@ fn has_unrelated_uncommitted_changes(root: &Path) -> Result<bool, HarnessError> 
 }
 
 fn committable_status_paths(root: &Path) -> Result<Vec<String>, HarnessError> {
+    Ok(work_status_paths(root)?.0)
+}
+
+fn work_status_paths(root: &Path) -> Result<(Vec<String>, Vec<String>), HarnessError> {
     let status = git(
         root,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )?;
-    Ok(parse_status_paths(&status)
-        .into_iter()
-        .filter(|path| !is_runtime_state_path(path))
-        .collect())
+    let mut generated = Vec::new();
+    let mut material = Vec::new();
+    for (state, path) in parse_status_entries(&status) {
+        if is_runtime_state_path(&path) {
+            continue;
+        }
+        if state == "??" && is_python_artifact(&path) {
+            generated.push(path);
+        } else {
+            material.push(path);
+        }
+    }
+    Ok((material, generated))
 }
 
-fn parse_status_paths(status: &str) -> Vec<String> {
+fn parse_status_entries(status: &str) -> Vec<(String, String)> {
     let mut records = status.split('\0');
     let mut paths = Vec::new();
     while let Some(record) = records.next() {
         if let Some(path) = record.get(3..).filter(|p| !p.is_empty()) {
-            paths.push(path.to_string());
+            paths.push((record[..2].to_string(), path.to_string()));
             // Porcelain -z spells rename destination first, then source in a
             // separate record. Neither path is quoted or shell interpreted.
             if record
@@ -776,6 +1105,11 @@ fn parse_status_paths(status: &str) -> Vec<String> {
         }
     }
     paths
+}
+
+fn is_python_artifact(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.ends_with(".pyc") || normalized.ends_with(".pyo")
 }
 
 fn is_runtime_state_path(path: &str) -> bool {
@@ -858,6 +1192,9 @@ fn work_fingerprint(root: &Path, path: &str) -> Result<String, HarnessError> {
                 path: path.to_string(),
                 source,
             }),
+        Ok(_) if path_has_link(root, path)? => Err(HarnessError::Provider(
+            "cannot fingerprint a path through a link/junction; no linked content inspected".into(),
+        )),
         Ok(_) => git(root, &["hash-object", "--", path]),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("absent".to_string()),
         Err(source) => Err(HarnessError::Io {
@@ -879,6 +1216,383 @@ mod tests {
         assert!(
             WORKER_PROMPT.contains("update the matching documentation in a bounded follow-up step"),
             "doc-currency cue missing from the worker prompt"
+        );
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::granularity::{ContextCapacity, ContextProvenance, Reliability, WorkProfile};
+
+    fn repository() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]).unwrap();
+        git(dir.path(), &["config", "user.name", "Fixture"]).unwrap();
+        git(
+            dir.path(),
+            &["config", "user.email", "fixture@example.invalid"],
+        )
+        .unwrap();
+        git(dir.path(), &["config", "core.autocrlf", "false"]).unwrap();
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "baseline"]).unwrap();
+        dir
+    }
+
+    fn profile() -> WorkProfile {
+        WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 64_000,
+                provenance: ContextProvenance::CallerSupplied,
+            },
+            Reliability::Strong,
+            &localpilot_config::GranularityConfig::default(),
+        )
+    }
+
+    fn write(root: &Path, path: &str, bytes: &[u8]) {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn generated_patterns_are_narrow_and_separator_independent() {
+        for path in [
+            "__pycache__/x.cpython-314.pyc",
+            "src\\__pycache__\\x.pyc",
+            "x.pyc",
+            "sub/x.pyo",
+        ] {
+            assert!(is_python_artifact(path), "{path}");
+        }
+        for path in [
+            "__pycache__/real.txt",
+            "src/__pycache__backup/x.txt",
+            "real.py",
+            "x.pyc.txt",
+            ".pytest_cache/real.txt",
+            "node_modules/x.js",
+        ] {
+            assert!(!is_python_artifact(path), "{path}");
+        }
+        assert_eq!(
+            parse_status_entries("?? x.pyc\0A  staged.pyc\0R  dest\0source\0"),
+            vec![
+                ("??".into(), "x.pyc".into()),
+                ("A ".into(), "staged.pyc".into()),
+                ("R ".into(), "dest".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn only_untracked_artifacts_are_excluded_and_reported() {
+        let dir = repository();
+        write(dir.path(), ".gitignore", b"ignored/\n");
+        git(dir.path(), &["add", ".gitignore"]).unwrap();
+        git(dir.path(), &["commit", "-qm", "ignore"]).unwrap();
+        let before = work_diff_baseline(dir.path()).unwrap();
+        assert!(before.files.is_empty());
+        write(dir.path(), "ignored/x.pyc", &[0, 255]);
+        write(
+            dir.path(),
+            "__pycache__/deliverable.txt",
+            b"real but artifact-shaped",
+        );
+        write(dir.path(), "x.pyc", &[0, 255]);
+        assert!(work_diff_baseline(dir.path())
+            .unwrap()
+            .files
+            .contains_key("__pycache__/deliverable.txt"));
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&before), false).unwrap();
+        assert_eq!(inspection.ignored_generated, vec!["x.pyc"]);
+        assert!(inspection.binary_changes.is_empty());
+        assert!(inspection.blocked.is_none());
+        let mut no_material = profile();
+        no_material.max_files = 0;
+        assert!(
+            inspect_work_diff(dir.path(), no_material, Some(&before), false)
+                .unwrap()
+                .blocked
+                .is_some(),
+            "a non-compiled deliverable inside a cache directory still counts"
+        );
+        // Git staging makes even a generated/ignored path meaningful.
+        git(dir.path(), &["add", "-f", "ignored/x.pyc", "x.pyc"]).unwrap();
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&before), false).unwrap();
+        assert_eq!(inspection.binary_changes.len(), 2);
+        assert_eq!(inspection.binary_bytes, 4);
+        assert!(inspection.blocked.is_none());
+        assert_eq!(
+            work_changed_paths(dir.path(), &before).unwrap(),
+            vec!["__pycache__/deliverable.txt", "ignored/x.pyc", "x.pyc"]
+        );
+    }
+
+    #[test]
+    fn tracked_ignored_binary_modification_delete_and_revert_count() {
+        let dir = repository();
+        write(dir.path(), ".gitignore", b"__pycache__/\n");
+        write(dir.path(), "__pycache__/x.pyc", &[0, 255, 1]);
+        git(
+            dir.path(),
+            &["add", "-f", ".gitignore", "__pycache__/x.pyc"],
+        )
+        .unwrap();
+        git(dir.path(), &["commit", "-qm", "tracked artifact"]).unwrap();
+        let baseline = work_diff_baseline(dir.path()).unwrap();
+        write(dir.path(), "__pycache__/x.pyc", &[0, 255, 2, 3]);
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&baseline), false).unwrap();
+        assert!(inspection.blocked.is_none());
+        assert_eq!(inspection.binary_bytes, 7);
+        let change = &inspection.binary_changes[0];
+        assert_eq!(change.before, Some(binary_material(&[0, 255, 1])));
+        assert_eq!(change.after, Some(binary_material(&[0, 255, 2, 3])));
+        let mut readonly = profile();
+        readonly.max_regions = 0;
+        assert!(
+            inspect_work_diff(dir.path(), readonly, Some(&baseline), false)
+                .unwrap()
+                .blocked
+                .is_some()
+        );
+        write(dir.path(), "__pycache__/x.pyc", &[0, 255, 1]);
+        assert!(
+            inspect_work_diff(dir.path(), profile(), Some(&baseline), false)
+                .unwrap()
+                .binary_changes
+                .is_empty()
+        );
+        std::fs::remove_file(dir.path().join("__pycache__/x.pyc")).unwrap();
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&baseline), false).unwrap();
+        assert_eq!(inspection.binary_bytes, 3);
+        assert_eq!(inspection.binary_changes[0].after, None);
+    }
+
+    #[test]
+    fn exact_binary_budget_is_accepted_and_old_plus_new_overflow_refused() {
+        let dir = repository();
+        write(dir.path(), "asset.bin", &vec![0; 32 * 1024]);
+        git(dir.path(), &["add", "asset.bin"]).unwrap();
+        git(dir.path(), &["commit", "-qm", "asset"]).unwrap();
+        let baseline = work_diff_baseline(dir.path()).unwrap();
+        let mut bytes = vec![0; 32 * 1024];
+        bytes[0] = 1;
+        write(dir.path(), "asset.bin", &bytes);
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&baseline), false).unwrap();
+        assert_eq!(
+            inspection.binary_bytes,
+            crate::granularity::MAX_BINARY_CHANGE_BYTES
+        );
+        assert!(inspection.blocked.is_none());
+        bytes.push(0);
+        write(dir.path(), "asset.bin", &bytes);
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&baseline), false).unwrap();
+        assert!(inspection.blocked.unwrap().contains("65537 bytes"));
+        assert!(
+            inspection.binary_changes.is_empty(),
+            "refuse before reading either payload"
+        );
+    }
+
+    #[test]
+    fn aggregate_binary_material_and_file_regions_are_not_zero_cost() {
+        let dir = repository();
+        let baseline = work_diff_baseline(dir.path()).unwrap();
+        write(dir.path(), "a.bin", &vec![0; 40 * 1024]);
+        write(dir.path(), "b.bin", &vec![0; 30 * 1024]);
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&baseline), false).unwrap();
+        assert!(inspection.blocked.unwrap().contains("71680 bytes"));
+        std::fs::remove_file(dir.path().join("b.bin")).unwrap();
+        let mut no_files = profile();
+        no_files.max_files = 0;
+        assert!(
+            inspect_work_diff(dir.path(), no_files, Some(&baseline), false)
+                .unwrap()
+                .blocked
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn untouched_initial_dirty_binary_is_excluded_but_a_new_change_is_inspected() {
+        let dir = repository();
+        write(dir.path(), "asset.bin", &[0, 1]);
+        git(dir.path(), &["add", "asset.bin"]).unwrap();
+        git(dir.path(), &["commit", "-qm", "asset"]).unwrap();
+        write(dir.path(), "asset.bin", &[0, 2]);
+        let baseline = work_diff_baseline(dir.path()).unwrap();
+        assert!(
+            inspect_work_diff(dir.path(), profile(), Some(&baseline), false)
+                .unwrap()
+                .binary_changes
+                .is_empty()
+        );
+        write(dir.path(), "asset.bin", &[0, 3]);
+        assert_eq!(
+            inspect_work_diff(dir.path(), profile(), Some(&baseline), false)
+                .unwrap()
+                .binary_changes
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn binary_rename_counts_the_deleted_source_and_added_destination() {
+        let dir = repository();
+        write(dir.path(), "old.bin", &[0, 255]);
+        git(dir.path(), &["add", "old.bin"]).unwrap();
+        git(dir.path(), &["commit", "-qm", "asset"]).unwrap();
+        let baseline = work_diff_baseline(dir.path()).unwrap();
+        git(dir.path(), &["mv", "old.bin", "new.bin"]).unwrap();
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&baseline), false).unwrap();
+        assert!(inspection.blocked.is_none());
+        assert_eq!(inspection.binary_bytes, 4);
+        assert_eq!(inspection.binary_changes.len(), 2);
+        assert!(inspection
+            .binary_changes
+            .iter()
+            .any(|c| c.path == "old.bin" && c.after.is_none()));
+        assert!(inspection
+            .binary_changes
+            .iter()
+            .any(|c| c.path == "new.bin" && c.before.is_none()));
+        let mut one_file = profile();
+        one_file.max_files = 1;
+        assert!(
+            inspect_work_diff(dir.path(), one_file, Some(&baseline), false)
+                .unwrap()
+                .blocked
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn linked_directories_are_not_fingerprinted_or_read_as_material() {
+        let dir = repository();
+        let outside = tempfile::tempdir().unwrap();
+        write(outside.path(), "external.bin", &[0, 255, 7]);
+        let link = dir.path().join("linked");
+        #[cfg(windows)]
+        {
+            // Junction creation needs no developer-mode symlink privilege.
+            let script = format!(
+                "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
+                link.display().to_string().replace('\'', "''"),
+                outside.path().display().to_string().replace('\'', "''"),
+            );
+            let output = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        assert!(path_has_link(dir.path(), "linked/external.bin").unwrap());
+        assert!(work_fingerprint(dir.path(), "linked/external.bin").is_err());
+        assert!(working_material(dir.path(), "linked/external.bin").is_err());
+        assert_eq!(
+            std::fs::read(outside.path().join("external.bin")).unwrap(),
+            [0, 255, 7]
+        );
+    }
+
+    #[test]
+    fn discard_preserves_excluded_artifacts_and_execution_evidence() {
+        let dir = repository();
+        write(dir.path(), "source.txt", b"committed");
+        git(dir.path(), &["add", "source.txt"]).unwrap();
+        git(dir.path(), &["commit", "-qm", "source"]).unwrap();
+        write(dir.path(), "existing.pyc", &[0, 255, 1]);
+        write(dir.path(), "source.txt", b"failed attempt");
+        write(dir.path(), "new[1].txt", b"failed attempt");
+        write(dir.path(), "__pycache__/new.pyc", &[0, 255, 2]);
+        write(
+            dir.path(),
+            ".localpilot/events.jsonl",
+            b"retained audit fixture",
+        );
+        let material_names: Vec<String> = (0..400)
+            .map(|i| format!("large-{i:04}-{}.txt", "x".repeat(100)))
+            .collect();
+        assert!(material_names.iter().map(String::len).sum::<usize>() > 32768);
+        for name in &material_names {
+            write(dir.path(), name, b"discarded oversized attempt");
+        }
+        // No ignore rules: the explicit material-path policy must protect them.
+        restore_committed_state(dir.path()).unwrap();
+        assert!(material_names
+            .iter()
+            .all(|name| !dir.path().join(name).exists()));
+        assert_eq!(
+            std::fs::read(dir.path().join("source.txt")).unwrap(),
+            b"committed"
+        );
+        assert!(!dir.path().join("new[1].txt").exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("existing.pyc")).unwrap(),
+            [0, 255, 1]
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("__pycache__/new.pyc")).unwrap(),
+            [0, 255, 2]
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(".localpilot/events.jsonl")).unwrap(),
+            b"retained audit fixture"
+        );
+    }
+
+    #[test]
+    fn literal_git_names_preserve_binary_and_text_accounting() {
+        let dir = repository();
+        write(dir.path(), "asset[1].bin", &[0, 1]);
+        write(dir.path(), "asset1.bin", &[0, 9]);
+        git(dir.path(), &["add", "-A"]).unwrap();
+        git(dir.path(), &["commit", "-qm", "literal assets"]).unwrap();
+        let baseline = work_diff_baseline(dir.path()).unwrap();
+        write(dir.path(), "asset[1].bin", &[0, 2]);
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&baseline), false).unwrap();
+        assert!(inspection.blocked.is_none());
+        assert_eq!(inspection.binary_bytes, 4);
+        assert_eq!(inspection.binary_changes.len(), 1);
+        let change = &inspection.binary_changes[0];
+        assert_eq!(change.path, "asset[1].bin");
+        assert_eq!(change.before, Some(binary_material(&[0, 1])));
+        assert_eq!(change.after, Some(binary_material(&[0, 2])));
+        write(dir.path(), "asset[1].bin", &vec![0; 64 * 1024 - 1]);
+        let inspection = inspect_work_diff(dir.path(), profile(), Some(&baseline), false).unwrap();
+        assert!(
+            inspection.blocked.unwrap().contains("65537 bytes"),
+            "literal names must not bypass old-plus-new byte accounting"
+        );
+
+        let text_dir = repository();
+        write(text_dir.path(), "text[1].txt", b"before\n");
+        write(text_dir.path(), "text1.txt", &[0, 1]);
+        git(text_dir.path(), &["add", "-A"]).unwrap();
+        git(text_dir.path(), &["commit", "-qm", "mixed literal names"]).unwrap();
+        let baseline = work_diff_baseline(text_dir.path()).unwrap();
+        write(
+            text_dir.path(),
+            "text[1].txt",
+            "line\n".repeat(300).as_bytes(),
+        );
+        write(text_dir.path(), "text1.txt", &[0, 2]);
+        let inspection =
+            inspect_work_diff(text_dir.path(), profile(), Some(&baseline), false).unwrap();
+        assert!(
+            inspection.blocked.unwrap().contains("changed lines"),
+            "a matching binary must not turn a text diff into binary accounting"
         );
     }
 }

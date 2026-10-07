@@ -61,6 +61,19 @@ monotonicity. No GPU or model name is required. Portable file/diff limits are th
 same on Windows, Linux and macOS; platform shell fixtures use their existing
 explicit platform branches. Live model checks remain opportunistic.
 
+Artifact/binary controls in `resume::artifact_tests` cover narrow Windows/POSIX
+path patterns, Git staging/tracking/ignores, initial dirty state, binary add,
+modify/delete/revert/rename accounting, exact and aggregate byte limits, and
+real symlink/junction paths refused before content hashing. The dispatch tests
+also exercise Python artifact creation plus an explicit binary-content check,
+generated-only opaque commands still requiring verification, and checkpoint
+reinspection excluding artifacts produced by the passing check from its commit.
+Durable inspection metadata must survive event-log replay; store migrations
+preserve older payloads and reject unsupported future format versions.
+Discard controls preserve excluded artifacts/execution evidence without ignore
+rules while restoring/removing material attempts. Git pathspec-like file names
+remain literal during diff accounting and cleanup, including over-budget binaries.
+
 ## Retrieval-Quality Measurement
 
 Two harnesses measure whether retrieval returns the *right* things, as distinct

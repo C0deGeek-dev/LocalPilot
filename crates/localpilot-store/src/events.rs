@@ -16,7 +16,7 @@ use localpilot_core::{EventId, Message, StructuredSummary};
 use serde::{Deserialize, Serialize};
 
 /// The current session event-log format version.
-pub const SESSION_EVENT_FORMAT_VERSION: u32 = 8;
+pub const SESSION_EVENT_FORMAT_VERSION: u32 = 9;
 
 /// One memory surfaced and used to answer a turn, for the local inspector.
 /// Carries only the id, its retrieval score, and which layer surfaced it — never
@@ -76,6 +76,20 @@ pub enum MessageOrigin {
     Synthetic { why: String },
     /// A user-initiated shell run surfaced into the transcript.
     Shell,
+}
+
+/// Content metadata only; binary payloads never enter the event log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryMaterial {
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryChange {
+    pub path: String,
+    pub before: Option<BinaryMaterial>,
+    pub after: Option<BinaryMaterial>,
 }
 
 /// What happened. Growable; the format version covers shape changes.
@@ -172,6 +186,14 @@ pub enum SessionEventKind {
     StepStarted {
         number: usize,
         description: String,
+    },
+    /// The shared completion/checkpoint inspection's material and exclusions.
+    /// Additive evidence; it never grants permission or proves verification.
+    WorkUnitInspected {
+        ignored_generated: Vec<String>,
+        binary_changes: Vec<BinaryChange>,
+        binary_bytes: u64,
+        blocked: Option<String>,
     },
     StepCompleted {
         number: usize,
@@ -422,6 +444,15 @@ fn migrate(
                 }
                 value
             }
+            // v8 -> v9: WorkUnitInspected adds content metadata and exclusions.
+            // Old events retain their payload and identities; older readers
+            // reject v9 explicitly rather than misparsing an unknown event kind.
+            8 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(9));
+                }
+                value
+            }
             _ => {
                 return Err(super::StoreError::UnsupportedFormat {
                     found: u64::from(version),
@@ -476,6 +507,45 @@ mod tests {
             at_unix: 1,
             kind,
         }
+    }
+
+    #[test]
+    fn inspection_metadata_replays_and_v8_payload_identity_is_preserved() {
+        let inspection = event(
+            SessionEventKind::WorkUnitInspected {
+                ignored_generated: vec!["__pycache__/x.pyc".into()],
+                binary_changes: vec![BinaryChange {
+                    path: "asset.bin".into(),
+                    before: None,
+                    after: Some(BinaryMaterial {
+                        bytes: 3,
+                        sha256: "fixture-digest".into(),
+                    }),
+                }],
+                binary_bytes: 3,
+                blocked: None,
+            },
+            None,
+        );
+        let line = serde_json::to_string(&inspection).expect("serialize inspection");
+        assert_eq!(
+            SessionEvent::from_line(&line).expect("replay inspection"),
+            inspection
+        );
+        let mut old = event(
+            SessionEventKind::TurnEnded {
+                stop: "Done".into(),
+                detail: None,
+            },
+            Some(inspection.id),
+        );
+        old.v = 8;
+        let line = serde_json::to_string(&old).expect("serialize old log");
+        let migrated = SessionEvent::from_line(&line).expect("migrate v8");
+        assert_eq!(migrated.id, old.id);
+        assert_eq!(migrated.parent_id, old.parent_id);
+        assert_eq!(migrated.kind, old.kind);
+        assert_eq!(migrated.v, SESSION_EVENT_FORMAT_VERSION);
     }
 
     #[test]
