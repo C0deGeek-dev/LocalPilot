@@ -3897,6 +3897,10 @@ Decision:
   intent (an overwritten `Option<String>`, not a lexically-ordered set), and a
   synthetic user message contributes no Goal/Constraints/NextSteps intent while
   its role-agnostic evidence classification still applies.
+  Exchange selection also respects this provenance: synthetic user-role feedback
+  stays within the existing user exchange, rather than making the actual user
+  instruction an older, droppable exchange. Oversized exchanges retain the user
+  anchor and paired tool suffix; the exact-instruction dispatch guard remains.
 
 Provenance: all code, tests, identifiers, and the `signal=…` grammar are original
 to this repository (clean-room). Rollback and compatibility: the change is

@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Context compaction keeps runtime feedback with the user request.** Synthetic
+  verification and repair messages no longer start a new user exchange that can
+  cause the actual instruction to be dropped under context pressure. Tool-call
+  pairing and the instruction-loss guard remain in force.
+
 - **File-path aliases keep secret protection.** Read/write effects classify both
   the requested path and normalized target. Directory text searches exclude
   protected descendant content; an explicitly named file uses its own read gate.

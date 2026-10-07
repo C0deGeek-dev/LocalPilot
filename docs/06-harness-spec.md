@@ -1034,7 +1034,11 @@ needs an ADR.
    (`localpilot-harness`).
 3. **Transcript fidelity.** The persisted transcript equals the model-visible
    history: any message that shapes the conversation is persisted (or
-   explicitly marked synthetic). Synthesized tool results and corrective user
+   explicitly marked synthetic). Synthetic user-role verification and repair
+   feedback belongs to the existing user exchange during context compaction;
+   it does not establish a new instruction boundary. The actual user request
+   remains the exchange anchor, with tool-use/result pairing preserved.
+   Synthesized tool results and corrective user
    messages are persisted today; full fidelity (including repair prompts)
    lands with the durable session store and is pinned by its
    transcript-equivalence test when it does.

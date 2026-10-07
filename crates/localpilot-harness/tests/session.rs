@@ -1510,6 +1510,57 @@ async fn a_steer_that_no_longer_fits_stops_the_turn_instead_of_being_dropped() {
 }
 
 #[tokio::test]
+async fn synthetic_repair_under_pressure_keeps_the_user_request_in_provider_calls() {
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("first", "read_file", json!({"path": "one.txt"}))
+            .tool_call("second", "read_file", json!({"path": "two.txt"}))
+            .malformed()
+            .text("inspection complete"),
+    );
+    let base = build(FakeProvider::new(), &[], SessionConfig::default())
+        .runtime
+        .context_usage()
+        .0;
+    let contents = "bounded evidence from a file\n".repeat(80);
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[("one.txt", &contents), ("two.txt", &contents)],
+        SessionConfig {
+            context_token_limit: (base + 900) * 105 / 100,
+            ..SessionConfig::default()
+        },
+        Profile::Default,
+    );
+    let instruction = "Inspect both files and answer; do not change files";
+    assert_eq!(
+        h.runtime.run_turn(instruction, &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let requests = provider.requests();
+    assert!(requests.len() >= 4);
+    assert!(requests.iter().all(|request| request
+        .messages
+        .iter()
+        .any(|message| message == &Message::text(localpilot_core::Role::User, instruction))));
+    assert!(requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .any(Message::is_synthetic));
+    assert!(h
+        .store
+        .read_events(h.runtime.session_id())
+        .unwrap()
+        .iter()
+        .any(|event| matches!(
+            event.kind,
+            localpilot_store::SessionEventKind::CompactionAttempt { .. }
+        )));
+}
+
+#[tokio::test]
 async fn tool_spec_overhead_does_not_inflate_the_calibrated_history_estimate() {
     // The provider counts the tool schemas as prompt input. When its count
     // agrees with the complete-input estimate the calibration ratio is 1, so

@@ -179,11 +179,13 @@ pub(crate) fn compact_plan(messages: Vec<Message>, token_limit: usize) -> Compac
         Some(StructuredSummary::new(SUMMARY_TITLE, entries))
     };
 
-    // Group the body into exchanges that each start at a user message, so a tool
-    // call and its result always live in the same exchange.
+    // Runtime feedback uses the user role for provider compatibility, but does
+    // not start a new user turn. Keep it in the exchange anchored to the actual
+    // instruction, so compaction cannot elect verification/repair feedback as
+    // the newest request and discard what the user asked for.
     let mut exchanges: Vec<Vec<Message>> = Vec::new();
     for message in body {
-        if message.role == Role::User || exchanges.is_empty() {
+        if (message.role == Role::User && !message.is_synthetic()) || exchanges.is_empty() {
             exchanges.push(Vec::new());
         }
         if let Some(last) = exchanges.last_mut() {
@@ -1015,6 +1017,44 @@ mod tests {
 
     fn synthetic(text: &str) -> Message {
         Message::text(Role::User, text).into_synthetic("no-progress")
+    }
+
+    #[test]
+    fn verification_feedback_does_not_replace_the_current_instruction() {
+        let instruction = user("Identify every caller; do not edit files");
+        let feedback = Message::text(Role::User, "Verification failed; continue investigating")
+            .into_synthetic("verify gate");
+        let mut messages = vec![Message::text(Role::System, "system"), instruction.clone()];
+        for index in 0..8 {
+            messages.extend(tool_exchange(&format!("read-{index}")));
+        }
+        messages.push(feedback.clone());
+        messages.extend(tool_exchange("latest"));
+
+        let result = compact_with_summary(messages, 300);
+        assert!(result.compacted);
+        assert!(estimate_tokens(&result.messages) <= 300);
+        assert!(result.messages.contains(&instruction));
+        assert!(result.messages.contains(&feedback));
+        let calls: BTreeSet<_> = result
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse(call) => Some(call.id.to_string()),
+                _ => None,
+            })
+            .collect();
+        let results: BTreeSet<_> = result
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult(result) => Some(result.id.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, results);
     }
 
     fn section_items(digest: &SemanticDigest, kind: SummarySectionKind) -> Vec<String> {
