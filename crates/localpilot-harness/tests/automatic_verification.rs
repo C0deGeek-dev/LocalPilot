@@ -1,21 +1,33 @@
 //! Automatic completion checks preserve explicit and opaque obligations.
 #![allow(clippy::unwrap_used)]
 
-use std::{process::Command, sync::Arc};
+use std::{path::PathBuf, process::Command, sync::Arc};
 
 use localpilot_config::GranularityConfig;
 use localpilot_core::SessionId;
 use localpilot_harness::{SessionConfig, SessionRuntime, StopReason};
 use localpilot_llm::FakeProvider;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
-use localpilot_sandbox::{PermissionEngine, Profile, ScriptedApprover, Workspace};
+use localpilot_sandbox::{Effect, PermissionEngine, Profile, ScriptedApprover, Workspace};
 use localpilot_store::{SessionEventKind, Store};
-use localpilot_tools::ToolRegistry;
+use localpilot_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSource};
 use serde_json::json;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 fn fixture(git: bool) -> (tempfile::TempDir, SessionRuntime, Arc<FakeProvider>) {
+    fixture_with(
+        git,
+        FakeProvider::new().tool_call("read", "read_file", json!({"path": "notes.txt"})),
+        ToolRegistry::with_builtins(),
+    )
+}
+
+fn fixture_with(
+    git: bool,
+    provider: FakeProvider,
+    tools: ToolRegistry,
+) -> (tempfile::TempDir, SessionRuntime, Arc<FakeProvider>) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("notes.txt"), "answer evidence\n").unwrap();
     // A detected stack whose existing verification deterministically fails.
@@ -47,8 +59,7 @@ fn fixture(git: bool) -> (tempfile::TempDir, SessionRuntime, Arc<FakeProvider>) 
         }
     }
     let provider = Arc::new(
-        FakeProvider::new()
-            .tool_call("read", "read_file", json!({"path": "notes.txt"}))
+        provider
             .text("answer")
             .text("answer")
             .text("answer")
@@ -56,7 +67,7 @@ fn fixture(git: bool) -> (tempfile::TempDir, SessionRuntime, Arc<FakeProvider>) 
     );
     let runtime = SessionRuntime::new(
         provider.clone(),
-        ToolRegistry::with_builtins(),
+        tools,
         PermissionEngine::new(Profile::Unrestricted, Vec::new()),
         Box::new(ScriptedApprover::always()),
         Store::ephemeral(),
@@ -69,6 +80,95 @@ fn fixture(git: bool) -> (tempfile::TempDir, SessionRuntime, Arc<FakeProvider>) 
         Vec::new(),
     );
     (dir, runtime, provider)
+}
+
+struct ExternalMcpWrite {
+    marker: PathBuf,
+    fail_after_write: bool,
+}
+
+#[async_trait::async_trait]
+impl Tool for ExternalMcpWrite {
+    fn name(&self) -> &str {
+        "external_action"
+    }
+
+    fn description(&self) -> &str {
+        "Fixture MCP call with an unobserved external effect"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    fn effects(
+        &self,
+        _: &serde_json::Value,
+        _: &ToolContext<'_>,
+    ) -> Result<Vec<Effect>, ToolError> {
+        // Matches the generic MCP adapter: network permission does not describe
+        // the server's actual writes or provide local touched-path evidence.
+        Ok(vec![Effect::Network])
+    }
+
+    async fn invoke(
+        &self,
+        _: serde_json::Value,
+        _: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        std::fs::write(&self.marker, "external write").unwrap();
+        if self.fail_after_write {
+            Err(ToolError::Failed(
+                "fixture failed after external write".into(),
+            ))
+        } else {
+            Ok(ToolOutput::ok("external action complete"))
+        }
+    }
+}
+
+#[tokio::test]
+async fn automatic_policy_cannot_exempt_mcp_effects_outside_the_repository() {
+    for fail_after_write in [false, true] {
+        let external = tempfile::tempdir().unwrap();
+        let marker = external.path().join("marker.txt");
+        let mut tools = ToolRegistry::with_builtins();
+        tools.register_from(
+            Box::new(ExternalMcpWrite {
+                marker: marker.clone(),
+                fail_after_write,
+            }),
+            ToolSource::Mcp("fixture".into()),
+        );
+        let (dir, mut runtime, _) = fixture_with(
+            true,
+            FakeProvider::new().tool_call("external", "external_action", json!({})),
+            tools,
+        );
+        runtime.set_automatic_verify_before_done();
+        let (tx, _) = broadcast::channel(256);
+        let stop = runtime
+            .run_turn(
+                "Use the external tool and answer",
+                &tx,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(marker.exists());
+        assert!(Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .stdout
+            .is_empty());
+        assert_eq!(
+            stop,
+            StopReason::NoProgress,
+            "failed call: {fail_after_write}"
+        );
+        assert_eq!(checks(&runtime, runtime.session_id()), vec!["failed"; 3]);
+    }
 }
 
 fn checks(runtime: &SessionRuntime, session: SessionId) -> Vec<String> {

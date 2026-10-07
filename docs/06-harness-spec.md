@@ -1442,7 +1442,8 @@ permissions and the single repair attempt remain unchanged.
   turns; changed bounded work still verifies. For `localpilot eval` it is **on by default**: a benchmark
   verifies implementation work before completion. Known unchanged read-only
   answers are exempt from the automatic policy; explicit requests retain checks
-  on those turns. Opt out
+  on those turns. Attempted MCP calls remain opaque, including failed calls
+  and calls with no local Git changes. Opt out
   with `localpilot eval --no-verify` for that extra check; bounded-unit checks
   remain required. `--verify-command <cmd>` overrides the detected command. The legacy
   `--verify` flag explicitly checks unchanged read-only work. The per-call `localpilot-verify`

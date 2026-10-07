@@ -10,6 +10,7 @@ is SemVer-stable; the configuration schema stability policy is in
   With a valid bounded-work baseline, pure inspection can finish without running
   unrelated project tests. Explicit `--verify`, command overrides and configured
   checks still run; edits and opaque/partial effects retain verification.
+  MCP calls remain opaque even when the local Git diff is empty.
 
 - **Context compaction keeps runtime feedback with the user request.** Synthetic
   verification and repair messages no longer start a new user exchange that can

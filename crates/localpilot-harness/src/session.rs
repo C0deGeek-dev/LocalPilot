@@ -1265,6 +1265,10 @@ pub struct SessionRuntime {
     /// Authorized write-capable invocation, including errors/partial writes.
     /// Separate from the conservative attempted-operation budget.
     work_mutation_may_have_run: bool,
+    /// MCP effects are opaque to the local diff and touched-path evidence.
+    /// An attempted call prevents the automatic read-only exemption without
+    /// asserting a local mutation or changing bounded-mutation obligations.
+    work_mcp_call_attempted: bool,
     provider: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
     /// Shared + swappable so an interactive host can change the permission
@@ -1464,6 +1468,7 @@ impl SessionRuntime {
             unit_verify_command: None,
             work_mutation_refusal: None,
             work_mutation_may_have_run: false,
+            work_mcp_call_attempted: false,
             provider,
             tools,
             // The incognito floor is a session property, not a profile, so it is
@@ -1901,6 +1906,7 @@ impl SessionRuntime {
         self.work_mutation_refusal = None;
         self.work_diff_baseline = None;
         self.work_mutation_may_have_run = false;
+        self.work_mcp_call_attempted = false;
         self.work_unit = crate::granularity::WorkUnit::default();
     }
 
@@ -2987,6 +2993,7 @@ impl SessionRuntime {
             && !diff_mutated
             && !self.work_unit.has_mutations()
             && !self.work_mutation_may_have_run
+            && !self.work_mcp_call_attempted
             && self.work_mutation_refusal.is_none();
         if known_unchanged_readonly
             || self.config.answer_only
@@ -3641,6 +3648,7 @@ impl SessionRuntime {
         self.work_unit = crate::granularity::WorkUnit::default();
         self.work_mutation_refusal = None;
         self.work_mutation_may_have_run = false;
+        self.work_mcp_call_attempted = false;
         self.active_work_profile = None;
         self.active_work_profile = self.work_profile();
         self.work_diff_baseline =
@@ -4764,6 +4772,10 @@ impl SessionRuntime {
                                 prompter: self.prompter.as_deref(),
                                 peers: self.peers.as_deref(),
                             };
+                            // Generic MCP adapters request network permission;
+                            // they cannot attest that a server did no external
+                            // or partial writes, even when a call returns Err.
+                            self.work_mcp_call_attempted |= self.tools.is_mcp(&active_call.name);
                             let dispatched = tokio::select! {
                                 () = cancel.cancelled() => None,
                                 // A graceful wind-down requested while this tool is

@@ -7645,6 +7645,10 @@ guarded so containment and no-regression hold:
    all-turn contract. Opaque/partial effects, edits and checkpoint ownership
    remain guarded; an empty Git diff alone cannot discharge them. This prevents
    unrelated existing test failures from turning a question into an edit task.
+   MCP provenance excludes attempted server calls from this automatic exemption:
+   network permission and an empty local diff cannot establish absence of
+   external or partial effects. This does not assert a local mutation or alter
+   the existing bounded-mutation check obligation.
    Stack detection gains a C++ branch: C++ sources at the root are compile-checked
    with an artifact-free `g++ -std=c++17 -I. -fsyntax-only <sources>` — a single
    `CheckRunner` program+args that writes no build artifacts (so it never pollutes
