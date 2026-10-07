@@ -1449,6 +1449,10 @@ permissions and the single repair attempt remain unchanged.
   `--verify` flag explicitly checks unchanged read-only work. The per-call `localpilot-verify`
   contract verifier is a separate mechanism.
 
+Failed-check retry feedback keeps repairs within the original user request.
+An unrelated existing failure can block verification; it does not authorize
+additional edits or count as a passing check. Existing retry and stop rules apply.
+
 ## Anti-Sunk-Cost Loop
 
 For each step:

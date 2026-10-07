@@ -3124,7 +3124,10 @@ impl SessionRuntime {
                 )));
                 VerifyGate::Retry(format!(
                     "The build/test verification did not pass, so the task is not yet complete. \
-                     Fix the problem and continue.\n\n{}",
+                     Address diagnostics relevant to the user's original request and keep edits \
+                     within that scope. This check does not authorize unrelated repairs. If an \
+                     unrelated existing failure blocks verification, report the blocker rather \
+                     than expanding the task. A failing check does not count as a pass.\n\n{}",
                     outcome.detail
                 ))
             }

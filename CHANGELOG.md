@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Verification retries preserve the requested scope.** Failed-check feedback
+  asks for relevant repairs and reports unrelated blockers without authorizing
+  additional work. Verification requirements and failure stops remain intact.
+
 - **Automatic eval checks distinguish read-only answers from implementation.**
   With a valid bounded-work baseline, pure inspection can finish without running
   unrelated project tests. Explicit `--verify`, command overrides and configured
