@@ -6,6 +6,9 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Documentation clarifies legacy check configuration.** `test_command` is a
+  phase check used only when explicit `harness.checks` are absent.
+
 - **Repeated calls to an absent knowledge backend stop early.** When
   `knowledge_search` freshly finds neither knowledge index, changing queries
   does not reset the consecutive-observation guard: the second call explains

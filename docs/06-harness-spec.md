@@ -141,7 +141,7 @@ ratified gate below shares the file (ADR-0012).
 mode = "agent"
 attempts_per_step = 3
 auto_commit = true
-test_command = "cargo test"   # shorthand; equivalent to a single cadence="step" check
+test_command = "cargo test"   # shorthand phase check; used only when checks is empty
 claim_gate = "off"            # "warn" flags a final-reply action claim no verified call backs (ADR-0023)
 
 [harness.rules]
