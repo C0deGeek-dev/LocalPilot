@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Text search advertises its literal default.** The query and tool descriptions
+  explain that regular expressions require `is_regex=true`. Matching behavior
+  and empty results are unchanged.
+
 - **Verification retries preserve the requested scope.** Failed-check feedback
   asks for relevant repairs and reports unrelated blockers without authorizing
   additional work. Verification requirements and failure stops remain intact.

@@ -1269,7 +1269,7 @@ fn wildcard_regex(pattern: &str) -> Result<regex::Regex, ToolError> {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchTextInput {
-    /// Text or regular expression to search for.
+    /// Literal text to search for by default. Set `is_regex` to true for a regular expression.
     query: String,
     /// Directory to search, relative to the workspace. Defaults to the root.
     #[serde(default)]
@@ -1299,7 +1299,7 @@ impl Tool for SearchText {
         string_field_detail(input, "query")
     }
     fn description(&self) -> &'static str {
-        "Search workspace files for text or a regex, respecting ignore files."
+        "Search workspace file contents, respecting ignore files. Queries are literal text by default; set is_regex=true to use a regular expression."
     }
     fn schema(&self) -> Value {
         schema_for::<SearchTextInput>()
