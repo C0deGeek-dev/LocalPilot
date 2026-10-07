@@ -1,5 +1,5 @@
 //! Offline provider scenarios exercise the real prompt, dispatch and checkpoint paths.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use localpilot_config::GranularityConfig;
 use localpilot_harness::{
@@ -103,6 +103,7 @@ async fn byte_small_whole_file_with_too_many_lines_requires_a_page() {
     let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
     let (_, events) = turn(&mut agent).await;
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "whole" && output.contains("explicit start_line"))));
+    assert_page_hint(&events, "whole", "dense.txt", 80);
     assert!(events.iter().any(
         |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "page")
     ));
@@ -134,6 +135,16 @@ async fn whole_file_exception_keeps_byte_and_tightened_line_bounds() {
         assert!(events.iter().any(
             |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, .. } if id == expected)
         ));
+        assert_page_hint(
+            &events,
+            expected,
+            if expected == "long" {
+                "long.txt"
+            } else {
+                "three.txt"
+            },
+            2,
+        );
     }
     assert!(events.iter().any(
         |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "two")
@@ -184,6 +195,7 @@ async fn giant_whole_file_read_is_refused_but_explicit_pages_work() {
     let (reason, events) = turn(&mut agent).await;
     assert_eq!(reason, StopReason::Done);
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "whole" && output.contains("explicit start_line"))));
+    assert_page_hint(&events, "whole", "large.txt", 80);
     for id in ["page1", "page2"] {
         assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id: actual, is_error: false, .. } if actual == id)));
     }
@@ -194,6 +206,28 @@ async fn giant_whole_file_read_is_refused_but_explicit_pages_work() {
         .messages
         .iter()
         .any(|m| format!("{m:?}").contains("Work unit: change at most")));
+}
+
+fn assert_page_hint(events: &[RuntimeEvent], id: &str, path: &str, end: u64) {
+    let output = events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ToolFinished {
+                id: actual,
+                is_error: true,
+                output,
+                ..
+            } if actual == id => Some(output),
+            _ => None,
+        })
+        .expect("refused read");
+    let call: serde_json::Value =
+        serde_json::from_str(output.split_once("Retry with: ").expect("copyable hint").1)
+            .expect("valid JSON call");
+    assert_eq!(
+        call,
+        json!({"name":"read_file", "arguments":{"path":path, "start_line":1, "end_line":end}})
+    );
 }
 
 #[tokio::test]

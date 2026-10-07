@@ -4,7 +4,10 @@
 
 Production hosts supply the shared automatic work profile. Before permissions,
 `read_file` and `read_tool_output` require explicit pages within its line bound
-(very small files can be read whole). Exact edits, multi-edit hunks and structured
+(very small files can be read whole). A read-limit refusal includes a copyable
+JSON tool call with the original path/output identifier and an explicit range
+within the active line bound; use it to retry, then advance the range to page
+further. No content is served by the refusal. Exact edits, multi-edit hunks and structured
 patch operations spend cumulative file/region/changed-material budgets. Large
 whole-file overwrite/deletion and global/regex replacement return an actionable
 refusal; use bounded exact hunks. Giant single lines also spend byte-equivalent

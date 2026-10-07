@@ -995,6 +995,10 @@ is checked against the byte ceiling before permission, not against a line count.
 The authorized builtin reads at most the byte ceiling plus one and checks
 selected line count before returning implicit whole-file output. Denied reads
 do not inspect content; explicit pages retain their existing output bounds.
+**2026-10-07 paging clarification:** read-limit refusals include a serialized
+JSON retry call preserving the original arguments with start/end lines set to
+the active bound. No implicit page is served; permissions, read provenance and
+repeat-observation policy retain their existing ordering and semantics.
 Attempted edits cumulatively spend the unit's file,
 region and patch budgets before permission dispatch. Retained redacted output is
 bounded on success and failure. Delegation inherits policy and spends a region;

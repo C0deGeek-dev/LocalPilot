@@ -26,7 +26,9 @@ Reads without an explicit last line are allowed for small text files only when
 both the active line limit and byte limit are satisfied. Before permission,
 the runtime checks metadata against the byte limit. After authorization, the
 read builtin reads at most that byte limit plus one and checks actual selected
-lines against `max_read_lines`. Larger files require explicit pages. A byte-small
+lines against `max_read_lines`. Larger files require explicit pages. Refusals provide a copyable JSON retry
+call with explicit start/end lines within the active (including custom) bound;
+no implicit partial read or extra permission is granted. A byte-small
 file with many lines is still refused; long-line output and retained-output
 limits continue to apply to explicit pages. Permission denial precedes any
 content inspection or content-dependent line check.

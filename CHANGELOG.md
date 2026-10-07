@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Read-limit refusals include a copyable paging call.** Whole-file or oversized
+  requests name exact `start_line`/`end_line` arguments under the active line
+  bound, including custom bounds. Permission gates and read caps are unchanged.
+
 - **Python completion checks use evidence to select a runner.** Explicit pytest
   configuration selects pytest; other Python projects and `tests/test_*.py`
   layouts use available pytest or standard-library unittest discovery. Automatic

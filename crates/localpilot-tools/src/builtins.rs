@@ -623,13 +623,14 @@ impl Tool for ReadFile {
         ctx: &ToolContext<'_>,
         limits: Option<FileReadLimits>,
     ) -> Result<ToolOutput, ToolError> {
+        let hint =
+            limits.map(|limits| crate::bounded_read_hint("read_file", &input, limits.max_lines));
         let input: ReadFileInput = parse_input(&input)?;
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
         let limits = limits.filter(|_| input.end_line.is_none());
         let refusal = || {
             ToolError::Failed(
-                "work envelope: request an explicit start_line/end_line page within the read limit"
-                    .to_string(),
+                format!("work envelope: request an explicit start_line/end_line page within the read limit. {}", hint.as_deref().unwrap_or_default()),
             )
         };
         let bytes = if let Some(limits) = limits {

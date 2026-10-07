@@ -407,6 +407,23 @@ pub struct FileReadLimits {
     pub max_bytes: usize,
 }
 
+/// Copyable retry call for a read that needs an explicit bounded line range.
+pub fn bounded_read_hint(name: &str, input: &Value, max_lines: usize) -> String {
+    let mut arguments = input.as_object().cloned().unwrap_or_default();
+    let start = input
+        .get("start_line")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .max(1);
+    let end = start.saturating_add(max_lines.max(1) as u64 - 1);
+    arguments.insert("start_line".to_string(), Value::from(start));
+    arguments.insert("end_line".to_string(), Value::from(end));
+    format!(
+        "Retry with: {}",
+        serde_json::json!({"name": name, "arguments": arguments})
+    )
+}
+
 /// Parse a tool's JSON input into a typed struct.
 ///
 /// # Errors
@@ -436,6 +453,31 @@ mod tests {
     use super::*;
     use crate::contract::SideEffectClass;
     use localpilot_sandbox::Effect;
+
+    #[test]
+    fn paging_hint_preserves_arguments_and_serializes_a_bounded_retry() {
+        for (start, expected_start, expected_end) in
+            [(0, 1, 2), (81, 81, 82), (u64::MAX, u64::MAX, u64::MAX)]
+        {
+            let input = serde_json::json!({"path": "quoted\"\\目录.txt", "start_line": start, "end_line": 999, "other": true});
+            let hint = bounded_read_hint("read_file", &input, 2);
+            let call: Value =
+                serde_json::from_str(hint.strip_prefix("Retry with: ").expect("hint prefix"))
+                    .expect("valid JSON");
+            assert_eq!(call["name"], "read_file");
+            assert_eq!(call["arguments"]["path"], input["path"]);
+            assert_eq!(call["arguments"]["other"], true);
+            assert_eq!(call["arguments"]["start_line"], expected_start);
+            assert_eq!(call["arguments"]["end_line"], expected_end);
+        }
+        let hint = bounded_read_hint("read_tool_output", &serde_json::json!({"id": "opaque"}), 80);
+        let call: Value =
+            serde_json::from_str(hint.strip_prefix("Retry with: ").expect("hint prefix"))
+                .expect("valid JSON");
+        assert_eq!(call["arguments"]["id"], "opaque");
+        assert_eq!(call["arguments"]["start_line"], 1);
+        assert_eq!(call["arguments"]["end_line"], 80);
+    }
 
     /// A tool that overrides nothing beyond the required methods, to prove the
     /// default contract path.

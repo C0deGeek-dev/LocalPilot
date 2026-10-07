@@ -286,9 +286,10 @@ impl WorkUnit {
                         .and_then(|path| std::fs::metadata(path).ok())
                         .is_some_and(|meta| meta.len() <= profile.max_output_bytes as u64);
                 if !tiny {
-                    return reject(
-                        "request an explicit start_line/end_line page within the read limit",
-                    );
+                    return Some(format!(
+                        "work envelope: request an explicit start_line/end_line page within the read limit. {}",
+                        localpilot_tools::bounded_read_hint(name, input, profile.max_read_lines)
+                    ));
                 }
             }
             return None;

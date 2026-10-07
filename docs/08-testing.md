@@ -706,3 +706,13 @@ invalid/training-only metadata, timeout and redirect refusal.
 `cargo test -p localpilot --bin localpilot context_` checks caps, output reserves,
 concurrent cache reuse, failed/disabled probes, and actual headless and synchronous
 server/worker runtime budgets. These checks make no live model calls.
+
+### Paging recovery advice
+
+`cargo test -p localpilot-tools paging_hint` checks escaped/Unicode paths,
+retained arguments and bounded/saturating retry ranges.
+`cargo test -p localpilot-harness --test granularity` exercises metadata and
+content-dependent read refusals, custom limits, legal retries and denied-secret
+ordering. Native synthetic-provider recovery copies the refusal JSON and
+advances explicit pages; this is protocol evidence, not live model quality.
+A provider that blindly repeats the refused call can still hit the repeat guard.
