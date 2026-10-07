@@ -87,7 +87,7 @@ async fn short_whole_file_read_uses_line_and_byte_limits_independently() {
 }
 
 #[tokio::test]
-async fn byte_small_whole_file_with_too_many_lines_requires_a_page() {
+async fn byte_small_whole_file_with_too_many_lines_returns_a_page() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("dense.txt"), "x\n".repeat(81)).unwrap();
     let provider = Arc::new(
@@ -102,8 +102,7 @@ async fn byte_small_whole_file_with_too_many_lines_requires_a_page() {
     );
     let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
     let (_, events) = turn(&mut agent).await;
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "whole" && output.contains("explicit start_line"))));
-    assert_page_hint(&events, "whole", "dense.txt", 80);
+    assert_next_page(&events, "whole", "dense.txt", 81, 160);
     assert!(events.iter().any(
         |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "page")
     ));
@@ -131,21 +130,11 @@ async fn whole_file_exception_keeps_byte_and_tightened_line_bounds() {
         ..GranularityConfig::default()
     });
     let (_, events) = turn(&mut agent).await;
-    for expected in ["long", "three"] {
-        assert!(events.iter().any(
-            |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, .. } if id == expected)
-        ));
-        assert_page_hint(
-            &events,
-            expected,
-            if expected == "long" {
-                "long.txt"
-            } else {
-                "three.txt"
-            },
-            2,
-        );
-    }
+    assert!(events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, .. } if id == "long")
+    ));
+    assert_page_hint(&events, "long", "long.txt", 2);
+    assert_next_page(&events, "three", "three.txt", 3, 4);
     assert!(events.iter().any(
         |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "two")
     ));
@@ -154,7 +143,7 @@ async fn whole_file_exception_keeps_byte_and_tightened_line_bounds() {
 #[tokio::test]
 async fn denied_whole_file_read_is_refused_before_content_dependent_limits() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(".env"), "private-fixture\n".repeat(81)).unwrap();
+    std::fs::write(dir.path().join(".env"), "private-fixture\n".repeat(600)).unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call("secret", "read_file", json!({"path":".env"}))
@@ -166,7 +155,7 @@ async fn denied_whole_file_read_is_refused_before_content_dependent_limits() {
 }
 
 #[tokio::test]
-async fn giant_whole_file_read_is_refused_but_explicit_pages_work() {
+async fn giant_whole_file_read_returns_first_page_and_explicit_pages_work() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("large.txt"),
@@ -194,8 +183,7 @@ async fn giant_whole_file_read_is_refused_but_explicit_pages_work() {
     let mut agent = runtime(dir.path(), provider.clone(), Profile::Bypass, None);
     let (reason, events) = turn(&mut agent).await;
     assert_eq!(reason, StopReason::Done);
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "whole" && output.contains("explicit start_line"))));
-    assert_page_hint(&events, "whole", "large.txt", 80);
+    assert_next_page(&events, "whole", "large.txt", 81, 160);
     for id in ["page1", "page2"] {
         assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id: actual, is_error: false, .. } if actual == id)));
     }
@@ -206,6 +194,42 @@ async fn giant_whole_file_read_is_refused_but_explicit_pages_work() {
         .messages
         .iter()
         .any(|m| format!("{m:?}").contains("Work unit: change at most")));
+}
+
+fn assert_next_page(events: &[RuntimeEvent], id: &str, path: &str, start: u64, end: u64) {
+    let output = events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ToolFinished {
+                id: actual,
+                is_error: false,
+                output,
+                ..
+            } if actual == id => Some(output),
+            _ => None,
+        })
+        .expect("successful bounded read");
+    assert!(output.contains("[bounded read]"));
+    let call: serde_json::Value =
+        serde_json::from_str(output.split_once("Retry with: ").expect("next page").1)
+            .expect("valid JSON call");
+    assert_eq!(
+        call,
+        json!({"name":"read_file", "arguments":{"path":path,"start_line":start,"end_line":end}})
+    );
+}
+
+#[tokio::test]
+async fn implicit_missing_file_reports_authorized_io_error_without_a_paging_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("missing", "read_file", json!({"path":"missing.txt"}))
+            .text("missing file"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "missing" && output.contains("missing.txt") && !output.contains("Retry with:") && !output.contains("work envelope"))));
 }
 
 fn assert_page_hint(events: &[RuntimeEvent], id: &str, path: &str, end: u64) {

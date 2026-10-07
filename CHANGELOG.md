@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **File-path aliases keep secret protection.** Read/write effects classify both
+  the requested path and normalized target. Directory text searches exclude
+  protected descendant content; an explicitly named file uses its own read gate.
+- **Structured patches reject duplicate destinations and report partial errors.**
+  Normalized aliases cannot overwrite an earlier operation in the same batch.
+  A late I/O failure reports completed operations and actual touches as failure;
+  per-file atomic writes do not imply a multi-file rollback transaction.
+
 - **Documentation clarifies legacy check configuration.** `test_command` is a
   phase check used only when explicit `harness.checks` are absent.
 
@@ -16,9 +24,12 @@ is SemVer-stable; the configuration schema stability policy is in
   still executes; a newly created index restores ordinary searches immediately.
   Empty results and plain MCP text do not count as backend absence.
 
-- **Read-limit refusals include a copyable paging call.** Whole-file or oversized
-  requests name exact `start_line`/`end_line` arguments under the active line
-  bound, including custom bounds. Permission gates and read caps are unchanged.
+- **Implicit file reads return a bounded first page.** After permission, the
+  builtin returns complete lines within the existing byte/line caps, reports
+  the actual partial range and supplies an exact next-page call. Small files
+  still return whole; oversized single lines and explicit over-cap ranges retain
+  bounded retry refusals. Missing paths report ordinary I/O errors. Repeating
+  the same page can still stop for no progress.
 
 - **Python completion checks use evidence to select a runner.** Explicit pytest
   configuration selects pytest; other Python projects and `tests/test_*.py`

@@ -22,16 +22,17 @@ malformed evidence start conservatively. Model names, parameter counts and large
 context windows never establish capability. See ADR-0199 for thresholds and
 [configuration](configuration.md#harnessgranularity) for stricter caps.
 
-Reads without an explicit last line are allowed for small text files only when
-both the active line limit and byte limit are satisfied. Before permission,
-the runtime checks metadata against the byte limit. After authorization, the
-read builtin reads at most that byte limit plus one and checks actual selected
-lines against `max_read_lines`. Larger files require explicit pages. Refusals provide a copyable JSON retry
-call with explicit start/end lines within the active (including custom) bound;
-no implicit partial read or extra permission is granted. A byte-small
-file with many lines is still refused; long-line output and retained-output
-limits continue to apply to explicit pages. Permission denial precedes any
-content inspection or content-dependent line check.
+Reads without an explicit last line pass through permission before the builtin
+reads at most the active byte limit plus one. It returns at most `max_read_lines`
+complete content lines, dropping any incomplete last line at the byte boundary.
+A partial page identifies its actual range, records a ranged read touch and
+provides exact start/end arguments for the next page. Whole small files preserve
+their usual output. A single line beyond the byte bound still refuses with an
+explicit retry; explicit oversized ranges also refuse. Explicit pages retain
+their existing I/O and retained-output bounds. No read cap is raised, and denied
+reads inspect no content. Missing paths reach the authorized I/O error rather
+than a paging refusal. Repeat observation still considers every result; repeatedly
+reading the same first page without advancing can stop the turn.
 
 New future steps declare `scope: files, regions, decisions, changed_lines` as four
 comma-separated integer counts. Approval refuses missing or oversized scope and

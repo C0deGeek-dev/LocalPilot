@@ -2,6 +2,45 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0223: File Scope And Partial Patch Evidence
+
+**Status:** accepted · **Date:** 2026-10-07. Tightens existing path mediation and
+clarifies structured patch failure semantics without changing schemas.
+
+Read and write path effects classify both the requested spelling and normalized
+target with the existing secret-path detector. An ordinary symlink/junction name
+cannot make a protected target ordinary. Failed normalization remains
+conservative. Workspace, granted read roots, scratch, trust and profile decisions
+retain their existing roles; these checks are permission policy, not an OS sandbox.
+
+Directory `search_text` permission grants do not implicitly grant protected
+descendant content. Before opening an entry, search checks its normalized target
+remains under the authorized search root and excludes secret-like descendants.
+The result reports that protected content was excluded without quoting it.
+An explicitly named file crosses its own read effect and can still be searched
+when that effect is authorized. Directory listings continue to list names;
+this amendment mediates content reads, not path-name visibility.
+
+A structured `apply_patch` rejects duplicate normalized destinations before
+preparing or writing any operation, using the existing touch-index collision
+identity (conservative case folding on Windows/macOS). Combine updates for one file into its single
+ordered hunk list. Aliases count as the same destination. Creates recheck that the target is absent
+at commit; this is not an exclusive-create lock against external races. Every hunk is validated
+before writes, and each file replacement remains atomic; the batch is not a
+multi-file filesystem transaction. Deletion requires an existing file.
+If a later commit fails after earlier files changed, return `ReportedFailure`
+with completed operations and actual touches, explicitly saying they were not
+rolled back. A failure before any commit remains an ordinary tool error. Existing
+redaction, output bounds, mutation accounting and completion verification apply
+to both; an error cannot erase the earlier verification obligation.
+
+The optional read-before-write precondition remains literal-path successful-read
+evidence, not a complete-file coverage or version-lock guarantee. Explicit
+line-range reads retain full-file physical I/O; only implicit first-page reads
+have a physical byte ceiling. These limits are not broadened into unproved
+transaction, concurrency or streaming guarantees. No persisted event-format
+change is needed: outcomes and touches reuse their existing typed host seam.
+
 ## ADR-0222: Fresh Backend Absence Is Independent Of Search Arguments
 
 **Status:** accepted · **Date:** 2026-10-07. Refines ADR-0215; preserves ADR-0146.
@@ -1028,6 +1067,19 @@ do not inspect content; explicit pages retain their existing output bounds.
 JSON retry call preserving the original arguments with start/end lines set to
 the active bound. No implicit page is served; permissions, read provenance and
 repeat-observation policy retain their existing ordering and semantics.
+**2026-10-07 bounded-page amendment (supersedes the implicit-read refusal
+policy above):** implicit builtin file reads serve a bounded first page after
+authorization, reading at most the byte ceiling plus one and returning complete
+lines within the line ceiling. A byte-cut incomplete line is withheld, not
+presented as complete UTF-8. Partial output reports the actual range, records
+ranged provenance and includes an exact next-page call. Files satisfying both
+ceilings keep whole-file output; a single line exceeding the byte ceiling still
+refuses. Explicit over-cap ranges and unbounded retained-output reads still
+refuse. Missing-file errors are resolved by the authorized builtin, with no
+content or metadata needed by implicit-read preflight. Every call still executes
+and participates in repeated-observation detection; no cap, verification rule,
+permission, schema or event-format exception is introduced. This avoids requiring
+a model to repair an ordinary whole-file request before seeing any source.
 Attempted edits cumulatively spend the unit's file,
 region and patch budgets before permission dispatch. Retained redacted output is
 bounded on success and failure. Delegation inherits policy and spends a region;

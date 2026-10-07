@@ -694,7 +694,7 @@ runs three offline fake-provider scenarios through real readonly tool dispatch
 and production review judgement. Equivalent-query variants reach the 200-call
 ceiling and malformed repair escalates; discovery of 185 new lines completes;
 exact-repeat detection stops early and a valid repair can still post a verdict.
-All start with legitimate oversized-read refusals under the automatic envelope.
+All start with legitimate explicit over-cap read ranges under the automatic envelope.
 These tests pin heuristic limitations and protocol safety, not live model
 quality. See [the evaluation findings](mesh-model-evaluation.md#search-stall-investigation).
 
@@ -707,15 +707,19 @@ invalid/training-only metadata, timeout and redirect refusal.
 concurrent cache reuse, failed/disabled probes, and actual headless and synchronous
 server/worker runtime budgets. These checks make no live model calls.
 
-### Paging recovery advice
+### Bounded paging recovery
 
 `cargo test -p localpilot-tools paging_hint` checks escaped/Unicode paths,
 retained arguments and bounded/saturating retry ranges.
-`cargo test -p localpilot-harness --test granularity` exercises metadata and
-content-dependent read refusals, custom limits, legal retries and denied-secret
-ordering. Native synthetic-provider recovery copies the refusal JSON and
-advances explicit pages; this is protocol evidence, not live model quality.
-A provider that blindly repeats the refused call can still hit the repeat guard.
+`cargo test -p localpilot-tools --test tools implicit_page` checks actual read
+ranges, custom line/byte bounds, exact EOF, CRLF and a UTF-8 byte cut; unseen
+trailing invalid bytes are not decoded or claimed as inspected.
+`cargo test -p localpilot-harness --test granularity` exercises implicit first
+pages, oversized-line refusals, explicit retries, missing-path errors and
+permission denial before content. Native synthetic-provider recovery advances
+the returned next-page calls and checks successful dispatches and actual ranges;
+this is protocol evidence, not live model quality. A provider that blindly
+repeats the same first page can still hit the repeat guard.
 
 ### Backend availability observations
 
@@ -726,3 +730,14 @@ restoration, ordinary empty queries followed by a hit and scripted-replay opt-ou
 present/corrupt and genuinely newly created indexes. Native absent-index replay
 must execute three knowledge_search calls and persist the backend_unavailable
 stop; no result-text matching or live model-quality claim is involved.
+
+### File scope and partial patch errors
+
+The tools integration suite compares readonly direct-secret denial with directory
+search, nested protected content and explicitly authorized file searches. It
+rejects duplicate patch destinations including lexical aliases before mutation.
+Windows probes an ordinary junction to a protected target and checks write
+path-effects retain the same protection. A sharing-locked deletion after a
+successful create verifies typed reported failure, the retained completed touch,
+unchanged locked file and monotone mutation obligation. These tests use synthetic
+fixture content and no live provider.

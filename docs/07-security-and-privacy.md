@@ -37,6 +37,14 @@ Trusted does not mean:
 - run destructive commands without approval
 - write outside workspace without approval
 
+Builtin file effects apply the secret-path detector to the requested spelling
+and its normalized target, so an ordinary alias cannot hide a protected path.
+Directory text search excludes protected descendant content before opening it;
+approval of the directory alone does not approve each credential-shaped file.
+An explicitly named protected file still requires its own read authorization.
+These are best-effort path-policy checks, not a claim to classify every secret
+value or contain arbitrary code at the operating-system level.
+
 Trust is a convenience gate, not a security boundary — the permission engine
 still mediates every effect. Its concrete role: a trusted folder does not
 re-prompt, its project-local skills and skill sources are loaded and visible, and

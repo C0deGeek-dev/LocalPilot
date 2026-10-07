@@ -60,6 +60,104 @@ fn bypass_engine() -> PermissionEngine {
     PermissionEngine::new(Profile::Bypass, Vec::new())
 }
 
+#[tokio::test]
+async fn implicit_pages_preserve_complete_lines_and_actual_read_ranges() {
+    let cases = [
+        ("a\nb\nc\n", 2, 64, "a\nb", Some((1, 2)), Some((3, 4))),
+        ("a\r\n💡\r\nb\r\n", 2, 6, "a", Some((1, 1)), Some((2, 3))),
+        ("a\nb\n", 2, 4, "a\nb\n", None, None),
+    ];
+    for (content, lines, bytes, expected, range, next) in cases {
+        let (_dir, ws) = workspace_with(&[("page.txt", content)]);
+        let mut registry = ToolRegistry::with_builtins();
+        registry.set_file_read_limits(lines, bytes);
+        let call = ToolCall::new(
+            ToolUseId::from("page"),
+            "read_file",
+            json!({"path":"page.txt"}),
+        );
+        let result = registry
+            .dispatch_detailed(
+                &call,
+                &ctx(&ws, Interactivity::NonInteractive, true),
+                &bypass_engine(),
+                &ScriptedApprover::always(),
+            )
+            .await;
+        assert!(!result.result.is_error(), "{}", result.result.output);
+        assert_eq!(result.touches.len(), 1);
+        assert_eq!(result.touches[0].lines.map(|r| (r.start, r.end)), range);
+        let output = result.result.output.split_once("output:\n").unwrap().1;
+        match next {
+            Some((start, end)) => {
+                assert_eq!(output.split_once("\n\n[bounded read]").unwrap().0, expected);
+                let call: serde_json::Value = serde_json::from_str(
+                    result.result.output.split_once("Retry with: ").unwrap().1,
+                )
+                .unwrap();
+                assert_eq!(
+                    call,
+                    json!({"name":"read_file","arguments":{"path":"page.txt","start_line":start,"end_line":end}})
+                );
+            }
+            None => assert_eq!(output, expected),
+        }
+    }
+}
+
+#[tokio::test]
+async fn implicit_page_does_not_decode_unseen_trailing_bytes() {
+    let (dir, ws) = workspace_with(&[]);
+    let mut bytes = b"a\nb\n".to_vec();
+    bytes.extend([0xff; 100]);
+    std::fs::write(dir.path().join("page.txt"), bytes).unwrap();
+    let mut registry = ToolRegistry::with_builtins();
+    registry.set_file_read_limits(80, 4);
+    let result = dispatch(
+        &registry,
+        "read_file",
+        json!({"path":"page.txt"}),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!result.is_error(), "{}", result.output);
+    assert!(result
+        .output
+        .contains("output:\na\nb\n\n[bounded read] Returned lines 1–2"));
+    assert!(result.output.contains("\"start_line\":3"));
+}
+
+#[tokio::test]
+async fn implicit_page_past_eof_does_not_claim_an_unseen_range() {
+    let (_dir, ws) = workspace_with(&[("page.txt", "a\nb\n")]);
+    let mut registry = ToolRegistry::with_builtins();
+    registry.set_file_read_limits(2, 64);
+    let call = ToolCall::new(
+        ToolUseId::from("page"),
+        "read_file",
+        json!({"path":"page.txt","start_line":3}),
+    );
+    let result = registry
+        .dispatch_detailed(
+            &call,
+            &ctx(&ws, Interactivity::NonInteractive, true),
+            &bypass_engine(),
+            &ScriptedApprover::always(),
+        )
+        .await;
+    assert!(!result.result.is_error());
+    assert!(result
+        .result
+        .output
+        .split_once("output:\n")
+        .unwrap()
+        .1
+        .is_empty());
+    assert!(result.touches.is_empty());
+}
+
 fn init_git_repo(dir: &std::path::Path) {
     std::process::Command::new("git")
         .args(["init"])
@@ -76,6 +174,180 @@ fn init_git_repo(dir: &std::path::Path) {
         .current_dir(dir)
         .output()
         .unwrap();
+}
+
+#[tokio::test]
+async fn directory_search_keeps_protected_descendants_behind_the_read_gate() {
+    let (_dir, ws) = workspace_with(&[
+        ("secrets.json", "private_probe_marker\n"),
+        ("config/secrets.yaml", "nested_private_probe_marker\n"),
+        ("public.txt", "public_probe_marker\n"),
+    ]);
+    let registry = ToolRegistry::with_builtins();
+    let engine = PermissionEngine::new(Profile::ReadOnly, Vec::new());
+    let context = ctx(&ws, Interactivity::NonInteractive, true);
+    let direct = dispatch(
+        &registry,
+        "read_file",
+        json!({"path":"secrets.json"}),
+        &context,
+        &engine,
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(direct.is_error());
+    let search = dispatch(
+        &registry,
+        "search_text",
+        json!({"query":"probe_marker","path":"."}),
+        &context,
+        &engine,
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(!search.is_error());
+    assert!(search.output.contains("public_probe_marker"));
+    assert!(!search.output.contains("private_probe_marker"));
+    let explicit = dispatch(
+        &registry,
+        "search_text",
+        json!({"query":"private_probe_marker","path":"secrets.json"}),
+        &context,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!explicit.is_error());
+    assert!(explicit.output.contains("private_probe_marker"));
+}
+
+#[tokio::test]
+async fn patch_rejects_duplicate_normalized_destinations_without_writing() {
+    let original = "alpha=1\nbeta=1\n";
+    let (dir, ws) = workspace_with(&[("data.txt", original)]);
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let registry = ToolRegistry::with_builtins();
+    let result = dispatch(&registry, "apply_patch", json!({"operations":[
+        {"action":"update","path":"data.txt","hunks":[{"old_text":"alpha=1","new_text":"alpha=2"}]},
+        {"action":"update","path":"sub/../data.txt","hunks":[{"old_text":"beta=1","new_text":"beta=2"}]}
+    ]}), &ctx(&ws, Interactivity::NonInteractive, true), &bypass_engine(), &ScriptedApprover::always()).await;
+    assert!(result.is_error(), "{}", result.output);
+    assert!(result.output.contains("duplicate"), "{}", result.output);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("data.txt")).unwrap(),
+        original
+    );
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[tokio::test]
+async fn patch_rejects_case_aliases_of_absent_destinations_before_creation() {
+    let (dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let result = dispatch(
+        &registry,
+        "apply_patch",
+        json!({"operations":[
+            {"action":"create","path":"New.txt","content":"first"},
+            {"action":"create","path":"new.txt","content":"second"}
+        ]}),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(result.is_error(), "{}", result.output);
+    assert!(!dir.path().join("New.txt").exists());
+    assert!(!dir.path().join("new.txt").exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn patch_reports_completed_touches_when_a_later_commit_fails() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (dir, ws) = workspace_with(&[("locked.txt", "keep\n")]);
+    // Permit inspection, but keep deletion locked until the call returns.
+    let _held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(dir.path().join("locked.txt"))
+        .unwrap();
+    let registry = ToolRegistry::with_builtins();
+    let call = ToolCall::new(
+        ToolUseId::from("patch"),
+        "apply_patch",
+        json!({"operations":[
+            {"action":"create","path":"created.txt","content":"completed\n"},
+            {"action":"delete","path":"locked.txt"}
+        ]}),
+    );
+    let result = registry
+        .dispatch_detailed(
+            &call,
+            &ctx(&ws, Interactivity::NonInteractive, true),
+            &bypass_engine(),
+            &ScriptedApprover::always(),
+        )
+        .await;
+    assert!(result.result.is_error());
+    assert!(result.mutation_may_have_run);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("created.txt")).unwrap(),
+        "completed\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("locked.txt")).unwrap(),
+        "keep\n"
+    );
+    assert_eq!(result.touches.len(), 1);
+    assert_eq!(
+        result.result.outcome,
+        localpilot_core::ToolOutcome::ReportedFailure
+    );
+    assert!(result.result.output.contains("create created.txt"));
+    assert!(result.result.output.contains("locked.txt"));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn canonical_secret_target_cannot_be_read_through_an_ordinary_junction() {
+    let (dir, ws) = workspace_with(&[(".ssh/config", "private_alias_marker\n")]);
+    let result = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(dir.path().join("ordinary"))
+        .arg(dir.path().join(".ssh"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let registry = ToolRegistry::with_builtins();
+    let result = dispatch(
+        &registry,
+        "read_file",
+        json!({"path":"ordinary/config"}),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &PermissionEngine::new(Profile::ReadOnly, Vec::new()),
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(result.is_error());
+    assert!(!result.output.contains("private_alias_marker"));
+    let effects = localpilot_tools::WriteFile
+        .effects(
+            &json!({"path":"ordinary/config","content":"new"}),
+            &ctx(&ws, Interactivity::NonInteractive, true),
+        )
+        .unwrap();
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::WritePath {
+            secret_like: true,
+            ..
+        }]
+    ));
 }
 
 #[tokio::test]

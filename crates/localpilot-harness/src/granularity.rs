@@ -272,25 +272,18 @@ impl WorkUnit {
         if matches!(name, "read_file" | "read_tool_output") {
             let start = input.get("start_line").and_then(Value::as_u64).unwrap_or(1);
             let end = input.get("end_line").and_then(Value::as_u64);
+            // The builtin serves an implicit bounded page only after permission.
+            // Leave missing-path and content errors to that authorized read too.
+            if name == "read_file" && end.is_none() {
+                return None;
+            }
             let bounded =
                 end.is_some_and(|end| end >= start && end - start < profile.max_read_lines as u64);
             if !bounded {
-                // Only metadata before permission. The authorized read builtin
-                // checks actual lines and reads at most the byte bound + 1.
-                let tiny = name == "read_file"
-                    && end.is_none()
-                    && input
-                        .get("path")
-                        .and_then(Value::as_str)
-                        .and_then(|path| workspace.resolve(std::path::Path::new(path)).ok())
-                        .and_then(|path| std::fs::metadata(path).ok())
-                        .is_some_and(|meta| meta.len() <= profile.max_output_bytes as u64);
-                if !tiny {
-                    return Some(format!(
-                        "work envelope: request an explicit start_line/end_line page within the read limit. {}",
-                        localpilot_tools::bounded_read_hint(name, input, profile.max_read_lines)
-                    ));
-                }
+                return Some(format!(
+                    "work envelope: request an explicit start_line/end_line page within the read limit. {}",
+                    localpilot_tools::bounded_read_hint(name, input, profile.max_read_lines)
+                ));
             }
             return None;
         }

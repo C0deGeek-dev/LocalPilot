@@ -2,12 +2,16 @@
 
 ## Bounded Agent Work
 
-Production hosts supply the shared automatic work profile. Before permissions,
-`read_file` and `read_tool_output` require explicit pages within its line bound
-(very small files can be read whole). A read-limit refusal includes a copyable
-JSON tool call with the original path/output identifier and an explicit range
-within the active line bound; use it to retry, then advance the range to page
-further. No content is served by the refusal. Exact edits, multi-edit hunks and structured
+Production hosts supply the shared automatic work profile. An implicit
+`read_file` request is authorized before any content inspection, then serves
+complete lines within the active line and byte bounds. A partial page names the
+actual returned range and a copyable JSON call for the next page. Small files
+that fit both bounds are still returned whole. A line too large to fit the byte
+bound, an explicit over-cap range, or an unbounded `read_tool_output` request
+still receives a refusal with an exact bounded retry call. Missing files report
+ordinary authorized I/O errors. Every call remains observable by the repeat
+guard; repeating the same successful page can also stop for no progress.
+Exact edits, multi-edit hunks and structured
 patch operations spend cumulative file/region/changed-material budgets. Large
 whole-file overwrite/deletion and global/regex replacement return an actionable
 refusal; use bounded exact hunks. Giant single lines also spend byte-equivalent
@@ -106,6 +110,8 @@ keep using the full schema.
 ## Builtin Tools
 
 File tools and supported literal shell targets share normalized path effects.
+Builtin file read/write effects classify secret-like paths by both requested
+spelling and normalized target; an ordinary alias does not lift the secret gate.
 The runtime's unique private scratch child is in read/write scope, with secret
 and session permission restrictions preserved. It is reported in the system
 prompt and supplied to child commands through `LOCALPILOT_SCRATCH_DIR` and
@@ -193,7 +199,12 @@ fuzzy** — a wrong-location edit is far worse than a failed one:
    `new_text`, is rejected up front.
 6. **Atomicity preserved.** `multi_edit` applies every edit in memory then does
    one atomic write; `apply_patch` validates every hunk before any write — a
-   miss on any one aborts the batch with nothing changed.
+   miss on any one aborts the batch with nothing changed. It rejects duplicate
+   normalized destinations, including conservative case aliases on Windows/macOS:
+   combine a file's updates in one hunk list.
+   Each file commits atomically, but the batch is not a transaction. A late I/O
+   failure reports completed operations and actual touches as a failure, without
+   rolling them back.
 
 ### `append_file`
 
@@ -223,13 +234,16 @@ Rules:
 
 ### `search_text`
 
-Searches text using ripgrep when available.
+Searches text with the builtin ignore-aware file walker and literal/regex matching.
 
 Rules:
 
 - respect ignore files by default
 - cap matches
 - never traverse outside workspace without approval
+- directory approval does not authorize protected descendant content: secret-like
+  descendants are excluded before opening, with a visible exclusion notice
+- explicitly naming a file uses its own read gate, including secret-path approval
 
 ### `multi_edit`
 
@@ -976,3 +990,13 @@ results and unrelated observations break the run. Corrupt/present indexes and
 ordinary empty matches are not authoritative absence, and plain MCP output text
 never supplies this metadata. Generic identical-call and windowed guards retain
 their existing policy (ADR-0222).
+
+### File I/O limits
+
+Explicit line ranges select bounded output after a full-file read; they do not
+bound physical I/O. Implicit first-page reads have the byte ceiling described
+above. Atomic replacement avoids torn files but does not compare the previous
+file version or serialize concurrent external writers. The optional prior-read
+precondition establishes a successful literal-path read, not full-file coverage
+or a freshness lock. Exact edit matching and completion verification remain
+independent safeguards. See ADR-0223.

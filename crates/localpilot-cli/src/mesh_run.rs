@@ -1331,8 +1331,8 @@ mod tests {
     }
 
     fn refused_reads(root: &Path) -> localpilot_llm::FakeProvider {
-        // Still legitimately outside the automatic envelope after the small-file
-        // read fix: force bounded pages without reinstating the byte/line bug.
+        // An explicit oversized range stays outside the automatic envelope;
+        // implicit requests now receive a bounded first page.
         std::fs::write(
             root.join("oversized.txt"),
             "large source line\n".repeat(20_000),
@@ -1342,12 +1342,12 @@ mod tests {
             .tool_call(
                 "read1",
                 "read_file",
-                serde_json::json!({"path":"oversized.txt"}),
+                serde_json::json!({"path":"oversized.txt", "start_line":1, "end_line":201}),
             )
             .tool_call(
                 "read2",
                 "read_file",
-                serde_json::json!({"path":"oversized.txt"}),
+                serde_json::json!({"path":"oversized.txt", "start_line":1, "end_line":201}),
             )
     }
 

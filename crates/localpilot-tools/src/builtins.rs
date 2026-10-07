@@ -189,34 +189,44 @@ pub(crate) fn binary_placeholder(len: usize) -> String {
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub(crate) fn read_path_effect(ctx: &ToolContext<'_>, path: &Path) -> Effect {
+    let secret_like = protected_path(ctx, path);
     if ctx.workspace.scratch_contains(path) {
         return Effect::ScratchPath {
             write: false,
             overwrite: false,
-            secret_like: is_secret_like(path),
+            secret_like,
         };
     }
     Effect::ReadPath {
         // Reads use the wider read scope (workspace + granted extra read
         // roots); writes below stay on the hard workspace boundary.
         inside_workspace: ctx.workspace.read_scoped(path),
-        secret_like: is_secret_like(path),
+        secret_like,
     }
 }
 
 pub(crate) fn write_path_effect(ctx: &ToolContext<'_>, path: &Path, overwrite: bool) -> Effect {
+    let secret_like = protected_path(ctx, path);
     if ctx.workspace.scratch_contains(path) {
         return Effect::ScratchPath {
             write: true,
             overwrite,
-            secret_like: is_secret_like(path),
+            secret_like,
         };
     }
     Effect::WritePath {
         inside_workspace: ctx.workspace.contains(path),
         overwrite,
-        secret_like: is_secret_like(path),
+        secret_like,
     }
+}
+
+fn protected_path(ctx: &ToolContext<'_>, path: &Path) -> bool {
+    is_secret_like(path)
+        || ctx
+            .workspace
+            .normalize(path)
+            .map_or(true, |target| is_secret_like(&target))
 }
 
 fn detect_newline(existing: &str) -> &'static str {
@@ -625,7 +635,8 @@ impl Tool for ReadFile {
     ) -> Result<ToolOutput, ToolError> {
         let hint =
             limits.map(|limits| crate::bounded_read_hint("read_file", &input, limits.max_lines));
-        let input: ReadFileInput = parse_input(&input)?;
+        let original_input = input;
+        let mut input: ReadFileInput = parse_input(&original_input)?;
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
         let limits = limits.filter(|_| input.end_line.is_none());
         let refusal = || {
@@ -633,7 +644,8 @@ impl Tool for ReadFile {
                 format!("work envelope: request an explicit start_line/end_line page within the read limit. {}", hint.as_deref().unwrap_or_default()),
             )
         };
-        let bytes = if let Some(limits) = limits {
+        let mut byte_limited = false;
+        let mut bytes = if let Some(limits) = limits {
             let file = std::fs::File::open(&path)
                 .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
             let mut bytes = Vec::new();
@@ -641,7 +653,8 @@ impl Tool for ReadFile {
                 .read_to_end(&mut bytes)
                 .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
             if bytes.len() > limits.max_bytes {
-                return Err(refusal());
+                byte_limited = true;
+                bytes.truncate(limits.max_bytes);
             }
             bytes
         } else {
@@ -651,11 +664,50 @@ impl Tool for ReadFile {
         // Refuse to inline binary: emit a short placeholder instead of dumping
         // lossy bytes that waste context and can derail the model.
         if looks_binary(&bytes) {
-            return Ok(cap(binary_placeholder(bytes.len())));
+            let placeholder = if byte_limited {
+                format!(
+                    "<binary data: bounded {}-byte prefix, not shown>",
+                    bytes.len()
+                )
+            } else {
+                binary_placeholder(bytes.len())
+            };
+            return Ok(cap(placeholder));
+        }
+        // A byte-bounded prefix may end inside a line or UTF-8 code point.
+        // Only complete lines belong to a page; the next call retries the rest.
+        if byte_limited {
+            let Some(last_newline) = bytes.iter().rposition(|&byte| byte == b'\n') else {
+                return Err(refusal());
+            };
+            bytes.truncate(last_newline + 1);
         }
         let text = String::from_utf8(bytes)
             .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
         let total = text.lines().count();
+        let mut continuation = None;
+        if let Some(limits) = limits {
+            let start = input.start_line.unwrap_or(1).max(1);
+            let available = total.saturating_sub(start - 1);
+            if available == 0 && input.start_line.is_some() && !byte_limited {
+                return Ok(cap(String::new()));
+            }
+            let returned = available.min(limits.max_lines);
+            if byte_limited || available > returned {
+                if returned == 0 {
+                    return Err(refusal());
+                }
+                let end = start.saturating_add(returned - 1);
+                input.start_line = Some(start);
+                input.end_line = Some(end);
+                let mut next = original_input;
+                next["start_line"] = serde_json::json!(end.saturating_add(1));
+                continuation = Some(format!(
+                    "\n\n[bounded read] Returned lines {start}–{end}; more content remains. {}",
+                    crate::bounded_read_hint("read_file", &next, limits.max_lines)
+                ));
+            }
+        }
         let selected = match (input.start_line, input.end_line) {
             (None, None) => text,
             (start, end) => {
@@ -689,7 +741,11 @@ impl Tool for ReadFile {
                 ),
             ),
         };
-        Ok(cap(selected).touching(touch))
+        let output = match continuation {
+            Some(next) => selected + &next,
+            None => selected,
+        };
+        Ok(cap(output).touching(touch))
     }
 }
 
@@ -1270,6 +1326,7 @@ impl Tool for SearchText {
         };
 
         let mut hits = Vec::new();
+        let mut protected_skipped = false;
         'walk: for result in ignore::WalkBuilder::new(&dir)
             .hidden(true)
             .require_git(false)
@@ -1280,6 +1337,15 @@ impl Tool for SearchText {
                 Err(_) => continue,
             };
             if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let Ok(target) = ctx.workspace.normalize(entry.path()) else {
+                continue;
+            };
+            // Permission for a directory does not authorize protected contents
+            // below it. An explicitly named file already crossed its own gate.
+            if target != dir && (!target.starts_with(&dir) || protected_path(ctx, entry.path())) {
+                protected_skipped = true;
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(entry.path()) else {
@@ -1304,7 +1370,11 @@ impl Tool for SearchText {
                 }
             }
         }
-        Ok(cap(hits.join("\n")))
+        let mut output = hits.join("\n");
+        if protected_skipped {
+            output.push_str("\n[search] Protected descendant content was excluded; explicitly read an authorized file to inspect it.");
+        }
+        Ok(cap(output))
     }
 }
 
@@ -1420,6 +1490,17 @@ impl Tool for ApplyPatch {
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: ApplyPatchInput = parse_input(&input)?;
 
+        let mut destinations = std::collections::BTreeSet::new();
+        for op in &input.operations {
+            let path = ctx.workspace.normalize(Path::new(op.path()))?;
+            if !destinations.insert(crate::touch::normalise(&path)) {
+                return Err(ToolError::InvalidInput(format!(
+                    "duplicate patch destination `{}`; combine its hunks into one operation",
+                    op.path()
+                )));
+            }
+        }
+
         // Validate every operation against the current tree before any write,
         // so a rejected hunk fails the whole patch with nothing applied.
         let mut writes: Vec<(PathBuf, Option<String>)> = Vec::new();
@@ -1464,9 +1545,9 @@ impl Tool for ApplyPatch {
                     writes.push((path, Some(apply_newline(&updated, newline))));
                 }
                 PatchOperation::Delete { .. } => {
-                    if !path.exists() {
+                    if !path.is_file() {
                         return Err(ToolError::Failed(format!(
-                            "{label}: the file does not exist"
+                            "{label}: the path must be an existing file"
                         )));
                     }
                     writes.push((path, None));
@@ -1474,28 +1555,48 @@ impl Tool for ApplyPatch {
             }
         }
 
-        // Apply. Each file write is atomic (temp-then-rename); validation
-        // above makes the whole patch all-or-nothing in practice.
+        // Each file write is atomic; the batch is not a filesystem transaction.
+        // A late I/O failure must preserve evidence of earlier committed files.
         let mut applied = Vec::new();
         let mut touches = Vec::new();
         for ((path, content), op) in writes.iter().zip(&input.operations) {
-            match content {
+            let committed = match content {
                 Some(content) => {
                     // Read back what was there so the touch names the lines that
                     // actually moved. One patch can span several files, so each
                     // gets its own touch rather than the call getting one.
                     let before = std::fs::read_to_string(path).unwrap_or_default();
-                    atomic_write(path, content.as_bytes())?;
-                    touches.push(if before.is_empty() {
-                        FileTouch::whole(path, TouchOp::Wrote)
+                    let written = if matches!(op, PatchOperation::Create { .. }) && path.exists() {
+                        Err(ToolError::Failed(format!(
+                            "{} exists at commit; create refuses to overwrite it",
+                            path.display()
+                        )))
                     } else {
-                        edit_touch(path, &before, content)
-                    });
+                        atomic_write(path, content.as_bytes())
+                    };
+                    written.map(|()| {
+                        if before.is_empty() {
+                            FileTouch::whole(path, TouchOp::Wrote)
+                        } else {
+                            edit_touch(path, &before, content)
+                        }
+                    })
                 }
-                None => {
-                    std::fs::remove_file(path)
-                        .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
-                    touches.push(FileTouch::whole(path, TouchOp::Deleted));
+                None => std::fs::remove_file(path)
+                    .map(|()| FileTouch::whole(path, TouchOp::Deleted))
+                    .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display()))),
+            };
+            match committed {
+                Ok(touch) => touches.push(touch),
+                Err(error) if applied.is_empty() => return Err(error),
+                Err(error) => {
+                    return Ok(ToolOutput::ok(format!(
+                        "patch partially applied: {}; failed {}: {error}; completed operations were not rolled back",
+                        applied.join("; "),
+                        op.describe()
+                    ))
+                    .with_outcome(ToolOutcome::ReportedFailure)
+                    .touching_all(touches));
                 }
             }
             applied.push(op.describe());
