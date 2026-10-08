@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Compacted runtime feedback keeps its origin.** Summary bullets no longer
+  label synthetic verification or repair feedback as a user request. Diagnostic
+  evidence, tool summaries and the retained user instruction remain available.
+
 - **Windows shell guidance describes the existing execution choices.** The tool
   advertises direct `program` + `args` invocation and the PowerShell fallback,
   including Windows PowerShell 5.1's lack of `&&`. Command execution, permission

@@ -946,7 +946,7 @@ fn collect_text_paths(text: &str, paths: &mut BTreeSet<String>) {
 fn summarize_exchange(exchange: &[Message], max_user_chars: usize) -> Option<String> {
     let user = exchange
         .iter()
-        .find(|message| message.role == Role::User)
+        .find(|message| message.role == Role::User && !message.is_synthetic())
         .and_then(first_text)
         .map(|text| truncate(text, max_user_chars));
     let tools: Vec<String> = exchange
@@ -1017,6 +1017,29 @@ mod tests {
 
     fn synthetic(text: &str) -> Message {
         Message::text(Role::User, text).into_synthetic("no-progress")
+    }
+
+    #[test]
+    fn compacted_feedback_is_not_labeled_as_a_user_request() {
+        let feedback = synthetic("Verification failed; repair the unrelated invoice test");
+        let mut dropped = vec![feedback.clone()];
+        dropped.extend(tool_exchange("read-invoice"));
+        let summary = structured_summary(&[dropped.clone()]).unwrap();
+        assert!(summary.render().contains("tools used: read_file"));
+        assert!(!summary.render().contains("user asked:"));
+        let digest = semantic_digest(&[dropped]);
+        assert!(section_items(&digest, SummarySectionKind::Goal).is_empty());
+        assert!(section_items(&digest, SummarySectionKind::CommandOutcomes)
+            .iter()
+            .any(|item| item.contains("Verification failed")));
+
+        let summary =
+            structured_summary(&[vec![feedback, user("Change only the report page size")]])
+                .unwrap();
+        assert!(summary
+            .render()
+            .contains("user asked: Change only the report page size"));
+        assert!(!summary.render().contains("user asked: Verification failed"));
     }
 
     #[test]
