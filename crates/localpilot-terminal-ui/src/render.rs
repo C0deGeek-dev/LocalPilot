@@ -3212,27 +3212,19 @@ fn render_dialog(
                 ..DialogHits::default()
             });
     }
-    let width = frame_area.width.saturating_sub(4).min(72);
-    let incognito_creation = matches!(
-        dialog,
+    let (incognito_creation, target) = match dialog {
         DialogState::Approval {
-            incognito_creation: true,
+            incognito_creation,
+            target,
             ..
-        }
-    );
-    let height = frame_area
-        .height
-        .saturating_sub(2)
-        .min(if incognito_creation { 9 } else { 7 });
-    if width < 20 || height < 5 {
+        } => (*incognito_creation, target.as_str()),
+        _ => (false, ""),
+    };
+    let Some((area, target_rows)) =
+        approval_dialog_area(frame_area, target, incognito_creation, false)
+    else {
         return DialogHits::default();
-    }
-    let area = Rect::new(
-        frame_area.x + frame_area.width.saturating_sub(width) / 2,
-        frame_area.y + frame_area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
+    };
     let inner = Rect::new(
         area.x.saturating_add(2),
         area.y.saturating_add(1),
@@ -3246,9 +3238,9 @@ fn render_dialog(
         DialogState::Trust(_) => Vec::new(),
         DialogState::Approval {
             tool,
-            target,
             risk_class,
             incognito_creation,
+            ..
         } => {
             let mut lines = vec![
                 Line::from(vec![
@@ -3262,8 +3254,12 @@ fn render_dialog(
                     format!("{tool} · {risk_class}"),
                     theme.ui(UiRole::Foreground),
                 ),
-                Line::styled(target.clone(), theme.ui(UiRole::Muted)),
             ];
+            lines.extend(
+                target_rows
+                    .iter()
+                    .map(|row| Line::styled(row.clone(), theme.ui(UiRole::Muted))),
+            );
             if *incognito_creation {
                 lines.push(Line::styled(
                     "Incognito: created files persist after this session.",
@@ -3530,35 +3526,27 @@ fn render_screen_reader_dialog(
             render_question_dialog(frame, frame_area, app, question, true)
         });
     }
-    let width = frame_area.width.saturating_sub(4).min(72);
-    let incognito_creation = matches!(
-        dialog,
+    let (incognito_creation, target) = match dialog {
         DialogState::Approval {
-            incognito_creation: true,
+            incognito_creation,
+            target,
             ..
-        }
-    );
-    let height = frame_area
-        .height
-        .saturating_sub(2)
-        .min(if incognito_creation { 9 } else { 7 });
-    if width < 20 || height < 5 {
+        } => (*incognito_creation, target.as_str()),
+        _ => (false, ""),
+    };
+    let Some((area, target_rows)) =
+        approval_dialog_area(frame_area, target, incognito_creation, true)
+    else {
         return Vec::new();
-    }
-    let area = Rect::new(
-        frame_area.x + frame_area.width.saturating_sub(width) / 2,
-        frame_area.y + frame_area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
+    };
     let theme = theme(app);
     let lines = match dialog {
         DialogState::Trust(_) => Vec::new(),
         DialogState::Approval {
             tool,
-            target,
             risk_class,
             incognito_creation,
+            ..
         } => {
             let mut lines = vec![
                 Line::styled(
@@ -3569,8 +3557,12 @@ fn render_screen_reader_dialog(
                     format!("{tool} · {risk_class}"),
                     theme.ui(UiRole::Foreground),
                 ),
-                Line::styled(truncate_end(target, area.width), theme.ui(UiRole::Muted)),
             ];
+            lines.extend(
+                target_rows
+                    .iter()
+                    .map(|row| Line::styled(row.clone(), theme.ui(UiRole::Muted))),
+            );
             if *incognito_creation {
                 lines.push(Line::styled(
                     "Incognito: created files persist after this session.",
@@ -3602,6 +3594,97 @@ fn render_screen_reader_dialog(
         area,
     );
     Vec::new()
+}
+
+/// The approval dialog takes this share of the frame width, between the two
+/// bounds below, so a wide terminal shows a long path or command in full.
+const APPROVAL_DIALOG_WIDTH_PERCENT: u32 = 70;
+const APPROVAL_DIALOG_MIN_WIDTH: u16 = 72;
+const APPROVAL_DIALOG_MAX_WIDTH: u16 = 100;
+const APPROVAL_DIALOG_SCREEN_READER_WIDTH: u16 = 72;
+/// The height the dialog had before it grew with its target.
+const APPROVAL_DIALOG_MIN_HEIGHT: u16 = 7;
+const APPROVAL_DIALOG_INCOGNITO_MIN_HEIGHT: u16 = 9;
+
+fn approval_dialog_width(frame_width: u16, screen_reader: bool) -> u16 {
+    let available = frame_width.saturating_sub(4);
+    if screen_reader {
+        return available.min(APPROVAL_DIALOG_SCREEN_READER_WIDTH);
+    }
+    let share = u32::from(frame_width) * APPROVAL_DIALOG_WIDTH_PERCENT / 100;
+    u16::try_from(share)
+        .unwrap_or(u16::MAX)
+        .clamp(APPROVAL_DIALOG_MIN_WIDTH, APPROVAL_DIALOG_MAX_WIDTH)
+        .min(available)
+}
+
+/// Wraps `text` into at most `max_rows` rows. When it needs more, the middle is
+/// replaced by a marker row so both the start and the end stay visible: the
+/// end of a command is often the part that matters.
+fn elide_middle_rows(text: &str, width: u16, max_rows: usize) -> Vec<String> {
+    let rows = crate::text::wrap_words(text, width)
+        .iter()
+        .map(|row| text[row.start_byte..row.end_byte].to_string())
+        .collect::<Vec<_>>();
+    let max_rows = max_rows.max(1);
+    if rows.len() <= max_rows {
+        return rows;
+    }
+    match max_rows {
+        1 => vec![truncate_end(&format!("{} …", rows[0]), width)],
+        2 => vec![
+            truncate_end(&format!("{} …", rows[0]), width),
+            rows[rows.len() - 1].clone(),
+        ],
+        _ => {
+            let tail = (max_rows - 1) / 2;
+            let head = max_rows - 1 - tail;
+            let hidden = rows.len() - head - tail;
+            let mut shown = rows[..head].to_vec();
+            shown.push(truncate_end(&format!("… {hidden} more rows …"), width));
+            shown.extend_from_slice(&rows[rows.len() - tail..]);
+            shown
+        }
+    }
+}
+
+/// The approval dialog's rectangle and the rows its target is shown in. The
+/// box grows with the wrapped target but never past the frame, and the target
+/// gives way before the heading and the answer keys do.
+fn approval_dialog_area(
+    frame_area: Rect,
+    target: &str,
+    incognito_creation: bool,
+    screen_reader: bool,
+) -> Option<(Rect, Vec<String>)> {
+    let width = approval_dialog_width(frame_area.width, screen_reader);
+    let max_height = frame_area.height.saturating_sub(2);
+    if width < 20 || max_height < 5 {
+        return None;
+    }
+    // The bordered layout adds a border row top and bottom and a two-cell gutter
+    // each side; the screen-reader layout is bare.
+    let (chrome_rows, chrome_columns) = if screen_reader { (0, 0) } else { (2, 4) };
+    // Heading, tool line and the answer keys (two rows for screen readers),
+    // plus the two incognito notes.
+    let fixed_rows = (if screen_reader { 4 } else { 3 }) + (if incognito_creation { 2 } else { 0 });
+    let minimum_height = if incognito_creation {
+        APPROVAL_DIALOG_INCOGNITO_MIN_HEIGHT
+    } else {
+        APPROVAL_DIALOG_MIN_HEIGHT
+    };
+    let content_width = width.saturating_sub(chrome_columns).max(1);
+    let room = max_height.saturating_sub(chrome_rows + fixed_rows).max(1);
+    let rows = elide_middle_rows(target, content_width, usize::from(room));
+    let needed = chrome_rows + fixed_rows + u16::try_from(rows.len()).unwrap_or(u16::MAX);
+    let height = needed.max(minimum_height).min(max_height);
+    let area = Rect::new(
+        frame_area.x + frame_area.width.saturating_sub(width) / 2,
+        frame_area.y + frame_area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    Some((area, rows))
 }
 
 /// The bordered question dialog takes this share of the frame width, between
@@ -5799,6 +5882,108 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("Permission required"));
         assert!(rendered.contains("Y allow once · N deny"));
+    }
+
+    fn approval_frame(
+        width: u16,
+        height: u16,
+        screen_reader: bool,
+        incognito: bool,
+        target: &str,
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        app.capabilities.screen_reader = screen_reader;
+        app.request_approval_with_incognito_creation("shell", target, "command", incognito);
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw approval dialog");
+        terminal.backend().to_string()
+    }
+
+    fn long_command(words: usize) -> String {
+        (0..words)
+            .map(|n| format!("word{n}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn approval_dialog_grows_wide_enough_to_show_a_long_target_on_one_row() {
+        // 90 columns of command: wrapped at the old 72-cell cap, one row at the
+        // share of a 200-column frame.
+        let target = "cargo test --workspace --no-fail-fast -- --nocapture approval_dialog_target_row_marker_abc";
+        assert!(target.len() > 68 && target.len() < 96);
+        let rendered = approval_frame(200, 40, false, false, target);
+        assert!(
+            rendered.lines().any(|line| line.contains(target)),
+            "target should sit on one row:\n{rendered}"
+        );
+        assert!(!rendered.contains('…'));
+    }
+
+    #[test]
+    fn approval_dialog_keeps_the_answer_keys_when_the_target_is_very_long() {
+        let target = long_command(400);
+        for (screen_reader, keys) in [(false, "Y allow once · N deny"), (true, "N or Esc deny")] {
+            for incognito in [false, true] {
+                let rendered = approval_frame(80, 24, screen_reader, incognito, &target);
+                assert!(
+                    rendered.contains("Permission required"),
+                    "heading missing (screen_reader={screen_reader}, incognito={incognito})"
+                );
+                assert!(
+                    rendered.contains(keys),
+                    "answer keys missing (screen_reader={screen_reader}, incognito={incognito}):\n{rendered}"
+                );
+                assert!(rendered.contains("word0 "), "start of the target missing");
+                assert!(rendered.contains("word399"), "end of the target missing");
+                assert!(rendered.contains("more rows"), "elision marker missing");
+            }
+        }
+    }
+
+    #[test]
+    fn approval_dialog_wraps_a_long_target_for_screen_readers() {
+        let target = long_command(14);
+        let rendered = approval_frame(60, 24, true, false, &target);
+        assert!(
+            rendered.contains("word13"),
+            "end of the target missing:\n{rendered}"
+        );
+        assert!(!rendered.contains("more rows"), "{rendered}");
+        assert!(rendered.contains("N or Esc deny"));
+    }
+
+    #[test]
+    fn approval_dialog_keeps_its_old_width_on_a_narrow_frame_and_bails_out_below_it() {
+        assert_eq!(approval_dialog_width(80, false), 72);
+        assert_eq!(approval_dialog_width(60, false), 56);
+        assert_eq!(approval_dialog_width(200, false), 100);
+        assert_eq!(approval_dialog_width(200, true), 72);
+        assert!(approval_dialog_area(Rect::new(0, 0, 22, 24), "x", false, false).is_none());
+        assert!(approval_dialog_area(Rect::new(0, 0, 80, 6), "x", false, false).is_none());
+        let (area, rows) =
+            approval_dialog_area(Rect::new(0, 0, 80, 24), "src/main.rs", false, false)
+                .expect("area");
+        assert_eq!((area.width, area.height), (72, 7));
+        assert_eq!(rows, vec!["src/main.rs".to_string()]);
+    }
+
+    #[test]
+    fn elided_rows_keep_the_start_and_the_end() {
+        let target = long_command(60);
+        let rows = elide_middle_rows(&target, 30, 5);
+        assert_eq!(rows.len(), 5);
+        assert!(rows[0].starts_with("word0 "));
+        assert!(rows[3 - 1].contains("more rows"));
+        assert!(rows[4].ends_with("word59"));
+        assert_eq!(elide_middle_rows("short", 30, 5), vec!["short".to_string()]);
+        assert_eq!(elide_middle_rows(&target, 30, 2).len(), 2);
+        assert_eq!(elide_middle_rows(&target, 30, 1).len(), 1);
     }
 
     #[test]

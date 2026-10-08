@@ -89,6 +89,17 @@ is SemVer-stable; the configuration schema stability policy is in
   names in a request are recognised by the request-driven reveal. The `git_log`,
   `git_commit` and `search_definitions` descriptions say more precisely what
   they do (ADR-0218).
+
+- **The permission dialog grows with what it asks about.** It had a fixed width
+  of at most 72 cells and a fixed height, so a long path or command was cut off
+  and could push the `Y allow once` / `N deny` line out of the box. It now takes
+  70% of the frame width (at least the old 72, at most 100), wraps the target
+  over as many rows as it needs and grows to fit, within the frame. When a target
+  is too long even then, the middle is replaced by a `… N more rows …` marker so
+  the start and the end stay visible, and the answer keys always stay on screen.
+  The screen-reader layout wraps the target too and keeps its 72-cell width
+  (LocalHub#238).
+
 - **Retrieved memory now sits beside the question in ordinary sessions.** Project
   memory, primers and rule cues used to end up at the end of a long system
   prompt, where the models measured so far passed over them: in tool-using turns
