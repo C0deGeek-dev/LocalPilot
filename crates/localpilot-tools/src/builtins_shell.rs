@@ -469,7 +469,14 @@ impl Tool for RunShell {
             .unwrap_or_default()
     }
     fn description(&self) -> &'static str {
-        "Run a shell command or direct program invocation with a timeout."
+        #[cfg(windows)]
+        {
+            "Run with timeout: program+args directly; command uses pwsh, else PowerShell 5.1 (no &&)."
+        }
+        #[cfg(not(windows))]
+        {
+            "Run a shell command or direct program invocation with a timeout."
+        }
     }
     fn exact_command(&self, input: &Value) -> Option<ExactCommand> {
         let input = parse_input(input)

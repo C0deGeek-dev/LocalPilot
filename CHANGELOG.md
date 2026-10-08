@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Windows shell guidance describes the existing execution choices.** The tool
+  advertises direct `program` + `args` invocation and the PowerShell fallback,
+  including Windows PowerShell 5.1's lack of `&&`. Command execution, permission
+  checks and timeouts are unchanged.
+
 - **Text search advertises its literal default.** The query and tool descriptions
   explain that regular expressions require `is_regex=true`. Matching behavior
   and empty results are unchanged.
