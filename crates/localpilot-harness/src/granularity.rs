@@ -328,7 +328,6 @@ impl WorkUnit {
                 _ => vec![op],
             };
             for hunk in hunks {
-                proposed.regions = proposed.regions.saturating_add(1);
                 for field in ["old_text", "new_text", "content"] {
                     if let Some(text) = hunk.get(field).and_then(Value::as_str) {
                         // Byte-equivalent cost also bounds giant single lines.
@@ -337,6 +336,24 @@ impl WorkUnit {
                             .saturating_add(text.lines().count().max(text.len().div_ceil(80)));
                     }
                 }
+                // Bound material before allocating the argument-only diff. A
+                // single submitted hunk can hide edits separated by equal lines.
+                if proposed.lines > profile.max_changed_lines {
+                    return reject(
+                        "cumulative files, regions or patch size exceeds the active profile",
+                    );
+                }
+                let regions = match (
+                    hunk.get("old_text").and_then(Value::as_str),
+                    hunk.get("new_text").and_then(Value::as_str),
+                ) {
+                    (Some(old), Some(new)) => match argument_change_regions(old, new) {
+                        Some(regions) => regions.max(1), // No-op attempts still spend a hunk.
+                        None => return reject("exact edit preview exceeds its computation bound"),
+                    },
+                    _ => 1,
+                };
+                proposed.regions = proposed.regions.saturating_add(regions);
             }
         }
         if proposed.files.len() > profile.max_files
@@ -350,9 +367,142 @@ impl WorkUnit {
     }
 }
 
+/// Preview separated changes using only supplied text, never workspace content.
+/// This tightens admission; the actual repository diff remains authoritative.
+fn argument_change_regions(old: &str, new: &str) -> Option<usize> {
+    let old: Vec<_> = old.lines().collect();
+    let new: Vec<_> = new.lines().collect();
+    let width = new.len().checked_add(1)?;
+    let cells = old.len().checked_add(1)?.checked_mul(width)?;
+    // Live profiles allow at most 200 lines of aggregate submitted material.
+    // Keep an independent ceiling even for an externally constructed profile.
+    if cells > 65_536 {
+        return None;
+    }
+    let mut matches = vec![0usize; cells];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            matches[i * width + j] = if old[i] == new[j] {
+                matches[(i + 1) * width + j + 1] + 1
+            } else {
+                matches[(i + 1) * width + j].max(matches[i * width + j + 1])
+            };
+        }
+    }
+    let (mut i, mut j, mut regions, mut changing) = (0, 0, 0, false);
+    while i < old.len() || j < new.len() {
+        if i < old.len() && j < new.len() && old[i] == new[j] {
+            changing = false;
+            i += 1;
+            j += 1;
+        } else {
+            if !changing {
+                regions += 1;
+                changing = true;
+            }
+            if i < old.len()
+                && (j == new.len() || matches[(i + 1) * width + j] >= matches[i * width + j + 1])
+            {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+    }
+    Some(regions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_edit_preview_counts_material_runs_with_bounded_memory() {
+        for (old, new, expected) in [
+            ("", "", 0),
+            ("same\n", "same\n", 0),
+            ("a\nb\nc\n", "a\nB\nC\n", 1),
+            ("a\nb\nc\n", "a\nx\nb\nc\n", 1),
+            ("a\nb\nc\n", "a\nc\n", 1),
+            ("a\nb\na\nc\n", "a\nB\na\nC\n", 2),
+            ("a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\n", 1),
+            ("a\nb\n", "", 1),
+        ] {
+            assert_eq!(argument_change_regions(old, new), Some(expected));
+        }
+        let large = "line\n".repeat(256);
+        assert_eq!(argument_change_regions(&large, &large), None);
+    }
+
+    #[test]
+    fn no_op_edit_still_spends_the_existing_attempt_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let profile = WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 8_000,
+                provenance: ContextProvenance::CallerSupplied,
+            },
+            Reliability::Unknown,
+            &GranularityConfig::default(),
+        );
+        let input = serde_json::json!({"path":"missing.py", "old_text":"same", "new_text":"same"});
+        let mut unit = WorkUnit::default();
+        assert!(unit
+            .check_and_reserve(profile, "edit_file", &input, &workspace)
+            .is_none());
+        assert!(unit.has_mutations());
+        assert!(unit
+            .check_and_reserve(profile, "edit_file", &input, &workspace)
+            .is_some());
+    }
+
+    #[test]
+    fn separated_material_changes_are_refused_before_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let profile = WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 8_000,
+                provenance: ContextProvenance::CallerSupplied,
+            },
+            Reliability::Unknown,
+            &GranularityConfig::default(),
+        );
+        let old = "def round_cents(amount):\n    \"\"\"Round to cents.\"\"\"\n    return int(amount * 100) / 100";
+        let new = "import math\n\ndef round_cents(amount):\n    \"\"\"Round to cents.\"\"\"\n    return math.floor(amount * 100 + 0.5) / 100";
+        for (name, input) in [
+            (
+                "edit_file",
+                serde_json::json!({"path":"money.py", "old_text":old, "new_text":new}),
+            ),
+            (
+                "multi_edit",
+                serde_json::json!({"path":"money.py", "edits":[{"old_text":old, "new_text":new}]}),
+            ),
+            (
+                "apply_patch",
+                serde_json::json!({"operations":[{"action":"update", "path":"money.py", "hunks":[{"old_text":old, "new_text":new}]}]}),
+            ),
+        ] {
+            let mut unit = WorkUnit::default();
+            assert!(
+                unit.check_and_reserve(profile, name, &input, &workspace)
+                    .is_some(),
+                "{name}"
+            );
+            assert!(
+                !unit.has_mutations(),
+                "a refused edit must not spend the unit"
+            );
+            let contiguous = serde_json::json!({"path":"money.py", "old_text":"    return int(amount * 100) / 100", "new_text":"    import math\n    return math.floor(amount * 100 + 0.5) / 100"});
+            assert!(unit
+                .check_and_reserve(profile, "edit_file", &contiguous, &workspace)
+                .is_none());
+        }
+    }
 
     #[test]
     fn independent_axes_and_monotonic_caps() {
