@@ -56,6 +56,11 @@ Builtin limits apply cumulatively to attempts, including partial/failed mutation
 Sizing normalizes every write target, including scratch and external paths, and
 refuses a request when normalization fails. Mixed patches cannot skip later
 operations through an outside target. Permission checks still own path access.
+Exact edit admission previews changes separated by uniquely aligned unchanged
+lines. Repeated or reordered shared lines keep the existing one-hunk admission;
+the post-write repository diff still enforces the effective region budget.
+No-op attempts spend a region, and the preview has an independent computation
+bound. See ADR-0224 for admission and opaque retry recovery.
 Model delegation inherits the policy and spends a region; fan-out is refused.
 Shell/MCP arguments cannot prove their diff size, so repository diffs are checked
 before completion and again after auto-fixes before commit. Ordinary comparisons

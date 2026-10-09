@@ -2,6 +2,39 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0224: Bounded Write Admission And Opaque Retry Recovery
+
+**Status:** accepted · **Date:** 2026-10-09. Refines ADR-0199 without widening
+permissions or exempting opaque effects from verification.
+
+Every normalized write target spends the cumulative work budget, including
+scratch and external paths. Failed normalization refuses the whole admission;
+an outside target cannot skip sizing later operations in a mixed patch.
+Reservation is committed only after all operations fit. This is atomic budget
+admission, not a multi-file filesystem transaction or a permission grant.
+
+Exact edit arguments are previewed for changes separated by uniquely aligned
+unchanged lines. Repeated or reordered shared lines retain one-hunk admission
+because their alignment is ambiguous; the actual post-write repository diff
+remains authoritative. The preview is bounded by the active material ceiling
+and an independent computation bound. No-op attempts still spend a region.
+
+A refused write that exceeds bounds blocks model shell commands and background
+starts within that unit. Otherwise an opaque retry could perform the same
+oversized mutation before the final diff check. Bounded reads, background
+inspection/cleanup and host-owned verification remain available under their
+existing permissions. Replacement-shape guidance alone does not latch this
+restriction. Only a successful dispatched bounded write or a fresh unit clears
+it; denied, failed or undispatched recovery does not.
+
+This deliberately constrains legitimate shell reads after a bounds refusal,
+including history recovery. An empty Git diff does not establish absence of
+external or partial effects; command spelling does not establish harmlessness.
+No shell allowlist, broad unchanged-turn exemption, larger work cap or reduced
+verification obligation compensates for that recovery cost. Typed operations
+retain their existing capabilities; historical file patch retrieval is not
+added by this decision. These rules are work policy, not an OS sandbox.
+
 ## ADR-0223: File Scope And Partial Patch Evidence
 
 **Status:** accepted · **Date:** 2026-10-07. Tightens existing path mediation and

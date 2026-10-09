@@ -9,7 +9,7 @@ is SemVer-stable; the configuration schema stability policy is in
 - **Mixed patches cannot skip work bounds through outside targets.** Every
   normalized write target spends the same cumulative budget, including scratch
   and external paths. A target normalization failure refuses the request;
-  permission checks still decide whether each target is authorized.
+  permission checks still decide whether each target is authorized (ADR-0224).
 
 - **Bounded write refusals constrain opaque retries.** After a write exceeds its
   work bounds, shell commands and background starts are refused until a smaller
