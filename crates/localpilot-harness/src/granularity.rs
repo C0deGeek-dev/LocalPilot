@@ -372,42 +372,38 @@ impl WorkUnit {
 fn argument_change_regions(old: &str, new: &str) -> Option<usize> {
     let old: Vec<_> = old.lines().collect();
     let new: Vec<_> = new.lines().collect();
-    let width = new.len().checked_add(1)?;
-    let cells = old.len().checked_add(1)?.checked_mul(width)?;
-    // Live profiles allow at most 200 lines of aggregate submitted material.
-    // Keep an independent ceiling even for an externally constructed profile.
-    if cells > 65_536 {
+    // Live profiles permit at most 200 aggregate lines. Independently bound
+    // argument scanning even for an externally constructed profile.
+    if old.len().checked_add(new.len())? > 400 {
         return None;
     }
-    let mut matches = vec![0usize; cells];
-    for i in (0..old.len()).rev() {
-        for j in (0..new.len()).rev() {
-            matches[i * width + j] = if old[i] == new[j] {
-                matches[(i + 1) * width + j + 1] + 1
-            } else {
-                matches[(i + 1) * width + j].max(matches[i * width + j + 1])
-            };
+    let mut anchors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (i, line) in old.iter().enumerate() {
+        let mut positions = new.iter().enumerate().filter(|(_, other)| *other == line);
+        if let Some((j, _)) = positions.next() {
+            // Repeated or reordered shared lines permit competing alignments.
+            // Retain the previous one-hunk admission in those cases; the actual
+            // post-write diff still enforces the effective region budget.
+            if positions.next().is_some()
+                || !seen.insert(line)
+                || anchors.last().is_some_and(|&(_, previous)| j <= previous)
+            {
+                return Some(1);
+            }
+            anchors.push((i, j));
         }
     }
-    let (mut i, mut j, mut regions, mut changing) = (0, 0, 0, false);
-    while i < old.len() || j < new.len() {
-        if i < old.len() && j < new.len() && old[i] == new[j] {
-            changing = false;
-            i += 1;
-            j += 1;
-        } else {
-            if !changing {
-                regions += 1;
-                changing = true;
-            }
-            if i < old.len()
-                && (j == new.len() || matches[(i + 1) * width + j] >= matches[i * width + j + 1])
-            {
-                i += 1;
-            } else {
-                j += 1;
-            }
+    let (mut old_end, mut new_end, mut regions) = (0, 0, 0);
+    for (i, j) in anchors {
+        if i > old_end || j > new_end {
+            regions += 1;
         }
+        old_end = i + 1;
+        new_end = j + 1;
+    }
+    if old_end < old.len() || new_end < new.len() {
+        regions += 1;
     }
     Some(regions)
 }
@@ -424,7 +420,11 @@ mod tests {
             ("a\nb\nc\n", "a\nB\nC\n", 1),
             ("a\nb\nc\n", "a\nx\nb\nc\n", 1),
             ("a\nb\nc\n", "a\nc\n", 1),
-            ("a\nb\na\nc\n", "a\nB\na\nC\n", 2),
+            ("a\nb\na\nc\n", "a\nB\na\nC\n", 1),
+            ("a\n", "b\na\na\n", 1),
+            ("a\nb\n", "b\nb\n", 1),
+            ("a\nb\n", "b\na\n", 1),
+            ("first\nanchor\nlast\n", "FIRST\nanchor\nLAST\n", 2),
             ("a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\n", 1),
             ("a\nb\n", "", 1),
         ] {

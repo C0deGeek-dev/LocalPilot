@@ -6,10 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
-- **Exact edits preview separate material changes.** Bounded work admission
-  counts changes separated by unchanged lines within an exact edit before
-  dispatch. Refused edits do not spend the unit; the final repository diff
-  remains authoritative.
+- **Exact edits preview unambiguous separate changes.** Bounded work admission
+  counts changes separated by uniquely aligned unchanged lines before dispatch.
+  Repeated or reordered shared lines retain the existing admission behavior.
+  Refused edits do not spend the unit; the final repository diff remains authoritative.
 
 - **Compacted runtime feedback keeps its origin.** Summary bullets no longer
   label synthetic verification or repair feedback as a user request. Diagnostic
