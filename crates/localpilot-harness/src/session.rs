@@ -1262,6 +1262,9 @@ pub struct SessionRuntime {
     unit_verification_exempt: Option<String>,
     unit_verify_command: Option<String>,
     work_mutation_refusal: Option<String>,
+    /// A bounds-denied write cannot be retried through an opaque process.
+    /// Successful bounded recovery or a fresh unit clears this dispatch latch.
+    work_opaque_retry_blocked: bool,
     /// Authorized write-capable invocation, including errors/partial writes.
     /// Separate from the conservative attempted-operation budget.
     work_mutation_may_have_run: bool,
@@ -1467,6 +1470,7 @@ impl SessionRuntime {
             unit_verification_exempt: None,
             unit_verify_command: None,
             work_mutation_refusal: None,
+            work_opaque_retry_blocked: false,
             work_mutation_may_have_run: false,
             work_mcp_call_attempted: false,
             provider,
@@ -1585,12 +1589,25 @@ impl SessionRuntime {
             self.tools.set_context_output_limit(active.max_output_bytes);
             self.tools
                 .set_file_read_limits(active.max_read_lines, active.max_output_bytes);
-            if let Some(reason) = self
+            if let Some(refusal) = self
                 .work_unit
                 .refusal(*active, name, input, &self.workspace)
             {
-                return Some(reason);
+                if is_file_write_tool(name) && refusal.blocks_opaque_retry {
+                    self.work_opaque_retry_blocked = true;
+                }
+                return Some(refusal.message);
             }
+        }
+        let opaque_launch = name == "run_shell"
+            || name == "run_background"
+                && input
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("start")
+                    == "start";
+        if self.work_opaque_retry_blocked && opaque_launch {
+            return Some("work envelope: a bounded write was refused; opaque shell/background retries cannot preserve its limits. Use bounded reads and a smaller exact edit, or checkpoint the unit; automatic verification remains available".to_string());
         }
         if self.config.granularity.is_some()
             && self.work_diff_baseline.is_none()
@@ -1647,10 +1664,14 @@ impl SessionRuntime {
     /// refusal has been ruled out. Permission denial and partial failure remain
     /// conservative attempted work, but a prior-read repair can still proceed.
     fn reserve_work_input(&mut self, name: &str, input: &serde_json::Value) -> Option<String> {
-        self.active_work_profile.and_then(|profile| {
-            self.work_unit
-                .check_and_reserve(profile, name, input, &self.workspace)
-        })
+        let profile = self.active_work_profile?;
+        let refusal = self
+            .work_unit
+            .check_and_reserve(profile, name, input, &self.workspace)?;
+        if is_file_write_tool(name) && refusal.blocks_opaque_retry {
+            self.work_opaque_retry_blocked = true;
+        }
+        Some(refusal.message)
     }
 
     /// Evaluate the `check_before_launch` discipline rule for a tool call. When
@@ -1904,6 +1925,7 @@ impl SessionRuntime {
         self.unit_verification_exempt = None;
         self.unit_verify_command = None;
         self.work_mutation_refusal = None;
+        self.work_opaque_retry_blocked = false;
         self.work_diff_baseline = None;
         self.work_mutation_may_have_run = false;
         self.work_mcp_call_attempted = false;
@@ -3650,6 +3672,7 @@ impl SessionRuntime {
         self.turn_files_changed.clear();
         self.work_unit = crate::granularity::WorkUnit::default();
         self.work_mutation_refusal = None;
+        self.work_opaque_retry_blocked = false;
         self.work_mutation_may_have_run = false;
         self.work_mcp_call_attempted = false;
         self.active_work_profile = None;
@@ -4642,6 +4665,7 @@ impl SessionRuntime {
                 let mut launch_warn: Option<String> = None;
                 let mut readable_error_sent = false;
                 let mut repaired_dispatched = false;
+                let mut bounded_write_dispatched = false;
                 let mut unavailable_backend = None;
                 let result = match decision {
                     PreDispatch::Redirect(resolution) => {
@@ -4814,6 +4838,8 @@ impl SessionRuntime {
                             // tool path stays unaware of the swarm entirely.
                             match dispatched {
                                 Some(dispatch) => {
+                                    bounded_write_dispatched =
+                                        is_file_write_tool(name) && dispatch.mutation_may_have_run;
                                     unavailable_backend = dispatch.unavailable_backend;
                                     self.work_mutation_may_have_run |=
                                         dispatch.mutation_may_have_run;
@@ -4926,6 +4952,9 @@ impl SessionRuntime {
                 // model-visible note (so the model sees what changed and learns the
                 // right shape), emit the redacted repair telemetry, and — in `warn`
                 // mode — log the repair loudly so it can be vetted before `on`.
+                if bounded_write_dispatched && !result.is_error() {
+                    self.work_opaque_retry_blocked = false;
+                }
                 if repaired_dispatched {
                     if let Some(decision) = &tool_decision {
                         if let Some(note) = &decision.model_note {

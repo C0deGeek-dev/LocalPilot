@@ -60,6 +60,11 @@ exclude unchanged pre-existing dirty files; prior dirty content in a file change
 this turn can conservatively trigger refusal. Without a repository baseline,
 model shell/background calls are refused; file tools and permission-gated
 verification remain available. Explicit user shell retains its authorization.
+When a bounded write exceeds its limits, model shell commands and background
+starts are also refused until a successful smaller bounded write or a fresh
+unit. Bounded reads, background list/logs/stop and automatic verification remain
+permission gated and available. A replacement-shape redirect alone does not
+block process access. The final diff check still applies to admitted commands.
 This policy does not add permissions or claim to be a filesystem security boundary.
 
 Repository inspection excludes only untracked generated Python paths

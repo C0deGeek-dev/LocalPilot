@@ -235,6 +235,13 @@ pub(crate) struct WorkUnit {
     lines: usize,
 }
 
+/// Keep recovery guidance separate from a bounds denial: only the latter
+/// prevents an opaque process from retrying the refused mutation.
+pub(crate) struct WorkRefusal {
+    pub(crate) message: String,
+    pub(crate) blocks_opaque_retry: bool,
+}
+
 impl WorkUnit {
     pub(crate) fn refusal(
         &self,
@@ -242,7 +249,7 @@ impl WorkUnit {
         name: &str,
         input: &Value,
         workspace: &Workspace,
-    ) -> Option<String> {
+    ) -> Option<WorkRefusal> {
         self.clone()
             .check_and_reserve(profile, name, input, workspace)
     }
@@ -255,9 +262,12 @@ impl WorkUnit {
         name: &str,
         input: &Value,
         workspace: &Workspace,
-    ) -> Option<String> {
+    ) -> Option<WorkRefusal> {
         let reject = |reason: &str| {
-            Some(format!("work envelope: {reason}; split into a smaller coherent unit, verify it, and checkpoint before continuing"))
+            Some(WorkRefusal {
+                message: format!("work envelope: {reason}; split into a smaller coherent unit, verify it, and checkpoint before continuing"),
+                blocks_opaque_retry: true,
+            })
         };
         if name == "swarm" {
             return reject("fan-out has no single coherent mutation scope; split it into independently reviewed units");
@@ -280,16 +290,19 @@ impl WorkUnit {
             let bounded =
                 end.is_some_and(|end| end >= start && end - start < profile.max_read_lines as u64);
             if !bounded {
-                return Some(format!(
+                return Some(WorkRefusal { message: format!(
                     "work envelope: request an explicit start_line/end_line page within the read limit. {}",
                     localpilot_tools::bounded_read_hint(name, input, profile.max_read_lines)
-                ));
+                ), blocks_opaque_retry: false });
             }
             return None;
         }
         if name == "replace_in_file" {
             // Regex/global substitution has no argument-derived region bound.
-            return reject("use bounded exact edit_file hunks instead of global/regex replacement");
+            return Some(WorkRefusal {
+                message: "work envelope: use bounded exact edit_file hunks instead of global/regex replacement; split into a smaller coherent unit, verify it, and checkpoint before continuing".to_string(),
+                blocks_opaque_retry: false,
+            });
         }
         let operations: Vec<&Value> = match name {
             "apply_patch" => input

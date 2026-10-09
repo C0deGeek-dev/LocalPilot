@@ -1032,6 +1032,15 @@ context (two regions with small context). Small context or conservative reliabil
 stops harness execution after a durable checkpoint. Caps apply cumulatively to
 attempted edits, including old/new text and giant-line byte equivalents.
 
+After a bounded write exceeds these limits, the runtime refuses model-requested
+shell commands and background starts for that unit. Use bounded reads and a
+smaller exact edit; a successful bounded write restores process access, and a
+fresh unit resets the restriction. Background listing, logs and stop actions,
+and host-owned automatic verification remain available under their permissions.
+Replacement-shape guidance alone does not impose this restriction. This prevents
+opaque process retries after a bounds refusal; it does not make unrestricted
+commands safe or replace the final repository-diff check.
+
 Plan review and execution disclosure show the strategy; idle `/harness-status`
 also shows the current agent profile. `harness resume` prints the fresh executor's
 profile before work. Harness steps start with unknown reliability. Stricter caps

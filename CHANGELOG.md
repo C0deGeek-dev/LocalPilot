@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Bounded write refusals constrain opaque retries.** After a write exceeds its
+  work bounds, shell commands and background starts are refused until a smaller
+  bounded write succeeds or a fresh unit begins. Bounded reads, background
+  inspection/cleanup and automatic verification remain available. Guidance to
+  replace a global substitution with exact edits does not impose this restriction.
+
 - **Exact edits preview unambiguous separate changes.** Bounded work admission
   counts changes separated by uniquely aligned unchanged lines before dispatch.
   Repeated or reordered shared lines retain the existing admission behavior.

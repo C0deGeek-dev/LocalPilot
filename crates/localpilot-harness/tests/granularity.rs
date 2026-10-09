@@ -317,6 +317,193 @@ async fn oversized_create_and_large_file_overwrite_preserve_original() {
 }
 
 #[tokio::test]
+async fn bounded_write_refusal_blocks_opaque_retry_but_keeps_reads_and_verification() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+    project(dir.path());
+    let command = if cfg!(windows) {
+        "[IO.File]::WriteAllText('a.txt', '')"
+    } else {
+        ": > a.txt"
+    };
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "one",
+                "edit_file",
+                json!({"path":"a.txt", "old_text":"before", "new_text":"after"}),
+            )
+            .tool_call(
+                "two",
+                "edit_file",
+                json!({"path":"a.txt", "old_text":"after", "new_text":"wider"}),
+            )
+            .tool_call("opaque", "run_shell", json!({"command":command}))
+            .tool_call(
+                "background",
+                "run_background",
+                json!({"command":command, "grace_secs":0}),
+            )
+            .tool_call("inspect", "read_file", json!({"path":"a.txt"}))
+            .tool_call("list", "run_background", json!({"action":"list"}))
+            .text("checkpoint")
+            .tool_call(
+                "fresh",
+                "run_shell",
+                json!({"command":"git status --short"}),
+            )
+            .text("fresh unit"),
+    );
+    let mut agent = runtime(
+        dir.path(),
+        provider,
+        Profile::Unrestricted,
+        Some("git status --short".to_string()),
+    );
+    let (_, events) = turn(&mut agent).await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "after\n",
+        "a refused bounded edit must not be followed by destructive opaque retries"
+    );
+    for id in ["opaque", "background"] {
+        assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id: call_id, is_error:true, output, .. } if call_id == id && output.contains("bounded write was refused"))));
+    }
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:false, output, .. } if id == "inspect" && output.contains("after"))));
+    assert_eq!(agent.current_turn_verification(), Some(CheckStatus::Passed));
+    assert!(events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:false, .. } if id == "list")
+    ));
+    let (_, next_events) = turn(&mut agent).await;
+    assert!(next_events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:false, .. } if id == "fresh")
+    ));
+}
+
+#[tokio::test]
+async fn smaller_bounded_repair_restores_opaque_checks_after_bounds_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+    project(dir.path());
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "large",
+                "edit_file",
+                json!({"path":"a.txt", "old_text":"before", "new_text":"x".repeat(20_000)}),
+            )
+            .tool_call(
+                "blocked",
+                "run_shell",
+                json!({"command":"git status --short"}),
+            )
+            .tool_call(
+                "repair",
+                "edit_file",
+                json!({"path":"a.txt", "old_text":"before", "new_text":"after"}),
+            )
+            .tool_call(
+                "check",
+                "run_shell",
+                json!({"command":"git status --short"}),
+            )
+            .text("checkpoint"),
+    );
+    let mut agent = runtime(
+        dir.path(),
+        provider,
+        Profile::Unrestricted,
+        Some("git status --short".to_string()),
+    );
+    let (_, events) = turn(&mut agent).await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "after\n"
+    );
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:true, output, .. } if id == "blocked" && output.contains("bounded write was refused"))));
+    for call in ["repair", "check"] {
+        assert!(events.iter().any(
+            |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:false, .. } if id == call)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn replacement_shape_guidance_does_not_block_opaque_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+    project(dir.path());
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "shape",
+                "replace_in_file",
+                json!({"path":"a.txt", "find":"before", "replace":"after"}),
+            )
+            .tool_call(
+                "check",
+                "run_shell",
+                json!({"command":"git status --short"}),
+            )
+            .tool_call(
+                "repair",
+                "edit_file",
+                json!({"path":"a.txt", "old_text":"before", "new_text":"after"}),
+            )
+            .text("checkpoint"),
+    );
+    let mut agent = runtime(
+        dir.path(),
+        provider,
+        Profile::Unrestricted,
+        Some("git status --short".to_string()),
+    );
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:true, output, .. } if id == "shape" && output.contains("bounded exact"))));
+    for call in ["check", "repair"] {
+        assert!(events.iter().any(
+            |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:false, .. } if id == call)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn failed_bounded_repair_does_not_restore_opaque_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+    project(dir.path());
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "large",
+                "edit_file",
+                json!({"path":"a.txt", "old_text":"before", "new_text":"x".repeat(20_000)}),
+            )
+            .tool_call(
+                "bad_repair",
+                "edit_file",
+                json!({"path":"a.txt", "old_text":"absent", "new_text":"after"}),
+            )
+            .tool_call(
+                "opaque",
+                "run_shell",
+                json!({"command":"git status --short"}),
+            )
+            .text("blocked"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Unrestricted, None);
+    let (_, events) = turn(&mut agent).await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "before\n"
+    );
+    assert!(events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:true, .. } if id == "bad_repair")
+    ));
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:true, output, .. } if id == "opaque" && output.contains("bounded write was refused"))));
+}
+
+#[tokio::test]
 async fn long_line_output_is_retained_and_projection_is_bounded() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("large.txt"), "α".repeat(10_000)).unwrap();
