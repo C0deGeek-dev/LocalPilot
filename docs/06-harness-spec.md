@@ -53,6 +53,9 @@ resetting it. Owned `.localpilot/` and `.localmind/` runtime state is excluded
 from project work and commits.
 
 Builtin limits apply cumulatively to attempts, including partial/failed mutations.
+Sizing normalizes every write target, including scratch and external paths, and
+refuses a request when normalization fails. Mixed patches cannot skip later
+operations through an outside target. Permission checks still own path access.
 Model delegation inherits the policy and spends a region; fan-out is refused.
 Shell/MCP arguments cannot prove their diff size, so repository diffs are checked
 before completion and again after auto-fixes before commit. Ordinary comparisons

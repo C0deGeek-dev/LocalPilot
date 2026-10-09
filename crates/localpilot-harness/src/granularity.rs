@@ -315,9 +315,13 @@ impl WorkUnit {
         };
         let mut proposed = self.clone();
         for op in operations {
-            let path = workspace
-                .resolve(std::path::Path::new(op.get("path")?.as_str()?))
-                .ok()?;
+            // Sizing must cover every target, including scratch and external
+            // paths. Containment belongs to permission checks; a failed
+            // containment check must not admit the rest of a mixed patch.
+            let path = match workspace.normalize(std::path::Path::new(op.get("path")?.as_str()?)) {
+                Ok(path) => path,
+                Err(_) => return reject("write target cannot be normalized for bounded sizing"),
+            };
             let action = op.get("action").and_then(Value::as_str).unwrap_or(name);
             if matches!(action, "delete" | "write_file") {
                 // Bounds deletion/overwrite of existing material, not just its replacement.
@@ -445,6 +449,85 @@ mod tests {
         }
         let large = "line\n".repeat(256);
         assert_eq!(argument_change_regions(&large, &large), None);
+    }
+
+    #[test]
+    fn scratch_and_external_targets_spend_the_same_mutation_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut workspace = Workspace::new(dir.path()).unwrap();
+        workspace.set_scratch_root(localpilot_sandbox::ScratchRoot::Parent(
+            outside.path().to_path_buf(),
+        ));
+        workspace.start_scratch("bounded-sizing").unwrap();
+        let scratch = workspace.scratch_dir().unwrap().join("scratch.txt");
+        let external = outside.path().join("external.txt");
+        let profile = WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 8_000,
+                provenance: ContextProvenance::CallerSupplied,
+            },
+            Reliability::Unknown,
+            &GranularityConfig::default(),
+        );
+        for path in [scratch, external] {
+            let mut unit = WorkUnit::default();
+            let input = serde_json::json!({"path":path, "content":"small\n"});
+            assert!(unit
+                .check_and_reserve(profile, "write_file", &input, &workspace)
+                .is_none());
+            assert!(
+                unit.has_mutations(),
+                "non-workspace targets must be counted"
+            );
+            let second = serde_json::json!({"path":"tracked.txt", "old_text":"a", "new_text":"b"});
+            assert!(unit
+                .check_and_reserve(profile, "edit_file", &second, &workspace)
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn mixed_patch_refusal_is_atomic_and_does_not_spend_a_partial_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let profile = WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 8_000,
+                provenance: ContextProvenance::CallerSupplied,
+            },
+            Reliability::Unknown,
+            &GranularityConfig::default(),
+        );
+        for external_first in [true, false] {
+            let create = serde_json::json!({"action":"create", "path":outside.path().join("header.txt"), "content":"small\n"});
+            let delete = serde_json::json!({"action":"delete", "path":"tracked.txt"});
+            let operations = if external_first {
+                vec![create, delete]
+            } else {
+                vec![delete, create]
+            };
+            let mut unit = WorkUnit::default();
+            assert!(unit
+                .check_and_reserve(
+                    profile,
+                    "apply_patch",
+                    &serde_json::json!({"operations":operations}),
+                    &workspace
+                )
+                .is_some());
+            assert!(
+                !unit.has_mutations(),
+                "refusal must not reserve earlier operations"
+            );
+            let bounded = serde_json::json!({"operations":[{"action":"update", "path":"tracked.txt", "hunks":[{"old_text":"a", "new_text":"b"}]}]});
+            assert!(unit
+                .check_and_reserve(profile, "apply_patch", &bounded, &workspace)
+                .is_none());
+        }
     }
 
     #[test]

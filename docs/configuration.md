@@ -1031,6 +1031,9 @@ units permit at most three files, four regions and two decisions with sufficient
 context (two regions with small context). Small context or conservative reliability
 stops harness execution after a durable checkpoint. Caps apply cumulatively to
 attempted edits, including old/new text and giant-line byte equivalents.
+All normalized write targets count, including owned scratch and external paths;
+an unresolvable target refuses the whole request rather than skipping later patch
+operations. These bounds do not authorize paths: permission checks still apply.
 
 After a bounded write exceeds these limits, the runtime refuses model-requested
 shell commands and background starts for that unit. Use bounded reads and a

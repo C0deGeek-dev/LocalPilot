@@ -317,6 +317,76 @@ async fn oversized_create_and_large_file_overwrite_preserve_original() {
 }
 
 #[tokio::test]
+async fn mixed_external_patch_cannot_skip_tracked_deletion_bounds_in_either_order() {
+    for external_first in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let external = outside.path().join("header.py");
+        std::fs::write(dir.path().join("reports.py"), "before\n").unwrap();
+        project(dir.path());
+        let create = json!({"action":"create", "path":external, "content":"header\n"});
+        let delete = json!({"action":"delete", "path":"reports.py"});
+        let operations = if external_first {
+            vec![create, delete]
+        } else {
+            vec![delete, create]
+        };
+        let provider = Arc::new(
+            FakeProvider::new()
+                .tool_call("mixed", "apply_patch", json!({"operations":operations}))
+                .text("checkpoint"),
+        );
+        let mut agent = runtime(dir.path(), provider, Profile::Unrestricted, None);
+        let (_, events) = turn(&mut agent).await;
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("reports.py"))
+                .ok()
+                .as_deref(),
+            Some("before\n"),
+            "mixed patch must be refused before either write, external_first={external_first}"
+        );
+        assert!(
+            !external.exists(),
+            "refusal must not dispatch a partial patch"
+        );
+        assert!(events.iter().any(|event| matches!(event,
+            RuntimeEvent::ToolFinished { id, is_error:true, output, .. }
+            if id == "mixed" && output.contains("work envelope:")
+        )));
+    }
+}
+
+#[tokio::test]
+async fn permitted_external_write_is_bounded_without_changing_permission_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let external = outside.path().join("small.txt");
+    project(dir.path());
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "external",
+                "write_file",
+                json!({"path":external, "content":"small\n"}),
+            )
+            .tool_call(
+                "second",
+                "write_file",
+                json!({"path":"second.txt", "content":"another\n"}),
+            )
+            .text("checkpoint"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Unrestricted, None);
+    let (_, events) = turn(&mut agent).await;
+    assert_eq!(std::fs::read_to_string(external).unwrap(), "small\n");
+    assert!(!dir.path().join("second.txt").exists());
+    assert!(events.iter().any(|event| matches!(event,
+        RuntimeEvent::ToolFinished { id, is_error:true, output, .. }
+        if id == "second" && output.contains("work envelope:")
+    )));
+}
+
+#[tokio::test]
 async fn bounded_write_refusal_blocks_opaque_retry_but_keeps_reads_and_verification() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
