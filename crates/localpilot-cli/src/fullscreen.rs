@@ -933,11 +933,13 @@ enum SlashRoute {
 }
 
 /// One entry in the serial operation chain. Only the head may be a pumped slash
-/// command; the queue itself stays prompt/shell-only, so `QueuedOperation::item_id`
-/// stays total and no synthetic slash timeline row is minted.
+/// command or LocalMind action. The queue itself stays prompt/shell-only, so
+/// `QueuedOperation::item_id` stays total and no synthetic slash timeline row is minted.
 enum SerialOperation {
     Queued(QueuedOperation),
     PumpedSlash(PumpedSlash),
+    LocalMindReindex,
+    LocalMindReview(LocalMindReviewIntent),
 }
 
 /// Enter or leave incognito mid-session. Entering swaps the runtime to a
@@ -4704,7 +4706,7 @@ async fn run_event_loop(
                         }
                     }
                     AppCommand::LocalMindReindex => {
-                        if drive_localmind_reindex(
+                        if drive_operation_chain(
                             terminal,
                             app,
                             runtime,
@@ -4720,8 +4722,13 @@ async fn run_event_loop(
                                 guidance,
                                 execution: execution.clone(),
                             },
-                            approval_tx,
+                            SerialOperation::LocalMindReindex,
                             &mut queue,
+                            PumpedAuthority {
+                                config,
+                                approval_tx,
+                                deferred_selfimprove_reload,
+                            },
                         )
                         .await?
                         {
@@ -4729,7 +4736,7 @@ async fn run_event_loop(
                         }
                     }
                     AppCommand::LocalMindReview(intent) => {
-                        if drive_localmind_review(
+                        if drive_operation_chain(
                             terminal,
                             app,
                             runtime,
@@ -4745,9 +4752,13 @@ async fn run_event_loop(
                                 guidance,
                                 execution: execution.clone(),
                             },
-                            approval_tx,
-                            intent,
+                            SerialOperation::LocalMindReview(intent),
                             &mut queue,
+                            PumpedAuthority {
+                                config,
+                                approval_tx,
+                                deferred_selfimprove_reload,
+                            },
                         )
                         .await?
                         {
@@ -4793,7 +4804,7 @@ async fn run_event_loop(
 }
 
 // The dispatcher accepts the ambient owners as one by-value `SlashContext` bundle
-// (built at its three call sites — pumped slash, prompt, shell) plus a `ResumeAuthority`
+// (built at its call sites) plus a `PumpedAuthority`
 // owner bundle, and reborrows them into the turn/shell wrappers, so the growing surface
 // no longer widens this signature.
 async fn drive_operation_chain(
@@ -4809,6 +4820,59 @@ async fn drive_operation_chain(
     while let Some(operation) = current {
         let next_item = queue.front().map(QueuedOperation::item_id);
         match operation {
+            SerialOperation::LocalMindReindex => {
+                if drive_localmind_reindex(
+                    terminal,
+                    app,
+                    runtime,
+                    SlashContext {
+                        approval_rx: &mut *ctx.approval_rx,
+                        question_rx: &mut *ctx.question_rx,
+                        cwd: ctx.cwd,
+                        history: ctx.history,
+                        mouse_state: &mut *ctx.mouse_state,
+                        paste_burst: &mut *ctx.paste_burst,
+                        workspace_index: &mut *ctx.workspace_index,
+                        stages: &mut *ctx.stages,
+                        guidance: ctx.guidance,
+                        execution: ctx.execution.clone(),
+                    },
+                    authority.approval_tx,
+                    queue,
+                )
+                .await?
+                {
+                    discard_queued_operations(queue);
+                    return Ok(true);
+                }
+            }
+            SerialOperation::LocalMindReview(intent) => {
+                if drive_localmind_review(
+                    terminal,
+                    app,
+                    runtime,
+                    SlashContext {
+                        approval_rx: &mut *ctx.approval_rx,
+                        question_rx: &mut *ctx.question_rx,
+                        cwd: ctx.cwd,
+                        history: ctx.history,
+                        mouse_state: &mut *ctx.mouse_state,
+                        paste_burst: &mut *ctx.paste_burst,
+                        workspace_index: &mut *ctx.workspace_index,
+                        stages: &mut *ctx.stages,
+                        guidance: ctx.guidance,
+                        execution: ctx.execution.clone(),
+                    },
+                    authority.approval_tx,
+                    intent,
+                    queue,
+                )
+                .await?
+                {
+                    discard_queued_operations(queue);
+                    return Ok(true);
+                }
+            }
             // A pumped slash command has no timeline item; it owns its own Busy
             // transition (compact immediately, ingest after preflight, resume after
             // entering Harness mode).
@@ -20216,6 +20280,63 @@ mod tests {
             .is_err(),
             "the removed hint's route is still absent from the real Clap tree"
         );
+    }
+
+    #[test]
+    fn localmind_completion_preserves_queued_prompt_order_and_output_anchors() {
+        // Exercise the same busy-input and activation transitions used by LocalMind
+        // operations and the serial chain, without touching a persistent store.
+        let mut app = app();
+        app.begin_work_with_label("Reindexing LocalMind graph");
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        for text in ["first queued prompt", "second queued prompt"] {
+            app.editor.insert(text);
+            assert!(!handle_turn_event_impl(
+                &mut app,
+                Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+                &cancel,
+                &event_hit_map(),
+                &mut queue,
+                &history,
+                Path::new("fixture"),
+                &image_capability(false),
+                &StageHost::new(),
+                None,
+                None,
+            ));
+        }
+        assert_eq!(queue.len(), 2);
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        for (prompt_text, answer) in [
+            ("first queued prompt", "first answer"),
+            ("second queued prompt", "second answer"),
+        ] {
+            let operation = queue.pop_front().expect("queued prompt");
+            assert_eq!(operation.prompt().text, prompt_text);
+            assert!(app.activate_prompt(operation.item_id()));
+            app.begin_work_before(queue.front().map(QueuedOperation::item_id));
+            app.apply_runtime(RuntimeUpdate::Text(answer.to_string()));
+            app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        }
+        let items = app.active_timeline().items();
+        let positions: Vec<_> = [
+            "first queued prompt",
+            "first answer",
+            "second queued prompt",
+            "second answer",
+        ]
+        .iter()
+        .map(|text| {
+            items
+                .iter()
+                .position(|item| item.text.contains(text))
+                .unwrap()
+        })
+        .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(queue.is_empty());
     }
 
     #[test]
