@@ -405,6 +405,14 @@ pub trait Tool: Send + Sync {
     /// Returns [`ToolError`] on invalid input or execution failure.
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError>;
 
+    /// Conservative identity of the operation refused by permissions. Defaults
+    /// to the complete input. Overrides may omit execution-neutral options,
+    /// but must preserve targets, arguments and command grant eligibility.
+    /// Used only after a fresh denial; never authorizes or suppresses a call.
+    fn permission_denial_target(&self, input: &Value) -> Value {
+        input.clone()
+    }
+
     /// Invoke after authorization with optional bounds on implicit file reads.
     /// Other tools keep their ordinary invocation; the read builtin enforces
     /// these independent limits without inspecting contents before permission.

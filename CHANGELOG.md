@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Permission refusals give the model usable alternatives.** Human grant setup
+  stays in session warnings/logs and explicit user shell results. Two consecutive
+  equivalent refusals nudge a change of approach; the third stops the turn with
+  a dedicated permission diagnostic. Cosmetic shell timeout changes count
+  together; different targets, commands, structured grant corrections and
+  intervening tool attempts reset the count. Every attempt freshly checks policy.
+  Eval preflights test access before requesting the model, uses existing user
+  command grants for the model and verifier, and emits no scorecard when the
+  verifier is permission-denied.
+
+
 - **Absent knowledge indexes no longer invite query loops.** Knowledge search
   is hidden from provider tools and broker discovery while both indexes are
   absent. Availability is rechecked for each request and stale call; an index

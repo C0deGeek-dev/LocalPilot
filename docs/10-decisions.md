@@ -2,6 +2,57 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0226: Permission Refusals Separate Audiences And Equivalent Attempts
+
+**Status:** accepted · **Date:** 2026-10-10 (LocalHub #233).
+Refines ADR-0215 without changing permission authority or the attempted-mutation
+accounting clarified by LocalHub #207 and ADR-0224.
+
+Registry refusals produce a model result plus typed host evidence. The model
+gets the factual boundary, an explicit not-executed statement, permitted
+alternatives and a direction to report verification blockers. Human-only grant
+setup stays in the redacted host projection: session warnings and existing
+`PermissionDecided` records. Explicit user shell retains human guidance. A
+structured correction toward an already-existing exact grant remains actionable
+for the model; it never creates a grant.
+
+After each fresh dispatch refusal, the existing consecutive-observation guard
+uses tool, permission reason/policy snapshot and conservative operation identity.
+It nudges on two equivalent denials and stops on three with `NoProgress` and
+`signal=permission_denied tool="..." reason="..." count=3`. No refused tool
+invocation runs, every attempt still rechecks permissions/approval and spends
+normal attempt budgets. Remaining calls in a stopped batch receive paired
+not-executed results. The existing guard opt-out preserves scripted replays.
+
+Tools default to full-input identity. `run_shell` uses its normalized execution
+mode, complete command or exact program/args, excluding timeout and unused input
+fields. It does not infer equivalence from a shared failure message, command
+class, interpreter basename or guessed intent. A changed command/target/argument,
+a switch from shell text to structured execution, a changed permission floor,
+a different tool attempt (including preflight-only backend refusals), user
+steering or a new turn resets the sequence. Opaque Python module/script variants
+are deliberately not presumed equivalent: their actual targets cannot be proven.
+This conservative boundary protects the issue's legitimate-retargeting exception.
+
+Capability baselines must establish that the project test operation is permitted
+before comparing arms. LocalBench keeps bypass and relies on explicit user-owned
+exact test grants; it never grants a fixture's own request. Eval preflights the
+configured/detected target with the actual workspace/model tool permission gate,
+without invoking it, then tells the model its exact structured operation. Quality
+checks match their direct program/args against existing grants too, retaining
+session floors. No target still preserves answer-only evaluations; an available
+but permission-denied target exits before the model request, diff staging or
+external grading. A later actual verifier denial also invalidates the eval.
+
+The stable `evaluation verification permission preflight failed:` error marker
+lets the LocalBench solver distinguish permission setup from a model failure.
+The matrix aborts with a terminal error and comparison caveat, does not persist
+that cell as unsolved, and clears comparison aggregates; earlier valid cells are
+retained on disk. This is a setup diagnosis, not a model-capability observation.
+External grading success cannot establish in-agent test access. Historical
+permission-blocked pilots require new runs; no claim about their model compliance
+or uplift is made by these deterministic changes.
+
 ## ADR-0225: Fresh Backend Availability Gates Visibility And Stale Attempts
 
 **Status:** accepted · **Date:** 2026-10-10. Refines ADR-0222 and ADR-0215 for

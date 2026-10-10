@@ -1107,6 +1107,11 @@ enum NoProgressDiagnostic {
         backend: String,
         count: usize,
     },
+    PermissionDenied {
+        tool: String,
+        reason: String,
+        count: usize,
+    },
 }
 
 /// Map the detector's typed signal (plus the tool that produced it) to a
@@ -1132,6 +1137,15 @@ fn no_progress_diagnostic(signal: NoProgressSignal, tool: &str) -> Option<NoProg
 /// the appended synthetic User message, and the persisted `TurnEnded.detail`.
 fn no_progress_notice(diagnostic: &NoProgressDiagnostic) -> (String, String) {
     let detail = match diagnostic {
+        NoProgressDiagnostic::PermissionDenied {
+            tool,
+            reason,
+            count,
+        } => {
+            let tool = serde_json::Value::String(tool.clone());
+            let reason = serde_json::Value::String(reason.clone());
+            format!("signal=permission_denied tool={tool} reason={reason} count={count}")
+        }
         NoProgressDiagnostic::BackendUnavailableAttempt {
             tool,
             backend,
@@ -2149,6 +2163,7 @@ impl SessionRuntime {
                         touches: Vec::new(),
                         mutation_may_have_run: false,
                         unavailable_backend: None,
+                        permission_denial: None,
                     },
                     true,
                 ),
@@ -2387,6 +2402,44 @@ impl SessionRuntime {
             self.verify_changed_work_only = true;
         }
         self.config.verify_before_done = true;
+    }
+
+    /// Resolve the eval test operation and establish headless model permission
+    /// before spending on a provider. No command runs and no authority is added.
+    ///
+    /// # Errors
+    /// A redacted permission explanation; an inaccessible verifier invalidates
+    /// a capability baseline rather than measuring the model's test retries.
+    pub fn preflight_eval_verification(
+        &self,
+    ) -> Result<Option<localpilot_config::CheckConfig>, String> {
+        if !self.config.verify_before_done && self.config.verify_command.is_none() {
+            return Ok(None);
+        }
+        let Some(check) = crate::verify_target::resolve_verify_check(
+            self.workspace.root(),
+            self.config.verify_command.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        let call = ToolCall::new(
+            ToolUseId::from("eval-verification-preflight"),
+            "run_shell",
+            serde_json::json!({"program":check.program,"args":check.args}),
+        );
+        let ctx = ToolContext {
+            workspace: &self.workspace,
+            interactivity: Interactivity::NonInteractive,
+            trusted: self.config.trusted,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        self.tools
+            .check_headless_permissions(&call, &ctx, &self.engine.snapshot())?;
+        Ok(Some(check))
     }
 
     pub fn set_granularity(&mut self, caps: localpilot_config::GranularityConfig) {
@@ -4739,6 +4792,7 @@ impl SessionRuntime {
                 let mut repaired_dispatched = false;
                 let mut bounded_write_dispatched = false;
                 let mut unavailable_backend = None;
+                let mut permission_denial = None;
                 let result = match decision {
                     PreDispatch::Redirect(resolution) => {
                         // The broker narrowed the surface and this tool is not
@@ -4913,6 +4967,17 @@ impl SessionRuntime {
                                     bounded_write_dispatched =
                                         is_file_write_tool(name) && dispatch.mutation_may_have_run;
                                     unavailable_backend = dispatch.unavailable_backend;
+                                    if let Some(denial) = &dispatch.permission_denial {
+                                        let _ = events.send(RuntimeEvent::Warning(
+                                            denial.human_guidance.clone(),
+                                        ));
+                                        self.record_event(SessionEventKind::PermissionDecided {
+                                            tool: name.clone(),
+                                            decision: "denied".to_string(),
+                                            detail: denial.human_guidance.clone(),
+                                        });
+                                    }
+                                    permission_denial = dispatch.permission_denial;
                                     self.work_mutation_may_have_run |=
                                         dispatch.mutation_may_have_run;
                                     let touched = dispatch.touches;
@@ -5079,18 +5144,34 @@ impl SessionRuntime {
                 // any harness rewrite (read elision names the prior call, so its
                 // stub differs every time) or appended notice, over the arguments
                 // actually dispatched. Authoritative backend absence is keyed
-                // independently of queries; ordinary results keep full identity.
-                let observed_call = match unavailable_backend {
-                    Some(backend) => format!("{name}\u{1f}backend_unavailable:{backend}"),
-                    None => format!("{name}\u{1f}{}", canonical_json(projected_input)),
+                // independently of queries; typed permission denials preserve
+                // operation and policy identity. Ordinary results keep full identity.
+                let observed_call = if let Some(denial) = &permission_denial {
+                    format!(
+                        "{name}\u{1f}permission_denied:{}\u{1f}{}",
+                        denial.reason,
+                        canonical_json(&denial.retry_identity)
+                    )
+                } else {
+                    match unavailable_backend {
+                        Some(backend) => format!("{name}\u{1f}backend_unavailable:{backend}"),
+                        None => format!("{name}\u{1f}{}", canonical_json(projected_input)),
+                    }
                 };
-                let observed_result = match unavailable_backend {
-                    Some(_) => "backend unavailable".to_string(),
-                    None => observation_identity(&result),
+                let observed_result = if permission_denial.is_some() {
+                    "permission denied".to_string()
+                } else {
+                    match unavailable_backend {
+                        Some(_) => "backend unavailable".to_string(),
+                        None => observation_identity(&result),
+                    }
                 };
                 let repeat = if absent_backend.is_none() && self.config.stop_repeated_observations {
                     self.repeat_guard.observe(&observed_call, &observed_result)
                 } else {
+                    // A different preflight-only attempt also breaks a denial
+                    // sequence; unavailable probes do not supply observations.
+                    self.repeat_guard.reset();
                     RepeatedObservation::Fresh
                 };
 
@@ -5268,12 +5349,14 @@ impl SessionRuntime {
                 let repeated_stop = unavailable_attempt_stop.or_else(|| match repeat {
                     RepeatedObservation::Fresh => None,
                     RepeatedObservation::Nudge { count } => {
-                        let hint = if let Some(backend) = unavailable_backend {
+                        let hint = if let Some(denial) = &permission_denial {
+                            format!("\n\n[permission denied] Tool `{name}` was refused for the same operation and permission reason ({}) {count} times in a row. No invocation ran. Do not retry cosmetic variants; use permitted tools or report the verification blocker. One more equivalent denial stops the turn. Permissions are freshly checked on every attempt; a changed target or matching structured grant starts a new sequence.", denial.reason)
+                        } else if let Some(backend) = unavailable_backend {
                             format!("\n\n[backend unavailable] Tool `{name}` freshly reported backend `{backend}` unavailable {count} times in a row. Changing queries cannot restore it: use another source or arrange backend setup. Another unavailable observation stops the turn; every retry still executes and rechecks availability.")
                         } else {
                             repeated_observation_hint(count)
                         };
-                        let warning = if unavailable_backend.is_some() {
+                        let warning = if unavailable_backend.is_some() || permission_denial.is_some() {
                             hint.trim().to_string()
                         } else {
                             format!("tool `{name}` returned the same result for the same input {count} times in a row; nudging a change of approach")
@@ -5285,7 +5368,13 @@ impl SessionRuntime {
                     // Frozen at the trip: tool, outcome, count and fingerprints of
                     // the observation that tripped, not of anything later.
                     RepeatedObservation::Stop { count } => {
-                        Some(if let Some(backend) = unavailable_backend {
+                        Some(if let Some(denial) = &permission_denial {
+                            NoProgressDiagnostic::PermissionDenied {
+                                tool: name.clone(),
+                                reason: denial.reason.to_string(),
+                                count,
+                            }
+                        } else if let Some(backend) = unavailable_backend {
                             NoProgressDiagnostic::BackendUnavailable {
                                 tool: name.clone(),
                                 backend: backend.to_string(),
@@ -5333,13 +5422,10 @@ impl SessionRuntime {
                 // it (the wire contract needs one result per tool_use) and stop
                 // before any further dispatch or provider request.
                 if let Some(diagnostic) = repeated_stop {
-                    let skipped_reason = if matches!(
-                        diagnostic,
-                        NoProgressDiagnostic::BackendUnavailableAttempt { .. }
-                    ) {
-                        "skipped: the turn stopped after repeated attempts to use an unavailable backend"
-                    } else {
-                        "skipped: the turn stopped because the same call kept returning the same result"
+                    let skipped_reason = match diagnostic {
+                        NoProgressDiagnostic::PermissionDenied { .. } => "skipped: the turn stopped after repeated equivalent permission denials; this call was not executed",
+                        NoProgressDiagnostic::BackendUnavailableAttempt { .. } => "skipped: the turn stopped after repeated attempts to use an unavailable backend",
+                        _ => "skipped: the turn stopped because the same call kept returning the same result",
                     };
                     for (skip_id, _, _, _) in &calls[call_index + 1..] {
                         self.append(tool_error_message(skip_id, skipped_reason));

@@ -55,7 +55,7 @@ pub use image::{
     ImageLoadError, LoadedImage, MAX_IMAGE_BASE64_BYTES,
 };
 pub use localpilot_core::ToolOutcome;
-pub use registry::{ToolDispatchResult, ToolRegistry};
+pub use registry::{PermissionDenial, ToolDispatchResult, ToolRegistry};
 pub use repair::{
     evaluate as evaluate_tool_input, is_repair_eligible, parse_stringified_json,
     unwrap_markdown_autolink, wrap_bare_string_as_array, RepairOutcome, RepairRequest,

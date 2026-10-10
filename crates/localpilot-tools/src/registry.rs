@@ -53,6 +53,16 @@ pub struct ToolDispatchResult {
     pub mutation_may_have_run: bool,
     /// Fresh backend absence reported by the invoked tool, never parsed from text.
     pub unavailable_backend: Option<&'static str>,
+    /// Pre-invoke permission refusal, separate from the model-facing result.
+    pub permission_denial: Option<PermissionDenial>,
+}
+
+/// Fresh permission evidence. Human guidance has crossed the redaction boundary.
+pub struct PermissionDenial {
+    pub reason: &'static str,
+    /// Internal identity only; persisted diagnostics must not expose inputs.
+    pub retry_identity: Value,
+    pub human_guidance: String,
 }
 
 impl ToolDispatchResult {
@@ -63,6 +73,7 @@ impl ToolDispatchResult {
             touches: Vec::new(),
             mutation_may_have_run: false,
             unavailable_backend: None,
+            permission_denial: None,
         }
     }
 }
@@ -286,6 +297,60 @@ impl ToolRegistry {
             .await
     }
 
+    /// Check headless model permission without invoking the tool or prompting.
+    /// This is a snapshot for evaluation setup, not an execution grant: actual
+    /// dispatch still rechecks every effect and the current authority.
+    ///
+    /// # Errors
+    /// Returns a redacted setup explanation when an effect cannot run headlessly.
+    pub fn check_headless_permissions(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext<'_>,
+        engine: &PermissionEngine,
+    ) -> Result<(), String> {
+        let tool = self
+            .get(&call.name)
+            .ok_or_else(|| format!("unknown tool: {}", call.name))?;
+        let engine = engine.resolved();
+        let command = tool.exact_command(&call.input);
+        let vetted = command
+            .as_ref()
+            .is_some_and(|command| engine.allows_command(command));
+        let contract = tool.contract();
+        let force_confirm = !matches!(engine.profile(), Profile::Bypass | Profile::Unrestricted)
+            && (matches!(contract.reversibility, Reversibility::Irreversible)
+                || matches!(contract.confirmation, Confirmation::Always));
+        let effects = tool
+            .effects(&call.input, ctx)
+            .map_err(|error| redact(&error.to_string()))?;
+        for effect in effects {
+            let request = PermissionRequest {
+                tool: tool.name().to_string(),
+                effect,
+                interactivity: localpilot_sandbox::Interactivity::NonInteractive,
+                trusted: ctx.trusted,
+                detail: tool.approval_detail(&call.input),
+            };
+            if engine.decide_command(&request, command.as_ref()) != Decision::Allow {
+                return Err(redact(&denial_message(
+                    tool.name(),
+                    &request,
+                    &engine,
+                    command.as_ref(),
+                    true,
+                )));
+            }
+            if force_confirm && !vetted {
+                return Err(format!(
+                    "{} requires interactive confirmation without an existing command grant",
+                    tool.name()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Dispatch a shell action the user explicitly authored. The submitted
     /// command-risk effect is already confirmed; the permission engine still
     /// decides every effect, retains denial, and can ask for separate protected
@@ -410,13 +475,36 @@ impl ToolRegistry {
                 Decision::Deny => false,
             };
             if !allowed {
-                return ToolDispatchResult::plain(unusable_result(
+                let human_guidance =
+                    denial_message(tool.name(), &request, engine, command.as_ref(), true);
+                let model_message =
+                    denial_message(tool.name(), &request, engine, command.as_ref(), false);
+                let mut dispatch = ToolDispatchResult::plain(unusable_result(
                     tool.name(),
                     &call.id,
-                    &denial_message(tool.name(), &request, engine, command.as_ref()),
+                    if intent == DispatchIntent::UserShell {
+                        &human_guidance
+                    } else {
+                        &model_message
+                    },
                     ctx,
                     self.context_output_bytes,
                 ));
+                dispatch.permission_denial = Some(PermissionDenial {
+                    reason: permission_denial_kind(&request, engine, command.as_ref()),
+                    retry_identity: serde_json::json!({ "target": tool.permission_denial_target(&call.input), "policy": format!(
+                        "{:?}:{:?}:{}:{}:{:?}:{:?}:{}",
+                        request.effect,
+                        engine.profile(),
+                        request.trusted,
+                        engine.incognito(),
+                        engine.lease_denial(),
+                        engine.decide_command(&request, command.as_ref()),
+                        vetted
+                    ) }),
+                    human_guidance: redact(&human_guidance),
+                });
+                return dispatch;
             }
             if matches!(effect, Effect::RunCommand(_) | Effect::UnscopedCommand) {
                 confirmed = true;
@@ -454,6 +542,7 @@ impl ToolRegistry {
                     touches: output.touches,
                     mutation_may_have_run,
                     unavailable_backend: output.unavailable_backend,
+                    permission_denial: None,
                 }
             }
             Err(err) => ToolDispatchResult {
@@ -480,6 +569,37 @@ fn redact_presentation(presentation: ToolOutputPresentation) -> ToolOutputPresen
     }
 }
 
+fn permission_denial_kind(
+    request: &PermissionRequest,
+    engine: &PermissionEngine,
+    command: Option<&ExactCommand>,
+) -> &'static str {
+    if engine.lease_denial().is_some()
+        && command.is_none_or(|command| !engine.allows_command(command))
+        && matches!(
+            request.effect,
+            Effect::WritePath { .. }
+                | Effect::ScratchPath { write: true, .. }
+                | Effect::RunCommand(_)
+                | Effect::UnscopedCommand
+        )
+    {
+        "readonly_lease"
+    } else if request.effect.is_outside_workspace() {
+        "outside_workspace"
+    } else if !request.trusted {
+        "untrusted_workspace"
+    } else if engine.incognito() && request.effect.may_create_files() {
+        "incognito_confirmation"
+    } else if request.effect == Effect::UnscopedCommand {
+        "opaque_command"
+    } else if engine.profile() == Profile::ReadOnly {
+        "readonly_profile"
+    } else {
+        "approval_required_or_declined"
+    }
+}
+
 /// The single exit for every result the model sees without the tool having
 /// produced a normal output: tool errors and the registry's own synthesized
 /// refusals (unknown tool, effects error, denial, gate block). An error is
@@ -501,14 +621,35 @@ fn unusable_result(
     )
 }
 
-/// The model-visible text for a denied tool call. An out-of-workspace path
-/// denial names the target and every way the user can grant the access, so it
-/// is an actionable answer instead of a dead end.
+/// Two audiences share the factual reason, but only the user gets grant setup.
 fn denial_message(
     tool: &str,
     request: &PermissionRequest,
     engine: &PermissionEngine,
     command: Option<&ExactCommand>,
+    human_guidance: bool,
+) -> String {
+    let mut message = denial_reason(tool, request, engine, command, human_guidance);
+    if !human_guidance {
+        message.push_str(" This call was not executed. This operation is not permitted in the current session; cosmetic retries cannot change that. Use permitted file tools or another permitted operation, and report any verification you could not perform. Permission changes require the user; do not edit permission settings or request unrestricted execution yourself.");
+        if command.is_none()
+            && matches!(
+                request.effect,
+                Effect::RunCommand(_) | Effect::UnscopedCommand
+            )
+        {
+            message.push_str(" If the user has already granted an exact command, use its matching structured program and args; a free-text command cannot match that grant.");
+        }
+    }
+    message
+}
+
+fn denial_reason(
+    tool: &str,
+    request: &PermissionRequest,
+    engine: &PermissionEngine,
+    command: Option<&ExactCommand>,
+    human_guidance: bool,
 ) -> String {
     let mut message = format!("permission denied for {tool}");
     if let Some(reason) = engine.lease_denial() {
@@ -531,7 +672,11 @@ fn denial_message(
     if let (Some(command), Effect::RunCommand(_)) = (vetted, request.effect) {
         // The grant exists; say what stopped it, so nobody adds it again.
         let reason = if !request.trusted {
-            "the workspace is not trusted (see `localpilot trust`)"
+            if human_guidance {
+                "the workspace is not trusted (see `localpilot trust`)"
+            } else {
+                "the workspace is not trusted"
+            }
         } else if engine.incognito() {
             "an incognito session never runs a command that may leave files behind \
              without a confirmation"
@@ -568,15 +713,21 @@ fn denial_message(
         if !request.detail.is_empty() {
             message.push_str(&format!(" ({})", request.detail));
         }
-        message.push_str(
-            ": the path is outside the workspace. The user can approve the prompt in an \
+        message.push_str(": the path is outside the workspace.");
+        if human_guidance {
+            message.push_str(
+                " The user can approve the prompt in an \
              interactive session, grant standing read access by listing the directory in \
              `extra_read_roots` under `[permissions]` in .localpilot.toml, or relaunch with \
              `--permission unrestricted`.",
-        );
+            );
+        }
     }
     if request.effect == Effect::UnscopedCommand {
-        message.push_str(": this command's file targets cannot be inspected. Approve it interactively, vet the exact structured program and argument prefix in user permissions.allow_commands, or explicitly select unrestricted. Bypass does not authorize opaque file targets.");
+        message.push_str(": this command's file targets cannot be inspected. Bypass does not authorize opaque file targets.");
+        if human_guidance {
+            message.push_str(" Approve it interactively, vet the exact structured program and argument prefix in user permissions.allow_commands, or explicitly select unrestricted.");
+        }
     }
     message
 }

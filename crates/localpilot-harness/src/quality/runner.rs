@@ -19,7 +19,8 @@ use std::time::Duration;
 use localpilot_config::redact;
 use localpilot_config::{AutoFix, CheckConfig, RuleSeverity};
 use localpilot_sandbox::{
-    classify, Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionRequest,
+    classify, Approver, Decision, Effect, ExactCommand, Interactivity, PermissionEngine,
+    PermissionRequest,
 };
 use localpilot_tools::kill_process_tree;
 use localx_eval_core::check::{CheckCommand, CheckSpec, CommandGate};
@@ -139,7 +140,11 @@ impl CommandGate for PermissionGate<'_> {
             detail: command_line(command),
         };
         async move {
-            match self.engine.decide(&request) {
+            let exact = ExactCommand {
+                program: command.program.clone(),
+                args: command.args.clone(),
+            };
+            match self.engine.decide_command(&request, Some(&exact)) {
                 Decision::Allow => true,
                 Decision::Deny => false,
                 Decision::Ask => self.approver.approve(&request).await,
@@ -394,6 +399,46 @@ mod tests {
         assert_eq!(to_spec(&cfg).severity, Some(CheckSeverity::Warn));
         cfg.severity = Some(RuleSeverity::Off);
         assert_eq!(to_spec(&cfg).severity, Some(CheckSeverity::Off));
+    }
+
+    #[tokio::test]
+    async fn a_direct_check_uses_the_user_grant_and_keeps_session_floors() {
+        use localpilot_sandbox::AllowedCommand;
+        let dir = tempfile::tempdir().unwrap();
+        let (program, args) = exit_with(0);
+        let entry = AllowedCommand {
+            program: program.clone(),
+            args_prefix: args.clone(),
+        };
+        let approver = ScriptedApprover::new(Vec::new());
+        for (grant, trusted, incognito, expected) in [
+            (false, true, false, CheckStatus::Denied),
+            (true, true, false, CheckStatus::Passed),
+            (true, false, false, CheckStatus::Denied),
+            (true, true, true, CheckStatus::Denied),
+        ] {
+            let engine = PermissionEngine::new(Profile::ReadOnly, Vec::new())
+                .with_incognito(incognito)
+                .with_allowed_commands(if grant {
+                    vec![entry.clone()]
+                } else {
+                    Vec::new()
+                });
+            let runner = CheckRunner::new(
+                &engine,
+                &approver,
+                Interactivity::NonInteractive,
+                trusted,
+                dir.path(),
+            );
+            let result = runner
+                .run(&check(&program, &refs(&args), AutoFix::No, None))
+                .await;
+            assert_eq!(
+                result.status, expected,
+                "grant={grant} trusted={trusted} incognito={incognito}"
+            );
+        }
     }
 
     fn refs(args: &[String]) -> Vec<&str> {

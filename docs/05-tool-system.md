@@ -64,6 +64,23 @@ In each case the answer is "search again for a current locator", never text
 from the same position. A wrong answer wearing a correct-looking id survives
 review; an explained failure does not.
 
+## Permission Refusal Feedback
+
+Registry permission refusals explicitly say that the invocation did not run.
+The model receives the permission boundary and permitted alternatives, including
+reporting checks it could not perform. Human setup instructions are separately
+redacted and exposed through session warnings and `PermissionDecided` event
+records. Explicit user shell keeps those human instructions in its result.
+
+The harness nudges after two consecutive equivalent refusals and stops after
+three (ADR-0226). Identity includes the fresh permission state and complete
+operation target; shell timeout and unused fields do not distinguish a retry.
+Different commands/arguments, targets, execution modes, intervening tool attempts,
+permission changes, steering and new turns start a fresh sequence. Switching to
+an exact structured command that matches an existing user grant remains allowed.
+No permission setting is changed, no attempt is cached or skipped before its
+fresh authorization decision, and refusal is not evidence of an executed write.
+
 ## Purpose
 
 Tools are the only path from model output to local side effects. Every tool call

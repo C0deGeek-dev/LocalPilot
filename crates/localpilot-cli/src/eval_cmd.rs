@@ -70,14 +70,26 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
             runtime.set_automatic_verify_before_done();
         }
     }
+    let verification = runtime.preflight_eval_verification().map_err(|reason| {
+        anyhow::anyhow!("evaluation verification permission preflight failed: {reason}")
+    })?;
+    let problem = verification.map_or_else(
+        || opts.problem.to_string(),
+        |check| verification_problem(opts.problem, &check),
+    );
     let session = runtime.session_id();
 
     // Run the turn; model text is discarded (stdout is reserved for the JSON).
     let (events_tx, _rx) = broadcast::channel(1024);
     let cancel = CancellationToken::new();
     let started = std::time::Instant::now();
-    let _reason = runtime.run_turn(opts.problem, &events_tx, &cancel).await;
+    let _reason = runtime.run_turn(&problem, &events_tx, &cancel).await;
     let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // The snapshot cannot grant future authority: a changed profile/lease or
+    // verifier can still deny the actual check. Such a cell is not a baseline.
+    if runtime.current_turn_verification() == Some(localpilot_harness::CheckStatus::Denied) {
+        anyhow::bail!("evaluation verification permission preflight failed: the actual verifier was denied; restore its permission before comparing capability arms");
+    }
 
     // Capture the produced change as a unified diff (excluding harness bookkeeping).
     git(&cwd, &["add", "-A"])?;
@@ -139,6 +151,17 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
         crate::context_inject::close_out_stderr(&cwd, runtime.session_id());
     }
     Ok(())
+}
+
+fn verification_problem(problem: &str, check: &localpilot_config::CheckConfig) -> String {
+    let operation = serde_json::json!({"program":check.program,"args":check.args}).to_string();
+    if localpilot_config::redact::contains_secret(&operation) {
+        // Never expose configured credentials or present masked arguments as
+        // if they were the same granted command. The host gate retains them.
+        format!("{problem}\n\nEvaluation test operation was permission-checked but has not run. Its configured arguments contain sensitive values, so use the automatic verification gate and report any checks you cannot perform yourself.")
+    } else {
+        format!("{problem}\n\nEvaluation test operation (permissions checked; not executed): use run_shell with {operation} to verify. Report the actual result; do not substitute cosmetic command variants.")
+    }
 }
 
 /// Grade the run with the optional `--test` command (exit 0 = passed). With no
@@ -203,4 +226,21 @@ fn git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod permission_tests {
+    #[test]
+    fn configured_verifier_credentials_are_not_exposed_to_the_model() {
+        let check = localpilot_harness::resolve_verify_check(
+            std::path::Path::new("."),
+            Some("python test.py sk-test-0123456789abcdefgh"),
+        )
+        .expect("a configured direct command");
+        let prompt = super::verification_problem("task", &check);
+        assert!(!prompt.contains("sk-test-"));
+        assert!(!prompt.contains("[REDACTED]"));
+        assert!(prompt.contains("automatic verification gate"));
+    }
 }

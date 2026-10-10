@@ -1155,6 +1155,44 @@ Inspectable external paths remain gated even with a command grant. The root is
 released at session teardown; crashes or filesystem cleanup failures can leave
 orphan directories. See [security and privacy](07-security-and-privacy.md).
 
+### Permission Posture For Capability Evaluations
+
+LocalBench retains `--permission bypass`. That profile still refuses opaque
+command targets headlessly. Give the exact test operation a narrow grant in
+**user** permissions config; a project cannot grant itself execution. For a
+unittest fixture, the user config can contain:
+
+```toml
+[[permissions.allow_commands]]
+program = "python"
+args_prefix = ["-m", "unittest", "discover", "-s", "tests"]
+```
+
+Select that same direct operation in the fixture's project config:
+
+```toml
+[harness]
+verify_command = "python -m unittest discover -s tests"
+```
+
+These examples permit that argument prefix across workspaces; choose grants
+appropriate to the fixture set and record the same grants/profile across arms.
+A literal model `command` still cannot match an exact structured grant. Eval
+preflights the detected/configured test operation through the headless model
+tool gate before requesting the model or staging/grading a diff. The preflight
+runs nothing and grants nothing; it gives the model the matching `program`/`args`
+operation. Automatic quality checks also match existing direct command grants,
+retaining the engine's trust, incognito and lease decisions. A preflight snapshot
+cannot waive later authorization: an actual denied verifier also invalidates eval.
+
+The eval `--test` command is external grading; a passing grader does not prove
+in-agent test access. A permission-denied eval emits no capability scorecard.
+LocalBench aborts the comparison with a setup diagnostic instead of persisting
+an unsolved cell. Correct the user grant/verification target and rerun affected
+baselines. A temporary workspace or isolated grader does not isolate the solver.
+Explicit unrestricted evaluation remains available to operators who intend that
+authority; it is not the LocalBench default.
+
 ### `[quota]`
 
 | Key | Type | Default | Meaning |

@@ -402,6 +402,7 @@ struct Readback {
     executed: usize,
     tool_uses: Vec<String>,
     results: Vec<(String, String)>,
+    warnings: Vec<String>,
 }
 
 async fn run(mut runtime: SessionRuntime, dir: &tempfile::TempDir) -> Readback {
@@ -409,9 +410,13 @@ async fn run(mut runtime: SessionRuntime, dir: &tempfile::TempDir) -> Readback {
     let cancel = CancellationToken::new();
     let reason = runtime.run_turn("go", &events, &cancel).await;
     let mut executed = 0;
+    let mut warnings = Vec::new();
     while let Ok(event) = rx.try_recv() {
         if matches!(event, RuntimeEvent::ToolFinished { .. }) {
             executed += 1;
+        }
+        if let RuntimeEvent::Warning(warning) = event {
+            warnings.push(warning);
         }
     }
     let session = runtime.session_id();
@@ -444,6 +449,7 @@ async fn run(mut runtime: SessionRuntime, dir: &tempfile::TempDir) -> Readback {
         executed,
         tool_uses,
         results,
+        warnings,
     }
 }
 
@@ -459,6 +465,10 @@ fn identical_calls(name: &str, input: &Value, count: usize) -> FakeProvider {
 async fn three_identical_failing_commands_stop_on_the_third() {
     let provider = identical_calls("run_shell", &json!({ "command": "exit 7" }), 6);
     let (runtime, dir) = build(provider, ToolRegistry::with_builtins(), default_rail(), &[]);
+    // Exercise an actual exit failure, rather than bypass's opaque-code denial.
+    runtime
+        .permission_engine_handle()
+        .set(PermissionEngine::new(Profile::Unrestricted, Vec::new()));
     let r = run(runtime, &dir).await;
 
     assert_eq!(r.reason, StopReason::NoProgress);
@@ -663,4 +673,370 @@ async fn the_same_image_and_description_three_times_stops() {
 
     assert_eq!(r.reason, StopReason::NoProgress);
     assert_eq!(r.executed, 3);
+}
+
+// #233: every attempt crosses the permission gate, but timeout/JSON changes
+// cannot turn the same refused operation into progress.
+#[tokio::test]
+async fn equivalent_opaque_denials_nudge_then_stop_without_execution() {
+    let mut provider = FakeProvider::new();
+    for i in 0..6 {
+        provider = provider.tool_call(
+            &format!("d{i}"),
+            "run_shell",
+            json!({"command":"python -m unittest", "timeout_secs":i+1}),
+        );
+    }
+    let (runtime, dir) = build(
+        provider.text("done"),
+        ToolRegistry::with_builtins(),
+        default_rail(),
+        &[],
+    );
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::NoProgress);
+    assert_eq!(r.executed, 3);
+    assert!(r
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("Approve it interactively")
+            && warning.contains("permissions.allow_commands")));
+    assert_eq!(
+        r.detail.as_deref(),
+        Some(r#"signal=permission_denied tool="run_shell" reason="opaque_command" count=3"#)
+    );
+    assert!(!r.results[0].1.contains("[permission denied]"));
+    assert!(r.results[1].1.contains("[permission denied]"));
+    assert!(r
+        .results
+        .iter()
+        .all(|(_, text)| text.contains("This call was not executed")));
+    let records = Store::open(dir.path())
+        .read_events(Store::open(dir.path()).list_sessions().unwrap()[0].id)
+        .unwrap();
+    assert_eq!(records.iter().filter(|e| matches!(&e.kind, SessionEventKind::PermissionDecided { decision, detail, .. } if decision == "denied" && detail.contains("Approve it interactively"))).count(), 3);
+}
+
+#[tokio::test]
+async fn different_opaque_commands_and_interleaved_tools_reset_denial_count() {
+    let mut provider = FakeProvider::new();
+    for (i, command) in [
+        "python -m unittest",
+        "python -m unittest",
+        "python -m pytest",
+        "python -m pytest",
+        "python ./other_tests.py",
+        "python ./other_tests.py",
+    ]
+    .iter()
+    .enumerate()
+    {
+        provider = provider.tool_call(&format!("d{i}"), "run_shell", json!({"command":command}));
+    }
+    provider = provider.tool_call("read", "read_file", json!({"path":"note.txt"}));
+    provider = provider.tool_call(
+        "d6",
+        "run_shell",
+        json!({"command":"python ./other_tests.py"}),
+    );
+    let (runtime, dir) = build(
+        provider.text("done"),
+        ToolRegistry::with_builtins(),
+        default_rail(),
+        &[("note.txt", "progress")],
+    );
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert_eq!(r.executed, 8);
+    assert!(!r.results.last().unwrap().1.contains("[permission denied]"));
+}
+
+#[tokio::test]
+async fn matching_structured_grant_runs_after_two_shell_denials() {
+    use localpilot_sandbox::AllowedCommand;
+    let provider = FakeProvider::new()
+        .tool_call("d0", "run_shell", json!({"command":"cargo --version"}))
+        .tool_call(
+            "d1",
+            "run_shell",
+            json!({"command":"cargo --version", "timeout_secs":1}),
+        )
+        .tool_call(
+            "corrected",
+            "run_shell",
+            json!({"program":"cargo", "args":["--version"]}),
+        )
+        .text("done");
+    let (runtime, dir) = build(provider, ToolRegistry::with_builtins(), default_rail(), &[]);
+    runtime.permission_engine_handle().set(
+        PermissionEngine::new(Profile::ReadOnly, Vec::new()).with_allowed_commands(vec![
+            AllowedCommand {
+                program: "cargo".to_string(),
+                args_prefix: vec!["--version".to_string()],
+            },
+        ]),
+    );
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert_eq!(r.executed, 3);
+    assert!(r.results[1].1.contains("[permission denied]"));
+    assert!(r.results[2].1.contains("exit: 0"), "{}", r.results[2].1);
+    assert!(!r.results[2].1.contains("[permission denied]"));
+}
+
+#[tokio::test]
+async fn denied_file_targets_are_distinct() {
+    let mut provider = FakeProvider::new();
+    for path in ["one.txt", "one.txt", "two.txt", "two.txt", "three.txt"] {
+        provider = provider.tool_call(path, "write_file", json!({"path":path, "content":"denied"}));
+    }
+    let (runtime, dir) = build(
+        provider.text("done"),
+        ToolRegistry::with_builtins(),
+        default_rail(),
+        &[],
+    );
+    runtime
+        .permission_engine_handle()
+        .set(PermissionEngine::new(Profile::ReadOnly, Vec::new()));
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert!(!dir.path().join("one.txt").exists());
+    assert!(!r.results[2].1.contains("[permission denied]"));
+}
+
+#[tokio::test]
+async fn denial_stop_pairs_remaining_calls_in_a_batch() {
+    let mut calls = (0..5)
+        .map(|i| {
+            Ok(ModelEvent::ToolCall {
+                id: format!("d{i}"),
+                name: "run_shell".to_string(),
+                input_json: json!({"command":"python -m unittest", "timeout_secs":i+1}),
+                provider_metadata: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    calls.push(Ok(ModelEvent::Done));
+    let provider = FakeProvider::new().script(calls).text("done");
+    let (runtime, dir) = build(provider, ToolRegistry::with_builtins(), default_rail(), &[]);
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::NoProgress);
+    assert_eq!(r.executed, 3);
+    assert_eq!(r.tool_uses.len(), 5);
+    assert_eq!(r.results.len(), 5);
+    assert!(r.results[3..]
+        .iter()
+        .all(|(_, text)| text.contains("repeated equivalent permission denials")));
+}
+
+#[tokio::test]
+async fn replay_opt_out_preserves_equivalent_denied_attempts() {
+    let mut provider = FakeProvider::new();
+    for i in 0..5 {
+        provider = provider.tool_call(
+            &format!("d{i}"),
+            "run_shell",
+            json!({"command":"python -m unittest", "timeout_secs":i+1}),
+        );
+    }
+    let config = SessionConfig {
+        stop_repeated_observations: false,
+        ..default_rail()
+    };
+    let (runtime, dir) = build(
+        provider.text("done"),
+        ToolRegistry::with_builtins(),
+        config,
+        &[],
+    );
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert_eq!(r.executed, 5);
+}
+
+#[tokio::test]
+async fn a_preflight_only_backend_attempt_breaks_the_denial_sequence() {
+    let provider = FakeProvider::new()
+        .tool_call("d0", "run_shell", json!({"command":"python -m unittest"}))
+        .tool_call(
+            "d1",
+            "run_shell",
+            json!({"command":"python -m unittest", "timeout_secs":1}),
+        )
+        .tool_call("absent", "knowledge_search", json!({"query":"anything"}))
+        .tool_call(
+            "d2",
+            "run_shell",
+            json!({"command":"python -m unittest", "timeout_secs":2}),
+        )
+        .text("done");
+    let mut registry = ToolRegistry::with_builtins();
+    registry.register(Box::new(localpilot_localmind::KnowledgeSearch));
+    let (runtime, dir) = build(provider, registry, default_rail(), &[]);
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert!(!r.results[3].1.contains("[permission denied]"));
+}
+
+#[tokio::test]
+async fn every_equivalent_retry_rechecks_interactive_approval() {
+    let provider = FakeProvider::new()
+        .tool_call("d0", "run_shell", json!({"command":"exit 0"}))
+        .tool_call(
+            "d1",
+            "run_shell",
+            json!({"command":"exit 0", "timeout_secs":1}),
+        )
+        .tool_call(
+            "approved",
+            "run_shell",
+            json!({"command":"exit 0", "timeout_secs":2}),
+        )
+        .text("done");
+    let config = SessionConfig {
+        interactivity: Interactivity::Interactive,
+        ..default_rail()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = SessionRuntime::new(
+        Arc::new(provider),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        Box::new(ScriptedApprover::new(vec![false, false, true])),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        config,
+        Vec::new(),
+    );
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert!(r.results[1].1.contains("[permission denied]"));
+    assert!(r.results[2].1.contains("exit: 0"));
+}
+
+#[test]
+fn eval_preflight_requires_existing_permission_and_never_executes_tests() {
+    use localpilot_sandbox::AllowedCommand;
+    let (mut runtime, dir) = build(
+        FakeProvider::new(),
+        ToolRegistry::with_builtins(),
+        default_rail(),
+        &[],
+    );
+    let command = "python -m unittest discover -s tests";
+    runtime.set_verify_before_done(true, Some(command.to_string()));
+    assert!(runtime
+        .preflight_eval_verification()
+        .unwrap_err()
+        .contains("file targets cannot be inspected"));
+    runtime.permission_engine_handle().set(
+        PermissionEngine::new(Profile::Bypass, Vec::new()).with_allowed_commands(vec![
+            AllowedCommand {
+                program: "python".into(),
+                args_prefix: vec![
+                    "-m".into(),
+                    "unittest".into(),
+                    "discover".into(),
+                    "-s".into(),
+                    "tests".into(),
+                ],
+            },
+        ]),
+    );
+    let check = runtime.preflight_eval_verification().unwrap().unwrap();
+    assert_eq!(check.program, "python");
+    assert_eq!(check.args, ["-m", "unittest", "discover", "-s", "tests"]);
+    assert!(!dir.path().join("__pycache__").exists());
+    // The preflight result is no standing grant: the next snapshot can deny it.
+    runtime
+        .permission_engine_handle()
+        .set(PermissionEngine::new(Profile::Bypass, Vec::new()));
+    assert!(runtime.preflight_eval_verification().is_err());
+}
+
+#[test]
+fn eval_preflight_retains_trust_and_incognito_floors_with_a_grant() {
+    use localpilot_sandbox::AllowedCommand;
+    for (trusted, incognito) in [(false, false), (true, true)] {
+        let config = SessionConfig {
+            trusted,
+            incognito,
+            ..default_rail()
+        };
+        let (mut runtime, _dir) = build(
+            FakeProvider::new(),
+            ToolRegistry::with_builtins(),
+            config,
+            &[],
+        );
+        runtime.set_verify_before_done(
+            true,
+            Some("python -m unittest discover -s tests".to_string()),
+        );
+        let engine = PermissionEngine::new(Profile::Default, Vec::new())
+            .with_incognito(incognito)
+            .with_allowed_commands(vec![AllowedCommand {
+                program: "python".into(),
+                args_prefix: vec!["-m".into(), "unittest".into()],
+            }]);
+        runtime.permission_engine_handle().set(engine);
+        assert!(runtime.preflight_eval_verification().is_err());
+    }
+}
+
+#[test]
+fn eval_preflight_checks_the_detected_target_but_preserves_no_target_answers() {
+    let (mut runtime, _dir) = build(
+        FakeProvider::new(),
+        ToolRegistry::with_builtins(),
+        default_rail(),
+        &[],
+    );
+    std::fs::create_dir(_dir.path().join("tests")).unwrap();
+    std::fs::write(_dir.path().join("tests/test_example.py"), "").unwrap();
+    runtime.set_automatic_verify_before_done();
+    assert!(runtime.preflight_eval_verification().is_err());
+    let (mut runtime, _dir) = build(
+        FakeProvider::new(),
+        ToolRegistry::with_builtins(),
+        default_rail(),
+        &[],
+    );
+    runtime.set_automatic_verify_before_done();
+    assert!(runtime.preflight_eval_verification().unwrap().is_none());
+}
+
+#[test]
+fn eval_test_grant_does_not_grant_an_inspectable_external_target() {
+    use localpilot_sandbox::AllowedCommand;
+    let (mut runtime, _dir) = build(
+        FakeProvider::new(),
+        ToolRegistry::with_builtins(),
+        default_rail(),
+        &[],
+    );
+    runtime.set_verify_before_done(
+        true,
+        Some("python -m unittest discover -s ../foreign".to_string()),
+    );
+    runtime.permission_engine_handle().set(
+        PermissionEngine::new(Profile::Bypass, Vec::new()).with_allowed_commands(vec![
+            AllowedCommand {
+                program: "python".into(),
+                args_prefix: vec![
+                    "-m".into(),
+                    "unittest".into(),
+                    "discover".into(),
+                    "-s".into(),
+                    "../foreign".into(),
+                ],
+            },
+        ]),
+    );
+    assert!(runtime
+        .preflight_eval_verification()
+        .unwrap_err()
+        .contains("outside the workspace"));
 }

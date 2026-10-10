@@ -568,8 +568,8 @@ async fn out_of_workspace_read_is_grantable_interactively_and_denial_is_actionab
     assert!(!approved.is_error(), "{}", approved.output);
     assert!(approved.output.contains("notes.md"));
 
-    // A refusal denies with an actionable message: it names every way the
-    // user can grant the access instead of a bare "permission denied".
+    // Model guidance reports the boundary and a usable alternative; only the
+    // host projection tells the user how to grant access.
     let refused = dispatch(
         &registry,
         "list_files",
@@ -582,8 +582,44 @@ async fn out_of_workspace_read_is_grantable_interactively_and_denial_is_actionab
     assert!(refused.is_error());
     assert!(refused.output.contains("permission denied"));
     assert!(refused.output.contains("outside the workspace"));
-    assert!(refused.output.contains("extra_read_roots"));
-    assert!(refused.output.contains("--permission unrestricted"));
+    assert!(refused.output.contains("This call was not executed"));
+    assert!(!refused.output.contains("extra_read_roots"));
+    assert!(!refused.output.contains("--permission unrestricted"));
+}
+
+#[tokio::test]
+async fn opaque_denials_separate_model_alternatives_from_user_grant_guidance() {
+    let (dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let call = ToolCall::new(
+        ToolUseId::from("denied"),
+        "run_shell",
+        json!({"command":"python -c \"open('should-not-exist', 'w').write('bad')\""}),
+    );
+    let context = ctx(&ws, Interactivity::NonInteractive, true);
+    let engine = bypass_engine();
+    let approver = ScriptedApprover::always();
+    let dispatch = registry
+        .dispatch_detailed(&call, &context, &engine, &approver)
+        .await;
+    assert!(dispatch.result.is_error());
+    assert!(!dispatch.mutation_may_have_run);
+    assert!(dispatch.touches.is_empty());
+    assert!(!dir.path().join("should-not-exist").exists());
+    assert!(dispatch
+        .result
+        .output
+        .contains("file targets cannot be inspected"));
+    assert!(dispatch.result.output.contains("Use permitted file tools"));
+    assert!(dispatch.result.output.contains("report any verification"));
+    assert!(!dispatch.result.output.contains("Approve it interactively"));
+    let denial = dispatch.permission_denial.unwrap();
+    assert!(denial.human_guidance.contains("Approve it interactively"));
+    assert!(denial.human_guidance.contains("permissions.allow_commands"));
+    let user = registry
+        .dispatch_user_shell_detailed(&call, &context, &engine, &approver)
+        .await;
+    assert!(user.result.output.contains("Approve it interactively"));
 }
 
 #[tokio::test]

@@ -490,6 +490,19 @@ impl Tool for RunShell {
     fn schema(&self) -> Value {
         schema_for::<RunShellInput>()
     }
+    fn permission_denial_target(&self, input: &Value) -> Value {
+        let Ok(input) = parse_input(input).and_then(normalize_run_shell_input) else {
+            return input.clone();
+        };
+        // Preserve mode and all execution arguments: a structured correction
+        // can match a grant; another interpreter or argument can change targets.
+        match input.execution {
+            RunShellExecution::Direct { program, args } => {
+                serde_json::json!({"program":program,"args":args})
+            }
+            RunShellExecution::Shell { command } => serde_json::json!({"command":command}),
+        }
+    }
     fn effects(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
         let input: RunShellInput = parse_input(input)?;
         let input = normalize_run_shell_input(input)?;
