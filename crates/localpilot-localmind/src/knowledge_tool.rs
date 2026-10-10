@@ -74,6 +74,18 @@ impl Tool for KnowledgeSearch {
         serde_json::to_value(schemars::schema_for!(KnowledgeSearchInput)).unwrap_or(Value::Null)
     }
 
+    fn unavailable_backend(
+        &self,
+        workspace: &localpilot_sandbox::Workspace,
+    ) -> Option<localpilot_tools::UnavailableBackend> {
+        let root = workspace.root();
+        (!crate::ingest::has_chunk_index(root) && !crate::span_store::has_span_index(root))
+            .then(|| localpilot_tools::UnavailableBackend {
+                key: "project_knowledge_indexes",
+                reason: "no indexed project knowledge yet; use workspace read/search tools, or run `localpilot ingest` to build the index".to_string(),
+            })
+    }
+
     fn approval_detail(&self, input: &Value) -> String {
         input
             .get("query")
@@ -275,6 +287,7 @@ mod tests {
         assert!(!out.is_error(), "a missing index must not be an error");
         assert!(out.text.contains("no indexed project knowledge"));
         assert_eq!(out.unavailable_backend, Some("project_knowledge_indexes"));
+        assert!(KnowledgeSearch.unavailable_backend(&ws).is_some());
     }
 
     #[tokio::test]
@@ -304,6 +317,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.unavailable_backend, None);
+        assert!(KnowledgeSearch.unavailable_backend(&ws).is_none());
         assert!(
             out.text.contains("marker.rs"),
             "restored index must actually be queried: {}",
@@ -330,6 +344,7 @@ mod tests {
 
         assert!(!out.is_error(), "a corrupt index must not break the turn");
         assert_eq!(out.unavailable_backend, None);
+        assert!(KnowledgeSearch.unavailable_backend(&ws).is_none());
         assert!(
             out.text.contains("unreadable"),
             "a corrupt index must be reported distinctly, got: {}",
@@ -489,5 +504,21 @@ mod tests {
                 secret_like: false
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn a_span_only_index_keeps_empty_searches_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        drop(crate::SpanStore::open(dir.path()).unwrap());
+        assert!(!crate::ingest::has_chunk_index(dir.path()));
+        assert!(KnowledgeSearch.unavailable_backend(&ws).is_none());
+        let out = KnowledgeSearch
+            .invoke(json!({"query":"no matching span"}), &context(&ws))
+            .await
+            .unwrap();
+        assert!(!out.is_error());
+        assert_eq!(out.unavailable_backend, None);
+        assert!(out.text.contains("no knowledge-base matches"));
     }
 }

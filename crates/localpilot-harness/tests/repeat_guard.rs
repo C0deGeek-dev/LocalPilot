@@ -145,6 +145,127 @@ async fn scripted_replay_opt_out_also_preserves_unavailable_observations() {
     assert_eq!(calls.load(Ordering::SeqCst), 5);
 }
 
+// #234: unrelated work remains allowed while absent queries never execute.
+// Use the real knowledge tool, not a text-matching fixture.
+#[tokio::test]
+async fn stale_knowledge_queries_interleaved_with_progress_do_not_stop_the_turn() {
+    let mut provider = FakeProvider::new();
+    for i in 0..123 {
+        provider = provider
+            .tool_call(
+                &format!("missing{i}"),
+                "knowledge_search",
+                json!({"query":format!("different{i}")}),
+            )
+            .tool_call(&format!("poll{i}"), "poll", json!({}));
+    }
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(localpilot_localmind::KnowledgeSearch));
+    registry.register(Box::new(PollTool {
+        calls: AtomicUsize::new(0),
+    }));
+    let config = SessionConfig {
+        tool_call_budget: Some(300),
+        tool_call_budget_max: Some(300),
+        tool_budget_explicit: true,
+        ..default_rail()
+    };
+    let (runtime, dir) = build(provider.text("finished"), registry, config, &[]);
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert_eq!(r.executed, 246);
+    assert_eq!(
+        r.results
+            .iter()
+            .filter(|(_, text)| text.contains("no indexed project knowledge"))
+            .count(),
+        123
+    );
+    assert!(r
+        .results
+        .iter()
+        .filter(|(id, _)| id.starts_with("missing"))
+        .all(|(_, text)| text.contains("was not executed")));
+}
+
+#[tokio::test]
+async fn consecutive_stale_knowledge_queries_stop_without_execution() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(localpilot_localmind::KnowledgeSearch));
+    let mut provider = FakeProvider::new();
+    for i in 0..123 {
+        provider = provider.tool_call(
+            &format!("missing{i}"),
+            "knowledge_search",
+            json!({"query":format!("different{i}")}),
+        );
+    }
+    let (runtime, dir) = build(provider.text("finished"), registry, default_rail(), &[]);
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::NoProgress);
+    assert_eq!(r.executed, 3);
+    assert_eq!(
+        r.detail.as_deref(),
+        Some(
+            r#"signal=backend_unavailable_attempt tool="knowledge_search" backend="project_knowledge_indexes" count=3"#
+        )
+    );
+}
+
+#[tokio::test]
+async fn stale_knowledge_queries_interleaved_with_empty_searches_do_not_stop_the_turn() {
+    let mut provider = FakeProvider::new();
+    for i in 0..123 {
+        provider = provider
+            .tool_call(
+                &format!("missing{i}"),
+                "knowledge_search",
+                json!({"query":format!("different{i}")}),
+            )
+            .tool_call(
+                &format!("empty{i}"),
+                "search_text",
+                json!({"path":"f.txt", "query":format!("absent{i}")}),
+            );
+    }
+    let mut registry = ToolRegistry::with_builtins();
+    registry.register(Box::new(localpilot_localmind::KnowledgeSearch));
+    let config = SessionConfig {
+        tool_call_budget: Some(300),
+        tool_call_budget_max: Some(300),
+        tool_budget_explicit: true,
+        ..default_rail()
+    };
+    let (runtime, dir) = build(
+        provider.text("finished"),
+        registry,
+        config,
+        &[("f.txt", "x\n")],
+    );
+    let r = run(runtime, &dir).await;
+    assert_eq!(r.reason, StopReason::Done);
+    assert_eq!(r.executed, 246);
+    assert_eq!(
+        r.results
+            .iter()
+            .filter(|(_, text)| text == "tool: search_text\nstatus: success\noutput:\n")
+            .count(),
+        123
+    );
+    assert_eq!(
+        r.results
+            .iter()
+            .filter(|(_, text)| text.contains("no indexed project knowledge"))
+            .count(),
+        123
+    );
+    assert!(r
+        .results
+        .iter()
+        .filter(|(id, _)| id.starts_with("missing"))
+        .all(|(_, text)| text.contains("was not executed")));
+}
+
 /// A tool whose output changes on every call, like polling a job that advances.
 struct PollTool {
     calls: AtomicUsize,

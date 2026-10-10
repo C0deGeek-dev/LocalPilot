@@ -1102,6 +1102,11 @@ enum NoProgressDiagnostic {
         backend: String,
         count: usize,
     },
+    BackendUnavailableAttempt {
+        tool: String,
+        backend: String,
+        count: usize,
+    },
 }
 
 /// Map the detector's typed signal (plus the tool that produced it) to a
@@ -1127,6 +1132,17 @@ fn no_progress_diagnostic(signal: NoProgressSignal, tool: &str) -> Option<NoProg
 /// the appended synthetic User message, and the persisted `TurnEnded.detail`.
 fn no_progress_notice(diagnostic: &NoProgressDiagnostic) -> (String, String) {
     let detail = match diagnostic {
+        NoProgressDiagnostic::BackendUnavailableAttempt {
+            tool,
+            backend,
+            count,
+        } => {
+            let tool = serde_json::Value::String(tool.clone());
+            let backend = serde_json::Value::String(backend.clone());
+            format!(
+                "signal=backend_unavailable_attempt tool={tool} backend={backend} count={count}"
+            )
+        }
         NoProgressDiagnostic::StuckRepeat { tool, count } => {
             // Infallible JSON-string encoding of the tool name, so every stuck
             // detail is guaranteed to use the frozen `tool="…"` form.
@@ -1349,6 +1365,8 @@ pub struct SessionRuntime {
     /// full registry every turn (today's behaviour, the rollback path). When set,
     /// the per-turn tool specs are narrowed to the broker's working set.
     broker: Option<Broker>,
+    /// Refused preflight attempts, distinct from actual tool observations.
+    unavailable_attempts: std::collections::HashMap<(String, &'static str), usize>,
     /// Long-running processes started by `run_background` this session. In-memory
     /// and session-scoped: every child is killed when the session closes (or this
     /// runtime drops), so no background server outlives the session.
@@ -1507,6 +1525,7 @@ impl SessionRuntime {
             prompter: None,
             peers: None,
             broker: None,
+            unavailable_attempts: std::collections::HashMap::new(),
             background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
             registry: None,
             image_support_override: None,
@@ -1726,6 +1745,7 @@ impl SessionRuntime {
     /// runs and the model retries. `None` when no broker is installed or the tool
     /// is already advertised (dispatch normally).
     fn broker_reresolution(&self, name: &str) -> Option<localpilot_tools::Resolution> {
+        self.refresh_backend_availability();
         let broker = self.broker.as_ref()?;
         if broker.is_advertised(name) {
             return None;
@@ -1737,6 +1757,7 @@ impl SessionRuntime {
     /// reveal the best unadvertised matches before the next request is built.
     /// A no-op without a broker, when disabled, or for an answer-only turn.
     fn reveal_for_request(&mut self, text: &str) {
+        self.refresh_backend_availability();
         if !self.config.tool_prompt_reveal || self.config.answer_only {
             return;
         }
@@ -1765,6 +1786,7 @@ impl SessionRuntime {
         text: &str,
         events: &broadcast::Sender<RuntimeEvent>,
     ) -> Vec<String> {
+        self.refresh_backend_availability();
         if !self.config.tool_marker_enabled || self.config.answer_only {
             return Vec::new();
         }
@@ -2931,6 +2953,7 @@ impl SessionRuntime {
         *monotone_diagnostic = None;
         self.error_breaker.reset();
         self.repeat_guard.reset();
+        self.unavailable_attempts.clear();
         self.tool_failure_guard.reset();
     }
 
@@ -3326,7 +3349,13 @@ impl SessionRuntime {
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        let specs = self.tools.advertised_specs();
+        let unavailable = self.refresh_backend_availability();
+        let specs = self
+            .tools
+            .advertised_specs()
+            .into_iter()
+            .filter(|(name, _, _)| !unavailable.iter().any(|(blocked, _)| blocked == name))
+            .collect::<Vec<_>>();
         let to_spec =
             |(name, description, input_schema): (&str, &str, serde_json::Value)| ToolSpec {
                 name: name.to_string(),
@@ -3360,6 +3389,14 @@ impl SessionRuntime {
             }
         }
         ordered.into_iter().map(to_spec).collect()
+    }
+
+    fn refresh_backend_availability(&self) -> Vec<(String, localpilot_tools::UnavailableBackend)> {
+        let unavailable = self.tools.unavailable_backends(&self.workspace);
+        if let Some(broker) = &self.broker {
+            broker.set_unavailable_tools(unavailable.iter().map(|(name, _)| name.clone()));
+        }
+        unavailable
     }
 
     /// Tool calls made during the most recent turn.
@@ -3786,6 +3823,7 @@ impl SessionRuntime {
         self.error_breaker.reset();
         self.repeat_guard.reset();
         let mut tools_enabled = !self.config.answer_only;
+        self.unavailable_attempts.clear();
         // A provider may reject a request as too large even when the local
         // estimate believed it fit. The first overflow forces tighter
         // compaction. If that is insufficient for a multi-image request, rung 6
@@ -4644,7 +4682,41 @@ impl SessionRuntime {
                 // the ordering is pinned and tested in `dispatch_gate`, not implicit
                 // here. The gate inputs are read-only; the permission engine runs
                 // only on `Proceed`.
-                let decision = if name == "read_image" && !self.active_accepts_images() {
+                let unavailable = self.refresh_backend_availability();
+                let absent_backend = unavailable
+                    .into_iter()
+                    .find(|(tool, _)| tool == name)
+                    .map(|(_, absence)| absence);
+                // Only consecutive stale attempts count. Another tool attempt
+                // breaks this run without making the absent backend eligible.
+                self.unavailable_attempts.retain(|(tool, key), _| {
+                    tool == name
+                        && absent_backend
+                            .as_ref()
+                            .is_some_and(|absence| absence.key == *key)
+                });
+                let mut unavailable_attempt_stop = None;
+                if let Some(absence) = &absent_backend {
+                    let count = self
+                        .unavailable_attempts
+                        .entry((name.clone(), absence.key))
+                        .or_default();
+                    *count += 1;
+                    if *count >= 3 && self.config.stop_repeated_observations {
+                        unavailable_attempt_stop =
+                            Some(NoProgressDiagnostic::BackendUnavailableAttempt {
+                                tool: name.clone(),
+                                backend: absence.key.to_string(),
+                                count: *count,
+                            });
+                    }
+                }
+                let decision = if let Some(absence) = &absent_backend {
+                    PreDispatch::Block {
+                        reason: redact(&format!("[backend unavailable] Tool `{name}` was not executed: {}. It is not advertised until the backend is available; use another source. Every request and stale call rechecks availability. Three consecutive attempts against this unavailable backend stop the turn.", absence.reason)),
+                        announce: false,
+                    }
+                } else if name == "read_image" && !self.active_accepts_images() {
                     PreDispatch::Block {
                         reason: "the active model does not accept images; use a vision-capable provider to inspect this file".to_string(),
                         announce: false,
@@ -4999,7 +5071,9 @@ impl SessionRuntime {
                 if let Some(scrubbed) = scrub_control_chars(&result.output) {
                     result.output = scrubbed;
                 }
-                self.capability_evidence.observe_outcome(!result.is_error());
+                if absent_backend.is_none() {
+                    self.capability_evidence.observe_outcome(!result.is_error());
+                }
 
                 // Judge what this call freshly observed before
                 // any harness rewrite (read elision names the prior call, so its
@@ -5014,7 +5088,7 @@ impl SessionRuntime {
                     Some(_) => "backend unavailable".to_string(),
                     None => observation_identity(&result),
                 };
-                let repeat = if self.config.stop_repeated_observations {
+                let repeat = if absent_backend.is_none() && self.config.stop_repeated_observations {
                     self.repeat_guard.observe(&observed_call, &observed_result)
                 } else {
                     RepeatedObservation::Fresh
@@ -5088,108 +5162,110 @@ impl SessionRuntime {
                 // against the per-tool stuck guard, while both kinds count as
                 // unproductive (a missing binary comes back as exit 127 — a
                 // *reported* failure — and must not spin unchecked).
-                match result.outcome {
-                    ToolOutcome::Unusable => {
-                        unproductive_streak += 1;
-                        self.turn_tool_failures += 1;
-                        let count = self.tool_failure_guard.record_failure(name);
-                        match count.cmp(&DEFAULT_TOOL_FAILURE_THRESHOLD) {
-                            std::cmp::Ordering::Less => {
-                                let _ = events.send(RuntimeEvent::Warning(format!(
-                                    "tool `{name}` failed ({}/{})",
-                                    count, DEFAULT_TOOL_FAILURE_THRESHOLD
-                                )));
-                            }
-                            std::cmp::Ordering::Equal => {
-                                let msg = format!(
-                                    "tool `{name}` has failed {count} times this turn; a \
+                if absent_backend.is_none() {
+                    match result.outcome {
+                        ToolOutcome::Unusable => {
+                            unproductive_streak += 1;
+                            self.turn_tool_failures += 1;
+                            let count = self.tool_failure_guard.record_failure(name);
+                            match count.cmp(&DEFAULT_TOOL_FAILURE_THRESHOLD) {
+                                std::cmp::Ordering::Less => {
+                                    let _ = events.send(RuntimeEvent::Warning(format!(
+                                        "tool `{name}` failed ({}/{})",
+                                        count, DEFAULT_TOOL_FAILURE_THRESHOLD
+                                    )));
+                                }
+                                std::cmp::Ordering::Equal => {
+                                    let msg = format!(
+                                        "tool `{name}` has failed {count} times this turn; a \
                                      different approach is likely needed"
-                                );
-                                let _ = events.send(RuntimeEvent::Warning(msg.clone()));
-                                let _ = events.send(RuntimeEvent::ToolStuck {
-                                    name: name.clone(),
-                                    count,
-                                });
-                                if !self.turn_stuck_tools.contains(name) {
-                                    self.turn_stuck_tools.push(name.clone());
+                                    );
+                                    let _ = events.send(RuntimeEvent::Warning(msg.clone()));
+                                    let _ = events.send(RuntimeEvent::ToolStuck {
+                                        name: name.clone(),
+                                        count,
+                                    });
+                                    if !self.turn_stuck_tools.contains(name) {
+                                        self.turn_stuck_tools.push(name.clone());
+                                    }
+                                }
+                                std::cmp::Ordering::Greater => {
+                                    let _ = events.send(RuntimeEvent::Warning(format!(
+                                        "tool `{name}` failed again (#{count}); still stuck"
+                                    )));
                                 }
                             }
-                            std::cmp::Ordering::Greater => {
+                            // Same-error breaker: when a tool fails identically several
+                            // times in a row, force a strategy change *before* the failure
+                            // budget is spent by surfacing a hint in the model-visible
+                            // result, rather than letting it re-send the same call.
+                            if self.error_breaker.observe(name, &result.output) {
                                 let _ = events.send(RuntimeEvent::Warning(format!(
-                                    "tool `{name}` failed again (#{count}); still stuck"
-                                )));
-                            }
-                        }
-                        // Same-error breaker: when a tool fails identically several
-                        // times in a row, force a strategy change *before* the failure
-                        // budget is spent by surfacing a hint in the model-visible
-                        // result, rather than letting it re-send the same call.
-                        if self.error_breaker.observe(name, &result.output) {
-                            let _ = events.send(RuntimeEvent::Warning(format!(
                                 "tool `{name}` keeps failing the same way; nudging a strategy change"
                             )));
-                            let hint = same_error_hint(name);
-                            result.output.push_str(&hint);
+                                let hint = same_error_hint(name);
+                                result.output.push_str(&hint);
+                            }
                         }
-                    }
-                    ToolOutcome::ReportedFailure => {
-                        unproductive_streak += 1;
-                        self.turn_reported_failures += 1;
-                        // The call spawned, ran, and captured output — direct
-                        // evidence the tool works, which is the property the
-                        // stuck guard measures. Clear it like a success.
-                        self.tool_failure_guard.record_working(name);
-                        // Three identical failing runs with nothing landing in
-                        // between deserve a nudge, but a failing-work nudge:
-                        // re-running will not change the result. In a genuine
-                        // edit/test loop the intervening success resets the
-                        // breaker, so it never fires there.
-                        if self.error_breaker.observe(name, &result.output) {
-                            let _ = events.send(RuntimeEvent::Warning(format!(
-                                "tool `{name}` keeps reporting the same failure; nudging a \
+                        ToolOutcome::ReportedFailure => {
+                            unproductive_streak += 1;
+                            self.turn_reported_failures += 1;
+                            // The call spawned, ran, and captured output — direct
+                            // evidence the tool works, which is the property the
+                            // stuck guard measures. Clear it like a success.
+                            self.tool_failure_guard.record_working(name);
+                            // Three identical failing runs with nothing landing in
+                            // between deserve a nudge, but a failing-work nudge:
+                            // re-running will not change the result. In a genuine
+                            // edit/test loop the intervening success resets the
+                            // breaker, so it never fires there.
+                            if self.error_breaker.observe(name, &result.output) {
+                                let _ = events.send(RuntimeEvent::Warning(format!(
+                                    "tool `{name}` keeps reporting the same failure; nudging a \
                                  strategy change"
-                            )));
-                            result.output.push_str(&same_failure_hint(name));
+                                )));
+                                result.output.push_str(&same_failure_hint(name));
+                            }
                         }
-                    }
-                    ToolOutcome::Ok => {
-                        unproductive_streak = 0;
-                        self.tool_failure_guard.record_working(name);
-                        // Feed the broker's learned re-rank: a revealed tool that ran
-                        // successfully ranks higher next time (no-op when learning off
-                        // or the tool was not revealed).
-                        if let Some(broker) = &self.broker {
-                            broker.note_success(name);
-                        }
-                        self.error_breaker.reset();
-                        // No-progress breaker: a successful call that keeps repeating
-                        // with the same result, or a turn cycling a tiny set of calls,
-                        // gets one strategy-change nudge before the budget controller
-                        // may stop the turn. The signature pairs the tool with its
-                        // arguments; the output is the observable state, so a re-read
-                        // after a real change (different output) is not flagged.
-                        let signature = format!("{name}\u{1f}{input}");
-                        let observed = observed_output(&result.output, &result);
-                        if no_progress.observe(&signature, &observed) {
-                            let _ = events.send(RuntimeEvent::Warning(
+                        ToolOutcome::Ok => {
+                            unproductive_streak = 0;
+                            self.tool_failure_guard.record_working(name);
+                            // Feed the broker's learned re-rank: a revealed tool that ran
+                            // successfully ranks higher next time (no-op when learning off
+                            // or the tool was not revealed).
+                            if let Some(broker) = &self.broker {
+                                broker.note_success(name);
+                            }
+                            self.error_breaker.reset();
+                            // No-progress breaker: a successful call that keeps repeating
+                            // with the same result, or a turn cycling a tiny set of calls,
+                            // gets one strategy-change nudge before the budget controller
+                            // may stop the turn. The signature pairs the tool with its
+                            // arguments; the output is the observable state, so a re-read
+                            // after a real change (different output) is not flagged.
+                            let signature = format!("{name}\u{1f}{input}");
+                            let observed = observed_output(&result.output, &result);
+                            if no_progress.observe(&signature, &observed) {
+                                let _ = events.send(RuntimeEvent::Warning(
                                 "tool calls are not making forward progress; nudging a strategy change"
                                     .to_string(),
                             ));
-                            result.output.push_str(&no_progress_hint());
-                        }
-                        // Rebuild the dynamic diagnostic from the recomputed signal
-                        // + the tool that produced it (provenance), and seed the
-                        // monotone diagnostic on the first active signal since the
-                        // last reset — so a later dynamic-clear cannot erase the
-                        // explicit controller's original cause.
-                        no_progress_dynamic =
-                            no_progress_diagnostic(no_progress.active_signal(), name);
-                        if no_progress_monotone.is_none() {
-                            no_progress_monotone = no_progress_dynamic.clone();
+                                result.output.push_str(&no_progress_hint());
+                            }
+                            // Rebuild the dynamic diagnostic from the recomputed signal
+                            // + the tool that produced it (provenance), and seed the
+                            // monotone diagnostic on the first active signal since the
+                            // last reset — so a later dynamic-clear cannot erase the
+                            // explicit controller's original cause.
+                            no_progress_dynamic =
+                                no_progress_diagnostic(no_progress.active_signal(), name);
+                            if no_progress_monotone.is_none() {
+                                no_progress_monotone = no_progress_dynamic.clone();
+                            }
                         }
                     }
-                }
-                let repeated_stop = match repeat {
+                } // A preflight refusal is not an executed tool observation.
+                let repeated_stop = unavailable_attempt_stop.or_else(|| match repeat {
                     RepeatedObservation::Fresh => None,
                     RepeatedObservation::Nudge { count } => {
                         let hint = if let Some(backend) = unavailable_backend {
@@ -5225,7 +5301,7 @@ impl SessionRuntime {
                             }
                         })
                     }
-                };
+                });
                 let _ = events.send(RuntimeEvent::ToolFinished {
                     id: result.id.to_string(),
                     name: name.clone(),
@@ -5257,12 +5333,16 @@ impl SessionRuntime {
                 // it (the wire contract needs one result per tool_use) and stop
                 // before any further dispatch or provider request.
                 if let Some(diagnostic) = repeated_stop {
+                    let skipped_reason = if matches!(
+                        diagnostic,
+                        NoProgressDiagnostic::BackendUnavailableAttempt { .. }
+                    ) {
+                        "skipped: the turn stopped after repeated attempts to use an unavailable backend"
+                    } else {
+                        "skipped: the turn stopped because the same call kept returning the same result"
+                    };
                     for (skip_id, _, _, _) in &calls[call_index + 1..] {
-                        self.append(tool_error_message(
-                            skip_id,
-                            "skipped: the turn stopped because the same call kept \
-                             returning the same result",
-                        ));
+                        self.append(tool_error_message(skip_id, skipped_reason));
                     }
                     return self.stop_no_progress(events, &diagnostic);
                 }

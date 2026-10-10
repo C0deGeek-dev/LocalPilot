@@ -2,6 +2,43 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0225: Fresh Backend Availability Gates Visibility And Stale Attempts
+
+**Status:** accepted · **Date:** 2026-10-10. Refines ADR-0222 and ADR-0215 for
+authoritative, side-effect-free availability probes (LocalHub #234).
+
+Tools may report absent backends through a cheap workspace probe. The default
+reports no authoritative absence; unknown availability remains eligible. Probes
+must not query content, create/open stores, contact servers or inspect protected
+content. Knowledge search probes the presence of both ingest and session-span
+indexes. Present/corrupt indexes and ordinary empty results remain eligible.
+
+Refresh before every provider request, broker request/marker reveal, and model
+tool attempt. Mask absent tools in provider specs, broker ranking/load/reveal,
+core, graduation and working-set tiers. Preserve catalog and membership so a
+restored backend recovers its visibility without re-registration. Availability
+is transient, not persisted or inferred from MCP text. It grants no permissions;
+restored calls still pass ordinary gates. Filesystem probes are snapshots, not
+locks: an actual invocation can still report fresh absence after a race.
+
+A stale call against a still-absent backend returns a redacted, explicit
+not-executed result. It spends the normal attempted-call budget but supplies no
+executed observation, tool-health failure or broker success. Actual invocations
+retain the existing observe-never-suppress rule and typed ADR-0222 fallback.
+Other tools may continue. Three consecutive stale attempts for the same
+tool/backend stop with `NoProgress` and a separate
+`signal=backend_unavailable_attempt` diagnostic. The count clears on observed
+recovery, another tool attempt, admitted user steering or a new turn. Interleaved
+attempts do not accumulate: absence is not proof that the rest of the turn
+is unproductive. Existing scripted replay guard
+opt-out disables this attempt stop too; it does not grant backend availability.
+
+This deliberately replaces ADR-0222's no-disabled-tool/pre-dispatch-suppression
+choice for tools with reliable probes. It does not disable ordinary searches,
+change generic result identity, or claim that hiding tools guarantees model
+compliance. Existing bounded attempts and budgets remain the backstops. No new
+serialized event or tool schema is introduced.
+
 ## ADR-0224: Bounded Write Admission And Opaque Retry Recovery
 
 **Status:** accepted · **Date:** 2026-10-09. Refines ADR-0199 without widening

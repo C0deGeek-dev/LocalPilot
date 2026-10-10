@@ -979,17 +979,24 @@ always recorded so its false-positive rate can be measured.
 
 ### Fresh backend availability
 
-A trusted tool can report a host-only unavailable-backend key after checking
-availability in its actual invocation. `knowledge_search` uses this only when
-both ingest and session-span indexes are absent; run `localpilot ingest run`
-to build the project index or use another source. The second consecutive absence
-gets a recovery notice and the third stops with `NoProgress` and
-`signal=backend_unavailable`. Varying queries does not reset that run.
-Every retry still invokes the tool and rechecks; restored indexes, unmarked
-results and unrelated observations break the run. Corrupt/present indexes and
-ordinary empty matches are not authoritative absence, and plain MCP output text
-never supplies this metadata. Generic identical-call and windowed guards retain
-their existing policy (ADR-0222).
+A trusted tool may provide a side-effect-free workspace availability probe.
+`knowledge_search` is absent while both ingest and session-span indexes are
+missing. Provider specs and broker search/load/reveal (including core and
+graduates) exclude absent tools. Probes refresh for each request and attempted
+call; a newly created index restores visibility, including between calls in one
+response. Unknown availability, corrupt/present indexes and ordinary empty
+matches remain eligible; MCP result text is not an availability probe.
+
+A stale call gets explicit not-executed feedback and can switch to other tools.
+The third consecutive stale attempt for that tool/backend stops with `NoProgress`
+and `signal=backend_unavailable_attempt`. Another tool attempt, recovery, user
+steering and new turns clear the count. Interleaved attempts do not stop useful
+work merely because that backend stays absent. Refused attempts consume
+the existing call budget, but are not executed observations or tool-health
+failures. Every actual call still crosses permission gates and is observed;
+post-invoke typed absence retains ADR-0222's consecutive fallback. No index is
+created by probing, no absence is persisted and no availability cache is used.
+See ADR-0225.
 
 ### File I/O limits
 

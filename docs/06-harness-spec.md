@@ -1793,14 +1793,23 @@ outcome.
 
 ### Authoritative backend absence
 
-The existing consecutive observation guard also recognizes fresh typed backend
-absence from trusted tools (ADR-0222). This identity is tool plus backend key,
-independent of query arguments/text; nudge on observation two, stop on three
-with `signal=backend_unavailable tool="…" backend="…" count=3` in TurnEnded.detail.
-Each observation follows an actual permission-gated invocation. No calls are
-suppressed or served from availability caches. `knowledge_search` marks only
-absence of both ingest and session-span indexes. Restored/unmarked results,
-unrelated calls, admitted steer and turn resets clear the consecutive run.
-Ordinary emptiness, corrupt-index messages and MCP text keep full call/result
-identity. Scripted replay opt-out remains; interleaved cycles stay with existing
-windowed policy. Host metadata introduces no serialized event/schema change.
+Reliable, side-effect-free probes gate provider advertisement and broker
+search/load/reveal before each request and attempted call (ADR-0225). Knowledge
+search probes both ingest and session-span index presence. Missing indexes yield
+explicit not-executed feedback; restored indexes permit ordinary dispatch again.
+Permission gates remain authoritative, and unknown availability stays eligible.
+
+A refused stale attempt is distinct from an executed observation. It spends the
+attempt budget, but does not feed observation identity, tool health or learned
+broker success. Three consecutive attempts for the same absent tool/backend stop
+the turn with `signal=backend_unavailable_attempt tool="..." backend="..." count=3`.
+Intervening tool attempts, backend recovery, admitted user steering and fresh turns
+reset this counter. Other work can continue after the initial refusal.
+Scripted replay's guard opt-out disables this attempt stop, not the probe.
+
+Actual invocations still feed the existing observation guards. Trusted typed
+backend absence discovered during invocation retains ADR-0222's consecutive
+identity, warning on two and stopping on three with `signal=backend_unavailable`.
+No absence is inferred from ordinary empty results, present/corrupt indexes or
+plain MCP text. Probes are snapshots, not locks; a backend may disappear between
+probe and execution. Host metadata introduces no serialized event/schema change.

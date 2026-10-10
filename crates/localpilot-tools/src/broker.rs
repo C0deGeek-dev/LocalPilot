@@ -533,6 +533,8 @@ pub struct Resolution {
 /// set, the deprecation overlay, and (when learning is on) the resolution history
 /// and the graduated set.
 struct BrokerState {
+    /// Host refreshes this from side-effect-free probes before requests/calls.
+    unavailable: std::collections::HashSet<String>,
     config: BrokerConfig,
     catalog: Catalog,
     revealed: WorkingSet,
@@ -557,20 +559,25 @@ impl BrokerState {
             .revealed
             .names()
             .into_iter()
-            .filter(|name| !stable.contains(name))
+            .filter(|name| !stable.contains(name) && !self.unavailable.contains(name))
             .collect();
+        stable.retain(|name| !self.unavailable.contains(name));
         AdvertisedTiers { stable, revealed }
     }
 
     fn is_advertised(&self, name: &str) -> bool {
-        name == TOOL_SEARCH
-            || name == TOOL_LOAD
-            || self.config.core.iter().any(|c| c == name)
-            || self.graduated.iter().any(|g| g == name)
-            || self.revealed.contains(name)
+        !self.unavailable.contains(name)
+            && (name == TOOL_SEARCH
+                || name == TOOL_LOAD
+                || self.config.core.iter().any(|c| c == name)
+                || self.graduated.iter().any(|g| g == name)
+                || self.revealed.contains(name))
     }
 
     fn reveal(&mut self, name: &str) -> RevealOutcome {
+        if self.unavailable.contains(name) {
+            return RevealOutcome::NotInCatalog;
+        }
         match self.catalog.get(name) {
             Some(entry) => {
                 let rendered = render_reveal(entry, &self.overlay);
@@ -608,14 +615,19 @@ impl BrokerState {
     fn ranked(&self, need: &str) -> Vec<Locator> {
         // Cap first, then apply learning: a learned boost reorders the top
         // candidates but never pulls a tool in from beyond the cap.
-        self.with_learning(resolve(&self.catalog, &self.overlay, need))
+        let mut hits = rank_all(&self.catalog, &self.overlay, need, need);
+        hits.retain(|hit| !self.unavailable.contains(&hit.name));
+        hits.truncate(MAX_LOCATORS);
+        self.with_learning(hits)
     }
 
     /// [`Self::ranked`] without the locator cap, for the request-driven reveal,
     /// which filters out visible tools before choosing so they cannot crowd a
     /// hidden match out.
     fn ranked_uncapped(&self, need: &str, named_in: &str) -> Vec<Locator> {
-        self.with_learning(rank_all(&self.catalog, &self.overlay, need, named_in))
+        let mut hits = rank_all(&self.catalog, &self.overlay, need, named_in);
+        hits.retain(|hit| !self.unavailable.contains(&hit.name));
+        self.with_learning(hits)
     }
 
     /// Apply the learned re-rank boost (when learning is on) and re-sort.
@@ -654,7 +666,8 @@ impl BrokerState {
         // A known deprecation replacement (the overlay) sharpens a retired-tool
         // hint: "X retired; closest now: Y".
         if let Some(replacement) = self.overlay.replacement_for(attempted).map(str::to_string) {
-            if self.catalog.get(&replacement).is_some() {
+            if self.catalog.get(&replacement).is_some() && !self.unavailable.contains(&replacement)
+            {
                 if let RevealOutcome::Revealed { name, rendered } = self.reveal(&replacement) {
                     return Resolution {
                         message: format!(
@@ -784,6 +797,7 @@ impl Broker {
     pub fn new(config: BrokerConfig) -> Self {
         let cap = config.working_set_cap;
         Self(Arc::new(Mutex::new(BrokerState {
+            unavailable: std::collections::HashSet::new(),
             config,
             catalog: Catalog::default(),
             revealed: WorkingSet::new(cap),
@@ -796,6 +810,12 @@ impl Broker {
     /// Replace the live catalog (e.g. after the registry is built).
     pub fn set_catalog(&self, catalog: Catalog) {
         self.0.lock().catalog = catalog;
+    }
+
+    /// Replace the transient availability snapshot without erasing membership,
+    /// graduation or catalog entries: restored tools recover their old position.
+    pub fn set_unavailable_tools(&self, names: impl IntoIterator<Item = String>) {
+        self.0.lock().unavailable = names.into_iter().collect();
     }
 
     /// Change-aware refresh: reproject the catalog against `fresh`, keeping
@@ -1180,6 +1200,41 @@ mod tests {
         let broker = Broker::new(BrokerConfig::default());
         broker.set_catalog(catalog());
         broker
+    }
+
+    #[test]
+    fn availability_masks_core_graduates_and_reveals_without_erasing_membership() {
+        let broker = Broker::new(BrokerConfig {
+            core: vec!["read_file".into()],
+            learning_enabled: true,
+            ..Default::default()
+        });
+        broker.set_catalog(catalog());
+        broker.seed_graduated(&["fetch".into()]);
+        broker.reveal("git_commit");
+        let original = broker.advertised_tiers();
+        let blocked: Vec<String> = ["read_file", "fetch", "git_commit"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        broker.set_unavailable_tools(blocked.clone());
+        for name in &blocked {
+            assert!(!broker.is_advertised(name));
+            assert!(!broker.advertised_tiers().is_stable(name));
+            assert!(!broker.advertised_tiers().revealed_tail().contains(name));
+            assert!(broker
+                .resolve(name)
+                .iter()
+                .all(|hit| !blocked.contains(&hit.name)));
+            assert_eq!(broker.reveal(name), RevealOutcome::NotInCatalog);
+            assert!(broker
+                .reresolve(name)
+                .revealed
+                .as_ref()
+                .is_none_or(|revealed| !blocked.contains(revealed)));
+        }
+        broker.set_unavailable_tools(Vec::new());
+        assert_eq!(broker.advertised_tiers(), original);
     }
 
     // --- request-driven reveal ---

@@ -167,6 +167,20 @@ impl ToolRegistry {
             .map(AsRef::as_ref)
     }
 
+    /// Fresh absence snapshot for this workspace; no cached or persisted state.
+    pub fn unavailable_backends(
+        &self,
+        workspace: &localpilot_sandbox::Workspace,
+    ) -> Vec<(String, crate::UnavailableBackend)> {
+        self.tools
+            .iter()
+            .filter_map(|tool| {
+                tool.unavailable_backend(workspace)
+                    .map(|absence| (tool.name().to_string(), absence))
+            })
+            .collect()
+    }
+
     /// Whether the named tool is served by an MCP server (vs. a builtin). An MCP
     /// tool has no typed schema to guide a safe repair, so the argument-repair
     /// stage refuses it. An unknown name reports `false`.

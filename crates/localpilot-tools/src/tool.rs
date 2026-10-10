@@ -346,6 +346,13 @@ impl ToolOutput {
     }
 }
 
+/// Authoritative absence from a cheap, side-effect-free backend probe.
+#[derive(Debug, Clone)]
+pub struct UnavailableBackend {
+    pub key: &'static str,
+    pub reason: String,
+}
+
 /// A builtin tool. Object-safe so the registry can hold `Box<dyn Tool>`.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -357,6 +364,14 @@ pub trait Tool: Send + Sync {
 
     /// The JSON schema for this tool's input, generated from a typed struct.
     fn schema(&self) -> Value;
+
+    /// Fresh, side-effect-free evidence of backend absence. None means no
+    /// authoritative absence (including unknown availability). Never run a
+    /// query, open/create a store, contact a server or inspect protected content.
+    /// Execution still crosses the ordinary permission gate when available.
+    fn unavailable_backend(&self, _workspace: &Workspace) -> Option<UnavailableBackend> {
+        None
+    }
 
     /// The side effects this call will have, used to drive the permission engine.
     /// Resolving effects must not itself perform the effect.

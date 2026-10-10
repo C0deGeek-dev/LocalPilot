@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Absent knowledge indexes no longer invite query loops.** Knowledge search
+  is hidden from provider tools and broker discovery while both indexes are
+  absent. Availability is rechecked for each request and stale call; an index
+  built during the session restores the tool immediately. Stale calls report
+  that no query ran and allow other work; only consecutive stale attempts
+  count toward the dedicated loop stop.
+  Ordinary empty searches and present-but-corrupt indexes retain their behavior.
+
 - **Harness session learning belongs to the full-screen timeline.** LocalMind
   close-out reports ordered lesson, graph and primer results through notices,
   with skipped stages as warnings and a `Learning from session` status label.

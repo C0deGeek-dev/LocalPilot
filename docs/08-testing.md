@@ -723,13 +723,17 @@ repeats the same first page can still hit the repeat guard.
 
 ### Backend availability observations
 
-`cargo test -p localpilot-harness --test repeat_guard` includes varied queries
-and varied messages for a freshly absent backend, actual invocation counts,
-restoration, ordinary empty queries followed by a hit and scripted-replay opt-out.
+`cargo test -p localpilot-harness --test backend_availability --test repeat_guard
+--test broker` covers hidden advertisement, broker search/load/graduation,
+zero invocations for stale calls, useful work after refusal, consecutive attempt
+stops and unaffected interleaved work, fresh-turn resets, real index creation and
+recovery within a single
+response. Typed absence from actual invocations retains varied-query detection,
+restoration and scripted replay controls. Ordinary empty searches, advancing
+polls and changed idempotent results remain covered.
 `cargo test -p localpilot-localmind knowledge_tool::tests` verifies missing,
-present/corrupt and genuinely newly created indexes. Native absent-index replay
-must execute three knowledge_search calls and persist the backend_unavailable
-stop; no result-text matching or live model-quality claim is involved.
+present/corrupt and genuinely newly created indexes and their probe eligibility.
+These are offline mechanism tests, not a live model benchmark claim.
 
 ### File scope and partial patch errors
 
