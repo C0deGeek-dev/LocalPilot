@@ -410,6 +410,10 @@ rather than entering provider input. The rest:
 - `/bg` lists this session's background processes (`/bg stop <id>` / `/bg stop
   all`).
 
+In full-screen chat, Ctrl+L forces a complete screen redraw without changing
+the draft, session or running work. Harness and wait-resume completion also
+force a redraw, repairing stray output written outside the UI without a resize.
+
 In full-screen chat, Ctrl+C first copies an active selection. With no selection,
 a nonempty composer is stashed and cleared without cancelling the turn; the next
 press on an empty busy composer cancels, and the following consecutive press

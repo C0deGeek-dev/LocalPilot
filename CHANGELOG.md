@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Full-screen chat recovers from stray terminal output.** Harness and
+  wait-resume completion repaint the entire screen, including on failure or
+  cancellation. Ctrl+L also forces a redraw without changing session state.
+
 - **The composer cursor follows the text on wrapped rows.** Drawing uses the
   editor's grapheme-wrapped rows directly, keeping cursor movement, clicks,
   height and scrolling aligned for long prompts and search input.

@@ -8151,6 +8151,9 @@ fn apply_resume_result(
     let output = crate::repl::command_output_from_buffer(out, res);
     present_command_report(app, command_report(kind.title(), output));
     app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+    // In-process close-out may have written outside ratatui. Repair both the
+    // physical screen and the diff cache, even on failure or first-cancel.
+    app.request_full_redraw();
 }
 
 /// `/harness-resume` and `/wait-resume` on the pump. Enters `Mode::Harness`
@@ -8599,6 +8602,9 @@ fn handle_operation_terminal_event(
     steer: Option<&SteerQueue>,
     pending_steer_items: &mut VecDeque<ItemId>,
 ) -> OperationInputOutcome {
+    if handle_redraw_event(app, &next) {
+        return OperationInputOutcome::Geometry;
+    }
     if matches!(next, Event::Paste(_)) {
         note_bracketed_paste(
             app,
@@ -9052,6 +9058,9 @@ fn accept_workspace_trust(
 }
 
 fn handle_trust_event(app: &mut AppModel, event: Event, hit_map: &HitMap) -> TrustEventOutcome {
+    if handle_redraw_event(app, &event) {
+        return TrustEventOutcome::Pending;
+    }
     match event {
         Event::Mouse(mouse) => {
             app.disarm_exit();
@@ -9561,6 +9570,9 @@ fn route_pointer_or_navigation(
     hit_map: &HitMap,
     mouse_state: &mut MouseState,
 ) -> RoutedEvent {
+    if handle_redraw_event(app, event) {
+        return RoutedEvent::Handled;
+    }
     match event {
         Event::Mouse(mouse) => handle_mouse_event(app, *mouse, hit_map, mouse_state),
         Event::FocusLost => {
@@ -10456,14 +10468,46 @@ fn draw_synchronized(
 ) -> Result<localpilot_terminal_ui::HitMap> {
     execute!(terminal.backend_mut(), BeginSynchronizedUpdate)
         .context("begin synchronized full-screen update")?;
-    let mut hit_map = None;
-    let draw_result = terminal
-        .draw(|frame| hit_map = Some(render(frame, app)))
-        .map(|_| ());
+    let draw_result = draw_frame(terminal, app);
     let end_result = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
-    draw_result.context("draw full-screen frame")?;
+    let hit_map = draw_result?;
     end_result.context("end synchronized full-screen update")?;
+    Ok(hit_map)
+}
+
+/// The shared drawing path, also exercised with a TestBackend whose screen
+/// can be changed behind ratatui's back to reproduce external terminal writes.
+fn draw_frame<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    app: &AppModel,
+) -> Result<HitMap> {
+    if app.take_full_redraw_request() {
+        terminal
+            .clear()
+            .context("clear corrupted full-screen frame")?;
+    }
+    let mut hit_map = None;
+    terminal
+        .draw(|frame| hit_map = Some(render(frame, app)))
+        .context("draw full-screen frame")?;
     hit_map.context("full-screen render did not produce a hit map")
+}
+
+/// Redraw is a host action and must work even when a dialog owns input.
+fn handle_redraw_event(app: &AppModel, event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    if is_key_action(*key)
+        && matches!(key.code, KeyCode::Char('l' | 'L'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+    {
+        app.request_full_redraw();
+        true
+    } else {
+        false
+    }
 }
 
 fn map_key(key: KeyEvent) -> Option<InputAction> {
@@ -13415,6 +13459,85 @@ mod tests {
         );
         assert!(timeline_has_notice(&app, "couldn't attach the image."));
         assert!(!timeline_has_notice(&app, "attached 1×1 image"));
+    }
+
+    #[test]
+    fn resume_completion_repaints_external_writes_without_a_resize() {
+        for failed in [false, true] {
+            let mut app = app();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+            let hits = draw_frame(&mut terminal, &app).expect("initial frame");
+            let content = single_hits(&hits).timeline;
+            let point = (content.x + 20, content.y + 1);
+            let mut stray = ratatui::buffer::Cell::default();
+            stray.set_symbol("#");
+            ratatui::backend::Backend::draw(
+                terminal.backend_mut(),
+                std::iter::once((point.0, point.1, &stray)),
+            )
+            .expect("external write");
+            draw_frame(&mut terminal, &app).expect("ordinary diff redraw");
+            assert_eq!(
+                terminal.backend().buffer()[point].symbol(),
+                "#",
+                "a normal unchanged frame leaves the external write behind"
+            );
+            let outcome = if failed {
+                Err(anyhow::anyhow!("step blocked"))
+            } else {
+                Ok(())
+            };
+            apply_resume_result(
+                &mut app,
+                (outcome, b"harness finished".to_vec()),
+                ResumeKind::Harness,
+            );
+            draw_frame(&mut terminal, &app).expect("repaint after resume");
+            let mut fresh = Terminal::new(TestBackend::new(80, 24)).expect("reference terminal");
+            draw_frame(&mut fresh, &app).expect("reference frame");
+            assert_eq!(terminal.backend().buffer(), fresh.backend().buffer());
+            assert!(
+                !app.take_full_redraw_request(),
+                "one repaint consumes the request"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_l_requests_repaint_without_touching_work_draft_or_trust() {
+        let mut app = app();
+        app.editor.insert("keep this draft");
+        app.begin_work();
+        let key = Event::Key(press(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert!(handle_redraw_event(&app, &key));
+        assert_eq!(app.editor.text(), "keep this draft");
+        assert!(app.take_full_redraw_request());
+        assert!(!app.take_full_redraw_request());
+        assert!(!handle_redraw_event(
+            &app,
+            &Event::Key(press(KeyCode::Char('l'), KeyModifiers::NONE))
+        ));
+        assert!(!handle_redraw_event(
+            &app,
+            &Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('l'),
+                KeyModifiers::CONTROL,
+                event::KeyEventKind::Release,
+            ))
+        ));
+        let hits = draw_hit_map(&app, 80, 24);
+        assert_eq!(
+            route_pointer_or_navigation(&mut app, &key, &hits, &mut MouseState::default()),
+            RoutedEvent::Handled
+        );
+        assert!(app.take_full_redraw_request());
+        app.require_workspace_trust("workspace");
+        assert_eq!(
+            handle_trust_event(&mut app, key, &hits),
+            TrustEventOutcome::Pending
+        );
+        assert!(app.workspace_trust_pending());
+        assert!(app.take_full_redraw_request());
     }
 
     #[test]

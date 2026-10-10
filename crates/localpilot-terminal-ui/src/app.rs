@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -1578,6 +1579,7 @@ pub enum RuntimeUpdate {
 
 #[derive(Debug, Clone)]
 pub struct AppModel {
+    full_redraw_requested: Cell<bool>,
     header: SharedHeader,
     projections: ProjectionSet,
     pair_status: Option<PairStatus>,
@@ -1702,6 +1704,7 @@ impl AppModel {
             vec![TabId::Session, TabId::LocalMind]
         };
         Self {
+            full_redraw_requested: Cell::new(false),
             header,
             projections,
             pair_status: None,
@@ -1738,6 +1741,17 @@ impl AppModel {
             workspace_files: Vec::new(),
             workspace_files_ready: false,
         }
+    }
+
+    /// Ask the terminal host to discard its diff cache before the next frame.
+    pub fn request_full_redraw(&self) {
+        self.full_redraw_requested.set(true);
+    }
+
+    /// Consume a pending full-frame repaint request without changing UI state.
+    #[must_use]
+    pub fn take_full_redraw_request(&self) -> bool {
+        self.full_redraw_requested.replace(false)
     }
 
     #[must_use]

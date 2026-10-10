@@ -579,6 +579,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
         "Ctrl+S      stash / restore draft",
         "F7 / F8     previous / next tool",
         image_left,
+        "Ctrl+L      redraw screen",
     ];
     let right = if app.capabilities.mouse_capture {
         [
@@ -590,6 +591,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
             "Ctrl+F       search messages",
             "Esc          return / stop and steer",
             "Esc Esc      clear draft",
+            "",
         ]
     } else {
         [
@@ -601,14 +603,15 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
             "Ctrl+F       search messages",
             "Esc          return / stop and steer",
             "Esc Esc      clear draft",
+            "",
         ]
     };
     let wide = area.width >= 70;
     let pair_rows = u16::from(app.is_pair());
     let requested = if wide {
-        9_u16.saturating_add(pair_rows)
+        10_u16.saturating_add(pair_rows)
     } else {
-        17_u16.saturating_add(pair_rows)
+        19_u16.saturating_add(pair_rows)
     };
     let height = requested.min(area.height);
     let help = Rect::new(
@@ -649,7 +652,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
             );
         }
         if app.is_pair() {
-            let y = help.y.saturating_add(9);
+            let y = help.y.saturating_add(10);
             if y < help.bottom() {
                 frame.render_widget(
                     Paragraph::new("F6          switch peer").style(theme.ui(UiRole::Foreground)),
@@ -1890,6 +1893,10 @@ fn help_lines(
         ),
         (
             "  Ctrl+C      Copy selection; else clear draft, cancel work, then exit".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Ctrl+L      Redraw the screen without changing the session".to_string(),
             UiRole::Foreground,
         ),
         (String::new(), UiRole::Foreground),
