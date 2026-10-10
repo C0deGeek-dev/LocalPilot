@@ -3016,6 +3016,15 @@ fn abbreviated_digest(full_digest: &str) -> String {
     full_digest.chars().take(8).collect()
 }
 
+/// Render the editor's exact visual rows; Paragraph must not word-wrap them
+/// again or cursor, hit-testing, height and scroll coordinates will diverge.
+fn editor_lines(text: &str, width: u16) -> Vec<Line<'_>> {
+    crate::text::wrap_ranges(text, width)
+        .into_iter()
+        .map(|row| Line::raw(&text[row.start_byte..row.end_byte]))
+        .collect()
+}
+
 fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -> (u16, usize) {
     let theme = theme(app);
     let left_edge = if app.focus == Focus::Composer {
@@ -3035,9 +3044,8 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
         render_slim_frame(frame, layout.composer, surface_edge, left_edge, surface);
         render_pair_composer_label(frame, layout.composer, app, surface);
         frame.render_widget(
-            Paragraph::new(search)
+            Paragraph::new(editor_lines(&search, width))
                 .style(surface)
-                .wrap(Wrap { trim: false })
                 .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
             inner,
         );
@@ -3075,13 +3083,12 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
     let placeholder = placeholder_text.is_some();
     let composer_text = placeholder_text.unwrap_or_else(|| app.editor.text());
     frame.render_widget(
-        Paragraph::new(composer_text.to_string())
+        Paragraph::new(editor_lines(composer_text, width))
             .style(if placeholder {
                 surface.patch(theme.ui(UiRole::Muted))
             } else {
                 surface
             })
-            .wrap(Wrap { trim: false })
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         inner,
     );
@@ -7654,6 +7661,79 @@ mod tests {
             hit_map.completion_rows[0].area.y,
         );
         assert!(line.contains("❯ @src/sample.rs"));
+    }
+
+    const WRAPPED_COMPOSER_PROMPT: &str = "I want a chrome extension that downloads the instagram posts, text + photo's + video's of the profile you're on. Places them in a folder with a index.html (and maybe .js and .css) that mimicks instagram. Just to preserve the images and video's. When you already scraped that account it will only add the new posts. That way you won't have duplicate posts.";
+
+    fn assert_composer_rows_and_cursor(app: &AppModel, width: u16, height: u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let mut hits = None;
+        terminal
+            .draw(|frame| hits = Some(render(frame, app)))
+            .expect("render composer");
+        let hits = hits.expect("hit map");
+        let inner = hits.frame.expect("layout").composer_content;
+        let rows = app.editor.visual_rows(hits.editor_width);
+        let (row, column) = app.editor.cursor_row_and_column(hits.editor_width);
+        assert_eq!(
+            terminal.get_cursor_position().expect("cursor"),
+            Position::new(
+                inner.x + column.min(inner.width - 1),
+                inner.y + u16::try_from(row - hits.composer_scroll).expect("visible row"),
+            )
+        );
+        // Compare actual rendered rows with the editor's visual coordinates,
+        // including whitespace rather than trimming it away.
+        for (index, expected) in rows
+            .iter()
+            .skip(hits.composer_scroll)
+            .take(usize::from(inner.height))
+            .enumerate()
+        {
+            let expected = &app.editor.text()[expected.start_byte..expected.end_byte];
+            let mut expected_buffer = Buffer::empty(Rect::new(0, 0, inner.width, 1));
+            expected_buffer.set_string(0, 0, expected, ratatui::style::Style::default());
+            for x in 0..inner.width {
+                assert_eq!(
+                    terminal.backend().buffer()[(inner.x + x, inner.y + index as u16)].symbol(),
+                    expected_buffer[(x, 0)].symbol(),
+                    "row {index}, column {x}, width {width}"
+                );
+            }
+        }
+        if rows.len() <= usize::from(height / 2 - 2) {
+            assert_eq!(usize::from(inner.height), rows.len());
+        }
+    }
+
+    #[test]
+    fn wrapped_composer_cursor_matches_drawn_rows_and_height() {
+        let mut app = model();
+        app.editor.insert(WRAPPED_COMPOSER_PROMPT);
+        for width in [172, 171, 80, 40] {
+            assert_composer_rows_and_cursor(&app, width, 30);
+        }
+        app.editor.insert("x");
+        assert_composer_rows_and_cursor(&app, 172, 30);
+        app.editor.insert("\nnext line");
+        assert_composer_rows_and_cursor(&app, 172, 30);
+        for row in [1, 2] {
+            app.editor.set_cursor_from_visual(row, 7, 168);
+            assert_composer_rows_and_cursor(&app, 172, 30);
+        }
+    }
+
+    #[test]
+    fn wrapped_composer_handles_scrolling_wide_graphemes_and_blank_lines() {
+        let mut app = model();
+        app.editor.insert(&"alpha 界 🧪 café  ".repeat(24));
+        app.editor.insert("\n\nlast line");
+        for width in [40, 80] {
+            assert_composer_rows_and_cursor(&app, width, 16);
+            app.editor.move_text_start();
+            assert_composer_rows_and_cursor(&app, width, 16);
+            app.editor.move_text_end();
+        }
     }
 
     #[test]

@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The composer cursor follows the text on wrapped rows.** Drawing uses the
+  editor's grapheme-wrapped rows directly, keeping cursor movement, clicks,
+  height and scrolling aligned for long prompts and search input.
+
 - **Mixed patches cannot skip work bounds through outside targets.** Every
   normalized write target spends the same cumulative budget, including scratch
   and external paths. A target normalization failure refuses the request;
