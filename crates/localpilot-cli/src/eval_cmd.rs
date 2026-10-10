@@ -136,7 +136,7 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
     // JSON-only stdout (close_out reports to stderr); a no-op when learning is
     // disabled or the session is empty.
     if opts.learn {
-        crate::context_inject::close_out(&cwd, runtime.session_id());
+        crate::context_inject::close_out_stderr(&cwd, runtime.session_id());
     }
     Ok(())
 }

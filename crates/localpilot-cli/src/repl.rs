@@ -283,7 +283,7 @@ pub async fn run_chat_with(
         );
         eprint!("{}", report.render(&cwd));
     } else {
-        crate::context_inject::close_out(&cwd, runtime.session_id());
+        crate::context_inject::close_out_stderr(&cwd, runtime.session_id());
     }
     let exit = result?;
     if deferred_selfimprove_reload.get() {

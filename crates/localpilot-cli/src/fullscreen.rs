@@ -8156,6 +8156,23 @@ fn apply_resume_result(
     app.request_full_redraw();
 }
 
+fn apply_closeout_update(app: &mut AppModel, update: crate::context_inject::CloseOutUpdate) {
+    use crate::context_inject::CloseOutUpdate;
+    match update {
+        CloseOutUpdate::Stage(_) => app.set_work_label("Learning from session"),
+        CloseOutUpdate::Finished => app.set_work_label("Working"),
+        CloseOutUpdate::Event(event) => {
+            let line = event.stderr_line();
+            let message = format!("LocalMind {}", line.trim_start_matches("learning: "));
+            app.apply_runtime(if event.is_warning() {
+                RuntimeUpdate::Warning(message)
+            } else {
+                RuntimeUpdate::Notice(message)
+            });
+        }
+    }
+}
+
 /// `/harness-resume` and `/wait-resume` on the pump. Enters `Mode::Harness`
 /// synchronously (mirroring the inline oracle) and keeps it across
 /// completion/error/first-cancel; `/agent` is the hidden exit. The model, provider,
@@ -8196,6 +8213,12 @@ async fn drive_harness_resume(
     let root = ctx.cwd.to_path_buf();
     let approval_tx = resume.approval_tx.clone();
     let (events_tx, mut events_rx) = broadcast::channel::<RuntimeEvent>(1024);
+    let (closeout_tx, mut closeout_rx) = mpsc::unbounded_channel();
+    let mut closeout_progress = |app: &mut AppModel| {
+        while let Ok(update) = closeout_rx.try_recv() {
+            apply_closeout_update(app, update);
+        }
+    };
     let operation = {
         let cancel = cancel.clone();
         async move {
@@ -8205,6 +8228,7 @@ async fn drive_harness_resume(
                 interactivity: localpilot_sandbox::Interactivity::Interactive,
                 trusted: snapshot.trusted,
                 approver: resume_approver_factory(approval_tx),
+                closeout_updates: Some(closeout_tx),
             };
             let provider = Some(snapshot.provider_id.as_str());
             let result = match kind {
@@ -8264,14 +8288,14 @@ async fn drive_harness_resume(
         &cancel,
         &image_capability,
         queue,
-        OperationKind::Command,
+        OperationKind::HarnessResume,
         EventLane::Runtime {
             events: &mut events_rx,
             steering: None,
             live: None,
         },
         QuestionMode::Inert,
-        ProgressLane::None,
+        ProgressLane::Tick(&mut closeout_progress),
         operation,
         move |app: &mut AppModel, result: (anyhow::Result<()>, Vec<u8>)| {
             apply_resume_result(app, result, kind);
@@ -8401,6 +8425,8 @@ enum OperationKind {
     Shell,
     /// A pumped slash command (`/compact`, long-running `/ingest`).
     Command,
+    /// Resume work owns session close-out writes and awaits them on cancellation.
+    HarnessResume,
     /// A cooperatively cancellable blocking command. Cancellation is signalled
     /// immediately, while forced exit still waits for the current bounded unit
     /// so no persistent worker is detached.
@@ -8415,9 +8441,10 @@ impl OperationKind {
         match self {
             Self::Turn => "poll full-screen turn input",
             Self::Shell => "poll full-screen shell input",
-            Self::Command | Self::CooperativeCommand | Self::UninterruptibleCommand => {
-                "poll full-screen command input"
-            }
+            Self::Command
+            | Self::HarnessResume
+            | Self::CooperativeCommand
+            | Self::UninterruptibleCommand => "poll full-screen command input",
         }
     }
 
@@ -8425,9 +8452,10 @@ impl OperationKind {
         match self {
             Self::Turn => "read full-screen turn input",
             Self::Shell => "read full-screen shell input",
-            Self::Command | Self::CooperativeCommand | Self::UninterruptibleCommand => {
-                "read full-screen command input"
-            }
+            Self::Command
+            | Self::HarnessResume
+            | Self::CooperativeCommand
+            | Self::UninterruptibleCommand => "read full-screen command input",
         }
     }
 
@@ -8435,21 +8463,25 @@ impl OperationKind {
         match self {
             Self::Turn => "poll after active full-screen paste key",
             Self::Shell => "poll after active shell paste key",
-            Self::Command | Self::CooperativeCommand | Self::UninterruptibleCommand => {
-                "poll after active command paste key"
-            }
+            Self::Command
+            | Self::HarnessResume
+            | Self::CooperativeCommand
+            | Self::UninterruptibleCommand => "poll after active command paste key",
         }
     }
 
     const fn waits_for_durable_boundary(self) -> bool {
         matches!(
             self,
-            Self::CooperativeCommand | Self::UninterruptibleCommand
+            Self::HarnessResume | Self::CooperativeCommand | Self::UninterruptibleCommand
         )
     }
 
     const fn wait_notice(self, forced_exit: bool) -> Option<&'static str> {
         match (self, forced_exit) {
+            (Self::HarnessResume, _) => Some(
+                "cancelling the harness run; waiting for the current step and session learning to finish",
+            ),
             (Self::CooperativeCommand, _) => Some(
                 "cancelling the graph reindex; waiting for the current bounded batch to finish",
             ),
@@ -8978,7 +9010,7 @@ where
                             }
                         }
                     }
-                    drain_runtime_events(app, lane_events, &mut pending_steer_items);
+                    drain_runtime_events(app, lane_events, &mut pending_steer_items, kind);
                     progress.drain(app);
                     if let Some(done) = on_complete.take() {
                         done(app, reason);
@@ -9003,7 +9035,7 @@ where
                 }
                 received = lane_events.recv() => {
                     match received {
-                        Ok(event) => apply_runtime_event(app, event, &mut pending_steer_items),
+                        Ok(event) => apply_operation_runtime_event(app, event, &mut pending_steer_items, kind),
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => {}
                     }
@@ -10411,14 +10443,28 @@ fn apply_runtime_event(
     app.apply_runtime(map_runtime_event(event));
 }
 
+fn apply_operation_runtime_event(
+    app: &mut AppModel,
+    event: RuntimeEvent,
+    pending_steer_items: &mut VecDeque<ItemId>,
+    kind: OperationKind,
+) {
+    if matches!(kind, OperationKind::HarnessResume) {
+        app.apply_runtime_within_work(map_runtime_event(event));
+    } else {
+        apply_runtime_event(app, event, pending_steer_items);
+    }
+}
+
 fn drain_runtime_events(
     app: &mut AppModel,
     rx: &mut broadcast::Receiver<RuntimeEvent>,
     pending_steer_items: &mut VecDeque<ItemId>,
+    kind: OperationKind,
 ) {
     loop {
         match rx.try_recv() {
-            Ok(event) => apply_runtime_event(app, event, pending_steer_items),
+            Ok(event) => apply_operation_runtime_event(app, event, pending_steer_items, kind),
             Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
             Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
                 break
@@ -13459,6 +13505,73 @@ mod tests {
         );
         assert!(timeline_has_notice(&app, "couldn't attach the image."));
         assert!(!timeline_has_notice(&app, "attached 1×1 image"));
+    }
+
+    #[test]
+    fn closeout_notices_keep_stage_order_and_stay_before_queued_prompts() {
+        use crate::context_inject::{CloseOutEvent, CloseOutStage, CloseOutUpdate};
+        let mut app = app();
+        app.begin_work();
+        app.editor.insert("keep draft");
+        let pending = app
+            .append_prompt("queued after harness", None, true)
+            .unwrap();
+        apply_operation_runtime_event(
+            &mut app,
+            RuntimeEvent::Stopped(StopReason::Done),
+            &mut VecDeque::new(),
+            OperationKind::HarnessResume,
+        );
+        assert!(matches!(app.active_work(), WorkState::Busy { .. }));
+        apply_closeout_update(&mut app, CloseOutUpdate::Stage(CloseOutStage::Lessons));
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some("Learning from session")
+        );
+        for event in [
+            CloseOutEvent::Session {
+                candidates: 2,
+                enqueued: 1,
+                accepted: 1,
+            },
+            CloseOutEvent::Graph {
+                reindexed: 3,
+                pruned: 1,
+                remaining: 2,
+            },
+            CloseOutEvent::Skipped {
+                stage: CloseOutStage::Primer,
+                reason: "not configured".to_string(),
+            },
+        ] {
+            apply_closeout_update(&mut app, CloseOutUpdate::Event(event));
+        }
+        let items = app.active_timeline().items();
+        let index = |needle: &str| {
+            items
+                .iter()
+                .position(|item| item.text.contains(needle))
+                .unwrap()
+        };
+        assert!(index("closed out session") < index("code graph updated"));
+        assert!(index("code graph updated") < index("primer distillation skipped"));
+        assert!(
+            index("primer distillation skipped")
+                < items.iter().position(|item| item.id == pending).unwrap()
+        );
+        assert_eq!(
+            items[index("primer distillation skipped")].kind,
+            ItemKind::Notice
+        );
+        assert!(items[index("code graph updated")]
+            .text
+            .contains("more queued for next session"));
+        assert_eq!(app.editor.text(), "keep draft");
+        apply_closeout_update(&mut app, CloseOutUpdate::Finished);
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some("Working")
+        );
     }
 
     #[test]
@@ -17228,71 +17341,83 @@ mod tests {
 
     #[tokio::test]
     async fn forced_exit_waits_for_a_cooperative_graph_batch_to_finish() {
-        let mut app = app();
-        app.begin_work_with_label("Reindexing LocalMind graph");
-        let history = localpilot_store::PromptHistory::with_store(None);
-        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
-        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
-        let cancel = CancellationToken::new();
-        let mut queue = VecDeque::new();
-        let mut mouse_state = MouseState::default();
-        let mut paste_burst = PasteBurst::default();
-        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
-        let mut io = characterization_io(
-            queued(vec![
-                Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-                Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            ]),
-            cell(0),
-            cell(0),
-            None,
-        );
-        let completed = std::rc::Rc::new(std::cell::Cell::new(false));
-        let operation = {
-            let completed = completed.clone();
-            async move {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                completed.set(true);
-            }
-        };
-
-        let out = drive_fullscreen_operation(
-            &mut app,
-            SlashContext {
-                stages: &mut StageHost::new(),
-                guidance: None,
-                execution: ExecutionSnapshot::default(),
-                approval_rx: &mut approval_rx,
-                question_rx: &mut question_rx,
-                cwd: Path::new("."),
-                history: &history,
-                mouse_state: &mut mouse_state,
-                paste_burst: &mut paste_burst,
-                workspace_index: &mut workspace_index,
-            },
-            &mut io,
-            &cancel,
-            &image_capability(false),
-            &mut queue,
+        for kind in [
             OperationKind::CooperativeCommand,
-            EventLane::Bare,
-            QuestionMode::Inert,
-            ProgressLane::None,
-            operation,
-            |app: &mut AppModel, ()| {
-                app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
-            },
-        )
-        .await
-        .expect("cooperative operation pump");
+            OperationKind::HarnessResume,
+        ] {
+            let mut app = app();
+            app.begin_work_with_label("Reindexing LocalMind graph");
+            let history = localpilot_store::PromptHistory::with_store(None);
+            let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+            let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+            let cancel = CancellationToken::new();
+            let mut queue = VecDeque::new();
+            let mut mouse_state = MouseState::default();
+            let mut paste_burst = PasteBurst::default();
+            let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+            let mut io = characterization_io(
+                queued(vec![
+                    Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                    Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                ]),
+                cell(0),
+                cell(0),
+                None,
+            );
+            let completed = std::rc::Rc::new(std::cell::Cell::new(false));
+            let operation = {
+                let completed = completed.clone();
+                async move {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    completed.set(true);
+                }
+            };
 
-        assert!(!out, "forced exit waits and returns to the open chat");
-        assert!(cancel.is_cancelled());
-        assert!(
-            completed.get(),
-            "the bounded write was observed through exit"
-        );
-        assert!(timeline_has(&app, "waiting for the current bounded batch"));
+            let out = drive_fullscreen_operation(
+                &mut app,
+                SlashContext {
+                    stages: &mut StageHost::new(),
+                    guidance: None,
+                    execution: ExecutionSnapshot::default(),
+                    approval_rx: &mut approval_rx,
+                    question_rx: &mut question_rx,
+                    cwd: Path::new("."),
+                    history: &history,
+                    mouse_state: &mut mouse_state,
+                    paste_burst: &mut paste_burst,
+                    workspace_index: &mut workspace_index,
+                },
+                &mut io,
+                &cancel,
+                &image_capability(false),
+                &mut queue,
+                kind,
+                EventLane::Bare,
+                QuestionMode::Inert,
+                ProgressLane::None,
+                operation,
+                |app: &mut AppModel, ()| {
+                    app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+                },
+            )
+            .await
+            .expect("cooperative operation pump");
+
+            assert!(!out, "forced exit waits and returns to the open chat");
+            assert!(cancel.is_cancelled());
+            assert!(
+                completed.get(),
+                "the bounded write was observed through exit"
+            );
+            assert!(timeline_has(
+                &app,
+                if matches!(kind, OperationKind::HarnessResume) {
+                    "waiting for the current step and session learning"
+                } else {
+                    "waiting for the current bounded batch"
+                }
+            ));
+        }
     }
 
     #[tokio::test]

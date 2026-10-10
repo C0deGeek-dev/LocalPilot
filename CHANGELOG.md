@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Harness session learning belongs to the full-screen timeline.** LocalMind
+  close-out reports ordered lesson, graph and primer results through notices,
+  with skipped stages as warnings and a `Learning from session` status label.
+  Learning no longer prints stderr or a separate spinner under the UI; plain
+  CLI close-out keeps its existing presentation. Cancellation waits for learning
+  writes to finish, and queued prompts stay behind their step's notices.
+
 - **Full-screen chat recovers from stray terminal output.** Harness and
   wait-resume completion repaint the entire screen, including on failure or
   cancellation. Ctrl+L also forces a redraw without changing session state.

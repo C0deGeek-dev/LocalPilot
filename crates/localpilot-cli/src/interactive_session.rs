@@ -368,7 +368,7 @@ impl InteractivePairHost {
         }
         if let Err(error) = registry.register(b_runtime).await {
             close_registered(&registry, &swarm_host, &[a_id]).await;
-            crate::context_inject::close_out(&cwd, a_id);
+            crate::context_inject::close_out_stderr(&cwd, a_id);
             return Err(error.into());
         }
 
@@ -436,12 +436,12 @@ fn close_unhosted_pair_session(cwd: &Path, mut session: InteractiveSessionBundle
     let id = session.runtime.session_id();
     session.runtime.close();
     drop(session);
-    crate::context_inject::close_out(cwd, id);
+    crate::context_inject::close_out_stderr(cwd, id);
 }
 
 fn close_pair_contexts(cwd: &Path, sessions: [SessionId; 2]) {
     for session in sessions {
-        crate::context_inject::close_out(cwd, session);
+        crate::context_inject::close_out_stderr(cwd, session);
     }
 }
 

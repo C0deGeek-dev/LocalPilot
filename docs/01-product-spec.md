@@ -410,6 +410,13 @@ rather than entering provider input. The rest:
 - `/bg` lists this session's background processes (`/bg stop <id>` / `/bg stop
   all`).
 
+After each harness step, full-screen LocalMind session learning uses the existing
+working chrome (`Learning from session`) and ordered timeline notices for lessons,
+code graph updates and repo-primer review. Skipped stages appear as warnings with
+the reason. Learning writes are awaited on cancellation; no separate stderr
+spinner or raw learning lines run beneath the full-screen UI. Plain CLI close-out
+and post-terminal shutdown retain their stderr presentation.
+
 In full-screen chat, Ctrl+L forces a complete screen redraw without changing
 the draft, session or running work. Harness and wait-resume completion also
 force a redraw, repairing stray output written outside the UI without a resize.

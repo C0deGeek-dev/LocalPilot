@@ -119,7 +119,7 @@ pub async fn run(
     }
     // Learn from the served session on disconnect (best-effort; skips an empty
     // session), so editor/ACP sessions feed LocalMind like the REPL does.
-    crate::context_inject::close_out(&project_root, runtime.session_id());
+    crate::context_inject::close_out_stderr(&project_root, runtime.session_id());
     Ok(())
 }
 

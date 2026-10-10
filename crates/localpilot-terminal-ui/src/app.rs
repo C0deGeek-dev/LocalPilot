@@ -2723,6 +2723,42 @@ impl AppModel {
         Self::begin_projection_work(self.projections.active_mut(), label, Instant::now());
     }
 
+    /// End an inner model turn while its host operation is still running.
+    /// Keep busy/cancellation state and the barrier before queued prompts.
+    pub fn apply_runtime_within_work(&mut self, update: RuntimeUpdate) {
+        if matches!(update, RuntimeUpdate::Stopped(_)) {
+            let projection = self.projections.active();
+            let work = projection.work;
+            let activity = projection.work_activity.clone();
+            let before = projection.active_insert_before;
+            self.apply_runtime(update);
+            let projection = self.projections.active_mut();
+            projection.work = work;
+            projection.work_activity = activity;
+            projection.active_insert_before = before;
+        } else {
+            self.apply_runtime(update);
+        }
+    }
+
+    /// Update host progress without resetting output anchors, tools or the draft.
+    pub fn set_work_label(&mut self, label: &str) {
+        let projection = self.projections.active_mut();
+        if !matches!(projection.work, WorkState::Busy { .. }) {
+            projection.work = WorkState::Busy {
+                cancellation_requested: false,
+            };
+        }
+        if let Some(activity) = &mut projection.work_activity {
+            activity.label = sanitize_inline(label);
+        } else {
+            projection.work_activity = Some(WorkActivity {
+                label: sanitize_inline(label),
+                started_at: Instant::now(),
+            });
+        }
+    }
+
     /// Marks one collaboration peer busy without changing the selected pane.
     /// Returns `false` for the ordinary single-session model.
     #[must_use]

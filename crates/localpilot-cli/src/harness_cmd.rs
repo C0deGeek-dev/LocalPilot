@@ -879,6 +879,7 @@ pub async fn resume(
             interactivity: Interactivity::NonInteractive,
             trusted: true,
             approver: || Box::new(ScriptedApprover::new(Vec::new())),
+            closeout_updates: None,
         },
         &events,
         &cancel,
@@ -919,6 +920,63 @@ where
     pub interactivity: Interactivity,
     pub trusted: bool,
     pub approver: A,
+    pub closeout_updates:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::context_inject::CloseOutUpdate>>,
+}
+
+/// A full-screen close-out runs independently so progress and input remain live.
+/// This guard joins even if the pump exits with an I/O error: persistent learning
+/// must finish before its owning operation can be dropped.
+struct CloseOutWorker(Option<std::thread::JoinHandle<()>>);
+
+impl Drop for CloseOutWorker {
+    fn drop(&mut self) {
+        if let Some(worker) = self.0.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+async fn close_out_step(
+    root: &Path,
+    session: localpilot_core::SessionId,
+    updates: Option<&tokio::sync::mpsc::UnboundedSender<crate::context_inject::CloseOutUpdate>>,
+) -> crate::context_inject::CloseOutReport {
+    let Some(updates) = updates else {
+        return crate::context_inject::close_out_stderr(root, session);
+    };
+    let root = root.to_path_buf();
+    let updates = updates.clone();
+    let worker_updates = updates.clone();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let worker = std::thread::Builder::new()
+        .name("session-closeout".to_string())
+        .spawn(move || {
+            let report = crate::context_inject::close_out(&root, session, |update| {
+                let _ = worker_updates.send(update);
+            });
+            let _ = done_tx.send(report);
+        });
+    let result = match worker {
+        Ok(worker) => {
+            let _worker = CloseOutWorker(Some(worker));
+            done_rx.await.map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    match result {
+        Ok(report) => report,
+        Err(error) => {
+            let event = crate::context_inject::CloseOutEvent::Skipped {
+                stage: crate::context_inject::CloseOutStage::Lessons,
+                reason: format!("session learning worker failed: {error}"),
+            };
+            let _ = updates.send(crate::context_inject::CloseOutUpdate::Event(event.clone()));
+            crate::context_inject::CloseOutReport {
+                events: vec![event],
+            }
+        }
+    }
 }
 
 /// Analyse a finished run in hindsight and offer what it earns to review.
@@ -1256,7 +1314,7 @@ where
         // close it out into LocalMind here (best-effort; skips an empty session)
         // — this is how autonomous runs produce reviewed memory, not just the
         // interactive REPL.
-        crate::context_inject::close_out(root, runtime.session_id());
+        close_out_step(root, runtime.session_id(), run.closeout_updates.as_ref()).await;
         let gate = render_gate(&outcome.gate);
         if !gate.is_empty() {
             write!(out, "{gate}")?;
@@ -1337,6 +1395,7 @@ pub async fn wait_resume(
             interactivity: Interactivity::NonInteractive,
             trusted: true,
             approver: || Box::new(ScriptedApprover::new(Vec::new())),
+            closeout_updates: None,
         },
         &events,
         &cancel,
@@ -1607,6 +1666,80 @@ pub(crate) fn repo_summary(root: &Path) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn closeout_presentation_child() {
+        let Ok(presentation) = std::env::var("LOCALPILOT_TEST_CLOSEOUT_PRESENTATION") else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )
+        .unwrap();
+        let session = localpilot_core::SessionId::new();
+        Store::open(dir.path())
+            .append_message(
+                session,
+                &localpilot_core::Message::text(
+                    localpilot_core::Role::User,
+                    "Lesson: keep terminal output inside the host UI.",
+                ),
+            )
+            .unwrap();
+        let (updates, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let timeline = presentation == "timeline";
+        let report = close_out_step(dir.path(), session, timeline.then_some(&updates)).await;
+        assert!(!report.events.is_empty());
+        if timeline {
+            let mut events = Vec::new();
+            let mut stages = Vec::new();
+            while let Ok(update) = received.try_recv() {
+                match update {
+                    crate::context_inject::CloseOutUpdate::Stage(stage) => stages.push(stage),
+                    crate::context_inject::CloseOutUpdate::Event(event) => events.push(event),
+                    crate::context_inject::CloseOutUpdate::Finished => {}
+                }
+            }
+            assert_eq!(events, report.events);
+            assert_eq!(
+                stages.first(),
+                Some(&crate::context_inject::CloseOutStage::Lessons)
+            );
+        }
+    }
+
+    #[test]
+    fn closeout_host_presentations_keep_stderr_owned_by_plain_cli() {
+        for presentation in ["timeline", "stderr"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "harness_cmd::tests::closeout_presentation_child",
+                    "--nocapture",
+                ])
+                .env("LOCALPILOT_TEST_CLOSEOUT_PRESENTATION", presentation)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "{}\n{stderr}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            if presentation == "timeline" {
+                assert!(
+                    stderr.is_empty(),
+                    "full-screen close-out wrote to stderr: {stderr}"
+                );
+            } else {
+                assert!(stderr.contains("learning: checking the session for lessons"));
+                assert!(stderr.contains("learning: closed out session —"));
+                assert!(stderr.contains("learning: updating the code graph"));
+            }
+        }
+    }
+
     #[test]
     fn a_harness_step_gets_the_command_list_and_keeps_the_tool_allowlist() {
         use localpilot_sandbox::{CommandClass, Decision, Effect, ExactCommand, PermissionRequest};
@@ -1714,6 +1847,7 @@ mod tests {
             interactivity: Interactivity::NonInteractive,
             trusted: false,
             approver: || Box::new(ScriptedApprover::new(Vec::new())) as Box<dyn Approver>,
+            closeout_updates: None,
         }
     }
 
@@ -2070,6 +2204,7 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
             interactivity: Interactivity::NonInteractive,
             trusted: false,
             approver: || Box::new(ScriptedApprover::new(Vec::new())) as Box<dyn Approver>,
+            closeout_updates: None,
         };
         let mut out: Vec<u8> = Vec::new();
         let waiter = wait_resume_with_events(
@@ -2652,6 +2787,7 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
             interactivity: Interactivity::NonInteractive,
             trusted: true,
             approver: || Box::new(ScriptedApprover::always()) as Box<dyn Approver>,
+            closeout_updates: None,
         };
         let (events_tx, _rx) = broadcast::channel::<RuntimeEvent>(64);
         let cancel = CancellationToken::new();
