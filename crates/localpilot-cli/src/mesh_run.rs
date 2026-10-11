@@ -829,16 +829,7 @@ fn owner_checkpoint_check(
     {
         return None;
     }
-    let mut check = localpilot_harness::resolve_verify_check(
-        root,
-        Some(if cfg!(windows) {
-            "python -I -m ast"
-        } else {
-            "python3 -I -m ast"
-        }),
-    )?;
-    check.args.extend(["--".to_owned(), source.clone()]);
-    Some(check)
+    localpilot_harness::python_syntax_check(root, source)
 }
 
 impl ModelJudge {

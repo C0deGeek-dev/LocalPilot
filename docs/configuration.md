@@ -1044,6 +1044,18 @@ Replacement-shape guidance alone does not impose this restriction. This prevents
 opaque process retries after a bounds refusal; it does not make unrestricted
 commands safe or replace the final repository-diff check.
 
+`headless_units` (0–8, default 0 = off) lets `localpilot eval` continue a task
+under a profile that stops after each checkpoint in up to that many bounded
+units. Only the user config or the environment
+(`LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_UNITS`) may set it; a project file
+that sets it is refused, and a value above 8 is a configuration error. A unit
+whose full verification fails continues only when every changed path is an
+existing regular Python file in the workspace, its isolated syntax check ran
+and passed, and the unit launched no shell, background process or MCP call and
+had no failed write. The task still ends as done only after the full
+verification passes. Per-unit caps are unchanged. `print`, `rpc` and
+interactive sessions do not use it. See ADR-0227.
+
 Plan review and execution disclosure show the strategy; idle `/harness-status`
 also shows the current agent profile. `harness resume` prints the fresh executor's
 profile before work. Harness steps start with unknown reliability. Stricter caps

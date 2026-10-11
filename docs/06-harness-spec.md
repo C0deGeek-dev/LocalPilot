@@ -68,6 +68,28 @@ exclude unchanged pre-existing dirty files; prior dirty content in a file change
 this turn can conservatively trigger refusal. Without a repository baseline,
 model shell/background calls are refused; file tools and permission-gated
 verification remain available. Explicit user shell retains its authorization.
+
+Headless `eval` can continue in bounded units when the user sets
+`[harness.granularity] headless_units` (ADR-0227; off by default). When the
+full check fails at the end of a unit, the harness may run a narrow unit check:
+`python -I -m ast` on each changed file, permission-gated, only when every
+changed path is a contained regular Python file, the unit launched no shell,
+background process or MCP call and no write failed. `HEAD` and every material
+path must be identical before the full check, after it and after the unit
+check, and the unit's bounds are inspected again before the checkpoint; a check
+that moved the workspace stops the task, preserving the work. A unit check that
+is denied or errors stops the task with that status. If every unit check passes,
+the turn ends with the `UnitCheckpoint` stop (never `Done`) and the host repeats
+the original task with a synthetic unit note. The next unit is sized from an
+unreferenced tree of the tracked material paths written through a temporary
+index (the real index, `HEAD` and refs are untouched), so earlier units are not
+counted again. The snapshot is refused when a path has a `filter` attribute
+(staging would run a repository helper outside the permission engine); then the
+unit is sized from `HEAD`, which can only over-count. Snapshot commands run
+without the filesystem monitor and under a 10-second bound. A failed full check stays an outstanding obligation for the rest
+of the session, on every exit: no later turn finishes, even unchanged, until
+the full check actually passes; a denied or missing verifier stops the task. While a further unit is
+available, envelope refusals name that step instead of a checkpoint.
 When a bounded write exceeds its limits, model shell commands and background
 starts are also refused until a successful smaller bounded write or a fresh
 unit. Bounded reads, background list/logs/stop and automatic verification remain

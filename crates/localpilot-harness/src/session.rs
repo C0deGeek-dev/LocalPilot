@@ -48,6 +48,9 @@ use crate::quality::{CheckOutcome, CheckRunner, CheckStatus};
 use crate::rules::{trigger_for_cadence, RuleContext, RuleEngine, RuleVerdict, Trigger};
 use crate::summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 
+mod unit_continuation;
+pub use unit_continuation::python_syntax_check;
+
 /// Why a turn loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
@@ -79,6 +82,11 @@ pub enum StopReason {
     /// mid-flight leaves a resumable, non-error result, so the turn can be
     /// continued after the process comes back (e.g. a self-dev reload).
     Quiesced,
+    /// A bounded unit of a headless task passed its executed unit check while
+    /// the task's full verification still fails. Never a completed task: the
+    /// host may open the next unit, and only a passing full check ends as
+    /// `Done`.
+    UnitCheckpoint,
 }
 
 /// A bounded, parseable summary of what a turn accomplished, surfaced at the
@@ -724,6 +732,17 @@ const CHUNKED_WRITE_REPAIR_PROMPT: &str =
 
 /// Whether a tool name is one of the file-write builtins a chunked-write
 /// instruction applies to.
+/// A model process launch whose effects the harness cannot observe.
+fn is_opaque_launch(name: &str, input: &serde_json::Value) -> bool {
+    name == "run_shell"
+        || name == "run_background"
+            && input
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("start")
+                == "start"
+}
+
 fn is_file_write_tool(name: &str) -> bool {
     matches!(
         name,
@@ -833,6 +852,9 @@ enum VerifyGate {
     /// The re-entry cap was reached with the build still failing; stop the turn
     /// with `NoProgress`.
     GiveUp(String),
+    /// The full check failed but the unit's own executed check passed; stop
+    /// the turn as a unit checkpoint so the host can open the next unit.
+    UnitCheckpoint(String),
 }
 
 /// Stable store key under which the broker's graduated tools persist across
@@ -1302,6 +1324,16 @@ pub struct SessionRuntime {
     /// An attempted call prevents the automatic read-only exemption without
     /// asserting a local mutation or changing bounded-mutation obligations.
     work_mcp_call_attempted: bool,
+    /// A model shell/background launch was dispatched in this unit. Its
+    /// effects are opaque to the diff, so the unit cannot earn a checkpoint.
+    work_opaque_launch_dispatched: bool,
+    /// A typed write returned an error after it may have run (partial write).
+    work_write_error_may_have_run: bool,
+    /// Unit checkpoints the host still allows in this task (0 = none).
+    unit_checkpoints_remaining: u8,
+    /// A unit checkpoint left the task's full verification failed. Survives
+    /// turn boundaries: no later turn finishes without an actual full pass.
+    outstanding_full_check: bool,
     provider: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
     /// Shared + swappable so an interactive host can change the permission
@@ -1505,6 +1537,10 @@ impl SessionRuntime {
             work_opaque_retry_blocked: false,
             work_mutation_may_have_run: false,
             work_mcp_call_attempted: false,
+            work_opaque_launch_dispatched: false,
+            work_write_error_may_have_run: false,
+            unit_checkpoints_remaining: 0,
+            outstanding_full_check: false,
             provider,
             tools,
             // The incognito floor is a session property, not a profile, so it is
@@ -1629,17 +1665,10 @@ impl SessionRuntime {
                 if is_file_write_tool(name) && refusal.blocks_opaque_retry {
                     self.work_opaque_retry_blocked = true;
                 }
-                return Some(refusal.message);
+                return Some(self.unit_refusal_guidance(refusal.message));
             }
         }
-        let opaque_launch = name == "run_shell"
-            || name == "run_background"
-                && input
-                    .get("action")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("start")
-                    == "start";
-        if self.work_opaque_retry_blocked && opaque_launch {
+        if self.work_opaque_retry_blocked && is_opaque_launch(name, input) {
             return Some("work envelope: a bounded write was refused; opaque shell/background retries cannot preserve its limits. Use bounded reads and a smaller exact edit, or checkpoint the unit; automatic verification remains available".to_string());
         }
         if self.config.granularity.is_some()
@@ -1704,7 +1733,7 @@ impl SessionRuntime {
         if is_file_write_tool(name) && refusal.blocks_opaque_retry {
             self.work_opaque_retry_blocked = true;
         }
-        Some(refusal.message)
+        Some(self.unit_refusal_guidance(refusal.message))
     }
 
     /// Evaluate the `check_before_launch` discipline rule for a tool call. When
@@ -1965,6 +1994,8 @@ impl SessionRuntime {
         self.work_diff_baseline = None;
         self.work_mutation_may_have_run = false;
         self.work_mcp_call_attempted = false;
+        self.work_opaque_launch_dispatched = false;
+        self.work_write_error_may_have_run = false;
         self.work_unit = crate::granularity::WorkUnit::default();
     }
 
@@ -3093,10 +3124,11 @@ impl SessionRuntime {
             && !self.work_mutation_may_have_run
             && !self.work_mcp_call_attempted
             && self.work_mutation_refusal.is_none();
-        if known_unchanged_readonly
-            || self.config.answer_only
-            || !self.config.verify_before_done
-                && (!bounded_mutation || self.unit_verification_exempt.is_some())
+        if !self.outstanding_full_check
+            && (known_unchanged_readonly
+                || self.config.answer_only
+                || !self.config.verify_before_done
+                    && (!bounded_mutation || self.unit_verification_exempt.is_some()))
         {
             return VerifyGate::Finalize;
         }
@@ -3124,7 +3156,7 @@ impl SessionRuntime {
                 })
             })
         }) else {
-            if bounded_mutation {
+            if bounded_mutation || self.outstanding_full_check {
                 let detail = "bounded unit has no applicable verification target; set verify_command or review an explicit verify: none reason before completion".to_string();
                 let _ = events.send(RuntimeEvent::Warning(detail.clone()));
                 return VerifyGate::GiveUp(detail);
@@ -3149,6 +3181,11 @@ impl SessionRuntime {
                     .to_string(),
             );
         }
+        // While a further unit is available, record the workspace the full
+        // check starts from: a unit cannot earn a checkpoint if a check moved it.
+        let before_full_check = (self.unit_checkpoints_remaining > 0)
+            .then(|| crate::resume::work_diff_baseline(&root).ok())
+            .flatten();
         let outcome = self
             .run_gate_checks(std::slice::from_ref(&check), Trigger::PhaseComplete, &root)
             .await
@@ -3156,6 +3193,7 @@ impl SessionRuntime {
         self.turn_verification = Some(outcome.status);
         match outcome.status {
             CheckStatus::Passed => {
+                self.outstanding_full_check = false;
                 if self.harness_checkpoint_owner {
                     if let (Some(profile), Some(baseline)) =
                         (self.work_profile(), self.work_diff_baseline.clone())
@@ -3199,13 +3237,13 @@ impl SessionRuntime {
                     "verify-before-done: could not run `{}` ({:?}); {}",
                     check.program,
                     outcome.status,
-                    if bounded_mutation {
+                    if bounded_mutation || self.outstanding_full_check {
                         "bounded unit remains unverified; stopping"
                     } else {
                         "finalizing without a verify signal"
                     }
                 )));
-                if bounded_mutation {
+                if bounded_mutation || self.outstanding_full_check {
                     VerifyGate::GiveUp(format!("verification {}: {:?}; unit remains unverified; restore the verifier and resume", check.program, outcome.status))
                 } else {
                     VerifyGate::Finalize
@@ -3214,6 +3252,19 @@ impl SessionRuntime {
             CheckStatus::Failed => {
                 if bounded_mutation {
                     self.capability_evidence.observe_outcome(false);
+                }
+                match self
+                    .try_unit_checkpoint(&root, diff_mutated, before_full_check.as_ref())
+                    .await
+                {
+                    unit_continuation::UnitAttempt::Checkpoint(detail) => {
+                        return VerifyGate::UnitCheckpoint(detail);
+                    }
+                    unit_continuation::UnitAttempt::Stop(detail) => {
+                        let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                        return VerifyGate::GiveUp(detail);
+                    }
+                    unit_continuation::UnitAttempt::NotEarned => {}
                 }
                 *attempts += 1;
                 let _ = events.send(RuntimeEvent::Warning(format!(
@@ -3765,12 +3816,25 @@ impl SessionRuntime {
         self.work_opaque_retry_blocked = false;
         self.work_mutation_may_have_run = false;
         self.work_mcp_call_attempted = false;
+        self.work_opaque_launch_dispatched = false;
+        self.work_write_error_may_have_run = false;
         self.active_work_profile = None;
         self.active_work_profile = self.work_profile();
         self.work_diff_baseline =
             self.config.granularity.as_ref().and_then(|_| {
                 crate::resume::work_diff_baseline(&self.workspace.process_dir()).ok()
             });
+        // A unit continued after a checkpoint is sized from where it starts.
+        // Without a snapshot it stays sized from `HEAD`, which only over-counts.
+        if self.outstanding_full_check {
+            let root = self.workspace.process_dir();
+            if let Some(baseline) = self.work_diff_baseline.as_mut() {
+                let paths: Vec<String> = baseline.files.keys().cloned().collect();
+                baseline.diff_base = crate::resume::snapshot_working_tree(&root, &paths)
+                    .ok()
+                    .flatten();
+            }
+        }
         if let Some(profile) = self.active_work_profile {
             self.tools
                 .set_context_output_limit(profile.max_output_bytes);
@@ -4538,6 +4602,15 @@ impl SessionRuntime {
                         );
                         return self.stop_with_detail(events, StopReason::NoProgress, Some(detail));
                     }
+                    VerifyGate::UnitCheckpoint(detail) => {
+                        self.outstanding_full_check = true;
+                        let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                        return self.stop_with_detail(
+                            events,
+                            StopReason::UnitCheckpoint,
+                            Some(detail),
+                        );
+                    }
                 }
             }
 
@@ -4966,6 +5039,8 @@ impl SessionRuntime {
                                 Some(dispatch) => {
                                     bounded_write_dispatched =
                                         is_file_write_tool(name) && dispatch.mutation_may_have_run;
+                                    self.work_opaque_launch_dispatched |=
+                                        is_opaque_launch(name, &active_call.input);
                                     unavailable_backend = dispatch.unavailable_backend;
                                     if let Some(denial) = &dispatch.permission_denial {
                                         let _ = events.send(RuntimeEvent::Warning(
@@ -5092,6 +5167,7 @@ impl SessionRuntime {
                 if bounded_write_dispatched && !result.is_error() {
                     self.work_opaque_retry_blocked = false;
                 }
+                self.work_write_error_may_have_run |= bounded_write_dispatched && result.is_error();
                 if repaired_dispatched {
                     if let Some(decision) = &tool_decision {
                         if let Some(note) = &decision.model_note {

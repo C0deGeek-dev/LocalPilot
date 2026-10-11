@@ -315,7 +315,10 @@ fn stop_reason(reason: StopReason) -> &'static str {
         | StopReason::ProviderError
         | StopReason::BudgetExceeded
         | StopReason::NoProgress
-        | StopReason::TimedOut => "error",
+        | StopReason::TimedOut
+        // Only headless evaluation opens further units; an unfinished task is
+        // never reported as a normal end of turn.
+        | StopReason::UnitCheckpoint => "error",
     }
 }
 

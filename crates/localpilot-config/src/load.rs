@@ -79,6 +79,7 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
     let mut config: Config = figment.extract().map_err(ConfigError::from)?;
     synthesize_env_providers(&mut config);
     validate_checks(&config.harness.checks)?;
+    validate_granularity(&config.harness.granularity)?;
     // Deliberately after the merge: layers combine per key, so an entry can be
     // invalid only once every layer has been applied (see `validate_mcp_env`).
     validate_mcp_env(&config.mcp)?;
@@ -88,7 +89,11 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
 /// Keys a project file must never set: they grant the agent more than the
 /// user's own settings do, and a repository must not be able to grant itself
 /// anything. Refused loudly rather than ignored, so the author sees why.
-const USER_ONLY_KEYS: [&str; 2] = ["permissions.allow_commands", "permissions.scratch_root"];
+const USER_ONLY_KEYS: [&str; 3] = [
+    "permissions.allow_commands",
+    "permissions.scratch_root",
+    "harness.granularity.headless_units",
+];
 
 fn refuse_user_only_keys(project: &Path) -> Result<(), ConfigError> {
     let layer = Figment::from(Toml::file(project));
@@ -191,6 +196,17 @@ pub fn is_portable_credential_alias(alias: &str) -> bool {
 
 /// Validate the ratified quality-gate checks: each needs a non-empty name and
 /// program, and names must be unique (a name is also a per-check override key).
+fn validate_granularity(caps: &crate::schema::GranularityConfig) -> Result<(), ConfigError> {
+    if caps.headless_units > crate::schema::MAX_HEADLESS_UNITS {
+        return Err(ConfigError::InvalidGranularity(format!(
+            "headless_units is {}; the maximum is {}",
+            caps.headless_units,
+            crate::schema::MAX_HEADLESS_UNITS
+        )));
+    }
+    Ok(())
+}
+
 fn validate_checks(checks: &[CheckConfig]) -> Result<(), ConfigError> {
     let mut seen = std::collections::HashSet::new();
     for check in checks {

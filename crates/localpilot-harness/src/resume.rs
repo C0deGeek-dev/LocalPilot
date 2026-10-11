@@ -666,7 +666,9 @@ pub(crate) fn inspect_work_diff(
     baseline: Option<&WorkDiffBaseline>,
     ignore_progress: bool,
 ) -> Result<WorkDiffInspection, HarnessError> {
-    let base = baseline.map_or("HEAD", |before| before.head.trim());
+    let base = baseline.map_or("HEAD", |before| {
+        before.diff_base.as_deref().unwrap_or(before.head.trim())
+    });
     let (mut paths, ignored_generated) = work_status_paths(root)?;
     let mut inspection = WorkDiffInspection {
         ignored_generated,
@@ -998,7 +1000,7 @@ fn working_material(root: &Path, path: &str) -> Result<Option<SizedMaterial>, Ha
     }
 }
 
-fn path_has_link(root: &Path, path: &str) -> Result<bool, HarnessError> {
+pub(crate) fn path_has_link(root: &Path, path: &str) -> Result<bool, HarnessError> {
     let mut candidate = root.to_path_buf();
     for component in Path::new(path).components() {
         if !matches!(component, std::path::Component::Normal(_)) {
@@ -1148,10 +1150,178 @@ fn write(path: &Path, contents: &str) -> Result<(), HarnessError> {
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct WorkDiffBaseline {
     pub(crate) head: String,
     pub(crate) files: std::collections::BTreeMap<String, String>,
+    /// The tracked working-tree state (a tree object) a continued unit started from. A unit is
+    /// sized against it instead of `HEAD`, so an earlier unit's uncommitted
+    /// edits are not counted again. Not part of equality: it identifies where
+    /// sizing starts, not what the workspace contains.
+    pub(crate) diff_base: Option<String>,
+}
+
+impl PartialEq for WorkDiffBaseline {
+    fn eq(&self, other: &Self) -> bool {
+        self.head == other.head && self.files == other.files
+    }
+}
+
+impl Eq for WorkDiffBaseline {}
+
+/// The longest any snapshot Git command may run.
+const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Record the tracked working tree at `paths` (the unit's material paths) as
+/// an unreferenced tree object, through a temporary copy of the index. The
+/// working tree, the real index, `HEAD` and every ref are untouched. `None`
+/// when nothing differs from `HEAD`'s tree.
+///
+/// Refuses (an error, never a fallback that runs anyway) when any path has a
+/// `filter` attribute: staging would run a repository-configured clean helper
+/// whose effects are outside the permission engine. Attributes are read with
+/// `check-attr`, which runs no helper; the filesystem monitor is disabled; each
+/// command is bounded by [`SNAPSHOT_TIMEOUT`].
+pub(crate) fn snapshot_working_tree(
+    root: &Path,
+    paths: &[String],
+) -> Result<Option<String>, HarnessError> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let mut attr_args = vec!["check-attr", "-z", "filter", "--"];
+    attr_args.extend(paths.iter().map(String::as_str));
+    let attributes = bounded_git(root, None, &attr_args, SNAPSHOT_TIMEOUT)?;
+    // Records are `path NUL attribute NUL value NUL`.
+    let values: Vec<&str> = attributes.split('\0').collect();
+    if values
+        .chunks(3)
+        .any(|record| record.len() == 3 && record[2] != "unspecified")
+    {
+        return Err(HarnessError::Provider(
+            "unit snapshot declined: a changed path has a filter attribute, so staging it would run a repository helper".into(),
+        ));
+    }
+    let index = bounded_git(
+        root,
+        None,
+        &["rev-parse", "--git-path", "index"],
+        SNAPSHOT_TIMEOUT,
+    )?;
+    let index = root.join(index.trim());
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let temporary = std::env::temp_dir().join(format!(
+        "localpilot-unit-index-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::copy(&index, &temporary).map_err(|source| HarnessError::Io {
+        path: index.display().to_string(),
+        source,
+    })?;
+    let result = (|| {
+        // Only tracked paths can be staged by update; untracked material keeps
+        // its whole-file sizing.
+        let mut list_args = vec!["ls-files", "-z", "--"];
+        list_args.extend(paths.iter().map(String::as_str));
+        let listed = bounded_git(root, Some(&temporary), &list_args, SNAPSHOT_TIMEOUT)?;
+        let tracked: Vec<&str> = listed.split(' ').filter(|p| !p.is_empty()).collect();
+        if !tracked.is_empty() {
+            let mut add_args = vec!["add", "-u", "--"];
+            add_args.extend(tracked);
+            bounded_git(root, Some(&temporary), &add_args, SNAPSHOT_TIMEOUT)?;
+        }
+        let tree = bounded_git(root, Some(&temporary), &["write-tree"], SNAPSHOT_TIMEOUT)?;
+        let head = bounded_git(root, None, &["rev-parse", "HEAD^{tree}"], SNAPSHOT_TIMEOUT)?;
+        let tree = tree.trim().to_string();
+        Ok((tree != head.trim()).then_some(tree))
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result
+}
+
+/// Run one Git command with literal pathspecs, no filesystem monitor, an
+/// optional alternate index, and a hard time bound.
+fn bounded_git(
+    root: &Path,
+    index: Option<&Path>,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<String, HarnessError> {
+    let mut command = Command::new("git");
+    command
+        .args(["--literal-pathspecs", "-c", "core.fsmonitor=false"])
+        .args(args)
+        .current_dir(root);
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    let label = format!("git {}", args.first().copied().unwrap_or_default());
+    bounded_output(command, timeout, &label)
+}
+
+/// Run `command` to completion within `timeout`, killing it when it overruns.
+/// Output beyond 1 MiB per stream is discarded.
+fn bounded_output(
+    mut command: Command,
+    timeout: std::time::Duration,
+    label: &str,
+) -> Result<String, HarnessError> {
+    const CAP: u64 = 1024 * 1024;
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| HarnessError::Provider(format!("{label}: {e}")))?;
+    let drain = |stream: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(stream) = stream {
+                let _ = stream.take(CAP).read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    );
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HarnessError::Provider(format!(
+                    "{label} did not finish within {}s and was stopped",
+                    timeout.as_secs()
+                )));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(e) => return Err(HarnessError::Provider(format!("{label}: {e}"))),
+        }
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
+    } else {
+        Err(HarnessError::Provider(format!(
+            "{label} failed: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        )))
+    }
 }
 
 pub(crate) fn work_diff_baseline(root: &Path) -> Result<WorkDiffBaseline, HarnessError> {
@@ -1163,7 +1333,11 @@ pub(crate) fn work_diff_baseline(root: &Path) -> Result<WorkDiffBaseline, Harnes
             Ok((path, hash))
         })
         .collect::<Result<_, HarnessError>>()?;
-    Ok(WorkDiffBaseline { head, files })
+    Ok(WorkDiffBaseline {
+        head,
+        files,
+        diff_base: None,
+    })
 }
 
 pub(crate) fn work_changed_paths(
@@ -1594,5 +1768,201 @@ mod artifact_tests {
             inspection.blocked.unwrap().contains("changed lines"),
             "a matching binary must not turn a text diff into binary accounting"
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::granularity::{ContextCapacity, ContextProvenance, Reliability, WorkProfile};
+
+    /// Twenty lines; optionally replace the first and/or the last.
+    fn lines(first: Option<&str>, last: Option<&str>) -> String {
+        (1..=20)
+            .map(|n| match n {
+                1 => first.map_or_else(|| n.to_string(), str::to_string),
+                20 => last.map_or_else(|| n.to_string(), str::to_string),
+                _ => n.to_string(),
+            })
+            .map(|line| {
+                line + "
+"
+            })
+            .collect()
+    }
+
+    fn repository() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]).unwrap();
+        git(dir.path(), &["config", "user.name", "Fixture"]).unwrap();
+        git(
+            dir.path(),
+            &["config", "user.email", "fixture@example.invalid"],
+        )
+        .unwrap();
+        git(dir.path(), &["config", "core.autocrlf", "false"]).unwrap();
+        std::fs::write(dir.path().join("a.txt"), lines(None, None)).unwrap();
+        std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+        git(dir.path(), &["add", "-A"]).unwrap();
+        git(dir.path(), &["commit", "-qm", "baseline"]).unwrap();
+        dir
+    }
+
+    /// One file, one region: the conservative profile continued units use.
+    fn conservative() -> WorkProfile {
+        WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 16_384,
+                provenance: ContextProvenance::CallerSupplied,
+            },
+            Reliability::Unknown,
+            &localpilot_config::GranularityConfig::default(),
+        )
+    }
+
+    /// HEAD, index bytes, refs, status and file bytes.
+    type RepositoryState = (String, Vec<u8>, String, String, Vec<(String, Vec<u8>)>);
+
+    fn repository_state(root: &Path) -> RepositoryState {
+        let mut files = Vec::new();
+        for name in ["a.txt", "b.txt", "new.txt"] {
+            files.push((
+                name.to_string(),
+                std::fs::read(root.join(name)).unwrap_or_default(),
+            ));
+        }
+        (
+            git(root, &["rev-parse", "HEAD"]).unwrap(),
+            std::fs::read(root.join(".git/index")).unwrap(),
+            git(root, &["for-each-ref"]).unwrap(),
+            git(root, &["status", "--porcelain=v1", "--untracked-files=all"]).unwrap(),
+            files,
+        )
+    }
+
+    #[test]
+    fn a_snapshot_touches_no_head_index_ref_or_file() {
+        let dir = repository();
+        let root = dir.path();
+        assert_eq!(
+            snapshot_working_tree(root, &material(root)).unwrap(),
+            None,
+            "clean tree"
+        );
+        std::fs::write(root.join("b.txt"), "b staged\n").unwrap();
+        git(root, &["add", "b.txt"]).unwrap();
+        std::fs::write(root.join("a.txt"), lines(Some("one"), None)).unwrap();
+        std::fs::write(root.join("new.txt"), "untracked\n").unwrap();
+        let before = repository_state(root);
+        let snapshot = snapshot_working_tree(root, &material(root))
+            .unwrap()
+            .unwrap();
+        assert_eq!(repository_state(root), before);
+        // The snapshot records the tracked working tree (staged and unstaged).
+        assert_eq!(
+            git(root, &["show", &format!("{snapshot}:a.txt")]).unwrap(),
+            lines(Some("one"), None)
+        );
+        assert_eq!(
+            git(root, &["show", &format!("{snapshot}:b.txt")]).unwrap(),
+            "b staged\n"
+        );
+    }
+
+    /// The unit's material paths, as the runtime passes them.
+    fn material(root: &Path) -> Vec<String> {
+        work_diff_baseline(root)
+            .unwrap()
+            .files
+            .into_keys()
+            .collect()
+    }
+
+    #[test]
+    fn an_unreadable_repository_fails_rather_than_guessing() {
+        // A `.git` file that is not a valid gitfile stops discovery here, so
+        // the result does not depend on where the temporary directory lives.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".git"), "not a gitfile\n").unwrap();
+        assert!(snapshot_working_tree(dir.path(), &["a.txt".to_string()]).is_err());
+    }
+
+    #[test]
+    fn a_filtered_path_is_declined_without_running_its_helper() {
+        let dir = repository();
+        let root = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("marker.txt");
+        let helper = root.join("probe.py");
+        std::fs::write(
+            &helper,
+            format!(
+                "import sys\nopen(r'{}', 'w').write('ran')\nsys.stdout.write(sys.stdin.read())\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join(".gitattributes"), "*.txt filter=probe\n").unwrap();
+        git(root, &["add", ".gitattributes", "probe.py"]).unwrap();
+        git(root, &["commit", "-qm", "attributes"]).unwrap();
+        let clean = format!("python {}", helper.display()).replace('\\', "/");
+        git(root, &["config", "filter.probe.clean", &clean]).unwrap();
+        std::fs::write(root.join("a.txt"), lines(Some("one"), None)).unwrap();
+        let _ = std::fs::remove_file(&marker);
+        let paths = vec!["a.txt".to_string()];
+        let declined = snapshot_working_tree(root, &paths).unwrap_err().to_string();
+        assert!(declined.contains("filter attribute"), "{declined}");
+        assert!(!marker.exists(), "the snapshot ran a repository helper");
+    }
+
+    #[test]
+    fn an_overrunning_command_is_stopped() {
+        let mut sleeper = Command::new("python");
+        sleeper.args(["-c", "import time; time.sleep(30)"]);
+        if Command::new("python").arg("--version").output().is_err() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let error = bounded_output(sleeper, std::time::Duration::from_millis(500), "sleeper")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("did not finish"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_failing_command_reports_its_error() {
+        let dir = repository();
+        let error = bounded_git(
+            dir.path(),
+            None,
+            &["rev-parse", "--verify", "no-such-ref"],
+            SNAPSHOT_TIMEOUT,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("git rev-parse failed"), "{error}");
+    }
+
+    #[test]
+    fn a_continued_unit_is_sized_from_its_snapshot() {
+        let dir = repository();
+        let root = dir.path();
+        // An earlier unit changed the first line.
+        std::fs::write(root.join("a.txt"), lines(Some("one"), None)).unwrap();
+        let mut baseline = work_diff_baseline(root).unwrap();
+        baseline.diff_base = snapshot_working_tree(root, &material(root)).unwrap();
+        // This unit changes the last line only.
+        std::fs::write(root.join("a.txt"), lines(Some("one"), Some("twenty"))).unwrap();
+        let sized = inspect_work_diff(root, conservative(), Some(&baseline), false).unwrap();
+        assert_eq!(sized.blocked, None, "one region since the snapshot");
+        let mut from_head = baseline.clone();
+        from_head.diff_base = None;
+        let counted = inspect_work_diff(root, conservative(), Some(&from_head), false).unwrap();
+        assert!(counted.blocked.is_some(), "two regions since HEAD");
+        // Equality ignores where sizing starts.
+        assert_eq!(baseline, from_head);
     }
 }

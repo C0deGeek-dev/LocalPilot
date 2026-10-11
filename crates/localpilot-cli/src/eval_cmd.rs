@@ -83,7 +83,11 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
     let (events_tx, _rx) = broadcast::channel(1024);
     let cancel = CancellationToken::new();
     let started = std::time::Instant::now();
-    let _reason = runtime.run_turn(&problem, &events_tx, &cancel).await;
+    // A constrained task may continue in bounded units when the user allows it;
+    // with that setting off this is a single turn.
+    let _reason = runtime
+        .run_turn_in_units(&problem, &events_tx, &cancel)
+        .await;
     let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     // The snapshot cannot grant future authority: a changed profile/lease or
     // verifier can still deny the actual check. Such a cell is not a baseline.

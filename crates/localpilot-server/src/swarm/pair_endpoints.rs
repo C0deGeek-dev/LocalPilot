@@ -149,7 +149,8 @@ fn map_capture(
         StopReason::Cancelled => TurnReply::Cancelled,
         StopReason::TimedOut => TurnReply::TimedOut,
         StopReason::BudgetExceeded => TurnReply::BudgetExceeded,
-        StopReason::NoProgress => TurnReply::NoProgress,
+        // Pair peers run single turns; an unfinished unit is not an envelope.
+        StopReason::NoProgress | StopReason::UnitCheckpoint => TurnReply::NoProgress,
         StopReason::Degraded | StopReason::ProviderError => {
             return Err(EndpointError::ProviderError(format!(
                 "peer {peer} provider stopped: {:?}",

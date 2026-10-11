@@ -2,6 +2,42 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0227: Headless Evaluation Continues In Verified Bounded Units
+
+**Status:** accepted · **Date:** 2026-10-11 (LocalHub #232, `eval` only).
+Extends ADR-0199 and mirrors ADR-0205's split between a unit check and final
+verification, without raising any per-unit cap.
+
+**Context.** Unknown reliability allows one file and one region and stops after
+a checkpoint at any context size. A one-prompt `eval` has no next user turn, so
+a four-site rename stopped with one site done (`NoProgress`): every later edit
+was refused and the full test suite cannot pass a half-renamed tree.
+
+**Decision.** `[harness.granularity] headless_units` (0–8, default 0; user
+config or environment only) lets `eval` run up to that many units. When a
+unit's full check fails, a narrow unit check may run: an isolated Python syntax
+check of each changed file, through the permission-gated runner, only if every
+changed path is a contained regular `.py` file and no shell/background/MCP
+launch or failed write happened in the unit. `HEAD` and all material paths must
+be identical before the full check, after it and after the unit check, and the
+unit's bounds are re-inspected before granting; a check that moved the workspace,
+or a unit check that is denied or errors, stops the task. All passing ends the
+turn as `UnitCheckpoint`; the host appends a synthetic note and repeats the
+original task. The failed full check becomes an obligation for the rest of the
+session that disables every finalize shortcut; only an executed passing full
+check yields `Done`. A continued unit is sized from an unreferenced tree written
+through a temporary index, refused for paths with a `filter` attribute (sizing
+then falls back to `HEAD` without running any helper). While a unit remains, envelope refusals tell the
+model to end the unit.
+
+**Consequences.** Syntax validity is not semantic correctness: a unit chain can
+accumulate incomplete work, bounded by the unit cap, the outstanding full check
+and unchanged scoring. Non-Python stacks, `print`, `rpc` and interactive
+sessions keep their behaviour; supporting them needs their own lifecycle and
+authorization contracts. `UnitCheckpoint` is stored as the existing
+`TurnEnded.stop` label (no format change); other hosts never produce it and map
+it to an unfinished turn. With the setting off, behaviour is unchanged.
+
 ## ADR-0226: Permission Refusals Separate Audiences And Equivalent Attempts
 
 **Status:** accepted · **Date:** 2026-10-10 (LocalHub #233).

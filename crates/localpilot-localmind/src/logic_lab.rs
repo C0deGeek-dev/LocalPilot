@@ -488,9 +488,10 @@ async fn run_arm(
         StopReason::Done => {}
         StopReason::Cancelled | StopReason::Quiesced => return Err(ArmStop::Cancelled),
         StopReason::BudgetExceeded | StopReason::TimedOut => return Err(ArmStop::Budget),
-        StopReason::Degraded | StopReason::ProviderError | StopReason::NoProgress => {
-            return Err(ArmStop::Infrastructure)
-        }
+        StopReason::Degraded
+        | StopReason::ProviderError
+        | StopReason::NoProgress
+        | StopReason::UnitCheckpoint => return Err(ArmStop::Infrastructure),
     }
     let log = runtime
         .store()

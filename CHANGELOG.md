@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Headless evaluations can finish multi-site edits in bounded units.** Opt in
+  with `[harness.granularity] headless_units` (user config or environment, at
+  most 8). After an executed syntax check of a Python-only unit, `eval`
+  continues the same task in a fresh unit; the task completes only when the full
+  verification passes. Off by default, with unchanged behaviour.
+- **Fixed** default-feature builds failing clippy on an unused close-out helper.
+
 - **Permission refusals give the model usable alternatives.** Human grant setup
   stays in session warnings/logs and explicit user shell results. Two consecutive
   equivalent refusals nudge a change of approach; the third stops the turn with

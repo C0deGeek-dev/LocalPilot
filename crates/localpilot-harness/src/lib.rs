@@ -115,10 +115,10 @@ pub use localx_eval_core::{
     RankingTrust, ResultsBlock, Scorecard, SpeedBlock, RANKING_FIXTURES, RUBRIC, SCORECARD_SCHEMA,
 };
 pub use session::{
-    check_command_digest, effective_context_limit, CompletionCheckResolver, ManualCompaction,
-    PlanStep, QuiesceSignal, RuntimeEvent, SessionConfig, SessionRecovery, SessionRuntime,
-    SoftInterrupt, SoftInterruptSource, SteerQueue, StopReason, SwitchError, SwitchOutcome,
-    TurnHandoff, CONTEXT_RESERVE_TOKENS,
+    check_command_digest, effective_context_limit, python_syntax_check, CompletionCheckResolver,
+    ManualCompaction, PlanStep, QuiesceSignal, RuntimeEvent, SessionConfig, SessionRecovery,
+    SessionRuntime, SoftInterrupt, SoftInterruptSource, SteerQueue, StopReason, SwitchError,
+    SwitchOutcome, TurnHandoff, CONTEXT_RESERVE_TOKENS,
 };
 pub use summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 pub use system_prompt::{

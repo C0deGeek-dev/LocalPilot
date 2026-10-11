@@ -10769,7 +10769,9 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
             StopReason::Degraded => StopState::Degraded,
             StopReason::ProviderError => StopState::ProviderError,
             StopReason::BudgetExceeded => StopState::BudgetExceeded,
-            StopReason::NoProgress => StopState::NoProgress,
+            // The interactive host never opens further units, so an unfinished
+            // unit shows as an unfinished turn.
+            StopReason::NoProgress | StopReason::UnitCheckpoint => StopState::NoProgress,
             StopReason::TimedOut => StopState::TimedOut,
             StopReason::Quiesced => StopState::Quiesced,
         }),

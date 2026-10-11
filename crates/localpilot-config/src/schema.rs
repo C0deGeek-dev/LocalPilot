@@ -1245,6 +1245,20 @@ pub struct GranularityConfig {
     pub max_changed_lines: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_decisions: Option<usize>,
+    /// Headless `eval` may continue a constrained task in up to this many
+    /// bounded units (0 = off, the default; at most
+    /// [`MAX_HEADLESS_UNITS`]). A unit continues only after an executed unit
+    /// check; the task still needs its full verification to pass.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub headless_units: u8,
+}
+
+/// The hard ceiling for `[harness.granularity] headless_units`.
+pub const MAX_HEADLESS_UNITS: u8 = 8;
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if signature
+fn is_zero(value: &u8) -> bool {
+    *value == 0
 }
 
 impl GranularityConfig {
