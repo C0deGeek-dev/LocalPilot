@@ -94,6 +94,8 @@ pub(crate) enum CloseOutEvent {
 }
 
 impl CloseOutEvent {
+    // Only the full-screen host renders warnings differently from progress.
+    #[cfg(any(feature = "tui", test))]
     pub(crate) fn is_warning(&self) -> bool {
         matches!(self, Self::Skipped { .. })
     }
