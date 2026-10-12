@@ -604,3 +604,78 @@ async fn signals_at_a_host_unit_boundary_are_handled_before_any_settlement() {
         }
     }
 }
+
+/// The tool-result text of the first work-envelope refusal the model saw.
+fn first_refusal(provider: &FakeProvider) -> String {
+    let seen = format!("{:?}", provider.requests());
+    let start = seen.find("work envelope");
+    assert!(start.is_some(), "no work-envelope refusal was seen");
+    let rest = &seen[start.unwrap_or_default()..];
+    rest[..rest.find('"').unwrap_or(rest.len())].to_string()
+}
+
+async fn refusal_with_units(dir: &Path, units_setting: u8, provider: FakeProvider) -> String {
+    let provider = Arc::new(provider);
+    let mut runtime = SessionRuntime::new(
+        provider.clone(),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::ephemeral(),
+        Workspace::new(dir).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            granularity: Some(GranularityConfig {
+                headless_units: units_setting,
+                ..GranularityConfig::default()
+            }),
+            verify_before_done: true,
+            verify_command: Some("python verify.py".to_string()),
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    let _ = units(&mut runtime).await;
+    first_refusal(&provider)
+}
+
+#[tokio::test]
+async fn a_refusal_that_ends_no_unit_keeps_the_default_text() {
+    if !python() {
+        return;
+    }
+    // A regex replacement after a real change: the host does not end the
+    // unit for it, so the model must not be told its unit is complete.
+    let script = || {
+        FakeProvider::new()
+            .tool_call(
+                "x",
+                "edit_file",
+                json!({"path": "money.py", "old_text": "x = 1", "new_text": "x = 2"}),
+            )
+            .tool_call(
+                "regex",
+                "replace_in_file",
+                json!({"path": "money.py", "find": "y = 1", "replace": "y = 2"}),
+            )
+            .text("done")
+            .text("done")
+            .text("done")
+    };
+    let off = refusal_with_units(two_site_repository(BOTH).path(), 0, script()).await;
+    let on = refusal_with_units(two_site_repository(BOTH).path(), 2, script()).await;
+    assert!(!on.contains("this unit is complete"), "{on}");
+    assert_eq!(on, off);
+}
+
+#[tokio::test]
+async fn a_refusal_that_ends_the_unit_says_so() {
+    if !python() {
+        return;
+    }
+    let edits = [edit("x", "x = 1", "x = 2"), edit("y", "y = 1", "y = 2")];
+    let on = refusal_with_units(two_site_repository(BOTH).path(), 2, stubborn(&edits, 3)).await;
+    assert!(on.contains("this unit is complete"), "{on}");
+    let off = refusal_with_units(two_site_repository(BOTH).path(), 0, stubborn(&edits, 3)).await;
+    assert!(!off.contains("this unit is complete"), "{off}");
+}

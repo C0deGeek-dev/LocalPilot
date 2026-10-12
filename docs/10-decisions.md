@@ -31,8 +31,10 @@ then falls back to `HEAD` without running any helper). Because small models
 retry refused edits rather than answer, a size-refused write in a unit that
 already changed the workspace ends the unit at the end of that tool batch
 (remaining calls answered as skipped); a full check passing there is a
-checkpoint, never `Done`. While a unit remains, envelope refusals tell the
-model to end the unit.
+checkpoint, never `Done`. Only the refusal that ends a unit this way tells the
+model its unit is complete; every other envelope refusal keeps the default
+text, since telling the model a unit ended when the host did not end it left
+the model stalled across tasks.
 
 **Consequences.** Syntax validity is not semantic correctness: a unit chain can
 accumulate incomplete work, bounded by the unit cap, the outstanding full check

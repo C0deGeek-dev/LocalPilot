@@ -1672,11 +1672,12 @@ impl SessionRuntime {
                 .work_unit
                 .refusal(*active, name, input, &self.workspace)
             {
+                let mut unit_ended = false;
                 if is_file_write_tool(name) && refusal.blocks_opaque_retry {
                     self.work_opaque_retry_blocked = true;
-                    self.request_unit_end();
+                    unit_ended = self.request_unit_end();
                 }
-                return Some(self.unit_refusal_guidance(refusal.message));
+                return Some(Self::unit_refusal_guidance(refusal.message, unit_ended));
             }
         }
         if self.work_opaque_retry_blocked && is_opaque_launch(name, input) {
@@ -1741,11 +1742,12 @@ impl SessionRuntime {
         let refusal = self
             .work_unit
             .check_and_reserve(profile, name, input, &self.workspace)?;
+        let mut unit_ended = false;
         if is_file_write_tool(name) && refusal.blocks_opaque_retry {
             self.work_opaque_retry_blocked = true;
-            self.request_unit_end();
+            unit_ended = self.request_unit_end();
         }
-        Some(self.unit_refusal_guidance(refusal.message))
+        Some(Self::unit_refusal_guidance(refusal.message, unit_ended))
     }
 
     /// Evaluate the `check_before_launch` discipline rule for a tool call. When

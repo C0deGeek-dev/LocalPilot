@@ -75,10 +75,11 @@ pub(super) enum UnitAttempt {
 impl SessionRuntime {
     /// A bounds-refused write ends the unit when a further unit is available
     /// and this unit already holds a mutation; the host settles it after the
-    /// current tool batch instead of waiting for the model to stop.
-    pub(super) fn request_unit_end(&mut self) {
+    /// current tool batch instead of waiting for the model to stop. Returns
+    /// whether the end is now scheduled.
+    pub(super) fn request_unit_end(&mut self) -> bool {
         if self.unit_checkpoints_remaining == 0 || !self.work_unit.has_mutations() {
-            return;
+            return false;
         }
         // An attempt budget is not a change: require the actual workspace to
         // differ from where this unit started.
@@ -89,6 +90,7 @@ impl SessionRuntime {
         if changed {
             self.unit_end_requested = true;
         }
+        changed
     }
 
     /// Settle a unit the host ended after a bounds refusal. A passing full
@@ -131,9 +133,10 @@ impl SessionRuntime {
     }
 
     /// Replace the generic checkpoint step of a work-envelope refusal with the
-    /// step this host actually offers, while a further unit is available.
-    pub(super) fn unit_refusal_guidance(&self, message: String) -> String {
-        if self.unit_checkpoints_remaining == 0 {
+    /// unit step only when this refusal actually scheduled the host's unit
+    /// end; every other refusal keeps the default text unchanged.
+    pub(super) fn unit_refusal_guidance(message: String, unit_ended: bool) -> String {
+        if !unit_ended {
             return message;
         }
         message.replace(REFUSAL_STEP, UNIT_STEP)
@@ -342,10 +345,11 @@ mod tests {
     }
 
     #[test]
-    fn refusal_guidance_names_the_unit_step_only_while_a_unit_remains() {
+    fn refusal_guidance_names_the_unit_step_only_when_the_unit_ended() {
         let message = format!("work envelope: too big; {REFUSAL_STEP}");
-        assert!(message.contains(REFUSAL_STEP));
-        let replaced = message.replace(REFUSAL_STEP, UNIT_STEP);
+        let kept = SessionRuntime::unit_refusal_guidance(message.clone(), false);
+        assert_eq!(kept, message);
+        let replaced = SessionRuntime::unit_refusal_guidance(message, true);
         assert!(replaced.contains("this unit is complete"));
         assert!(!replaced.contains(REFUSAL_STEP));
     }
