@@ -1334,6 +1334,13 @@ pub struct SessionRuntime {
     /// A unit checkpoint left the task's full verification failed. Survives
     /// turn boundaries: no later turn finishes without an actual full pass.
     outstanding_full_check: bool,
+    /// A bounds-refused write ended a unit that already holds a successful
+    /// mutation; the host settles it after the current tool batch.
+    unit_end_requested: bool,
+    /// The verify gate is settling a host-ended unit (see `unit_end_requested`).
+    settling_host_unit: bool,
+    /// What the last granted unit checkpoint established, for the next unit's note.
+    last_unit_outcome: Option<String>,
     provider: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
     /// Shared + swappable so an interactive host can change the permission
@@ -1541,6 +1548,9 @@ impl SessionRuntime {
             work_write_error_may_have_run: false,
             unit_checkpoints_remaining: 0,
             outstanding_full_check: false,
+            unit_end_requested: false,
+            settling_host_unit: false,
+            last_unit_outcome: None,
             provider,
             tools,
             // The incognito floor is a session property, not a profile, so it is
@@ -1664,6 +1674,7 @@ impl SessionRuntime {
             {
                 if is_file_write_tool(name) && refusal.blocks_opaque_retry {
                     self.work_opaque_retry_blocked = true;
+                    self.request_unit_end();
                 }
                 return Some(self.unit_refusal_guidance(refusal.message));
             }
@@ -1732,6 +1743,7 @@ impl SessionRuntime {
             .check_and_reserve(profile, name, input, &self.workspace)?;
         if is_file_write_tool(name) && refusal.blocks_opaque_retry {
             self.work_opaque_retry_blocked = true;
+            self.request_unit_end();
         }
         Some(self.unit_refusal_guidance(refusal.message))
     }
@@ -1996,6 +2008,7 @@ impl SessionRuntime {
         self.work_mcp_call_attempted = false;
         self.work_opaque_launch_dispatched = false;
         self.work_write_error_may_have_run = false;
+        self.unit_end_requested = false;
         self.work_unit = crate::granularity::WorkUnit::default();
     }
 
@@ -3193,6 +3206,25 @@ impl SessionRuntime {
         self.turn_verification = Some(outcome.status);
         match outcome.status {
             CheckStatus::Passed => {
+                if self.settling_host_unit {
+                    return match self.host_unit_after_pass(
+                        &root,
+                        diff_mutated,
+                        before_full_check.as_ref(),
+                    ) {
+                        unit_continuation::UnitAttempt::Checkpoint(detail) => {
+                            VerifyGate::UnitCheckpoint(detail)
+                        }
+                        unit_continuation::UnitAttempt::Stop(detail) => {
+                            let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                            VerifyGate::GiveUp(detail)
+                        }
+                        unit_continuation::UnitAttempt::NotEarned => VerifyGate::Retry(
+                            "The edit was refused because this unit is at its limit. If the task is complete, give your final answer; otherwise describe the remaining changes."
+                                .to_string(),
+                        ),
+                    };
+                }
                 self.outstanding_full_check = false;
                 if self.harness_checkpoint_owner {
                     if let (Some(profile), Some(baseline)) =
@@ -3818,6 +3850,7 @@ impl SessionRuntime {
         self.work_mcp_call_attempted = false;
         self.work_opaque_launch_dispatched = false;
         self.work_write_error_may_have_run = false;
+        self.unit_end_requested = false;
         self.active_work_profile = None;
         self.active_work_profile = self.work_profile();
         self.work_diff_baseline =
@@ -4007,6 +4040,15 @@ impl SessionRuntime {
                     &mut no_progress_dynamic,
                     &mut no_progress_monotone,
                 );
+            }
+            // A refused write ended a unit that already changed something.
+            // Cancellation, shutdown and the deadline were honoured above; user
+            // steering just admitted outranks the host's boundary, so the model
+            // sees it instead. Otherwise settle the unit as if it had answered.
+            if std::mem::take(&mut self.unit_end_requested) && !admission.user {
+                if let Some(stop) = self.settle_host_unit(&mut verify_attempts, events).await {
+                    return stop;
+                }
             }
 
             // The advertised tool specs are prompt input on every request, and
@@ -4588,30 +4630,10 @@ impl SessionRuntime {
                 // still red, stop with `NoProgress` (the verify signal driving the
                 // no-progress guard) rather than accept a never-green "done".
                 // Bounded by the budget/timeout rails and `VERIFY_GATE_MAX_ATTEMPTS`.
-                match self.verify_before_done(&mut verify_attempts, events).await {
-                    VerifyGate::Finalize => return self.stop(events, StopReason::Done),
-                    VerifyGate::Retry(feedback) => {
-                        self.append(
-                            Message::text(Role::User, feedback).into_synthetic("verify gate"),
-                        );
-                        continue;
-                    }
-                    VerifyGate::GiveUp(detail) => {
-                        self.append(
-                            Message::text(Role::User, &detail).into_synthetic("bounded unit stop"),
-                        );
-                        return self.stop_with_detail(events, StopReason::NoProgress, Some(detail));
-                    }
-                    VerifyGate::UnitCheckpoint(detail) => {
-                        self.outstanding_full_check = true;
-                        let _ = events.send(RuntimeEvent::Warning(detail.clone()));
-                        return self.stop_with_detail(
-                            events,
-                            StopReason::UnitCheckpoint,
-                            Some(detail),
-                        );
-                    }
+                if let Some(stop) = self.settle_gate(&mut verify_attempts, events).await {
+                    return stop;
                 }
+                continue;
             }
 
             if let Some(message) = invalid_tool_calls(&calls) {
@@ -4653,6 +4675,8 @@ impl SessionRuntime {
                     }
                     let admission = self.admit_soft_interrupts("between_tools", events);
                     if admission.user {
+                        // User steering outranks a host-ended unit boundary.
+                        self.unit_end_requested = false;
                         self.reset_progress_breakers(
                             &mut no_progress,
                             &mut unproductive_streak,
@@ -4661,6 +4685,17 @@ impl SessionRuntime {
                         );
                     }
                     continue 'turn;
+                }
+                // A refused write ended the unit: answer the rest of the batch
+                // without dispatching anything that could extend its effects.
+                if self.unit_end_requested {
+                    for (skip_id, _, _, _) in &calls[call_index..] {
+                        self.append(tool_error_message(
+                            skip_id,
+                            "skipped: this unit ended at a refused edit; the call was not executed",
+                        ));
+                    }
+                    break;
                 }
                 // Progress-aware ceiling: a runaway or spinning tool loop stops
                 // cleanly with a model-visible, recorded reason before the next

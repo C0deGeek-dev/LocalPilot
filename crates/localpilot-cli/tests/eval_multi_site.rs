@@ -556,7 +556,7 @@ async fn units_finish_a_multi_site_rename_only_through_a_passing_full_check() {
         );
         let all = all_messages(&run);
         assert!(all.contains("Continue the same task with the next bounded unit"));
-        assert!(all.contains("end this unit now"), "{all}");
+        assert!(all.contains("this unit is complete"), "{all}");
     }
 }
 
@@ -572,7 +572,7 @@ async fn without_the_setting_the_task_stops_as_before() {
         assert!(!run.turn_stops().iter().any(|s| s == "UnitCheckpoint"));
         let all = all_messages(&run);
         assert!(all.contains("verify it, and checkpoint before continuing"));
-        assert!(!all.contains("end this unit now"));
+        assert!(!all.contains("this unit is complete"));
         assert!(!all.contains("next bounded unit"));
     }
 }

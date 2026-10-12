@@ -89,7 +89,14 @@ unit is sized from `HEAD`, which can only over-count. Snapshot commands run
 without the filesystem monitor and under a 10-second bound. A failed full check stays an outstanding obligation for the rest
 of the session, on every exit: no later turn finishes, even unchanged, until
 the full check actually passes; a denied or missing verifier stops the task. While a further unit is
-available, envelope refusals name that step instead of a checkpoint.
+available, envelope refusals say the unit is complete. A small model may keep
+retrying a refused edit instead of answering, so when a write is refused for
+size and the unit has already changed the workspace, the host ends the unit
+after that tool batch: later calls in the batch are answered as skipped, never
+dispatched, and the unit is settled through the same gate as a final answer.
+A full check that passes at such a host-ended unit is a checkpoint, not a
+finished task: the task ends only with the model's own final answer and a
+passing full check.
 When a bounded write exceeds its limits, model shell commands and background
 starts are also refused until a successful smaller bounded write or a fresh
 unit. Bounded reads, background list/logs/stop and automatic verification remain

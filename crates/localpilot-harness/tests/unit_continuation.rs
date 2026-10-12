@@ -6,7 +6,10 @@ use std::{path::Path, process::Command, sync::Arc};
 
 use localpilot_config::GranularityConfig;
 use localpilot_harness::{CheckStatus, SessionConfig, SessionRuntime, StopReason};
-use localpilot_llm::FakeProvider;
+use localpilot_llm::{
+    FakeProvider, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderDeclaration,
+    ProviderError,
+};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{PermissionEngine, Profile, ScriptedApprover, Workspace};
 use localpilot_store::{SessionEventKind, Store};
@@ -247,4 +250,357 @@ async fn a_passing_full_check_finishes_after_a_checkpoint() {
     assert_eq!(statuses.len(), 3, "{statuses:?}");
     assert!(statuses[0].contains("failed") && statuses[1].contains("passed"));
     assert!(statuses[2].contains("passed"));
+}
+
+/// A two-region file: `x` near the top, `y` far below, so editing both
+/// exceeds a one-region unit.
+fn two_site_repository(verifier: &str) -> tempfile::TempDir {
+    let dir = repository(verifier);
+    let filler = "\n".repeat(12);
+    std::fs::write(
+        dir.path().join("money.py"),
+        format!("x = 1\n{filler}y = 1\n"),
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-qam", "two sites"]);
+    dir
+}
+
+fn edit(id: &str, old: &str, new: &str) -> (String, serde_json::Value) {
+    (
+        id.to_string(),
+        json!({"path": "money.py", "old_text": old, "new_text": new}),
+    )
+}
+
+/// A model that never stops on its own: it keeps sending its next edit.
+fn stubborn(edits: &[(String, serde_json::Value)], tail: usize) -> FakeProvider {
+    let mut provider = FakeProvider::new();
+    for (id, input) in edits {
+        provider = provider.tool_call(id, "edit_file", input.clone());
+    }
+    for _ in 0..tail {
+        provider = provider.text("done");
+    }
+    provider
+}
+
+const BOTH: &str = "import sys\ntext = open('money.py').read()\nsys.exit(0 if 'x = 2' in text and 'y = 2' in text else 1)\n";
+const PASSES: &str = "import sys\nsys.exit(0)\n";
+
+#[tokio::test]
+async fn the_host_ends_a_unit_at_a_refused_edit_and_the_model_finishes_later() {
+    if !python() {
+        return;
+    }
+    let dir = two_site_repository(BOTH);
+    // x (allowed), y (refused: second region) -> host ends unit 1; unit 2:
+    // y (allowed), then the model's own final answer.
+    let edits = [
+        edit("x", "x = 1", "x = 2"),
+        edit("y1", "y = 1", "y = 2"),
+        edit("y2", "y = 1", "y = 2"),
+    ];
+    let mut runtime = runtime(
+        dir.path(),
+        stubborn(&edits, 3),
+        Profile::Unrestricted,
+        ScriptedApprover::always(),
+        true,
+    );
+    assert_eq!(units(&mut runtime).await, StopReason::Done);
+    // Full failed + unit check passed (checkpoint), then full passed.
+    let statuses = check_statuses(&runtime);
+    assert_eq!(statuses, ["failed", "passed", "passed"], "{statuses:?}");
+}
+
+#[tokio::test]
+async fn a_passing_full_check_at_a_refused_edit_is_not_the_end_of_the_task() {
+    if !python() {
+        return;
+    }
+    // The checker passes from the start: a host-ended unit must still not
+    // finish the task; only the model's own final answer can.
+    let dir = two_site_repository(PASSES);
+    let edits = [
+        edit("x", "x = 1", "x = 2"),
+        edit("y1", "y = 1", "y = 2"),
+        edit("y2", "y = 1", "y = 2"),
+    ];
+    let mut runtime = runtime(
+        dir.path(),
+        stubborn(&edits, 3),
+        Profile::Unrestricted,
+        ScriptedApprover::always(),
+        true,
+    );
+    assert_eq!(units(&mut runtime).await, StopReason::Done);
+    // Host checkpoint at the passing check, then the model's own final answer.
+    assert_eq!(check_statuses(&runtime), ["passed", "passed"]);
+    // Both edits landed before Done: the refused y was not dropped by an
+    // early finish at the passing check.
+    let text = std::fs::read_to_string(dir.path().join("money.py")).unwrap();
+    assert!(text.contains("x = 2") && text.contains("y = 2"), "{text}");
+}
+
+#[tokio::test]
+async fn calls_queued_after_a_refused_edit_do_not_run() {
+    if !python() {
+        return;
+    }
+    let dir = two_site_repository(BOTH);
+    let outside = tempfile::tempdir().unwrap();
+    let marker = outside.path().join("ran.txt");
+    let provider = FakeProvider::new()
+        .tool_call(
+            "x",
+            "edit_file",
+            json!({"path": "money.py", "old_text": "x = 1", "new_text": "x = 2"}),
+        )
+        .script(vec![
+            Ok(ModelEvent::ToolCall {
+                id: "y".into(),
+                name: "edit_file".into(),
+                input_json: json!({"path": "money.py", "old_text": "y = 1", "new_text": "y = 2"}),
+                provider_metadata: None,
+            }),
+            Ok(ModelEvent::ToolCall {
+                id: "touch".into(),
+                name: "write_file".into(),
+                input_json: json!({"path": marker.display().to_string(), "content": "ran"}),
+                provider_metadata: None,
+            }),
+            Ok(ModelEvent::Done),
+        ])
+        .text("done")
+        .text("done")
+        .text("done");
+    let provider = Arc::new(provider);
+    let mut runtime = SessionRuntime::new(
+        provider.clone(),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::ephemeral(),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            granularity: Some(GranularityConfig {
+                headless_units: 2,
+                ..GranularityConfig::default()
+            }),
+            verify_before_done: true,
+            verify_command: Some("python verify.py".to_string()),
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    let _ = units(&mut runtime).await;
+    assert!(!marker.exists(), "a queued call ran after the unit ended");
+    // The queued call was answered as skipped, once, without dispatch.
+    let seen = format!("{:?}", provider.requests().last().unwrap());
+    assert_eq!(
+        seen.matches("skipped: this unit ended at a refused edit")
+            .count(),
+        1,
+        "{seen}"
+    );
+}
+
+#[tokio::test]
+async fn host_ended_units_respect_the_cap_and_the_off_setting() {
+    if !python() {
+        return;
+    }
+    for units_setting in [0u8, 1] {
+        let dir = two_site_repository(BOTH);
+        let edits = [
+            edit("x", "x = 1", "x = 2"),
+            edit("y1", "y = 1", "y = 2"),
+            edit("y2", "y = 1", "y = 2"),
+            edit("y3", "y = 1", "y = 2"),
+        ];
+        let mut runtime = SessionRuntime::new(
+            Arc::new(stubborn(&edits, 4)),
+            ToolRegistry::with_builtins(),
+            PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::ephemeral(),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                granularity: Some(GranularityConfig {
+                    headless_units: units_setting,
+                    ..GranularityConfig::default()
+                }),
+                verify_before_done: true,
+                verify_command: Some("python verify.py".to_string()),
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        );
+        let stop = units(&mut runtime).await;
+        assert_ne!(stop, StopReason::Done, "units={units_setting}");
+        assert_ne!(stop, StopReason::UnitCheckpoint, "units={units_setting}");
+        let text = std::fs::read_to_string(dir.path().join("money.py")).unwrap();
+        assert!(!text.contains("y = 2"), "units={units_setting}: {text}");
+    }
+}
+
+/// Delegates to a scripted provider and fires `hook` while serving request
+/// number `at` (1-based), i.e. while the batch it returns is streaming.
+struct Signalling {
+    inner: FakeProvider,
+    at: usize,
+    served: std::sync::atomic::AtomicUsize,
+    hook: Box<dyn Fn() + Send + Sync>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for Signalling {
+    fn declaration(&self) -> &ProviderDeclaration {
+        self.inner.declaration()
+    }
+
+    async fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
+        let n = self
+            .served
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if n == self.at {
+            (self.hook)();
+        }
+        self.inner.stream(request).await
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Signal {
+    Cancel,
+    Quiesce,
+    Steer,
+    UrgentSteer,
+}
+
+#[tokio::test]
+async fn signals_at_a_host_unit_boundary_are_handled_before_any_settlement() {
+    if !python() {
+        return;
+    }
+    for signal in [
+        Signal::Cancel,
+        Signal::Quiesce,
+        Signal::Steer,
+        Signal::UrgentSteer,
+    ] {
+        let dir = two_site_repository(BOTH);
+        // Request 1: allowed edit of x. Request 2: refused edit of y plus a
+        // queued read; the signal fires while request 2 streams.
+        let inner = FakeProvider::new()
+            .tool_call("x", "edit_file", json!({"path": "money.py", "old_text": "x = 1", "new_text": "x = 2"}))
+            .script(vec![
+                Ok(ModelEvent::ToolCall {
+                    id: "y".into(),
+                    name: "edit_file".into(),
+                    input_json: json!({"path": "money.py", "old_text": "y = 1", "new_text": "y = 2"}),
+                    provider_metadata: None,
+                }),
+                Ok(ModelEvent::ToolCall {
+                    id: "read".into(),
+                    name: "read_file".into(),
+                    input_json: json!({"path": "money.py"}),
+                    provider_metadata: None,
+                }),
+                Ok(ModelEvent::Done),
+            ])
+            .text("noted")
+            .text("noted")
+            .text("noted")
+            .text("noted");
+        let cancel = CancellationToken::new();
+        let slot: Arc<
+            std::sync::Mutex<
+                Option<(
+                    localpilot_harness::SteerQueue,
+                    localpilot_harness::QuiesceSignal,
+                )>,
+            >,
+        > = Arc::new(std::sync::Mutex::new(None));
+        let hook_slot = slot.clone();
+        let hook_cancel = cancel.clone();
+        let provider = Arc::new(Signalling {
+            inner,
+            at: 2,
+            served: std::sync::atomic::AtomicUsize::new(0),
+            hook: Box::new(move || {
+                let guard = hook_slot.lock().unwrap();
+                let (steer, quiesce) = guard.as_ref().unwrap();
+                match signal {
+                    Signal::Cancel => hook_cancel.cancel(),
+                    Signal::Quiesce => quiesce.request(),
+                    Signal::Steer => steer.push("steering: stop and report"),
+                    Signal::UrgentSteer => {
+                        steer.push_interrupt(localpilot_harness::SoftInterrupt {
+                            content: "urgent: stop and report".into(),
+                            source: localpilot_harness::SoftInterruptSource::User,
+                            urgent: true,
+                        })
+                    }
+                }
+            }),
+        });
+        let mut runtime = SessionRuntime::new(
+            provider.clone(),
+            ToolRegistry::with_builtins(),
+            PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::ephemeral(),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                granularity: Some(GranularityConfig {
+                    headless_units: 2,
+                    ..GranularityConfig::default()
+                }),
+                verify_before_done: true,
+                verify_command: Some("python verify.py".to_string()),
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        );
+        *slot.lock().unwrap() = Some((runtime.steer_queue(), runtime.quiesce_signal()));
+        let (events, _rx) = broadcast::channel(1024);
+        let stop = runtime
+            .run_turn_in_units("Change x and y to 2.", &events, &cancel)
+            .await;
+        let served = provider.served.load(std::sync::atomic::Ordering::SeqCst);
+        match signal {
+            Signal::Cancel => assert_eq!(stop, StopReason::Cancelled, "{signal:?}"),
+            Signal::Quiesce => assert_eq!(stop, StopReason::Quiesced, "{signal:?}"),
+            Signal::Steer | Signal::UrgentSteer => {
+                // The steering reached the model before any host settlement.
+                assert!(served >= 3, "{signal:?}: served {served}");
+            }
+        }
+        if matches!(signal, Signal::Cancel | Signal::Quiesce) {
+            // Nothing ran after the signal: no check, no further request.
+            assert!(check_statuses(&runtime).is_empty(), "{signal:?}");
+            assert_eq!(served, 2, "{signal:?}");
+        } else {
+            // The host boundary did not outrank the steer: the very next
+            // request carries the steer and no unit was settled before it.
+            let third = format!("{:?}", provider.inner.requests()[2]);
+            assert!(third.contains("stop and report"), "{signal:?}");
+            assert!(!third.contains("of at most"), "{signal:?}: settled first");
+        }
+        // Every tool_use sent so far was answered exactly once.
+        if let Some(last) = provider.inner.requests().last() {
+            let seen = format!("{last:?}");
+            assert_eq!(
+                seen.matches("ToolUse(").count(),
+                seen.matches("ToolResult(").count(),
+                "{signal:?}"
+            );
+        }
+    }
 }

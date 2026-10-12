@@ -10,15 +10,15 @@ use localpilot_core::{Message, Role};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use super::{RuntimeEvent, SessionRuntime, StopReason};
+use super::{RuntimeEvent, SessionRuntime, StopReason, VerifyGate};
 use crate::quality::CheckStatus;
 use crate::rules::Trigger;
 
+const MOVED: &str = "unit checkpoint refused: a verification command changed the workspace; the work is preserved for review";
 const REFUSAL_STEP: &str =
     "split into a smaller coherent unit, verify it, and checkpoint before continuing";
-const UNIT_STEP: &str = "stop editing and end this unit now: give your final answer naming \
-     the changes that remain; the harness checks this unit and opens the next one with the \
-     same task";
+const UNIT_STEP: &str = "this unit is complete: the harness now checks it and, when the \
+     check allows, opens the next unit with the same task";
 
 /// A host-owned syntax check for one root-relative Python source file. It
 /// parses with the standard library in isolated mode and cannot import a
@@ -73,6 +73,63 @@ pub(super) enum UnitAttempt {
 }
 
 impl SessionRuntime {
+    /// A bounds-refused write ends the unit when a further unit is available
+    /// and this unit already holds a mutation; the host settles it after the
+    /// current tool batch instead of waiting for the model to stop.
+    pub(super) fn request_unit_end(&mut self) {
+        if self.unit_checkpoints_remaining == 0 || !self.work_unit.has_mutations() {
+            return;
+        }
+        // An attempt budget is not a change: require the actual workspace to
+        // differ from where this unit started.
+        let changed = self.work_diff_baseline.as_ref().is_some_and(|before| {
+            crate::resume::work_diff_baseline(&self.workspace.process_dir())
+                .is_ok_and(|after| &after != before)
+        });
+        if changed {
+            self.unit_end_requested = true;
+        }
+    }
+
+    /// Settle a unit the host ended after a bounds refusal. A passing full
+    /// check is not a finished task here: the refused write shows more work
+    /// was intended, so it can only become a checkpoint.
+    pub(super) async fn settle_host_unit(
+        &mut self,
+        attempts: &mut usize,
+        events: &broadcast::Sender<RuntimeEvent>,
+    ) -> Option<StopReason> {
+        self.settling_host_unit = true;
+        let stop = self.settle_gate(attempts, events).await;
+        self.settling_host_unit = false;
+        stop
+    }
+
+    /// Settle a would-be final answer through the verify gate. `Some` ends
+    /// the turn with that stop; `None` continues it (failure feedback added).
+    pub(super) async fn settle_gate(
+        &mut self,
+        attempts: &mut usize,
+        events: &broadcast::Sender<RuntimeEvent>,
+    ) -> Option<StopReason> {
+        match self.verify_before_done(attempts, events).await {
+            VerifyGate::Finalize => Some(self.stop(events, StopReason::Done)),
+            VerifyGate::Retry(feedback) => {
+                self.append(Message::text(Role::User, feedback).into_synthetic("verify gate"));
+                None
+            }
+            VerifyGate::GiveUp(detail) => {
+                self.append(Message::text(Role::User, &detail).into_synthetic("bounded unit stop"));
+                Some(self.stop_with_detail(events, StopReason::NoProgress, Some(detail)))
+            }
+            VerifyGate::UnitCheckpoint(detail) => {
+                self.outstanding_full_check = true;
+                let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                Some(self.stop_with_detail(events, StopReason::UnitCheckpoint, Some(detail)))
+            }
+        }
+    }
+
     /// Replace the generic checkpoint step of a work-envelope refusal with the
     /// step this host actually offers, while a further unit is available.
     pub(super) fn unit_refusal_guidance(&self, message: String) -> String {
@@ -92,39 +149,11 @@ impl SessionRuntime {
         diff_mutated: bool,
         before_full_check: Option<&crate::resume::WorkDiffBaseline>,
     ) -> UnitAttempt {
-        if self.unit_checkpoints_remaining == 0
-            || !diff_mutated
-            || self.harness_checkpoint_owner
-            || self.work_mcp_call_attempted
-            || self.work_opaque_launch_dispatched
-            || self.work_write_error_may_have_run
-        {
-            return UnitAttempt::NotEarned;
-        }
-        let (Some(profile), Some(baseline), Some(before)) = (
-            self.work_profile(),
-            self.work_diff_baseline.clone(),
-            before_full_check.cloned(),
-        ) else {
-            return UnitAttempt::NotEarned;
-        };
-        if !profile.stop_after_checkpoint || before.head != baseline.head {
-            return UnitAttempt::NotEarned;
-        }
-        let moved = "unit checkpoint refused: a verification command changed the workspace; the work is preserved for review";
-        match crate::resume::work_diff_baseline(root) {
-            Ok(now) if now == before => {}
-            _ => return UnitAttempt::Stop(moved.to_string()),
-        }
-        match crate::resume::inspect_work_diff(root, profile, Some(&baseline), false) {
-            Ok(inspection) if inspection.blocked.is_none() => {}
-            Ok(inspection) => {
-                return UnitAttempt::Stop(inspection.blocked.unwrap_or_default());
-            }
-            Err(error) => {
-                return UnitAttempt::Stop(format!("cannot inspect bounded unit: {error}"));
-            }
-        }
+        let (profile, baseline, before) =
+            match self.unit_precheck(root, diff_mutated, before_full_check) {
+                Ok(eligible) => eligible,
+                Err(attempt) => return attempt,
+            };
         let Ok(changed) = crate::resume::work_changed_paths(root, &baseline) else {
             return UnitAttempt::NotEarned;
         };
@@ -161,13 +190,88 @@ impl SessionRuntime {
         }
         match crate::resume::work_diff_baseline(root) {
             Ok(after) if after == before => {}
-            _ => return UnitAttempt::Stop(moved.to_string()),
+            _ => return UnitAttempt::Stop(MOVED.to_string()),
         }
-        self.unit_checkpoints_remaining -= 1;
-        UnitAttempt::Checkpoint(format!(
-            "unit checkpoint: syntax check passed for {}; the full verification still fails, so the task is not complete",
+        self.grant_unit(format!(
+            "syntax check passed for {}; the full verification still fails",
             files.join(", ")
         ))
+    }
+
+    /// A host-ended unit whose full check passed: a checkpoint under the same
+    /// eligibility, never a finished task.
+    pub(super) fn host_unit_after_pass(
+        &mut self,
+        root: &Path,
+        diff_mutated: bool,
+        before_full_check: Option<&crate::resume::WorkDiffBaseline>,
+    ) -> UnitAttempt {
+        if let Err(attempt) = self.unit_precheck(root, diff_mutated, before_full_check) {
+            return attempt;
+        }
+        self.grant_unit(
+            "the full verification passed, but the unit ended at a refused edit; the task finishes only with your final answer and a passing full verification"
+                .to_string(),
+        )
+    }
+
+    fn grant_unit(&mut self, outcome: String) -> UnitAttempt {
+        self.unit_checkpoints_remaining -= 1;
+        self.last_unit_outcome = Some(outcome.clone());
+        UnitAttempt::Checkpoint(format!("unit checkpoint: {outcome}"))
+    }
+
+    /// Eligibility shared by every checkpoint: a remaining unit, an actual
+    /// change, no opaque or partial effects, an unchanged `HEAD`, a workspace
+    /// identical to the one the full check started from, and bounds that hold.
+    fn unit_precheck(
+        &mut self,
+        root: &Path,
+        diff_mutated: bool,
+        before_full_check: Option<&crate::resume::WorkDiffBaseline>,
+    ) -> Result<
+        (
+            crate::granularity::WorkProfile,
+            crate::resume::WorkDiffBaseline,
+            crate::resume::WorkDiffBaseline,
+        ),
+        UnitAttempt,
+    > {
+        if self.unit_checkpoints_remaining == 0
+            || !diff_mutated
+            || self.harness_checkpoint_owner
+            || self.work_mcp_call_attempted
+            || self.work_opaque_launch_dispatched
+            || self.work_write_error_may_have_run
+        {
+            return Err(UnitAttempt::NotEarned);
+        }
+        let (Some(profile), Some(baseline), Some(before)) = (
+            self.work_profile(),
+            self.work_diff_baseline.clone(),
+            before_full_check.cloned(),
+        ) else {
+            return Err(UnitAttempt::NotEarned);
+        };
+        if !profile.stop_after_checkpoint || before.head != baseline.head {
+            return Err(UnitAttempt::NotEarned);
+        }
+        match crate::resume::work_diff_baseline(root) {
+            Ok(now) if now == before => {}
+            _ => return Err(UnitAttempt::Stop(MOVED.to_string())),
+        }
+        match crate::resume::inspect_work_diff(root, profile, Some(&baseline), false) {
+            Ok(inspection) if inspection.blocked.is_none() => {}
+            Ok(inspection) => {
+                return Err(UnitAttempt::Stop(inspection.blocked.unwrap_or_default()));
+            }
+            Err(error) => {
+                return Err(UnitAttempt::Stop(format!(
+                    "cannot inspect bounded unit: {error}"
+                )));
+            }
+        }
+        Ok((profile, baseline, before))
     }
 
     /// Run a headless task, continuing in bounded units when
@@ -191,12 +295,14 @@ impl SessionRuntime {
         let mut reason = self.run_turn(prompt, events, cancel).await;
         while reason == StopReason::UnitCheckpoint && !cancel.is_cancelled() {
             unit += 1;
+            let outcome = self.last_unit_outcome.take().unwrap_or_default();
             self.append(
                 Message::text(
                     Role::User,
                     format!(
-                        "Unit {} of at most {units} is recorded: its syntax check passed, but the full verification still fails. Continue the same task with the next bounded unit. The task is complete only when the full verification passes.",
-                        unit - 1
+                        "Unit {} of at most {units} is recorded: {}. Continue the same task with the next bounded unit. The task is complete only when you give your final answer and the full verification passes.",
+                        unit - 1,
+                        outcome
                     ),
                 )
                 .into_synthetic("unit checkpoint"),
@@ -240,7 +346,7 @@ mod tests {
         let message = format!("work envelope: too big; {REFUSAL_STEP}");
         assert!(message.contains(REFUSAL_STEP));
         let replaced = message.replace(REFUSAL_STEP, UNIT_STEP);
-        assert!(replaced.contains("end this unit now"));
+        assert!(replaced.contains("this unit is complete"));
         assert!(!replaced.contains(REFUSAL_STEP));
     }
 }

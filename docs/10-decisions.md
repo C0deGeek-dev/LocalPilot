@@ -27,7 +27,11 @@ original task. The failed full check becomes an obligation for the rest of the
 session that disables every finalize shortcut; only an executed passing full
 check yields `Done`. A continued unit is sized from an unreferenced tree written
 through a temporary index, refused for paths with a `filter` attribute (sizing
-then falls back to `HEAD` without running any helper). While a unit remains, envelope refusals tell the
+then falls back to `HEAD` without running any helper). Because small models
+retry refused edits rather than answer, a size-refused write in a unit that
+already changed the workspace ends the unit at the end of that tool batch
+(remaining calls answered as skipped); a full check passing there is a
+checkpoint, never `Done`. While a unit remains, envelope refusals tell the
 model to end the unit.
 
 **Consequences.** Syntax validity is not semantic correctness: a unit chain can
