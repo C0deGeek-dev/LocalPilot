@@ -555,7 +555,14 @@ async fn units_finish_a_multi_site_rename_only_through_a_passing_full_check() {
             text(&run)
         );
         let all = all_messages(&run);
-        assert!(all.contains("Continue the same task with the next bounded unit"));
+        assert!(all.contains(
+            "If the original request still needs changes, continue with the next bounded unit"
+        ));
+        // The note keeps the scope rule instead of making a full pass the goal.
+        assert!(all.contains("report unrelated existing failures instead of fixing them"));
+        assert!(!all.contains(
+            "complete only when you give your final answer and the full verification passes"
+        ));
         assert!(all.contains("this unit is complete"), "{all}");
     }
 }

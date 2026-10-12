@@ -80,7 +80,10 @@ check, and the unit's bounds are inspected again before the checkpoint; a check
 that moved the workspace stops the task, preserving the work. A unit check that
 is denied or errors stops the task with that status. If every unit check passes,
 the turn ends with the `UnitCheckpoint` stop (never `Done`) and the host repeats
-the original task with a synthetic unit note. The next unit is sized from an
+the original task with a synthetic unit note. The note keeps the scope rule
+(continue only if the original request still needs changes; repair only
+failures the changes caused and report unrelated existing ones) rather than
+making a full pass the goal, which drove models into unrelated repairs. The next unit is sized from an
 unreferenced tree of the tracked material paths written through a temporary
 index (the real index, `HEAD` and refs are untouched), so earlier units are not
 counted again. The snapshot is refused when a path has a `filter` attribute

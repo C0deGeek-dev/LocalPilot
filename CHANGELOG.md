@@ -12,6 +12,9 @@ is SemVer-stable; the configuration schema stability policy is in
   run are unchanged; the host's verification gate still runs the granted check.
   On the long-task harness the appended instruction cost solved tasks (27/48
   with it, 34/48 without) and roughly doubled tool calls and wall time.
+- **Headless unit notes keep the task's scope.** After a unit checkpoint the
+  model is told to continue only if the request still needs changes and to
+  report, not fix, unrelated existing failures.
 - **A failing automatic check no longer sends read-only answers into unrelated
   repairs.** When `eval`'s automatic check fails on repository material the
   turn did not change, the turn ends unverified with the answer kept instead of

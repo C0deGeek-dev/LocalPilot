@@ -303,7 +303,7 @@ impl SessionRuntime {
                 Message::text(
                     Role::User,
                     format!(
-                        "Unit {} of at most {units} is recorded: {}. Continue the same task with the next bounded unit. The task is complete only when you give your final answer and the full verification passes.",
+                        "Unit {} of at most {units} is recorded: {}. If the original request still needs changes, continue with the next bounded unit. Repair only failures your changes caused; report unrelated existing failures instead of fixing them.",
                         unit - 1,
                         outcome
                     ),
