@@ -6,6 +6,23 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Evaluation tasks reach the model unchanged.** `eval` no longer appends the
+  permission-checked test operation and an instruction to run it to the task.
+  The permission preflight and the rule that a denied verifier invalidates the
+  run are unchanged; the host's verification gate still runs the granted check.
+  On the long-task harness the appended instruction cost solved tasks (27/48
+  with it, 34/48 without) and roughly doubled tool calls and wall time.
+- **A failing automatic check no longer sends read-only answers into unrelated
+  repairs.** When `eval`'s automatic check fails on repository material the
+  turn did not change, the turn ends unverified with the answer kept instead of
+  asking the model to fix the failure; changed work keeps the repair loop.
+- **Automatic work sizing never runs repository helpers.** The per-turn status
+  scan, change inspection and per-path fingerprints run without the filesystem
+  monitor, with every filter driver configured in the workspace or a nested
+  repository disabled, under a time and output bound; filtered paths compare as
+  raw bytes and can only over-count. A changed submodule no longer drops the
+  work baseline.
+
 - **Headless evaluations can finish multi-site edits in bounded units.** Opt in
   with `[harness.granularity] headless_units` (user config or environment, at
   most 8). After an executed syntax check of a Python-only unit, `eval`

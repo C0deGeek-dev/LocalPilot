@@ -100,9 +100,15 @@ async fn run(grant: bool) {
         assert_eq!(card["process"]["exit_reason"], "Done");
         assert!(!requests.is_empty());
         let request: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-        assert!(request["messages"]
-            .to_string()
-            .contains("Evaluation test operation"));
+        // The task reaches the model unchanged: no verifier instruction and
+        // nothing from the configured operation's arguments.
+        let messages = request["messages"].to_string();
+        assert!(messages.contains("inspect the fixture"), "{messages}");
+        assert!(
+            !messages.contains("Evaluation test operation"),
+            "{messages}"
+        );
+        assert!(!messages.contains("unittest discover"), "{messages}");
         // The gate actually completed the granted command, not just the preflight.
         let store = localpilot_store::Store::open(root.path());
         let session = store.list_sessions().unwrap()[0].id;
@@ -138,6 +144,6 @@ async fn denied_eval_verification_exits_before_the_model_request() {
 }
 
 #[tokio::test]
-async fn granted_eval_test_operation_reaches_the_model_and_verifier() {
+async fn a_granted_verifier_runs_and_the_task_reaches_the_model_unchanged() {
     run(true).await;
 }

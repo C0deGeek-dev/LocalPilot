@@ -1192,8 +1192,10 @@ appropriate to the fixture set and record the same grants/profile across arms.
 A literal model `command` still cannot match an exact structured grant. Eval
 preflights the detected/configured test operation through the headless model
 tool gate before requesting the model or staging/grading a diff. The preflight
-runs nothing and grants nothing; it gives the model the matching `program`/`args`
-operation. Automatic quality checks also match existing direct command grants,
+runs nothing and grants nothing, and the model receives the task unchanged: the
+automatic verification gate runs the granted operation when the model gives its
+final answer, and a denied model command gets the refusal's permitted
+alternatives (ADR-0228). Automatic quality checks also match existing direct command grants,
 retaining the engine's trust, incognito and lease decisions. A preflight snapshot
 cannot waive later authorization: an actual denied verifier also invalidates eval.
 

@@ -2,6 +2,59 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0229: Automatic Verification Ends Unverified On Unchanged Material
+
+**Status:** accepted · **Date:** 2026-10-12. Refines the automatic `eval`
+completion policy; the read-only exemption and every effect floor are unchanged.
+
+**Context.** A read-only question loses the read-only exemption as soon as the
+model runs an opaque shell command (for example `git log` through a compound
+command). The automatic check then runs, and in a repository with an unrelated
+failing test it fails; the repair feedback sent the model into unrelated edits,
+size refusals and the opaque-retry latch. On the long-task harness, 16 of 54
+history-question runs failed the check before any write, 13 of those then
+started editing and 8 of those failed; the same pattern appeared on other
+question tasks.
+
+**Decision.** Under the automatic policy only, a failed full check whose
+observed repository material (HEAD, status paths, raw fingerprints) equals the
+turn's baseline before and after the check ends the turn as `NoProgress` with
+the detail "verification failed … observed repository material was unchanged,
+so the answer is kept and no repair is requested". The failed `CheckRan` is
+recorded. Any observed change, an MCP call, explicit verification, an
+outstanding unit obligation, a refused mutation or an owner checkpoint keeps
+the existing repair loop.
+
+**Consequences.** Unchanged Git material does not prove that no ignored,
+external or partial effect happened, so the outcome is never `Done` and never a
+claim that the failure predates the turn. A fix task answered without any edit
+now ends after one failed check instead of being nudged to try again.
+
+## ADR-0228: Evaluation Task Text Carries No Verifier Instruction
+
+**Status:** accepted · **Date:** 2026-10-12. Refines ADR-0226; the permission
+preflight and denied-verifier invalidation are unchanged.
+
+**Context.** ADR-0226's eval preflight also appended the granted test operation
+to the task as "use run_shell with {program/args} to verify". For the
+auto-detected Python check that operation is a long `python -c` script. On the
+48-row long-task harness with a small local model, the same build with and
+without the appended text solved 27/48 (twice) and 34/48; with the text the model
+made about 1.5× the tool calls, 2–3× the verification attempts and spent twice
+the wall time, mostly on failing shell commands.
+
+**Decision.** `eval` gives the model the task unchanged. The preflight still
+checks the verifier through the headless model tool gate before any model
+request and aborts on refusal; an actual denied verifier after the turn still
+produces no scorecard. Verification guidance comes from the host's automatic
+gate at the final answer and from the refusal of a denied model command, which
+already names permitted alternatives.
+
+**Consequences.** A model that wants to run the tests itself must find a
+permitted form on its own or rely on the gate; a denied literal command is
+answered by the ADR-0226 refusal and repeat guard. No configured argument,
+credential or masked value reaches the prompt.
+
 ## ADR-0227: Headless Evaluation Continues In Verified Bounded Units
 
 **Status:** accepted · **Date:** 2026-10-11 (LocalHub #232, `eval` only).

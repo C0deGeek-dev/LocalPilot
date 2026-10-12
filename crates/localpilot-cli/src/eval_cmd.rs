@@ -70,13 +70,14 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
             runtime.set_automatic_verify_before_done();
         }
     }
-    let verification = runtime.preflight_eval_verification().map_err(|reason| {
+    // The preflight proves the verifier is permitted before any model request.
+    // The model gets the task unchanged: the host gate runs the granted check
+    // at its final answer, and a denied model command gets the refusal's own
+    // alternatives. Telling the model to run the operation itself cost solved
+    // tasks and doubled its tool use.
+    runtime.preflight_eval_verification().map_err(|reason| {
         anyhow::anyhow!("evaluation verification permission preflight failed: {reason}")
     })?;
-    let problem = verification.map_or_else(
-        || opts.problem.to_string(),
-        |check| verification_problem(opts.problem, &check),
-    );
     let session = runtime.session_id();
 
     // Run the turn; model text is discarded (stdout is reserved for the JSON).
@@ -86,7 +87,7 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
     // A constrained task may continue in bounded units when the user allows it;
     // with that setting off this is a single turn.
     let _reason = runtime
-        .run_turn_in_units(&problem, &events_tx, &cancel)
+        .run_turn_in_units(opts.problem, &events_tx, &cancel)
         .await;
     let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     // The snapshot cannot grant future authority: a changed profile/lease or
@@ -157,17 +158,6 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn verification_problem(problem: &str, check: &localpilot_config::CheckConfig) -> String {
-    let operation = serde_json::json!({"program":check.program,"args":check.args}).to_string();
-    if localpilot_config::redact::contains_secret(&operation) {
-        // Never expose configured credentials or present masked arguments as
-        // if they were the same granted command. The host gate retains them.
-        format!("{problem}\n\nEvaluation test operation was permission-checked but has not run. Its configured arguments contain sensitive values, so use the automatic verification gate and report any checks you cannot perform yourself.")
-    } else {
-        format!("{problem}\n\nEvaluation test operation (permissions checked; not executed): use run_shell with {operation} to verify. Report the actual result; do not substitute cosmetic command variants.")
-    }
-}
-
 /// Grade the run with the optional `--test` command (exit 0 = passed). With no
 /// command the run is emitted ungraded, for an external grader to fill in.
 fn grade(test_command: Option<&str>, cwd: &Path) -> anyhow::Result<ResultsBlock> {
@@ -230,21 +220,4 @@ fn git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used)]
-mod permission_tests {
-    #[test]
-    fn configured_verifier_credentials_are_not_exposed_to_the_model() {
-        let check = localpilot_harness::resolve_verify_check(
-            std::path::Path::new("."),
-            Some("python test.py sk-test-0123456789abcdefgh"),
-        )
-        .expect("a configured direct command");
-        let prompt = super::verification_problem("task", &check);
-        assert!(!prompt.contains("sk-test-"));
-        assert!(!prompt.contains("[REDACTED]"));
-        assert!(prompt.contains("automatic verification gate"));
-    }
 }

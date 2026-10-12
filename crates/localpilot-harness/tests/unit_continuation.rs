@@ -679,3 +679,152 @@ async fn a_refusal_that_ends_the_unit_says_so() {
     let off = refusal_with_units(two_site_repository(BOTH).path(), 0, stubborn(&edits, 3)).await;
     assert!(!off.contains("this unit is complete"), "{off}");
 }
+
+/// Every request the model saw, rendered for byte comparison.
+async fn requests_with_units(units_setting: u8, verifier: &str, provider: FakeProvider) -> String {
+    let dir = two_site_repository(verifier);
+    let provider = Arc::new(provider);
+    let mut runtime = SessionRuntime::new(
+        provider.clone(),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::ephemeral(),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            granularity: Some(GranularityConfig {
+                headless_units: units_setting,
+                ..GranularityConfig::default()
+            }),
+            verify_before_done: true,
+            verify_command: Some("python verify.py".to_string()),
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    let _ = units(&mut runtime).await;
+    let rendered = format!("{:?}", provider.requests());
+    // Per-run temporary names are not behaviour: mask the workspace root
+    // and every per-session scratch name before comparing.
+    let mut masked = rendered;
+    // Debug rendering escapes backslashes once per nesting level.
+    let mut root = dir.path().display().to_string();
+    for _ in 0..3 {
+        masked = masked.replace(&root, "<root>");
+        root = root.replace('\\', "\\\\");
+    }
+    mask_after(&masked, "localpilot-", &['\\', '"', ' '])
+}
+
+/// Replace each run of characters after `marker` (up to any `stops`) with `*`.
+fn mask_after(text: &str, marker: &str, stops: &[char]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(marker) {
+        out.push_str(&rest[..at + marker.len()]);
+        rest = &rest[at + marker.len()..];
+        let end = rest.find(|c| stops.contains(&c)).unwrap_or(rest.len());
+        out.push('*');
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[tokio::test]
+async fn units_that_never_engage_leave_every_request_unchanged() {
+    if !python() {
+        return;
+    }
+    // A read, a refused regex replacement, one bounded edit and a final
+    // answer the full check accepts: no unit ends, so the setting must not
+    // change a single byte the model sees.
+    let script = || {
+        FakeProvider::new()
+            .tool_call("read", "read_file", json!({"path": "money.py"}))
+            .tool_call(
+                "regex",
+                "replace_in_file",
+                json!({"path": "money.py", "find": "x = 1", "replace": "x = 2"}),
+            )
+            .tool_call(
+                "huge",
+                "edit_file",
+                json!({"path": "money.py", "old_text": "x = 1", "new_text": "x = 2
+".repeat(400)}),
+            )
+            .tool_call(
+                "x",
+                "edit_file",
+                json!({"path": "money.py", "old_text": "x = 1", "new_text": "x = 2"}),
+            )
+            .text("done")
+            .text("done")
+    };
+    let off = requests_with_units(0, PASSES, script()).await;
+    let on = requests_with_units(8, PASSES, script()).await;
+    assert!(
+        off.contains("work envelope"),
+        "the regex refusal was exercised"
+    );
+    assert_eq!(on, off);
+}
+
+#[tokio::test]
+async fn a_whole_unit_session_runs_no_repository_helper() {
+    if !python() {
+        return;
+    }
+    let dir = two_site_repository(BOTH);
+    let outside = tempfile::tempdir().unwrap();
+    let filter_marker = outside.path().join("filter.txt");
+    let monitor_marker = outside.path().join("monitor.txt");
+    let script = |name: &str, marker: &Path, body: &str| {
+        let path = outside.path().join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "import sys\nopen(r'{}', 'a').write('ran')\n{body}\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        format!("python {}", path.display()).replace('\\', "/")
+    };
+    let clean = script(
+        "clean.py",
+        &filter_marker,
+        "sys.stdout.write(sys.stdin.read())",
+    );
+    let monitor = script("monitor.py", &monitor_marker, "");
+    std::fs::write(dir.path().join(".gitattributes"), "*.py filter=probe\n").unwrap();
+    git(dir.path(), &["add", ".gitattributes"]);
+    git(dir.path(), &["commit", "-qm", "attributes"]);
+    git(dir.path(), &["config", "filter.probe.clean", &clean]);
+    git(dir.path(), &["config", "filter.probe.required", "true"]);
+    git(dir.path(), &["config", "core.fsmonitor", &monitor]);
+    let _ = std::fs::remove_file(&filter_marker);
+    let _ = std::fs::remove_file(&monitor_marker);
+    // Edit x, a refused y edit ends the unit (checkpoint), then y in unit 2.
+    let edits = [
+        edit("x", "x = 1", "x = 2"),
+        edit("y1", "y = 1", "y = 2"),
+        edit("y2", "y = 1", "y = 2"),
+    ];
+    let mut runtime = runtime(
+        dir.path(),
+        stubborn(&edits, 3),
+        Profile::Unrestricted,
+        ScriptedApprover::always(),
+        true,
+    );
+    let _ = units(&mut runtime).await;
+    assert!(
+        check_statuses(&runtime).iter().any(|s| s == "passed"),
+        "the session reached its checks: {:?}",
+        check_statuses(&runtime)
+    );
+    assert!(!filter_marker.exists(), "a clean filter ran");
+    assert!(!monitor_marker.exists(), "the filesystem monitor ran");
+}

@@ -669,13 +669,13 @@ pub(crate) fn inspect_work_diff(
     let base = baseline.map_or("HEAD", |before| {
         before.diff_base.as_deref().unwrap_or(before.head.trim())
     });
-    let (mut paths, ignored_generated) = work_status_paths(root)?;
+    let (mut paths, ignored_generated) = sizing_status_paths(root)?;
     let mut inspection = WorkDiffInspection {
         ignored_generated,
         ..WorkDiffInspection::default()
     };
     paths.extend(
-        git(
+        quiet_git(
             root,
             &[
                 "diff",
@@ -711,7 +711,7 @@ pub(crate) fn inspect_work_diff(
     let mut lines = 0usize;
     let mut regions = 0usize;
     for path in &paths {
-        let stat = git(
+        let stat = quiet_git(
             root,
             &[
                 "diff",
@@ -806,7 +806,7 @@ pub(crate) fn inspect_work_diff(
             }
             // First reject a huge diff before materializing its patch.
             if lines <= profile.max_changed_lines {
-                let diff = git(
+                let diff = quiet_git(
                     root,
                     &[
                         "diff",
@@ -1075,9 +1075,36 @@ fn work_status_paths(root: &Path) -> Result<(Vec<String>, Vec<String>), HarnessE
         root,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )?;
+    Ok(split_status(&status))
+}
+
+/// The automatic per-turn sizing scan. Status may re-read stat-dirty files
+/// through configured clean/process filters; every configured driver and the
+/// filesystem monitor are neutralised so this scan never runs a repository
+/// helper. A filtered file may then count as changed, which only over-counts.
+fn sizing_status_paths(root: &Path) -> Result<(Vec<String>, Vec<String>), HarnessError> {
+    let status = quiet_git(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    Ok(split_status(&status))
+}
+
+/// Git for automatic work inspection: bounded, no filesystem monitor, and
+/// every configured filter driver replaced by a non-required no-op, so no
+/// repository helper runs. Filtered paths then compare as raw bytes, which
+/// can only over-count (the unit then fails closed); it never under-counts.
+fn quiet_git(root: &Path, args: &[&str]) -> Result<String, HarnessError> {
+    let mut all = filter_overrides(root)?;
+    all.extend(args.iter().map(|arg| (*arg).to_string()));
+    let all = all.iter().map(String::as_str).collect::<Vec<_>>();
+    bounded_git(root, None, &all, SNAPSHOT_TIMEOUT)
+}
+
+fn split_status(status: &str) -> (Vec<String>, Vec<String>) {
     let mut generated = Vec::new();
     let mut material = Vec::new();
-    for (state, path) in parse_status_entries(&status) {
+    for (state, path) in parse_status_entries(status) {
         if is_runtime_state_path(&path) {
             continue;
         }
@@ -1087,7 +1114,7 @@ fn work_status_paths(root: &Path) -> Result<(Vec<String>, Vec<String>), HarnessE
             material.push(path);
         }
     }
-    Ok((material, generated))
+    (material, generated)
 }
 
 fn parse_status_entries(status: &str) -> Vec<(String, String)> {
@@ -1241,6 +1268,87 @@ pub(crate) fn snapshot_working_tree(
     result
 }
 
+/// `-c` overrides that turn every configured filter driver into a no-op.
+/// Reading configuration runs no helper.
+fn filter_overrides(root: &Path) -> Result<Vec<String>, HarnessError> {
+    // Status recurses into checked-out submodules and runs their own filter
+    // drivers; `-c` overrides reach those child processes, so every driver
+    // configured in the workspace or in any nested repository is listed.
+    let mut drivers = std::collections::BTreeSet::new();
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((repository, depth)) = pending.pop() {
+        visited += 1;
+        if visited > MAX_NESTED_REPOSITORIES || depth > MAX_NESTED_DEPTH {
+            return Err(HarnessError::Provider(
+                "nested repositories exceed the automatic inspection bound; review the work explicitly".into(),
+            ));
+        }
+        configured_filter_drivers(&repository, &mut drivers)?;
+        let staged = bounded_git(
+            &repository,
+            None,
+            &["ls-files", "-s", "-z"],
+            SNAPSHOT_TIMEOUT,
+        )?;
+        for entry in staged.split('\0') {
+            // "<mode> <object> <stage>\t<path>"; mode 160000 is a gitlink.
+            if let Some((meta, path)) = entry.split_once('\t') {
+                if meta.starts_with("160000 ") {
+                    let child = repository.join(path);
+                    if child.join(".git").exists() {
+                        pending.push((child, depth + 1));
+                    }
+                }
+            }
+        }
+    }
+    Ok(drivers
+        .iter()
+        .flat_map(|driver| {
+            ["clean=", "smudge=", "process=", "required=false"]
+                .map(|setting| ["-c".to_string(), format!("filter.{driver}.{setting}")])
+        })
+        .flatten()
+        .collect())
+}
+
+const MAX_NESTED_REPOSITORIES: usize = 64;
+const MAX_NESTED_DEPTH: usize = 4;
+const MAX_NESTED_CHANGED_PATHS: usize = 256;
+
+/// Filter driver names configured for one repository. Reading configuration
+/// runs no helper; exit 1 means no matching key.
+fn configured_filter_drivers(
+    repository: &Path,
+    drivers: &mut std::collections::BTreeSet<String>,
+) -> Result<(), HarnessError> {
+    let listed = match bounded_git(
+        repository,
+        None,
+        &[
+            "config",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\..*\.(clean|smudge|process)$",
+        ],
+        SNAPSHOT_TIMEOUT,
+    ) {
+        Ok(listed) => listed,
+        Err(HarnessError::Provider(message)) if message.trim_end().ends_with("failed:") => {
+            String::new()
+        }
+        Err(error) => return Err(error),
+    };
+    drivers.extend(
+        listed
+            .lines()
+            .filter_map(|key| key.strip_prefix("filter."))
+            .filter_map(|rest| rest.rsplit_once('.').map(|(driver, _)| driver.to_string())),
+    );
+    Ok(())
+}
+
 /// Run one Git command with literal pathspecs, no filesystem monitor, an
 /// optional alternate index, and a hard time bound.
 fn bounded_git(
@@ -1262,7 +1370,7 @@ fn bounded_git(
 }
 
 /// Run `command` to completion within `timeout`, killing it when it overruns.
-/// Output beyond 1 MiB per stream is discarded.
+/// Output beyond 1 MiB is an error rather than a silently shortened answer.
 fn bounded_output(
     mut command: Command,
     timeout: std::time::Duration,
@@ -1279,7 +1387,7 @@ fn bounded_output(
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
             if let Some(stream) = stream {
-                let _ = stream.take(CAP).read_to_end(&mut bytes);
+                let _ = stream.take(CAP + 1).read_to_end(&mut bytes);
             }
             bytes
         })
@@ -1314,6 +1422,11 @@ fn bounded_output(
     };
     let stdout = stdout.join().unwrap_or_default();
     let stderr = stderr.join().unwrap_or_default();
+    if stdout.len() as u64 > CAP {
+        return Err(HarnessError::Provider(format!(
+            "{label} output exceeded 1 MiB; inspection is incomplete"
+        )));
+    }
     if status.success() {
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
@@ -1326,7 +1439,8 @@ fn bounded_output(
 
 pub(crate) fn work_diff_baseline(root: &Path) -> Result<WorkDiffBaseline, HarnessError> {
     let head = git(root, &["rev-parse", "HEAD"])?;
-    let files = committable_status_paths(root)?
+    let files = sizing_status_paths(root)?
+        .0
         .into_iter()
         .map(|path| {
             let hash = work_fingerprint(root, &path)?;
@@ -1358,6 +1472,20 @@ pub(crate) fn work_changed_paths(
 }
 
 fn work_fingerprint(root: &Path, path: &str) -> Result<String, HarnessError> {
+    let mut visited = 0usize;
+    fingerprint_at(root, path, 0, &mut visited)
+}
+
+/// Fingerprint one path. Only declared submodules (gitlinks) are descended,
+/// under one shared depth and repository budget; any other nested repository
+/// is declined, never descended or hidden.
+fn fingerprint_at(
+    root: &Path,
+    path: &str,
+    depth: usize,
+    visited: &mut usize,
+) -> Result<String, HarnessError> {
+    let path = path.trim_end_matches('/');
     let candidate = root.join(path);
     match std::fs::symlink_metadata(&candidate) {
         Ok(meta) if meta.file_type().is_symlink() => std::fs::read_link(&candidate)
@@ -1369,13 +1497,70 @@ fn work_fingerprint(root: &Path, path: &str) -> Result<String, HarnessError> {
         Ok(_) if path_has_link(root, path)? => Err(HarnessError::Provider(
             "cannot fingerprint a path through a link/junction; no linked content inspected".into(),
         )),
-        Ok(_) => git(root, &["hash-object", "--", path]),
+        // A nested repository: its checked-out commit, its own quiet status
+        // and each changed path's fingerprint, so any change inside it moves
+        // the fingerprint.
+        Ok(meta) if meta.is_dir() && candidate.join(".git").exists() => {
+            if !is_gitlink(root, path)? {
+                return Err(HarnessError::Provider(format!(
+                    "{path} is an undeclared nested repository; automatic inspection declines it; review the work explicitly"
+                )));
+            }
+            *visited += 1;
+            if depth + 1 > MAX_NESTED_DEPTH || *visited > MAX_NESTED_REPOSITORIES {
+                return Err(HarnessError::Provider(
+                    "nested repositories exceed the automatic inspection bound; review the work explicitly".into(),
+                ));
+            }
+            let head = bounded_git(&candidate, None, &["rev-parse", "HEAD"], SNAPSHOT_TIMEOUT)?;
+            let status = quiet_git(
+                &candidate,
+                &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            )?;
+            // Status alone cannot tell two edits of an already-changed file
+            // apart; include each changed path's own raw fingerprint.
+            let mut hash = Sha256::new();
+            hash.update(status.as_bytes());
+            let entries = parse_status_entries(&status);
+            if entries.len() > MAX_NESTED_CHANGED_PATHS {
+                return Err(HarnessError::Provider(format!(
+                    "nested repository {path} has more than {MAX_NESTED_CHANGED_PATHS} changed paths; review the work explicitly"
+                )));
+            }
+            for (_, changed) in entries {
+                hash.update(fingerprint_at(&candidate, &changed, depth + 1, visited)?.as_bytes());
+                hash.update([0]);
+            }
+            Ok(format!("repository:{}:{:x}", head.trim(), hash.finalize()))
+        }
+        // Raw bytes, never a clean filter: the fingerprint only compares the
+        // same path before and after within one process.
+        Ok(_) => bounded_git(
+            root,
+            None,
+            &["hash-object", "--no-filters", "--", path],
+            SNAPSHOT_TIMEOUT,
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("absent".to_string()),
         Err(source) => Err(HarnessError::Io {
             path: path.to_string(),
             source,
         }),
     }
+}
+
+/// Whether `path` is a submodule declared in `root`'s index (mode 160000).
+fn is_gitlink(root: &Path, path: &str) -> Result<bool, HarnessError> {
+    let staged = bounded_git(
+        root,
+        None,
+        &["ls-files", "-s", "-z", "--", path],
+        SNAPSHOT_TIMEOUT,
+    )?;
+    Ok(staged
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\t'))
+        .any(|(meta, listed)| meta.starts_with("160000 ") && listed == path))
 }
 
 #[cfg(test)]
@@ -1915,6 +2100,194 @@ mod snapshot_tests {
         let declined = snapshot_working_tree(root, &paths).unwrap_err().to_string();
         assert!(declined.contains("filter attribute"), "{declined}");
         assert!(!marker.exists(), "the snapshot ran a repository helper");
+    }
+
+    #[test]
+    fn work_sizing_never_runs_a_configured_filter_helper() {
+        if Command::new("python").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = repository();
+        let root = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("marker.txt");
+        let helper = outside.path().join("probe.py");
+        std::fs::write(
+            &helper,
+            format!(
+                "import sys\nopen(r'{}', 'w').write('ran')\nsys.stdout.write(sys.stdin.read())\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join(".gitattributes"), "*.txt filter=probe\n").unwrap();
+        std::fs::write(root.join("a.txt"), lines(None, None)).unwrap();
+        git(root, &["add", ".gitattributes", "a.txt"]).unwrap();
+        git(root, &["commit", "-qm", "attributes"]).unwrap();
+        let clean = format!("python {}", helper.display()).replace('\\', "/");
+        git(root, &["config", "filter.probe.clean", &clean]).unwrap();
+        // Same size, new content: status must read the file to decide.
+        let touch = |text: &str| {
+            std::fs::write(root.join("a.txt"), lines(Some(text), None)).unwrap();
+            let _ = std::fs::remove_file(&marker);
+        };
+        // Control: plain Git status runs the helper for this file.
+        touch("x");
+        git(root, &["status", "--porcelain"]).unwrap();
+        assert!(
+            marker.exists(),
+            "fixture does not exercise the clean filter"
+        );
+        touch("y");
+        let baseline = work_diff_baseline(root).unwrap();
+        assert!(baseline.files.contains_key("a.txt"), "{:?}", baseline.files);
+        assert!(!marker.exists(), "work sizing ran a repository helper");
+    }
+
+    #[test]
+    fn a_nested_repository_filter_never_runs_during_sizing() {
+        if Command::new("python").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = repository();
+        let root = dir.path();
+        let child = root.join("child");
+        std::fs::create_dir(&child).unwrap();
+        git(&child, &["init", "-q"]).unwrap();
+        git(&child, &["config", "user.name", "Fixture"]).unwrap();
+        git(&child, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+        std::fs::write(child.join(".gitattributes"), "*.txt filter=probe\n").unwrap();
+        std::fs::write(child.join("a.txt"), "old\n").unwrap();
+        git(&child, &["add", ".gitattributes", "a.txt"]).unwrap();
+        git(&child, &["commit", "-qm", "child"]).unwrap();
+        git(root, &["add", "child"]).unwrap();
+        git(root, &["commit", "-qm", "gitlink"]).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("marker.txt");
+        let helper = outside.path().join("probe.py");
+        std::fs::write(
+            &helper,
+            format!(
+                "import sys\nopen(r'{}', 'w').write('ran')\nsys.stdout.write(sys.stdin.read())\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let clean = format!("python {}", helper.display()).replace('\\', "/");
+        git(&child, &["config", "filter.probe.clean", &clean]).unwrap();
+        // Same size, new content: the child status must read the file.
+        let touch = |text: &str| {
+            std::fs::write(child.join("a.txt"), text).unwrap();
+            let _ = std::fs::remove_file(&marker);
+        };
+        touch("new\n");
+        git(root, &["status", "--porcelain"]).unwrap();
+        assert!(
+            marker.exists(),
+            "fixture does not exercise the child filter"
+        );
+        touch("mid\n");
+        let baseline = work_diff_baseline(root).unwrap();
+        assert!(baseline.files.contains_key("child"), "{:?}", baseline.files);
+        assert!(!marker.exists(), "sizing ran a nested repository helper");
+        // A further edit inside the already-changed child moves its fingerprint.
+        touch("end\n");
+        let after = work_diff_baseline(root).unwrap();
+        assert_ne!(baseline.files.get("child"), after.files.get("child"));
+        assert!(!marker.exists(), "sizing ran a nested repository helper");
+    }
+
+    /// A committed repository at `dir` holding one file.
+    fn small_repository(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q"]).unwrap();
+        git(dir, &["config", "user.name", "Fixture"]).unwrap();
+        git(dir, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+        std::fs::write(
+            dir.join("f.txt"),
+            "one
+",
+        )
+        .unwrap();
+        git(dir, &["add", "f.txt"]).unwrap();
+        git(dir, &["commit", "-qm", "f"]).unwrap();
+    }
+
+    #[test]
+    fn an_undeclared_nested_repository_is_declined_not_descended() {
+        let dir = repository();
+        let root = dir.path();
+        small_repository(&root.join("r"));
+        let declined = work_diff_baseline(root).unwrap_err().to_string();
+        assert!(
+            declined.contains("undeclared nested repository"),
+            "{declined}"
+        );
+    }
+
+    #[test]
+    fn nested_repositories_beyond_the_depth_bound_fail_closed() {
+        let dir = repository();
+        let root = dir.path();
+        // root/c/c/c/c/c: five declared levels below the workspace.
+        let levels = (1..=5)
+            .map(|n| (0..n).fold(root.to_path_buf(), |path, _| path.join("c")))
+            .collect::<Vec<_>>();
+        small_repository(&levels[4]);
+        for parent in levels[..4].iter().rev() {
+            small_repository(parent);
+            git(parent, &["add", "c"]).unwrap();
+            git(parent, &["commit", "-qm", "gitlink"]).unwrap();
+        }
+        git(root, &["add", "c"]).unwrap();
+        git(root, &["commit", "-qm", "gitlink"]).unwrap();
+        std::fs::write(
+            levels[4].join("f.txt"),
+            "two
+",
+        )
+        .unwrap();
+        let error = work_diff_baseline(root).unwrap_err().to_string();
+        assert!(error.contains("exceed"), "{error}");
+    }
+
+    #[test]
+    fn nested_repositories_beyond_the_count_bound_fail_closed() {
+        let dir = repository();
+        let root = dir.path();
+        for n in 0..=MAX_NESTED_REPOSITORIES {
+            let child = root.join(format!("m{n}"));
+            small_repository(&child);
+            std::fs::write(
+                child.join("f.txt"),
+                "two
+",
+            )
+            .unwrap();
+        }
+        git(root, &["add", "."]).unwrap();
+        git(root, &["commit", "-qm", "gitlinks"]).unwrap();
+        let error = work_diff_baseline(root).unwrap_err().to_string();
+        assert!(error.contains("exceed"), "{error}");
+    }
+
+    #[test]
+    fn oversized_output_is_an_error_not_a_short_answer() {
+        if Command::new("python").arg("--version").output().is_err() {
+            return;
+        }
+        let mut talker = Command::new("python");
+        talker.args([
+            "-c",
+            "import sys; sys.stdout.write('x' * (2 * 1024 * 1024))",
+        ]);
+        let error = bounded_output(talker, std::time::Duration::from_secs(10), "talker")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("exceeded") || error.contains("did not finish"),
+            "{error}"
+        );
     }
 
     #[test]

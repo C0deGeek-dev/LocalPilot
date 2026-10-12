@@ -36,6 +36,11 @@ fn fixture_with(
         "invalid existing manifest !\n",
     )
     .unwrap();
+    if !git {
+        // A broken `.git` file stops discovery here, so a temporary directory
+        // inside some other repository still has no usable baseline.
+        std::fs::write(dir.path().join(".git"), "gitdir: missing-repository\n").unwrap();
+    }
     if git {
         for args in [
             vec!["init", "-q"],
@@ -226,4 +231,112 @@ async fn automatic_policy_cannot_exempt_work_without_a_repository_baseline() {
         StopReason::NoProgress
     );
     assert_eq!(checks(&runtime, runtime.session_id()), vec!["failed"; 3]);
+}
+
+#[tokio::test]
+async fn a_failed_check_on_unchanged_material_keeps_the_answer_unverified() {
+    // An opaque shell command removes the read-only exemption, so the check
+    // runs; it fails while repository material is unchanged. The turn ends
+    // unverified with the answer kept, and no repair request follows.
+    let (_dir, mut runtime, provider) = fixture_with(
+        true,
+        FakeProvider::new().tool_call(
+            "probe",
+            "run_shell",
+            json!({"command": "python -c \"print(1)\""}),
+        ),
+        ToolRegistry::with_builtins(),
+    );
+    runtime.set_automatic_verify_before_done();
+    let (tx, _) = broadcast::channel(256);
+    assert_eq!(
+        runtime
+            .run_turn("Inspect and answer", &tx, &CancellationToken::new())
+            .await,
+        StopReason::NoProgress
+    );
+    assert_eq!(checks(&runtime, runtime.session_id()), vec!["failed"]);
+    assert_eq!(provider.requests().len(), 2, "no repair request followed");
+}
+
+#[tokio::test]
+async fn a_changed_workspace_keeps_the_repair_loop() {
+    let (_dir, mut runtime, _) = fixture_with(
+        true,
+        FakeProvider::new().tool_call(
+            "edit",
+            "edit_file",
+            json!({"path": "notes.txt", "old_text": "answer evidence", "new_text": "changed"}),
+        ),
+        ToolRegistry::with_builtins(),
+    );
+    runtime.set_automatic_verify_before_done();
+    let (tx, _) = broadcast::channel(256);
+    assert_eq!(
+        runtime
+            .run_turn("Edit notes and answer", &tx, &CancellationToken::new())
+            .await,
+        StopReason::NoProgress
+    );
+    assert_eq!(checks(&runtime, runtime.session_id()), vec!["failed"; 3]);
+}
+
+#[tokio::test]
+async fn explicit_verification_keeps_the_repair_loop_on_an_unchanged_workspace() {
+    let (_dir, mut runtime, _) = fixture_with(
+        true,
+        FakeProvider::new().tool_call(
+            "log",
+            "run_shell",
+            json!({"program": "git", "args": ["log", "--oneline"]}),
+        ),
+        ToolRegistry::with_builtins(),
+    );
+    runtime.set_verify_before_done(true, None);
+    let (tx, _) = broadcast::channel(256);
+    assert_eq!(
+        runtime
+            .run_turn(
+                "Read the history and answer",
+                &tx,
+                &CancellationToken::new()
+            )
+            .await,
+        StopReason::NoProgress
+    );
+    assert_eq!(checks(&runtime, runtime.session_id()), vec!["failed"; 3]);
+}
+
+#[tokio::test]
+async fn unobserved_shell_effects_never_turn_a_failed_check_into_done() {
+    // Effects the repository evidence cannot see: an ignored file inside the
+    // workspace and a file outside it. A failed check still never finishes.
+    let external = tempfile::tempdir().unwrap();
+    let outside = external.path().join("outside.txt");
+    for target in ["ignored.log".to_string(), outside.display().to_string()] {
+        let (dir, mut runtime, _) = fixture_with(
+            true,
+            FakeProvider::new().tool_call(
+                "write",
+                "run_shell",
+                json!({"command": format!(
+                    "python -c \"open(r'{}', 'w').write('x')\"",
+                    target.replace('\\', "/")
+                )}),
+            ),
+            ToolRegistry::with_builtins(),
+        );
+        std::fs::write(dir.path().join(".git/info/exclude"), "ignored.log\n").unwrap();
+        runtime.set_automatic_verify_before_done();
+        let (tx, _) = broadcast::channel(256);
+        let stop = runtime
+            .run_turn("Inspect and answer", &tx, &CancellationToken::new())
+            .await;
+        assert_ne!(stop, StopReason::Done, "{target}");
+        let statuses = checks(&runtime, runtime.session_id());
+        assert!(
+            !statuses.is_empty() && statuses.iter().all(|s| s == "failed"),
+            "{target}: {statuses:?}"
+        );
+    }
 }

@@ -86,7 +86,15 @@ index (the real index, `HEAD` and refs are untouched), so earlier units are not
 counted again. The snapshot is refused when a path has a `filter` attribute
 (staging would run a repository helper outside the permission engine); then the
 unit is sized from `HEAD`, which can only over-count. Snapshot commands run
-without the filesystem monitor and under a 10-second bound. A failed full check stays an outstanding obligation for the rest
+without the filesystem monitor and under a 10-second bound. The work-sizing
+status scan and per-path fingerprints follow the same rule and never run a
+repository helper: every filter driver configured in the workspace or in any
+checked-out nested repository (bounded depth and count; beyond it inspection
+fails closed) is overridden to a no-op and made non-required, and fingerprints
+hash the raw working-tree bytes (a declared submodule by its checked-out commit,
+its status and the fingerprints of its changed paths, under one shared depth
+and count budget; an undeclared nested repository is declined, never descended). Filtered paths can
+only over-count. Output over 1 MiB is an error, not a shortened answer. A failed full check stays an outstanding obligation for the rest
 of the session, on every exit: no later turn finishes, even unchanged, until
 the full check actually passes; a denied or missing verifier stops the task. While a further unit is
 available, a small model may keep
@@ -1444,6 +1452,14 @@ permissions and the single repair attempt remain unchanged.
   contract. `--no-verify` omits the optional automatic policy; required bounded
   verification and configured checks still apply. No-VCS and opaque effects gain
   no new exemption. A read-only answer need not repair an unrelated failing test.
+  When the automatic check does run (for example after an opaque shell read)
+  and fails while the observed repository material (HEAD, status paths, raw
+  fingerprints) still equals the turn's baseline before and after the check,
+  the turn ends unverified (`NoProgress`) with the answer kept and no repair
+  feedback; the failed check is recorded. This is not a pass and not a claim
+  about when the failure began. Any observed change, an MCP call, explicit
+  verification, an outstanding unit obligation or an owner checkpoint keeps the
+  repair loop (ADR-0229).
 - **Command resolution.** `[harness] verify_command` (a single command line,
   split on whitespace — no shell) wins; otherwise the command is detected from
   the workspace's marker files (`Cargo.toml` → `cargo test`, `go.mod` →

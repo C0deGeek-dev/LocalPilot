@@ -2450,6 +2450,29 @@ impl SessionRuntime {
         self.config.verify_before_done = true;
     }
 
+    /// Under the automatic policy, a full check that fails while the observed
+    /// repository material (HEAD, status paths and raw fingerprints) still
+    /// equals the turn's baseline, before and after the check, ends the turn
+    /// unverified with the answer kept: repair feedback here sends the model
+    /// into unrelated work. This is not a pass and not a claim about when the
+    /// failure began. Explicit verification, any observed change, an MCP call,
+    /// an outstanding check obligation or a host-owned unit keep the repair loop.
+    fn failed_on_unchanged_material(&self, root: &Path, diff_mutated: bool) -> bool {
+        let Some(baseline) = self.work_diff_baseline.as_ref() else {
+            return false;
+        };
+        self.verify_changed_work_only
+            && !diff_mutated
+            && !self.outstanding_full_check
+            && !self.harness_checkpoint_owner
+            && !self.settling_host_unit
+            && !self.work_unit.has_mutations()
+            && self.work_mutation_refusal.is_none()
+            // MCP effects are invisible to the workspace evidence.
+            && !self.work_mcp_call_attempted
+            && crate::resume::work_diff_baseline(root).is_ok_and(|after| &after == baseline)
+    }
+
     /// Resolve the eval test operation and establish headless model permission
     /// before spending on a provider. No command runs and no authority is added.
     ///
@@ -3299,6 +3322,14 @@ impl SessionRuntime {
                         return VerifyGate::GiveUp(detail);
                     }
                     unit_continuation::UnitAttempt::NotEarned => {}
+                }
+                if self.failed_on_unchanged_material(&root, diff_mutated) {
+                    let detail = format!(
+                        "verification failed: `{}` did not pass; observed repository material was unchanged, so the answer is kept and no repair is requested",
+                        check.program
+                    );
+                    let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                    return VerifyGate::GiveUp(detail);
                 }
                 *attempts += 1;
                 let _ = events.send(RuntimeEvent::Warning(format!(
