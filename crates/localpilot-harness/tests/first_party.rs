@@ -89,7 +89,9 @@ struct GradeResult {
 /// workspace. `cargo` is used rather than a bare `rustc` invocation because it
 /// sets up the platform linker correctly on every tier-1 toolchain (a raw
 /// `rustc` link from a grandchild process is environment-fragile on
-/// `windows-gnu`). Red (a failing or non-compiling unit) yields `passed = false`;
+/// `windows-gnu`). The empty `[workspace]` table makes the temp crate its own
+/// workspace root, so a temp dir inside another Cargo workspace still grades it
+/// alone. Red (a failing or non-compiling unit) yields `passed = false`;
 /// green yields `passed = true`.
 fn grade(entry: &str, content: &str) -> GradeResult {
     let dir = tempfile::tempdir().unwrap();
@@ -98,7 +100,8 @@ fn grade(entry: &str, content: &str) -> GradeResult {
         dir.path().join("Cargo.toml"),
         format!(
             "[package]\nname = \"corpus_task\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
-             [lib]\npath = \"{entry}\"\n"
+             [lib]\npath = \"{entry}\"\n\n\
+             [workspace]\n"
         ),
     )
     .unwrap();

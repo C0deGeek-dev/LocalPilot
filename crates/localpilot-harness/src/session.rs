@@ -2479,17 +2479,15 @@ impl SessionRuntime {
     /// # Errors
     /// A redacted permission explanation; an inaccessible verifier invalidates
     /// a capability baseline rather than measuring the model's test retries.
-    pub fn preflight_eval_verification(
-        &self,
-    ) -> Result<Option<localpilot_config::CheckConfig>, String> {
+    pub fn preflight_eval_verification(&self) -> Result<(), String> {
         if !self.config.verify_before_done && self.config.verify_command.is_none() {
-            return Ok(None);
+            return Ok(());
         }
         let Some(check) = crate::verify_target::resolve_verify_check(
             self.workspace.root(),
             self.config.verify_command.as_deref(),
         ) else {
-            return Ok(None);
+            return Ok(());
         };
         let call = ToolCall::new(
             ToolUseId::from("eval-verification-preflight"),
@@ -2507,8 +2505,7 @@ impl SessionRuntime {
             peers: None,
         };
         self.tools
-            .check_headless_permissions(&call, &ctx, &self.engine.snapshot())?;
-        Ok(Some(check))
+            .check_headless_permissions(&call, &ctx, &self.engine.snapshot())
     }
 
     pub fn set_granularity(&mut self, caps: localpilot_config::GranularityConfig) {

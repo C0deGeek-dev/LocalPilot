@@ -945,7 +945,8 @@ fn eval_preflight_requires_existing_permission_and_never_executes_tests() {
             },
         ]),
     );
-    let check = runtime.preflight_eval_verification().unwrap().unwrap();
+    runtime.preflight_eval_verification().unwrap();
+    let check = localpilot_harness::resolve_verify_check(dir.path(), Some(command)).unwrap();
     assert_eq!(check.program, "python");
     assert_eq!(check.args, ["-m", "unittest", "discover", "-s", "tests"]);
     assert!(!dir.path().join("__pycache__").exists());
@@ -1005,7 +1006,7 @@ fn eval_preflight_checks_the_detected_target_but_preserves_no_target_answers() {
         &[],
     );
     runtime.set_automatic_verify_before_done();
-    assert!(runtime.preflight_eval_verification().unwrap().is_none());
+    runtime.preflight_eval_verification().unwrap();
 }
 
 #[test]

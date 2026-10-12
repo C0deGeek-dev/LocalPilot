@@ -25,6 +25,11 @@ is SemVer-stable; the configuration schema stability policy is in
   repository disabled, under a time and output bound; filtered paths compare as
   raw bytes and can only over-count. A changed submodule no longer drops the
   work baseline.
+- **`SessionRuntime::preflight_eval_verification` returns `Result<(), String>`.**
+  It only establishes permission; callers that need the resolved check use
+  `resolve_verify_check`. The first-party corpus test now grades each task as
+  its own Cargo workspace, so it passes when the temp directory sits inside
+  another workspace.
 
 - **Headless evaluations can finish multi-site edits in bounded units.** Opt in
   with `[harness.granularity] headless_units` (user config or environment, at
