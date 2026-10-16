@@ -1030,7 +1030,12 @@ region and one decision. Repeated valid tool successes plus verified changed
 units permit at most three files, four regions and two decisions with sufficient
 context (two regions with small context). Small context or conservative reliability
 stops harness execution after a durable checkpoint. Caps apply cumulatively to
-attempted edits, including old/new text and giant-line byte equivalents.
+attempted edits, including old/new text and giant-line byte equivalents, except
+for attested prepared exact updates measured against the unit base (ADR-0230).
+Typed missing/ambiguous matches restore only their own no-write reservation;
+denied and partial writes remain spent. Refusals show used/allowed files,
+regions and lines and suggest an exact correction within the admitted footprint,
+or preserving the work and stopping when the fix cannot fit.
 All normalized write targets count, including owned scratch and external paths;
 an unresolvable target refuses the whole request rather than skipping later patch
 operations. These bounds do not authorize paths: permission checks still apply.

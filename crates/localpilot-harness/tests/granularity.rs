@@ -1651,3 +1651,54 @@ async fn checkpoint_reinspection_excludes_artifacts_from_the_passing_check_and_c
         localpilot_store::SessionEventKind::WorkUnitInspected { ignored_generated, binary_changes, .. }
         if ignored_generated.contains(&"__pycache__/from_check.pyc".to_string()) && binary_changes.len() == 1)));
 }
+
+#[tokio::test]
+async fn refusals_report_actual_budgets_and_a_feasible_default_step() {
+    let (_, events) = exact_edit_attempts(&[("one", "correct"), ("two", "changed")], 80).await;
+    let output = events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ToolFinished {
+                id,
+                output,
+                is_error: true,
+                ..
+            } if id == "edit1" => Some(output),
+            _ => None,
+        })
+        .unwrap();
+    for fact in [
+        "files 1/1",
+        "regions 1/1",
+        "lines 2/80",
+        "already admitted",
+        "preserve",
+        "stop",
+    ] {
+        assert!(output.contains(fact), "missing {fact}: {output}");
+    }
+    assert!(!output.contains("checkpoint before continuing"));
+    assert!(!output.contains("this unit is complete"));
+
+    let (_, events) = exact_edit_attempts(&[("one\nmiddle\ntwo", "ONE\nmiddle\nTWO")], 80).await;
+    let output = events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ToolFinished {
+                id,
+                output,
+                is_error: true,
+                ..
+            } if id == "edit0" => Some(output),
+            _ => None,
+        })
+        .unwrap();
+    for fact in [
+        "files 0/1",
+        "regions 0/1",
+        "lines 0/80",
+        "one contiguous region",
+    ] {
+        assert!(output.contains(fact), "missing {fact}: {output}");
+    }
+}

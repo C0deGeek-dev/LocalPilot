@@ -214,7 +214,7 @@ impl WorkProfile {
         // shell/MCP and across compaction, verification, and the stop rule.
         // How the profile was derived stays in the session's events.
         let stop = if self.stop_after_checkpoint {
-            " Then stop at that verified checkpoint and describe the next action."
+            " Then stop after verification and describe the remaining work; the host owns any checkpoint."
         } else {
             ""
         };
@@ -257,6 +257,9 @@ impl std::fmt::Debug for MeasuredFile {
     }
 }
 
+/// Shared ending replaced only when the host actually ends a bounded unit.
+pub(crate) const REFUSAL_STEP: &str = "Next step: ";
+
 /// Keep recovery guidance separate from a bounds denial: only the latter
 /// prevents an opaque process from retrying the refused mutation.
 pub(crate) struct WorkRefusal {
@@ -296,6 +299,20 @@ impl WorkUnit {
         self.clone()
             .check_and_reserve(profile, name, input, workspace)
     }
+    fn refusal_message(&self, profile: WorkProfile, reason: &str) -> String {
+        let step = if self.has_mutations() {
+            "Correct an already admitted exact region without increasing its footprint.".to_string()
+        } else if profile.max_regions == 1 {
+            "Keep the whole change inside one contiguous region within these limits.".to_string()
+        } else {
+            format!(
+                "Keep the whole change within {} regions and {} files, within these limits.",
+                profile.max_regions, profile.max_files
+            )
+        };
+        format!("work envelope: {reason}. Used/allowed: files {}/{}; regions {}/{}; lines {}/{}. {REFUSAL_STEP}{step} If the fix cannot fit, preserve the current work and stop with the remaining work.", self.files.len(), profile.max_files, self.regions, profile.max_regions, self.lines, profile.max_changed_lines)
+    }
+
     pub(crate) fn has_mutations(&self) -> bool {
         self.regions != 0
     }
@@ -308,7 +325,7 @@ impl WorkUnit {
     ) -> Option<WorkRefusal> {
         let reject = |reason: &str| {
             Some(WorkRefusal {
-                message: format!("work envelope: {reason}; split into a smaller coherent unit, verify it, and checkpoint before continuing"),
+                message: self.refusal_message(profile, reason),
                 blocks_opaque_retry: true,
             })
         };
@@ -343,7 +360,10 @@ impl WorkUnit {
         if name == "replace_in_file" {
             // Regex/global substitution has no argument-derived region bound.
             return Some(WorkRefusal {
-                message: "work envelope: use bounded exact edit_file hunks instead of global/regex replacement; split into a smaller coherent unit, verify it, and checkpoint before continuing".to_string(),
+                message: self.refusal_message(
+                    profile,
+                    "use bounded exact edit_file hunks instead of global/regex replacement",
+                ),
                 blocks_opaque_retry: false,
             });
         }
@@ -620,7 +640,12 @@ impl localpilot_tools::FileEditGuard for ExactEditGuard {
             || proposed.regions > self.profile.max_regions
             || proposed.lines > self.profile.max_changed_lines
         {
-            return Err(localpilot_tools::ToolError::WorkEnvelope("work envelope: cumulative files, regions or patch size exceeds the active profile; split into a smaller coherent unit, verify it, and checkpoint before continuing".into()));
+            return Err(localpilot_tools::ToolError::WorkEnvelope(
+                self.before.refusal_message(
+                    self.profile,
+                    "cumulative files, regions or patch size exceeds the active profile",
+                ),
+            ));
         }
         let mut accepted = self.accepted.lock().map_err(|_| {
             localpilot_tools::ToolError::WorkEnvelope(

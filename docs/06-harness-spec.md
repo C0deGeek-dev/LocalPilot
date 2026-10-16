@@ -78,6 +78,12 @@ An exact missing/ambiguous match is a typed precondition failure that proves no
 write occurred, including the whole multi-edit/patch batch; only that proof
 restores the call's reservation. Permission denial and partial failures do not.
 This refund does not waive the separate failed-write unit-check eligibility rule.
+Work-envelope size refusals report current used/allowed files, regions and
+changed-line equivalents. An untouched unit asks for the whole change within
+its region limit; a spent unit suggests correcting an admitted exact region
+without increasing its footprint. If it cannot fit, preserve the work and stop
+with the remainder. Ordinary turns do not ask the model to create a checkpoint;
+only an actually host-ended unit substitutes the host's check/continuation step.
 Sizing normalizes every write target, including scratch and external paths, and
 refuses a request when normalization fails. Mixed patches cannot skip later
 operations through an outside target. Permission checks still own path access.

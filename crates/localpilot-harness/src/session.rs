@@ -1686,7 +1686,7 @@ impl SessionRuntime {
             }
         }
         if self.work_opaque_retry_blocked && is_opaque_launch(name, input) {
-            return Some("work envelope: a bounded write was refused; opaque shell/background retries cannot preserve its limits. Use bounded reads and a smaller exact edit, or checkpoint the unit; automatic verification remains available".to_string());
+            return Some("work envelope: a bounded write was refused; opaque shell/background retries cannot preserve its limits. Use bounded reads and an exact correction within the admitted region, or preserve the work and stop; automatic verification remains available".to_string());
         }
         if self.config.granularity.is_some()
             && self.work_diff_baseline.is_none()

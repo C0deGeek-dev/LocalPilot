@@ -32,6 +32,10 @@ retained, and the model must inspect smaller logical material rather than treat 
 truncated page as complete. Permission decisions, schema validation/repair and
 verification retain their existing paths. Repairs do not establish capability.
 
+Work-envelope refusals include used/allowed files, regions and lines, with an
+exact-edit recovery step or a preserve-and-stop step when the change cannot fit.
+Only a host-ended unit can advertise automatic unit continuation.
+
 Host dispatch metadata distinguishes a pre-invoke refusal from an authorized
 write-capable invocation, including an error after a possible partial write.
 Exact-match no-write proof and prepared-edit refusal are separate host metadata;

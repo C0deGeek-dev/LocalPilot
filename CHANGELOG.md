@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Work refusals name the remaining options.** Size refusals show used/allowed
+  file, region and line budgets and suggest a bounded exact correction or
+  preserving the work and stopping. Ordinary turns no longer ask the model to
+  take an unavailable checkpoint; host-ended units retain their continuation.
+
 - **Exact edits can correct an admitted region.** Prepared updates to tracked
   text reserve the union of the unit's actual changed regions/material after
   permission approval and before writing. Missing or ambiguous exact matches
