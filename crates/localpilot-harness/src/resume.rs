@@ -2266,7 +2266,7 @@ mod snapshot_tests {
         dir
     }
 
-    /// One file, one region: the conservative profile continued units use.
+    /// An explicit one-file/one-region cap isolates snapshot-relative sizing.
     fn conservative() -> WorkProfile {
         WorkProfile::resolve(
             ContextCapacity {
@@ -2275,7 +2275,10 @@ mod snapshot_tests {
                 provenance: ContextProvenance::CallerSupplied,
             },
             Reliability::Unknown,
-            &localpilot_config::GranularityConfig::default(),
+            &localpilot_config::GranularityConfig {
+                max_regions: Some(1),
+                ..localpilot_config::GranularityConfig::default()
+            },
         )
     }
 

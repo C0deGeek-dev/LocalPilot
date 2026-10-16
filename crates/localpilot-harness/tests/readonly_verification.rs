@@ -75,6 +75,11 @@ async fn denied_review_writes_still_spend_the_attempt_budget_without_requiring_t
             "edit_file",
             json!({"path":"a.txt", "old_text":"before", "new_text":"wider"}),
         )
+        .tool_call(
+            "three",
+            "edit_file",
+            json!({"path":"a.txt", "old_text":"before", "new_text":"widest"}),
+        )
         .text("review complete");
     let mut runtime = runtime(
         dir.path(),
@@ -90,7 +95,8 @@ async fn denied_review_writes_still_spend_the_attempt_budget_without_requiring_t
         "before\n"
     );
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "one" && output.contains("readonly"))));
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "two" && output.contains("cumulative"))));
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "two" && output.contains("readonly"))));
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "three" && output.contains("cumulative"))));
     assert!(!runtime
         .store()
         .read_events(runtime.session_id())
