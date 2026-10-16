@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Small work units can fit an import and its use.** Weak/unknown sessions
+  with small or pressured context allow two regions in one file. File, line,
+  read and decision caps stay unchanged; explicit user caps and step scopes
+  still tighten, and malformed sessions retain one region.
+
 - **Work refusals name the remaining options.** Size refusals show used/allowed
   file, region and line budgets and suggest a bounded exact correction or
   preserving the work and stopping. Ordinary turns no longer ask the model to

@@ -1025,8 +1025,11 @@ max_changed_lines = 30
 
 Context below 32,000 usable prompt tokens or at 70% pressure gets 80-line reads,
 80 changed-line equivalents and 4 KiB output projections; sufficient context gets
-200, 200 and 12 KiB. Unknown/weak/malformed reliability permits one file, one
-region and one decision. Repeated valid tool successes plus verified changed
+200, 200 and 12 KiB. Unknown/weak reliability with small or pressured context
+permits one file, two regions and one decision. Malformed reliability and
+unknown/weak reliability with sufficient context permit one file, one region and
+one decision. User region caps and reviewed step scope can still tighten to one
+(ADR-0231). Repeated valid tool successes plus verified changed
 units permit at most three files, four regions and two decisions with sufficient
 context (two regions with small context). Small context or conservative reliability
 stops harness execution after a durable checkpoint. Caps apply cumulatively to

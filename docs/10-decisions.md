@@ -2,6 +2,27 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0231: Small Weak Or Unknown Units Allow Two Regions In One File
+
+**Status:** accepted · **Date:** 2026-10-16. Refines ADR-0199 region sizing.
+
+**Context.** Exact correction recovery and factual refusal guidance cannot admit
+an import plus its separated use under one region. Keeping an entire fix inside
+one file can require two bounded regions even with conservative reliability.
+
+**Decision.** Weak/Unknown reliability under the existing small/pressured-context
+predicate permits at most two regions in one file. Malformed evidence remains
+one region, non-Strong sufficient-context profiles remain one, and Strong
+small/sufficient-context profiles retain two/four. File, changed-line, read,
+decision and retained-output caps are unchanged. User caps, reviewed scope and
+active-unit tightening can only reduce these limits. Headless units remain opt-in;
+permission, opaque retry, verification and completion rules are unchanged.
+
+**Consequences.** A bounded import and use can be admitted together. This is an
+admission capability, not evidence of model quality or a benchmark score gain;
+strict checkers that require one region still reject a two-region result. The
+region rule can be reverted independently of exact-edit recovery and guidance.
+
 ## ADR-0230: Exact Updates Reserve Prepared Material Before Writing
 
 **Status:** accepted · **Date:** 2026-10-16. Refines ADR-0199/0224 admission;

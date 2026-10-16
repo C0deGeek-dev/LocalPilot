@@ -68,7 +68,10 @@ fn runtime_with_tools(
             interactivity: Interactivity::NonInteractive,
             trusted: true,
             context_token_limit: 8_000,
-            granularity: Some(GranularityConfig::default()),
+            granularity: Some(GranularityConfig {
+                max_regions: Some(1),
+                ..GranularityConfig::default()
+            }),
             verify_command: verify,
             ..SessionConfig::default()
         },
@@ -119,6 +122,7 @@ async fn exact_edit_attempts(
     );
     agent.set_granularity(GranularityConfig {
         max_changed_lines: Some(max_lines),
+        max_regions: Some(1),
         ..GranularityConfig::default()
     });
     let (_, events) = turn(&mut agent).await;
@@ -1318,7 +1322,10 @@ async fn contract_refusal_does_not_spend_a_mutation_that_never_dispatched() {
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             enforce_prior_read: true,
-            granularity: Some(GranularityConfig::default()),
+            granularity: Some(GranularityConfig {
+                max_regions: Some(1),
+                ..GranularityConfig::default()
+            }),
             trusted: true,
             ..SessionConfig::default()
         },

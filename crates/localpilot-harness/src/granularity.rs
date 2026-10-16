@@ -142,6 +142,8 @@ impl WorkProfile {
                 } else {
                     4
                 }
+            } else if small && matches!(reliability, Reliability::Weak | Reliability::Unknown) {
+                2
             } else {
                 1
             },
@@ -742,7 +744,10 @@ mod tests {
                 provenance: ContextProvenance::CallerSupplied,
             },
             Reliability::Unknown,
-            &GranularityConfig::default(),
+            &GranularityConfig {
+                max_regions: Some(1),
+                ..GranularityConfig::default()
+            },
         );
         for path in [scratch, external] {
             let mut unit = WorkUnit::default();
@@ -773,7 +778,10 @@ mod tests {
                 provenance: ContextProvenance::CallerSupplied,
             },
             Reliability::Unknown,
-            &GranularityConfig::default(),
+            &GranularityConfig {
+                max_regions: Some(1),
+                ..GranularityConfig::default()
+            },
         );
         for external_first in [true, false] {
             let create = serde_json::json!({"action":"create", "path":outside.path().join("header.txt"), "content":"small\n"});
@@ -814,7 +822,10 @@ mod tests {
                 provenance: ContextProvenance::CallerSupplied,
             },
             Reliability::Unknown,
-            &GranularityConfig::default(),
+            &GranularityConfig {
+                max_regions: Some(1),
+                ..GranularityConfig::default()
+            },
         );
         let input = serde_json::json!({"path":"missing.py", "old_text":"same", "new_text":"same"});
         let mut unit = WorkUnit::default();
@@ -838,7 +849,10 @@ mod tests {
                 provenance: ContextProvenance::CallerSupplied,
             },
             Reliability::Unknown,
-            &GranularityConfig::default(),
+            &GranularityConfig {
+                max_regions: Some(1),
+                ..GranularityConfig::default()
+            },
         );
         let old = "def round_cents(amount):\n    \"\"\"Round to cents.\"\"\"\n    return int(amount * 100) / 100";
         let new = "import math\n\ndef round_cents(amount):\n    \"\"\"Round to cents.\"\"\"\n    return math.floor(amount * 100 + 0.5) / 100";
@@ -870,6 +884,71 @@ mod tests {
             assert!(unit
                 .check_and_reserve(profile, "edit_file", &contiguous, &workspace)
                 .is_none());
+        }
+    }
+
+    #[test]
+    fn two_regions_are_limited_to_weak_or_unknown_small_profiles() {
+        for reliability in [
+            Reliability::Unknown,
+            Reliability::Weak,
+            Reliability::Malformed,
+            Reliability::Strong,
+        ] {
+            for (limit, used, provenance, small) in [
+                (8_000, 0, ContextProvenance::CallerSupplied, true),
+                (128_000, 0, ContextProvenance::CallerSupplied, false),
+                (128_000, 90_000, ContextProvenance::RuntimeUsage, true),
+                (128_000, 0, ContextProvenance::Unknown, true),
+            ] {
+                let context = ContextCapacity {
+                    used,
+                    limit,
+                    provenance,
+                };
+                let profile =
+                    WorkProfile::resolve(context, reliability, &GranularityConfig::default());
+                let expected = match (reliability, small) {
+                    (Reliability::Strong, false) => 4,
+                    (Reliability::Malformed, _) => 1,
+                    (_, true) => 2,
+                    _ => 1,
+                };
+                assert_eq!(
+                    profile.max_regions, expected,
+                    "{reliability:?}, small={small}"
+                );
+                assert_eq!(
+                    profile.max_files,
+                    if reliability == Reliability::Strong && !small {
+                        3
+                    } else {
+                        1
+                    }
+                );
+                assert_eq!(profile.max_changed_lines, if small { 80 } else { 200 });
+                assert_eq!(profile.max_read_lines, if small { 80 } else { 200 });
+                let capped = WorkProfile::resolve(
+                    context,
+                    reliability,
+                    &GranularityConfig {
+                        max_regions: Some(1),
+                        ..GranularityConfig::default()
+                    },
+                );
+                assert_eq!(capped.max_regions, 1);
+                let mut active = capped;
+                active.tighten(profile);
+                assert_eq!(active.max_regions, 1);
+                let mut scoped = profile;
+                scoped.bound_to_scope(WorkScope {
+                    files: 1,
+                    regions: 1,
+                    decisions: 1,
+                    changed_lines: 10,
+                });
+                assert_eq!(scoped.max_regions, 1);
+            }
         }
     }
 

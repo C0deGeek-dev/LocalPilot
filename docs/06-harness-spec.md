@@ -19,7 +19,11 @@ Ordinary agent and harness runtimes share `granularity::WorkProfile`. Context
 capacity/pressure controls read, patch and retained-output material; session-local
 structured reliability controls decisions and simultaneous regions. Unknown and
 malformed evidence start conservatively. Model names, parameter counts and large
-context windows never establish capability. See ADR-0199 for thresholds and
+context windows never establish capability. Weak/unknown evidence with small or
+pressured context allows one file and two regions, so a bounded import and its
+use can fit one unit. Malformed evidence and non-Strong large contexts keep one
+region; Strong small/large contexts keep two/four. All other caps and user/scope
+tightening remain unchanged. See ADR-0199/0231 for thresholds and
 [configuration](configuration.md#harnessgranularity) for stricter caps.
 
 Reads without an explicit last line pass through permission before the builtin
@@ -43,7 +47,7 @@ Legacy steps without scope still parse and execute conservatively; no migration 
 invented historical metadata is required. A stricter effective profile can require
 replanning an existing explicitly sized future step.
 
-One unit reads relevant explicit ranges, applies one coherent bounded region,
+One unit reads relevant explicit ranges, applies one coherent bounded change,
 runs its smallest planned check, then uses the existing rule/gate/commit/progress
 and session-link path. The ratified quality gate still runs. Small context or
 conservative reliability stops after that durable checkpoint; the next invocation
