@@ -717,9 +717,20 @@ async fn requests_with_units(units_setting: u8, verifier: &str, provider: FakePr
     // Render both ordinary and extended Windows roots at every nesting level
     // before replacing: a shorter spelling can otherwise leave an escaped
     // extended-path prefix whose spelling differs from the system note.
-    let root = dir.path().display().to_string();
+    // The tool resolves Windows short user names (RUNNER~1) to the canonical
+    // long path; the system note can still contain the original temp root.
+    let roots = [
+        dir.path().to_path_buf(),
+        std::fs::canonicalize(dir.path()).unwrap(),
+    ];
+    let mut bases = Vec::new();
+    for root in roots {
+        let root = root.display().to_string();
+        bases.push(root.clone());
+        bases.push(format!(r"\\?\{root}"));
+    }
     let mut spellings = Vec::new();
-    for base in [root.clone(), format!(r"\\?\{root}")] {
+    for base in bases {
         let mut spelling = base;
         for _ in 0..6 {
             spellings.push(spelling.clone());
