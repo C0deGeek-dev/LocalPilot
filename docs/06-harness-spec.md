@@ -52,15 +52,41 @@ unit keeps its work and records the reason/next action instead of silently
 resetting it. Owned `.localpilot/` and `.localmind/` runtime state is excluded
 from project work and commits.
 
-Builtin limits apply cumulatively to attempts, including partial/failed mutations.
+Builtin limits retain cumulative attempt accounting for denied, partial,
+cancelled and unknown mutations. Exact `edit_file`, `multi_edit` and update-only
+`apply_patch` calls can instead reserve the union of their actual changed text
+relative to the unit base. Their existing matcher prepares the complete batch
+after every path permission and submits it to a host guard before any write.
+The guard uses deterministic, uncolored zero-context Git comparison and the same patch-material
+measurement as final inspection; a same-region correction is free, but a
+disjoint region or accumulated changed material still refuses before writing.
+Only successful commits install that measured accounting. Original/current
+text is transient host state, never model output, an event or persisted data.
+Proof is limited to contained tracked text matching the unit base or the last
+successful prepared edit, at most 1 MiB per before/after text. Comparison uses
+private temporary files, disables external diff/text conversion/fsmonitor,
+bounds each Git operation to ten seconds and refuses output beyond 1 MiB.
+LF/CRLF normalization is attested against the current unit base; the cached
+observation retains the exact bytes written and the Git text policy. Filters,
+custom encodings, ident expansion, unsupported control text and a changed policy
+decline measured credit. Git display configuration cannot merge work regions.
+Dirty/untracked/outside targets, no repository baseline, previous opaque/MCP
+activity, changed observations and unavailable proof retain conservative
+attempt accounting. No cap is raised. The existing pinned `tempfile` dependency
+owns temporary comparison cleanup.
+An exact missing/ambiguous match is a typed precondition failure that proves no
+write occurred, including the whole multi-edit/patch batch; only that proof
+restores the call's reservation. Permission denial and partial failures do not.
+This refund does not waive the separate failed-write unit-check eligibility rule.
 Sizing normalizes every write target, including scratch and external paths, and
 refuses a request when normalization fails. Mixed patches cannot skip later
 operations through an outside target. Permission checks still own path access.
 Exact edit admission previews changes separated by uniquely aligned unchanged
 lines. Repeated or reordered shared lines keep the existing one-hunk admission;
 the post-write repository diff still enforces the effective region budget.
-No-op attempts spend a region, and the preview has an independent computation
-bound. See ADR-0224 for admission and opaque retry recovery.
+A no-op alone cannot establish measured credit and keeps conservative attempt
+accounting; the preview has an independent computation bound. See ADR-0224
+for opaque retry recovery and ADR-0230 for exact-edit admission.
 Model delegation inherits the policy and spends a region; fan-out is refused.
 Shell/MCP arguments cannot prove their diff size, so repository diffs are checked
 before completion and again after auto-fixes before commit. Ordinary comparisons

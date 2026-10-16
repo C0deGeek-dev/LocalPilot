@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+tempfile = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 indexmap = { workspace = true }
@@ -42,5 +43,4 @@ insta = { workspace = true }
 localpilot-localmind = { path = "../localpilot-localmind" }
 proptest = { workspace = true }
 serde_json = { workspace = true }
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

@@ -37,9 +37,27 @@ fn runtime_with_seed(
     verify: Option<String>,
     seed: Vec<localpilot_core::Message>,
 ) -> SessionRuntime {
+    runtime_with_tools(
+        root,
+        provider,
+        profile,
+        verify,
+        seed,
+        ToolRegistry::with_builtins(),
+    )
+}
+
+fn runtime_with_tools(
+    root: &Path,
+    provider: Arc<FakeProvider>,
+    profile: Profile,
+    verify: Option<String>,
+    seed: Vec<localpilot_core::Message>,
+    tools: ToolRegistry,
+) -> SessionRuntime {
     SessionRuntime::new(
         provider,
-        ToolRegistry::with_builtins(),
+        tools,
         PermissionEngine::new(profile, Vec::new()),
         Box::new(ScriptedApprover::always()),
         Store::open(root),
@@ -68,6 +86,327 @@ async fn turn(runtime: &mut SessionRuntime) -> (StopReason, Vec<RuntimeEvent>) {
         events.push(event);
     }
     (reason, events)
+}
+
+async fn exact_edit_attempts(
+    edits: &[(&str, &str)],
+    max_lines: usize,
+) -> (String, Vec<RuntimeEvent>) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("source.txt"),
+        "anchor\none\nmiddle\ntwo\nend\n",
+    )
+    .unwrap();
+    project(dir.path());
+    // Display-oriented configuration must not merge two work regions.
+    git(dir.path(), &["config", "diff.interHunkContext", "20"]);
+    git(dir.path(), &["config", "diff.algorithm", "histogram"]);
+    git(dir.path(), &["config", "color.ui", "always"]);
+    let mut provider = FakeProvider::new();
+    for (n, (old, new)) in edits.iter().enumerate() {
+        provider = provider.tool_call(
+            &format!("edit{n}"),
+            "edit_file",
+            json!({"path":"source.txt", "old_text":old, "new_text":new}),
+        );
+    }
+    let mut agent = runtime(
+        dir.path(),
+        Arc::new(provider.text("finished")),
+        Profile::Bypass,
+        None,
+    );
+    agent.set_granularity(GranularityConfig {
+        max_changed_lines: Some(max_lines),
+        ..GranularityConfig::default()
+    });
+    let (_, events) = turn(&mut agent).await;
+    (
+        std::fs::read_to_string(dir.path().join("source.txt")).unwrap(),
+        events,
+    )
+}
+
+fn edit_failed(events: &[RuntimeEvent], wanted: &str) -> bool {
+    events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ToolFinished { id, is_error, .. } if id == wanted => Some(*is_error),
+            _ => None,
+        })
+        .expect("tool finished")
+}
+
+#[tokio::test]
+async fn an_exact_correction_reuses_the_changed_region() {
+    let (source, events) = exact_edit_attempts(&[("one", "wrong"), ("wrong", "correct")], 80).await;
+    assert!(!edit_failed(&events, "edit0"));
+    assert!(!edit_failed(&events, "edit1"));
+    assert!(source.contains("correct"));
+}
+
+#[tokio::test]
+async fn an_exact_match_miss_does_not_spend_the_recovery_budget() {
+    let (source, events) =
+        exact_edit_attempts(&[("missing", "wrong"), ("one", "correct")], 80).await;
+    assert!(edit_failed(&events, "edit0"));
+    assert!(!edit_failed(&events, "edit1"));
+    assert!(source.contains("correct"));
+}
+
+#[tokio::test]
+async fn exact_recovery_still_refuses_a_disjoint_region() {
+    let (source, events) = exact_edit_attempts(&[("one", "correct"), ("two", "changed")], 80).await;
+    assert!(!edit_failed(&events, "edit0"));
+    assert!(edit_failed(&events, "edit1"));
+    assert!(source.contains("two"));
+}
+
+#[tokio::test]
+async fn exact_recovery_does_not_allow_accumulating_changed_lines() {
+    let (source, events) =
+        exact_edit_attempts(&[("one", "a\nb\nc"), ("b", "d\ne\nf\ng\nh")], 6).await;
+    assert!(!edit_failed(&events, "edit0"));
+    assert!(edit_failed(&events, "edit1"));
+    assert!(source.contains("a\nb\nc"));
+}
+
+#[tokio::test]
+async fn exact_recovery_does_not_refund_permission_denial() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("source.txt"), "original\n").unwrap();
+    project(dir.path());
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "denied",
+                "edit_file",
+                json!({"path":"source.txt","old_text":"original","new_text":"first"}),
+            )
+            .tool_call(
+                "retry",
+                "edit_file",
+                json!({"path":"source.txt","old_text":"original","new_text":"second"}),
+            )
+            .text("stopped"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished {id, output, ..} if id == "denied" && output.contains("denied"))));
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished {id, output, ..} if id == "retry" && output.contains("work envelope:"))));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("source.txt")).unwrap(),
+        "original\n"
+    );
+}
+
+#[tokio::test]
+async fn exact_recovery_keeps_unknown_and_dirty_bases_conservative() {
+    for repository in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("source.txt"), "original\n").unwrap();
+        if repository {
+            project(dir.path());
+        }
+        std::fs::write(dir.path().join("source.txt"), "dirty\n").unwrap();
+        let provider = Arc::new(
+            FakeProvider::new()
+                .tool_call(
+                    "first",
+                    "edit_file",
+                    json!({"path":"source.txt","old_text":"dirty","new_text":"first"}),
+                )
+                .tool_call(
+                    "second",
+                    "edit_file",
+                    json!({"path":"source.txt","old_text":"first","new_text":"second"}),
+                )
+                .text("stopped"),
+        );
+        let mut agent = runtime(dir.path(), provider, Profile::Bypass, None);
+        let (_, events) = turn(&mut agent).await;
+        assert!(!edit_failed(&events, "first"));
+        assert!(edit_failed(&events, "second"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("source.txt")).unwrap(),
+            "first\n"
+        );
+    }
+}
+
+#[tokio::test]
+async fn prepared_multi_updates_reuse_only_their_real_region() {
+    for tool in ["multi_edit", "apply_patch"] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("source.txt"), "first\nanchor\nlast\n").unwrap();
+        project(dir.path());
+        let mut provider = FakeProvider::new().tool_call(
+            "first",
+            "edit_file",
+            json!({"path":"source.txt","old_text":"first","new_text":"wrong"}),
+        );
+        for (id, old, new) in [
+            ("correct", "wrong", "correct"),
+            ("disjoint", "last", "changed"),
+        ] {
+            let input = if tool == "multi_edit" {
+                json!({"path":"source.txt","edits":[{"old_text":old,"new_text":new}]})
+            } else {
+                json!({"operations":[{"action":"update","path":"source.txt","hunks":[{"old_text":old,"new_text":new}]}]})
+            };
+            provider = provider.tool_call(id, tool, input);
+        }
+        let mut agent = runtime(
+            dir.path(),
+            Arc::new(provider.text("finished")),
+            Profile::Bypass,
+            None,
+        );
+        let (_, events) = turn(&mut agent).await;
+        assert!(!edit_failed(&events, "correct"), "{tool}");
+        assert!(edit_failed(&events, "disjoint"), "{tool}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("source.txt")).unwrap(),
+            "correct\nanchor\nlast\n"
+        );
+    }
+}
+
+struct FailedAfterWrite;
+
+#[tokio::test]
+async fn exact_recovery_preserves_crlf_with_git_and_attribute_normalization() {
+    for autocrlf in ["true", "false"] {
+        for attribute in ["", "source.txt text eol=lf\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            git(dir.path(), &["init", "-q"]);
+            git(dir.path(), &["config", "core.autocrlf", autocrlf]);
+            std::fs::write(dir.path().join("source.txt"), "first\r\nanchor\r\nlast\r\n").unwrap();
+            std::fs::write(dir.path().join(".gitattributes"), attribute).unwrap();
+            project(dir.path());
+            let provider = Arc::new(
+                FakeProvider::new()
+                    .tool_call(
+                        "first",
+                        "edit_file",
+                        json!({"path":"source.txt","old_text":"first","new_text":"wrong"}),
+                    )
+                    .tool_call(
+                        "correct",
+                        "edit_file",
+                        json!({"path":"source.txt","old_text":"wrong","new_text":"correct"}),
+                    )
+                    .text("finished"),
+            );
+            let mut agent = runtime(dir.path(), provider, Profile::Bypass, None);
+            let (_, events) = turn(&mut agent).await;
+            assert!(!edit_failed(&events, "first"), "{autocrlf} {attribute}");
+            assert!(!edit_failed(&events, "correct"), "{autocrlf} {attribute}");
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("source.txt")).unwrap(),
+                "correct\r\nanchor\r\nlast\r\n"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn exact_recovery_keeps_custom_text_transforms_conservative() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("source.txt"), "original\n").unwrap();
+    std::fs::write(dir.path().join(".gitattributes"), "source.txt ident\n").unwrap();
+    project(dir.path());
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "first",
+                "edit_file",
+                json!({"path":"source.txt","old_text":"original","new_text":"first"}),
+            )
+            .tool_call(
+                "second",
+                "edit_file",
+                json!({"path":"source.txt","old_text":"first","new_text":"second"}),
+            )
+            .text("finished"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Bypass, None);
+    let (_, events) = turn(&mut agent).await;
+    assert!(!edit_failed(&events, "first"));
+    assert!(edit_failed(&events, "second"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("source.txt")).unwrap(),
+        "first\n"
+    );
+}
+
+#[async_trait::async_trait]
+impl localpilot_tools::Tool for FailedAfterWrite {
+    fn name(&self) -> &str {
+        "edit_file"
+    }
+    fn description(&self) -> &str {
+        "writes, then reports failure"
+    }
+    fn schema(&self) -> serde_json::Value {
+        localpilot_tools::Tool::schema(&localpilot_tools::EditFile)
+    }
+    fn effects(
+        &self,
+        input: &serde_json::Value,
+        ctx: &localpilot_tools::ToolContext<'_>,
+    ) -> Result<Vec<localpilot_sandbox::Effect>, localpilot_tools::ToolError> {
+        localpilot_tools::Tool::effects(&localpilot_tools::EditFile, input, ctx)
+    }
+    async fn invoke(
+        &self,
+        input: serde_json::Value,
+        ctx: &localpilot_tools::ToolContext<'_>,
+    ) -> Result<localpilot_tools::ToolOutput, localpilot_tools::ToolError> {
+        let mut output =
+            localpilot_tools::Tool::invoke(&localpilot_tools::EditFile, input, ctx).await?;
+        output.outcome = localpilot_core::ToolOutcome::ReportedFailure;
+        Ok(output)
+    }
+}
+
+#[tokio::test]
+async fn exact_recovery_does_not_refund_a_write_that_reports_partial_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("source.txt"), "original\n").unwrap();
+    project(dir.path());
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "partial",
+                "edit_file",
+                json!({"path":"source.txt","old_text":"original","new_text":"first"}),
+            )
+            .tool_call(
+                "retry",
+                "edit_file",
+                json!({"path":"source.txt","old_text":"first","new_text":"second"}),
+            )
+            .text("stopped"),
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(FailedAfterWrite));
+    let mut agent = runtime_with_tools(
+        dir.path(),
+        provider,
+        Profile::Bypass,
+        None,
+        Vec::new(),
+        tools,
+    );
+    let (_, events) = turn(&mut agent).await;
+    assert!(edit_failed(&events, "partial"));
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, output, .. } if id == "retry" && output.contains("work envelope:"))));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("source.txt")).unwrap(),
+        "first\n"
+    );
 }
 
 #[tokio::test]
@@ -389,7 +728,7 @@ async fn permitted_external_write_is_bounded_without_changing_permission_scope()
 #[tokio::test]
 async fn bounded_write_refusal_blocks_opaque_retry_but_keeps_reads_and_verification() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+    std::fs::write(dir.path().join("a.txt"), "before\nanchor\nother\n").unwrap();
     project(dir.path());
     let command = if cfg!(windows) {
         "[IO.File]::WriteAllText('a.txt', '')"
@@ -406,7 +745,7 @@ async fn bounded_write_refusal_blocks_opaque_retry_but_keeps_reads_and_verificat
             .tool_call(
                 "two",
                 "edit_file",
-                json!({"path":"a.txt", "old_text":"after", "new_text":"wider"}),
+                json!({"path":"a.txt", "old_text":"other", "new_text":"wider"}),
             )
             .tool_call("opaque", "run_shell", json!({"command":command}))
             .tool_call(
@@ -433,7 +772,7 @@ async fn bounded_write_refusal_blocks_opaque_retry_but_keeps_reads_and_verificat
     let (_, events) = turn(&mut agent).await;
     assert_eq!(
         std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-        "after\n",
+        "after\nanchor\nother\n",
         "a refused bounded edit must not be followed by destructive opaque retries"
     );
     for id in ["opaque", "background"] {

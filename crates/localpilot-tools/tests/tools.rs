@@ -61,6 +61,128 @@ fn bypass_engine() -> PermissionEngine {
 }
 
 #[tokio::test]
+async fn exact_match_failures_carry_no_write_proof_for_the_whole_batch() {
+    let (_dir, ws) = workspace_with(&[("source.txt", "one\none\ntwo\n")]);
+    let registry = ToolRegistry::with_builtins();
+    for (name, input) in [
+        (
+            "edit_file",
+            json!({"path":"source.txt","old_text":"missing","new_text":"new"}),
+        ),
+        (
+            "edit_file",
+            json!({"path":"source.txt","old_text":"one","new_text":"new"}),
+        ),
+        (
+            "multi_edit",
+            json!({"path":"source.txt","edits":[{"old_text":"two","new_text":"changed"},{"old_text":"missing","new_text":"new"}]}),
+        ),
+        (
+            "apply_patch",
+            json!({"operations":[{"action":"create","path":"new.txt","content":"unwritten"},{"action":"update","path":"source.txt","hunks":[{"old_text":"missing","new_text":"new"}]}]}),
+        ),
+    ] {
+        let result = registry
+            .dispatch_detailed(
+                &ToolCall::new(ToolUseId::from("miss"), name, input),
+                &ctx(&ws, Interactivity::NonInteractive, true),
+                &bypass_engine(),
+                &ScriptedApprover::always(),
+            )
+            .await;
+        assert!(result.result.is_error());
+        assert!(result.edit_precondition_failed, "{name}");
+        assert!(
+            result.mutation_may_have_run,
+            "verification evidence remains conservative"
+        );
+        assert!(result.work_refusal.is_none());
+        assert_eq!(
+            std::fs::read_to_string(ws.root().join("source.txt")).unwrap(),
+            "one\none\ntwo\n"
+        );
+        assert!(!ws.root().join("new.txt").exists());
+    }
+}
+
+struct RefusePrepared {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl localpilot_tools::FileEditGuard for RefusePrepared {
+    fn check(&self, edits: &[localpilot_tools::PreparedEdit<'_>]) -> Result<(), ToolError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(!edits.is_empty());
+        assert!(edits.iter().all(|edit| edit.before != edit.after));
+        Err(ToolError::WorkEnvelope(
+            "work envelope: prepared refusal".into(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn prepared_guard_runs_after_permissions_and_before_any_exact_write() {
+    let (_dir, ws) = workspace_with(&[("source.txt", "old\n"), ("other.txt", "other\n")]);
+    let registry = ToolRegistry::with_builtins();
+    for (name, input) in [
+        (
+            "edit_file",
+            json!({"path":"source.txt","old_text":"old","new_text":"new"}),
+        ),
+        (
+            "multi_edit",
+            json!({"path":"source.txt","edits":[{"old_text":"old","new_text":"new"}]}),
+        ),
+        (
+            "apply_patch",
+            json!({"operations":[{"action":"update","path":"source.txt","hunks":[{"old_text":"old","new_text":"new"}]},{"action":"update","path":"other.txt","hunks":[{"old_text":"other","new_text":"changed"}]}]}),
+        ),
+    ] {
+        let guard = RefusePrepared {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let call = ToolCall::new(ToolUseId::from("guard"), name, input);
+        let denied = registry
+            .dispatch_with_edit_guard(
+                &call,
+                &ctx(&ws, Interactivity::NonInteractive, true),
+                &PermissionEngine::new(Profile::ReadOnly, Vec::new()),
+                &ScriptedApprover::always(),
+                Some(&guard),
+            )
+            .await;
+        assert!(denied.result.is_error());
+        assert!(!denied.edit_precondition_failed);
+        assert!(denied.work_refusal.is_none());
+        assert_eq!(guard.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let refused = registry
+            .dispatch_with_edit_guard(
+                &call,
+                &ctx(&ws, Interactivity::NonInteractive, true),
+                &bypass_engine(),
+                &ScriptedApprover::always(),
+                Some(&guard),
+            )
+            .await;
+        assert_eq!(guard.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!refused.mutation_may_have_run);
+        assert!(!refused.edit_precondition_failed);
+        assert_eq!(
+            refused.work_refusal.as_deref(),
+            Some("work envelope: prepared refusal")
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.root().join("source.txt")).unwrap(),
+            "old\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.root().join("other.txt")).unwrap(),
+            "other\n"
+        );
+    }
+}
+
+#[tokio::test]
 async fn implicit_pages_preserve_complete_lines_and_actual_read_ranges() {
     let cases = [
         ("a\nb\nc\n", 2, 64, "a\nb", Some((1, 2)), Some((3, 4))),
@@ -291,6 +413,8 @@ async fn patch_reports_completed_touches_when_a_later_commit_fails() {
         .await;
     assert!(result.result.is_error());
     assert!(result.mutation_may_have_run);
+    assert!(!result.edit_precondition_failed);
+    assert!(result.work_refusal.is_none());
     assert_eq!(
         std::fs::read_to_string(dir.path().join("created.txt")).unwrap(),
         "completed\n"
@@ -2593,6 +2717,24 @@ async fn a_failing_command_reaches_the_model_as_status_error() {
 }
 
 struct ErroringTool(String);
+
+#[tokio::test]
+async fn error_text_cannot_forge_exact_match_no_write_proof() {
+    let (_dir, ws) = workspace_with(&[]);
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(ErroringTool("old_text was not found".into())));
+    let result = registry
+        .dispatch_detailed(
+            &ToolCall::new(ToolUseId::from("fake-miss"), "erroring", json!({})),
+            &ctx(&ws, Interactivity::NonInteractive, true),
+            &bypass_engine(),
+            &ScriptedApprover::always(),
+        )
+        .await;
+    assert!(result.result.is_error());
+    assert!(!result.edit_precondition_failed);
+    assert!(result.work_refusal.is_none());
+}
 
 #[async_trait]
 impl Tool for ErroringTool {

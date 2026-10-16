@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0230: Exact Updates Reserve Prepared Material Before Writing
+
+**Status:** accepted · **Date:** 2026-10-16. Refines ADR-0199/0224 admission;
+permission, verification, opaque-process and profile caps remain unchanged.
+
+**Context.** Summing attempted hunks prevents correcting the same admitted line.
+Refunding every failure is unsafe because a denied attempt must remain spent
+and a multi-file patch can fail after earlier destinations were written.
+Argument counts or one enclosing touch range cannot prove region overlap.
+
+**Decision.** Exact tools keep their matcher and permission pipeline. After all
+permissions and complete in-memory preparation, an optional host guard checks
+the whole batch before any commit. The runtime measures the prospective text
+against an attested unit base, using bounded helper-free Git comparisons and
+the final observer's patch-material counting. Successful calls install that
+accounting; unsupported or unavailable proof keeps conservative attempt spend.
+Prepared text is transient, bounded host data, never persisted or model-facing.
+
+Only a named exact-match precondition before any write carries no-write proof
+through registry host metadata and restores that call's prior reservation.
+Permission denial, cancellation, unknown failure and partial patch output do
+not refund. Existing mutation/failed-write verification evidence stays separate.
+The argument preview remains a tightening bound and final inspection remains
+authoritative. No-op-only calls do not establish measured credit. No work cap,
+permission, opaque retry rule or unit-check eligibility is relaxed.
+Line-ending normalization is attested from an unchanged Git base; later calls
+must match both the exact written bytes and the Git text policy. Custom
+filter/encoding/ident transformations retain conservative accounting. Both
+comparisons force stable zero-context, uncolored hunks, independently of display
+configuration.
+
+**Consequences.** Models can repair an admitted region or retry a stale exact
+match without gaining a second region. Projection adds bounded Git work and
+private temporary text; existing workspace-pinned `tempfile` handles cleanup.
+Large/untracked/dirty/outside, opaque or stale cases may still refuse a correction
+conservatively. Tool schemas, provider prompts and persisted result shapes are
+unchanged. Hosts without the optional guard keep existing invocation behavior.
+
 ## ADR-0229: Automatic Verification Ends Unverified On Unchanged Material
 
 **Status:** accepted · **Date:** 2026-10-12. Refines the automatic `eval`

@@ -2,7 +2,7 @@
 //! Only observed, session-local outcomes establish reliability. An active unit
 //! may tighten as pressure grows; compaction never refunds its work budget.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use localpilot_config::GranularityConfig;
 use localpilot_sandbox::Workspace;
@@ -226,13 +226,35 @@ impl WorkProfile {
     }
 }
 
-/// Cumulative *attempted* mutation budget. Failed/partial writes cannot refund
-/// it; repeated small calls cannot evade it. Read paths do not spend file slots.
+/// Unit material plus conservative attempted writes. Successful exact tools
+/// may install measured accounting; only typed pre-write match failures refund.
+/// Read paths never spend file slots.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WorkUnit {
     files: BTreeSet<std::path::PathBuf>,
     regions: usize,
     lines: usize,
+    measured: BTreeMap<std::path::PathBuf, MeasuredFile>,
+    measured_edits_enabled: bool,
+}
+
+#[derive(Clone)]
+struct MeasuredFile {
+    original: std::sync::Arc<str>,
+    current: std::sync::Arc<str>,
+    normalize_crlf: bool,
+    attribute_fingerprint: String,
+    regions: usize,
+    lines: usize,
+}
+
+impl std::fmt::Debug for MeasuredFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeasuredFile")
+            .field("regions", &self.regions)
+            .field("lines", &self.lines)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Keep recovery guidance separate from a bounds denial: only the latter
@@ -243,6 +265,27 @@ pub(crate) struct WorkRefusal {
 }
 
 impl WorkUnit {
+    pub(crate) fn enable_measured_edits(&mut self, enabled: bool) {
+        self.measured_edits_enabled = enabled;
+    }
+
+    pub(crate) fn settle_attempt(
+        &mut self,
+        before: &Self,
+        dispatch: &localpilot_tools::ToolDispatchResult,
+        accepted: Option<Self>,
+    ) {
+        if dispatch.edit_precondition_failed || dispatch.work_refusal.is_some() {
+            *self = before.clone();
+        } else if dispatch.result.is_error() {
+            // Denied/partial/unknown writes retain attempted counts. No future
+            // correction may discount cached text after a possible mutation.
+            self.measured.clear();
+        } else if let Some(accepted) = accepted {
+            *self = accepted;
+        }
+    }
+
     pub(crate) fn refusal(
         &self,
         profile: WorkProfile,
@@ -314,6 +357,20 @@ impl WorkUnit {
             _ => return None,
         };
         let mut proposed = self.clone();
+        let credit = if self.measured_edits_enabled && measured_edit_input(name, input) {
+            self.measured
+                .values()
+                .fold((0usize, 0usize), |(regions, lines), file| {
+                    (
+                        regions.saturating_add(file.regions),
+                        lines.saturating_add(file.lines),
+                    )
+                })
+        } else {
+            (0, 0)
+        };
+        proposed.regions = proposed.regions.saturating_sub(credit.0);
+        proposed.lines = proposed.lines.saturating_sub(credit.1);
         for op in operations {
             // Sizing must cover every target, including scratch and external
             // paths. Containment belongs to permission checks; a failed
@@ -379,8 +436,199 @@ impl WorkUnit {
         {
             return reject("cumulative files, regions or patch size exceeds the active profile");
         }
+        // Keep the attempt spent until the authorized tool either proves a
+        // match-precondition miss or successfully installs measured accounting.
+        proposed.regions = proposed.regions.saturating_add(credit.0);
+        proposed.lines = proposed.lines.saturating_add(credit.1);
         *self = proposed;
         None
+    }
+}
+
+fn measured_edit_input(name: &str, input: &Value) -> bool {
+    match name {
+        "edit_file" | "multi_edit" => true,
+        "apply_patch" => input
+            .get("operations")
+            .and_then(Value::as_array)
+            .is_some_and(|ops| {
+                !ops.is_empty()
+                    && ops
+                        .iter()
+                        .all(|op| op.get("action").and_then(Value::as_str) == Some("update"))
+            }),
+        _ => false,
+    }
+}
+
+/// Per-call host guard. The exact tool owns preparation and invokes this only
+/// after all permissions, immediately before committing its prepared batch.
+pub(crate) struct ExactEditGuard {
+    before: WorkUnit,
+    profile: WorkProfile,
+    workspace: Workspace,
+    baseline: Option<crate::resume::WorkDiffBaseline>,
+    name: String,
+    input: Value,
+    accepted: std::sync::Mutex<Option<WorkUnit>>,
+}
+
+impl ExactEditGuard {
+    pub(crate) fn new(
+        before: WorkUnit,
+        profile: WorkProfile,
+        workspace: Workspace,
+        baseline: Option<crate::resume::WorkDiffBaseline>,
+        name: &str,
+        input: &Value,
+    ) -> Self {
+        Self {
+            before,
+            profile,
+            workspace,
+            baseline,
+            name: name.into(),
+            input: input.clone(),
+            accepted: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn accepted(&self) -> Option<WorkUnit> {
+        self.accepted.lock().ok()?.clone()
+    }
+
+    fn project(&self, edits: &[localpilot_tools::PreparedEdit<'_>]) -> Option<WorkUnit> {
+        if !self.before.measured_edits_enabled || !measured_edit_input(&self.name, &self.input) {
+            return None;
+        }
+        let baseline = self.baseline.as_ref()?;
+        let root = self.workspace.root();
+        let mut next = self.before.clone();
+        for edit in edits {
+            const MAX_TEXT: usize = 1024 * 1024;
+            if edit.before.len() > MAX_TEXT
+                || edit.after.len() > MAX_TEXT
+                || edit.before.contains('\0')
+                || edit.after.contains('\0')
+            {
+                return None;
+            }
+            let relative = edit
+                .path
+                .strip_prefix(root)
+                .ok()?
+                .to_str()?
+                .replace('\\', "/");
+            if crate::resume::path_has_link(root, &relative).ok()? {
+                return None;
+            }
+            let attribute_fingerprint =
+                crate::resume::plain_edit_policy(root, &relative).ok()??;
+            if [edit.before, edit.after].iter().any(|text| {
+                text.chars()
+                    .any(|c| c.is_control() && !matches!(c, '\t' | '\r' | '\n'))
+            }) {
+                return None;
+            }
+            if [edit.before, edit.after]
+                .iter()
+                .any(|text| text.replace("\r\n", "\n").contains('\r'))
+                || (!edit.before.contains("\r\n") && edit.after.contains("\r\n"))
+            {
+                return None;
+            }
+            let previous = next.measured.get(edit.path);
+            let (original, normalize_crlf) = if let Some(previous) = previous {
+                if previous.current.as_ref() != edit.before
+                    || previous.attribute_fingerprint != attribute_fingerprint
+                {
+                    return None;
+                }
+                (previous.original.clone(), previous.normalize_crlf)
+            } else {
+                // Existing dirty material is conservatively sized by the final
+                // observer; it is not a baseline for admission credit.
+                if baseline.diff_base.is_none() && baseline.files.contains_key(&relative) {
+                    return None;
+                }
+                let original = crate::resume::original_edit_text(root, baseline, &relative).ok()?;
+                // The actual Git comparison is empty at this base. Infer only
+                // its built-in CRLF normalization, never a custom transform.
+                let normalize = if original == edit.before {
+                    false
+                } else if original == edit.before.replace("\r\n", "\n") {
+                    true
+                } else {
+                    return None;
+                };
+                (std::sync::Arc::from(original), normalize)
+            };
+            let after = if normalize_crlf {
+                edit.after.replace("\r\n", "\n")
+            } else {
+                edit.after.to_owned()
+            };
+            let size = crate::resume::projected_text_size(root, &original, &after).ok()?;
+            if size.regions == 0 && previous.is_none() {
+                return None;
+            }
+            if let Some(previous) = previous {
+                next.regions = next.regions.saturating_sub(previous.regions);
+                next.lines = next.lines.saturating_sub(previous.lines);
+            }
+            let lines = size.lines.max(size.material);
+            next.regions = next.regions.saturating_add(size.regions);
+            next.lines = next.lines.saturating_add(lines);
+            next.files.insert(edit.path.to_owned());
+            next.measured.insert(
+                edit.path.to_owned(),
+                MeasuredFile {
+                    original,
+                    current: std::sync::Arc::from(edit.after),
+                    normalize_crlf,
+                    attribute_fingerprint,
+                    regions: size.regions,
+                    lines,
+                },
+            );
+        }
+        Some(next)
+    }
+}
+
+impl localpilot_tools::FileEditGuard for ExactEditGuard {
+    fn check(
+        &self,
+        edits: &[localpilot_tools::PreparedEdit<'_>],
+    ) -> Result<(), localpilot_tools::ToolError> {
+        let proposed = if let Some(proposed) = self.project(edits) {
+            proposed
+        } else {
+            let mut conservative = self.before.clone();
+            conservative.enable_measured_edits(false);
+            if let Some(refusal) = conservative.check_and_reserve(
+                self.profile,
+                &self.name,
+                &self.input,
+                &self.workspace,
+            ) {
+                return Err(localpilot_tools::ToolError::WorkEnvelope(refusal.message));
+            }
+            return Ok(());
+        };
+        if proposed.files.len() > self.profile.max_files
+            || proposed.regions > self.profile.max_regions
+            || proposed.lines > self.profile.max_changed_lines
+        {
+            return Err(localpilot_tools::ToolError::WorkEnvelope("work envelope: cumulative files, regions or patch size exceeds the active profile; split into a smaller coherent unit, verify it, and checkpoint before continuing".into()));
+        }
+        let mut accepted = self.accepted.lock().map_err(|_| {
+            localpilot_tools::ToolError::WorkEnvelope(
+                "work envelope: prepared edit accounting unavailable".into(),
+            )
+        })?;
+        *accepted = Some(proposed);
+        Ok(())
     }
 }
 

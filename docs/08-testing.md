@@ -52,6 +52,17 @@ Background tests cover cancellation during startup grace, stop and session close
 
 ## Automatic Work Sizing
 
+Prepared-edit contracts exercise the real registry and session: same-region
+correction, typed missing-match recovery, disjoint-region and changed-material
+refusal, and denied-write spend. Tool contracts prove permission denial never
+invokes the prepared guard, batch refusal writes no file, and partial patch
+failure carries no no-write proof. Zero-context comparison controls cover
+separated regions and giant patch-like content lines. Full verification and
+the opaque retry/checkpoint rules remain independently covered.
+Recovery tests also cover LF/CRLF under Git and attribute normalization,
+configured hunk-merging/color settings, custom-transform fallback and invalid
+UTF-8 baseline refusal.
+
 The production-dispatch scenarios also cover short whole-file text larger in
 bytes than its line count, byte-small files exceeding the line cap, tightened
 line configuration, and denied reads preceding content-dependent limits.

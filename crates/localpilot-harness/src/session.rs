@@ -1668,6 +1668,11 @@ impl SessionRuntime {
             self.tools.set_context_output_limit(active.max_output_bytes);
             self.tools
                 .set_file_read_limits(active.max_read_lines, active.max_output_bytes);
+            self.work_unit.enable_measured_edits(
+                self.work_diff_baseline.is_some()
+                    && !self.work_opaque_launch_dispatched
+                    && !self.work_mcp_call_attempted,
+            );
             if let Some(refusal) = self
                 .work_unit
                 .refusal(*active, name, input, &self.workspace)
@@ -2210,6 +2215,8 @@ impl SessionRuntime {
                         mutation_may_have_run: false,
                         unavailable_backend: None,
                         permission_denial: None,
+                        edit_precondition_failed: false,
+                        work_refusal: None,
                     },
                     true,
                 ),
@@ -4928,6 +4935,7 @@ impl SessionRuntime {
                 let mut launch_warn: Option<String> = None;
                 let mut readable_error_sent = false;
                 let mut repaired_dispatched = false;
+                let work_before = self.work_unit.clone();
                 let mut bounded_write_dispatched = false;
                 let mut unavailable_backend = None;
                 let mut permission_denial = None;
@@ -5067,6 +5075,24 @@ impl SessionRuntime {
                             // they cannot attest that a server did no external
                             // or partial writes, even when a call returns Err.
                             self.work_mcp_call_attempted |= self.tools.is_mcp(&active_call.name);
+                            let edit_guard = self
+                                .active_work_profile
+                                .filter(|_| {
+                                    matches!(
+                                        name.as_str(),
+                                        "edit_file" | "multi_edit" | "apply_patch"
+                                    )
+                                })
+                                .map(|profile| {
+                                    crate::granularity::ExactEditGuard::new(
+                                        work_before.clone(),
+                                        profile,
+                                        self.workspace.clone(),
+                                        self.work_diff_baseline.clone(),
+                                        name,
+                                        &active_call.input,
+                                    )
+                                });
                             let dispatched = tokio::select! {
                                 () = cancel.cancelled() => None,
                                 // A graceful wind-down requested while this tool is
@@ -5074,11 +5100,12 @@ impl SessionRuntime {
                                 // quiesce path below, which leaves a resumable
                                 // result for a wait-like tool rather than an abort.
                                 () = quiesce.token().cancelled() => None,
-                                result = self.tools.dispatch_detailed(
+                                result = self.tools.dispatch_with_edit_guard(
                                     &active_call,
                                     &ctx,
                                     &engine,
                                     self.approver.as_ref(),
+                                    edit_guard.as_ref().map(|guard| guard as &dyn localpilot_tools::FileEditGuard),
                                 ) => Some(result),
                             };
                             // A delegating call is one call to this session, but
@@ -5101,7 +5128,21 @@ impl SessionRuntime {
                             // advisory conflict alerts — subscribes, so the
                             // tool path stays unaware of the swarm entirely.
                             match dispatched {
-                                Some(dispatch) => {
+                                Some(mut dispatch) => {
+                                    if is_file_write_tool(name) {
+                                        self.work_unit.settle_attempt(
+                                            &work_before,
+                                            &dispatch,
+                                            edit_guard.as_ref().and_then(|guard| guard.accepted()),
+                                        );
+                                    }
+                                    if let Some(reason) = dispatch.work_refusal.take() {
+                                        self.work_opaque_retry_blocked = true;
+                                        let ended = self.request_unit_end();
+                                        let reason = Self::unit_refusal_guidance(reason, ended);
+                                        self.work_mutation_refusal = Some(reason.clone());
+                                        dispatch.result.output = reason;
+                                    }
                                     bounded_write_dispatched =
                                         is_file_write_tool(name) && dispatch.mutation_may_have_run;
                                     self.work_opaque_launch_dispatched |=
