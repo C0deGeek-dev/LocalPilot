@@ -26,15 +26,6 @@ pub enum ToolError {
     /// A filesystem or process error.
     #[error("{0}")]
     Failed(String),
-
-    /// Exact matching failed before any destination was written. Never use for
-    /// permission refusal, commit failures or a partially applied patch.
-    #[error("{0}")]
-    EditPrecondition(String),
-
-    /// The host refused prepared edits before the first write.
-    #[error("{0}")]
-    WorkEnvelope(String),
 }
 
 impl From<SandboxError> for ToolError {

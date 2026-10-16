@@ -444,12 +444,12 @@ fn reindent(replacement: &str, pad: &str, add: bool) -> String {
 /// edit (a path, or `edit N (path)`, or `operation N … hunk M`).
 fn edit_miss_error(location: &str, haystack: &str, needle: &str, miss: &EditMiss) -> ToolError {
     match miss {
-        EditMiss::Ambiguous { count } => ToolError::EditPrecondition(format!(
+        EditMiss::Ambiguous { count } => ToolError::Failed(format!(
             "{location}: ambiguous edit — old_text matches {count} times; include more \
              surrounding context so it matches exactly once (or use replace_in_file to \
              change every occurrence)."
         )),
-        EditMiss::NotFound => ToolError::EditPrecondition(format!(
+        EditMiss::NotFound => ToolError::Failed(format!(
             "{location}: old_text was not found. {} Re-read the file before editing — its \
              contents may have changed since your last read; the text must match the file \
              (whitespace/indentation aside).",
@@ -976,15 +976,6 @@ impl Tool for EditFile {
         Ok(vec![write_path_effect(ctx, Path::new(&input.path), true)])
     }
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
-        self.invoke_with_edit_guard(input, ctx, None, None).await
-    }
-    async fn invoke_with_edit_guard(
-        &self,
-        input: Value,
-        ctx: &ToolContext<'_>,
-        _read_limits: Option<crate::FileReadLimits>,
-        guard: Option<&dyn crate::FileEditGuard>,
-    ) -> Result<ToolOutput, ToolError> {
         let input: EditFileInput = parse_input(&input)?;
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
         let content = std::fs::read_to_string(&path)
@@ -1001,15 +992,7 @@ impl Tool for EditFile {
         match locate_edit(&haystack, &needle, &replacement) {
             Ok(plan) => {
                 let updated = apply_plan(&haystack, &plan);
-                let persisted = apply_newline(&updated, newline);
-                if let Some(guard) = guard {
-                    guard.check(&[crate::PreparedEdit {
-                        path: &path,
-                        before: &content,
-                        after: &persisted,
-                    }])?;
-                }
-                atomic_write(&path, persisted.as_bytes())?;
+                atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
                 Ok(ToolOutput::ok(format!("edited {}", path.display()))
                     .touching(edit_touch(&path, &haystack, &updated)))
             }
@@ -1073,15 +1056,6 @@ impl Tool for MultiEdit {
         Ok(vec![write_path_effect(ctx, Path::new(&input.path), true)])
     }
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
-        self.invoke_with_edit_guard(input, ctx, None, None).await
-    }
-    async fn invoke_with_edit_guard(
-        &self,
-        input: Value,
-        ctx: &ToolContext<'_>,
-        _read_limits: Option<crate::FileReadLimits>,
-        guard: Option<&dyn crate::FileEditGuard>,
-    ) -> Result<ToolOutput, ToolError> {
         let input: MultiEditInput = parse_input(&input)?;
         if input.edits.is_empty() {
             return Err(ToolError::InvalidInput(
@@ -1106,15 +1080,7 @@ impl Tool for MultiEdit {
                 Err(miss) => return Err(edit_miss_error(&location, &updated, &needle, &miss)),
             }
         }
-        let persisted = apply_newline(&updated, newline);
-        if let Some(guard) = guard {
-            guard.check(&[crate::PreparedEdit {
-                path: &path,
-                before: &original,
-                after: &persisted,
-            }])?;
-        }
-        atomic_write(&path, persisted.as_bytes())?;
+        atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
         // Several edits in one call collapse into one enclosing range. This is
         // the case a per-call inference gets wrong, and the reason the range is
         // computed from the content rather than from the arguments.
@@ -1522,15 +1488,6 @@ impl Tool for ApplyPatch {
             .collect())
     }
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
-        self.invoke_with_edit_guard(input, ctx, None, None).await
-    }
-    async fn invoke_with_edit_guard(
-        &self,
-        input: Value,
-        ctx: &ToolContext<'_>,
-        _read_limits: Option<crate::FileReadLimits>,
-        guard: Option<&dyn crate::FileEditGuard>,
-    ) -> Result<ToolOutput, ToolError> {
         let input: ApplyPatchInput = parse_input(&input)?;
 
         let mut destinations = std::collections::BTreeSet::new();
@@ -1547,7 +1504,6 @@ impl Tool for ApplyPatch {
         // Validate every operation against the current tree before any write,
         // so a rejected hunk fails the whole patch with nothing applied.
         let mut writes: Vec<(PathBuf, Option<String>)> = Vec::new();
-        let mut prepared = Vec::new();
         for (index, op) in input.operations.iter().enumerate() {
             let label = format!("operation {} ({})", index + 1, op.describe());
             let path = ctx.workspace.normalize(Path::new(op.path()))?;
@@ -1586,9 +1542,7 @@ impl Tool for ApplyPatch {
                             }
                         }
                     }
-                    let persisted = apply_newline(&updated, newline);
-                    prepared.push((path.clone(), original, persisted.clone()));
-                    writes.push((path, Some(persisted)));
+                    writes.push((path, Some(apply_newline(&updated, newline))));
                 }
                 PatchOperation::Delete { .. } => {
                     if !path.is_file() {
@@ -1598,20 +1552,6 @@ impl Tool for ApplyPatch {
                     }
                     writes.push((path, None));
                 }
-            }
-        }
-
-        if prepared.len() == writes.len() && !prepared.is_empty() {
-            if let Some(guard) = guard {
-                let edits: Vec<_> = prepared
-                    .iter()
-                    .map(|(path, before, after)| crate::PreparedEdit {
-                        path,
-                        before,
-                        after,
-                    })
-                    .collect();
-                guard.check(&edits)?;
             }
         }
 

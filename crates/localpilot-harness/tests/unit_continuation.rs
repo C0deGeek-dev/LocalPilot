@@ -67,7 +67,6 @@ fn runtime(
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             granularity: Some(GranularityConfig {
-                max_regions: Some(1),
                 headless_units: 2,
                 ..GranularityConfig::default()
             }),
@@ -387,7 +386,6 @@ async fn calls_queued_after_a_refused_edit_do_not_run() {
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             granularity: Some(GranularityConfig {
-                max_regions: Some(1),
                 headless_units: 2,
                 ..GranularityConfig::default()
             }),
@@ -432,7 +430,6 @@ async fn host_ended_units_respect_the_cap_and_the_off_setting() {
             RecoveryEngine::new(RecoveryBudget::default()),
             SessionConfig {
                 granularity: Some(GranularityConfig {
-                    max_regions: Some(1),
                     headless_units: units_setting,
                     ..GranularityConfig::default()
                 }),
@@ -562,7 +559,6 @@ async fn signals_at_a_host_unit_boundary_are_handled_before_any_settlement() {
             RecoveryEngine::new(RecoveryBudget::default()),
             SessionConfig {
                 granularity: Some(GranularityConfig {
-                    max_regions: Some(1),
                     headless_units: 2,
                     ..GranularityConfig::default()
                 }),
@@ -630,7 +626,6 @@ async fn refusal_with_units(dir: &Path, units_setting: u8, provider: FakeProvide
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             granularity: Some(GranularityConfig {
-                max_regions: Some(1),
                 headless_units: units_setting,
                 ..GranularityConfig::default()
             }),
@@ -699,7 +694,6 @@ async fn requests_with_units(units_setting: u8, verifier: &str, provider: FakePr
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             granularity: Some(GranularityConfig {
-                max_regions: Some(1),
                 headless_units: units_setting,
                 ..GranularityConfig::default()
             }),

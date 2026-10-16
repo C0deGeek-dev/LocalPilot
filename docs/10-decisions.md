@@ -4,7 +4,13 @@ This file starts the decision log. Add new records at the top.
 
 ## ADR-0231: Small Weak Or Unknown Units Allow Two Regions In One File
 
-**Status:** accepted · **Date:** 2026-10-16. Refines ADR-0199 region sizing.
+**Status:** reverted · **Date:** 2026-10-16. Refines ADR-0199 region sizing.
+
+**Disposition.** Reverted after the combined admission/guidance/profile experiment
+scored 33/48 vs retained defaults 36/48, with the focused bug task unchanged at
+3/6. Existing conservative admission, refusal guidance and region defaults are
+restored. Native correctness checks passed, but the measured tradeoff was rejected.
+This record describes the withdrawn experiment, not current behavior.
 
 **Context.** Exact correction recovery and factual refusal guidance cannot admit
 an import plus its separated use under one region. Keeping an entire fix inside
@@ -25,8 +31,14 @@ region rule can be reverted independently of exact-edit recovery and guidance.
 
 ## ADR-0230: Exact Updates Reserve Prepared Material Before Writing
 
-**Status:** accepted · **Date:** 2026-10-16. Refines ADR-0199/0224 admission;
+**Status:** reverted · **Date:** 2026-10-16. Refines ADR-0199/0224 admission;
 permission, verification, opaque-process and profile caps remain unchanged.
+
+**Disposition.** Reverted after the combined admission/guidance/profile experiment
+scored 33/48 vs retained defaults 36/48, with the focused bug task unchanged at
+3/6. Existing conservative admission, refusal guidance and region defaults are
+restored. Native correctness checks passed, but the measured tradeoff was rejected.
+This record describes the withdrawn experiment, not current behavior.
 
 **Context.** Summing attempted hunks prevents correcting the same admitted line.
 Refunding every failure is unsafe because a denied attempt must remain spent

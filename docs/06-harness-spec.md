@@ -19,11 +19,7 @@ Ordinary agent and harness runtimes share `granularity::WorkProfile`. Context
 capacity/pressure controls read, patch and retained-output material; session-local
 structured reliability controls decisions and simultaneous regions. Unknown and
 malformed evidence start conservatively. Model names, parameter counts and large
-context windows never establish capability. Weak/unknown evidence with small or
-pressured context allows one file and two regions, so a bounded import and its
-use can fit one unit. Malformed evidence and non-Strong large contexts keep one
-region; Strong small/large contexts keep two/four. All other caps and user/scope
-tightening remain unchanged. See ADR-0199/0231 for thresholds and
+context windows never establish capability. See ADR-0199 for thresholds and
 [configuration](configuration.md#harnessgranularity) for stricter caps.
 
 Reads without an explicit last line pass through permission before the builtin
@@ -47,7 +43,7 @@ Legacy steps without scope still parse and execute conservatively; no migration 
 invented historical metadata is required. A stricter effective profile can require
 replanning an existing explicitly sized future step.
 
-One unit reads relevant explicit ranges, applies one coherent bounded change,
+One unit reads relevant explicit ranges, applies one coherent bounded region,
 runs its smallest planned check, then uses the existing rule/gate/commit/progress
 and session-link path. The ratified quality gate still runs. Small context or
 conservative reliability stops after that durable checkpoint; the next invocation
@@ -56,47 +52,15 @@ unit keeps its work and records the reason/next action instead of silently
 resetting it. Owned `.localpilot/` and `.localmind/` runtime state is excluded
 from project work and commits.
 
-Builtin limits retain cumulative attempt accounting for denied, partial,
-cancelled and unknown mutations. Exact `edit_file`, `multi_edit` and update-only
-`apply_patch` calls can instead reserve the union of their actual changed text
-relative to the unit base. Their existing matcher prepares the complete batch
-after every path permission and submits it to a host guard before any write.
-The guard uses deterministic, uncolored zero-context Git comparison and the same patch-material
-measurement as final inspection; a same-region correction is free, but a
-disjoint region or accumulated changed material still refuses before writing.
-Only successful commits install that measured accounting. Original/current
-text is transient host state, never model output, an event or persisted data.
-Proof is limited to contained tracked text matching the unit base or the last
-successful prepared edit, at most 1 MiB per before/after text. Comparison uses
-private temporary files, disables external diff/text conversion/fsmonitor,
-bounds each Git operation to ten seconds and refuses output beyond 1 MiB.
-LF/CRLF normalization is attested against the current unit base; the cached
-observation retains the exact bytes written and the Git text policy. Filters,
-custom encodings, ident expansion, unsupported control text and a changed policy
-decline measured credit. Git display configuration cannot merge work regions.
-Dirty/untracked/outside targets, no repository baseline, previous opaque/MCP
-activity, changed observations and unavailable proof retain conservative
-attempt accounting. No cap is raised. The existing pinned `tempfile` dependency
-owns temporary comparison cleanup.
-An exact missing/ambiguous match is a typed precondition failure that proves no
-write occurred, including the whole multi-edit/patch batch; only that proof
-restores the call's reservation. Permission denial and partial failures do not.
-This refund does not waive the separate failed-write unit-check eligibility rule.
-Work-envelope size refusals report current used/allowed files, regions and
-changed-line equivalents. An untouched unit asks for the whole change within
-its region limit; a spent unit suggests correcting an admitted exact region
-without increasing its footprint. If it cannot fit, preserve the work and stop
-with the remainder. Ordinary turns do not ask the model to create a checkpoint;
-only an actually host-ended unit substitutes the host's check/continuation step.
+Builtin limits apply cumulatively to attempts, including partial/failed mutations.
 Sizing normalizes every write target, including scratch and external paths, and
 refuses a request when normalization fails. Mixed patches cannot skip later
 operations through an outside target. Permission checks still own path access.
 Exact edit admission previews changes separated by uniquely aligned unchanged
 lines. Repeated or reordered shared lines keep the existing one-hunk admission;
 the post-write repository diff still enforces the effective region budget.
-A no-op alone cannot establish measured credit and keeps conservative attempt
-accounting; the preview has an independent computation bound. See ADR-0224
-for opaque retry recovery and ADR-0230 for exact-edit admission.
+No-op attempts spend a region, and the preview has an independent computation
+bound. See ADR-0224 for admission and opaque retry recovery.
 Model delegation inherits the policy and spends a region; fan-out is refused.
 Shell/MCP arguments cannot prove their diff size, so repository diffs are checked
 before completion and again after auto-fixes before commit. Ordinary comparisons

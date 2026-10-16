@@ -63,10 +63,10 @@ pub use repair::{
 };
 pub use schema_intent::{field_intent, is_repair_exempt, INTENT_KEY};
 pub use tool::{
-    bounded_read_hint, AgentHost, Audience, Delivered, Delivery, FileEditGuard, FileReadLimits,
-    OutputRetention, PeerMessage, PeerSummary, PreparedEdit, QuestionOption, ShellOutput,
-    SwarmIdentity, SwarmPeers, Tool, ToolContext, ToolOutput, ToolOutputPresentation,
-    UnavailableBackend, UserAnswer, UserPrompter, UserQuestion,
+    bounded_read_hint, AgentHost, Audience, Delivered, Delivery, FileReadLimits, OutputRetention,
+    PeerMessage, PeerSummary, QuestionOption, ShellOutput, SwarmIdentity, SwarmPeers, Tool,
+    ToolContext, ToolOutput, ToolOutputPresentation, UnavailableBackend, UserAnswer, UserPrompter,
+    UserQuestion,
 };
 pub use validate::{
     is_input_valid, readable_input_error, required_fields_present, tool_input_issues,

@@ -55,10 +55,6 @@ pub struct ToolDispatchResult {
     pub unavailable_backend: Option<&'static str>,
     /// Pre-invoke permission refusal, separate from the model-facing result.
     pub permission_denial: Option<PermissionDenial>,
-    /// A trusted exact matcher proved no write occurred.
-    pub edit_precondition_failed: bool,
-    /// Prepared edits were refused by the host before writing.
-    pub work_refusal: Option<String>,
 }
 
 /// Fresh permission evidence. Human guidance has crossed the redaction boundary.
@@ -78,8 +74,6 @@ impl ToolDispatchResult {
             mutation_may_have_run: false,
             unavailable_backend: None,
             permission_denial: None,
-            edit_precondition_failed: false,
-            work_refusal: None,
         }
     }
 }
@@ -299,29 +293,8 @@ impl ToolRegistry {
         engine: &PermissionEngine,
         approver: &dyn Approver,
     ) -> ToolDispatchResult {
-        self.dispatch_detailed_with_intent(call, ctx, engine, approver, DispatchIntent::Model, None)
+        self.dispatch_detailed_with_intent(call, ctx, engine, approver, DispatchIntent::Model)
             .await
-    }
-
-    /// Dispatch with a host guard evaluated by exact tools after permissions
-    /// and preparation, before any write. Other tools retain normal dispatch.
-    pub async fn dispatch_with_edit_guard(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext<'_>,
-        engine: &PermissionEngine,
-        approver: &dyn Approver,
-        guard: Option<&dyn crate::FileEditGuard>,
-    ) -> ToolDispatchResult {
-        self.dispatch_detailed_with_intent(
-            call,
-            ctx,
-            engine,
-            approver,
-            DispatchIntent::Model,
-            guard,
-        )
-        .await
     }
 
     /// Check headless model permission without invoking the tool or prompting.
@@ -398,15 +371,8 @@ impl ToolRegistry {
                 self.context_output_bytes,
             ));
         }
-        self.dispatch_detailed_with_intent(
-            call,
-            ctx,
-            engine,
-            approver,
-            DispatchIntent::UserShell,
-            None,
-        )
-        .await
+        self.dispatch_detailed_with_intent(call, ctx, engine, approver, DispatchIntent::UserShell)
+            .await
     }
 
     /// [`ToolRegistry::dispatch`], also returning what the tool reported touching.
@@ -422,7 +388,7 @@ impl ToolRegistry {
         approver: &dyn Approver,
     ) -> (ToolResult, Vec<crate::touch::FileTouch>) {
         let dispatch = self
-            .dispatch_detailed_with_intent(call, ctx, engine, approver, DispatchIntent::Model, None)
+            .dispatch_detailed_with_intent(call, ctx, engine, approver, DispatchIntent::Model)
             .await;
         (dispatch.result, dispatch.touches)
     }
@@ -434,7 +400,6 @@ impl ToolRegistry {
         engine: &PermissionEngine,
         approver: &dyn Approver,
         intent: DispatchIntent,
-        edit_guard: Option<&dyn crate::FileEditGuard>,
     ) -> ToolDispatchResult {
         let Some(tool) = self.get(&call.name) else {
             return ToolDispatchResult::plain(unusable_result(
@@ -553,7 +518,7 @@ impl ToolRegistry {
             ) || effect.may_create_files()
         });
         match tool
-            .invoke_with_edit_guard(call.input.clone(), ctx, self.file_read_limits, edit_guard)
+            .invoke_with_file_read_limits(call.input.clone(), ctx, self.file_read_limits)
             .await
         {
             // Redaction happens here, for every profile including bypass.
@@ -578,19 +543,10 @@ impl ToolRegistry {
                     mutation_may_have_run,
                     unavailable_backend: output.unavailable_backend,
                     permission_denial: None,
-                    edit_precondition_failed: false,
-                    work_refusal: None,
                 }
             }
             Err(err) => ToolDispatchResult {
-                mutation_may_have_run: mutation_may_have_run
-                    && !matches!(err, crate::ToolError::WorkEnvelope(_)),
-                edit_precondition_failed: matches!(err, crate::ToolError::EditPrecondition(_)),
-                work_refusal: if let crate::ToolError::WorkEnvelope(reason) = &err {
-                    Some(redact(reason))
-                } else {
-                    None
-                },
+                mutation_may_have_run,
                 ..ToolDispatchResult::plain(unusable_result(
                     tool.name(),
                     &call.id,

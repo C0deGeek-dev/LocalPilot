@@ -434,22 +434,6 @@ pub trait Tool: Send + Sync {
     fn contract(&self) -> crate::contract::ToolContract {
         crate::contract::ToolContract::default()
     }
-
-    /// Authorized invocation with an optional prepared-edit admission guard.
-    /// Non-edit tools retain their existing invocation, including read limits.
-    ///
-    /// # Errors
-    /// Returns the tool error or a host refusal before writes.
-    async fn invoke_with_edit_guard(
-        &self,
-        input: Value,
-        ctx: &ToolContext<'_>,
-        read_limits: Option<FileReadLimits>,
-        _guard: Option<&dyn FileEditGuard>,
-    ) -> Result<ToolOutput, ToolError> {
-        self.invoke_with_file_read_limits(input, ctx, read_limits)
-            .await
-    }
 }
 
 /// Independent bounds for a file read without an explicit last line.
@@ -457,22 +441,6 @@ pub trait Tool: Send + Sync {
 pub struct FileReadLimits {
     pub max_lines: usize,
     pub max_bytes: usize,
-}
-
-/// Prepared exact replacement, available only after path permission approval.
-/// Transient host data; never part of a model result or persisted event.
-pub struct PreparedEdit<'a> {
-    pub path: &'a std::path::Path,
-    pub before: &'a str,
-    pub after: &'a str,
-}
-
-/// A host may tighten admission using the exact tool's prepared replacement.
-/// Called once for the complete batch, before any write; never grants access.
-pub trait FileEditGuard: Send + Sync {
-    /// # Errors
-    /// Returns a host work-envelope refusal; the tool must leave all files intact.
-    fn check(&self, edits: &[PreparedEdit<'_>]) -> Result<(), ToolError>;
 }
 
 /// Copyable retry call for a read that needs an explicit bounded line range.

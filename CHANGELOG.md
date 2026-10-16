@@ -6,26 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Bounded-edit defaults restored.** Withdraw the experimental measured-edit
+  accounting, refusal wording and small-session two-region profile after the
+  combined evaluation regressed. Existing work caps and conservative attempt
+  accounting apply again.
 - **Python verification selection works across platforms.** The evidence-based
   pytest/unittest adapter recognizes the stack detector's `python3` command as
   well as `python`, preserving its configuration checks on macOS and Linux.
-
-- **Small work units can fit an import and its use.** Weak/unknown sessions
-  with small or pressured context allow two regions in one file. File, line,
-  read and decision caps stay unchanged; explicit user caps and step scopes
-  still tighten, and malformed sessions retain one region.
-
-- **Work refusals name the remaining options.** Size refusals show used/allowed
-  file, region and line budgets and suggest a bounded exact correction or
-  preserving the work and stopping. Ordinary turns no longer ask the model to
-  take an unavailable checkpoint; host-ended units retain their continuation.
-
-- **Exact edits can correct an admitted region.** Prepared updates to tracked
-  text reserve the union of the unit's actual changed regions/material after
-  permission approval and before writing. Missing or ambiguous exact matches
-  release only their own no-write reservation; denied, partial and unknown
-  writes stay spent. Disjoint edits and growing changes still obey the same
-  caps, and unprovable cases retain conservative accounting.
 
 - **Evaluation tasks reach the model unchanged.** `eval` no longer appends the
   permission-checked test operation and an instruction to run it to the task.

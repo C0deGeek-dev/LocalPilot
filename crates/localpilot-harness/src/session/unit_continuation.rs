@@ -15,7 +15,8 @@ use crate::quality::CheckStatus;
 use crate::rules::Trigger;
 
 const MOVED: &str = "unit checkpoint refused: a verification command changed the workspace; the work is preserved for review";
-use crate::granularity::REFUSAL_STEP;
+const REFUSAL_STEP: &str =
+    "split into a smaller coherent unit, verify it, and checkpoint before continuing";
 const UNIT_STEP: &str = "this unit is complete: the harness now checks it and, when the \
      check allows, opens the next unit with the same task";
 
@@ -138,10 +139,7 @@ impl SessionRuntime {
         if !unit_ended {
             return message;
         }
-        match message.split_once(REFUSAL_STEP) {
-            Some((facts, _)) => format!("{facts}{UNIT_STEP}"),
-            None => message,
-        }
+        message.replace(REFUSAL_STEP, UNIT_STEP)
     }
 
     /// Run the unit's own check after its full check failed. A checkpoint needs
@@ -348,13 +346,11 @@ mod tests {
 
     #[test]
     fn refusal_guidance_names_the_unit_step_only_when_the_unit_ended() {
-        let message = format!("work envelope: too big; regions 1/1. {REFUSAL_STEP}Correct an already admitted exact region.");
+        let message = format!("work envelope: too big; {REFUSAL_STEP}");
         let kept = SessionRuntime::unit_refusal_guidance(message.clone(), false);
         assert_eq!(kept, message);
         let replaced = SessionRuntime::unit_refusal_guidance(message, true);
         assert!(replaced.contains("this unit is complete"));
         assert!(!replaced.contains(REFUSAL_STEP));
-        assert!(!replaced.contains("Correct an already admitted"));
-        assert!(replaced.contains("regions 1/1"));
     }
 }

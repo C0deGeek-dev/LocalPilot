@@ -12,15 +12,7 @@ still receives a refusal with an exact bounded retry call. Missing files report
 ordinary authorized I/O errors. Every call remains observable by the repeat
 guard; repeating the same successful page can also stop for no progress.
 Exact edits, multi-edit hunks and structured
-patch operations obey file/region/changed-material budgets. Prepared exact
-updates to tracked files can reuse their unit's actually changed regions and
-material. The exact tool supplies its prepared before/after text to the host
-only after every permission has passed and before any file is written; a
-multi-file update is checked as one batch. Argument-only limits still tighten
-admission. Unprovable cases keep conservative cumulative attempt accounting.
-Only a typed missing/ambiguous exact-match precondition, before any write,
-releases that call's reservation. Denial, cancellation, partial and unknown
-failures remain spent. Large
+patch operations spend cumulative file/region/changed-material budgets. Large
 whole-file overwrite/deletion and global/regex replacement return an actionable
 refusal; use bounded exact hunks. Giant single lines also spend byte-equivalent
 material, so line count alone cannot permit a large rewrite.
@@ -32,15 +24,8 @@ retained, and the model must inspect smaller logical material rather than treat 
 truncated page as complete. Permission decisions, schema validation/repair and
 verification retain their existing paths. Repairs do not establish capability.
 
-Work-envelope refusals include used/allowed files, regions and lines, with an
-exact-edit recovery step or a preserve-and-stop step when the change cannot fit.
-Only a host-ended unit can advertise automatic unit continuation.
-
 Host dispatch metadata distinguishes a pre-invoke refusal from an authorized
 write-capable invocation, including an error after a possible partial write.
-Exact-match no-write proof and prepared-edit refusal are separate host metadata;
-neither is inferred from output text or empty touches. The existing conservative
-failed-write verification evidence is independent of budget release.
 This metadata is neither a permission grant nor model-facing wire data. The
 completion gate uses it separately from attempted-operation budgets so refused
 readonly reviews can finish without waiving verification after real work.

@@ -813,23 +813,24 @@ pub(crate) fn inspect_work_diff(
                         "--no-ext-diff",
                         "--no-textconv",
                         "--unified=0",
-                        "--no-color",
-                        "--no-relative",
-                        "--inter-hunk-context=0",
-                        "--diff-algorithm=myers",
-                        "--no-indent-heuristic",
                         "--no-renames",
                         base,
                         "--",
                         path,
                     ],
                 )?;
-                let measured = text_patch_size(&diff);
-                let material = measured.material;
+                let material = diff
+                    .lines()
+                    .filter(|line| {
+                        (line.starts_with('+') && !line.starts_with("+++"))
+                            || (line.starts_with('-') && !line.starts_with("---"))
+                    })
+                    .map(|line| line.len().saturating_sub(1).div_ceil(80))
+                    .sum::<usize>();
                 if material > profile.max_changed_lines {
                     return Ok(inspection.refuse("work envelope: changed byte material exceeds the profile (including giant single lines); preserve and split the work"));
                 }
-                regions += measured.regions;
+                regions += diff.lines().filter(|line| line.starts_with("@@ ")).count();
             }
         }
         if paths.len() > profile.max_files
@@ -842,259 +843,8 @@ pub(crate) fn inspect_work_diff(
     Ok(inspection)
 }
 
-/// Counts taken from the same zero-context Git patch used by final inspection.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct TextPatchSize {
-    pub(crate) regions: usize,
-    pub(crate) lines: usize,
-    pub(crate) material: usize,
-}
-
-fn text_patch_size(patch: &str) -> TextPatchSize {
-    let mut size = TextPatchSize::default();
-    let mut in_hunk = false;
-    for row in patch.lines() {
-        if row.starts_with("@@ ") {
-            size.regions += 1;
-            in_hunk = true;
-        } else if in_hunk && (row.starts_with('+') || row.starts_with('-')) {
-            size.lines += 1;
-            size.material = size
-                .material
-                .saturating_add(row.len().saturating_sub(1).div_ceil(80));
-        }
-    }
-    size
-}
-
-/// Material is supplied by an already-authorized exact tool, never read here.
-/// The bounded child compares only private temporary files, with no helpers.
-pub(crate) fn projected_text_size(
-    root: &Path,
-    before: &str,
-    after: &str,
-) -> Result<TextPatchSize, HarnessError> {
-    let temp = tempfile::tempdir().map_err(|source| HarnessError::Io {
-        path: "prepared edit comparison".into(),
-        source,
-    })?;
-    let old = temp.path().join("before.txt");
-    let new = temp.path().join("after.txt");
-    for (path, text) in [(&old, before), (&new, after)] {
-        std::fs::write(path, text).map_err(|source| HarnessError::Io {
-            path: "prepared edit comparison".into(),
-            source,
-        })?;
-    }
-    let mut command = Command::new("git");
-    command
-        .args([
-            "--literal-pathspecs",
-            "-c",
-            "core.fsmonitor=false",
-            "diff",
-            "--no-index",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--text",
-            "--unified=0",
-            "--no-color",
-            "--no-relative",
-            "--inter-hunk-context=0",
-            "--diff-algorithm=myers",
-            "--no-indent-heuristic",
-            "--no-renames",
-            "--",
-        ])
-        .arg(&old)
-        .arg(&new)
-        .current_dir(root);
-    let patch = bounded_output_with_kind(
-        command,
-        SNAPSHOT_TIMEOUT,
-        "prepared edit diff",
-        OutputKind::Diff,
-    )?;
-    Ok(text_patch_size(&patch))
-}
-
-/// A unit base object is trusted host state, and this path has been authorized
-/// by the exact tool. Reading a blob does not run a repository filter.
-pub(crate) fn original_edit_text(
-    root: &Path,
-    baseline: &WorkDiffBaseline,
-    relative: &str,
-) -> Result<String, HarnessError> {
-    let base = baseline
-        .diff_base
-        .as_deref()
-        .unwrap_or(baseline.head.trim());
-    let current = quiet_git(
-        root,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--numstat",
-            "--no-renames",
-            base,
-            "--",
-            relative,
-        ],
-    )?;
-    if !current.is_empty() {
-        return Err(HarnessError::Provider(
-            "prepared edit baseline is not the current file".into(),
-        ));
-    }
-    let mut command = Command::new("git");
-    command
-        .args([
-            "--literal-pathspecs",
-            "-c",
-            "core.fsmonitor=false",
-            "show",
-            &format!("{base}:{relative}"),
-        ])
-        .current_dir(root);
-    bounded_output_with_kind(
-        command,
-        SNAPSHOT_TIMEOUT,
-        "prepared edit baseline",
-        OutputKind::Text,
-    )
-}
-
-/// Only plain text with Git's built-in CRLF policy is projected. Custom
-/// transformations cannot be reproduced by a raw prepared-text comparison.
-pub(crate) fn plain_edit_policy(
-    root: &Path,
-    relative: &str,
-) -> Result<Option<String>, HarnessError> {
-    let attributes = bounded_git(
-        root,
-        None,
-        &[
-            "check-attr",
-            "-z",
-            "filter",
-            "working-tree-encoding",
-            "ident",
-            "text",
-            "eol",
-            "--",
-            relative,
-        ],
-        SNAPSHOT_TIMEOUT,
-    )?;
-    let fields: Vec<_> = attributes.split_terminator('\0').collect();
-    if fields.len() != 15
-        || fields
-            .chunks_exact(3)
-            .take(3)
-            .any(|field| field[2] != "unspecified")
-    {
-        return Ok(None);
-    }
-    let policy = bounded_git(
-        root,
-        None,
-        &["config", "--default", "false", "--get", "core.autocrlf"],
-        SNAPSHOT_TIMEOUT,
-    )?;
-    Ok(Some(format!(
-        "{:x}",
-        Sha256::digest(format!("{attributes}\n{policy}").as_bytes())
-    )))
-}
-
 fn binary_budget_refusal(bytes: u64) -> String {
     format!("work envelope: binary change material of {bytes} bytes exceeds the unit's {} byte budget (old + new); preserve the work and split it or request a separate explicit review", crate::granularity::MAX_BINARY_CHANGE_BYTES)
-}
-
-#[cfg(test)]
-mod prepared_diff_tests {
-    use super::*;
-
-    #[test]
-    fn prepared_text_uses_zero_context_regions_and_counts_patch_like_lines() {
-        let root = tempfile::tempdir().unwrap();
-        let before = "first\nanchor\nlast\n";
-        let separate = projected_text_size(root.path(), before, "FIRST\nanchor\nLAST\n").unwrap();
-        assert_eq!(separate.regions, 2);
-        assert_eq!(separate.lines, 4);
-        let same = projected_text_size(root.path(), before, before).unwrap();
-        assert_eq!(same.regions, 0);
-        let giant = projected_text_size(
-            root.path(),
-            "---old\n",
-            &format!("+++{}\n", "x".repeat(6500)),
-        )
-        .unwrap();
-        assert_eq!(giant.regions, 1);
-        assert_eq!(giant.lines, 2);
-        assert!(giant.material > 80);
-    }
-
-    #[test]
-    fn prepared_baseline_declines_invalid_utf8_instead_of_replacing_bytes() {
-        let root = tempfile::tempdir().unwrap();
-        git(root.path(), &["init", "-q"]).unwrap();
-        std::fs::write(root.path().join("source.txt"), [0xff, b'\n']).unwrap();
-        git(root.path(), &["add", "source.txt"]).unwrap();
-        git(
-            root.path(),
-            &[
-                "-c",
-                "core.hooksPath=.git/empty-hooks",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.invalid",
-                "commit",
-                "-qm",
-                "fixture",
-            ],
-        )
-        .unwrap();
-        let baseline = work_diff_baseline(root.path()).unwrap();
-        assert!(original_edit_text(root.path(), &baseline, "source.txt").is_err());
-    }
-
-    #[test]
-    fn prepared_policy_declines_transforms_and_changes_with_git_configuration() {
-        let root = tempfile::tempdir().unwrap();
-        git(root.path(), &["init", "-q"]).unwrap();
-        for attribute in ["filter=unused", "working-tree-encoding=UTF-16", "ident"] {
-            std::fs::write(
-                root.path().join(".gitattributes"),
-                format!("source.txt {attribute}\n"),
-            )
-            .unwrap();
-            assert!(plain_edit_policy(root.path(), "source.txt")
-                .unwrap()
-                .is_none());
-        }
-        std::fs::write(
-            root.path().join(".gitattributes"),
-            "source.txt text eol=lf\n",
-        )
-        .unwrap();
-        git(root.path(), &["config", "core.autocrlf", "false"]).unwrap();
-        let before = plain_edit_policy(root.path(), "source.txt")
-            .unwrap()
-            .unwrap();
-        git(root.path(), &["config", "core.autocrlf", "true"]).unwrap();
-        assert_ne!(
-            plain_edit_policy(root.path(), "source.txt")
-                .unwrap()
-                .unwrap(),
-            before
-        );
-    }
 }
 
 fn binary_material(bytes: &[u8]) -> localpilot_store::BinaryMaterial {
@@ -1503,7 +1253,7 @@ pub(crate) fn snapshot_working_tree(
         let mut list_args = vec!["ls-files", "-z", "--"];
         list_args.extend(paths.iter().map(String::as_str));
         let listed = bounded_git(root, Some(&temporary), &list_args, SNAPSHOT_TIMEOUT)?;
-        let tracked: Vec<&str> = listed.split('\0').filter(|p| !p.is_empty()).collect();
+        let tracked: Vec<&str> = listed.split(' ').filter(|p| !p.is_empty()).collect();
         if !tracked.is_empty() {
             let mut add_args = vec!["add", "-u", "--"];
             add_args.extend(tracked);
@@ -1622,29 +1372,12 @@ fn bounded_git(
 /// Run `command` to completion within `timeout`, killing it when it overruns.
 /// Output beyond 1 MiB is an error rather than a silently shortened answer.
 fn bounded_output(
-    command: Command,
-    timeout: std::time::Duration,
-    label: &str,
-) -> Result<String, HarnessError> {
-    bounded_output_with_kind(command, timeout, label, OutputKind::Ordinary)
-}
-
-#[derive(Clone, Copy)]
-enum OutputKind {
-    Ordinary,
-    Text,
-    Diff,
-}
-
-fn bounded_output_with_kind(
     mut command: Command,
     timeout: std::time::Duration,
     label: &str,
-    kind: OutputKind,
 ) -> Result<String, HarnessError> {
     const CAP: u64 = 1024 * 1024;
     let mut child = command
-        .env_remove("GIT_DIFF_OPTS")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1694,13 +1427,8 @@ fn bounded_output_with_kind(
             "{label} output exceeded 1 MiB; inspection is incomplete"
         )));
     }
-    if status.success() || (matches!(kind, OutputKind::Diff) && status.code() == Some(1)) {
-        if !matches!(kind, OutputKind::Ordinary) {
-            String::from_utf8(stdout)
-                .map_err(|_| HarnessError::Provider(format!("{label}: non-UTF-8 output")))
-        } else {
-            Ok(String::from_utf8_lossy(&stdout).into_owned())
-        }
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
         Err(HarnessError::Provider(format!(
             "{label} failed: {}",
@@ -2266,7 +1994,7 @@ mod snapshot_tests {
         dir
     }
 
-    /// An explicit one-file/one-region cap isolates snapshot-relative sizing.
+    /// One file, one region: the conservative profile continued units use.
     fn conservative() -> WorkProfile {
         WorkProfile::resolve(
             ContextCapacity {
@@ -2275,10 +2003,7 @@ mod snapshot_tests {
                 provenance: ContextProvenance::CallerSupplied,
             },
             Reliability::Unknown,
-            &localpilot_config::GranularityConfig {
-                max_regions: Some(1),
-                ..localpilot_config::GranularityConfig::default()
-            },
+            &localpilot_config::GranularityConfig::default(),
         )
     }
 
