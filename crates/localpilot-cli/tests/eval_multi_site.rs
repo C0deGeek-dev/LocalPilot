@@ -1,4 +1,5 @@
 //! A headless evaluation renaming one function across several sites.
+//! Fixtures explicitly cap each unit at one region to exercise continuation.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use assert_cmd::Command;
@@ -439,6 +440,16 @@ fn find_turn_stop(event: &Value) -> Option<String> {
 }
 
 async fn run_eval(plan: Plan, units: Option<&str>, verify: bool, grant_verifier: bool) -> Run {
+    run_eval_with_region_cap(plan, units, verify, grant_verifier, Some("1")).await
+}
+
+async fn run_eval_with_region_cap(
+    plan: Plan,
+    units: Option<&str>,
+    verify: bool,
+    grant_verifier: bool,
+    regions: Option<&str>,
+) -> Run {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/props"))
@@ -468,6 +479,7 @@ async fn run_eval(plan: Plan, units: Option<&str>, verify: bool, grant_verifier:
     let workspace = root.path().to_path_buf();
     let user_config = config.path().to_path_buf();
     let units = units.map(str::to_string);
+    let regions = regions.map(str::to_string);
     let output = tokio::task::spawn_blocking(move || {
         let permission = if grant_verifier { "bypass" } else { "default" };
         let mut args = vec!["eval", "--model", "fixture", "--permission", permission];
@@ -485,6 +497,9 @@ async fn run_eval(plan: Plan, units: Option<&str>, verify: bool, grant_verifier:
             .env("XDG_CONFIG_HOME", &user_config)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .args(args);
+        if let Some(regions) = regions {
+            cmd.env("LOCALPILOT_HARNESS__GRANULARITY__MAX_REGIONS", regions);
+        }
         if let Some(units) = units {
             cmd.env("LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_UNITS", units);
         }
@@ -568,7 +583,7 @@ async fn units_finish_a_multi_site_rename_only_through_a_passing_full_check() {
 }
 
 #[tokio::test]
-async fn without_the_setting_the_task_stops_as_before() {
+async fn without_unit_continuation_the_one_region_task_stops() {
     if !python_available() {
         return;
     }
@@ -578,7 +593,10 @@ async fn without_the_setting_the_task_stops_as_before() {
         assert_eq!(run.exit_reason(), "NoProgress", "{}", text(&run));
         assert!(!run.turn_stops().iter().any(|s| s == "UnitCheckpoint"));
         let all = all_messages(&run);
-        assert!(all.contains("verify it, and checkpoint before continuing"));
+        for fact in ["files 1/1", "regions 1/1", "preserve", "stop"] {
+            assert!(all.contains(fact), "missing {fact}: {all}");
+        }
+        assert!(!all.contains("checkpoint before continuing"));
         assert!(!all.contains("this unit is complete"));
         assert!(!all.contains("next bounded unit"));
     }
@@ -688,5 +706,41 @@ async fn units_above_the_ceiling_are_a_configuration_error() {
         String::from_utf8_lossy(&run.output.stderr).contains("headless_units"),
         "{}",
         text(&run)
+    );
+}
+
+#[tokio::test]
+async fn default_small_units_admit_two_regions_but_keep_one_file() {
+    if !python_available() {
+        return;
+    }
+    let stopped = run_eval_with_region_cap(Plan::Rename, None, true, true, None).await;
+    assert_eq!(stopped.sites_renamed(), 2, "{}", text(&stopped));
+    assert_ne!(stopped.exit_reason(), "Done", "{}", text(&stopped));
+    assert!(all_messages(&stopped).contains("regions 2/2"));
+    assert!(!stopped.turn_stops().iter().any(|s| s == "UnitCheckpoint"));
+    let continued = run_eval_with_region_cap(Plan::Rename, Some("8"), true, true, None).await;
+    assert_eq!(continued.sites_renamed(), 4, "{}", text(&continued));
+    assert_eq!(continued.exit_reason(), "Done", "{}", text(&continued));
+    // No --test grader was configured: prove the final fixture with its real
+    // checker instead of treating the ungraded scorecard as a test result.
+    let checked = std::process::Command::new("python")
+        .args(["-B", "-m", "unittest", "discover", "-s", "tests"])
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .current_dir(continued.root.path())
+        .output()
+        .unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert_eq!(
+        continued
+            .turn_stops()
+            .iter()
+            .filter(|s| *s == "UnitCheckpoint")
+            .count(),
+        1
     );
 }

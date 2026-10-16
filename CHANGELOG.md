@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Python verification selection works across platforms.** The evidence-based
+  pytest/unittest adapter recognizes the stack detector's `python3` command as
+  well as `python`, preserving its configuration checks on macOS and Linux.
+
 - **Small work units can fit an import and its use.** Weak/unknown sessions
   with small or pressured context allow two regions in one file. File, line,
   read and decision caps stay unchanged; explicit user caps and step scopes

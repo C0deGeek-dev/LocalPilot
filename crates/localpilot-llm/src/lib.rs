@@ -3,9 +3,9 @@
 //! Connects the agent to models behind one object-safe [`ModelProvider`] trait
 //! that hides API differences behind a single internal stream contract while
 //! exposing typed capabilities, quota metadata, and a stable error taxonomy.
-//! Provider-specific code lives only in this crate; official public APIs and
-//! local OpenAI-compatible servers only — never private or undocumented
-//! endpoints.
+//! Provider implementations live in the `localpilot-llm-openai` and
+//! `localpilot-llm-anthropic` adapters and are re-exported here. They use official
+//! public APIs and local OpenAI-compatible servers only.
 #![forbid(unsafe_code)]
 
 mod discovery;

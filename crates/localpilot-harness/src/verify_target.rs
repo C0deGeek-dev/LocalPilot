@@ -32,11 +32,7 @@ pub fn resolve_verify_check(root: &Path, override_cmd: Option<&str>) -> Option<C
 #[must_use]
 pub fn detect_verify_command(root: &Path) -> Option<CheckConfig> {
     let detected = localx_eval_core::verify::detect_verify_command(root);
-    let core_python = detected.as_ref().is_some_and(|command| {
-        command.program == "python"
-            && command.args.first().is_some_and(|arg| arg == "-m")
-            && command.args.get(1).is_some_and(|arg| arg == "pytest")
-    });
+    let core_python = detected.as_ref().is_some_and(is_pytest_command);
     if detected.is_some() && !core_python {
         return detected.map(verify_check);
     }
@@ -47,8 +43,12 @@ pub fn detect_verify_command(root: &Path) -> Option<CheckConfig> {
         return detected.map(verify_check);
     };
     if core_python || explicit_pytest || unittest_layout(root) {
+        let program = detected.as_ref().map_or(
+            if cfg!(windows) { "python" } else { "python3" },
+            |command| command.program.as_str(),
+        );
         return Some(verify_check(CheckCommand::new(
-            "python",
+            program,
             vec![
                 "-B".into(),
                 "-c".into(),
@@ -58,6 +58,12 @@ pub fn detect_verify_command(root: &Path) -> Option<CheckConfig> {
         )));
     }
     None
+}
+
+fn is_pytest_command(command: &CheckCommand) -> bool {
+    matches!(command.program.as_str(), "python" | "python3")
+        && command.args.first().is_some_and(|arg| arg == "-m")
+        && command.args.get(1).is_some_and(|arg| arg == "pytest")
 }
 
 // Detection never spawns Python. Module availability is decided by the same
@@ -217,7 +223,10 @@ mod tests {
         std::fs::create_dir(dir.path().join("tests")).unwrap();
         touch(dir.path(), "tests/test_sample.py");
         let check = detect_verify_command(dir.path()).unwrap();
-        assert_eq!(check.program, "python");
+        assert_eq!(
+            check.program,
+            if cfg!(windows) { "python" } else { "python3" }
+        );
         assert_eq!(check.args.last().unwrap(), "auto");
         assert_eq!(
             localpilot_sandbox::classify(&check.program, &check.args),
@@ -232,6 +241,24 @@ mod tests {
         assert!(resolve_verify_check(dir.path(), Some(" ")).is_none());
         touch(dir.path(), "Cargo.toml");
         assert_eq!(detect_verify_command(dir.path()).unwrap().program, "cargo");
+    }
+
+    #[test]
+    fn core_pytest_detection_accepts_both_platform_interpreters() {
+        for program in ["python", "python3"] {
+            assert!(is_pytest_command(&CheckCommand::new(
+                program,
+                vec!["-m".into(), "pytest".into(), "-q".into()]
+            )));
+            assert!(!is_pytest_command(&CheckCommand::new(
+                program,
+                vec!["-m".into(), "unittest".into()]
+            )));
+        }
+        assert!(!is_pytest_command(&CheckCommand::new(
+            "other",
+            vec!["-m".into(), "pytest".into()]
+        )));
     }
 
     #[test]
