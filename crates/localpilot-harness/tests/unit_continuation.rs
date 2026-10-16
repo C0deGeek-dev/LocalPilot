@@ -714,11 +714,21 @@ async fn requests_with_units(units_setting: u8, verifier: &str, provider: FakePr
     // Per-run temporary names are not behaviour: mask the workspace root
     // and every per-session scratch name before comparing.
     let mut masked = rendered;
-    // Debug rendering escapes backslashes once per nesting level.
-    let mut root = dir.path().display().to_string();
-    for _ in 0..3 {
-        masked = masked.replace(&root, "<root>");
-        root = root.replace('\\', "\\\\");
+    // Render both ordinary and extended Windows roots at every nesting level
+    // before replacing: a shorter spelling can otherwise leave an escaped
+    // extended-path prefix whose spelling differs from the system note.
+    let root = dir.path().display().to_string();
+    let mut spellings = Vec::new();
+    for base in [root.clone(), format!(r"\\?\{root}")] {
+        let mut spelling = base;
+        for _ in 0..6 {
+            spellings.push(spelling.clone());
+            spelling = spelling.replace('\\', "\\\\");
+        }
+    }
+    spellings.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    for spelling in spellings {
+        masked = masked.replace(&spelling, "<root>");
     }
     mask_after(&masked, "localpilot-", &['\\', '"', ' '])
 }
