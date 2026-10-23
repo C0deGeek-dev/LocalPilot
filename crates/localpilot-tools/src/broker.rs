@@ -48,8 +48,8 @@ pub const DEFAULT_SCORE_FLOOR: u32 = 1;
 
 /// The default core working set: the always-advertised builtins a coding turn
 /// needs from turn one. Everything else (git, fetch, knowledge expand/fetch,
-/// memory, skills, MCP tools) is revealed on demand. Projects opt in to the
-/// broker, so this default only takes effect when narrowing is enabled.
+/// memory, skills, MCP tools) is revealed on demand. This core takes effect
+/// when the broker is enabled; turning it off advertises the full registry.
 pub const DEFAULT_CORE: &[&str] = &[
     "read_file",
     "read_image",

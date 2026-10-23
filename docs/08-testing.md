@@ -1,5 +1,12 @@
 # Test Plan
 
+Context-accounting regressions in `localpilot-harness/tests/session.rs` cover
+complete-input calibration, reset after model/provider switches, instruction
+preservation and automatic/manual/forced compaction. `tests/broker.rs` verifies
+that revealing a tool updates both the gauge and the next request's schema
+estimate. `tests/repeat_guard.rs` covers consecutive observations, productive
+edit/test loops, changing polling results, steering and explicit cost budgets.
+
 Answer-only regressions in `localpilot-harness/tests/answer_only.rs` verify
 adjacent current-turn context, stored-history isolation, audit equality,
 attachments, repair retries, normal-session compatibility and unsolicited

@@ -359,6 +359,12 @@ exhaustion with the actual numbers and compacts before retrying once. It does
 not suggest smaller file writes or raising `max_tokens`; those remain the
 recovery for a genuine output-cap stop.
 
+Delegated agents inherit their parent's configured input budget, including
+when an agent definition overrides the model name. They do not independently
+discover a different model's context window. Choose a parent budget that fits
+the models used for delegation; a model-name override alone is not a capacity
+guarantee.
+
 ## Evals
 
 The offline golden-task scorecard runs with the normal workspace test suite:

@@ -1584,6 +1584,76 @@ async fn tool_spec_overhead_does_not_inflate_the_calibrated_history_estimate() {
 }
 
 #[tokio::test]
+async fn changing_models_discards_the_previous_tokenizer_calibration() {
+    let provider = Arc::new(CalibratingProvider::new());
+    let mut h = build_from_provider(provider.clone(), SessionConfig::default());
+    assert_eq!(
+        h.runtime.run_turn("hello", &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let calibrated = h.runtime.context_usage().0;
+    h.runtime.set_active_model("different-tokenizer").unwrap();
+    let reset = h.runtime.context_usage().0;
+    assert!(
+        reset < calibrated,
+        "the old tokenizer ratio must be discarded"
+    );
+
+    let mut rx = h.events.subscribe();
+    assert_eq!(
+        h.runtime.run_turn("continue", &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let requests = provider.requests();
+    let request = &requests[1];
+    assert_eq!(request.model, "different-tokenizer");
+    let expected = estimate_tokens(&request.messages) + estimate_tool_spec_tokens(&request.tools);
+    let first_usage = drain(&mut rx).into_iter().find_map(|event| match event {
+        RuntimeEvent::ContextUsage { used, .. } => Some(used),
+        _ => None,
+    });
+    assert_eq!(first_usage, Some(expected));
+}
+
+#[tokio::test]
+async fn changing_providers_discards_the_previous_tokenizer_calibration() {
+    let first = Arc::new(CalibratingProvider::new());
+    let second = Arc::new(FakeProvider::new().text("new provider"));
+    let registry = localpilot_llm::ProviderRegistry::from_providers(
+        std::collections::HashMap::from([
+            ("first".into(), first.clone() as Arc<dyn ModelProvider>),
+            ("second".into(), second.clone() as Arc<dyn ModelProvider>),
+        ]),
+        std::collections::HashMap::from([
+            ("first".into(), "one".into()),
+            ("second".into(), "two".into()),
+        ]),
+        "first",
+    );
+    let mut h = build_from_provider(first, SessionConfig::default());
+    h.runtime.set_registry(Arc::new(registry));
+    assert_eq!(
+        h.runtime.run_turn("hello", &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let calibrated = h.runtime.context_usage().0;
+    h.runtime.set_active_provider("second").unwrap();
+    assert!(h.runtime.context_usage().0 < calibrated);
+    let mut rx = h.events.subscribe();
+    assert_eq!(
+        h.runtime.run_turn("continue", &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let request = second.requests().remove(0);
+    let expected = estimate_tokens(&request.messages) + estimate_tool_spec_tokens(&request.tools);
+    let first_usage = drain(&mut rx).into_iter().find_map(|event| match event {
+        RuntimeEvent::ContextUsage { used, .. } => Some(used),
+        _ => None,
+    });
+    assert_eq!(first_usage, Some(expected));
+}
+
+#[tokio::test]
 async fn provider_prompt_usage_corrects_the_context_gauge() {
     let provider = FakeProvider::new().script(vec![
         Ok(ModelEvent::Usage(TokenUsage {
@@ -1711,6 +1781,57 @@ async fn manual_compaction_stores_a_summary_for_future_turns() {
     let text = message_text(&requests.last().expect("request after compaction").messages);
     assert!(text.contains("Conversation summary for trimmed history"));
     assert!(text.contains("after manual compact"));
+}
+
+#[tokio::test]
+async fn forced_compaction_keeps_advertised_schemas_in_the_reported_budget() {
+    let provider = Arc::new(
+        FakeProvider::new()
+            .text("one")
+            .text("two")
+            .text("three")
+            .text("four"),
+    );
+    let mut h = build_from_arc(
+        provider.clone(),
+        &[],
+        SessionConfig::default(),
+        Profile::Default,
+    );
+    for label in ["first", "second", "third"] {
+        assert_eq!(
+            h.runtime
+                .run_turn(
+                    &format!("{label} {}", "context ".repeat(1800)),
+                    &h.events,
+                    &h.cancel
+                )
+                .await,
+            StopReason::Done
+        );
+    }
+    let before = h.runtime.context_usage().0;
+    let reserve = h.runtime.advertised_tool_estimate();
+    let result = h.runtime.compact_conversation_force().await;
+    assert!(result.compacted);
+    assert!(result.context_used < before);
+    assert!(
+        result.context_used > reserve,
+        "the gauge still includes tool schemas"
+    );
+    assert_eq!(result.context_used, h.runtime.context_usage().0);
+    let mut rx = h.events.subscribe();
+    assert_eq!(
+        h.runtime.run_turn("continue", &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    let request = provider.requests().pop().unwrap();
+    let complete = estimate_tokens(&request.messages) + estimate_tool_spec_tokens(&request.tools);
+    let first_usage = drain(&mut rx).into_iter().find_map(|event| match event {
+        RuntimeEvent::ContextUsage { used, .. } => Some(used),
+        _ => None,
+    });
+    assert_eq!(first_usage, Some(complete));
 }
 
 #[tokio::test]

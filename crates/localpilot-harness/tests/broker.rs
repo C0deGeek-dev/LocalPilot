@@ -879,6 +879,25 @@ fn first_context_used(rx: &mut broadcast::Receiver<RuntimeEvent>) -> usize {
 }
 
 #[tokio::test]
+async fn revealing_a_tool_updates_both_the_gauge_and_the_next_request_estimate() {
+    let mut h = build_broker_harness(FakeProvider::new().text("done"), BrokerConfig::default());
+    let before = h.runtime.advertised_tool_estimate();
+    let gauge_before = h.runtime.context_usage().0;
+    h.broker.reveal("ask_user");
+    let after = h.runtime.advertised_tool_estimate();
+    assert!(after > before);
+    assert_eq!(h.runtime.context_usage().0 - gauge_before, after - before);
+
+    let mut rx = h.events.subscribe();
+    h.runtime.run_turn("hello", &h.events, &h.cancel).await;
+    let request = h.provider.requests().remove(0);
+    assert!(request.tools.iter().any(|tool| tool.name == "ask_user"));
+    let complete = localpilot_harness::estimate_tokens(&request.messages)
+        + localpilot_harness::estimate_tool_spec_tokens(&request.tools);
+    assert_eq!(first_context_used(&mut rx), complete);
+}
+
+#[tokio::test]
 async fn on_a_small_window_the_broker_leaves_more_of_the_budget_free() {
     // Same small budget, same request; the advertised specs are counted in the
     // reported context use, so the narrowed set shows up as headroom.
