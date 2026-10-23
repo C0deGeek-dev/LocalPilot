@@ -662,9 +662,20 @@ structural, not a convention:
   interpolation of model input, so an edit path or branch name can never become
   another command. No `push`/`fetch`/`pull`/remote subcommand appears anywhere in
   the patch-generation crate.
+- **Static Git helpers are controlled.** Proposal Git calls suppress traditional
+  hooks, filesystem monitors, signing, automatic maintenance and recursive
+  submodule effects per command. Diff rendering disables external diff/textconv.
+  Named hooks and associated filter attributes are refused before checkout or
+  index operations; unused filter configuration alone is supported. Attribute
+  proof covers working tree, index and source/destination trees and requires
+  Git's `check-attr --source` support. Even explicit `-filter` is declined because
+  driver values can collide with Git's textual attribute sentinels. User Git
+  configuration is preserved. These controls govern LocalPilot's operations;
+  they do not isolate the host or authorize validation execution.
 - **Path containment.** Edit paths are joined under the worktree with a guard
   that rejects absolute paths, `..` traversal, and drive prefixes; an edit can
-  only land strictly inside the worktree.
+  only land strictly inside the worktree. Existing symlink/junction components
+  are refused before proposal writes.
 - **Scope-bound.** A proposal may touch only the files the finding named; both
   the declared edits and the produced diff are checked against that set.
 - **Interactive approval is informed and identity-bound.** `/selfimprove

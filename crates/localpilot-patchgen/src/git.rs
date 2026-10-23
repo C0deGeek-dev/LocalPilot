@@ -13,29 +13,234 @@
 //! - **Path containment.** [`safe_join`] rejects absolute paths, `..` traversal,
 //!   and drive prefixes, so every edit lands strictly inside the worktree.
 
+use std::io::{Seek, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::error::PatchError;
 
 /// Run a fixed git subcommand in `cwd`, returning stdout. Arguments are argv, not
 /// a shell string. The first element of `args` is the subcommand.
 pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, PatchError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| PatchError::Git {
-            args: args.join(" "),
-            message: e.to_string(),
-        })?;
+    // Detect configured executable filters before checkout/index/diff operations,
+    // not after one of those operations has already run the helper.
+    if matches!(
+        args.first(),
+        Some(&"add" | &"commit" | &"status" | &"diff" | &"merge")
+    ) || args.starts_with(&["worktree", "add"])
+    {
+        reject_executable_filters(cwd, args)?;
+    }
+    let mut command = static_git(cwd);
+    command.args(args);
+    let output = command.output().map_err(|e| PatchError::Git {
+        args: args.join(" "),
+        message: e.to_string(),
+    })?;
     if !output.status.success() {
         return Err(PatchError::Git {
             args: args.join(" "),
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    String::from_utf8(output.stdout)
+        .map_err(|_| PatchError::UnsupportedGitPolicy("Git output is not UTF-8".into()))
+}
+
+fn static_git(cwd: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .args([
+            "--literal-pathspecs",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "tag.gpgSign=false",
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "submodule.recurse=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+        ])
+        .env_remove("GIT_EXTERNAL_DIFF")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_ATTR_SOURCE")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .current_dir(cwd);
+    command
+}
+
+fn reject_executable_filters(cwd: &Path, operation: &[&str]) -> Result<(), PatchError> {
+    // Names only: configured helper command values may contain secrets. Named
+    // hooks can exist independently of traditional core.hooksPath on newer Git.
+    let named = static_git(cwd)
+        .args(["config", "--name-only", "--get-regexp", "^hook\\."])
+        .output()
+        .map_err(|error| policy_error(&error.to_string()))?;
+    match named.status.code() {
+        Some(1) => {}
+        Some(0) => {
+            return Err(policy_error(
+                "configured named hooks require separate review",
+            ))
+        }
+        _ => return Err(policy_error("cannot inspect named-hook configuration")),
+    }
+    // Unused configured filters (notably global Git LFS) are harmless. Inspect
+    // actual attributes instead of forbidding their mere presence in config.
+    let paths = static_output(
+        cwd,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )?;
+    inspect_filter_attributes(cwd, &paths, None)?;
+    inspect_filter_attributes(cwd, &paths, Some("--cached"))?;
+
+    let head = static_git(cwd)
+        .args(["rev-parse", "--verify", "HEAD^{tree}"])
+        .output()
+        .map_err(|error| policy_error(&error.to_string()))?;
+    if head.status.success() {
+        inspect_tree_filters(cwd, "HEAD")?;
+    } // An unborn fixture repository has only working/index attributes.
+    if operation.first() == Some(&"merge") || operation.starts_with(&["worktree", "add"]) {
+        let source = operation
+            .last()
+            .ok_or_else(|| policy_error("missing checkout source"))?;
+        if *source != "HEAD" {
+            inspect_tree_filters(cwd, source)?;
+        }
+    }
+    Ok(())
+}
+
+fn inspect_tree_filters(cwd: &Path, source: &str) -> Result<(), PatchError> {
+    if source.starts_with('-') {
+        return Err(policy_error("invalid checkout source"));
+    }
+    let expression = format!("{source}^{{tree}}");
+    let tree = static_output(cwd, &["rev-parse", "--verify", &expression])?;
+    let tree = std::str::from_utf8(&tree)
+        .map_err(|_| policy_error("invalid Git tree identity"))?
+        .trim();
+    if !matches!(tree.len(), 40 | 64) || !tree.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(policy_error("invalid Git tree identity"));
+    }
+    let paths = static_output(cwd, &["ls-tree", "-r", "--name-only", "-z", tree])?;
+    inspect_filter_attributes(cwd, &paths, Some(&format!("--source={tree}")))
+}
+
+fn inspect_filter_attributes(
+    cwd: &Path,
+    paths: &[u8],
+    source: Option<&str>,
+) -> Result<(), PatchError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // File-backed stdin avoids the documented check-attr pipe-buffer deadlock.
+    let mut input = tempfile::tempfile().map_err(|error| policy_error(&error.to_string()))?;
+    input
+        .write_all(paths)
+        .and_then(|()| input.rewind())
+        .map_err(|error| policy_error(&error.to_string()))?;
+    let mut command = static_git(cwd);
+    command.arg("check-attr");
+    if let Some(source) = source {
+        command.arg(source);
+    }
+    let output = command
+        .args(["-z", "--stdin", "--all"])
+        .stdin(Stdio::from(input))
+        .output()
+        .map_err(|error| policy_error(&error.to_string()))?;
+    if !output.status.success() {
+        return Err(policy_error("Git cannot establish checkout attributes; a Git with check-attr --source support is required"));
+    }
+    let mut fields = output.stdout.split(|byte| *byte == 0);
+    loop {
+        match fields.next() {
+            None | Some([]) => break,
+            Some(_) => {}
+        }
+        let attribute = fields
+            .next()
+            .ok_or_else(|| policy_error("incomplete attribute proof"))?;
+        let _value = fields
+            .next()
+            .ok_or_else(|| policy_error("incomplete attribute proof"))?;
+        // --all omits truly unspecified attributes. Drivers can literally be
+        // named "unspecified" or "unset"; requesting only filter would make
+        // those values indistinguishable from sentinels. Refuse every explicit
+        // filter attribute, including -filter, in the supported static path.
+        if attribute == b"filter" {
+            return Err(policy_error("checkout/index filter attributes require separate review; refusing static proposal operation"));
+        }
+    }
+    Ok(())
+}
+
+fn static_output(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, PatchError> {
+    let output = static_git(cwd)
+        .args(args)
+        .output()
+        .map_err(|error| policy_error(&error.to_string()))?;
+    if !output.status.success() {
+        return Err(policy_error("cannot inspect static Git metadata"));
+    }
+    Ok(output.stdout)
+}
+
+fn policy_error(message: &str) -> PatchError {
+    PatchError::UnsupportedGitPolicy(message.into())
+}
+
+/// Reject existing symlinks/junctions before a scoped proposal write. Lexical
+/// safe_join alone cannot prevent following a symlink committed in the base.
+pub(crate) fn contained_edit_path(root: &Path, rel: &str) -> Result<PathBuf, PatchError> {
+    let target = safe_join(root, rel)?;
+    let mut current = root.to_path_buf();
+    for component in Path::new(rel).components() {
+        if let Component::Normal(part) = component {
+            current.push(part);
+            match std::fs::symlink_metadata(&current) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(PatchError::OutsideWorktree(rel.into()));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(PatchError::Io {
+                        path: current,
+                        source,
+                    })
+                }
+            }
+        }
+    }
+    Ok(target)
 }
 
 /// `git rev-parse HEAD` in `repo`, trimmed.
@@ -51,7 +256,16 @@ pub(crate) fn is_clean(cwd: &Path) -> Result<bool, PatchError> {
 /// Project-relative paths (forward-slashed) that differ from `base` in the
 /// working tree at `cwd` — the changed-file set, used to enforce scope.
 pub(crate) fn changed_paths(cwd: &Path, base: &str) -> Result<Vec<String>, PatchError> {
-    let out = git(cwd, &["diff", "--name-only", base])?;
+    let out = git(
+        cwd,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            base,
+        ],
+    )?;
     Ok(out
         .lines()
         .map(|line| line.trim().replace('\\', "/"))
@@ -389,6 +603,32 @@ impl Drop for Worktree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn proposal_write_path_refuses_a_directory_junction() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = root.path().join("escape");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(outside.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(matches!(
+            contained_edit_path(root.path(), "escape/new.txt"),
+            Err(PatchError::OutsideWorktree(_))
+        ));
+        assert!(!outside.path().join("new.txt").exists());
+        assert!(link.starts_with(root.path()));
+        std::fs::remove_dir(link).unwrap();
+    }
 
     #[test]
     fn safe_join_rejects_escapes_and_accepts_normal_paths() {

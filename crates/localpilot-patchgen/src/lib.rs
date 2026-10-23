@@ -116,7 +116,7 @@ pub fn propose(
 
     // Write each edit strictly inside the worktree.
     for edit in &proposal.edits {
-        let target = git::safe_join(worktree.path(), &edit.path)?;
+        let target = git::contained_edit_path(worktree.path(), &edit.path)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|source| PatchError::Io {
                 path: parent.to_path_buf(),
@@ -350,7 +350,17 @@ fn commit_message(finding_evidence: &str) -> String {
 
 /// Build the diff summary from `base..HEAD` in the worktree.
 fn compute_diff_summary(worktree: &Path, base: &str) -> Result<DiffSummary, PatchError> {
-    let numstat = git::git(worktree, &["diff", "--numstat", base, "HEAD"])?;
+    let numstat = git::git(
+        worktree,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            base,
+            "HEAD",
+        ],
+    )?;
     let mut files = Vec::new();
     let mut insertions = 0_u64;
     let mut deletions = 0_u64;
@@ -366,10 +376,24 @@ fn compute_diff_summary(worktree: &Path, base: &str) -> Result<DiffSummary, Patc
         deletions = deletions.saturating_add(removed.parse().unwrap_or(0));
         files.push(path.replace('\\', "/"));
     }
-    let full = git::git(worktree, &["diff", "--no-color", base, "HEAD"])?;
+    let full = git::git(
+        worktree,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            base,
+            "HEAD",
+        ],
+    )?;
     let (patch, truncated) = if full.len() > MAX_DIFF_BYTES {
         let mut cut = full;
-        cut.truncate(MAX_DIFF_BYTES);
+        let mut boundary = MAX_DIFF_BYTES;
+        while !cut.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        cut.truncate(boundary);
         cut.push_str("\n... (diff truncated)\n");
         (cut, true)
     } else {
@@ -410,6 +434,226 @@ mod tests {
 
     fn provenance() -> ChangeProvenance {
         ChangeProvenance::new("fix the TODO in a.rs", "test-model", "the TODO is stale")
+    }
+
+    fn marker_script(path: &Path, marker: &Path) {
+        let quoted = marker
+            .to_str()
+            .unwrap()
+            .replace('\\', "/")
+            .replace('\'', "'\\''");
+        std::fs::write(
+            path,
+            format!("#!/bin/sh\nprintf 'executed\\n' >> '{quoted}'\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    #[test]
+    fn proposal_and_promotion_suppress_hooks_without_changing_user_configuration() {
+        let repo = init_repo();
+        let hooks = tempfile::tempdir().unwrap();
+        let marker = hooks.path().join("marker");
+        for name in [
+            "post-checkout",
+            "pre-commit",
+            "commit-msg",
+            "post-commit",
+            "post-merge",
+        ] {
+            marker_script(&hooks.path().join(name), &marker);
+        }
+        git::git(
+            repo.path(),
+            &["config", "core.hooksPath", hooks.path().to_str().unwrap()],
+        )
+        .unwrap();
+        // Positive sensitivity control: the ordinary Git operation executes the
+        // harmless hook, proving this fixture could detect implicit execution.
+        let control = repo.path().join(".localpilot/control");
+        let output = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                control.to_str().unwrap(),
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let before = std::fs::read(&marker).unwrap();
+        assert!(!before.is_empty());
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        let patch = propose(repo.path(), "static-hooks", &request, provenance()).unwrap();
+        let token = ApprovalToken::approve(patch.id(), "controlled-fixture-reviewer");
+        patch.promote(&token).unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+        let setting = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args(["config", "--local", "--get", "core.hooksPath"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(setting.stdout).unwrap().trim(),
+            hooks.path().to_str().unwrap()
+        );
+        git::git(
+            repo.path(),
+            &["worktree", "remove", "--force", control.to_str().unwrap()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn unused_filter_configuration_is_supported_but_active_filters_refuse_before_checkout() {
+        let repo = init_repo();
+        let helpers = tempfile::tempdir().unwrap();
+        let marker = helpers.path().join("marker");
+        let script = helpers.path().join("filter.sh");
+        marker_script(&script, &marker);
+        let command = format!(
+            "sh '{}'",
+            script
+                .to_str()
+                .unwrap()
+                .replace('\\', "/")
+                .replace('\'', "'\\''")
+        );
+        git::git(repo.path(), &["config", "filter.fixture.clean", &command]).unwrap();
+        git::git(repo.path(), &["config", "filter.fixture.smudge", &command]).unwrap();
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        propose(repo.path(), "unused-filter", &request, provenance())
+            .unwrap()
+            .discard()
+            .unwrap();
+        assert!(!marker.exists(), "an unused configured filter never runs");
+
+        // Materialize attributes without invoking conversion: no index/checkout
+        // operation follows until the production guard has inspected them.
+        std::fs::write(repo.path().join(".gitattributes"), "*.rs filter=fixture\n").unwrap();
+        let before = git::head_commit(repo.path()).unwrap();
+        let error = propose(repo.path(), "active-filter", &request, provenance()).unwrap_err();
+        assert!(matches!(error, PatchError::UnsupportedGitPolicy(_)));
+        assert!(!repo
+            .path()
+            .join(".localpilot/worktrees/active-filter")
+            .exists());
+        assert_eq!(git::head_commit(repo.path()).unwrap(), before);
+        assert!(!marker.exists(), "refusal must precede filter execution");
+    }
+
+    #[test]
+    fn diff_helpers_do_not_run_when_producing_the_reviewable_summary() {
+        let repo = init_repo();
+        let helpers = tempfile::tempdir().unwrap();
+        let marker = helpers.path().join("marker");
+        let script = helpers.path().join("diff-helper.sh");
+        marker_script(&script, &marker);
+        let command = format!(
+            "sh '{}'",
+            script
+                .to_str()
+                .unwrap()
+                .replace('\\', "/")
+                .replace('\'', "'\\''")
+        );
+        git::git(repo.path(), &["config", "diff.external", &command]).unwrap();
+        git::git(repo.path(), &["config", "diff.fixture.textconv", &command]).unwrap();
+        std::fs::write(repo.path().join(".gitattributes"), "*.rs diff=fixture\n").unwrap();
+        git::git(repo.path(), &["add", ".gitattributes"]).unwrap();
+        git::git(repo.path(), &["commit", "-m", "controlled diff attributes"]).unwrap();
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        let patch = propose(repo.path(), "static-diff", &request, provenance()).unwrap();
+        assert!(patch.diff_summary().patch.contains("+pub fn fixed()"));
+        assert!(!marker.exists());
+        let output = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args(["diff", "--ext-diff", "HEAD", patch.id()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(
+            marker.exists(),
+            "ordinary Git would execute the configured helper"
+        );
+    }
+
+    #[test]
+    fn large_unicode_diff_stays_bounded_and_reviewable_without_panicking() {
+        let repo = init_repo();
+        for padding in 0..4 {
+            let text = format!("{}{}\n", "x".repeat(padding), "🦀".repeat(20000));
+            let request = proposal(&["a.rs"], &[("a.rs", &text)]);
+            let patch = propose(
+                repo.path(),
+                &format!("unicode-{padding}"),
+                &request,
+                provenance(),
+            )
+            .unwrap();
+            assert!(patch.diff_summary().truncated);
+            assert!(patch
+                .diff_summary()
+                .patch
+                .ends_with("\n... (diff truncated)\n"));
+            assert!(patch.diff_summary().patch.len() <= MAX_DIFF_BYTES + 30);
+        }
+    }
+
+    #[test]
+    fn filter_driver_names_cannot_masquerade_as_unspecified_attribute_sentinels() {
+        let repo = init_repo();
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        for (index, attribute) in ["filter=unspecified", "filter=unset", "-filter"]
+            .iter()
+            .enumerate()
+        {
+            std::fs::write(
+                repo.path().join(".gitattributes"),
+                format!("*.rs {attribute}\n"),
+            )
+            .unwrap();
+            assert!(matches!(
+                propose(
+                    repo.path(),
+                    &format!("sentinel-{index}"),
+                    &request,
+                    provenance()
+                ),
+                Err(PatchError::UnsupportedGitPolicy(_))
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proposal_refuses_a_committed_symlink_escape_before_writing() {
+        let repo = init_repo();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("owned.txt"), "original").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("escape")).unwrap();
+        git::git(repo.path(), &["add", "escape"]).unwrap();
+        git::git(repo.path(), &["commit", "-m", "controlled symlink fixture"]).unwrap();
+        let request = proposal(&["escape/owned.txt"], &[("escape/owned.txt", "changed")]);
+        assert!(matches!(
+            propose(repo.path(), "symlink-refused", &request, provenance()),
+            Err(PatchError::OutsideWorktree(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("owned.txt")).unwrap(),
+            "original"
+        );
     }
 
     fn proposal(allowed: &[&str], edits: &[(&str, &str)]) -> PatchProposal {

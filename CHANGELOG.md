@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Harden static proposal Git operations against implicit hooks, signing and
+  diff helpers. Refuse unsupported filter attributes before checkout/index
+  effects while supporting unused filter configuration. Guard existing
+  symlink/junction edit targets and truncate Unicode diffs at valid boundaries.
+
 - Add library-only proposal-validation contracts: separate execution, promotion
   and publication authorities; content-bound evidence; and repository-wide
   locking with durable nonce reservations. Existing CLI callers have not yet

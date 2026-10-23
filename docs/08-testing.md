@@ -10,6 +10,14 @@ share the same authority identity. The ignored child helper runs through that
 parent test, rather than representing skipped behavioural coverage. These test
 the library contracts; the existing CLI is not yet migrated to them.
 
+Native proposal fixtures install harmless hook/diff-helper markers and first
+prove ordinary Git can execute them, then exercise actual proposal/summary/
+promotion calls and verify the markers do not change. Active filter attributes
+refuse before checkout; unused configured filters remain compatible. Sentinel-
+named filters, bounded Unicode diffs, Windows directory junctions and Unix
+committed symlink escapes have negative controls. These checks require Git
+`check-attr --source` support for attributes in pinned source trees.
+
 Context-accounting regressions in `localpilot-harness/tests/session.rs` cover
 complete-input calibration, reset after model/provider switches, instruction
 preservation and automatic/manual/forced compaction. `tests/broker.rs` verifies

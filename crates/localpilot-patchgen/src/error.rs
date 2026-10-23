@@ -8,6 +8,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PatchError {
+    /// Static operations cannot establish a nonexecuting Git policy.
+    #[error("unsupported Git execution policy: {0}")]
+    UnsupportedGitPolicy(String),
     /// A git invocation failed. `args` is the fixed subcommand (never a shell
     /// string); `message` is git's stderr.
     #[error("git {args} failed: {message}")]

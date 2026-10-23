@@ -528,6 +528,11 @@ approval API. It does not yet add preflight, run proposal checks or enforce a ne
 CLI promotion gate. These contracts must be wired through all callers before
 claiming that validation protects promotion.
 
+The proposal Git helper independently suppresses implicit hook/signing/diff
+execution and refuses unsupported filter attributes before checkout/index
+effects. Those protections are wired into the existing proposal path. They do
+not constitute the still-pending proposal-validation execution/promotion gate.
+
 ### `localpilot-dist`
 
 Owns the **on-disk contract** for what is installed, which version runs, and how a

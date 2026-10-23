@@ -17,7 +17,7 @@ uuid = { workspace = true }
 fd-lock = { workspace = true }
 localpilot-config = { path = "../localpilot-config" }
 localpilot-store = { path = "../localpilot-store" }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 proptest = { workspace = true }
