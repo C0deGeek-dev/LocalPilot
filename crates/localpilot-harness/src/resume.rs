@@ -1253,7 +1253,7 @@ pub(crate) fn snapshot_working_tree(
         let mut list_args = vec!["ls-files", "-z", "--"];
         list_args.extend(paths.iter().map(String::as_str));
         let listed = bounded_git(root, Some(&temporary), &list_args, SNAPSHOT_TIMEOUT)?;
-        let tracked: Vec<&str> = listed.split(' ').filter(|p| !p.is_empty()).collect();
+        let tracked: Vec<&str> = listed.split('\0').filter(|p| !p.is_empty()).collect();
         if !tracked.is_empty() {
             let mut add_args = vec!["add", "-u", "--"];
             add_args.extend(tracked);
