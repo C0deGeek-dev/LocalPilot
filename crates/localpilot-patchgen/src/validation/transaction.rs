@@ -45,6 +45,22 @@ pub struct Reservation {
     pub issued_at: u64,
 }
 
+/// Exact ref transition used to inspect an interrupted promotion without replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromotionIntent {
+    /// Exact proposal whose source was approved.
+    pub proposal_id: String,
+    /// Branch reference expected to advance.
+    pub target_ref: String,
+    /// Required value before the effect.
+    pub base_commit: String,
+    /// Only permitted value after the effect.
+    pub proposed_commit: String,
+    /// Locally completed validation that qualified the proposal.
+    pub validation_run: uuid::Uuid,
+}
+
 /// A durable intent, retained after completion or interruption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +71,10 @@ pub struct AuthorityEvent {
     pub completed: bool,
     /// Bounded human-readable recovery/outcome note.
     pub outcome: Option<String>,
+    /// Exact old/new ref goal, durable before a promotion effect. Older records
+    /// may lack this data; they require manual inspection, never guessed replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<PromotionIntent>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -280,7 +300,7 @@ impl RepositoryTransaction<'_> {
     ) -> Result<uuid::Uuid, ValidationError> {
         self.check_repository(proposal)?;
         let reservation = token.reservation(proposal, plan)?;
-        self.reserve_with_environment(reservation, Some(token.environment_identity()))
+        self.reserve_with_environment(reservation, Some(token.environment_identity()), None)
     }
 
     /// Retire promotion authority before Git effects. This is not itself the
@@ -311,7 +331,17 @@ impl RepositoryTransaction<'_> {
         {
             return Err(ValidationError::Stale);
         }
-        self.reserve(reservation)
+        self.reserve_with_environment(
+            reservation,
+            None,
+            Some(PromotionIntent {
+                proposal_id: proposal.proposal_id.clone(),
+                target_ref: proposal.target_ref.clone(),
+                base_commit: proposal.base_commit.clone(),
+                proposed_commit: proposal.proposed_commit.clone(),
+                validation_run: receipt.run_id,
+            }),
+        )
     }
 
     /// Retire publication authority independently of patch validation.
@@ -335,13 +365,14 @@ impl RepositoryTransaction<'_> {
     }
 
     fn reserve(&mut self, reservation: Reservation) -> Result<uuid::Uuid, ValidationError> {
-        self.reserve_with_environment(reservation, None)
+        self.reserve_with_environment(reservation, None, None)
     }
 
     fn reserve_with_environment(
         &mut self,
         reservation: Reservation,
         environment: Option<ContentDigest>,
+        promotion: Option<PromotionIntent>,
     ) -> Result<uuid::Uuid, ValidationError> {
         if self.poisoned {
             return Err(ValidationError::RecoveryRequired);
@@ -358,6 +389,11 @@ impl RepositoryTransaction<'_> {
                 "execution environment comparison required".into(),
             ));
         }
+        if (reservation.purpose == AuthorityPurpose::PatchPromotion) != promotion.is_some() {
+            return Err(ValidationError::Invalid(
+                "promotion requires an exact old/new ref goal".into(),
+            ));
+        }
         if let Some(environment) = environment {
             self.journal.environments.insert(nonce, environment);
         }
@@ -367,6 +403,7 @@ impl RepositoryTransaction<'_> {
                 reservation,
                 completed: false,
                 outcome: None,
+                promotion,
             },
         );
         self.flush()?;
@@ -649,6 +686,23 @@ mod tests {
         let promoted = tx
             .reserve_promotion(token, &proposal, &plan, &receipt)
             .unwrap();
+        let goal = PromotionIntent {
+            proposal_id: proposal.proposal_id.clone(),
+            target_ref: proposal.target_ref.clone(),
+            base_commit: proposal.base_commit.clone(),
+            proposed_commit: proposal.proposed_commit.clone(),
+            validation_run: run,
+        };
+        let persisted: Journal = read_journal(&tx.path).unwrap();
+        assert_eq!(persisted.events[&promoted].promotion.as_ref(), Some(&goal));
+        assert!(!persisted.events[&promoted].completed);
+        // Old records remain inspectable. Missing a goal is missing recovery
+        // proof, never permission to infer that an effect did not happen.
+        let mut legacy = serde_json::to_value(&persisted.events[&promoted]).unwrap();
+        legacy.as_object_mut().unwrap().remove("promotion");
+        let legacy: AuthorityEvent = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.promotion.is_none());
+        assert!(!legacy.completed);
         tx.finish(
             promoted,
             "fixture reservation only; no actual Git promotion",

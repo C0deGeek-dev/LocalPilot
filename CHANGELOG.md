@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Keep trusted host launcher names when resolving executable aliases, including
+  Homebrew `rustup` links to `rustup-init`, while hashing physical target bytes.
+  Refuse project-owned executable search aliases. Exercise actual validation
+  crashes, concurrent attempts, output redaction and exhausted budgets; persist
+  exact promotion ref goals before effects for later recovery inspection.
+
 - Add a library-only proposal execution coordinator using single-use evaluation
   consent and the existing permission-gated runner. Restrict commands and
   environment to the reviewed plan, retain process ownership through cleanup,

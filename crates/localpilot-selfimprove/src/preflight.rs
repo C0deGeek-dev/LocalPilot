@@ -461,17 +461,38 @@ fn file_risks(path: &str) -> Vec<PreflightRisk> {
 fn resolve_program(name: &str, roots: &[&Path]) -> Result<PathBuf, ValidationError> {
     let path = std::env::var_os("PATH").ok_or_else(|| invalid("host PATH is unavailable"))?;
     for directory in std::env::split_paths(&path).filter(|p| p.is_absolute()) {
-        let candidate = directory.join(executable(name));
-        let Ok(candidate) = fs::canonicalize(candidate) else {
-            continue;
-        };
-        if candidate.is_file() && !roots.iter().any(|root| candidate.starts_with(root)) {
+        if let Some(candidate) = host_program(&directory, name, roots) {
             return Ok(candidate);
         }
     }
     Err(invalid(
         "registered host rustup executable is unavailable outside the project",
     ))
+}
+
+fn host_program(directory: &Path, name: &str, roots: &[&Path]) -> Option<PathBuf> {
+    // Keep the invocation basename: rustup dispatches on argv[0], and Homebrew's
+    // `rustup` symlink points to a binary named `rustup-init`. Canonicalizing the
+    // final component would silently select installer mode. Hash the physical
+    // target separately while binding this absolute launch path in the plan.
+    // Inspect ancestors as well: a project-owned bin symlink pointing outside
+    // the project must not become a trusted host executable search location.
+    if directory.ancestors().any(|ancestor| {
+        fs::canonicalize(ancestor).is_ok_and(|path| roots.iter().any(|root| path == *root))
+    }) {
+        return None;
+    }
+    let parent = fs::canonicalize(directory).ok()?;
+    let candidate = parent.join(executable(name));
+    let physical = fs::canonicalize(&candidate).ok()?;
+    if !physical.is_file()
+        || roots
+            .iter()
+            .any(|root| parent.starts_with(root) || physical.starts_with(root))
+    {
+        return None;
+    }
+    Some(candidate)
 }
 
 fn host_file_digest(path: &Path, roots: &[&Path]) -> Result<ContentDigest, ValidationError> {
@@ -773,6 +794,34 @@ mod tests {
         fs::remove_dir(target).unwrap();
         #[cfg(unix)]
         fs::remove_file(target).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_multicall_alias_keeps_its_launch_name_and_project_aliases_are_refused() {
+        let host = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_root = fs::canonicalize(project.path()).unwrap();
+        let bin = host.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let physical = host.path().join("rustup-init");
+        fs::write(&physical, "controlled physical host bytes; never executed").unwrap();
+        std::os::unix::fs::symlink(&physical, bin.join("rustup")).unwrap();
+        let launch = host_program(&bin, "rustup", &[&project_root]).unwrap();
+        assert_eq!(launch.file_name().unwrap(), "rustup");
+        assert_ne!(launch, fs::canonicalize(&launch).unwrap());
+        assert_eq!(
+            host_file_digest(&launch, &[&project_root]).unwrap(),
+            ContentDigest::for_bytes(b"controlled physical host bytes; never executed")
+        );
+        std::os::unix::fs::symlink(&bin, project.path().join("host-bin")).unwrap();
+        assert!(
+            host_program(&project.path().join("host-bin"), "rustup", &[&project_root]).is_none()
+        );
+        let project_bin = project.path().join("bin");
+        fs::create_dir(&project_bin).unwrap();
+        std::os::unix::fs::symlink(&physical, project_bin.join("rustup")).unwrap();
+        assert!(host_program(&project_bin, "rustup", &[&project_root]).is_none());
     }
 
     #[test]

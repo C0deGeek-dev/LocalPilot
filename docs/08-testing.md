@@ -722,6 +722,15 @@ workspace package requires the matching workflow change. Build-only steps,
 comments, other platforms, and the separate coverage job do not satisfy this
 guard.
 
+The `proposal-validation` nextest group permits at most two execution fixtures at
+once. These fixtures hash real installed toolchains and run dependency-free Cargo
+tests; debug builds can take over a minute. Crash boundaries run as separate
+tests with actual subprocess exit, bounded by the existing five-minute test
+deadline and a three-minute child-process timeout. The ignored crash helper is
+invoked by those tests. Coverage includes a crash after writing Passed evidence
+but before journal completion: the stored receipt alone must never authorize a
+new run or promotion reservation.
+
 Supply-chain hygiene:
 
 ```powershell

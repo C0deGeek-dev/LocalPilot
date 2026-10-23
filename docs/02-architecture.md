@@ -544,6 +544,10 @@ the nonce journal. Abandoned futures and uncertain cleanup leave recovery pendin
 This API starts no automatic retries or promotion and has no CLI execution entry
 point yet. The registered profile declares only a worktree-local target cache and
 no artifacts; future artifact profiles must add bounded collection before passing.
+Promotion reservations also persist their exact old/new ref goal and validation
+run before effects, so recovery can inspect the intended transition. A complete
+Passed receipt with an unfinished authority journal still cannot qualify a new
+evaluation or promotion reservation.
 
 New proposals retain their original base/target/scope in provenance. Reopening a
 persisted proposal is a nonowning inspection: dropping that handle preserves its

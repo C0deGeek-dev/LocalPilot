@@ -684,6 +684,10 @@ Windows job accounting and Unix process-group snapshots acknowledge cleanup;
 Unix process groups do not contain a descendant deliberately creating a new
 session. Future cancellation drops the process owner and leaves an unfinished
 journal that requires explicit inspection, never automatic replay.
+The launcher keeps the reviewed executable basename while separately hashing its
+resolved physical target. This preserves multicall dispatch, including Homebrew's
+`rustup` alias to `rustup-init`. Project-owned executable search aliases are refused
+even when they point outside the project.
 
 The self-improvement loop's write half (ADR-0034) is built so the human gate is
 structural, not a convention:

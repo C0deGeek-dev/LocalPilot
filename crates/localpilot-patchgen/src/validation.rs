@@ -13,7 +13,8 @@ mod transaction;
 pub use authority::{EvaluationToken, OutwardApprovalToken, PatchApprovalToken};
 pub use inspection::ProposalInspection;
 pub use transaction::{
-    AuthorityEvent, AuthorityPurpose, RepositoryAuthority, RepositoryTransaction, Reservation,
+    AuthorityEvent, AuthorityPurpose, PromotionIntent, RepositoryAuthority, RepositoryTransaction,
+    Reservation,
 };
 
 use serde::{Deserialize, Serialize};

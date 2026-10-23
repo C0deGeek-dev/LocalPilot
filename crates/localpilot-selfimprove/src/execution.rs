@@ -3,7 +3,9 @@
 
 use crate::preflight::{preflight_in_transaction, PreflightReport};
 use localpilot_config::{AutoFix, CheckConfig};
-use localpilot_harness::{CancelSignal, CheckRunner, CleanupOutcome, CommandEnd, EnvPolicy};
+use localpilot_harness::{
+    CancelSignal, CheckRunner, CleanupOutcome, CommandEnd, CommandRun, EnvPolicy,
+};
 use localpilot_patchgen::validation::{
     EvaluationToken, RepositoryAuthority, ValidationCheckEvidence, ValidationCommandEnd,
     ValidationError, ValidationEvidence, ValidationState, VALIDATION_SCHEMA,
@@ -45,6 +47,35 @@ pub async fn validate_proposal(
     progress: &mut dyn Write,
 ) -> Result<ValidationEvidence, ValidationError> {
     let started = Instant::now();
+    validate_with_elapsed(
+        root,
+        id,
+        review,
+        token,
+        engine,
+        trusted,
+        cancel,
+        progress,
+        move || started.elapsed(),
+    )
+    .await
+}
+
+// The production clock starts before any preparation. Keeping its elapsed
+// measurement injectable internally lets the fixture exercise total-budget
+// exhaustion through the real coordinator without a fifteen-minute sleep.
+#[allow(clippy::too_many_arguments)]
+async fn validate_with_elapsed(
+    root: &Path,
+    id: &str,
+    review: &PreflightReport,
+    token: EvaluationToken,
+    engine: &PermissionEngine,
+    trusted: bool,
+    cancel: CancelSignal,
+    progress: &mut dyn Write,
+    elapsed: impl Fn() -> Duration,
+) -> Result<ValidationEvidence, ValidationError> {
     let mut authority = RepositoryAuthority::open(root)?;
     let mut transaction = authority.try_transaction()?;
     let mut patch = ProposedPatch::reopen(root, id)?;
@@ -98,7 +129,7 @@ pub async fn validate_proposal(
             break;
         }
         let budget = Duration::from_secs(plan.limits.total_secs)
-            .saturating_sub(started.elapsed())
+            .saturating_sub(elapsed())
             .min(Duration::from_secs(plan.limits.per_check_secs));
         if budget <= CLEANUP_RESERVE {
             receipt.state = ValidationState::Invalid;
@@ -143,6 +174,7 @@ pub async fn validate_proposal(
             severity: None,
         };
         let run = runner.execute(&config).await;
+        let failure_state = check_failure(&run, budget);
         let end = match run.end {
             CommandEnd::Exited {
                 code: Some(code),
@@ -161,10 +193,6 @@ pub async fn validate_proposal(
         let cleanup_confirmed = run.cleanup == CleanupOutcome::Confirmed;
         safely_stopped &=
             run.pipes_closed && (cleanup_confirmed || run.cleanup == CleanupOutcome::NotStarted);
-        let passed = end == (ValidationCommandEnd::Exited { code: 0 })
-            && cleanup_confirmed
-            && run.pipes_closed
-            && run.elapsed <= budget;
         receipt.checks.push(ValidationCheckEvidence {
             command: check.clone(),
             end: end.clone(),
@@ -184,14 +212,8 @@ pub async fn validate_proposal(
             plan.checks.len()
         )
         .map_err(|_| invalid("validation progress sink failed"))?;
-        if !passed {
-            receipt.state = if !safely_stopped || !run.pipes_closed || run.elapsed > budget {
-                ValidationState::Invalid
-            } else if end == ValidationCommandEnd::Cancelled {
-                ValidationState::Cancelled
-            } else {
-                ValidationState::Failed
-            };
+        if let Some(state) = failure_state {
+            receipt.state = state;
             break;
         }
     }
@@ -205,7 +227,7 @@ pub async fn validate_proposal(
         receipt.state = ValidationState::Stale;
     }
     receipt.finished_at = now()?;
-    if started.elapsed() > Duration::from_secs(plan.limits.total_secs) {
+    if elapsed() > Duration::from_secs(plan.limits.total_secs) {
         receipt.state = ValidationState::Invalid;
     }
     // The initial registered profile declares no artifacts. Any future profile
@@ -225,6 +247,8 @@ pub async fn validate_proposal(
     // Persist before returning success or completing the journal. A crash in
     // between remains recovery-required, including if the receipt says Passed.
     patch.record_validation(&transaction, receipt.clone())?;
+    writeln!(progress, "Validation receipt persisted")
+        .map_err(|_| invalid("validation progress sink failed"))?;
     if safely_stopped {
         transaction.finish(
             run_id,
@@ -232,6 +256,26 @@ pub async fn validate_proposal(
         )?;
     }
     Ok(receipt)
+}
+
+fn check_failure(run: &CommandRun, budget: Duration) -> Option<ValidationState> {
+    if !run.pipes_closed
+        || run.elapsed > budget
+        || !matches!(
+            run.cleanup,
+            CleanupOutcome::Confirmed | CleanupOutcome::NotStarted
+        )
+    {
+        return Some(ValidationState::Invalid);
+    }
+    match run.end {
+        CommandEnd::Exited {
+            code: Some(0),
+            success: true,
+        } if run.cleanup == CleanupOutcome::Confirmed => None,
+        CommandEnd::Cancelled => Some(ValidationState::Cancelled),
+        _ => Some(ValidationState::Failed),
+    }
 }
 
 // Constructed only after consuming an EvaluationToken; the runner's separate
@@ -409,7 +453,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_cold_and_warm_grants_pass_through_ask_and_persist_before_return() {
-        let (root, patch, head) = fixture("pub fn value() -> u32 { 2 }\n#[test] fn works() { assert_eq!(value(), 2); assert!(std::env::var_os(\"LOCALMIND_GLOBAL_ROOT\").is_none()); assert!(std::env::var_os(\"OPENAI_API_KEY\").is_none()); println!(\"fixture passed\"); }\n");
+        let (root, patch, head) = fixture("pub fn value() -> u32 { 2 }\n#[test] fn works() { assert_eq!(value(), 2); assert!(std::env::var_os(\"LOCALMIND_GLOBAL_ROOT\").is_none()); assert!(std::env::var_os(\"OPENAI_API_KEY\").is_none()); use std::io::Write; let mut out = std::io::stdout(); out.write_all(b\"sk-abcdefghijklmnopqrstuvwxyz0123\\n\").unwrap(); out.write_all(&vec![b'x'; 50000]).unwrap(); }\n");
         let mut runs = Vec::new();
         for label in ["cold", "warm"] {
             let started = Instant::now();
@@ -420,6 +464,11 @@ mod tests {
                 receipt.checks[0].elapsed_ms
             );
             assert_eq!(receipt.state, ValidationState::Passed, "{receipt:?}");
+            assert!(receipt.checks[0].truncated);
+            assert!(receipt.checks[0].stdout.len() <= 16 * 1024);
+            assert!(!receipt.checks[0]
+                .stdout
+                .contains("sk-abcdefghijklmnopqrstuvwxyz0123"));
             let reopened = ProposedPatch::reopen(root.path(), patch.id()).unwrap();
             assert_eq!(reopened.provenance().validation.as_ref(), Some(&receipt));
             let fresh = proposal_preflight(root.path(), patch.id()).unwrap();
@@ -473,5 +522,334 @@ mod tests {
         assert!(trim(&mut output, 19));
         assert_eq!(output.len(), 18);
         assert!(!trim(&mut output, 19));
+    }
+
+    struct CrashAtProgress {
+        boundary: String,
+    }
+
+    impl Write for CrashAtProgress {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            // write_fmt can split a single line across several writes. Both
+            // distinctive words are literals, independent of ordinal formatting.
+            let text = String::from_utf8_lossy(bytes);
+            if (self.boundary == "before_spawn" && text.contains("starting"))
+                || (self.boundary == "after_observation" && text.contains("observed"))
+                || (self.boundary == "after_final_receipt" && text.contains("receipt persisted"))
+            {
+                // An actual process exit skips every Rust destructor, unlike a
+                // panic or dropping the coordinator future inside this process.
+                std::process::exit(73);
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper invoked by the actual crash boundary fixture"]
+    fn crash_worker_entry() {
+        let Some(root) = std::env::var_os("LOCALPILOT_VALIDATION_CRASH_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let review = proposal_preflight(&root, "validation-fixture").unwrap();
+        let token = EvaluationToken::approve(
+            &review.proposal.identity,
+            &review.plan,
+            "fixture owner",
+            "controlled subprocess crash boundary",
+        )
+        .unwrap();
+        let mut output = CrashAtProgress {
+            boundary: std::env::var("LOCALPILOT_VALIDATION_CRASH_BOUNDARY").unwrap(),
+        };
+        let engine = PermissionEngine::new(Profile::Default, Vec::new());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(validate_proposal(
+                &root,
+                "validation-fixture",
+                &review,
+                token,
+                &engine,
+                true,
+                CancelSignal::new(),
+                &mut output,
+            ))
+            .unwrap();
+        panic!("requested crash boundary was not reached");
+    }
+
+    async fn assert_crash_boundary(boundary: &str) {
+        let (root, patch, head) = fixture("#[test] fn works() {}\n");
+        let output = tokio::time::timeout(
+            Duration::from_secs(180),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "execution::tests::crash_worker_entry",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("LOCALPILOT_VALIDATION_CRASH_ROOT", root.path())
+                .env("LOCALPILOT_VALIDATION_CRASH_BOUNDARY", boundary)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(73),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reopened = ProposedPatch::reopen(root.path(), patch.id()).unwrap();
+        let receipt = reopened.provenance().validation.as_ref().unwrap();
+        let expected = if boundary == "after_final_receipt" {
+            ValidationState::Passed
+        } else {
+            ValidationState::Running
+        };
+        assert_eq!(receipt.state, expected);
+        if expected == ValidationState::Running {
+            assert_eq!(receipt.resumed_state(), ValidationState::Invalid);
+        }
+        assert_eq!(
+            receipt.checks.len(),
+            usize::from(boundary != "before_spawn")
+        );
+        if boundary == "before_spawn" {
+            assert!(!patch.worktree_path().join("target").exists());
+        }
+        let review = proposal_preflight(root.path(), patch.id()).unwrap();
+        let fresh = EvaluationToken::approve(
+            &review.proposal.identity,
+            &review.plan,
+            "fixture owner",
+            "explicit fresh execution request",
+        )
+        .unwrap();
+        let engine = PermissionEngine::new(Profile::Default, Vec::new());
+        let result = validate_proposal(
+            root.path(),
+            patch.id(),
+            &review,
+            fresh,
+            &engine,
+            true,
+            CancelSignal::new(),
+            &mut Vec::new(),
+        )
+        .await;
+        assert!(matches!(result, Err(ValidationError::RecoveryRequired)));
+        let mut authority = RepositoryAuthority::open(root.path()).unwrap();
+        let mut transaction = authority.try_transaction().unwrap();
+        assert_eq!(transaction.events().count(), 1);
+        assert!(transaction.events().all(|event| !event.completed));
+        if receipt.state == ValidationState::Passed {
+            // Even complete on-disk data does not replace the unfinished
+            // local authority journal at the separate promotion boundary.
+            let promotion = localpilot_patchgen::validation::PatchApprovalToken::approve(
+                &review.proposal.identity,
+                &review.plan,
+                receipt,
+                "fixture owner",
+                "controlled promotion refusal",
+            )
+            .unwrap();
+            assert!(transaction
+                .reserve_promotion(promotion, &review.proposal.identity, &review.plan, receipt)
+                .is_err());
+        }
+        assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), head);
+    }
+
+    #[tokio::test]
+    async fn crash_before_spawn_requires_recovery_and_starts_no_check() {
+        assert_crash_boundary("before_spawn").await;
+    }
+
+    #[tokio::test]
+    async fn crash_after_check_observation_requires_recovery() {
+        assert_crash_boundary("after_observation").await;
+    }
+
+    #[tokio::test]
+    async fn crash_after_passing_receipt_blocks_execution_and_promotion() {
+        assert_crash_boundary("after_final_receipt").await;
+    }
+
+    struct ConcurrentAttempt {
+        start: Option<std::sync::mpsc::Sender<()>>,
+        observed: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Write for ConcurrentAttempt {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(start) = self.start.take() {
+                start.send(()).unwrap();
+                self.observed.recv_timeout(Duration::from_secs(30)).unwrap();
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_validate_cannot_consume_a_second_grant_or_start_a_second_run() {
+        let (root, patch, head) = fixture("#[test] fn works() {}\n");
+        let review = proposal_preflight(root.path(), patch.id()).unwrap();
+        let token = EvaluationToken::approve(
+            &review.proposal.identity,
+            &review.plan,
+            "fixture owner",
+            "first controlled run",
+        )
+        .unwrap();
+        let second_token = EvaluationToken::approve(
+            &review.proposal.identity,
+            &review.plan,
+            "fixture owner",
+            "second controlled run",
+        )
+        .unwrap();
+        let second_review = review.clone();
+        let second_root = root.path().to_path_buf();
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        let attempt = std::thread::spawn(move || {
+            start_rx.recv_timeout(Duration::from_secs(180)).unwrap();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let engine = PermissionEngine::new(Profile::Default, Vec::new());
+            let result = runtime.block_on(validate_proposal(
+                &second_root,
+                "validation-fixture",
+                &second_review,
+                second_token,
+                &engine,
+                true,
+                CancelSignal::new(),
+                &mut Vec::new(),
+            ));
+            assert!(matches!(result, Err(ValidationError::Busy)), "{result:?}");
+            observed_tx.send(()).unwrap();
+        });
+        let engine = PermissionEngine::new(Profile::Default, Vec::new());
+        let mut progress = ConcurrentAttempt {
+            start: Some(start_tx),
+            observed: observed_rx,
+        };
+        let receipt = validate_proposal(
+            root.path(),
+            patch.id(),
+            &review,
+            token,
+            &engine,
+            true,
+            CancelSignal::new(),
+            &mut progress,
+        )
+        .await
+        .unwrap();
+        attempt.join().unwrap();
+        assert_eq!(receipt.state, ValidationState::Passed, "{receipt:?}");
+        let mut authority = RepositoryAuthority::open(root.path()).unwrap();
+        let transaction = authority.try_transaction().unwrap();
+        assert_eq!(transaction.events().count(), 1);
+        assert!(transaction.events().all(|event| event.completed));
+        assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), head);
+    }
+
+    #[tokio::test]
+    async fn preparation_that_exhausts_the_total_budget_starts_no_command_and_persists_invalid() {
+        let (root, patch, head) = fixture("#[test] fn works() {}\n");
+        let review = proposal_preflight(root.path(), patch.id()).unwrap();
+        let token = EvaluationToken::approve(
+            &review.proposal.identity,
+            &review.plan,
+            "fixture owner",
+            "controlled deadline fixture",
+        )
+        .unwrap();
+        let engine = PermissionEngine::new(Profile::Default, Vec::new());
+        let receipt = validate_with_elapsed(
+            root.path(),
+            patch.id(),
+            &review,
+            token,
+            &engine,
+            true,
+            CancelSignal::new(),
+            &mut Vec::new(),
+            || Duration::from_secs(901),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt.state, ValidationState::Invalid);
+        assert!(receipt.checks.is_empty());
+        assert!(!patch.worktree_path().join("target").exists());
+        assert_eq!(
+            ProposedPatch::reopen(root.path(), patch.id())
+                .unwrap()
+                .provenance()
+                .validation
+                .as_ref(),
+            Some(&receipt)
+        );
+        assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), head);
+    }
+
+    #[tokio::test]
+    async fn actual_exit_zero_without_owned_cleanup_is_invalid_at_the_receipt_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = PermissionEngine::new(Profile::Bypass, Vec::new());
+        let approver = localpilot_sandbox::ScriptedApprover::always();
+        #[cfg(windows)]
+        let (program, args) = ("cmd.exe", vec!["/C".into(), "exit 0".into()]);
+        #[cfg(not(windows))]
+        let (program, args) = ("sh", vec!["-c".into(), "exit 0".into()]);
+        let command = CheckConfig {
+            name: "cleanup boundary fixture".into(),
+            program: program.into(),
+            args,
+            fix_program: None,
+            fix_args: Vec::new(),
+            cadence: Default::default(),
+            auto_fix: AutoFix::No,
+            severity: None,
+        };
+        let runner = CheckRunner::new(
+            &engine,
+            &approver,
+            Interactivity::Interactive,
+            true,
+            root.path(),
+        );
+        let unowned = runner.execute(&command).await;
+        assert!(matches!(
+            unowned.end,
+            CommandEnd::Exited { success: true, .. }
+        ));
+        assert!(unowned.pipes_closed);
+        assert_eq!(unowned.cleanup, CleanupOutcome::Unverified);
+        assert_eq!(
+            check_failure(&unowned, Duration::from_secs(30)),
+            Some(ValidationState::Invalid)
+        );
+        let owned = runner.with_owned_processes().execute(&command).await;
+        assert_eq!(check_failure(&owned, Duration::from_secs(30)), None);
+        // The same actual successful observation cannot pass after its approved
+        // deadline, even if exit, pipes and process cleanup were all successful.
+        assert_eq!(
+            check_failure(&owned, Duration::ZERO),
+            Some(ValidationState::Invalid)
+        );
     }
 }
