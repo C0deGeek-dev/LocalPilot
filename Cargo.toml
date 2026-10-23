@@ -102,7 +102,7 @@ insta = "=1.47.2"
 # because v4 also requires edition 2024.
 # Shared LocalX eval primitives (scorecard contract, blind judge, ablation,
 # gated check runner, verify detection). Pinned by rev per the exact-pin policy.
-localx-eval-core = { git = "https://github.com/C0deGeek-dev/localx-llama.git", rev = "123d8b8fcc1b047caa514de4ad2be353750f3c1c" }
+localx-eval-core = { git = "https://github.com/C0deGeek-dev/localx-llama.git", rev = "b6b1bf2e6ea348e41166af6860d1fc5605a77ee9" }
 keyring = { version = "=3.6.3", default-features = false, features = [
     "windows-native",
 ] }
@@ -132,7 +132,7 @@ toml = "=0.8.23"
 # Reuse the parser and Python grammar already linked by code intelligence.
 tree-sitter = "=0.26.9"
 tree-sitter-python = "=0.25.0"
-tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util", "io-std", "time", "sync"] }
+tokio = { version = "=1.51.6", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util", "io-std", "time", "sync"] }
 tokio-util = { version = "=0.7.13", features = ["rt"] }
 # Win32 security and process containment calls, used only by
 # `localpilot-winsec` (ADR-0189). Already in the lock graph through tokio and

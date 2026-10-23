@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Update the shared async runtime to Tokio1.51.6 and the TLS security fixes
+  while preserving Rust1.82 and existing runtime features. Guard the audit
+  exceptions for unbuilt optional QUIC dependencies against activation.
+
 - **Opt-in selective Python rename units.** User-only `headless_rename_units`
   lets `eval` continue a uniform identifier rename through bounded, verified
   units. Syntactic proof never replaces the original full check. Existing
