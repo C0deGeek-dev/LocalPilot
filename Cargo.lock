@@ -1815,6 +1815,8 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-python",
 ]
 
 [[package]]

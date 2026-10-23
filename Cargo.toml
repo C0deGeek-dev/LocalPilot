@@ -129,6 +129,9 @@ yaml_serde = "=0.10.7"
 thiserror = "=2.0.9"
 time = { version = "=0.3.37", features = ["local-offset"] }
 toml = "=0.8.23"
+# Reuse the parser and Python grammar already linked by code intelligence.
+tree-sitter = "=0.26.9"
+tree-sitter-python = "=0.25.0"
 tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util", "io-std", "time", "sync"] }
 tokio-util = { version = "=0.7.13", features = ["rt"] }
 # Win32 security and process containment calls, used only by

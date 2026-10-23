@@ -69,6 +69,21 @@ this turn can conservatively trigger refusal. Without a repository baseline,
 model shell/background calls are refused; file tools and permission-gated
 verification remain available. Explicit user shell retains its authorization.
 
+An opt-in selective mode, `headless_rename_units` (default0), reuses that
+headless lifecycle only after a size-refused write and bounded proof of a
+uniform Python identifier change (ADR-0232). The existing read permission gate
+runs before source access. Exact attested base/current bytes must have matching
+clean syntax-tree structure and differ only at one consistent identifier pair;
+all other bytes stay identical. The first unit must rename a function declaration,
+and later units retain that pair; a standalone call substitution cannot activate
+it. Proof carries material identity into checkpoint
+checks and never replaces them. It declines dirty/unavailable bases, ambiguous
+or unsupported source, parse/size/time limits and every existing opaque/MCP/
+failed-write exclusion. One pair persists through the bounded chain, with at
+most one proof attempt per unit. Positive global `headless_units` takes
+precedence. Neither setting can be enabled by project configuration. Default
+behavior, conservative attempt spend, per-unit caps and other hosts are unchanged.
+
 Headless `eval` can continue in bounded units when the user sets
 `[harness.granularity] headless_units` (ADR-0227; off by default). When the
 full check fails at the end of a unit, the harness may run a narrow unit check:

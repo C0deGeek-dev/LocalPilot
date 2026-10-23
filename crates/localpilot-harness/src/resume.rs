@@ -1471,6 +1471,44 @@ pub(crate) fn work_changed_paths(
     Ok(paths)
 }
 
+/// Recover the exact tracked source a bounded unit started from. Callers must
+/// authorize the path read first. Dirty initial material has no attested tree.
+pub(crate) fn work_base_source(
+    root: &Path,
+    before: &WorkDiffBaseline,
+    path: &str,
+) -> Result<String, HarnessError> {
+    if before.diff_base.is_none() && !before.files.is_empty() {
+        return Err(HarnessError::Provider("no clean source base".into()));
+    }
+    let base = before.diff_base.as_ref().unwrap_or(&before.head).trim();
+    if !base.bytes().all(|b| b.is_ascii_hexdigit())
+        || !matches!(base.len(), 40 | 64)
+        || !Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(HarnessError::Provider("unsupported source base".into()));
+    }
+    let source = bounded_git(
+        root,
+        None,
+        &[
+            "show",
+            "--no-ext-diff",
+            "--no-textconv",
+            &format!("{base}:{path}"),
+        ],
+        SNAPSHOT_TIMEOUT,
+    )?;
+    // The shared Git helper decodes lossily. Never accept replacement bytes as
+    // evidence of exact source; genuine replacement characters also decline.
+    if source.contains('\u{fffd}') {
+        return Err(HarnessError::Provider("source is not exact UTF-8".into()));
+    }
+    Ok(source)
+}
+
 fn work_fingerprint(root: &Path, path: &str) -> Result<String, HarnessError> {
     let mut visited = 0usize;
     fingerprint_at(root, path, 0, &mut visited)

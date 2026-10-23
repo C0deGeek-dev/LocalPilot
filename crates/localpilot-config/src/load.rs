@@ -89,10 +89,11 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
 /// Keys a project file must never set: they grant the agent more than the
 /// user's own settings do, and a repository must not be able to grant itself
 /// anything. Refused loudly rather than ignored, so the author sees why.
-const USER_ONLY_KEYS: [&str; 3] = [
+const USER_ONLY_KEYS: [&str; 4] = [
     "permissions.allow_commands",
     "permissions.scratch_root",
     "harness.granularity.headless_units",
+    "harness.granularity.headless_rename_units",
 ];
 
 fn refuse_user_only_keys(project: &Path) -> Result<(), ConfigError> {
@@ -197,6 +198,14 @@ pub fn is_portable_credential_alias(alias: &str) -> bool {
 /// Validate the ratified quality-gate checks: each needs a non-empty name and
 /// program, and names must be unique (a name is also a per-check override key).
 fn validate_granularity(caps: &crate::schema::GranularityConfig) -> Result<(), ConfigError> {
+    if caps.headless_rename_units > crate::schema::MAX_HEADLESS_UNITS {
+        return Err(ConfigError::InvalidGranularity(format!(
+            "headless_rename_units is {}; the maximum is {}",
+            caps.headless_rename_units,
+            crate::schema::MAX_HEADLESS_UNITS
+        )));
+    }
+
     if caps.headless_units > crate::schema::MAX_HEADLESS_UNITS {
         return Err(ConfigError::InvalidGranularity(format!(
             "headless_units is {}; the maximum is {}",

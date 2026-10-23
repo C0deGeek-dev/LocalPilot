@@ -48,6 +48,7 @@ use crate::quality::{CheckOutcome, CheckRunner, CheckStatus};
 use crate::rules::{trigger_for_cadence, RuleContext, RuleEngine, RuleVerdict, Trigger};
 use crate::summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 
+mod rename;
 mod unit_continuation;
 pub use unit_continuation::python_syntax_check;
 
@@ -1331,6 +1332,7 @@ pub struct SessionRuntime {
     work_write_error_may_have_run: bool,
     /// Unit checkpoints the host still allows in this task (0 = none).
     unit_checkpoints_remaining: u8,
+    rename_continuation: Option<unit_continuation::RenameContinuation>,
     /// A unit checkpoint left the task's full verification failed. Survives
     /// turn boundaries: no later turn finishes without an actual full pass.
     outstanding_full_check: bool,
@@ -1547,6 +1549,7 @@ impl SessionRuntime {
             work_opaque_launch_dispatched: false,
             work_write_error_may_have_run: false,
             unit_checkpoints_remaining: 0,
+            rename_continuation: None,
             outstanding_full_check: false,
             unit_end_requested: false,
             settling_host_unit: false,
@@ -2011,6 +2014,7 @@ impl SessionRuntime {
         self.work_opaque_launch_dispatched = false;
         self.work_write_error_may_have_run = false;
         self.unit_end_requested = false;
+        self.rename_continuation = None;
         self.work_unit = crate::granularity::WorkUnit::default();
     }
 
@@ -3881,6 +3885,10 @@ impl SessionRuntime {
         self.work_opaque_launch_dispatched = false;
         self.work_write_error_may_have_run = false;
         self.unit_end_requested = false;
+        if let Some(state) = &mut self.rename_continuation {
+            state.proof = None;
+            state.attempted = false;
+        }
         self.active_work_profile = None;
         self.active_work_profile = self.work_profile();
         self.work_diff_baseline =
@@ -4707,6 +4715,10 @@ impl SessionRuntime {
                     if admission.user {
                         // User steering outranks a host-ended unit boundary.
                         self.unit_end_requested = false;
+                        if let Some(state) = &mut self.rename_continuation {
+                            state.proof = None;
+                            state.attempted = false;
+                        }
                         self.reset_progress_breakers(
                             &mut no_progress,
                             &mut unproductive_streak,

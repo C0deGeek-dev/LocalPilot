@@ -99,6 +99,86 @@ async fn units(runtime: &mut SessionRuntime) -> StopReason {
 
 const FAILS: &str = "import sys\nsys.exit(1)\n";
 
+#[tokio::test]
+async fn selective_evidence_requires_read_authority_and_stable_checks() {
+    if !python() {
+        return;
+    }
+    for (with_read, moving_verifier, expected) in
+        [(true, false, 1), (false, false, 0), (true, true, 0)]
+    {
+        let verifier = if moving_verifier {
+            "import sys\nopen('other.py','w').write('x = 1\\n')\nsys.exit(1)\n"
+        } else {
+            FAILS
+        };
+        let dir = repository(verifier);
+        std::fs::write(
+            dir.path().join("money.py"),
+            "def old_name():\n    return 1\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "money.py"]);
+        git(dir.path(), &["commit", "-qm", "function fixture"]);
+        let provider = FakeProvider::new()
+            .tool_call(
+                "rename",
+                "edit_file",
+                json!({"path":"money.py","old_text":"def old_name","new_text":"def new_name"}),
+            )
+            .tool_call(
+                "next",
+                "edit_file",
+                json!({"path":"money.py","old_text":"return 1","new_text":"return 2"}),
+            )
+            .text("done")
+            .text("done")
+            .text("done")
+            .text("done")
+            .text("done");
+        let registry = ToolRegistry::with_builtins();
+        let registry = if with_read {
+            registry
+        } else {
+            registry.narrowed(&["edit_file".to_owned()])
+        };
+        let mut runtime = SessionRuntime::new(
+            Arc::new(provider),
+            registry,
+            PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::ephemeral(),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                granularity: Some(GranularityConfig {
+                    headless_rename_units: 2,
+                    ..GranularityConfig::default()
+                }),
+                verify_before_done: true,
+                verify_command: Some("python verify.py".into()),
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        );
+        let (events, _rx) = broadcast::channel(1024);
+        let stop = runtime
+            .run_turn_in_units(
+                "Rename old_name to new_name everywhere.",
+                &events,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_ne!(stop, StopReason::Done);
+        let checkpoints=runtime.store().read_events(runtime.session_id()).unwrap().into_iter()
+            .filter(|e| matches!(&e.kind,SessionEventKind::TurnEnded {stop,..} if stop=="UnitCheckpoint")).count();
+        assert_eq!(
+            checkpoints, expected,
+            "read={with_read}, moved={moving_verifier}"
+        );
+    }
+}
+
 /// Statuses of the checks this session actually ran, in order.
 fn check_statuses(runtime: &SessionRuntime) -> Vec<String> {
     runtime

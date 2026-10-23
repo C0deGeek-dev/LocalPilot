@@ -2,6 +2,46 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0232: Selective Python Rename Continuation Reuses Verified Units
+
+**Status:** accepted, opt-in/default off · **Date:** 2026-10-23.
+
+**Context.** Conservative single-turn bounds prevent a four-site rename from
+finishing. Global verified units can finish it but cost unrelated tasks, so
+ADR-0227 remains off by default. The withdrawn accounting/profile remedies in
+ADR-0230/0231 remain reverted. A narrower trigger needs actual change evidence.
+
+**Decision.** User/env-only `harness.granularity.headless_rename_units` (0–8,
+default0) offers a separate eval-only experiment. Positive legacy
+`headless_units` takes precedence and retains its behavior. A real size refusal
+after mutation can end a narrow unit only when one contained regular tracked
+Python file differs from its attested base solely by a uniform ASCII identifier
+pair. Reuse the already linked Tree-sitter/Python versions, matching tree
+structure and every remaining byte, including strings, comments and whitespace.
+The first unit must rename a function declaration; later units retain its pair.
+This rejects ordinary call substitutions such as int to round as a starting
+trigger. It recognizes a syntactic class, not binding or task correctness.
+
+Read authorization uses the existing `read_file` headless permission preflight
+before source retrieval. Dirty initial material, unavailable snapshots,
+unsupported source, parser error/missing nodes and resource exhaustion decline.
+Sources are limited to64KiB, traversal to16384 node pairs, parses to100ms each,
+and changed names to256 bytes. Probe at most once per unit; preserve one pair
+through the chain. Source material is checked around proof and again before
+checkpoint verification. No source content is added to model messages.
+
+After proof, the existing host-unit lifecycle, opaque/MCP/uncertain-write
+exclusions, permissions, syntax/full checks, stable-material checks and bounded
+unit count remain authoritative. Only an actual passing full verification and
+the model's final answer complete the task. No attempt refunds, cap increases,
+standing grants, new process runner, persisted format or prompt-intent heuristic.
+
+**Consequences.** Supported renames can continue in smaller verified units when
+explicitly enabled. Unsupported or ambiguous material retains conservative
+refusals. Print/RPC/interactive and shipped defaults are unchanged. Mechanism
+tests establish behavior; default activation or quality claims require their
+own comparative evidence and owner disposition.
+
 ## ADR-0231: Small Weak Or Unknown Units Allow Two Regions In One File
 
 **Status:** reverted · **Date:** 2026-10-16. Refines ADR-0199 region sizing.

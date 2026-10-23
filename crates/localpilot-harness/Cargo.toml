@@ -20,6 +20,8 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-python = { workspace = true }
 localpilot-config = { path = "../localpilot-config" }
 localpilot-core = { path = "../localpilot-core" }
 localpilot-llm = { path = "../localpilot-llm" }

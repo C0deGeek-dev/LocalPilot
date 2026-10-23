@@ -59,6 +59,22 @@ Background tests cover cancellation during startup grace, stop and session close
 
 ## Automatic Work Sizing
 
+`localpilot-cli/tests/eval_multi_site.rs` drives the actual CLI with an offline
+scripted provider and isolated repositories/configuration. Selective rename
+controls verify declaration-led four-site completion through three checkpoints
+and an actual passing full check; call substitutions, mixed edits, dirty bases,
+failed writes, opaque launches, missing verification, pair switching and unit
+limits cannot gain completion. Configuration controls refuse project enablement
+and values above the ceiling before provider requests. Legacy global-unit and
+default-off behavior remain independently covered. Harness unit controls prove
+that unavailable read authority and a verifier that moves material earn no
+selective checkpoint. Parser tests distinguish code identifiers in f-strings
+from string/comment content and reject unsupported/bounded input.
+
+These deterministic checks establish the continuation mechanism and its refusal
+boundaries. They do not establish a live model-quality improvement or authorize
+changing the default.
+
 The production-dispatch scenarios also cover short whole-file text larger in
 bytes than its line count, byte-small files exceeding the line cap, tightened
 line configuration, and denied reads preceding content-dependent limits.

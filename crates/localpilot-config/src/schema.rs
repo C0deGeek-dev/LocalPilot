@@ -1251,6 +1251,10 @@ pub struct GranularityConfig {
     /// check; the task still needs its full verification to pass.
     #[serde(skip_serializing_if = "is_zero")]
     pub headless_units: u8,
+    /// Eval-only uniform Python identifier continuation; user/env only, 0 = off.
+    /// Positive `headless_units` takes precedence. Same hard unit ceiling.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub headless_rename_units: u8,
 }
 
 /// The hard ceiling for `[harness.granularity] headless_units`.

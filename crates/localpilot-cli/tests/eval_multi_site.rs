@@ -328,6 +328,12 @@ enum Plan {
     StopAfterFirst,
     /// Rename the first site, run a shell command, then end the unit.
     ShellInUnit,
+    NumericFirst,
+    CallSubstitution,
+    DirtyBaseline,
+    FailedWrite,
+    ProjectEnableRename,
+    DifferentPair,
 }
 
 /// A model that reads the workspace to choose its next site, like a model that
@@ -361,6 +367,36 @@ impl Respond for Workspace {
         let renamed_any = !std::fs::read_to_string(self.root.join("money.py"))
             .unwrap_or_default()
             .contains("def old_name");
+        if self.plan == Plan::CallSubstitution && n == 0 {
+            return calls_tool(
+                n,
+                "edit_file",
+                &json!({"path":"money.py","old_text":"round(amount, 2)","new_text":"int(amount, 2)"}),
+            );
+        }
+        if self.plan == Plan::NumericFirst && n == 0 {
+            return calls_tool(
+                n,
+                "edit_file",
+                &json!({"path":"money.py", "old_text":"round(amount, 2)", "new_text":"round(amount, 3)"}),
+            );
+        }
+        if self.plan == Plan::FailedWrite && n == 0 {
+            return calls_tool(
+                n,
+                "edit_file",
+                &json!({"path":"money.py", "old_text":"not present", "new_text":"new_name"}),
+            );
+        }
+        if self.plan == Plan::DifferentPair && renamed_any {
+            if let Some((file, old, new)) = remaining {
+                return calls_tool(
+                    n,
+                    "edit_file",
+                    &json!({"path":file,"old_text":old,"new_text":new.replace("new_name","other_name")}),
+                );
+            }
+        }
         match (self.plan, remaining) {
             (Plan::StopAfterFirst, _) if renamed_any => says("Done."),
             (Plan::ShellInUnit, _)
@@ -439,6 +475,16 @@ fn find_turn_stop(event: &Value) -> Option<String> {
 }
 
 async fn run_eval(plan: Plan, units: Option<&str>, verify: bool, grant_verifier: bool) -> Run {
+    run_eval_mode(plan, units, None, verify, grant_verifier).await
+}
+
+async fn run_eval_mode(
+    plan: Plan,
+    units: Option<&str>,
+    rename_units: Option<&str>,
+    verify: bool,
+    grant_verifier: bool,
+) -> Run {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/props"))
@@ -451,6 +497,19 @@ async fn run_eval(plan: Plan, units: Option<&str>, verify: bool, grant_verifier:
     let root = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     fixture(root.path(), config.path(), &server.uri());
+    if plan == Plan::ProjectEnableRename {
+        let path = root.path().join(".localpilot.toml");
+        let mut config = std::fs::read_to_string(&path).unwrap();
+        config.push_str("\n[harness.granularity]\nheadless_rename_units = 8\n");
+        std::fs::write(path, config).unwrap();
+    }
+    if plan == Plan::DirtyBaseline {
+        std::fs::write(
+            root.path().join("preexisting.txt"),
+            "unrelated untracked material\n",
+        )
+        .unwrap();
+    }
     if !grant_verifier {
         std::fs::write(config.path().join("localpilot/config.toml"), "").unwrap();
     }
@@ -468,6 +527,7 @@ async fn run_eval(plan: Plan, units: Option<&str>, verify: bool, grant_verifier:
     let workspace = root.path().to_path_buf();
     let user_config = config.path().to_path_buf();
     let units = units.map(str::to_string);
+    let rename_units = rename_units.map(str::to_string);
     let output = tokio::task::spawn_blocking(move || {
         let permission = if grant_verifier { "bypass" } else { "default" };
         let mut args = vec!["eval", "--model", "fixture", "--permission", permission];
@@ -484,9 +544,17 @@ async fn run_eval(plan: Plan, units: Option<&str>, verify: bool, grant_verifier:
             .env("APPDATA", &user_config)
             .env("XDG_CONFIG_HOME", &user_config)
             .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env_remove("LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_UNITS")
+            .env_remove("LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_RENAME_UNITS")
             .args(args);
         if let Some(units) = units {
             cmd.env("LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_UNITS", units);
+        }
+        if let Some(units) = rename_units {
+            cmd.env(
+                "LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_RENAME_UNITS",
+                units,
+            );
         }
         cmd.output().unwrap()
     })
@@ -686,6 +754,119 @@ async fn units_above_the_ceiling_are_a_configuration_error() {
     assert!(!run.output.status.success());
     assert!(
         String::from_utf8_lossy(&run.output.stderr).contains("headless_units"),
+        "{}",
+        text(&run)
+    );
+}
+
+#[tokio::test]
+async fn selective_renames_finish_only_through_verified_units() {
+    if !python_available() {
+        return;
+    }
+    for verify in [true, false] {
+        let run = run_eval_mode(Plan::Rename, None, Some("8"), verify, true).await;
+        assert_eq!(run.sites_renamed(), 4, "{}", text(&run));
+        assert_eq!(run.exit_reason(), "Done", "{}", text(&run));
+        assert_eq!(
+            run.turn_stops()
+                .iter()
+                .filter(|s| *s == "UnitCheckpoint")
+                .count(),
+            3,
+            "{}",
+            text(&run)
+        );
+    }
+}
+
+#[tokio::test]
+async fn selective_mode_preserves_safety_and_source_identity_refusals() {
+    if !python_available() {
+        return;
+    }
+    for (plan, units, grant) in [
+        (Plan::NumericFirst, "8", true),
+        (Plan::CallSubstitution, "8", true),
+        (Plan::DirtyBaseline, "8", true),
+        (Plan::FailedWrite, "8", true),
+        (Plan::ShellInUnit, "8", true),
+        (Plan::StopAfterFirst, "8", true),
+        (Plan::Rename, "8", false),
+    ] {
+        let run = run_eval_mode(plan, None, Some(units), true, grant).await;
+        assert_ne!(run.exit_reason(), "Done", "{}", text(&run));
+        assert!(
+            !run.turn_stops().iter().any(|s| s == "UnitCheckpoint"),
+            "{}",
+            text(&run)
+        );
+    }
+}
+
+#[tokio::test]
+async fn selective_unit_limit_and_zero_keep_work_unfinished() {
+    if !python_available() {
+        return;
+    }
+    for (units, sites, checkpoints) in [("0", 1, 0), ("2", 2, 1)] {
+        let run = run_eval_mode(Plan::Rename, None, Some(units), true, true).await;
+        assert_eq!(run.sites_renamed(), sites, "{}", text(&run));
+        assert_ne!(run.exit_reason(), "Done", "{}", text(&run));
+        assert_eq!(
+            run.turn_stops()
+                .iter()
+                .filter(|s| *s == "UnitCheckpoint")
+                .count(),
+            checkpoints
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_global_units_keep_precedence_over_selective_mode() {
+    if !python_available() {
+        return;
+    }
+    // A numeric first change is ineligible for narrow mode, but legacy opt-in
+    // global continuation still ends that bounded unit through its own checks.
+    let run = run_eval_mode(Plan::NumericFirst, Some("2"), Some("8"), true, true).await;
+    assert!(
+        run.turn_stops().iter().any(|s| s == "UnitCheckpoint"),
+        "{}",
+        text(&run)
+    );
+}
+
+#[tokio::test]
+async fn selective_units_above_the_ceiling_fail_before_provider_requests() {
+    let run = run_eval_mode(Plan::Rename, None, Some("9"), true, true).await;
+    assert!(!run.output.status.success());
+    assert!(run.requests.is_empty());
+    assert!(text(&run).contains("headless_rename_units"));
+}
+
+#[tokio::test]
+async fn a_project_cannot_enable_selective_continuation() {
+    let run = run_eval_mode(Plan::ProjectEnableRename, None, None, true, true).await;
+    assert!(!run.output.status.success());
+    assert!(run.requests.is_empty());
+    assert!(text(&run).contains("harness.granularity.headless_rename_units"));
+}
+
+#[tokio::test]
+async fn a_selective_chain_cannot_switch_rename_pairs() {
+    if !python_available() {
+        return;
+    }
+    let run = run_eval_mode(Plan::DifferentPair, None, Some("8"), true, true).await;
+    assert_ne!(run.exit_reason(), "Done", "{}", text(&run));
+    assert_eq!(
+        run.turn_stops()
+            .iter()
+            .filter(|s| *s == "UnitCheckpoint")
+            .count(),
+        1,
         "{}",
         text(&run)
     );

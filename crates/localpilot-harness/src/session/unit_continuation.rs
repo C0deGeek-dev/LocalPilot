@@ -6,7 +6,9 @@
 use std::path::Path;
 
 use localpilot_config::CheckConfig;
-use localpilot_core::{Message, Role};
+use localpilot_core::{Message, Role, ToolCall, ToolUseId};
+use localpilot_sandbox::Interactivity;
+use localpilot_tools::ToolContext;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -19,6 +21,13 @@ const REFUSAL_STEP: &str =
     "split into a smaller coherent unit, verify it, and checkpoint before continuing";
 const UNIT_STEP: &str = "this unit is complete: the harness now checks it and, when the \
      check allows, opens the next unit with the same task";
+
+#[derive(Default)]
+pub(super) struct RenameContinuation {
+    pair: Option<super::rename::RenamePair>,
+    pub(super) proof: Option<crate::resume::WorkDiffBaseline>,
+    pub(super) attempted: bool,
+}
 
 /// A host-owned syntax check for one root-relative Python source file. It
 /// parses with the standard library in isolated mode and cannot import a
@@ -88,9 +97,104 @@ impl SessionRuntime {
                 .is_ok_and(|after| &after != before)
         });
         if changed {
+            if self.rename_continuation.is_some() && !self.prepare_rename_unit() {
+                return false;
+            }
             self.unit_end_requested = true;
         }
         changed
+    }
+
+    fn prepare_rename_unit(&mut self) -> bool {
+        let Some(state) = &mut self.rename_continuation else {
+            return false;
+        };
+        if state.attempted {
+            return state.proof.is_some();
+        }
+        state.attempted = true;
+        if self.harness_checkpoint_owner
+            || self.work_mcp_call_attempted
+            || self.work_opaque_launch_dispatched
+            || self.work_write_error_may_have_run
+            || !self.work_profile().is_some_and(|p| p.stop_after_checkpoint)
+        {
+            return false;
+        }
+        let Some(baseline) = self.work_diff_baseline.as_ref() else {
+            return false;
+        };
+        let root = self.workspace.process_dir();
+        let Ok(paths) = crate::resume::work_changed_paths(&root, baseline) else {
+            return false;
+        };
+        let Some(paths) = syntax_check_targets(&root, &paths, 1) else {
+            return false;
+        };
+        let path = &paths[0];
+        let call = ToolCall::new(
+            ToolUseId::from("rename-evidence-read"),
+            "read_file",
+            serde_json::json!({"path":path}),
+        );
+        let ctx = ToolContext {
+            workspace: &self.workspace,
+            interactivity: Interactivity::NonInteractive,
+            trusted: self.config.trusted,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        if self
+            .tools
+            .check_headless_permissions(&call, &ctx, &self.engine.snapshot())
+            .is_err()
+        {
+            return false;
+        }
+        let Ok(material) = crate::resume::work_diff_baseline(&root) else {
+            return false;
+        };
+        let Ok(before) = crate::resume::work_base_source(&root, baseline, path) else {
+            return false;
+        };
+        use std::io::Read;
+        let Ok(file) = std::fs::File::open(root.join(path)) else {
+            return false;
+        };
+        let mut bytes = Vec::new();
+        if file
+            .take(super::rename::SOURCE_CAP as u64 + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > super::rename::SOURCE_CAP
+        {
+            return false;
+        }
+        let Ok(after) = std::str::from_utf8(&bytes) else {
+            return false;
+        };
+        let Some(evidence) = super::rename::rename_evidence(&before, after) else {
+            return false;
+        };
+        if !crate::resume::work_diff_baseline(&root).is_ok_and(|now| now == material) {
+            return false;
+        }
+        let Some(state) = &mut self.rename_continuation else {
+            return false;
+        };
+        let pair = evidence.pair;
+        if state.pair.is_none() && !evidence.declares_function {
+            return false;
+        }
+        if state.pair.as_ref().is_some_and(|old| old != &pair) {
+            return false;
+        }
+        state.pair = Some(pair);
+        state.proof = Some(material);
+        true
     }
 
     /// Settle a unit the host ended after a bounds refusal. A passing full
@@ -259,6 +363,15 @@ impl SessionRuntime {
         if !profile.stop_after_checkpoint || before.head != baseline.head {
             return Err(UnitAttempt::NotEarned);
         }
+        if let Some(state) = &self.rename_continuation {
+            match &state.proof {
+                None => return Err(UnitAttempt::NotEarned),
+                Some(proof) if proof != &before => return Err(UnitAttempt::Stop(
+                    "unit checkpoint refused: the workspace moved after rename evidence; work is preserved".into(),
+                )),
+                Some(_) => {}
+            }
+        }
         match crate::resume::work_diff_baseline(root) {
             Ok(now) if now == before => {}
             _ => return Err(UnitAttempt::Stop(MOVED.to_string())),
@@ -278,22 +391,34 @@ impl SessionRuntime {
     }
 
     /// Run a headless task, continuing in bounded units when
-    /// `[harness.granularity] headless_units` allows it. With the setting off
-    /// this is exactly [`SessionRuntime::run_turn`].
+    /// the user enables global units or selective Python rename units. With
+    /// both settings off this is exactly [`SessionRuntime::run_turn`].
     pub async fn run_turn_in_units(
         &mut self,
         prompt: &str,
         events: &broadcast::Sender<RuntimeEvent>,
         cancel: &CancellationToken,
     ) -> StopReason {
-        let units = self.config.granularity.as_ref().map_or(0, |caps| {
-            caps.headless_units
-                .min(localpilot_config::MAX_HEADLESS_UNITS)
+        let (units, rename_only) = self.config.granularity.as_ref().map_or((0, false), |caps| {
+            if caps.headless_units > 0 {
+                (
+                    caps.headless_units
+                        .min(localpilot_config::MAX_HEADLESS_UNITS),
+                    false,
+                )
+            } else {
+                (
+                    caps.headless_rename_units
+                        .min(localpilot_config::MAX_HEADLESS_UNITS),
+                    true,
+                )
+            }
         });
         if units == 0 {
             return self.run_turn(prompt, events, cancel).await;
         }
         self.unit_checkpoints_remaining = units - 1;
+        self.rename_continuation = rename_only.then(RenameContinuation::default);
         let mut unit = 1u8;
         let mut reason = self.run_turn(prompt, events, cancel).await;
         while reason == StopReason::UnitCheckpoint && !cancel.is_cancelled() {
@@ -315,6 +440,7 @@ impl SessionRuntime {
         // The obligation stays until an executed full check passes: a resumed
         // turn on this runtime cannot finish unresolved work.
         self.unit_checkpoints_remaining = 0;
+        self.rename_continuation = None;
         reason
     }
 }

@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Opt-in selective Python rename units.** User-only `headless_rename_units`
+  lets `eval` continue a uniform identifier rename through bounded, verified
+  units. Syntactic proof never replaces the original full check. Existing
+  permissions, edit limits and global-unit behavior remain; default is off.
+
 - **Refresh transport and YAML dependencies.** Update the TLS implementation,
   certificate verifier and bundled roots to security-fixed releases. Agent and
   skill YAML uses the maintained YAML organization parser; remove the unused
