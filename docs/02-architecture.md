@@ -529,6 +529,22 @@ promotion/publication callers use the original approval API. Preflight does not
 run checks or enforce the pending promotion gate; all callers must adopt it
 before claiming validation protects promotion.
 
+`localpilot-selfimprove::validate_proposal` is the library execution coordinator.
+It holds that common-repository transaction, re-resolves the reviewed plan before
+each command, consumes an `EvaluationToken`, and calls the existing harness
+`CheckRunner::execute`. Exact typed commands add a restriction before the normal
+permission decision; the consumed grant answers matching Ask decisions and never
+overrides Deny. The opt-in owned-process runner reuses tools' process owner
+(Windows jobs or Unix groups), recording cleanup confirmation separately from
+exit status. Existing quality callers retain their previous behavior.
+
+The coordinator persists Running and per-check observations, then recomputes
+source/toolchain/context identity and persists the final receipt before finishing
+the nonce journal. Abandoned futures and uncertain cleanup leave recovery pending.
+This API starts no automatic retries or promotion and has no CLI execution entry
+point yet. The registered profile declares only a worktree-local target cache and
+no artifacts; future artifact profiles must add bounded collection before passing.
+
 New proposals retain their original base/target/scope in provenance. Reopening a
 persisted proposal is a nonowning inspection: dropping that handle preserves its
 worktree; explicit discard still removes it, while a newly created unpersisted

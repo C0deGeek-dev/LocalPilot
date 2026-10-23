@@ -191,7 +191,56 @@ pub struct RepositoryTransaction<'a> {
 }
 
 impl RepositoryTransaction<'_> {
-    pub(super) fn ensure_repository(&self, root: &Path) -> Result<(), ValidationError> {
+    /// Recheck the consumed run's private host configuration/environment without
+    /// exposing values or comparison digests in public evidence.
+    ///
+    /// # Errors
+    /// Missing/nonexecution intent, changed context or invalid plan/configuration.
+    pub fn verify_execution_context(
+        &self,
+        run: uuid::Uuid,
+        plan: &ValidationPlanIdentity,
+    ) -> Result<(), ValidationError> {
+        let event = self
+            .journal
+            .events
+            .get(&run)
+            .ok_or(ValidationError::RecoveryRequired)?;
+        if event.reservation.purpose != AuthorityPurpose::Evaluation
+            || self.journal.environments.get(&run)
+                != Some(&super::authority::execution_context(plan)?)
+        {
+            return Err(ValidationError::Stale);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_evaluation_record(
+        &self,
+        evidence: &ValidationEvidence,
+    ) -> Result<(), ValidationError> {
+        let event = self
+            .journal
+            .events
+            .get(&evidence.run_id)
+            .ok_or(ValidationError::RecoveryRequired)?;
+        if event.completed
+            || event.reservation.purpose != AuthorityPurpose::Evaluation
+            || event.reservation.binding
+                != ContentDigest::hash(
+                    "localpilot-evaluation-consent-v1",
+                    &[
+                        evidence.proposal.as_str().as_bytes(),
+                        evidence.plan.as_str().as_bytes(),
+                    ],
+                )
+            || evidence.approved_plan.digest()? != evidence.plan
+        {
+            return Err(ValidationError::Stale);
+        }
+        Ok(())
+    }
+    pub(crate) fn ensure_repository(&self, root: &Path) -> Result<(), ValidationError> {
         let common = crate::git::git(root, &["rev-parse", "--git-common-dir"])?;
         let common =
             fs::canonicalize(root.join(common.trim())).map_err(|source| io(root, source))?;
@@ -574,6 +623,7 @@ mod tests {
         std::env::set_var(&key, "private-original");
         plan.environment_names = vec![key.clone()];
         receipt.plan = plan.digest().unwrap();
+        receipt.approved_plan = plan.clone();
         let evaluation =
             EvaluationToken::approve(&proposal, &plan, "human", "execute fixed checks").unwrap();
         let run = tx.reserve_evaluation(evaluation, &proposal, &plan).unwrap();

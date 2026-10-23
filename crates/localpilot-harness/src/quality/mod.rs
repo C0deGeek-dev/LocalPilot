@@ -14,6 +14,6 @@ pub use discovery::{program_on_path, propose_gate, ProposedCheck};
 pub use profiles::ToolchainProfile;
 pub use ratify::{ratify_gate, render_check, summarize_proposal, GateRatification};
 pub use runner::{
-    CancelSignal, CheckOutcome, CheckRunner, CheckSeverity, CheckStatus, CommandEnd, CommandRun,
-    EnvPolicy, QUALITY_CHECK_TOOL,
+    CancelSignal, CheckOutcome, CheckRunner, CheckSeverity, CheckStatus, CleanupOutcome,
+    CommandEnd, CommandRun, EnvPolicy, QUALITY_CHECK_TOOL,
 };

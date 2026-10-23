@@ -300,6 +300,8 @@ pub struct ValidationPlanIdentity {
     pub checks: Vec<PlannedCheck>,
     /// Names of allowed inherited environment variables, sorted uniquely.
     pub environment_names: Vec<String>,
+    /// Explicit nonsecret environment overrides, included in the preview/hash.
+    pub environment_set: std::collections::BTreeMap<String, String>,
     /// Relevant host configuration paths. Only names are public; private token/
     /// journal comparison binds their bounded content without exposing it.
     pub private_config_paths: Vec<String>,
@@ -386,6 +388,20 @@ impl ValidationPlanIdentity {
         hash.number(self.environment_names.len() as u64);
         for name in &self.environment_names {
             hash.field(name.as_bytes());
+        }
+        hash.number(self.environment_set.len() as u64);
+        for (name, value) in &self.environment_set {
+            if name.is_empty()
+                || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                || value.contains('\0')
+                || localpilot_config::redact::redact(value) != *value
+            {
+                return Err(ValidationError::Invalid(
+                    "explicit environment must be nonsecret and portable".into(),
+                ));
+            }
+            hash.field(name.as_bytes());
+            hash.field(value.as_bytes());
         }
         hash.number(self.private_config_paths.len() as u64);
         for path in &self.private_config_paths {
@@ -537,6 +553,8 @@ pub struct ValidationEvidence {
     pub proposal: ContentDigest,
     /// Exact reviewed plan at execution.
     pub plan: ContentDigest,
+    /// Complete approved nonsecret command/environment/limit plan for inspection.
+    pub approved_plan: ValidationPlanIdentity,
     /// Aggregate outcome, never sufficient without the detailed observations.
     pub state: ValidationState,
     /// Unix seconds at start.
@@ -565,7 +583,10 @@ impl ValidationEvidence {
                 "unsupported evidence identity".into(),
             ));
         }
-        if self.proposal != proposal.digest() || self.plan != plan.digest()? {
+        if self.proposal != proposal.digest()
+            || self.plan != plan.digest()?
+            || self.approved_plan != *plan
+        {
             return Err(ValidationError::Stale);
         }
         if self.started_at > self.finished_at || self.finished_at > now {

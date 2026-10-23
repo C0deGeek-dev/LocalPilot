@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Add a library-only proposal execution coordinator using single-use evaluation
+  consent and the existing permission-gated runner. Restrict commands and
+  environment to the reviewed plan, retain process ownership through cleanup,
+  and persist partial/final observations before completing the authority journal.
+  CLI execution, promotion/publication migration and final gate adoption remain
+  pending; ordinary quality callers keep their existing behavior.
+
 - Add static `self-review preflight --id` for proposal diff/source identity,
   trusted-base Rust command plans and explicit host-access risks. It runs no
   proposed checks or promotion. Preserve persisted proposals when a review handle

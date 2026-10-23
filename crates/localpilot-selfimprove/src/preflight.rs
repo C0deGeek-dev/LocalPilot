@@ -59,13 +59,21 @@ pub fn proposal_preflight(root: &Path, id: &str) -> Result<PreflightReport, Vali
     let mut authority = RepositoryAuthority::open(root)?;
     let transaction = authority.try_transaction()?;
     let patch = ProposedPatch::reopen(root, id)?;
-    let checks = base_checks(&patch)?;
-    let selector = toolchain_selector(&patch)?;
+    preflight_in_transaction(root, &patch, &transaction)
+}
+
+pub(crate) fn preflight_in_transaction(
+    root: &Path,
+    patch: &ProposedPatch,
+    transaction: &localpilot_patchgen::validation::RepositoryTransaction<'_>,
+) -> Result<PreflightReport, ValidationError> {
+    let checks = base_checks(patch)?;
+    let selector = toolchain_selector(patch)?;
     let root = fs::canonicalize(root).map_err(|e| io(root, e))?;
     let worktree =
         fs::canonicalize(patch.worktree_path()).map_err(|e| io(patch.worktree_path(), e))?;
     let host = resolve_host(&selector, &checks, &[&root, &worktree])?;
-    build_report(&patch, &transaction, &checks, host)
+    build_report(patch, transaction, &checks, host)
 }
 
 fn base_checks(patch: &ProposedPatch) -> Result<Vec<CheckConfig>, ValidationError> {
@@ -224,6 +232,10 @@ fn validate_registered_check(check: &CheckConfig) -> Result<(), ValidationError>
             Some("check" | "build" | "test" | "clippy" | "fmt")
         )
         || check.args.iter().any(|arg| arg == "--fix")
+        || check
+            .args
+            .iter()
+            .any(|arg| localpilot_config::redact::redact(arg) != *arg)
         || (check.args.first().map(String::as_str) == Some("fmt")
             && !check.args.iter().any(|arg| arg == "--check"))
     {
@@ -238,6 +250,14 @@ fn build_report(
     checks: &[CheckConfig],
     host: HostRust,
 ) -> Result<PreflightReport, ValidationError> {
+    let workspace = localpilot_sandbox::Workspace::new(patch.worktree_path())
+        .map_err(|_| invalid("proposal workspace cannot be resolved"))?;
+    let target = workspace
+        .resolve(Path::new("target"))
+        .map_err(|_| invalid("declared target cache escapes the proposal workspace"))?;
+    if target != workspace.root().join("target") {
+        return Err(invalid("declared target cache is aliased"));
+    }
     let program = host
         .rustup
         .to_str()
@@ -278,6 +298,32 @@ fn build_report(
     .iter()
     .map(|s| (*s).into())
     .collect();
+    if cfg!(windows) {
+        // MSVC discovery needs Windows installation roots outside a developer
+        // prompt; a developer prompt additionally supplies include/library roots.
+        // Preserve only named toolchain inputs, never the whole host environment.
+        environment_names.extend(
+            [
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+                "ProgramW6432",
+                "SystemDrive",
+                "INCLUDE",
+                "LIB",
+                "LIBPATH",
+                "VCINSTALLDIR",
+                "VCToolsInstallDir",
+                "VCToolsVersion",
+                "VSINSTALLDIR",
+                "WindowsSdkDir",
+                "WindowsSDKVersion",
+                "UniversalCRTSdkDir",
+                "UCRTVersion",
+            ]
+            .iter()
+            .map(|name| (*name).into()),
+        );
+    }
     environment_names.sort();
     let plan = ValidationPlanIdentity {
         profile: "ratified-rust-v1".into(),
@@ -291,6 +337,16 @@ fn build_report(
         toolchain: host.identity.digest(),
         checks: planned,
         environment_names,
+        environment_set: BTreeMap::from([
+            ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
+            (
+                "CARGO_TARGET_DIR".into(),
+                target
+                    .to_str()
+                    .ok_or_else(|| invalid("non-UTF8 target cache"))?
+                    .into(),
+            ),
+        ]),
         private_config_paths: host.private_config_paths,
         artifact_paths: Vec::new(),
         cache_paths: vec!["target".into()],
@@ -507,6 +563,7 @@ impl PreflightReport {
                 check.name, check.program, check.args, class
             ));
         }
+        out.push_str(&format!("Fixed nonsecret environment: {:?}\nNetwork: Cargo uses --frozen for dependency resolution; proposed code retains host network access.\n", self.plan.environment_set));
         out.push_str(&format!("Environment names: {:?}\nPrivate host config paths (contents not displayed): {:?}\nLimits: {}s/check, {}s total, {} bytes/output stream; artifact count/size/total: {}/{}/{} bytes\nDeclared artifacts: {:?}; caches: {:?}\nCold/warm cost: not measured for this plan. Deadlines are execution limits, not a prediction of runtime.\n", self.plan.environment_names, self.plan.private_config_paths, self.plan.limits.per_check_secs, self.plan.limits.total_secs, self.plan.limits.stream_bytes, self.plan.limits.artifact_count, self.plan.limits.artifact_bytes, self.plan.limits.artifact_total_bytes, self.plan.artifact_paths, self.plan.cache_paths));
         for (risk, paths) in &self.risks {
             out.push_str(&format!("Risk {risk:?}: {paths:?}\n"));
@@ -671,6 +728,51 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let error = resolve_host(&selector, &[check(&["check"])], &[root.path()]);
         assert!(matches!(error, Err(ValidationError::Invalid(_))));
+    }
+
+    #[test]
+    fn a_declared_cache_cannot_redirect_validation_outside_the_worktree() {
+        let (repo, patch) = fixture();
+        let external = tempfile::tempdir().unwrap();
+        let target = patch.worktree_path().join("target");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), &target).unwrap();
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&target)
+            .arg(external.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let mut authority = RepositoryAuthority::open(repo.path()).unwrap();
+        let transaction = authority.try_transaction().unwrap();
+        let host_dir = tempfile::tempdir().unwrap();
+        let result = build_report(
+            &patch,
+            &transaction,
+            &base_checks(&patch).unwrap(),
+            HostRust {
+                rustup: host_dir.path().join(executable("rustup")),
+                identity: HostToolchainIdentity {
+                    selector: "1.82".into(),
+                    root: host_dir.path().to_str().unwrap().into(),
+                    components: BTreeMap::new(),
+                },
+                private_config_paths: Vec::new(),
+            },
+        );
+        assert!(
+            matches!(result, Err(ValidationError::Invalid(ref message)) if message.contains("cache escapes"))
+        );
+        assert_eq!(transaction.events().count(), 0);
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+        // Remove only the link; external fixture remains owned by its TempDir.
+        #[cfg(windows)]
+        fs::remove_dir(target).unwrap();
+        #[cfg(unix)]
+        fs::remove_file(target).unwrap();
     }
 
     #[test]

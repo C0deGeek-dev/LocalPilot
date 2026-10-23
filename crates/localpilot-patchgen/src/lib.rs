@@ -192,6 +192,28 @@ pub fn propose(
 }
 
 impl ProposedPatch {
+    /// Persist detailed observations for a run consumed under this repository's
+    /// current exclusive transaction. This writes data, never a passing capability
+    /// or promotion approval; the final gate rechecks the complete receipt.
+    ///
+    /// # Errors
+    /// Different repository/run/plan, unsupported schema or atomic-store failure.
+    pub fn record_validation(
+        &mut self,
+        transaction: &validation::RepositoryTransaction<'_>,
+        evidence: validation::ValidationEvidence,
+    ) -> Result<(), validation::ValidationError> {
+        transaction.ensure_repository(&self.repo_root)?;
+        transaction.verify_evaluation_record(&evidence)?;
+        if evidence.schema != validation::VALIDATION_SCHEMA {
+            return Err(validation::ValidationError::Invalid(
+                "unknown validation schema".into(),
+            ));
+        }
+        self.provenance.validation = Some(evidence);
+        write_proposal_meta(&self.repo_root, &self.id, &self.provenance)?;
+        Ok(())
+    }
     /// Reattach to a proposal created in an earlier process (e.g. a separate
     /// `promote`/`discard` CLI invocation) so it can be reviewed, promoted (with a
     /// token), or discarded. Reconstructs the handle from the on-disk worktree and

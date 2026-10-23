@@ -664,6 +664,27 @@ process belongs to this profile. Preflight is available independently of the
 still-pending execution/promotion gate; existing approval callers have not yet
 migrated to the new authorities.
 
+The library execution coordinator consumes separate evaluation consent before
+calling the existing permission-gated runner. It passes only the displayed
+environment names and fixed nonsecret settings: the worktree-local Cargo target
+directory and disabled rustup auto-install. Windows additionally preserves the
+named MSVC discovery/include/library inputs. Ambient model credentials, Rust
+flags and LocalPilot settings are not inherited. Host Cargo configuration remains
+a reviewed private input, hashed for change detection without storing its contents.
+Approved code still has the host user's access; an environment allowlist does not
+prevent it reading credentials or other files directly.
+
+Execution reserves cleanup time within the approved check and total budgets;
+bounded stdout/stderr are redacted before receipt storage. Source/host inspection
+and filesystem persistence can stall with the host OS, so the budget is not a
+hard real-time guarantee for those operations. Late observations cannot pass.
+An exit code of zero is insufficient: missing pipe closure, uncertain process
+cleanup, stale inputs, incomplete checks or elapsed limits invalidate evidence.
+Windows job accounting and Unix process-group snapshots acknowledge cleanup;
+Unix process groups do not contain a descendant deliberately creating a new
+session. Future cancellation drops the process owner and leaves an unfinished
+journal that requires explicit inspection, never automatic replay.
+
 The self-improvement loop's write half (ADR-0034) is built so the human gate is
 structural, not a convention:
 

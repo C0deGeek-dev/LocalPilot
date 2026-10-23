@@ -21,9 +21,12 @@
 #![forbid(unsafe_code)]
 
 mod contract;
+mod execution;
 mod guardrails;
 mod orchestrator;
 mod preflight;
+
+pub use execution::validate_proposal;
 
 pub use preflight::{proposal_preflight, PreflightReport, PreflightRisk};
 
