@@ -519,6 +519,15 @@ Owns the write half of the self-improvement loop (ADR-0034):
 - the `ApprovalToken`-gated promotion path (single human-only constructor)
 - the change-provenance record carried with each proposal
 
+The `validation` library module defines content/plan identities, three separate
+memory-only authorities, structured evidence and a Git-common-dir lock/consumption
+journal. Its canonical hashes preserve field and argv boundaries; old provenance
+without structured evidence is unvalidated. The new module is currently
+library-only: the existing CLI promotion/publication paths still use the original
+approval API. It does not yet add preflight, run proposal checks or enforce a new
+CLI promotion gate. These contracts must be wired through all callers before
+claiming that validation protects promotion.
+
 ### `localpilot-dist`
 
 Owns the **on-disk contract** for what is installed, which version runs, and how a

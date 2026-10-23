@@ -1928,11 +1928,16 @@ dependencies = [
 name = "localpilot-patchgen"
 version = "5.0.0"
 dependencies = [
+ "fd-lock",
  "localpilot-config",
+ "localpilot-store",
+ "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.9",
+ "uuid",
 ]
 
 [[package]]

@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Add library-only proposal-validation contracts: separate execution, promotion
+  and publication authorities; content-bound evidence; and repository-wide
+  locking with durable nonce reservations. Existing CLI callers have not yet
+  adopted the new validation gate.
+
 - Update the shared async runtime to Tokio1.51.6 and the TLS security fixes
   while preserving Rust1.82 and existing runtime features. Guard the audit
   exceptions for unbuilt optional QUIC dependencies against activation.

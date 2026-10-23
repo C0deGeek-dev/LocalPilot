@@ -12,7 +12,12 @@ workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+fd-lock = { workspace = true }
 localpilot-config = { path = "../localpilot-config" }
+localpilot-store = { path = "../localpilot-store" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+proptest = { workspace = true }

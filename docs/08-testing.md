@@ -1,5 +1,15 @@
 # Test Plan
 
+`localpilot-patchgen` contract tests cover canonical field/argv boundaries,
+stale/expired/partial receipts, denied and cancelled outcomes, legacy provenance,
+private environment comparison, and all six forbidden token substitutions.
+A separate child test process reserves an intent and holds the real file lock;
+the parent observes contention, kills/waits for the child, then verifies lock
+release and durable refusal to replay the unfinished intent. Linked worktrees
+share the same authority identity. The ignored child helper runs through that
+parent test, rather than representing skipped behavioural coverage. These test
+the library contracts; the existing CLI is not yet migrated to them.
+
 Context-accounting regressions in `localpilot-harness/tests/session.rs` cover
 complete-input calibration, reset after model/provider switches, instruction
 preservation and automatic/manual/forced compaction. `tests/broker.rs` verifies

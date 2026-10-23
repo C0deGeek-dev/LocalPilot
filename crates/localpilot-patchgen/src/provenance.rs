@@ -46,6 +46,10 @@ pub struct ChangeProvenance {
     /// The eval-gate result, attached once the gate has run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_result: Option<EvalResult>,
+    /// Structured proposal validation, independent of historical narrative eval
+    /// results. Missing evidence in old records means NotRun, never Passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<crate::validation::ValidationEvidence>,
 }
 
 impl ChangeProvenance {
@@ -68,6 +72,7 @@ impl ChangeProvenance {
             rollback_notes: "drop the proposal branch/worktree".to_string(),
             lessons: Vec::new(),
             eval_result: None,
+            validation: None,
         }
     }
 

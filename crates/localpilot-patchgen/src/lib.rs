@@ -26,6 +26,7 @@ mod git;
 mod outward;
 mod proposal;
 mod provenance;
+pub mod validation;
 
 pub use error::PatchError;
 pub use gate::ApprovalToken;
