@@ -645,6 +645,25 @@ spans; spans leave the index when their session leaves it.
 
 ## Self-Improvement Patch Generation
 
+`localpilot self-review preflight --id <proposal>` shows a persisted proposal,
+its original base, exact resolved validation command plan and host-access risks.
+It issues no execution consent, runs no proposed command and does not promote.
+Checks come only from committed `.localpilot.toml` in the proposal base, with
+the base's explicit installed Rust toolchain. A proposed replacement config is
+displayed as a risk and cannot choose commands for its own validation. V1
+supports registered Cargo check/build/test/clippy and `fmt --check`; it refuses
+arbitrary executables, aliases, fixers and missing toolchains without fallback or
+automatic installation. Keep credentials in user/environment configuration;
+only reviewed command settings belong in committed project config.
+
+The review states that future approved checks run with LocalPilot's host access.
+Worktrees separate ordinary edits; they do not contain build scripts, proc macros,
+tests, network access or arbitrary filesystem/process effects. Cargo `--frozen`
+restricts Cargo's resolution/network use, not invoked code. No default model/GPU
+process belongs to this profile. Preflight is available independently of the
+still-pending execution/promotion gate; existing approval callers have not yet
+migrated to the new authorities.
+
 The self-improvement loop's write half (ADR-0034) is built so the human gate is
 structural, not a convention:
 

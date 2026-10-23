@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Add static `self-review preflight --id` for proposal diff/source identity,
+  trusted-base Rust command plans and explicit host-access risks. It runs no
+  proposed checks or promotion. Preserve persisted proposals when a review handle
+  is dropped, retain their original base/scope, and write provenance atomically.
+  Include new scoped files in the produced diff before declaring a proposal empty.
+  Execution and promotion callers have not yet adopted the new validation gate.
+
 - Harden static proposal Git operations against implicit hooks, signing and
   diff helpers. Refuse unsupported filter attributes before checkout/index
   effects while supporting unused filter configuration. Guard existing

@@ -106,20 +106,49 @@ pub(super) fn environment_digest(plan: &ValidationPlanIdentity) -> ContentDigest
     hash.finish()
 }
 
+pub(super) fn execution_context(
+    plan: &ValidationPlanIdentity,
+) -> Result<ContentDigest, ValidationError> {
+    use std::io::Read;
+    let mut hash = super::CanonicalHash::new("localpilot-private-execution-context-v1");
+    hash.field(environment_digest(plan).as_str().as_bytes());
+    for path in &plan.private_config_paths {
+        hash.field(path.as_bytes());
+        match std::fs::File::open(path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take(1024 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|source| ValidationError::Io {
+                        path: path.into(),
+                        source,
+                    })?;
+                if bytes.len() > 1024 * 1024 {
+                    return Err(ValidationError::Invalid(
+                        "private configuration exceeds1MiB".into(),
+                    ));
+                }
+                hash.field(b"present");
+                hash.field(&bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => hash.field(b"absent"),
+            Err(source) => {
+                return Err(ValidationError::Io {
+                    path: path.into(),
+                    source,
+                })
+            }
+        }
+    }
+    Ok(hash.finish())
+}
+
 fn evaluation_binding(
     proposal: &ProposalIdentity,
     plan: &ValidationPlanIdentity,
 ) -> Result<(ContentDigest, ContentDigest), ValidationError> {
-    let proposal = proposal.digest();
-    let plan_digest = plan.digest()?;
-    let environment = environment_digest(plan);
-    let binding = ContentDigest::hash(
-        "localpilot-evaluation-consent-v1",
-        &[
-            proposal.as_str().as_bytes(),
-            plan_digest.as_str().as_bytes(),
-        ],
-    );
+    let environment = execution_context(plan)?;
+    let binding = proposal.execution_identity(plan)?;
     Ok((binding, environment))
 }
 

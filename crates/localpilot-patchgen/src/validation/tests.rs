@@ -51,7 +51,9 @@ pub(super) fn fixture(
             args: vec!["--frozen".into(), "a b".into()],
         }],
         environment_names: Vec::new(),
+        private_config_paths: Vec::new(),
         artifact_paths: Vec::new(),
+        cache_paths: Vec::new(),
         limits: ValidationLimits::default(),
     };
     let now = super::authority::unix_now().unwrap();
@@ -202,6 +204,8 @@ fn unsupported_plans_and_artifact_escape_fail_before_authorization() {
         "a//b",
         ".",
         "a/../b",
+        ".git/authority",
+        ".localpilot/proposals/receipt.json",
     ] {
         let mut changed = plan.clone();
         changed.artifact_paths = vec![path.into()];
@@ -268,6 +272,29 @@ fn execution_consent_expires_on_environment_changes_and_debug_is_redacted() {
         0,
         "stale authority never reserves effects"
     );
+}
+
+#[test]
+fn changing_private_host_configuration_invalidates_execution_without_publishing_its_contents() {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init"]);
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(config.path(), "trusted host config version one").unwrap();
+    let mut authority = RepositoryAuthority::open(repo.path()).unwrap();
+    let mut transaction = authority.try_transaction().unwrap();
+    let (proposal, mut plan, _) = fixture(transaction.repository_identity());
+    plan.private_config_paths = vec![config.path().to_str().unwrap().into()];
+    let grant =
+        EvaluationToken::approve(&proposal, &plan, "reviewer", "execute this plan").unwrap();
+    std::fs::write(config.path(), "changed host config version two").unwrap();
+    assert!(matches!(
+        transaction.reserve_evaluation(grant, &proposal, &plan),
+        Err(ValidationError::Stale)
+    ));
+    assert_eq!(transaction.events().count(), 0);
+    assert!(!serde_json::to_string(&plan)
+        .unwrap()
+        .contains("host config version"));
 }
 
 pub(super) fn git(root: &std::path::Path, args: &[&str]) {

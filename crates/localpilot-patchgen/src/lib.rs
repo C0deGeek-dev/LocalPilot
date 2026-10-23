@@ -39,7 +39,7 @@ pub use outward::{
     OutwardEvent, OutwardKind, OutwardPolicy, PublishPlan, OUTWARD_SCHEMA,
 };
 pub use proposal::{PatchProposal, ProposedEdit};
-pub use provenance::{ChangeProvenance, EvalResult, PROVENANCE_SCHEMA};
+pub use provenance::{ChangeProvenance, EvalResult, ProposalBase, PROVENANCE_SCHEMA};
 
 use std::path::{Path, PathBuf};
 
@@ -70,7 +70,7 @@ pub struct DiffSummary {
 }
 
 /// A proposed patch sitting in an isolated worktree, awaiting human review. Owns
-/// the worktree; dropping or [`Self::discard`]ing it is the rollback.
+/// the worktree; dropping a new unpersisted handle or [`Self::discard`] is rollback.
 #[derive(Debug)]
 pub struct ProposedPatch {
     id: String,
@@ -104,7 +104,7 @@ pub fn propose(
     repo_root: &Path,
     branch: &str,
     proposal: &PatchProposal,
-    provenance: ChangeProvenance,
+    mut provenance: ChangeProvenance,
 ) -> Result<ProposedPatch, PatchError> {
     if !provenance.is_complete() {
         return Err(PatchError::IncompleteProvenance);
@@ -112,6 +112,19 @@ pub fn propose(
     proposal.validate_scope()?;
 
     let base_commit = git::head_commit(repo_root)?;
+    provenance.proposal_base = Some(ProposalBase {
+        commit: base_commit.clone(),
+        target_ref: git::git(repo_root, &["symbolic-ref", "--quiet", "HEAD"])?
+            .trim()
+            .into(),
+        allowed_paths: proposal
+            .allowed_paths
+            .iter()
+            .map(|p| proposal::normalize(p))
+            .collect(),
+    });
+    // Fresh source proposals never inherit a historical validation receipt.
+    provenance.validation = None;
     let worktree = git::Worktree::create(repo_root, branch)?;
 
     // Write each edit strictly inside the worktree.
@@ -132,6 +145,9 @@ pub fn propose(
     // Minimality + scope, enforced on the *produced* diff (defense in depth over
     // the declared edits): the change must touch something, and only files the
     // finding named.
+    // Stage inside the disposable worktree before comparing against its base:
+    // an unstaged Git diff omits newly created, untracked proposal files.
+    git::git(worktree.path(), &["add", "-A"])?;
     let changed = git::changed_paths(worktree.path(), &base_commit)?;
     if changed.is_empty() {
         return Err(PatchError::EmptyProposal);
@@ -149,7 +165,6 @@ pub fn propose(
 
     // Commit on the isolated branch (never main); identity is inline so it does
     // not depend on global git config.
-    git::git(worktree.path(), &["add", "-A"])?;
     let message = commit_message(&proposal.finding_evidence);
     git::git(
         worktree.path(),
@@ -180,9 +195,10 @@ impl ProposedPatch {
     /// Reattach to a proposal created in an earlier process (e.g. a separate
     /// `promote`/`discard` CLI invocation) so it can be reviewed, promoted (with a
     /// token), or discarded. Reconstructs the handle from the on-disk worktree and
-    /// the persisted provenance, and recomputes the diff summary. The base is the
-    /// proposal commit's parent (`<branch>^`), since [`propose`] commits exactly once
-    /// on the isolated branch. This never mints a token and never writes the main
+    /// the persisted provenance, and recomputes the diff summary. New records keep
+    /// their original base explicitly; legacy review falls back to `<branch>^`.
+    /// Dropping this inspection handle preserves the proposal for later review
+    /// or explicit discard. This never mints a token and never writes the main
     /// branch — the [`ApprovalToken`] gate on [`Self::promote`] is unchanged.
     ///
     /// # Errors
@@ -196,9 +212,22 @@ impl ProposedPatch {
             .map_err(|_| PatchError::UnknownProposal(branch.to_string()))?;
         let provenance: ChangeProvenance =
             serde_json::from_str(&json).map_err(|e| PatchError::Serde(e.to_string()))?;
-        let base_commit = git::git(repo_root, &["rev-parse", &format!("{branch}^")])?
-            .trim()
-            .to_string();
+        let base_commit = match &provenance.proposal_base {
+            Some(base)
+                if matches!(base.commit.len(), 40 | 64)
+                    && base.commit.bytes().all(|b| b.is_ascii_hexdigit()) =>
+            {
+                base.commit.clone()
+            }
+            Some(_) => {
+                return Err(PatchError::UnsupportedGitPolicy(
+                    "invalid recorded proposal base".into(),
+                ))
+            }
+            None => git::git(repo_root, &["rev-parse", &format!("{branch}^")])?
+                .trim()
+                .to_string(),
+        };
         let diff_summary = compute_diff_summary(worktree.path(), &base_commit)?;
         Ok(Self {
             id: branch.to_string(),
@@ -329,7 +358,8 @@ fn write_proposal_meta(
     let json = provenance
         .to_json()
         .map_err(|e| PatchError::Serde(e.to_string()))?;
-    std::fs::write(&path, json).map_err(|source| PatchError::Io { path, source })
+    localpilot_store::atomic_write(&path, json.as_bytes())?;
+    Ok(())
 }
 
 /// A plan-agnostic commit subject for the isolated proposal branch.
@@ -434,6 +464,29 @@ mod tests {
 
     fn provenance() -> ChangeProvenance {
         ChangeProvenance::new("fix the TODO in a.rs", "test-model", "the TODO is stale")
+    }
+
+    #[test]
+    fn inspecting_a_persisted_proposal_does_not_discard_its_worktree() {
+        let repo = init_repo();
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        let patch = propose(repo.path(), "persisted-review", &request, provenance()).unwrap();
+        let path = patch.worktree_path().to_owned();
+        patch.persist().unwrap();
+        {
+            let preview = ProposedPatch::reopen(repo.path(), "persisted-review").unwrap();
+            assert!(preview.diff_summary().patch.contains("fixed"));
+        }
+        assert!(
+            path.is_dir(),
+            "merely viewing a persisted proposal must not delete it"
+        );
+        let again = ProposedPatch::reopen(repo.path(), "persisted-review").unwrap();
+        again.discard().unwrap();
+        assert!(
+            !path.exists(),
+            "explicit discard still removes a persisted proposal"
+        );
     }
 
     fn marker_script(path: &Path, marker: &Path) {

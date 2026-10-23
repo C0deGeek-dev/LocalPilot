@@ -5,11 +5,13 @@
 //! revalidate the current identities under the repository transaction lock.
 
 mod authority;
+mod inspection;
 #[cfg(test)]
 mod tests;
 mod transaction;
 
 pub use authority::{EvaluationToken, OutwardApprovalToken, PatchApprovalToken};
+pub use inspection::ProposalInspection;
 pub use transaction::{
     AuthorityEvent, AuthorityPurpose, RepositoryAuthority, RepositoryTransaction, Reservation,
 };
@@ -27,6 +29,9 @@ pub const RECEIPT_LIFETIME_SECS: u64 = 24 * 60 * 60;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ValidationError {
+    /// The owning proposal/Git primitive refused inspection.
+    #[error(transparent)]
+    Patch(#[from] crate::PatchError),
     /// Invalid canonical input or unsupported persisted schema.
     #[error("invalid validation record: {0}")]
     Invalid(String),
@@ -71,6 +76,11 @@ pub enum ValidationError {
 pub struct ContentDigest(String);
 
 impl ContentDigest {
+    /// Standard SHA256 of actual content bytes (for executables and artifacts).
+    #[must_use]
+    pub fn for_bytes(bytes: &[u8]) -> Self {
+        Self(format!("{:x}", Sha256::digest(bytes)))
+    }
     /// Read the canonical hex representation.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -158,6 +168,24 @@ pub struct ProposalIdentity {
 }
 
 impl ProposalIdentity {
+    /// Shared preview/consent binding for this proposal and exact ordered plan.
+    /// The policy version in the plan owns the derived risk/permission wording.
+    ///
+    /// # Errors
+    /// Unsupported or incomplete validation plans cannot be authorized.
+    pub fn execution_identity(
+        &self,
+        plan: &ValidationPlanIdentity,
+    ) -> Result<ContentDigest, ValidationError> {
+        Ok(ContentDigest::hash(
+            "localpilot-evaluation-consent-v1",
+            &[
+                self.digest().as_str().as_bytes(),
+                plan.digest()?.as_str().as_bytes(),
+            ],
+        ))
+    }
+
     /// Hash the explicit ordered fields, never display or pretty JSON.
     #[must_use]
     pub fn digest(&self) -> ContentDigest {
@@ -192,6 +220,33 @@ pub struct PlannedCheck {
     pub executable: ContentDigest,
     /// Exact arguments, preserving boundaries and order.
     pub args: Vec<String>,
+}
+
+/// Installed host toolchain components resolved without running proposed tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostToolchainIdentity {
+    /// Explicit selector from the trusted proposal base.
+    pub selector: String,
+    /// Resolved installed toolchain root, outside both project worktrees.
+    pub root: String,
+    /// Sorted component names and actual content digests.
+    pub components: std::collections::BTreeMap<String, ContentDigest>,
+}
+
+impl HostToolchainIdentity {
+    /// Stable identity including tool paths, compiler and executable content.
+    #[must_use]
+    pub fn digest(&self) -> ContentDigest {
+        let mut hash = CanonicalHash::new("localpilot-host-toolchain-v1");
+        hash.field(self.selector.as_bytes());
+        hash.field(self.root.as_bytes());
+        hash.number(self.components.len() as u64);
+        for (name, content) in &self.components {
+            hash.field(name.as_bytes());
+            hash.field(content.as_str().as_bytes());
+        }
+        hash.finish()
+    }
 }
 
 /// Execution limits are part of consent, not ambient defaults.
@@ -245,8 +300,13 @@ pub struct ValidationPlanIdentity {
     pub checks: Vec<PlannedCheck>,
     /// Names of allowed inherited environment variables, sorted uniquely.
     pub environment_names: Vec<String>,
+    /// Relevant host configuration paths. Only names are public; private token/
+    /// journal comparison binds their bounded content without exposing it.
+    pub private_config_paths: Vec<String>,
     /// Only these ignored outputs may be created.
     pub artifact_paths: Vec<String>,
+    /// Declared ignored build/cache directories; not source or receipt artifacts.
+    pub cache_paths: Vec<String>,
     /// Explicit resource limits.
     pub limits: ValidationLimits,
 }
@@ -271,6 +331,8 @@ impl ValidationPlanIdentity {
                 .iter()
                 .any(|n| n.is_empty() || n.contains(['=', '\0']))
             || self.artifact_paths.len() > 16
+            || self.cache_paths.len() > 16
+            || self.private_config_paths.len() > 8
         {
             return Err(ValidationError::Invalid("unsupported command plan".into()));
         }
@@ -325,6 +387,15 @@ impl ValidationPlanIdentity {
         for name in &self.environment_names {
             hash.field(name.as_bytes());
         }
+        hash.number(self.private_config_paths.len() as u64);
+        for path in &self.private_config_paths {
+            if !std::path::Path::new(path).is_absolute() {
+                return Err(ValidationError::Invalid(
+                    "private configuration path must be absolute".into(),
+                ));
+            }
+            hash.field(path.as_bytes());
+        }
         hash.number(self.artifact_paths.len() as u64);
         let mut seen_artifacts = std::collections::BTreeSet::new();
         for path in &self.artifact_paths {
@@ -333,8 +404,22 @@ impl ValidationPlanIdentity {
             } else {
                 path.clone()
             };
-            if !valid_relative_path(path) || !seen_artifacts.insert(identity) {
+            if !valid_relative_path(path)
+                || matches!(path.split('/').next(), Some(".git" | ".localpilot"))
+                || !seen_artifacts.insert(identity)
+            {
                 return Err(ValidationError::Invalid("unsupported artifact path".into()));
+            }
+            hash.field(path.as_bytes());
+        }
+        hash.number(self.cache_paths.len() as u64);
+        for path in &self.cache_paths {
+            if !valid_relative_path(path)
+                || matches!(path.split('/').next(), Some(".git" | ".localpilot"))
+            {
+                return Err(ValidationError::Invalid(
+                    "unsupported cache directory".into(),
+                ));
             }
             hash.field(path.as_bytes());
         }

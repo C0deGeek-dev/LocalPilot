@@ -191,6 +191,15 @@ pub struct RepositoryTransaction<'a> {
 }
 
 impl RepositoryTransaction<'_> {
+    pub(super) fn ensure_repository(&self, root: &Path) -> Result<(), ValidationError> {
+        let common = crate::git::git(root, &["rev-parse", "--git-common-dir"])?;
+        let common =
+            fs::canonicalize(root.join(common.trim())).map_err(|source| io(root, source))?;
+        if common.to_str() != Some(self.journal.common_dir.as_str()) {
+            return Err(ValidationError::Stale);
+        }
+        Ok(())
+    }
     /// Repository identity includes UUID and canonical location. A moved or
     /// independently cloned repository does not inherit outstanding authority.
     #[must_use]
@@ -244,18 +253,12 @@ impl RepositoryTransaction<'_> {
             .events
             .get(&receipt.run_id)
             .ok_or(ValidationError::RecoveryRequired)?;
-        let expected_evaluation_binding = ContentDigest::hash(
-            "localpilot-evaluation-consent-v1",
-            &[
-                proposal.digest().as_str().as_bytes(),
-                plan.digest()?.as_str().as_bytes(),
-            ],
-        );
+        let expected_evaluation_binding = proposal.execution_identity(plan)?;
         if !evaluation.completed
             || evaluation.reservation.purpose != AuthorityPurpose::Evaluation
             || evaluation.reservation.binding != expected_evaluation_binding
             || self.journal.environments.get(&receipt.run_id)
-                != Some(&super::authority::environment_digest(plan))
+                != Some(&super::authority::execution_context(plan)?)
         {
             return Err(ValidationError::Stale);
         }
@@ -601,12 +604,13 @@ mod tests {
             "fixture reservation only; no actual Git promotion",
         )
         .unwrap();
+        let private_environment = super::super::authority::execution_context(&plan).unwrap();
         std::env::remove_var(key);
         assert_eq!(tx.events().count(), 2);
         let audit = serde_json::to_string(&tx.events().collect::<Vec<_>>()).unwrap();
         assert!(!audit.contains("private-original"));
         assert!(!audit.contains("environments"));
-        assert!(!audit.contains(super::super::authority::environment_digest(&plan).as_str()));
+        assert!(!audit.contains(private_environment.as_str()));
     }
 
     #[test]

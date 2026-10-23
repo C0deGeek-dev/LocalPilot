@@ -522,11 +522,19 @@ Owns the write half of the self-improvement loop (ADR-0034):
 The `validation` library module defines content/plan identities, three separate
 memory-only authorities, structured evidence and a Git-common-dir lock/consumption
 journal. Its canonical hashes preserve field and argv boundaries; old provenance
-without structured evidence is unvalidated. The new module is currently
-library-only: the existing CLI promotion/publication paths still use the original
-approval API. It does not yet add preflight, run proposal checks or enforce a new
-CLI promotion gate. These contracts must be wired through all callers before
-claiming that validation protects promotion.
+without structured evidence is unvalidated. `self-review preflight --id` now
+inspects a recorded proposal and resolves committed-base Rust check configuration
+without running it. The new token/receipt gate is still library-only: existing
+promotion/publication callers use the original approval API. Preflight does not
+run checks or enforce the pending promotion gate; all callers must adopt it
+before claiming validation protects promotion.
+
+New proposals retain their original base/target/scope in provenance. Reopening a
+persisted proposal is a nonowning inspection: dropping that handle preserves its
+worktree; explicit discard still removes it, while a newly created unpersisted
+proposal retains rollback-on-drop. Provenance writes use the existing atomic
+store primitive. Static identity binds actual bounded source bytes and unchanged
+initialized submodules, refusing dirty, unsupported or unapproved ignored files.
 
 The proposal Git helper independently suppresses implicit hook/signing/diff
 execution and refuses unsupported filter attributes before checkout/index

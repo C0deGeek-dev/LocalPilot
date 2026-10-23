@@ -28,6 +28,13 @@ use crate::outward_cmd;
 /// The `self-review` write-half subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ProposePatchCommand {
+    /// Inspect a persisted proposal and its committed-base validation plan.
+    /// Runs no proposed code and issues no execution or promotion authority.
+    Preflight {
+        /// Proposal id printed by propose-patch.
+        #[arg(long)]
+        id: String,
+    },
     /// Propose a patch for one ranked self-review finding: a model authors the edit,
     /// it is written to an isolated worktree, and the command stops for human review.
     ProposePatch {
@@ -314,6 +321,12 @@ pub(crate) fn proposal_branch(finding_rank: usize) -> String {
 pub async fn dispatch(cmd: ProposePatchCommand, out: &mut dyn Write) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     match cmd {
+        ProposePatchCommand::Preflight { id } => {
+            let report = localpilot_selfimprove::proposal_preflight(&cwd, &id)
+                .context("preparing static proposal validation review")?;
+            write!(out, "{}", report.render())?;
+            Ok(())
+        }
         ProposePatchCommand::ProposePatch {
             finding,
             model,

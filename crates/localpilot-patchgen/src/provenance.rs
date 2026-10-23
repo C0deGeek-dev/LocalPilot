@@ -11,6 +11,18 @@ use serde::{Deserialize, Serialize};
 /// Schema tag so a consumer can pin the record shape.
 pub const PROVENANCE_SCHEMA: &str = "localpilot-change-provenance-v1";
 
+/// Immutable proposal origin, retained when a branch gains additional commits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalBase {
+    /// Exact original target commit.
+    pub commit: String,
+    /// Target reference approved for this proposal.
+    pub target_ref: String,
+    /// Original finding scope; later edits cannot silently widen it.
+    pub allowed_paths: Vec<String>,
+}
+
 /// The outcome of the eval gate over a proposed patch (attached once the gate
 /// lands). Kept deliberately small and host-neutral here: a pass/fail plus a
 /// short scorecard summary string the gate produced.
@@ -50,6 +62,9 @@ pub struct ChangeProvenance {
     /// results. Missing evidence in old records means NotRun, never Passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<crate::validation::ValidationEvidence>,
+    /// Explicit origin for new proposals. Legacy records need fresh inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_base: Option<ProposalBase>,
 }
 
 impl ChangeProvenance {
@@ -73,6 +88,7 @@ impl ChangeProvenance {
             lessons: Vec::new(),
             eval_result: None,
             validation: None,
+            proposal_base: None,
         }
     }
 

@@ -23,6 +23,9 @@
 mod contract;
 mod guardrails;
 mod orchestrator;
+mod preflight;
+
+pub use preflight::{proposal_preflight, PreflightReport, PreflightRisk};
 
 pub use contract::{
     cross_gate, unattended_next, ApprovalToken, AwaitingApproval, LoopError, PatchError, Stage,

@@ -24,10 +24,18 @@ use crate::error::PatchError;
 pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, PatchError> {
     // Detect configured executable filters before checkout/index/diff operations,
     // not after one of those operations has already run the helper.
-    if matches!(
-        args.first(),
-        Some(&"add" | &"commit" | &"status" | &"diff" | &"merge")
-    ) || args.starts_with(&["worktree", "add"])
+    let committed_diff = args.first() == Some(&"diff")
+        && args.len() >= 3
+        && args[args.len() - 2..].iter().all(|arg| {
+            *arg == "HEAD"
+                || (matches!(arg.len(), 40 | 64) && arg.bytes().all(|b| b.is_ascii_hexdigit()))
+        });
+    if (!committed_diff
+        && matches!(
+            args.first(),
+            Some(&"add" | &"commit" | &"status" | &"diff" | &"merge")
+        ))
+        || args.starts_with(&["worktree", "add"])
     {
         reject_executable_filters(cwd, args)?;
     }
@@ -118,14 +126,8 @@ fn reject_executable_filters(cwd: &Path, operation: &[&str]) -> Result<(), Patch
     inspect_filter_attributes(cwd, &paths, None)?;
     inspect_filter_attributes(cwd, &paths, Some("--cached"))?;
 
-    let head = static_git(cwd)
-        .args(["rev-parse", "--verify", "HEAD^{tree}"])
-        .output()
-        .map_err(|error| policy_error(&error.to_string()))?;
-    if head.status.success() {
-        inspect_tree_filters(cwd, "HEAD")?;
-    } // An unborn fixture repository has only working/index attributes.
     if operation.first() == Some(&"merge") || operation.starts_with(&["worktree", "add"]) {
+        inspect_tree_filters(cwd, "HEAD")?;
         let source = operation
             .last()
             .ok_or_else(|| policy_error("missing checkout source"))?;
@@ -157,29 +159,8 @@ fn inspect_filter_attributes(
     paths: &[u8],
     source: Option<&str>,
 ) -> Result<(), PatchError> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    // File-backed stdin avoids the documented check-attr pipe-buffer deadlock.
-    let mut input = tempfile::tempfile().map_err(|error| policy_error(&error.to_string()))?;
-    input
-        .write_all(paths)
-        .and_then(|()| input.rewind())
-        .map_err(|error| policy_error(&error.to_string()))?;
-    let mut command = static_git(cwd);
-    command.arg("check-attr");
-    if let Some(source) = source {
-        command.arg(source);
-    }
-    let output = command
-        .args(["-z", "--stdin", "--all"])
-        .stdin(Stdio::from(input))
-        .output()
-        .map_err(|error| policy_error(&error.to_string()))?;
-    if !output.status.success() {
-        return Err(policy_error("Git cannot establish checkout attributes; a Git with check-attr --source support is required"));
-    }
-    let mut fields = output.stdout.split(|byte| *byte == 0);
+    let output = attribute_output(cwd, paths, source)?;
+    let mut fields = output.split(|byte| *byte == 0);
     loop {
         match fields.next() {
             None | Some([]) => break,
@@ -200,6 +181,50 @@ fn inspect_filter_attributes(
         }
     }
     Ok(())
+}
+
+pub(crate) fn attribute_output(
+    cwd: &Path,
+    paths: &[u8],
+    source: Option<&str>,
+) -> Result<Vec<u8>, PatchError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    // File-backed stdin avoids the documented check-attr pipe-buffer deadlock.
+    let mut input = tempfile::tempfile().map_err(|error| policy_error(&error.to_string()))?;
+    input
+        .write_all(paths)
+        .and_then(|()| input.rewind())
+        .map_err(|error| policy_error(&error.to_string()))?;
+    let mut command = static_git(cwd);
+    command.arg("check-attr");
+    if let Some(source) = source {
+        command.arg(source);
+    }
+    let output = command
+        .args(["-z", "--stdin", "--all"])
+        .stdin(Stdio::from(input))
+        .output()
+        .map_err(|error| policy_error(&error.to_string()))?;
+    if !output.status.success() {
+        return Err(policy_error("Git cannot establish checkout attributes; a Git with check-attr --source support is required"));
+    }
+    Ok(output.stdout)
+}
+
+pub(crate) fn config_value(cwd: &Path, name: &str) -> Result<Option<String>, PatchError> {
+    let output = static_git(cwd)
+        .args(["config", "--get", name])
+        .output()
+        .map_err(|error| policy_error(&error.to_string()))?;
+    match output.status.code() {
+        Some(0) => String::from_utf8(output.stdout)
+            .map(Some)
+            .map_err(|_| policy_error("non-UTF8 text policy")),
+        Some(1) => Ok(None),
+        _ => Err(policy_error("cannot inspect text configuration")),
+    }
 }
 
 fn static_output(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, PatchError> {
@@ -325,8 +350,8 @@ const WINDOWS_PATH_LIMIT: usize = 259;
 
 /// An isolated git worktree on its own branch, or detached at an exact
 /// revision. All edits land inside it, never in the main working tree.
-/// Dropping it (or calling [`Worktree::remove`]) tears it down — the rollback
-/// path is to drop it.
+/// Newly created temporary worktrees roll back on drop. Reopened persisted
+/// worktrees remain inspectable until explicit [`Worktree::remove`].
 #[derive(Debug)]
 pub struct Worktree {
     repo_root: PathBuf,
@@ -335,6 +360,7 @@ pub struct Worktree {
     /// Whether `create` made a branch that removal must delete.
     branched: bool,
     removed: bool,
+    remove_on_drop: bool,
 }
 
 impl Worktree {
@@ -342,7 +368,7 @@ impl Worktree {
     /// branch `branch` based on the repo's current `HEAD`.
     pub(crate) fn create(repo_root: &Path, branch: &str) -> Result<Self, PatchError> {
         validate_branch_name(branch)?;
-        let dir = repo_root.join(".localpilot").join("worktrees").join(branch);
+        let dir = contained_edit_path(repo_root, &format!("{WORKTREES_DIR}/{branch}"))?;
         if let Some(parent) = dir.parent() {
             std::fs::create_dir_all(parent).map_err(|source| PatchError::Io {
                 path: parent.to_path_buf(),
@@ -362,6 +388,7 @@ impl Worktree {
             branch: branch.to_string(),
             branched: true,
             removed: false,
+            remove_on_drop: true,
         })
     }
 
@@ -420,6 +447,7 @@ impl Worktree {
             branch: name.to_string(),
             branched: false,
             removed: false,
+            remove_on_drop: true,
         })
     }
 
@@ -439,6 +467,7 @@ impl Worktree {
             branch: branch.to_string(),
             branched: true,
             removed: false,
+            remove_on_drop: false,
         })
     }
 
@@ -456,7 +485,7 @@ impl Worktree {
     /// [`Worktree::open`] (e.g. a separate promote/discard invocation). The worktree
     /// is then only removed by an explicit [`Worktree::remove`] on a reattached handle.
     pub(crate) fn detach(&mut self) {
-        self.removed = true;
+        self.remove_on_drop = false;
     }
 
     /// Remove the worktree and delete its branch, if it has one — the
@@ -594,7 +623,7 @@ pub fn sweep_worktrees(repo_root: &Path, prefix: &str) -> Vec<(PathBuf, Result<(
 
 impl Drop for Worktree {
     fn drop(&mut self) {
-        if !self.removed {
+        if self.remove_on_drop && !self.removed {
             let _ = self.remove();
         }
     }

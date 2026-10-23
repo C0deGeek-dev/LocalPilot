@@ -209,7 +209,11 @@ and tighten it through [`harness.granularity`](docs/configuration.md#harnessgran
 
 Additional surfaces include MCP tools, `rpc`, `acp`, `mcp serve`, project
 knowledge ingestion, memory search, skill inspection, handoffs, self-review,
-and redacted session exports. `localpilot mcp serve` turns the session runtime
+and redacted session exports. `self-review preflight --id <proposal>` displays a
+persisted proposal's static source proof and committed-base Rust check plan;
+it does not execute the plan or promote the proposal. See the
+[execution and host-access limits](docs/07-security-and-privacy.md#self-improvement-patch-generation).
+`localpilot mcp serve` turns the session runtime
 itself into an MCP server another agent host drives: `prompt` (with mid-turn
 `steer`/`follow_up` dispositions), `cancel`, `status`, `transcript`, a
 cursor-paged `events` feed, and `reply_permission`, with

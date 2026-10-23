@@ -2030,13 +2030,16 @@ dependencies = [
 name = "localpilot-selfimprove"
 version = "5.0.0"
 dependencies = [
+ "localpilot-config",
  "localpilot-patchgen",
+ "localpilot-sandbox",
  "localpilot-selfdev",
  "localpilot-selfreview",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.9",
+ "toml",
 ]
 
 [[package]]

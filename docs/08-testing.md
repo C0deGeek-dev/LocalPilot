@@ -18,6 +18,21 @@ named filters, bounded Unicode diffs, Windows directory junctions and Unix
 committed symlink escapes have negative controls. These checks require Git
 `check-attr --source` support for attributes in pinned source trees.
 
+Inspection fixtures verify stable actual source identity, retained origin across
+extra proposal commits, scope refusal, dirty/untracked/undeclared-cache refusal,
+legacy origin refusal and target movement. A regression fixture first failed
+because dropping a persisted review removed its worktree; both the corrected
+handle lifecycle and real CLI display/reopen/promotion are tested. Preflight
+tests resolve the base's Cargo plan while the proposed config requests a shell,
+with no marker/build/authority event produced. CLI tests inspect the actual
+installed trusted toolchain; pure report tests use nonexecutable host bytes to
+prove no executable-version probe occurs.
+
+Binary inspection also pins a filename beginning `--config=` as literal source,
+not Git options. Newly created scoped files are staged inside the disposable
+worktree before the produced-diff scope check, so untracked additions cannot
+silently disappear from that comparison. No-op/out-of-scope refusal remains.
+
 Context-accounting regressions in `localpilot-harness/tests/session.rs` cover
 complete-input calibration, reset after model/provider switches, instruction
 preservation and automatic/manual/forced compaction. `tests/broker.rs` verifies
