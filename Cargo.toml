@@ -79,7 +79,7 @@ ratatui = { version = "=0.29.0", default-features = false, features = [
 # A cross-process advisory lock (released by the OS when its holder exits), for
 # serializing skill-management changes to one scope.
 fd-lock = "=4.0.4"
-figment = { version = "=0.10.19", features = ["env", "toml", "yaml"] }
+figment = { version = "=0.10.19", features = ["env", "toml"] }
 futures = "=0.3.31"
 globset = "=0.4.16"
 ignore = "=0.4.23"
@@ -117,11 +117,15 @@ tempfile = "=3.14.0"
 sha2 = "=0.10.8"
 tar = "=0.4.45"
 flate2 = "=1.0.35"
+# Security-reviewed lockfile resolutions: rustls 0.23.46, rustls-webpki
+# 0.103.16 and webpki-roots 1.0.10. Keep TLS verification and the current backend.
 reqwest = { version = "=0.12.11", features = ["json", "stream", "rustls-tls"], default-features = false }
 schemars = "=0.8.21"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
-serde_yaml = "=0.9.34"
+# Maintained YAML organization fork; Rust 1.82 compatible. Configuration uses
+# Figment's TOML/env providers, not its legacy serde_yaml feature.
+yaml_serde = "=0.10.7"
 thiserror = "=2.0.9"
 time = { version = "=0.3.37", features = ["local-offset"] }
 toml = "=0.8.23"

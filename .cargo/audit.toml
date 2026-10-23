@@ -1,5 +1,16 @@
 [advisories]
 ignore = [
+    # quinn-proto is retained for reqwest's opt-in HTTP/3 support but is not
+    # compiled in any supported workspace feature/target graph. The fixed
+    # quinn-proto >=0.11.18 resolves edition-2024 dependencies that Cargo 1.82
+    # cannot parse even when unused. dependency_policy.rs enforces the absence
+    # of QUIC from the active graph. Remove these exceptions before enabling
+    # HTTP/3 or when the toolchain can resolve the fixed dependency graph.
+    "RUSTSEC-2026-0338",
+    "RUSTSEC-2026-0339",
+    "RUSTSEC-2026-0340",
+    "RUSTSEC-2026-0341",
+    "RUSTSEC-2026-0342",
     # time 0.3.37 (via the vendored LocalMind workspace) is affected by
     # RUSTSEC-2026-0009. The fixed time 0.3.47 crate requires edition-2024
     # manifest metadata, which needs Rust/Cargo >= 1.85.0 (the release that

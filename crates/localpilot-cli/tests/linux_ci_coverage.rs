@@ -24,7 +24,7 @@ struct Step {
 }
 
 fn linux_test_packages(workflow: &str) -> anyhow::Result<BTreeSet<String>> {
-    let workflow: Workflow = serde_yaml::from_str(workflow)?;
+    let workflow: Workflow = yaml_serde::from_str(workflow)?;
     let job = workflow
         .jobs
         .get("test")

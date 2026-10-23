@@ -114,7 +114,7 @@ impl SkillManifest {
             SkillError::InvalidManifest("unterminated SKILL.md frontmatter".to_string())
         })?;
         let front: SkillFrontmatter =
-            serde_yaml::from_str(front).map_err(|e| SkillError::InvalidManifest(e.to_string()))?;
+            yaml_serde::from_str(front).map_err(|e| SkillError::InvalidManifest(e.to_string()))?;
         if front.name.is_empty()
             || front.name.len() > 64
             || !front

@@ -142,7 +142,7 @@ impl AgentDefinition {
     /// [`AgentError::Invalid`] when a field fails validation.
     pub fn from_yaml(text: &str) -> Result<Self, AgentError> {
         let definition: Self =
-            serde_yaml::from_str(text).map_err(|e| AgentError::Parse(e.to_string()))?;
+            yaml_serde::from_str(text).map_err(|e| AgentError::Parse(e.to_string()))?;
         definition.validate()?;
         Ok(definition)
     }
@@ -360,6 +360,27 @@ prompt: '   '
         assert!(
             d.prompt_parts.include_base,
             "unlisted parts keep their default"
+        );
+    }
+
+    #[test]
+    fn duplicate_fields_and_multiple_documents_are_refused() {
+        let duplicate = format!("{MINIMAL}name: different\n");
+        assert!(AgentDefinition::from_yaml(&duplicate).is_err());
+        let documents = format!("{MINIMAL}\n---\n{MINIMAL}");
+        assert!(AgentDefinition::from_yaml(&documents).is_err());
+    }
+
+    #[test]
+    fn quoted_scalars_aliases_and_block_prompts_keep_their_values() {
+        let text = "format_version: 1\nname: reviewer\ndescription: &description 'on: yes'\ndisplay_name: *description\ntools: ['read_file']\nprompt: |\n  Review the change.\n  Preserve the constraints.\n";
+        let parsed = AgentDefinition::from_yaml(text).expect("valid YAML definition");
+        assert_eq!(parsed.description, "on: yes");
+        assert_eq!(parsed.display_name.as_deref(), Some("on: yes"));
+        assert_eq!(parsed.tools, ["read_file"]);
+        assert_eq!(
+            parsed.prompt,
+            "Review the change.\nPreserve the constraints.\n"
         );
     }
 

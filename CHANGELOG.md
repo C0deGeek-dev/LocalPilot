@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Refresh transport and YAML dependencies.** Update the TLS implementation,
+  certificate verifier and bundled roots to security-fixed releases. Agent and
+  skill YAML uses the maintained YAML organization parser; remove the unused
+  configuration YAML backend. Rust 1.82 and TLS certificate validation remain.
+
 - **Bounded-edit defaults restored.** Withdraw the experimental measured-edit
   accounting, refusal wording and small-session two-region profile after the
   combined evaluation regressed. Existing work caps and conservative attempt

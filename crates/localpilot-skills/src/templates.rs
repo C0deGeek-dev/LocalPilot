@@ -148,7 +148,7 @@ fn parse_template(path: &Path) -> Result<PromptTemplate, SkillError> {
         .and_then(|rest| rest.split_once("\n---"))
     {
         Some((front, body)) => {
-            let front: TemplateFrontmatter = serde_yaml::from_str(front)
+            let front: TemplateFrontmatter = yaml_serde::from_str(front)
                 .map_err(|e| SkillError::InvalidTemplate(e.to_string()))?;
             (front, body.trim_start_matches('\n').to_string())
         }
