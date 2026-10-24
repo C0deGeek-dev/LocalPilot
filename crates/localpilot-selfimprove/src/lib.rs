@@ -25,8 +25,10 @@ mod execution;
 mod guardrails;
 mod orchestrator;
 mod preflight;
+mod promotion;
 
 pub use execution::validate_proposal;
+pub use promotion::{promote_proposal, promotion_review, PromotionReview};
 
 pub use preflight::{proposal_preflight, PreflightReport, PreflightRisk};
 

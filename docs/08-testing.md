@@ -731,6 +731,16 @@ invoked by those tests. Coverage includes a crash after writing Passed evidence
 but before journal completion: the stored receipt alone must never authorize a
 new run or promotion reservation.
 
+Patch-generation tests also terminate subprocesses before promotion reservation,
+before Git, after Git, after the associated state write and after journal finish.
+These fixtures check the durable ref goal and unfinished-authority behavior.
+Receipt regressions reject modified output and failed runs relabeled as passing;
+the common-service integration runs real Cargo validation, promotes through the
+shared transaction and checks the existing build/reload stages separately.
+A compiled marker executable verifies that static Git ignores a project-local
+program placed first on PATH. Ignored worker tests are invoked only by their
+own parent fixtures, rather than as standalone checks.
+
 Supply-chain hygiene:
 
 ```powershell

@@ -61,6 +61,17 @@ pub struct PromotionIntent {
     pub validation_run: uuid::Uuid,
 }
 
+/// Observations committed by the execution coordinator, not reconstructed from
+/// a mutable proposal receipt or a generic recovery/outcome note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationCompletion {
+    /// Exact complete redacted receipt observed by the coordinator.
+    pub evidence: ContentDigest,
+    /// Its terminal state; generic completion is not a passing result.
+    pub state: super::ValidationState,
+}
+
 /// A durable intent, retained after completion or interruption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +86,10 @@ pub struct AuthorityEvent {
     /// may lack this data; they require manual inspection, never guessed replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promotion: Option<PromotionIntent>,
+    /// Missing in historical/generic recovery records; such records cannot
+    /// qualify receipt data as passing validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<ValidationCompletion>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -287,6 +302,18 @@ impl RepositoryTransaction<'_> {
         self.journal.events.values()
     }
 
+    /// Refuse a new effect or approval review while any earlier intent requires
+    /// inspection. Read-only recovery inspection can still enumerate events.
+    ///
+    /// # Errors
+    /// Interrupted intent or an uncertain write in this transaction.
+    pub fn require_idle(&self) -> Result<(), ValidationError> {
+        if self.poisoned || self.journal.events.values().any(|event| !event.completed) {
+            return Err(ValidationError::RecoveryRequired);
+        }
+        Ok(())
+    }
+
     /// Consume execution authority before spawning. Keep this transaction guard
     /// alive for the run; another process must not mutate authority concurrently.
     ///
@@ -317,20 +344,7 @@ impl RepositoryTransaction<'_> {
     ) -> Result<uuid::Uuid, ValidationError> {
         self.check_repository(proposal)?;
         let reservation = token.reservation(proposal, plan, receipt)?;
-        let evaluation = self
-            .journal
-            .events
-            .get(&receipt.run_id)
-            .ok_or(ValidationError::RecoveryRequired)?;
-        let expected_evaluation_binding = proposal.execution_identity(plan)?;
-        if !evaluation.completed
-            || evaluation.reservation.purpose != AuthorityPurpose::Evaluation
-            || evaluation.reservation.binding != expected_evaluation_binding
-            || self.journal.environments.get(&receipt.run_id)
-                != Some(&super::authority::execution_context(plan)?)
-        {
-            return Err(ValidationError::Stale);
-        }
+        self.verify_completed_evaluation(proposal, plan, receipt)?;
         self.reserve_with_environment(
             reservation,
             None,
@@ -342,6 +356,63 @@ impl RepositoryTransaction<'_> {
                 validation_run: receipt.run_id,
             }),
         )
+    }
+
+    pub(super) fn verify_completed_evaluation(
+        &self,
+        proposal: &ProposalIdentity,
+        plan: &ValidationPlanIdentity,
+        receipt: &ValidationEvidence,
+    ) -> Result<(), ValidationError> {
+        self.check_repository(proposal)?;
+        if self.journal.events.values().any(|event| !event.completed) {
+            return Err(ValidationError::RecoveryRequired);
+        }
+        let evaluation = self
+            .journal
+            .events
+            .get(&receipt.run_id)
+            .ok_or(ValidationError::RecoveryRequired)?;
+        let expected_evaluation_binding = proposal.execution_identity(plan)?;
+        if !evaluation.completed {
+            return Err(ValidationError::RecoveryRequired);
+        }
+        let completion = evaluation
+            .validation
+            .as_ref()
+            .ok_or(ValidationError::NotValidated(
+                super::ValidationState::Invalid,
+            ))?;
+        if completion.state != super::ValidationState::Passed {
+            return Err(ValidationError::NotValidated(completion.state));
+        }
+        if completion.evidence != receipt.digest()? {
+            return Err(ValidationError::Stale);
+        }
+        if evaluation.reservation.purpose != AuthorityPurpose::Evaluation
+            || evaluation.reservation.binding != expected_evaluation_binding
+            || self.journal.environments.get(&receipt.run_id)
+                != Some(&super::authority::execution_context(plan)?)
+        {
+            return Err(ValidationError::Stale);
+        }
+        Ok(())
+    }
+
+    /// Inspect saved passing evidence against the locally committed observation
+    /// digest. The host supplies freshly resolved proposal/plan identities under
+    /// this guard. No token is minted and no effect or state transition occurs.
+    ///
+    /// # Errors
+    /// Partial, expired, changed, failed or recovery-pending observations.
+    pub fn verify_validation(
+        &self,
+        proposal: &ProposalIdentity,
+        plan: &ValidationPlanIdentity,
+        receipt: &ValidationEvidence,
+    ) -> Result<(), ValidationError> {
+        receipt.verify_current(proposal, plan, super::authority::unix_now()?)?;
+        self.verify_completed_evaluation(proposal, plan, receipt)
     }
 
     /// Retire publication authority independently of patch validation.
@@ -404,13 +475,61 @@ impl RepositoryTransaction<'_> {
                 completed: false,
                 outcome: None,
                 promotion,
+                validation: None,
             },
         );
         self.flush()?;
         Ok(nonce)
     }
 
-    /// Record the observed terminal outcome. An interrupted/unknown effect must
+    /// Commit exact terminal validation observations only after their receipt is
+    /// durably stored. A generic `finish` note does not create this proof.
+    ///
+    /// # Errors
+    /// Wrong/finished intent, partial or invalid evidence, clock or persistence.
+    pub fn finish_evaluation(
+        &mut self,
+        evidence: &ValidationEvidence,
+    ) -> Result<(), ValidationError> {
+        self.verify_evaluation_record(evidence)?;
+        if matches!(
+            evidence.state,
+            super::ValidationState::NotRun
+                | super::ValidationState::Authorized
+                | super::ValidationState::Running
+        ) {
+            return Err(ValidationError::NotValidated(evidence.state));
+        }
+        let now = super::authority::unix_now()?;
+        if evidence.finished_at < evidence.started_at || evidence.finished_at > now {
+            return Err(ValidationError::Clock);
+        }
+        if evidence.state == super::ValidationState::Passed {
+            // This verifies structure/limits. The coordinator separately resolves
+            // current source and private host context before storing the receipt.
+            evidence.verify_passing_observations(&evidence.approved_plan, now)?;
+            self.verify_execution_context(evidence.run_id, &evidence.approved_plan)?;
+        }
+        let completion = ValidationCompletion {
+            evidence: evidence.digest()?,
+            state: evidence.state,
+        };
+        let event = self
+            .journal
+            .events
+            .get_mut(&evidence.run_id)
+            .ok_or(ValidationError::RecoveryRequired)?;
+        event.validation = Some(completion);
+        event.completed = true;
+        event.outcome = Some(format!(
+            "validation {:?} observations persisted",
+            evidence.state
+        ));
+        self.flush()
+    }
+
+    /// Record a generic observed/recovered terminal outcome. This does not turn
+    /// a validation receipt into passing proof. An interrupted/unknown effect must
     /// remain unfinished until an explicit inspection/recovery operation resolves
     /// it; simply reopening never invokes this method or retries the effect.
     ///
@@ -432,6 +551,11 @@ impl RepositoryTransaction<'_> {
             .ok_or_else(|| ValidationError::Invalid("unknown authority intent".into()))?;
         if event.completed {
             return Err(ValidationError::Consumed);
+        }
+        if event.reservation.purpose == AuthorityPurpose::Evaluation {
+            // Recovery can retire an interrupted run, but never manufacture or
+            // retain passing observations from a generic outcome note.
+            event.validation = None;
         }
         event.completed = true;
         event.outcome = Some(localpilot_config::redact::redact(outcome));
@@ -669,10 +793,9 @@ mod tests {
             PatchApprovalToken::approve(&proposal, &plan, &receipt, "human", "promote").unwrap();
         assert!(matches!(
             tx.reserve_promotion(token, &proposal, &plan, &receipt),
-            Err(ValidationError::Stale)
+            Err(ValidationError::RecoveryRequired)
         ));
-        tx.finish(run, "controlled passing fixture with observed cleanup")
-            .unwrap();
+        tx.finish_evaluation(&receipt).unwrap();
         let token =
             PatchApprovalToken::approve(&proposal, &plan, &receipt, "human", "promote").unwrap();
         std::env::set_var(&key, "private-changed");

@@ -210,6 +210,10 @@ impl ProposedPatch {
                 "unknown validation schema".into(),
             ));
         }
+        // Keep each run inspectable after a later retry replaces the current
+        // provenance pointer. Archive first; uncertain/mixed writes leave the
+        // authority journal unfinished and cannot qualify a promotion.
+        validation::persist_validation_evidence(&self.repo_root, &evidence)?;
         self.provenance.validation = Some(evidence);
         write_proposal_meta(&self.repo_root, &self.id, &self.provenance)?;
         Ok(())
@@ -310,17 +314,18 @@ impl ProposedPatch {
         if !token.authorizes(&self.id) {
             return Err(PatchError::TokenMismatch);
         }
+        self.fast_forward(self.worktree.branch(), token.reviewer())
+    }
+
+    fn fast_forward(&self, revision: &str, reviewer: &str) -> Result<PromoteOutcome, PatchError> {
         if !git::is_clean(&self.repo_root)? {
             return Err(PatchError::DirtyTarget);
         }
         // Fast-forward only: never silently create a merge or resolve conflicts.
-        match git::git(
-            &self.repo_root,
-            &["merge", "--ff-only", self.worktree.branch()],
-        ) {
+        match git::git(&self.repo_root, &["merge", "--ff-only", revision]) {
             Ok(_) => Ok(PromoteOutcome {
                 branch: self.worktree.branch().to_string(),
-                reviewer: token.reviewer().to_string(),
+                reviewer: reviewer.to_string(),
             }),
             Err(PatchError::Git { .. }) => Err(PatchError::NotFastForward),
             Err(other) => Err(other),

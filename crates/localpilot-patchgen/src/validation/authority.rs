@@ -230,6 +230,7 @@ fn patch_binding(
             receipt.run_id.as_bytes(),
             &receipt.started_at.to_be_bytes(),
             &receipt.finished_at.to_be_bytes(),
+            receipt.digest()?.as_str().as_bytes(),
         ],
     ))
 }

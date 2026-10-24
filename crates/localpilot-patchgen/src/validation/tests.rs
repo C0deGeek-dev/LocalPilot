@@ -62,6 +62,7 @@ pub(super) fn fixture(
         schema: VALIDATION_SCHEMA.into(),
         run_id: uuid::Uuid::new_v4(),
         proposal: proposal.digest(),
+        approved_proposal: proposal.clone(),
         plan: plan.digest().unwrap(),
         approved_plan: plan.clone(),
         state: ValidationState::Passed,

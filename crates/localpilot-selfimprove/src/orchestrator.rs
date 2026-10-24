@@ -188,10 +188,7 @@ impl<S: SelfDevStage> Orchestrator<S> {
     }
 
     fn state_path(&self) -> PathBuf {
-        self.root
-            .join(".localpilot")
-            .join("selfimprove")
-            .join("state.json")
+        loop_state_path(&self.root)
     }
 
     /// The persisted loop state, or `None` when no loop is active.
@@ -200,29 +197,11 @@ impl<S: SelfDevStage> Orchestrator<S> {
     /// [`LoopError::Io`] / [`LoopError::Serde`] if the record exists but cannot be
     /// read or parsed.
     pub fn state(&self) -> Result<Option<LoopState>, LoopError> {
-        let path = self.state_path();
-        match std::fs::read_to_string(&path) {
-            Ok(json) => {
-                let state =
-                    serde_json::from_str(&json).map_err(|e| LoopError::Serde(e.to_string()))?;
-                Ok(Some(state))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(LoopError::Io { path, source }),
-        }
+        read_loop_state(&self.root)
     }
 
     fn write_state(&self, state: &LoopState) -> Result<(), LoopError> {
-        let path = self.state_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| LoopError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let json =
-            serde_json::to_string_pretty(state).map_err(|e| LoopError::Serde(e.to_string()))?;
-        std::fs::write(&path, json).map_err(|source| LoopError::Io { path, source })
+        write_loop_state(&self.root, state)
     }
 
     /// Clear the loop so a fresh one can start. Idempotent.
@@ -318,6 +297,27 @@ impl<S: SelfDevStage> Orchestrator<S> {
         Ok(outcome)
     }
 
+    /// Approve an exact locally validated review through the common locked
+    /// service. The host supplies separate explicit promotion consent. This
+    /// staged API does not replace legacy callers until their migration lands.
+    ///
+    /// # Errors
+    /// Missing/changed active loop, stale evidence/consent, unfinished authority
+    /// or a failed source/state/journal checkpoint.
+    pub fn approve_validated(
+        &self,
+        review: &crate::PromotionReview,
+        token: localpilot_patchgen::validation::PatchApprovalToken,
+    ) -> Result<PromoteOutcome, LoopError> {
+        crate::promotion::promote_for_loop(
+            &self.root,
+            &review.preflight.proposal.identity.proposal_id,
+            review,
+            token,
+            true,
+        )
+    }
+
     /// **Approved → Built.** Build the *approved, promoted* tree (the workspace
     /// root — never the proposal worktree) via the self-dev stage, guarded by the
     /// reused rollback circuit breaker.
@@ -401,6 +401,36 @@ impl<S: SelfDevStage> Orchestrator<S> {
             None => Err(LoopError::NoActiveLoop { attempted }),
         }
     }
+}
+
+pub(crate) fn loop_state_path(root: &Path) -> PathBuf {
+    root.join(".localpilot")
+        .join("selfimprove")
+        .join("state.json")
+}
+
+pub(crate) fn read_loop_state(root: &Path) -> Result<Option<LoopState>, LoopError> {
+    let path = loop_state_path(root);
+    match std::fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json)
+            .map(Some)
+            .map_err(|e| LoopError::Serde(e.to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(LoopError::Io { path, source }),
+    }
+}
+
+pub(crate) fn write_loop_state(root: &Path, state: &LoopState) -> Result<(), LoopError> {
+    let path = loop_state_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| LoopError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let json = serde_json::to_vec_pretty(state).map_err(|e| LoopError::Serde(e.to_string()))?;
+    localpilot_store::atomic_write(&path, &json)?;
+    Ok(())
 }
 
 #[cfg(test)]

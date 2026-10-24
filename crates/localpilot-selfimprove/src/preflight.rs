@@ -2,6 +2,9 @@
 //! toolchain discovery reads installed files, never probes a proposed executable.
 
 use localpilot_config::{CheckConfig, Config};
+use localpilot_patchgen::validation::resolve_host_program as resolve_program;
+#[cfg(all(test, unix))]
+use localpilot_patchgen::validation::trusted_program_at as host_program;
 use localpilot_patchgen::validation::{
     ContentDigest, HostToolchainIdentity, PlannedCheck, ProposalInspection, RepositoryAuthority,
     ValidationError, ValidationLimits, ValidationPlanIdentity,
@@ -456,43 +459,6 @@ fn file_risks(path: &str) -> Vec<PreflightRisk> {
         risks.push(PreflightRisk::BinaryOrGenerated);
     }
     risks
-}
-
-fn resolve_program(name: &str, roots: &[&Path]) -> Result<PathBuf, ValidationError> {
-    let path = std::env::var_os("PATH").ok_or_else(|| invalid("host PATH is unavailable"))?;
-    for directory in std::env::split_paths(&path).filter(|p| p.is_absolute()) {
-        if let Some(candidate) = host_program(&directory, name, roots) {
-            return Ok(candidate);
-        }
-    }
-    Err(invalid(
-        "registered host rustup executable is unavailable outside the project",
-    ))
-}
-
-fn host_program(directory: &Path, name: &str, roots: &[&Path]) -> Option<PathBuf> {
-    // Keep the invocation basename: rustup dispatches on argv[0], and Homebrew's
-    // `rustup` symlink points to a binary named `rustup-init`. Canonicalizing the
-    // final component would silently select installer mode. Hash the physical
-    // target separately while binding this absolute launch path in the plan.
-    // Inspect ancestors as well: a project-owned bin symlink pointing outside
-    // the project must not become a trusted host executable search location.
-    if directory.ancestors().any(|ancestor| {
-        fs::canonicalize(ancestor).is_ok_and(|path| roots.iter().any(|root| path == *root))
-    }) {
-        return None;
-    }
-    let parent = fs::canonicalize(directory).ok()?;
-    let candidate = parent.join(executable(name));
-    let physical = fs::canonicalize(&candidate).ok()?;
-    if !physical.is_file()
-        || roots
-            .iter()
-            .any(|root| parent.starts_with(root) || physical.starts_with(root))
-    {
-        return None;
-    }
-    Some(candidate)
 }
 
 fn host_file_digest(path: &Path, roots: &[&Path]) -> Result<ContentDigest, ValidationError> {

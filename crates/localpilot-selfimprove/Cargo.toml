@@ -15,6 +15,7 @@ localpilot-selfreview = { path = "../localpilot-selfreview" }
 localpilot-config = { path = "../localpilot-config" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-harness = { path = "../localpilot-harness" }
+localpilot-store = { path = "../localpilot-store" }
 toml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

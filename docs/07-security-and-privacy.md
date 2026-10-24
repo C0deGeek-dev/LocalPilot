@@ -689,6 +689,22 @@ resolved physical target. This preserves multicall dispatch, including Homebrew'
 `rustup` alias to `rustup-init`. Project-owned executable search aliases are refused
 even when they point outside the project.
 
+Static Git also resolves an absolute host executable outside the project before
+launch. Its child search path excludes project directories and the inherited
+`GIT_EXEC_PATH` override is removed. A project-local executable cannot become the
+Git program merely by appearing first on PATH.
+
+The staged common promotion service verifies passing evidence against a locally
+completed evaluation journal entry. That entry binds the entire bounded receipt,
+including output, cleanup and termination observations; editing a receipt or
+relabeling a failed run cannot create passing authority. Generic journal recovery
+does not certify validation. Per-run evidence retains the approved source snapshot
+and command plan; loading historical JSON alone never grants promotion authority.
+The promotion capability retains the repository lock through the fast-forward,
+atomic matching loop-state update and journal completion. An interrupted effect
+leaves its intended refs and commits pending for explicit inspection. Existing
+production approval callers have not yet migrated to this library service.
+
 The self-improvement loop's write half (ADR-0034) is built so the human gate is
 structural, not a convention:
 

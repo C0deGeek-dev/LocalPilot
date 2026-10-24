@@ -125,6 +125,12 @@ pub fn cross_gate(_token: &ApprovalToken) -> Stage {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LoopError {
+    /// Proposal validation or authority refused the requested operation.
+    #[error(transparent)]
+    Validation(#[from] localpilot_patchgen::validation::ValidationError),
+    /// Atomic loop-state persistence failed.
+    #[error(transparent)]
+    Store(#[from] localpilot_store::StoreError),
     /// A step was attempted that is not the loop's current step.
     #[error("the loop is at {actual:?}; {attempted} is not the next step")]
     OutOfOrder {

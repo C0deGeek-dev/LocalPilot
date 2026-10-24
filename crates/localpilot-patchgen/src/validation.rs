@@ -5,21 +5,26 @@
 //! revalidate the current identities under the repository transaction lock.
 
 mod authority;
+mod host;
 mod inspection;
+mod promotion;
 #[cfg(test)]
 mod tests;
 mod transaction;
 
 pub use authority::{EvaluationToken, OutwardApprovalToken, PatchApprovalToken};
+pub(crate) use host::trusted_search_directory;
+pub use host::{resolve_host_program, trusted_program_at};
 pub use inspection::ProposalInspection;
+pub use promotion::{PendingPromotion, ValidatedProposal};
 pub use transaction::{
     AuthorityEvent, AuthorityPurpose, PromotionIntent, RepositoryAuthority, RepositoryTransaction,
-    Reservation,
+    Reservation, ValidationCompletion,
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Current persisted validation format. Unknown formats never imply a pass.
 pub const VALIDATION_SCHEMA: &str = "localpilot-proposal-validation-v1";
@@ -30,6 +35,11 @@ pub const RECEIPT_LIFETIME_SECS: u64 = 24 * 60 * 60;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ValidationError {
+    /// No current passing observations qualify this proposal for promotion.
+    #[error(
+        "proposal validation is {0:?}; inspect evidence and explicitly validate before promotion"
+    )]
+    NotValidated(ValidationState),
     /// The owning proposal/Git primitive refused inspection.
     #[error(transparent)]
     Patch(#[from] crate::PatchError),
@@ -552,6 +562,8 @@ pub struct ValidationEvidence {
     pub run_id: uuid::Uuid,
     /// Proposal at the start of approved execution.
     pub proposal: ContentDigest,
+    /// Full source snapshot for historical inspection after a branch moves.
+    pub approved_proposal: ProposalIdentity,
     /// Exact reviewed plan at execution.
     pub plan: ContentDigest,
     /// Complete approved nonsecret command/environment/limit plan for inspection.
@@ -569,6 +581,92 @@ pub struct ValidationEvidence {
 }
 
 impl ValidationEvidence {
+    /// Canonical identity of the complete nonsecret observation, including logs,
+    /// outcomes and artifacts. Used by both consent and local journal completion;
+    /// an unchanged run id/time is not permission to edit the observed receipt.
+    ///
+    /// # Errors
+    /// Unknown schema, inconsistent plan, excess capture or unredacted output.
+    pub fn digest(&self) -> Result<ContentDigest, ValidationError> {
+        if self.schema != VALIDATION_SCHEMA
+            || self.run_id.is_nil()
+            || self.proposal != self.approved_proposal.digest()
+            || self.plan != self.approved_plan.digest()?
+            || self.checks.len() > self.approved_plan.checks.len()
+            || self.artifacts.len() > self.approved_plan.limits.artifact_count as usize
+        {
+            return Err(ValidationError::Invalid(
+                "unsupported evidence identity or bounds".into(),
+            ));
+        }
+        let mut hash = CanonicalHash::new("localpilot-validation-observations-v1");
+        hash.field(self.schema.as_bytes());
+        hash.field(self.run_id.as_bytes());
+        hash.field(self.proposal.as_str().as_bytes());
+        hash.field(self.plan.as_str().as_bytes());
+        let state = match self.state {
+            ValidationState::NotRun => "not_run",
+            ValidationState::Authorized => "authorized",
+            ValidationState::Running => "running",
+            ValidationState::Passed => "passed",
+            ValidationState::Failed => "failed",
+            ValidationState::Cancelled => "cancelled",
+            ValidationState::Invalid => "invalid",
+            ValidationState::Expired => "expired",
+            ValidationState::Stale => "stale",
+        };
+        hash.field(state.as_bytes());
+        hash.number(self.started_at);
+        hash.number(self.finished_at);
+        hash.number(self.checks.len() as u64);
+        for check in &self.checks {
+            if check.stdout.len() as u64 > self.approved_plan.limits.stream_bytes
+                || check.stderr.len() as u64 > self.approved_plan.limits.stream_bytes
+                || localpilot_config::redact::redact(&check.stdout) != check.stdout
+                || localpilot_config::redact::redact(&check.stderr) != check.stderr
+            {
+                return Err(ValidationError::Invalid(
+                    "evidence output must be bounded and redacted".into(),
+                ));
+            }
+            hash.field(check.command.name.as_bytes());
+            hash.field(check.command.program.as_bytes());
+            hash.field(check.command.executable.as_str().as_bytes());
+            hash.number(check.command.args.len() as u64);
+            for arg in &check.command.args {
+                hash.field(arg.as_bytes());
+            }
+            let end = match check.end {
+                ValidationCommandEnd::Exited { code } => {
+                    hash.field(b"exited");
+                    hash.field(&code.to_be_bytes());
+                    None
+                }
+                ValidationCommandEnd::Denied => Some("denied"),
+                ValidationCommandEnd::NotStarted => Some("not_started"),
+                ValidationCommandEnd::TimedOut => Some("timed_out"),
+                ValidationCommandEnd::Cancelled => Some("cancelled"),
+                ValidationCommandEnd::Failed => Some("failed"),
+            };
+            if let Some(end) = end {
+                hash.field(end.as_bytes());
+            }
+            hash.number(check.elapsed_ms);
+            hash.field(check.stdout.as_bytes());
+            hash.field(check.stderr.as_bytes());
+            hash.number(u64::from(check.truncated));
+            hash.number(u64::from(check.pipes_closed));
+            hash.number(u64::from(check.cleanup_confirmed));
+        }
+        hash.number(self.artifacts.len() as u64);
+        for artifact in &self.artifacts {
+            hash.field(artifact.path.as_bytes());
+            hash.number(artifact.bytes);
+            hash.field(artifact.digest.as_str().as_bytes());
+        }
+        Ok(hash.finish())
+    }
+
     /// Recheck every pass condition against a freshly resolved current plan.
     ///
     /// # Errors
@@ -585,11 +683,20 @@ impl ValidationEvidence {
             ));
         }
         if self.proposal != proposal.digest()
+            || self.approved_proposal != *proposal
             || self.plan != plan.digest()?
             || self.approved_plan != *plan
         {
             return Err(ValidationError::Stale);
         }
+        self.verify_passing_observations(plan, now)
+    }
+
+    fn verify_passing_observations(
+        &self,
+        plan: &ValidationPlanIdentity,
+        now: u64,
+    ) -> Result<(), ValidationError> {
         if self.started_at > self.finished_at || self.finished_at > now {
             return Err(ValidationError::Clock);
         }
@@ -660,4 +767,64 @@ impl ValidationEvidence {
             other => other,
         }
     }
+}
+
+const MAX_RECEIPT_BYTES: u64 = 4 * 1024 * 1024;
+
+fn receipt_path(root: &Path, run: uuid::Uuid) -> PathBuf {
+    root.join(".localpilot/validation/receipts")
+        .join(format!("{run}.json"))
+}
+
+pub(crate) fn persist_validation_evidence(
+    root: &Path,
+    evidence: &ValidationEvidence,
+) -> Result<(), ValidationError> {
+    evidence.digest()?;
+    let path = receipt_path(root, evidence.run_id);
+    let parent = path
+        .parent()
+        .ok_or_else(|| ValidationError::Invalid("receipt path has no parent".into()))?;
+    std::fs::create_dir_all(parent).map_err(|source| ValidationError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    let bytes = serde_json::to_vec_pretty(evidence)?;
+    if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+        return Err(ValidationError::Invalid("receipt exceeds4MiB".into()));
+    }
+    localpilot_store::atomic_write(&path, &bytes)?;
+    Ok(())
+}
+
+/// Load bounded historical observations as inspectable data. This never creates
+/// consent, a validated capability or a claim that the journal completed.
+///
+/// # Errors
+/// Missing/oversized/malformed record or mismatched run/schema/content identity.
+pub fn load_validation_evidence(
+    root: &Path,
+    run: uuid::Uuid,
+) -> Result<ValidationEvidence, ValidationError> {
+    use std::io::Read;
+    let path = receipt_path(root, run);
+    let file = std::fs::File::open(&path).map_err(|source| ValidationError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| ValidationError::Io { path, source })?;
+    if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+        return Err(ValidationError::Invalid("receipt exceeds4MiB".into()));
+    }
+    let evidence: ValidationEvidence = serde_json::from_slice(&bytes).map_err(|_| {
+        ValidationError::Invalid("unsupported validation receipt JSON/schema".into())
+    })?;
+    if evidence.run_id != run {
+        return Err(ValidationError::Stale);
+    }
+    evidence.digest()?;
+    Ok(evidence)
 }

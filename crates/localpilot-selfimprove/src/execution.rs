@@ -76,11 +76,13 @@ async fn validate_with_elapsed(
     progress: &mut dyn Write,
     elapsed: impl Fn() -> Duration,
 ) -> Result<ValidationEvidence, ValidationError> {
+    let started_at = now()?;
     let mut authority = RepositoryAuthority::open(root)?;
     let mut transaction = authority.try_transaction()?;
+    transaction.require_idle()?;
     let mut patch = ProposedPatch::reopen(root, id)?;
     let current = preflight_in_transaction(root, &patch, &transaction)?;
-    if current.digest()? != review.digest()? || current.plan != review.plan {
+    if current != *review || current.digest()? != review.digest()? {
         return Err(ValidationError::Stale);
     }
     let workspace = Workspace::new(Path::new(&current.plan.worktree))
@@ -94,10 +96,11 @@ async fn validate_with_elapsed(
         schema: VALIDATION_SCHEMA.into(),
         run_id,
         proposal: current.proposal.identity.digest(),
+        approved_proposal: current.proposal.identity.clone(),
         plan: plan.digest()?,
         approved_plan: plan.clone(),
         state: ValidationState::Running,
-        started_at: now()?,
+        started_at,
         finished_at: now()?,
         checks: Vec::new(),
         artifacts: Vec::new(),
@@ -250,10 +253,7 @@ async fn validate_with_elapsed(
     writeln!(progress, "Validation receipt persisted")
         .map_err(|_| invalid("validation progress sink failed"))?;
     if safely_stopped {
-        transaction.finish(
-            run_id,
-            "validation observations persisted; no promotion performed",
-        )?;
+        transaction.finish_evaluation(&receipt)?;
     }
     Ok(receipt)
 }
@@ -331,7 +331,7 @@ fn invalid(message: &str) -> ValidationError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::proposal_preflight;
@@ -361,7 +361,7 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().into()
     }
 
-    fn fixture(source: &str) -> (tempfile::TempDir, ProposedPatch, String) {
+    pub(crate) fn fixture(source: &str) -> (tempfile::TempDir, ProposedPatch, String) {
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "-b", "main"]);
         git(root.path(), &["config", "user.name", "fixture"]);
@@ -419,7 +419,7 @@ mod tests {
         (root, patch, head)
     }
 
-    async fn run(
+    pub(crate) async fn run(
         root: &Path,
         patch: &ProposedPatch,
         profile: Profile,
@@ -480,6 +480,14 @@ mod tests {
             runs.push(receipt.run_id);
         }
         assert_ne!(runs[0], runs[1]);
+        for run in &runs {
+            let historical =
+                localpilot_patchgen::validation::load_validation_evidence(root.path(), *run)
+                    .unwrap();
+            assert_eq!(historical.run_id, *run);
+            assert_eq!(historical.state, ValidationState::Passed);
+            assert_eq!(historical.approved_proposal.proposal_id, patch.id());
+        }
         let mut authority = RepositoryAuthority::open(root.path()).unwrap();
         let transaction = authority.try_transaction().unwrap();
         assert_eq!(transaction.events().count(), 2);

@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Add a staged common promotion service that holds the repository lock through
+  source promotion and atomic loop-state persistence. Bind passing receipts to
+  locally completed observations, retain per-run evidence and source snapshots,
+  and reject edited or relabeled receipts. Resolve static Git from an absolute
+  host executable outside the project. Production caller migration remains pending.
+
 - Keep trusted host launcher names when resolving executable aliases, including
   Homebrew `rustup` links to `rustup-init`, while hashing physical target bytes.
   Refuse project-owned executable search aliases. Exercise actual validation

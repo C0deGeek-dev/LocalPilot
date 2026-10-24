@@ -2036,6 +2036,7 @@ dependencies = [
  "localpilot-sandbox",
  "localpilot-selfdev",
  "localpilot-selfreview",
+ "localpilot-store",
  "serde",
  "serde_json",
  "tempfile",

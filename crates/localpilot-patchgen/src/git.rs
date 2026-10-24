@@ -39,7 +39,7 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, PatchError> {
     {
         reject_executable_filters(cwd, args)?;
     }
-    let mut command = static_git(cwd);
+    let mut command = static_git(cwd)?;
     command.args(args);
     let output = command.output().map_err(|e| PatchError::Git {
         args: args.join(" "),
@@ -55,9 +55,37 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, PatchError> {
         .map_err(|_| PatchError::UnsupportedGitPolicy("Git output is not UTF-8".into()))
 }
 
-fn static_git(cwd: &Path) -> Command {
-    let mut command = Command::new("git");
+fn static_git(cwd: &Path) -> Result<Command, PatchError> {
+    let mut roots =
+        vec![std::fs::canonicalize(cwd).map_err(|error| policy_error(&error.to_string()))?];
+    for ancestor in cwd.ancestors().filter(|path| path.join(".git").exists()) {
+        let root =
+            std::fs::canonicalize(ancestor).map_err(|error| policy_error(&error.to_string()))?;
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    let refs: Vec<_> = roots.iter().map(PathBuf::as_path).collect();
+    let program = crate::validation::resolve_host_program("git", &refs).map_err(|_| {
+        policy_error("a trusted host Git executable outside the project is required")
+    })?;
+    let mut search = vec![program
+        .parent()
+        .ok_or_else(|| policy_error("host Git has no parent"))?
+        .to_path_buf()];
+    if let Some(path) = std::env::var_os("PATH") {
+        search.extend(
+            std::env::split_paths(&path)
+                .filter_map(|dir| crate::validation::trusted_search_directory(&dir, &refs)),
+        );
+    }
+    let path = std::env::join_paths(search)
+        .map_err(|_| policy_error("unsupported host Git search path"))?;
+    let mut command = Command::new(program);
     command
+        .env("PATH", path)
+        .env_remove("GIT_EXEC_PATH")
+        .env("NoDefaultCurrentDirectoryInExePath", "1")
         .args([
             "--literal-pathspecs",
             "-c",
@@ -92,13 +120,13 @@ fn static_git(cwd: &Path) -> Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .current_dir(cwd);
-    command
+    Ok(command)
 }
 
 fn reject_executable_filters(cwd: &Path, operation: &[&str]) -> Result<(), PatchError> {
     // Names only: configured helper command values may contain secrets. Named
     // hooks can exist independently of traditional core.hooksPath on newer Git.
-    let named = static_git(cwd)
+    let named = static_git(cwd)?
         .args(["config", "--name-only", "--get-regexp", "^hook\\."])
         .output()
         .map_err(|error| policy_error(&error.to_string()))?;
@@ -197,7 +225,7 @@ pub(crate) fn attribute_output(
         .write_all(paths)
         .and_then(|()| input.rewind())
         .map_err(|error| policy_error(&error.to_string()))?;
-    let mut command = static_git(cwd);
+    let mut command = static_git(cwd)?;
     command.arg("check-attr");
     if let Some(source) = source {
         command.arg(source);
@@ -214,7 +242,7 @@ pub(crate) fn attribute_output(
 }
 
 pub(crate) fn config_value(cwd: &Path, name: &str) -> Result<Option<String>, PatchError> {
-    let output = static_git(cwd)
+    let output = static_git(cwd)?
         .args(["config", "--get", name])
         .output()
         .map_err(|error| policy_error(&error.to_string()))?;
@@ -228,7 +256,7 @@ pub(crate) fn config_value(cwd: &Path, name: &str) -> Result<Option<String>, Pat
 }
 
 fn static_output(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, PatchError> {
-    let output = static_git(cwd)
+    let output = static_git(cwd)?
         .args(args)
         .output()
         .map_err(|error| policy_error(&error.to_string()))?;
@@ -632,6 +660,72 @@ impl Drop for Worktree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "subprocess helper invoked by static_git_never_selects_a_project_executable"]
+    fn git_lookup_worker() {
+        let Some(root) = std::env::var_os("LOCALPILOT_GIT_LOOKUP_ROOT") else {
+            return;
+        };
+        let version = git(Path::new(&root), &["--version"]).unwrap();
+        assert!(version.starts_with("git version"));
+    }
+
+    #[test]
+    fn static_git_never_selects_a_project_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("marker.rs");
+        std::fs::write(&source, "fn main() { if let Some(p) = std::env::var_os(\"LOCALPILOT_GIT_LOOKUP_MARKER\") { std::fs::write(p, b\"executed\").unwrap(); } println!(\"git version controlled-fake\"); }\n").unwrap();
+        let fake_git = root
+            .path()
+            .join(if cfg!(windows) { "git.exe" } else { "git" });
+        let built = Command::new("rustc")
+            .args(["--edition=2021", "--crate-name", "controlled_git_marker"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&fake_git)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let marker = root.path().join("executed-marker");
+        Command::new(&fake_git)
+            .env("LOCALPILOT_GIT_LOOKUP_MARKER", &marker)
+            .output()
+            .unwrap();
+        assert!(
+            marker.is_file(),
+            "positive control must execute the marker fixture"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        let mut entries = vec![root.path().to_path_buf()];
+        entries.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "git::tests::git_lookup_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .current_dir(root.path())
+            .env("PATH", std::env::join_paths(entries).unwrap())
+            .env("LOCALPILOT_GIT_LOOKUP_ROOT", root.path())
+            .env("LOCALPILOT_GIT_LOOKUP_MARKER", &marker)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !marker.exists(),
+            "static Git executed a project-controlled executable before consent"
+        );
+    }
 
     #[cfg(windows)]
     #[test]
