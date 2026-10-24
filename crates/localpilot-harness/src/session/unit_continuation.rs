@@ -27,6 +27,7 @@ pub(super) struct RenameContinuation {
     pair: Option<super::rename::RenamePair>,
     pub(super) proof: Option<crate::resume::WorkDiffBaseline>,
     pub(super) attempted: bool,
+    pub(super) batch_refused: bool,
 }
 
 /// A host-owned syntax check for one root-relative Python source file. It
@@ -82,6 +83,137 @@ pub(super) enum UnitAttempt {
 }
 
 impl SessionRuntime {
+    /// Refuse a proven rename spanning too many hunks before any write. A hint
+    /// spends no attempt and grants no authority; the normal retry still goes
+    /// through permissions, reservation, source inspection and verification.
+    pub(super) fn rename_admission_guidance(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Option<String> {
+        use std::io::Read as _;
+        let state = self.rename_continuation.as_ref()?;
+        let profile = self.active_work_profile?;
+        if self.unit_checkpoints_remaining == 0
+            || self.work_unit.has_mutations()
+            || self.work_mcp_call_attempted
+            || self.work_opaque_launch_dispatched
+            || self.work_write_error_may_have_run
+        {
+            return None;
+        }
+        let (path, old_text, new_text) = match name {
+            "write_file" => (
+                input.get("path")?.as_str()?,
+                None,
+                input.get("content")?.as_str()?,
+            ),
+            "edit_file" => (
+                input.get("path")?.as_str()?,
+                Some(input.get("old_text")?.as_str()?),
+                input.get("new_text")?.as_str()?,
+            ),
+            "apply_patch" => {
+                let operations = input.get("operations")?.as_array()?;
+                let [operation] = operations.as_slice() else {
+                    return None;
+                };
+                if operation.get("action")?.as_str()? != "update" {
+                    return None;
+                }
+                let hunks = operation.get("hunks")?.as_array()?;
+                let [hunk] = hunks.as_slice() else {
+                    return None;
+                };
+                (
+                    operation.get("path")?.as_str()?,
+                    Some(hunk.get("old_text")?.as_str()?),
+                    hunk.get("new_text")?.as_str()?,
+                )
+            }
+            _ => return None,
+        };
+        if new_text.len() > super::rename::SOURCE_CAP {
+            return None;
+        }
+        let root = self.workspace.process_dir();
+        let normalized = self.workspace.resolve(Path::new(path)).ok()?;
+        let relative = normalized
+            .strip_prefix(self.workspace.root())
+            .ok()?
+            .to_str()?
+            .replace('\\', "/");
+        syntax_check_targets(&root, std::slice::from_ref(&relative), 1)?;
+        let call = ToolCall::new(
+            ToolUseId::from("rename-admission-read"),
+            "read_file",
+            serde_json::json!({"path": relative}),
+        );
+        let ctx = ToolContext {
+            workspace: &self.workspace,
+            interactivity: self.config.interactivity,
+            trusted: self.config.trusted,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        self.tools
+            .check_headless_permissions(&call, &ctx, &self.engine.snapshot())
+            .ok()?;
+        let before =
+            crate::resume::work_base_source(&root, self.work_diff_baseline.as_ref()?, &relative)
+                .ok()?;
+        if before.len() > super::rename::SOURCE_CAP {
+            return None;
+        }
+        let mut current = String::new();
+        std::fs::File::open(&normalized)
+            .ok()?
+            .take(super::rename::SOURCE_CAP as u64 + 1)
+            .read_to_string(&mut current)
+            .ok()?;
+        if current != before || current.len() > super::rename::SOURCE_CAP {
+            return None;
+        }
+        let after = if let Some(old) = old_text {
+            if old.is_empty() || before.matches(old).count() != 1 {
+                return None;
+            }
+            before.replacen(old, new_text, 1)
+        } else {
+            new_text.to_owned()
+        };
+        let hint = super::rename::first_bounded_edit(
+            &before,
+            &after,
+            state.pair.as_ref(),
+            profile.max_regions,
+        )?;
+        if profile.max_changed_lines < 2 {
+            return None;
+        }
+        let message = match hint {
+            super::rename::AdmissionHint::Exact { old, new, regions } => {
+                if old
+                    .len()
+                    .div_ceil(80)
+                    .saturating_add(new.len().div_ceil(80))
+                    > profile.max_changed_lines
+                {
+                    return None;
+                }
+                let retry = serde_json::json!({"tool":"edit_file", "input":{"path":relative,"old_text":old,"new_text":new}}).to_string();
+                format!("work envelope: this rename changes {regions} separate regions, but the current unit allows {}. Nothing was written. Start with one exact edit: {retry}. Remaining sites still require bounded verified checkpoints and final full verification.", profile.max_regions)
+            }
+            super::rename::AdmissionHint::DeclarationFirst { pair, regions } => {
+                format!("work envelope: this proposed name change spans {regions} separate regions, but the current unit allows {}. Nothing was written. The first selective unit must rename the function declaration: find {:?} and rename only its declaration to {:?} with one exact edit. Caller changes alone cannot activate continuation. Remaining sites require verified checkpoints and final full verification.", profile.max_regions, pair.old, pair.new)
+            }
+        };
+        (message.len() <= profile.max_output_bytes).then_some(message)
+    }
+
     /// A bounds-refused write ends the unit when a further unit is available
     /// and this unit already holds a mutation; the host settles it after the
     /// current tool batch instead of waiting for the model to stop. Returns

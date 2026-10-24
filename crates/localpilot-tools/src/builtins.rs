@@ -640,7 +640,7 @@ impl Tool for ReadFile {
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
         let limits = limits.filter(|_| input.end_line.is_none());
         let refusal = || {
-            ToolError::Failed(
+            ToolError::WorkEnvelope(
                 format!("work envelope: request an explicit start_line/end_line page within the read limit. {}", hint.as_deref().unwrap_or_default()),
             )
         };

@@ -55,6 +55,8 @@ pub struct ToolDispatchResult {
     pub unavailable_backend: Option<&'static str>,
     /// Pre-invoke permission refusal, separate from the model-facing result.
     pub permission_denial: Option<PermissionDenial>,
+    /// Host-only classification; never inferred from model-visible output.
+    pub work_envelope_refusal: bool,
 }
 
 /// Fresh permission evidence. Human guidance has crossed the redaction boundary.
@@ -74,6 +76,7 @@ impl ToolDispatchResult {
             mutation_may_have_run: false,
             unavailable_backend: None,
             permission_denial: None,
+            work_envelope_refusal: false,
         }
     }
 }
@@ -543,10 +546,12 @@ impl ToolRegistry {
                     mutation_may_have_run,
                     unavailable_backend: output.unavailable_backend,
                     permission_denial: None,
+                    work_envelope_refusal: false,
                 }
             }
             Err(err) => ToolDispatchResult {
                 mutation_may_have_run,
+                work_envelope_refusal: matches!(&err, crate::ToolError::WorkEnvelope(_)),
                 ..ToolDispatchResult::plain(unusable_result(
                     tool.name(),
                     &call.id,

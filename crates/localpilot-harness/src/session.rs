@@ -1671,10 +1671,15 @@ impl SessionRuntime {
             self.tools.set_context_output_limit(active.max_output_bytes);
             self.tools
                 .set_file_read_limits(active.max_read_lines, active.max_output_bytes);
-            if let Some(refusal) = self
-                .work_unit
-                .refusal(*active, name, input, &self.workspace)
-            {
+            let active = *active;
+            if let Some(guidance) = self.rename_admission_guidance(name, input) {
+                self.work_opaque_retry_blocked = true;
+                if let Some(state) = &mut self.rename_continuation {
+                    state.batch_refused = true;
+                }
+                return Some(guidance);
+            }
+            if let Some(refusal) = self.work_unit.refusal(active, name, input, &self.workspace) {
                 let mut unit_ended = false;
                 if is_file_write_tool(name) && refusal.blocks_opaque_retry {
                     self.work_opaque_retry_blocked = true;
@@ -2214,6 +2219,7 @@ impl SessionRuntime {
                         mutation_may_have_run: false,
                         unavailable_backend: None,
                         permission_denial: None,
+                        work_envelope_refusal: false,
                     },
                     true,
                 ),
@@ -3888,6 +3894,7 @@ impl SessionRuntime {
         if let Some(state) = &mut self.rename_continuation {
             state.proof = None;
             state.attempted = false;
+            state.batch_refused = false;
         }
         self.active_work_profile = None;
         self.active_work_profile = self.work_profile();
@@ -4691,6 +4698,9 @@ impl SessionRuntime {
             }
 
             // Execute tool calls through the permission-gated registry.
+            if let Some(state) = &mut self.rename_continuation {
+                state.batch_refused = false;
+            }
             for (call_index, (id, name, input, _)) in calls.iter().enumerate() {
                 // A graceful wind-down requested between tool calls: answer this
                 // call and every remaining tool_use (resumable for a wait-like
@@ -4718,6 +4728,7 @@ impl SessionRuntime {
                         if let Some(state) = &mut self.rename_continuation {
                             state.proof = None;
                             state.attempted = false;
+                            state.batch_refused = false;
                         }
                         self.reset_progress_breakers(
                             &mut no_progress,
@@ -4736,6 +4747,17 @@ impl SessionRuntime {
                             skip_id,
                             "skipped: this unit ended at a refused edit; the call was not executed",
                         ));
+                    }
+                    break;
+                }
+                if self
+                    .rename_continuation
+                    .as_ref()
+                    .is_some_and(|state| state.batch_refused)
+                {
+                    for (skip_id, _, _, _) in &calls[call_index..] {
+                        self.append(tool_error_message(skip_id,
+                            "skipped: rename admission needs a bounded exact-edit retry; this call was not executed. Follow the first refusal before continuing."));
                     }
                     break;
                 }
@@ -4943,6 +4965,7 @@ impl SessionRuntime {
                 let mut bounded_write_dispatched = false;
                 let mut unavailable_backend = None;
                 let mut permission_denial = None;
+                let mut work_envelope_refusal = false;
                 let result = match decision {
                     PreDispatch::Redirect(resolution) => {
                         // The broker narrowed the surface and this tool is not
@@ -4960,6 +4983,9 @@ impl SessionRuntime {
                         ))
                     }
                     PreDispatch::Block { reason, announce } => {
+                        // This reason is host-authored pre-dispatch policy,
+                        // never tool output. Do not attribute it as execution.
+                        work_envelope_refusal = reason.starts_with("work envelope:");
                         if is_file_write_tool(name) && reason.starts_with("work envelope:") {
                             self.work_mutation_refusal = Some(reason.clone());
                         }
@@ -4987,6 +5013,7 @@ impl SessionRuntime {
                             ))
                         } else if let Some(reason) = self.reserve_work_input(name, projected_input)
                         {
+                            work_envelope_refusal = true;
                             if is_file_write_tool(name) {
                                 self.work_mutation_refusal = Some(reason.clone());
                             }
@@ -5119,6 +5146,7 @@ impl SessionRuntime {
                                     self.work_opaque_launch_dispatched |=
                                         is_opaque_launch(name, &active_call.input);
                                     unavailable_backend = dispatch.unavailable_backend;
+                                    work_envelope_refusal = dispatch.work_envelope_refusal;
                                     if let Some(denial) = &dispatch.permission_denial {
                                         let _ = events.send(RuntimeEvent::Warning(
                                             denial.human_guidance.clone(),
@@ -5289,9 +5317,12 @@ impl SessionRuntime {
                 if let Some(scrubbed) = scrub_control_chars(&result.output) {
                     result.output = scrubbed;
                 }
-                if absent_backend.is_none() {
-                    self.capability_evidence.observe_outcome(!result.is_error());
-                }
+                let attributable = absent_backend.is_none()
+                    && unavailable_backend.is_none()
+                    && permission_denial.is_none()
+                    && !work_envelope_refusal;
+                self.capability_evidence
+                    .observe_tool_outcome(result.outcome, attributable);
 
                 // Judge what this call freshly observed before
                 // any harness rewrite (read elision names the prior call, so its

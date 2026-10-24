@@ -100,6 +100,75 @@ async fn units(runtime: &mut SessionRuntime) -> StopReason {
 const FAILS: &str = "import sys\nsys.exit(1)\n";
 
 #[tokio::test]
+async fn rename_admission_requires_read_authority_and_an_attested_clean_base() {
+    let before = "def old_name(x):\n    return x\n\n\nvalue = old_name(1)\n";
+    for scenario in ["authorized", "no-read-tool", "dirty"] {
+        let dir = repository(FAILS);
+        std::fs::write(dir.path().join("money.py"), before).unwrap();
+        git(dir.path(), &["add", "money.py"]);
+        git(dir.path(), &["commit", "-qm", "rename fixture"]);
+        if scenario == "dirty" {
+            std::fs::write(dir.path().join("unrelated.txt"), "preexisting").unwrap();
+        }
+        let provider = FakeProvider::new()
+            .tool_call("read", "read_file", json!({"path":"money.py"}))
+            .tool_call(
+                "whole",
+                "write_file",
+                json!({
+                    "path":"money.py", "content":before.replace("old_name", "new_name")
+                }),
+            )
+            .text("done");
+        let registry = ToolRegistry::with_builtins();
+        let registry = if scenario == "no-read-tool" {
+            registry.narrowed(&["write_file".to_owned()])
+        } else {
+            registry
+        };
+        let mut runtime = SessionRuntime::new(
+            Arc::new(provider),
+            registry,
+            PermissionEngine::new(Profile::Bypass, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::ephemeral(),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                granularity: Some(GranularityConfig {
+                    headless_rename_units: 2,
+                    ..GranularityConfig::default()
+                }),
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        );
+        let (events, mut receiver) = broadcast::channel(1024);
+        let stop = runtime
+            .run_turn_in_units(
+                "Rename old_name to new_name everywhere.",
+                &events,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_ne!(stop, StopReason::Done);
+        let mut guided = false;
+        while let Ok(event) = receiver.try_recv() {
+            if let localpilot_harness::RuntimeEvent::ToolFinished { output, .. } = event {
+                guided |= output.contains("Nothing was written");
+            }
+        }
+        assert_eq!(guided, scenario == "authorized", "{scenario}");
+        if scenario == "authorized" {
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("money.py")).unwrap(),
+                before
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn selective_evidence_requires_read_authority_and_stable_checks() {
     if !python() {
         return;

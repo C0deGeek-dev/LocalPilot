@@ -1,5 +1,26 @@
 # Test Plan
 
+`localpilot-harness/tests/granularity.rs` drives real dispatch for implicit
+oversized-line and explicit-range read refusals, oversized writes, permission
+denials, a completed nonzero Git command, missing-file I/O and typed backend
+absence. These controls keep host refusals neutral without hiding their error
+results; policy-looking text from an ordinary failed tool still weakens
+reliability. Evidence-counter controls prove neutral observations cannot earn
+Strong, do not poison Strong, and do not forgive malformed input. Existing
+failed changed-unit verification and active-unit monotonicity tests remain the
+regression boundaries. All fixtures use disposable repositories and fake models.
+
+Selective admission controls in `eval_multi_site.rs` begin with a whole-file
+write, a whole-body edit and a single oversized patch. Each is refused before
+source changes; following the suggested exact edit completes all four sites
+through three verified checkpoints. Default-off controls retain their refusal.
+`unit_continuation.rs` checks missing read authority and dirty bases; parser
+controls reject mixed edits, ambiguous suggestions and a changed rename pair.
+A batched control queues source and test mutations behind the oversized first
+edit and proves those calls are not executed before the bounded retry.
+The same control with callers queued first still requires a declaration-led
+verified chain; caller-only edits cannot establish continuation authority.
+
 `localpilot-patchgen` contract tests cover canonical field/argv boundaries,
 stale/expired/partial receipts, denied and cancelled outcomes, legacy provenance,
 private environment comparison, and all six forbidden token substitutions.

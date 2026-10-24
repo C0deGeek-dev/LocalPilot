@@ -26,6 +26,11 @@ pub enum ToolError {
     /// A filesystem or process error.
     #[error("{0}")]
     Failed(String),
+
+    /// A host-enforced work/read bound refused the operation. This remains an
+    /// error to the model, but is not evidence that execution malfunctioned.
+    #[error("{0}")]
+    WorkEnvelope(String),
 }
 
 impl From<SandboxError> for ToolError {

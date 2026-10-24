@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Opt-in selective Python rename continuation now refuses supported multi-hunk
+  rename requests before mutation and suggests one bounded exact edit. Normal
+  permission checks, unit budgets, checkpoints and final verification still
+  govern the retry. The experiment remains disabled by default.
+
+- Work-envelope refusals, permission denials and typed unavailable backends no
+  longer count as failed model execution when deriving work reliability.
+  Completed commands reporting failure are neutral too. Errors remain visible;
+  malformed calls, actual unusable execution and failed changed-unit checks
+  retain their conservative behavior. Editing limits and continuation defaults
+  are unchanged.
+
 - Wire explicit `self-review`/`selfimprove` validation and evidence commands, and
   separate content-bound patch promotion confirmations, through the common
   service. Add `/selfimprove preflight`, `evidence` and `validate <reviewer>` with

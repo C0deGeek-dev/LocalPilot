@@ -78,6 +78,24 @@ The first unit must rename a function declaration; later units retain its pair.
 This rejects ordinary call substitutions such as int to round as a starting
 trigger. It recognizes a syntactic class, not binding or task correctness.
 
+Before mutation, this opt-in mode also refuses a supported single-file
+`write_file`, `edit_file`, or one-update/one-hunk `apply_patch` whose proven
+uniform rename spans too many separated regions. With authorized read access
+and a matching clean/attested base, suggest one unique exact line edit, starting
+with the declaration in the first unit. A later unit retains the established
+identifier pair. This is guidance only: nothing is written or reserved by the
+refused call, and the model's retry follows ordinary dispatch and verification.
+No partial write, hunk-cap change, post-effect refund or generic diff-accounting
+change. Unsupported, ambiguous, linked, dirty or unreadable sources retain the
+existing behavior. Guidance material and source parsing remain bounded.
+After this pre-admission refusal, remaining calls in the same model batch get
+paired not-executed results. The next model request can retry the exact edit in
+the same unit; this is neither a checkpoint nor a budget reset. A later queued
+call cannot consume the unit before the model sees the first refusal.
+An oversized caller-first name change gets declaration-first guidance instead
+of being written. It does not establish the rename pair or earn continuation;
+the first verified unit must still change the declaration.
+
 Read authorization uses the existing `read_file` headless permission preflight
 before source retrieval. Dirty initial material, unavailable snapshots,
 unsupported source, parser error/missing nodes and resource exhaustion decline.
@@ -1416,6 +1434,15 @@ profile. This is evidence of structured execution, not a general intelligence
 score or proof of semantic correctness. Unknown, failed and malformed evidence
 stay conservative. Failed verification of changed work also narrows reliability;
 unavailable verifiers remain missing evidence rather than proof about the model.
+Host work-envelope refusals, typed permission denials and authoritative backend
+absence are missing execution evidence too: they neither count as successes nor
+poison reliability. ToolOutcome::ReportedFailure means a completed negative
+observation and is neutral; ToolOutcome::Unusable still weakens reliability when
+attributable to execution. A host-only WorkEnvelope error classification crosses
+dispatch without changing persisted ToolResult or model-facing error status.
+Tool-output text cannot claim that classification. Malformed inputs remain
+malformed regardless of a later refusal. This attribution clarification changes
+no thresholds, active-unit monotonicity, edit limits or continuation defaults.
 Counts remain in memory and reset on provider/model changes, new/load/fork
 sessions and process restart. Provider schemas can be misleading;
 their successful use never waives the real checks. No raw values or persisted

@@ -54,6 +54,22 @@ pub struct CapabilityEvidence {
 }
 
 impl CapabilityEvidence {
+    /// Host refusals and completed negative observations supply no execution
+    /// evidence. Keeping them neutral also prevents refusals earning successes.
+    pub(crate) fn observe_tool_outcome(
+        &mut self,
+        outcome: localpilot_core::ToolOutcome,
+        attributable: bool,
+    ) {
+        if attributable {
+            match outcome {
+                localpilot_core::ToolOutcome::Ok => self.observe_outcome(true),
+                localpilot_core::ToolOutcome::Unusable => self.observe_outcome(false),
+                localpilot_core::ToolOutcome::ReportedFailure => {}
+            }
+        }
+    }
+
     pub fn observe_input(&mut self, valid: bool) {
         self.last_input_valid = valid;
         self.malformed |= !valid;
@@ -726,6 +742,34 @@ mod tests {
         assert_eq!(evidence.reliability(), Reliability::Strong);
         evidence.observe_input(false);
         evidence.observe_outcome(true);
+        assert_eq!(evidence.reliability(), Reliability::Malformed);
+    }
+
+    #[test]
+    fn neutral_outcomes_neither_poison_nor_establish_reliability() {
+        use localpilot_core::ToolOutcome;
+        let mut evidence = CapabilityEvidence::default();
+        evidence.observe_verification();
+        evidence.observe_verification();
+        for _ in 0..10 {
+            evidence.observe_input(true);
+            evidence.observe_tool_outcome(ToolOutcome::Unusable, false);
+            evidence.observe_tool_outcome(ToolOutcome::Ok, false);
+            evidence.observe_tool_outcome(ToolOutcome::ReportedFailure, true);
+        }
+        assert_eq!(evidence.reliability(), Reliability::Unknown);
+        for _ in 0..8 {
+            evidence.observe_input(true);
+            evidence.observe_tool_outcome(ToolOutcome::Ok, true);
+        }
+        assert_eq!(evidence.reliability(), Reliability::Strong);
+        evidence.observe_tool_outcome(ToolOutcome::Unusable, false);
+        evidence.observe_tool_outcome(ToolOutcome::ReportedFailure, true);
+        assert_eq!(evidence.reliability(), Reliability::Strong);
+        evidence.observe_tool_outcome(ToolOutcome::Unusable, true);
+        assert_eq!(evidence.reliability(), Reliability::Weak);
+        evidence.observe_input(false);
+        evidence.observe_tool_outcome(ToolOutcome::Unusable, false);
         assert_eq!(evidence.reliability(), Reliability::Malformed);
     }
 }

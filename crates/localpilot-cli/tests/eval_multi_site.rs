@@ -334,6 +334,11 @@ enum Plan {
     FailedWrite,
     ProjectEnableRename,
     DifferentPair,
+    WholeWriteFirst,
+    WholeEditFirst,
+    WholePatchFirst,
+    WholeBatchFirst,
+    WholeCallerBatchFirst,
 }
 
 /// A model that reads the workspace to choose its next site, like a model that
@@ -356,7 +361,72 @@ impl Respond for Workspace {
             .cloned()
             .unwrap_or(Value::Null);
         let last_text = last["content"].to_string();
-        if last["role"] == "tool" && last_text.contains("work envelope") {
+        let whole_first = matches!(
+            self.plan,
+            Plan::WholeWriteFirst
+                | Plan::WholeEditFirst
+                | Plan::WholePatchFirst
+                | Plan::WholeBatchFirst
+                | Plan::WholeCallerBatchFirst
+        );
+        if whole_first && n == 0 {
+            return calls_tool(n, "read_file", &json!({"path":"money.py"}));
+        }
+        if whole_first && n == 1 {
+            let before = std::fs::read_to_string(self.root.join("money.py")).unwrap();
+            let after = before.replace("old_name", "new_name");
+            return match self.plan {
+                Plan::WholeWriteFirst => {
+                    calls_tool(n, "write_file", &json!({"path":"money.py","content":after}))
+                }
+                Plan::WholeEditFirst => calls_tool(
+                    n,
+                    "edit_file",
+                    &json!({"path":"money.py","old_text":before,"new_text":after}),
+                ),
+                Plan::WholeBatchFirst | Plan::WholeCallerBatchFirst => {
+                    let app = std::fs::read_to_string(self.root.join("app.py")).unwrap();
+                    let mut edits = [
+                        json!({"path":"money.py","old_text":before,"new_text":after}),
+                        json!({"path":"app.py","old_text":app,"new_text":app.replace("old_name", "new_name")}),
+                        json!({"path":"tests/test_rename.py","old_text":"hasattr(money, 'old_name')","new_text":"hasattr(money, 'new_name')"}),
+                    ];
+                    if self.plan == Plan::WholeCallerBatchFirst {
+                        edits.swap(0, 1);
+                    }
+                    let calls: Vec<_> = edits.iter().enumerate().map(|(index, input)| json!({
+                        "index":index,"id":format!("batch_{n}_{index}"),"function":{"name":"edit_file","arguments":input.to_string()}
+                    })).collect();
+                    sse(&[
+                        json!({"choices":[{"delta":{"tool_calls":calls}}]}),
+                        json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+                    ])
+                }
+                _ => calls_tool(
+                    n,
+                    "apply_patch",
+                    &json!({"operations":[{"action":"update","path":"money.py","hunks":[{"old_text":before,"new_text":after}]}]}),
+                ),
+            };
+        }
+        if whole_first
+            && (last_text.contains("Nothing was written")
+                || last_text.contains("rename admission needs"))
+        {
+            let unchanged = std::fs::read_to_string(self.root.join("money.py")).unwrap();
+            assert!(
+                unchanged.contains("def old_name")
+                    && unchanged.contains("return old_name(amount) * 2")
+            );
+            assert!(!unchanged.contains("new_name"));
+            assert!(std::fs::read_to_string(self.root.join("app.py"))
+                .unwrap()
+                .contains("from money import old_name"));
+            if !last_text.contains("rename admission needs") {
+                assert!(last_text.contains("def new_name(amount):"), "{last_text}");
+            }
+            // Follow the suggested edit through ordinary dispatch below.
+        } else if last["role"] == "tool" && last_text.contains("work envelope") {
             return says("This unit is done; the remaining old_name sites still need renaming.");
         }
         let remaining = SITES.iter().find(|(file, old, _)| {
@@ -777,6 +847,43 @@ async fn selective_renames_finish_only_through_verified_units() {
             "{}",
             text(&run)
         );
+    }
+}
+
+#[tokio::test]
+async fn selective_admission_refuses_multi_hunk_writes_then_allows_bounded_retries() {
+    if !python_available() {
+        return;
+    }
+    for plan in [
+        Plan::WholeWriteFirst,
+        Plan::WholeEditFirst,
+        Plan::WholePatchFirst,
+        Plan::WholeBatchFirst,
+        Plan::WholeCallerBatchFirst,
+    ] {
+        let run = run_eval_mode(plan, None, Some("8"), true, true).await;
+        assert_eq!(run.sites_renamed(), 4, "{}", text(&run));
+        assert_eq!(run.exit_reason(), "Done", "{}", text(&run));
+        assert_eq!(
+            run.turn_stops()
+                .iter()
+                .filter(|s| *s == "UnitCheckpoint")
+                .count(),
+            3,
+            "{}",
+            text(&run)
+        );
+        assert!(run
+            .requests
+            .iter()
+            .any(|r| r.to_string().contains("Nothing was written")));
+        let off = run_eval_mode(plan, None, None, true, true).await;
+        assert_ne!(off.exit_reason(), "Done", "{}", text(&off));
+        assert!(!off
+            .requests
+            .iter()
+            .any(|r| r.to_string().contains("Nothing was written")));
     }
 }
 

@@ -22,6 +22,20 @@ pub(super) struct RenamePair {
 pub(super) struct RenameEvidence {
     pub pair: RenamePair,
     pub declares_function: bool,
+    pub declaration_row: Option<usize>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum AdmissionHint {
+    Exact {
+        old: String,
+        new: String,
+        regions: usize,
+    },
+    DeclarationFirst {
+        pair: RenamePair,
+        regions: usize,
+    },
 }
 
 fn identifier(bytes: &[u8]) -> bool {
@@ -73,6 +87,7 @@ pub(super) fn rename_evidence(before: &str, after: &str) -> Option<RenameEvidenc
     let mut ends = (0, 0);
     let mut pair: Option<RenamePair> = None;
     let mut declares_function = false;
+    let mut declaration_row = None;
     while let Some((old, new)) = pending.pop() {
         count += 1;
         if count > NODE_CAP
@@ -111,10 +126,14 @@ pub(super) fn rename_evidence(before: &str, after: &str) -> Option<RenameEvidenc
             if pair.as_ref().is_some_and(|expected| expected != &found) {
                 return None;
             }
-            declares_function |= old.parent().is_some_and(|parent| {
+            let declaration = old.parent().is_some_and(|parent| {
                 parent.kind() == "function_definition"
                     && parent.child_by_field_name("name") == Some(old)
             });
+            if declaration {
+                declares_function = true;
+                declaration_row.get_or_insert(old.start_position().row);
+            }
             pair = Some(found);
         }
         ends = (old.end_byte(), new.end_byte());
@@ -125,12 +144,120 @@ pub(super) fn rename_evidence(before: &str, after: &str) -> Option<RenameEvidenc
     pair.map(|pair| RenameEvidence {
         pair,
         declares_function,
+        declaration_row,
+    })
+}
+
+/// A refusal hint, never an applied patch or checkpoint. Uniform name changes
+/// preserve lines, so separated changed-line groups are the actual diff hunks.
+pub(super) fn first_bounded_edit(
+    before: &str,
+    after: &str,
+    expected: Option<&RenamePair>,
+    max_regions: usize,
+) -> Option<AdmissionHint> {
+    let evidence = rename_evidence(before, after)?;
+    if before.contains('\r') || expected.is_some_and(|pair| pair != &evidence.pair) {
+        return None;
+    }
+    let old: Vec<_> = before.lines().collect();
+    let new: Vec<_> = after.lines().collect();
+    if old.len() != new.len() {
+        return None;
+    }
+    let mut previous_changed = false;
+    let mut regions = 0;
+    let mut first = None;
+    for (row, (old, new)) in old.iter().zip(&new).enumerate() {
+        let changed = old != new;
+        if changed {
+            first.get_or_insert(row);
+            regions += usize::from(!previous_changed);
+        }
+        previous_changed = changed;
+    }
+    if regions <= max_regions {
+        return None;
+    }
+    if expected.is_none() && !evidence.declares_function {
+        return Some(AdmissionHint::DeclarationFirst {
+            pair: evidence.pair,
+            regions,
+        });
+    }
+    let row = if expected.is_none() {
+        evidence.declaration_row?
+    } else {
+        first?
+    };
+    let old = *old.get(row)?;
+    let new = *new.get(row)?;
+    if old == new || old.is_empty() || before.matches(old).count() != 1 {
+        return None;
+    }
+    Some(AdmissionHint::Exact {
+        old: old.to_owned(),
+        new: new.to_owned(),
+        regions,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_oversized_uniform_rename_suggests_one_unique_declaration_edit() {
+        let before =
+            "def old_name(x):\n    return x\n\n\ndef doubled(x):\n    return old_name(x) * 2\n";
+        let after = before.replace("old_name", "new_name");
+        assert_eq!(
+            first_bounded_edit(before, &after, None, 1),
+            Some(AdmissionHint::Exact {
+                old: "def old_name(x):".into(),
+                new: "def new_name(x):".into(),
+                regions: 2
+            })
+        );
+        assert!(first_bounded_edit(before, &after, None, 2).is_none());
+        assert!(first_bounded_edit(before, &after.replace("* 2", "* 3"), None, 1).is_none());
+        let callers = "from money import old_name\n\nvalue = old_name(3)\n";
+        let changed = callers.replace("old_name", "new_name");
+        let pair = RenamePair {
+            old: "old_name".into(),
+            new: "new_name".into(),
+        };
+        assert_eq!(
+            first_bounded_edit(callers, &changed, None, 1),
+            Some(AdmissionHint::DeclarationFirst {
+                pair: pair.clone(),
+                regions: 2
+            })
+        );
+        assert_eq!(
+            first_bounded_edit(callers, &changed, Some(&pair), 1),
+            Some(AdmissionHint::Exact {
+                old: "from money import old_name".into(),
+                new: "from money import new_name".into(),
+                regions: 2,
+            })
+        );
+        assert!(first_bounded_edit(
+            callers,
+            &callers.replace("old_name", "other_name"),
+            Some(&pair),
+            1
+        )
+        .is_none());
+        let ambiguous = format!("{before}\n{before}");
+        assert!(first_bounded_edit(
+            &ambiguous,
+            &ambiguous.replace("old_name", "new_name"),
+            None,
+            1
+        )
+        .is_none());
+    }
 
     #[test]
     fn recognizes_code_identifiers_including_interpolated_calls() {
@@ -147,7 +274,8 @@ mod tests {
                         old: "old_name".into(),
                         new: "new_name".into()
                     },
-                    declares_function: source.starts_with("def ")
+                    declares_function: source.starts_with("def "),
+                    declaration_row: source.starts_with("def ").then_some(0),
                 })
             );
         }

@@ -22,6 +22,14 @@ malformed evidence start conservatively. Model names, parameter counts and large
 context windows never establish capability. See ADR-0199 for thresholds and
 [configuration](configuration.md#harnessgranularity) for stricter caps.
 
+Capability observations distinguish host policy from execution. Work-envelope
+refusals, permission denials and typed backend absence remain model-visible
+errors but neither earn successes nor weaken reliability. A completed command
+reporting failure is also neutral. Actual unusable invocations and failed
+verification of changed work still weaken reliability; malformed input remains
+malformed. The host uses typed dispatch evidence, never tool-output wording,
+for these exclusions. No active-unit bounds or continuation defaults are widened.
+
 Reads without an explicit last line pass through permission before the builtin
 reads at most the active byte limit plus one. It returns at most `max_read_lines`
 complete content lines, dropping any incomplete last line at the byte boundary.
@@ -83,6 +91,20 @@ failed-write exclusion. One pair persists through the bounded chain, with at
 most one proof attempt per unit. Positive global `headless_units` takes
 precedence. Neither setting can be enabled by project configuration. Default
 behavior, conservative attempt spend, per-unit caps and other hosts are unchanged.
+
+In this opt-in mode, a supported single-file write/edit or single-update patch
+whose uniform rename spans too many regions is refused before mutation. An
+authorized, clean/attested source can yield one unique exact-edit suggestion,
+starting with the function declaration. Nothing is applied or reserved by that
+refused call. The retry uses normal permissions and budgets; checkpoints and
+final verification remain mandatory. Ambiguous or unsupported shapes keep the
+existing refusal behavior. Pre-admission analysis is bounded per request;
+checkpoint proof is still attempted at most once per unit.
+Remaining calls in a batch are not executed after this admission refusal; each
+gets its paired result. The model can retry in the next request without any
+automatic patch, checkpoint, grant or budget reset.
+Oversized caller-first requests get declaration-first guidance and remain
+unapplied; they cannot establish the pair or activate continuation.
 
 Headless `eval` can continue in bounded units when the user sets
 `[harness.granularity] headless_units` (ADR-0227; off by default). When the

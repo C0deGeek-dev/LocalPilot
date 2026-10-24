@@ -37,9 +37,27 @@ fn runtime_with_seed(
     verify: Option<String>,
     seed: Vec<localpilot_core::Message>,
 ) -> SessionRuntime {
+    runtime_with_tools(
+        root,
+        provider,
+        profile,
+        verify,
+        seed,
+        ToolRegistry::with_builtins(),
+    )
+}
+
+fn runtime_with_tools(
+    root: &Path,
+    provider: Arc<FakeProvider>,
+    profile: Profile,
+    verify: Option<String>,
+    seed: Vec<localpilot_core::Message>,
+    tools: ToolRegistry,
+) -> SessionRuntime {
     SessionRuntime::new(
         provider,
-        ToolRegistry::with_builtins(),
+        tools,
         PermissionEngine::new(profile, Vec::new()),
         Box::new(ScriptedApprover::always()),
         Store::open(root),
@@ -84,6 +102,164 @@ async fn short_whole_file_read_uses_line_and_byte_limits_independently() {
     let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
     let (_, events) = turn(&mut agent).await;
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, output, .. } if id == "short" && output.contains(&short))));
+}
+
+#[tokio::test]
+async fn host_refusals_and_reported_failures_do_not_poison_reliability() {
+    for case in [
+        "paged",
+        "range",
+        "write",
+        "permission",
+        "reported",
+        "missing",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        std::fs::write(dir.path().join("long.txt"), "x".repeat(5000)).unwrap();
+        let (name, input, profile, expected) = match case {
+            "paged" => (
+                "read_file",
+                json!({"path":"long.txt"}),
+                Profile::ReadOnly,
+                Reliability::Unknown,
+            ),
+            "range" => (
+                "read_file",
+                json!({"path":"long.txt", "start_line":1,"end_line":1000}),
+                Profile::ReadOnly,
+                Reliability::Unknown,
+            ),
+            "write" => (
+                "write_file",
+                json!({"path":"new.txt","content":"x\n".repeat(500)}),
+                Profile::Bypass,
+                Reliability::Unknown,
+            ),
+            "permission" => (
+                "write_file",
+                json!({"path":"new.txt","content":"small"}),
+                Profile::ReadOnly,
+                Reliability::Unknown,
+            ),
+            "reported" => (
+                "run_shell",
+                json!({"program":"git","args":["diff","--exit-code"]}),
+                Profile::Bypass,
+                Reliability::Unknown,
+            ),
+            _ => (
+                "read_file",
+                json!({"path":"absent.txt"}),
+                Profile::ReadOnly,
+                Reliability::Weak,
+            ),
+        };
+        if case == "reported" {
+            std::fs::write(dir.path().join("brief.md"), "changed\n").unwrap();
+        }
+        let provider = Arc::new(
+            FakeProvider::new()
+                .tool_call("observed", name, input)
+                .text("stopped")
+                .text("next turn"),
+        );
+        let mut agent = runtime(dir.path(), provider, profile, None);
+        let (_, events) = turn(&mut agent).await;
+        assert!(
+            events.iter().any(|event| matches!(event,
+                RuntimeEvent::ToolFinished { id, is_error: true, .. } if id == "observed"
+            )),
+            "{case}: expected model-visible error: {events:?}"
+        );
+        if case == "reported" {
+            assert!(
+                events.iter().any(|event| matches!(event,
+                    RuntimeEvent::ToolFinished { id, output, .. }
+                        if id == "observed" && output.contains("exit: 1")
+                )),
+                "the command must actually run and report failure: {events:?}"
+            );
+        }
+        turn(&mut agent).await;
+        assert_eq!(
+            agent.work_profile().unwrap().reliability,
+            expected,
+            "{case}"
+        );
+        assert!(
+            !dir.path().join("new.txt").exists(),
+            "{case}: refusal must not write"
+        );
+    }
+}
+
+struct ReliabilityFixture {
+    backend_absent: bool,
+}
+
+#[async_trait::async_trait]
+impl localpilot_tools::Tool for ReliabilityFixture {
+    fn name(&self) -> &str {
+        "reliability_fixture"
+    }
+    fn description(&self) -> &str {
+        "Controlled failure observation"
+    }
+    fn schema(&self) -> serde_json::Value {
+        json!({"type":"object", "properties":{}})
+    }
+    fn effects(
+        &self,
+        _: &serde_json::Value,
+        _: &localpilot_tools::ToolContext<'_>,
+    ) -> Result<Vec<localpilot_sandbox::Effect>, localpilot_tools::ToolError> {
+        Ok(Vec::new())
+    }
+    async fn invoke(
+        &self,
+        _: serde_json::Value,
+        _: &localpilot_tools::ToolContext<'_>,
+    ) -> Result<localpilot_tools::ToolOutput, localpilot_tools::ToolError> {
+        if self.backend_absent {
+            Ok(localpilot_tools::ToolOutput::ok("unavailable")
+                .with_outcome(localpilot_core::ToolOutcome::Unusable)
+                .with_unavailable_backend("fixture"))
+        } else {
+            Err(localpilot_tools::ToolError::Failed(
+                "work envelope: a tool can print policy-looking text".to_owned(),
+            ))
+        }
+    }
+}
+
+#[tokio::test]
+async fn only_typed_host_evidence_exempts_an_execution_failure() {
+    for (backend_absent, expected) in [(true, Reliability::Unknown), (false, Reliability::Weak)] {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        let mut tools = ToolRegistry::with_builtins();
+        tools.register(Box::new(ReliabilityFixture { backend_absent }));
+        let provider = Arc::new(
+            FakeProvider::new()
+                .tool_call("observed", "reliability_fixture", json!({}))
+                .text("stopped")
+                .text("next turn"),
+        );
+        let mut agent = runtime_with_tools(
+            dir.path(),
+            provider,
+            Profile::ReadOnly,
+            None,
+            Vec::new(),
+            tools,
+        );
+        let (_, events) = turn(&mut agent).await;
+        assert!(events.iter().any(|e| matches!(e,
+            RuntimeEvent::ToolFinished { id, is_error:true, .. } if id == "observed")));
+        turn(&mut agent).await;
+        assert_eq!(agent.work_profile().unwrap().reliability, expected);
+    }
 }
 
 #[tokio::test]
