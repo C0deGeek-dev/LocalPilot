@@ -1928,11 +1928,16 @@ dependencies = [
 name = "localpilot-patchgen"
 version = "5.0.0"
 dependencies = [
+ "fd-lock",
  "localpilot-config",
+ "localpilot-store",
+ "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.9",
+ "uuid",
 ]
 
 [[package]]
@@ -2025,13 +2030,20 @@ dependencies = [
 name = "localpilot-selfimprove"
 version = "5.0.0"
 dependencies = [
+ "localpilot-config",
+ "localpilot-harness",
  "localpilot-patchgen",
+ "localpilot-sandbox",
  "localpilot-selfdev",
  "localpilot-selfreview",
+ "localpilot-store",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.9",
+ "tokio",
+ "toml",
+ "uuid",
 ]
 
 [[package]]
@@ -2200,7 +2212,7 @@ dependencies = [
 [[package]]
 name = "localx-eval-core"
 version = "0.1.0"
-source = "git+https://github.com/C0deGeek-dev/localx-llama.git?rev=b6b1bf2e6ea348e41166af6860d1fc5605a77ee9#b6b1bf2e6ea348e41166af6860d1fc5605a77ee9"
+source = "git+https://github.com/C0deGeek-dev/localx-llama.git?rev=04965684163f927bc3d150a40a2b8f7627163877#04965684163f927bc3d150a40a2b8f7627163877"
 dependencies = [
  "regex",
  "serde",

@@ -22,11 +22,14 @@ use localpilot_sandbox::{
     classify, Approver, Decision, Effect, ExactCommand, Interactivity, PermissionEngine,
     PermissionRequest,
 };
-use localpilot_tools::kill_process_tree;
-use localx_eval_core::check::{CheckCommand, CheckSpec, CommandGate};
+use localpilot_tools::{kill_process_tree, ProcessTreeGuard};
+use localx_eval_core::check::{
+    CheckCommand, CheckSpec, CommandGate, CommandProcessGuard, ManagedCommand,
+};
 
 pub use localx_eval_core::check::{
-    CancelSignal, CheckOutcome, CheckSeverity, CheckStatus, CommandEnd, CommandRun, EnvPolicy,
+    CancelSignal, CheckOutcome, CheckSeverity, CheckStatus, CleanupOutcome, CommandEnd, CommandRun,
+    EnvPolicy,
 };
 
 /// The tool identity quality-gate checks present to the permission engine. A
@@ -60,12 +63,31 @@ impl<'a> CheckRunner<'a> {
                 approver,
                 interactivity,
                 trusted,
+                owned_processes: false,
+                exact_commands: None,
             },
             root,
             timeout: None,
             env: EnvPolicy::Inherit,
             cancel: None,
         }
+    }
+
+    /// Keep the existing tools' OS process owner through acknowledged cleanup.
+    /// Legacy quality callers retain their previous best-effort reap semantics.
+    #[must_use]
+    pub fn with_owned_processes(mut self) -> Self {
+        self.gate.owned_processes = true;
+        self
+    }
+
+    /// Restrict execution to these exact typed commands before the normal
+    /// permission decision. This adds a restriction, never a permission grant;
+    /// the caller must separately possess proposal execution consent.
+    #[must_use]
+    pub fn with_exact_commands(mut self, commands: Vec<ExactCommand>) -> Self {
+        self.gate.exact_commands = Some(commands);
+        self
     }
 
     /// Override the per-check timeout.
@@ -127,6 +149,8 @@ struct PermissionGate<'a> {
     approver: &'a dyn Approver,
     interactivity: Interactivity,
     trusted: bool,
+    owned_processes: bool,
+    exact_commands: Option<Vec<ExactCommand>>,
 }
 
 impl CommandGate for PermissionGate<'_> {
@@ -144,11 +168,30 @@ impl CommandGate for PermissionGate<'_> {
                 program: command.program.clone(),
                 args: command.args.clone(),
             };
+            if self
+                .exact_commands
+                .as_ref()
+                .is_some_and(|commands| !commands.contains(&exact))
+            {
+                return false;
+            }
             match self.engine.decide_command(&request, Some(&exact)) {
                 Decision::Allow => true,
                 Decision::Deny => false,
                 Decision::Ask => self.approver.approve(&request).await,
             }
+        }
+    }
+
+    fn spawn(&self, command: &mut tokio::process::Command) -> std::io::Result<ManagedCommand> {
+        if self.owned_processes {
+            let (child, tree) = ProcessTreeGuard::spawn(command)?;
+            Ok(ManagedCommand::owned(
+                child,
+                Box::new(CheckProcessGuard(tree)),
+            ))
+        } else {
+            command.spawn().map(ManagedCommand::unmanaged)
         }
     }
 
@@ -158,6 +201,25 @@ impl CommandGate for PermissionGate<'_> {
 
     fn reap(&self, pid: u32) -> impl Future<Output = ()> {
         kill_process_tree(pid)
+    }
+}
+
+struct CheckProcessGuard(ProcessTreeGuard);
+
+impl CommandProcessGuard for CheckProcessGuard {
+    fn request_stop(&mut self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(self.0.request_stop())
+    }
+    fn confirm_stopped(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = CleanupOutcome> + Send + '_>> {
+        Box::pin(async move {
+            if self.0.confirm_stopped().await {
+                CleanupOutcome::Confirmed
+            } else {
+                CleanupOutcome::Unverified
+            }
+        })
     }
 }
 
@@ -266,6 +328,199 @@ mod tests {
             "cmd".to_string(),
             vec!["/C".to_string(), "type nul > marker.txt".to_string()],
         )
+    }
+
+    #[tokio::test]
+    async fn owned_checks_observe_cleanup_and_reject_commands_outside_the_exact_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = bypass();
+        let approver = ScriptedApprover::always();
+        let (program, args) = exit_with(0);
+        let runner = CheckRunner::new(
+            &engine,
+            &approver,
+            Interactivity::Interactive,
+            true,
+            dir.path(),
+        )
+        .with_owned_processes()
+        .with_exact_commands(vec![ExactCommand {
+            program: program.clone(),
+            args: args.clone(),
+        }]);
+        let result = runner
+            .execute(&check(&program, &refs(&args), AutoFix::No, None))
+            .await;
+        assert!(matches!(
+            result.end,
+            CommandEnd::Exited { success: true, .. }
+        ));
+        assert_eq!(result.cleanup, CleanupOutcome::Confirmed);
+        let (other, argv) = create_marker();
+        let refused = runner
+            .execute(&check(&other, &refs(&argv), AutoFix::No, None))
+            .await;
+        assert_eq!(refused.end, CommandEnd::Denied);
+        assert_eq!(refused.cleanup, CleanupOutcome::NotStarted);
+        assert!(!dir.path().join("marker.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn exact_execution_plan_and_approver_never_override_a_read_only_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = PermissionEngine::new(Profile::ReadOnly, Vec::new());
+        let approver = ScriptedApprover::always();
+        let (program, args) = create_marker();
+        let runner = CheckRunner::new(
+            &engine,
+            &approver,
+            Interactivity::Interactive,
+            true,
+            dir.path(),
+        )
+        .with_owned_processes()
+        .with_exact_commands(vec![ExactCommand {
+            program: program.clone(),
+            args: args.clone(),
+        }]);
+        let result = runner
+            .execute(&check(&program, &refs(&args), AutoFix::No, None))
+            .await;
+        assert_eq!(result.end, CommandEnd::Denied);
+        assert_eq!(result.cleanup, CleanupOutcome::NotStarted);
+        assert!(!dir.path().join("marker.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn owned_timeout_is_observed_and_confirmed_without_a_missing_program_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = bypass();
+        let approver = ScriptedApprover::always();
+        #[cfg(windows)]
+        let command = check(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 60",
+            ],
+            AutoFix::No,
+            None,
+        );
+        #[cfg(not(windows))]
+        let command = check("sh", &["-c", "sleep 60"], AutoFix::No, None);
+        let runner = CheckRunner::new(
+            &engine,
+            &approver,
+            Interactivity::Interactive,
+            true,
+            dir.path(),
+        )
+        .with_owned_processes()
+        .with_timeout(Duration::from_millis(100));
+        let timed_out = runner.execute(&command).await;
+        assert_eq!(timed_out.end, CommandEnd::TimedOut);
+        assert!(timed_out.pid.is_some());
+        assert_eq!(timed_out.cleanup, CleanupOutcome::Confirmed);
+        assert!(timed_out.pipes_closed);
+        let missing = runner
+            .execute(&check(
+                "missing-owned-fixture-program",
+                &[],
+                AutoFix::No,
+                None,
+            ))
+            .await;
+        assert!(matches!(missing.end, CommandEnd::NotStarted(_)));
+        assert_eq!(missing.cleanup, CleanupOutcome::NotStarted);
+    }
+
+    #[tokio::test]
+    async fn owned_runner_retires_descendants_after_parent_exit_cancellation_and_future_drop() {
+        // Child writes a readiness marker, waits for release and would then
+        // write a leak marker. Assert the effect after releasing it, rather than
+        // interpreting a successful kill helper or an empty capture as proof.
+        for mode in ["exit", "cancel", "drop"] {
+            let dir = tempfile::tempdir().unwrap();
+            #[cfg(windows)]
+            let command = {
+                std::fs::write(dir.path().join("descendant.ps1"), "Set-Content started ready; while (!(Test-Path released)) { Start-Sleep -Milliseconds 20 }; Set-Content leaked bad").unwrap();
+                let tail = if mode == "exit" {
+                    ""
+                } else {
+                    "; Start-Sleep -Seconds 60"
+                };
+                let script = format!("Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -File ./descendant.ps1' -RedirectStandardOutput out.txt -RedirectStandardError err.txt; while (!(Test-Path started)) {{ Start-Sleep -Milliseconds 20 }}{tail}");
+                check(
+                    "powershell.exe",
+                    &["-NoProfile", "-NonInteractive", "-Command", &script],
+                    AutoFix::No,
+                    None,
+                )
+            };
+            #[cfg(not(windows))]
+            let command = {
+                std::fs::write(dir.path().join("descendant.sh"), "printf ready > started; while [ ! -f released ]; do sleep 0.02; done; printf bad > leaked\n").unwrap();
+                let tail = if mode == "exit" { "" } else { "; wait" };
+                let script = format!("sh ./descendant.sh > out.txt 2> err.txt & while [ ! -f started ]; do sleep 0.02; done{tail}");
+                check("sh", &["-c", &script], AutoFix::No, None)
+            };
+            let engine = bypass();
+            let approver = ScriptedApprover::always();
+            let cancel = CancelSignal::new();
+            let runner = CheckRunner::new(
+                &engine,
+                &approver,
+                Interactivity::Interactive,
+                true,
+                dir.path(),
+            )
+            .with_owned_processes()
+            .with_timeout(Duration::from_secs(60))
+            .with_cancel(cancel.clone());
+            let mut invocation = Box::pin(runner.execute(&command));
+            if mode == "exit" {
+                let result = tokio::time::timeout(Duration::from_secs(40), &mut invocation)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(result.end, CommandEnd::Exited { success: true, .. }),
+                    "{result:?}"
+                );
+                #[cfg(windows)]
+                assert_eq!(result.cleanup, CleanupOutcome::Confirmed);
+                assert!(dir.path().join("started").is_file());
+            } else {
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        tokio::select! {
+                            result = &mut invocation => panic!("fixture ended before readiness: {result:?}"),
+                            () = tokio::time::sleep(Duration::from_millis(20)) => {
+                                if dir.path().join("started").is_file() { break; }
+                            }
+                        }
+                    }
+                }).await.unwrap();
+                if mode == "cancel" {
+                    cancel.cancel();
+                    let result = invocation.as_mut().await;
+                    assert_eq!(result.end, CommandEnd::Cancelled);
+                    #[cfg(windows)]
+                    assert_eq!(result.cleanup, CleanupOutcome::Confirmed);
+                }
+            }
+            drop(invocation);
+            // Drop is best effort, so give the detached Unix signal helper time
+            // to run before releasing the controlled descendant.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            std::fs::write(dir.path().join("released"), "go").unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            assert!(
+                !dir.path().join("leaked").exists(),
+                "descendant escaped {mode}"
+            );
+        }
     }
     #[cfg(not(windows))]
     fn create_marker() -> (String, Vec<String>) {

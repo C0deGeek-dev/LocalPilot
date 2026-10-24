@@ -1,5 +1,38 @@
 # Test Plan
 
+`localpilot-patchgen` contract tests cover canonical field/argv boundaries,
+stale/expired/partial receipts, denied and cancelled outcomes, legacy provenance,
+private environment comparison, and all six forbidden token substitutions.
+A separate child test process reserves an intent and holds the real file lock;
+the parent observes contention, kills/waits for the child, then verifies lock
+release and durable refusal to replay the unfinished intent. Linked worktrees
+share the same authority identity. The ignored child helper runs through that
+parent test, rather than representing skipped behavioural coverage. These test
+the library contracts; the existing CLI is not yet migrated to them.
+
+Native proposal fixtures install harmless hook/diff-helper markers and first
+prove ordinary Git can execute them, then exercise actual proposal/summary/
+promotion calls and verify the markers do not change. Active filter attributes
+refuse before checkout; unused configured filters remain compatible. Sentinel-
+named filters, bounded Unicode diffs, Windows directory junctions and Unix
+committed symlink escapes have negative controls. These checks require Git
+`check-attr --source` support for attributes in pinned source trees.
+
+Inspection fixtures verify stable actual source identity, retained origin across
+extra proposal commits, scope refusal, dirty/untracked/undeclared-cache refusal,
+legacy origin refusal and target movement. A regression fixture first failed
+because dropping a persisted review removed its worktree; both the corrected
+handle lifecycle and real CLI display/reopen/promotion are tested. Preflight
+tests resolve the base's Cargo plan while the proposed config requests a shell,
+with no marker/build/authority event produced. CLI tests inspect the actual
+installed trusted toolchain; pure report tests use nonexecutable host bytes to
+prove no executable-version probe occurs.
+
+Binary inspection also pins a filename beginning `--config=` as literal source,
+not Git options. Newly created scoped files are staged inside the disposable
+worktree before the produced-diff scope check, so untracked additions cannot
+silently disappear from that comparison. No-op/out-of-scope refusal remains.
+
 Context-accounting regressions in `localpilot-harness/tests/session.rs` cover
 complete-input calibration, reset after model/provider switches, instruction
 preservation and automatic/manual/forced compaction. `tests/broker.rs` verifies
@@ -688,6 +721,58 @@ Linux test steps with `cargo metadata --offline --no-deps`. Adding or removing a
 workspace package requires the matching workflow change. Build-only steps,
 comments, other platforms, and the separate coverage job do not satisfy this
 guard.
+
+The `proposal-validation` nextest group permits at most two execution fixtures at
+once. These fixtures hash real installed toolchains and run dependency-free Cargo
+tests; debug builds can take over a minute. Crash boundaries run as separate
+tests with actual subprocess exit, bounded by the existing five-minute test
+deadline. Execution workers have a three-minute controller timeout; common-service
+crash/concurrency workers have a four-minute controller timeout. Ignored helpers are
+invoked by those tests. Coverage includes a crash after writing Passed evidence
+but before journal completion: the stored receipt alone must never authorize a
+new run or promotion reservation.
+
+Windows CI jobs allow60 minutes for the complete workspace, embedded workspace
+and TUI sequence. The previous45-minute whole-job cap interrupted runs after
+all4033 workspace tests passed. This job budget does not change the five-minute
+individual test deadline, child-controller limits or proposal execution budgets;
+Linux/macOS retain their45-minute whole-job cap.
+
+Patch-generation tests also terminate subprocesses before promotion reservation,
+before Git, after Git, after the associated state write and after journal finish.
+These fixtures check the durable ref goal and unfinished-authority behavior.
+Receipt regressions reject modified output and failed runs relabeled as passing;
+the common-service integration runs real Cargo validation, promotes through the
+shared transaction and checks the existing build/reload stages separately.
+A compiled marker executable verifies that static Git ignores a project-local
+program placed first on PATH. Ignored worker tests are invoked only by their
+own parent fixtures, rather than as standalone checks.
+
+Common-service subprocess tests cover reservation before Git, source change
+before application-state persistence, and state persistence before journal
+completion. Recovery refuses stale reviews, changed/missing state and dirty
+targets, then reconciles only exact journaled checkpoints. Competing direct and
+orchestrated callers yield one promotion. State-writer tests cover unfinished
+authority and reload handoff before child wait. A deleted lock-file control must
+fail closed. Historical-evidence tests change output while preserving a valid run
+UUID and verify that the actual display refuses a currently-verified label.
+
+Actual TUI pump tests require separate execution and promotion dialogs, enforce a
+live ReadOnly downgrade despite a project bypass profile, cancel an open dialog,
+and cancel a running Cargo heartbeat while waiting for cleanup and its final
+receipt. The heartbeat fixture is finite even if its controller is terminated.
+Recovery dialogs also refuse stale answers. These are native process/interaction
+tests without a model or network, not model-quality measurements.
+
+An owned disposable sentinel fixture demonstrates the host-access limit: approved
+proposal tests write outside the worktree while the target remains at its clean
+base and the loop remains Proposed. Separate promotion consent then permits the
+real self-dev builder, gauntlet and immutable store to run. Its compiled local
+protocol stand-in reports embedded identity and answers a hello; it is not the
+actual LocalPilot RPC implementation. Wrong-source vetting is rejected, the real
+activation rollback restores the previous channel, and explicit sentinel cleanup
+must succeed. Existing self-dev gauntlet integration tests against the actual CLI
+remain a separate check.
 
 Supply-chain hygiene:
 

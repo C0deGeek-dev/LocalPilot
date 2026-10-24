@@ -10,9 +10,10 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
     OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
@@ -24,6 +25,46 @@ use windows_sys::Win32::System::Threading::{
 pub struct ProcessJob(OwnedHandle);
 
 impl ProcessJob {
+    /// Request termination of every process currently associated with this job.
+    /// A successful request is not proof of completion; retain this owner and
+    /// poll `active_processes` after releasing the direct child handle.
+    ///
+    /// # Errors
+    /// Windows refused the termination request. Drop remains kill-on-close.
+    pub fn request_termination(&self) -> io::Result<()> {
+        // SAFETY: this exclusively owned job handle stays live through the call;
+        // the API takes no borrowed buffers or process identifiers.
+        if unsafe { TerminateJobObject(self.0.as_raw_handle() as HANDLE, 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Observe the job's active-process count, including inherited descendants.
+    /// Zero is the conservative drain condition; API errors are never emptiness.
+    ///
+    /// # Errors
+    /// Windows failed to query the owned job's accounting information.
+    pub fn active_processes(&self) -> io::Result<u32> {
+        // SAFETY: Win32 POD initialized before the API fills its fields.
+        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: the job and correctly sized writable POD remain live for the
+        // synchronous call; Windows retains no pointer into the stack buffer.
+        let queried = unsafe {
+            QueryInformationJobObject(
+                self.0.as_raw_handle() as HANDLE,
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                std::mem::size_of_val(&accounting) as u32,
+                ptr::null_mut(),
+            )
+        };
+        if queried == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(accounting.ActiveProcesses)
+    }
+
     fn new() -> io::Result<Self> {
         // SAFETY: null attributes/name request an unnamed, non-inheritable job.
         let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
@@ -259,5 +300,51 @@ mod tests {
             );
             assert!(!dir.path().join("escaped").exists());
         }
+    }
+
+    #[tokio::test]
+    async fn requested_termination_drains_an_exited_parents_job_without_stopping_another_job() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("descendant.ps1"),
+            "Set-Content started ready; while (!(Test-Path released)) { Start-Sleep -Milliseconds 20 }; Set-Content leaked bad").unwrap();
+        let (mut parent, job) = spawn_in_job(&mut command(
+            "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -File ./descendant.ps1' -RedirectStandardOutput out.txt -RedirectStandardError err.txt", dir.path()), CREATE_NO_WINDOW).unwrap();
+        marker(&dir.path().join("started")).await;
+        tokio::time::timeout(Duration::from_secs(10), parent.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(parent);
+        assert!(
+            job.active_processes().unwrap() > 0,
+            "descendant must remain after parent exit"
+        );
+        let other = tempfile::tempdir().unwrap();
+        let (mut other_child, other_job) = spawn_in_job(
+            &mut command(
+                "Set-Content started ready; Start-Sleep -Seconds 60",
+                other.path(),
+            ),
+            CREATE_NO_WINDOW,
+        )
+        .unwrap();
+        marker(&other.path().join("started")).await;
+        job.request_termination().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while job.active_processes().unwrap() != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(other_child.try_wait().unwrap().is_none());
+        assert!(other_job.active_processes().unwrap() > 0);
+        std::fs::write(dir.path().join("released"), "go").unwrap();
+        assert!(!dir.path().join("leaked").exists());
+        drop(other_job);
+        tokio::time::timeout(Duration::from_secs(10), other_child.wait())
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

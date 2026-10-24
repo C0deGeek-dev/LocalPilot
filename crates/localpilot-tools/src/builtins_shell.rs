@@ -59,27 +59,101 @@ struct NormalizedRunShellInput {
 /// Owns the spawned command's process tree until the child has been reaped.
 /// Dropping an in-flight `run_shell` future must not orphan a shell wrapper's
 /// grandchildren. Windows owns a kernel job; Unix signals the process group.
-pub(crate) struct ProcessTreeGuard {
+pub struct ProcessTreeGuard {
     #[cfg(not(windows))]
     pid: Option<u32>,
     #[cfg(windows)]
     job: Option<localpilot_winsec::ProcessJob>,
+    drained: bool,
 }
 
 impl ProcessTreeGuard {
-    pub(crate) fn spawn(
+    /// Spawn only after the caller's command permission gate has allowed the
+    /// prepared command. Ownership setup must complete before user code runs.
+    ///
+    /// # Errors
+    /// Process/job setup failed; no unowned fallback is started.
+    pub fn spawn(
         command: &mut tokio::process::Command,
     ) -> std::io::Result<(tokio::process::Child, Self)> {
         #[cfg(windows)]
         {
             let (child, job) = localpilot_winsec::spawn_in_job(command, CREATE_NO_WINDOW)?;
-            Ok((child, Self { job: Some(job) }))
+            Ok((
+                child,
+                Self {
+                    job: Some(job),
+                    drained: false,
+                },
+            ))
         }
         #[cfg(not(windows))]
         {
+            command.kill_on_drop(true);
+            #[cfg(unix)]
+            command.process_group(0);
             let child = command.spawn()?;
-            let guard = Self { pid: child.id() };
+            let guard = Self {
+                pid: child.id(),
+                drained: false,
+            };
             Ok((child, guard))
+        }
+    }
+
+    /// Request termination while retaining OS ownership for later confirmation.
+    /// Release/wait the direct Child before `confirm_stopped`, especially on
+    /// Windows where process handles can delay job accounting updates.
+    pub async fn request_stop(&mut self) {
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            let _ = job.request_termination();
+        }
+        #[cfg(not(windows))]
+        if let Some(pid) = self.pid {
+            kill_process_tree(pid).await;
+        }
+    }
+
+    /// Observe owned job/group emptiness within four seconds. An unsupported
+    /// platform, failed observation or deadline returns false, never a clean pass.
+    pub async fn confirm_stopped(&mut self) -> bool {
+        if self.drained {
+            return true;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        loop {
+            #[cfg(windows)]
+            let empty = match self.job.as_ref().map(|job| job.active_processes()) {
+                Some(Ok(count)) => count == 0,
+                _ => return false,
+            };
+            #[cfg(unix)]
+            let empty = match self.pid {
+                Some(pid) => match observed_process_group(pid).await {
+                    Ok(present) => !present,
+                    Err(_) => return false,
+                },
+                None => return false,
+            };
+            #[cfg(not(any(windows, unix)))]
+            let empty = false;
+            if empty {
+                self.drained = true;
+                #[cfg(windows)]
+                {
+                    self.job = None;
+                }
+                #[cfg(not(windows))]
+                {
+                    self.pid = None;
+                }
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -107,6 +181,65 @@ impl ProcessTreeGuard {
             self.pid = None;
         }
     }
+}
+
+#[cfg(unix)]
+async fn observed_process_group(group: u32) -> std::io::Result<bool> {
+    use tokio::io::AsyncReadExt;
+    // An exit status from `kill -0` conflates absent processes with permission
+    // refusal. Read the documented numeric process-group column instead, and
+    // fail closed when the bounded observation cannot be established.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let program = ["/bin/ps", "/usr/bin/ps"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "system process observer unavailable",
+                )
+            })?;
+        let mut child = tokio::process::Command::new(program)
+            .args(["-A", "-o", "pid=", "-o", "pgid="])
+            .env("LC_ALL", "C")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("missing process snapshot"))?;
+        let mut bytes = Vec::new();
+        stdout.take(1024 * 1024 + 1).read_to_end(&mut bytes).await?;
+        let status = child.wait().await?;
+        if !status.success() || bytes.len() > 1024 * 1024 {
+            return Err(std::io::Error::other(
+                "process snapshot unavailable or oversized",
+            ));
+        }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| std::io::Error::other("nonnumeric process snapshot"))?;
+        let mut present = false;
+        let mut observed_self = false;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next().and_then(|s| s.parse::<u32>().ok());
+            let pgid = fields.next().and_then(|s| s.parse::<u32>().ok());
+            if pid.is_none() || pgid.is_none() || fields.next().is_some() {
+                return Err(std::io::Error::other("invalid process-group snapshot"));
+            }
+            present |= pgid == Some(group);
+            observed_self |= pid == Some(std::process::id());
+        }
+        if !observed_self {
+            return Err(std::io::Error::other("incomplete process-group snapshot"));
+        }
+        Ok(present)
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "process snapshot timed out"))?
 }
 
 impl Drop for ProcessTreeGuard {
@@ -643,11 +776,15 @@ pub async fn kill_process_tree(pid: u32) {
         // `-s KILL` and the `--` separator are both required: procps `kill`
         // parses `-KILL -1234` as two option words, exits 0, and signals
         // nothing at all — a silent no-op that left every timed-out tree alive.
-        let _ = tokio::process::Command::new("kill")
+        let Some(program) = system_kill() else {
+            return;
+        };
+        let _ = tokio::process::Command::new(program)
             .args(["-s", "KILL", "--", &format!("-{pid}")])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .status()
             .await;
     }
@@ -667,7 +804,10 @@ pub(crate) fn kill_process_tree_detached(pid: u32) {
     {
         // See the note in `kill_process_tree`: without `-s`/`--` this signals
         // nothing and still reports success.
-        let _ = std::process::Command::new("kill")
+        let Some(program) = system_kill() else {
+            return;
+        };
+        let _ = std::process::Command::new(program)
             .args(["-s", "KILL", "--", &format!("-{pid}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -677,6 +817,13 @@ pub(crate) fn kill_process_tree_detached(pid: u32) {
     {
         let _ = pid;
     }
+}
+
+#[cfg(unix)]
+fn system_kill() -> Option<&'static str> {
+    ["/bin/kill", "/usr/bin/kill"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
 }
 
 #[cfg(test)]

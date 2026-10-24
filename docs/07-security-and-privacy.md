@@ -645,6 +645,122 @@ spans; spans leave the index when their session leaves it.
 
 ## Self-Improvement Patch Generation
 
+`localpilot self-review preflight --id <proposal>` shows a persisted proposal,
+its original base, exact resolved validation command plan and host-access risks.
+It issues no execution consent, runs no proposed command and does not promote.
+Checks come only from committed `.localpilot.toml` in the proposal base, with
+the base's explicit installed Rust toolchain. A proposed replacement config is
+displayed as a risk and cannot choose commands for its own validation. V1
+supports registered Cargo check/build/test/clippy and `fmt --check`; it refuses
+arbitrary executables, aliases, fixers and missing toolchains without fallback or
+automatic installation. Keep credentials in user/environment configuration;
+only reviewed command settings belong in committed project config.
+
+The review states that future approved checks run with LocalPilot's host access.
+Worktrees separate ordinary edits; they do not contain build scripts, proc macros,
+tests, network access or arbitrary filesystem/process effects. Cargo `--frozen`
+restricts Cargo's resolution/network use, not invoked code. No default model/GPU
+process belongs to this profile. CLI and chat patch approval now use separate
+execution and promotion authorities. The older library approval API is removed.
+Recovery controls require separate explicit inspection; final acceptance remains
+pending.
+
+For a persisted proposal, `self-review validate --id <proposal>` displays the
+execution review and stops. Running it requires `--approve-execution`, a human
+`--reviewer` and the exact displayed `--review` digest. `self-review evidence
+--id <proposal>` shows bounded recorded observations and separately verifies
+current promotion eligibility. `self-review promote --id <proposal> --approve
+--reviewer <you> --review <promotion-review>` requires that distinct promotion
+review. Viewing evidence never certifies it or executes another check. An old
+proposal without locally completed validation cannot be promoted by approval alone.
+
+The active loop exposes the same operations as `selfimprove preflight`,
+`validate` and `evidence`; `selfimprove next --approve` additionally requires the
+passing promotion review digest. In chat, `/selfimprove validate <reviewer>`
+displays the exact plan before a dedicated host-access confirmation, then uses
+the session's current permission and trust policy. Escape requests cancellation
+and waits for cleanup evidence. `/selfimprove approve <reviewer>` separately
+displays passing observations before promotion confirmation. Neither `next` nor
+a bypass permission profile supplies these confirmations. CLI Ctrl+C cancels
+an active validation run. A retry always needs fresh execution consent.
+
+In chat, incognito permits only `/selfimprove status`. Other proposal operations,
+including previews and evidence/recovery inspection, can persist authority
+bookkeeping and retain the existing persistence restriction.
+
+The library execution coordinator consumes separate evaluation consent before
+calling the existing permission-gated runner. It passes only the displayed
+environment names and fixed nonsecret settings: the worktree-local Cargo target
+directory and disabled rustup auto-install. Windows additionally preserves the
+named MSVC discovery/include/library inputs. Ambient model credentials, Rust
+flags and LocalPilot settings are not inherited. Host Cargo configuration remains
+a reviewed private input, hashed for change detection without storing its contents.
+Approved code still has the host user's access; an environment allowlist does not
+prevent it reading credentials or other files directly.
+
+Execution reserves cleanup time within the approved check and total budgets;
+bounded stdout/stderr are redacted before receipt storage. Source/host inspection
+and filesystem persistence can stall with the host OS, so the budget is not a
+hard real-time guarantee for those operations. Late observations cannot pass.
+An exit code of zero is insufficient: missing pipe closure, uncertain process
+cleanup, stale inputs, incomplete checks or elapsed limits invalidate evidence.
+Windows job accounting and Unix process-group snapshots acknowledge cleanup;
+Unix process groups do not contain a descendant deliberately creating a new
+session. Future cancellation drops the process owner and leaves an unfinished
+journal that requires explicit inspection, never automatic replay.
+The launcher keeps the reviewed executable basename while separately hashing its
+resolved physical target. This preserves multicall dispatch, including Homebrew's
+`rustup` alias to `rustup-init`. Project-owned executable search aliases are refused
+even when they point outside the project.
+
+Static Git also resolves an absolute host executable outside the project before
+launch. Its child search path excludes project directories and the inherited
+`GIT_EXEC_PATH` override is removed. A project-local executable cannot become the
+Git program merely by appearing first on PATH.
+
+The staged common promotion service verifies passing evidence against a locally
+completed evaluation journal entry. That entry binds the entire bounded receipt,
+including output, cleanup and termination observations; editing a receipt or
+relabeling a failed run cannot create passing authority. Generic journal recovery
+does not certify validation. Per-run evidence retains the approved source snapshot
+and command plan; loading historical JSON alone never grants promotion authority.
+The promotion capability retains the repository lock through the fast-forward,
+atomic matching loop-state update and journal completion. An interrupted effect
+leaves its intended refs and commits pending for explicit inspection. Existing
+production patch approval callers use this service, and the only public source
+promotion API requires its validated capability. Publication uses a distinct
+pending owner and never accepts patch consent.
+
+All loop-state writers acquire the same common-repository transaction: reset,
+proposal creation, build, reload and discard refuse live or unfinished authority.
+Discard clears only its matching Proposed state and retains historical receipts.
+The lock file is stable: a missing file in an initialized authority store is an
+error, never a reason to create a new lock inode. Old processes that do not use
+this protocol must be stopped before adoption; mixed writers are unsupported.
+
+`selfimprove recovery` (also `self-review recovery`) lists unfinished intents.
+Add `--nonce <uuid>` to inspect the exact event and current state. After inspecting
+remaining processes, host effects and any remote publication, acknowledge with
+`--acknowledge-unknown-effects --reviewer <you> --note <inspection> --review
+<displayed-digest>` and the same nonce. Chat uses `/selfimprove recovery [uuid]`
+and `/selfimprove recover <uuid> <reviewer> -- <inspection-note>` with a dedicated
+confirmation. Changed inspection data requires a new review. Acknowledgement
+retires that intent; it never reruns checks, promotes source, publishes or
+certifies stored validation. Host inspection is a human assertion, not proof of
+containment or cleanup supplied by this metadata operation.
+
+Promotion recovery additionally requires a clean target on the recorded branch,
+with its ref and HEAD exactly at the journaled old or new commit. The intent
+records either no matching application state or the exact before/after logical
+state hashes. Recovery can complete only that matching Approved checkpoint after
+the source is already at the new commit. Missing, corrupt, changed or unproven
+application state, divergent source and older intents without this proof remain
+blocked for manual investigation. It never reconstructs an approval from Stage
+data. Evaluation recovery cannot turn an interrupted Passed receipt into locally
+completed validation; a new execution still needs fresh consent. Historical
+evidence is labeled currently verified only when the complete receipt matches
+the current verified observations, not merely its run UUID.
+
 The self-improvement loop's write half (ADR-0034) is built so the human gate is
 structural, not a convention:
 
@@ -662,9 +778,20 @@ structural, not a convention:
   interpolation of model input, so an edit path or branch name can never become
   another command. No `push`/`fetch`/`pull`/remote subcommand appears anywhere in
   the patch-generation crate.
+- **Static Git helpers are controlled.** Proposal Git calls suppress traditional
+  hooks, filesystem monitors, signing, automatic maintenance and recursive
+  submodule effects per command. Diff rendering disables external diff/textconv.
+  Named hooks and associated filter attributes are refused before checkout or
+  index operations; unused filter configuration alone is supported. Attribute
+  proof covers working tree, index and source/destination trees and requires
+  Git's `check-attr --source` support. Even explicit `-filter` is declined because
+  driver values can collide with Git's textual attribute sentinels. User Git
+  configuration is preserved. These controls govern LocalPilot's operations;
+  they do not isolate the host or authorize validation execution.
 - **Path containment.** Edit paths are joined under the worktree with a guard
   that rejects absolute paths, `..` traversal, and drive prefixes; an edit can
-  only land strictly inside the worktree.
+  only land strictly inside the worktree. Existing symlink/junction components
+  are refused before proposal writes.
 - **Scope-bound.** A proposal may touch only the files the finding named; both
   the declared edits and the produced diff are checked against that set.
 - **Interactive approval is informed and identity-bound.** `/selfimprove
@@ -676,7 +803,9 @@ structural, not a convention:
 - **Reload happens outside terminal modes.** A Built→Reloaded action requires a
   separate confirmation, asks the interactive host to exit, restores the
   alternate-screen state, and only then calls the existing self-dev reload.
-  A failed process swap rolls persisted state back to Built as before.
+  A failed launch rolls persisted state back to Built while retaining the common
+  guard. On Windows, successful launch releases the guard before waiting for the
+  child. An error after that handoff does not overwrite the successor's state.
 
 ## Outward Draft Emission
 
@@ -687,10 +816,13 @@ as patch promotion:
 
 - **No publish without a human.** Authoring or persisting a draft mints no
   approval token and touches no network. The only operation that yields a runnable
-  publish plan requires the same value-typed approval token used to promote a
-  patch, and that token's sole constructor is the explicit `--approve` path. The
+  pending publication requires an `OutwardApprovalToken` bound to the exact
+  draft/argv, target and resolved host/account. Patch/execution tokens cannot
+  substitute for it. Consent is issued only on the explicit `--approve` path. The
   autonomous loop has no path to mint one, so it can propose a draft but never
-  publish — a standing test pins this.
+  publish. The common lock is retained through the effect and durable Published
+  event before journal completion. A failed/ambiguous effect remains pending;
+  another attempt requires explicit inspection, never automatic replay.
 - **Default-off, fail-closed allowlist.** A draft can only be built (let alone
   published) when `[self_improvement] enabled = true` **and** its `owner/repo`
   target is on the `outward_targets` allowlist. Both ship off; an un-allowlisted or
@@ -705,6 +837,12 @@ as patch promotion:
   plan it *would* run and publishes nothing. The human reviews the plan (and the
   resolved `gh` account, surfaced from a `gh auth status` preflight) before
   approving.
+- **Resolved account and outcome.** Approved publication resolves an absolute
+  host `gh` outside the project, requires one active successful host/account in
+  authentication metadata and checks it again before the effect. A JSON exit0
+  alone is insufficient ([GitHub CLI status contract](https://cli.github.com/manual/gh_auth_status)).
+  The emitted object URL must match the selected host, target and issue/PR kind;
+  missing or ambiguous output leaves inspection pending even after exit0.
 - **Redacted, locally inspectable.** The draft title/body are redacted with the
   shared workspace redactor at construction, so a secret never reaches the
   project-local `.localpilot/outward/` store even before publish. The body carries

@@ -338,6 +338,33 @@ Then decide: `localpilot learning review accept`, `reject`, `defer`, or rewrite
 it with `edit`. A rewrite is a new lesson and starts untested. See the
 [command list](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/wiki/Reference.md#lesson-lab).
 
+## Validate a proposed self-improvement before promotion
+
+For an existing proposal, inspect its committed-base command plan first:
+
+```sh
+localpilot self-review preflight --id <proposal>
+localpilot self-review validate --id <proposal>
+```
+
+Both commands inspect without granting execution consent. After reviewing the
+exact argv, limits and host-access risks, run that displayed plan deliberately:
+
+```sh
+localpilot self-review validate --id <proposal> --approve-execution --reviewer <you> --review <execution-digest>
+localpilot self-review evidence --id <proposal>
+localpilot self-review promote --id <proposal> --approve --reviewer <you> --review <promotion-digest>
+```
+
+Use the distinct digests displayed by each review. A changed plan/proposal needs
+a new review; failed, incomplete or stale evidence cannot authorize promotion.
+In chat, use `/selfimprove preflight`, `validate <you>`, `evidence`, then
+`approve <you>`; execution and promotion ask different questions. Escape cancels
+validation and waits for cleanup; it does not undo effects already performed.
+These checks select no model or GPU, but approved project code has the host
+user's filesystem, credentials, network and process access. See the
+[authorization and recovery limits](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/07-security-and-privacy.md#self-improvement-patch-generation).
+
 ## Keep work units small
 
 Agent mode automatically uses bounded reads and edits; Harness mode validates

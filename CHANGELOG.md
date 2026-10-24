@@ -6,6 +6,60 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Wire explicit `self-review`/`selfimprove` validation and evidence commands, and
+  separate content-bound patch promotion confirmations, through the common
+  service. Add `/selfimprove preflight`, `evidence` and `validate <reviewer>` with
+  a distinct host-access confirmation and cooperative cancellation. Production
+  patch callers use the mandatory capability gate. Remove the older branch-name
+  approval API and unused descriptive gate helper. Add explicit, review-bound
+  recovery inspection and acknowledgement without replaying interrupted effects
+  or certifying validation. Final acceptance remains pending.
+
+- Serialize reset, proposal creation, build, reload and discard with validation
+  and promotion. Journal exact application-state checkpoints for interrupted
+  promotions; reconcile only proven transitions after explicit inspection.
+  Release the reload guard after a successful Windows child launch and before
+  waiting; roll back state only when launch has not occurred. Refuse a lost
+  authority lock file instead of recreating its inode. Evidence displays compare
+  complete receipts before labeling historical data currently verified.
+
+- Add a staged common promotion service that holds the repository lock through
+  source promotion and atomic loop-state persistence. Bind passing receipts to
+  locally completed observations, retain per-run evidence and source snapshots,
+  and reject edited or relabeled receipts. Resolve static Git from an absolute
+  host executable outside the project.
+
+- Keep trusted host launcher names when resolving executable aliases, including
+  Homebrew `rustup` links to `rustup-init`, while hashing physical target bytes.
+  Refuse project-owned executable search aliases. Exercise actual validation
+  crashes, concurrent attempts, output redaction and exhausted budgets; persist
+  exact promotion ref goals before effects for later recovery inspection.
+
+- Add a proposal execution coordinator using single-use evaluation
+  consent and the existing permission-gated runner. Restrict commands and
+  environment to the reviewed plan, retain process ownership through cleanup,
+  and persist partial/final observations before completing the authority journal.
+  Ordinary quality callers keep their existing behavior.
+
+- Add static `self-review preflight --id` for proposal diff/source identity,
+  trusted-base Rust command plans and explicit host-access risks. It runs no
+  proposed checks or promotion. Preserve persisted proposals when a review handle
+  is dropped, retain their original base/scope, and write provenance atomically.
+  Include new scoped files in the produced diff before declaring a proposal empty.
+
+- Harden static proposal Git operations against implicit hooks, signing and
+  diff helpers. Refuse unsupported filter attributes before checkout/index
+  effects while supporting unused filter configuration. Guard existing
+  symlink/junction edit targets and truncate Unicode diffs at valid boundaries.
+
+- Add proposal-validation contracts: separate execution, promotion
+  and publication authorities; content-bound evidence; and repository-wide
+  locking with durable nonce reservations. Publication uses distinct draft-,
+  target- and account-bound consent while retaining the common lock through its
+  observed outcome and durable local event. Ambiguous publication blocks another
+  attempt until explicit inspection; no automatic replay. Require one active
+  authenticated account and one matching created-object URL from the host CLI.
+
 - Update the shared async runtime to Tokio1.51.6 and the TLS security fixes
   while preserving Rust1.82 and existing runtime features. Guard the audit
   exceptions for unbuilt optional QUIC dependencies against activation.

@@ -78,6 +78,20 @@ pub enum ReviewAction {
 pub enum SelfImproveAction {
     /// Show the current persisted stage (bare `/selfimprove` is equivalent).
     Status,
+    /// Static diff, risks and command preview; never executes proposed code.
+    Preflight,
+    /// Inspect recorded evidence without authorizing a new run or promotion.
+    Evidence,
+    /// Inspect unfinished authority without acknowledging or replaying effects.
+    Recovery { nonce: Option<String> },
+    /// Acknowledge an exact displayed recovery after host confirmation.
+    Recover {
+        nonce: String,
+        reviewer: String,
+        note: String,
+    },
+    /// Authorize one exact displayed execution plan after a host confirmation.
+    Validate { reviewer: String },
     /// Review and propose one finding. `finding` is a 1-based rank; when omitted,
     /// a single finding is selected automatically and multiple findings are listed.
     Start { finding: Option<usize> },
@@ -447,11 +461,13 @@ impl SlashAction {
             ),
             Self::SelfImprove(action) => match action {
                 SelfImproveAction::Status => Persistence::ReadOnly,
-                SelfImproveAction::Start { .. }
+                SelfImproveAction::Preflight | SelfImproveAction::Evidence | SelfImproveAction::Start { .. }
+                | SelfImproveAction::Recovery { .. } | SelfImproveAction::Recover { .. }
                 | SelfImproveAction::Next
                 | SelfImproveAction::Approve { .. }
+                | SelfImproveAction::Validate { .. }
                 | SelfImproveAction::Reset => {
-                    Persistence::Persistent("advance the persisted self-improvement loop on disk")
+                    Persistence::Persistent("inspect or update durable repository authority and self-improvement state")
                 }
             },
             Self::Skills(arg) => match skills_arg_writes(arg) {
@@ -723,7 +739,7 @@ slash_commands! {
             "selfimprove",
             Optional,
             Fall,
-            "Review, propose, approve, build, and reload (/selfimprove [status|start|next|approve|reset])"
+            "Review, validate, recover, separately approve, build and reload (/selfimprove [status|preflight|evidence|validate|recovery|recover|start|next|approve|reset])"
         ),
         New => fullscreen_only("new", NoArg, Fall, "Start a fresh session"),
         Fork => fullscreen_only("fork", NoArg, Fall, "Branch the conversation into a new session"),
@@ -970,14 +986,61 @@ pub fn parse_slash_for(host: Host, line: &str) -> Option<SlashAction> {
 
 fn parse_selfimprove(name: &str, args: &str) -> SlashAction {
     const USAGE: &str =
-        "usage: /selfimprove [status | start [finding-rank] | next | approve <reviewer> | reset]";
+        "usage: /selfimprove [status | preflight | evidence | validate <reviewer> | recovery [intent-uuid] | recover <intent-uuid> <reviewer> -- <inspection-note> | start [finding-rank] | next | approve <reviewer> | reset]";
 
     match args {
         "" | "status" => SlashAction::SelfImprove(SelfImproveAction::Status),
+        "preflight" => SlashAction::SelfImprove(SelfImproveAction::Preflight),
+        "evidence" => SlashAction::SelfImprove(SelfImproveAction::Evidence),
+        "recovery" => SlashAction::SelfImprove(SelfImproveAction::Recovery { nonce: None }),
         "start" => SlashAction::SelfImprove(SelfImproveAction::Start { finding: None }),
         "next" => SlashAction::SelfImprove(SelfImproveAction::Next),
         "reset" => SlashAction::SelfImprove(SelfImproveAction::Reset),
         _ => {
+            if let Some(nonce) = args.strip_prefix("recovery ").map(str::trim) {
+                return if nonce.is_empty() {
+                    SlashAction::Invalid {
+                        command: name.into(),
+                        reason: USAGE.into(),
+                    }
+                } else {
+                    SlashAction::SelfImprove(SelfImproveAction::Recovery {
+                        nonce: Some(nonce.into()),
+                    })
+                };
+            }
+            if let Some(rest) = args.strip_prefix("recover ") {
+                if let Some((nonce, rest)) = rest.trim().split_once(char::is_whitespace) {
+                    if let Some((reviewer, note)) = rest.split_once(" -- ") {
+                        if !nonce.is_empty()
+                            && !reviewer.trim().is_empty()
+                            && !note.trim().is_empty()
+                        {
+                            return SlashAction::SelfImprove(SelfImproveAction::Recover {
+                                nonce: nonce.into(),
+                                reviewer: reviewer.trim().into(),
+                                note: note.trim().into(),
+                            });
+                        }
+                    }
+                }
+                return SlashAction::Invalid {
+                    command: name.into(),
+                    reason: USAGE.into(),
+                };
+            }
+            if let Some(reviewer) = args.strip_prefix("validate ").map(str::trim) {
+                return if reviewer.is_empty() {
+                    SlashAction::Invalid {
+                        command: name.to_string(),
+                        reason: "validation requires the human reviewer's name".into(),
+                    }
+                } else {
+                    SlashAction::SelfImprove(SelfImproveAction::Validate {
+                        reviewer: reviewer.to_owned(),
+                    })
+                };
+            }
             if let Some(rank) = args.strip_prefix("start ").map(str::trim) {
                 return match rank.parse::<usize>() {
                     Ok(finding) if finding > 0 => {
@@ -2116,6 +2179,49 @@ mod tests {
 
     #[test]
     fn selfimprove_preserves_explicit_rank_reviewer_and_gate_actions() {
+        assert_eq!(
+            parse("/selfimprove recovery"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Recovery {
+                nonce: None
+            }))
+        );
+        assert_eq!(
+            parse("/selfimprove recover intent-uuid David Smith -- inspected effects"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Recover {
+                nonce: "intent-uuid".into(),
+                reviewer: "David Smith".into(),
+                note: "inspected effects".into()
+            }))
+        );
+        assert!(matches!(
+            parse("/selfimprove recover intent-uuid David"),
+            Some(SlashAction::Invalid { .. })
+        ));
+        for action in [
+            SelfImproveAction::Preflight,
+            SelfImproveAction::Evidence,
+            SelfImproveAction::Recovery { nonce: None },
+        ] {
+            assert!(matches!(SlashAction::SelfImprove(action).persistence(), Persistence::Persistent(_)), "authority inspection may create durable repository bookkeeping and must keep the incognito floor");
+        }
+        assert_eq!(
+            parse("/selfimprove preflight"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Preflight))
+        );
+        assert_eq!(
+            parse("/selfimprove evidence"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Evidence))
+        );
+        assert_eq!(
+            parse("/selfimprove validate David Smith"),
+            Some(SlashAction::SelfImprove(SelfImproveAction::Validate {
+                reviewer: "David Smith".into()
+            }))
+        );
+        assert!(matches!(
+            parse("/selfimprove validate"),
+            Some(SlashAction::Invalid { .. })
+        ));
         assert_eq!(
             parse("/selfimprove"),
             Some(SlashAction::SelfImprove(SelfImproveAction::Status))

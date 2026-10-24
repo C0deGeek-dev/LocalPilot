@@ -439,10 +439,8 @@ pub struct McpServerStatus {
     pub error: Option<String>,
 }
 
-/// Workspace trust state. Trust is established by the sandbox when a session
-/// starts; `doctor` only reports what it can observe ahead of that.
-// `Trusted`/`Untrusted` are produced by the sandbox trust check once a session
-// evaluates the workspace; `doctor` reports `Unknown` until then.
+/// Workspace trust observed through the same trust store used by sessions.
+/// `Unknown` means the lookup could not be completed, not an untrusted workspace.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

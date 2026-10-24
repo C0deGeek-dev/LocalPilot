@@ -9,26 +9,26 @@
 //! plus a human-reviewable [`DiffSummary`]. It then **stops**.
 //!
 //! Applying that change to the main branch — [`ProposedPatch::promote`] — requires
-//! an [`ApprovalToken`], which only a human-confirmation path mints. There is no
+//! an ephemeral [`validation::ValidatedProposal`] capability, constructed only
+//! by current locked revalidation of separate promotion consent. There is no
 //! code path from proposing to promoting without one, the agent never merges to
 //! `main`, nothing here ever pushes, and rollback is to drop the worktree/branch
 //! ([`ProposedPatch::discard`]).
 //!
 //! The same gate guards the *outward* half (ADR-0053): an [`OutwardDraft`] is a
 //! draft issue/PR the agent may author and persist locally, but turning one into a
-//! runnable [`PublishPlan`] requires the same [`ApprovalToken`]. See
+//! pending publication owner requires a distinct [`validation::OutwardApprovalToken`]. See
 //! [`mod@outward`].
 #![forbid(unsafe_code)]
 
 mod error;
-mod gate;
 mod git;
 mod outward;
 mod proposal;
 mod provenance;
+pub mod validation;
 
 pub use error::PatchError;
-pub use gate::ApprovalToken;
 pub use git::{
     check_path_budget, sweep_worktrees, worktrees_root, Worktree, MAX_WORKTREE_NAME, WORKTREES_DIR,
 };
@@ -38,7 +38,7 @@ pub use outward::{
     OutwardEvent, OutwardKind, OutwardPolicy, PublishPlan, OUTWARD_SCHEMA,
 };
 pub use proposal::{PatchProposal, ProposedEdit};
-pub use provenance::{ChangeProvenance, EvalResult, PROVENANCE_SCHEMA};
+pub use provenance::{ChangeProvenance, EvalResult, ProposalBase, PROVENANCE_SCHEMA};
 
 use std::path::{Path, PathBuf};
 
@@ -69,7 +69,7 @@ pub struct DiffSummary {
 }
 
 /// A proposed patch sitting in an isolated worktree, awaiting human review. Owns
-/// the worktree; dropping or [`Self::discard`]ing it is the rollback.
+/// the worktree; dropping a new unpersisted handle or [`Self::discard`] is rollback.
 #[derive(Debug)]
 pub struct ProposedPatch {
     id: String,
@@ -103,7 +103,7 @@ pub fn propose(
     repo_root: &Path,
     branch: &str,
     proposal: &PatchProposal,
-    provenance: ChangeProvenance,
+    mut provenance: ChangeProvenance,
 ) -> Result<ProposedPatch, PatchError> {
     if !provenance.is_complete() {
         return Err(PatchError::IncompleteProvenance);
@@ -111,11 +111,24 @@ pub fn propose(
     proposal.validate_scope()?;
 
     let base_commit = git::head_commit(repo_root)?;
+    provenance.proposal_base = Some(ProposalBase {
+        commit: base_commit.clone(),
+        target_ref: git::git(repo_root, &["symbolic-ref", "--quiet", "HEAD"])?
+            .trim()
+            .into(),
+        allowed_paths: proposal
+            .allowed_paths
+            .iter()
+            .map(|p| proposal::normalize(p))
+            .collect(),
+    });
+    // Fresh source proposals never inherit a historical validation receipt.
+    provenance.validation = None;
     let worktree = git::Worktree::create(repo_root, branch)?;
 
     // Write each edit strictly inside the worktree.
     for edit in &proposal.edits {
-        let target = git::safe_join(worktree.path(), &edit.path)?;
+        let target = git::contained_edit_path(worktree.path(), &edit.path)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|source| PatchError::Io {
                 path: parent.to_path_buf(),
@@ -131,6 +144,9 @@ pub fn propose(
     // Minimality + scope, enforced on the *produced* diff (defense in depth over
     // the declared edits): the change must touch something, and only files the
     // finding named.
+    // Stage inside the disposable worktree before comparing against its base:
+    // an unstaged Git diff omits newly created, untracked proposal files.
+    git::git(worktree.path(), &["add", "-A"])?;
     let changed = git::changed_paths(worktree.path(), &base_commit)?;
     if changed.is_empty() {
         return Err(PatchError::EmptyProposal);
@@ -148,7 +164,6 @@ pub fn propose(
 
     // Commit on the isolated branch (never main); identity is inline so it does
     // not depend on global git config.
-    git::git(worktree.path(), &["add", "-A"])?;
     let message = commit_message(&proposal.finding_evidence);
     git::git(
         worktree.path(),
@@ -176,13 +191,40 @@ pub fn propose(
 }
 
 impl ProposedPatch {
+    /// Persist detailed observations for a run consumed under this repository's
+    /// current exclusive transaction. This writes data, never a passing capability
+    /// or promotion approval; the final gate rechecks the complete receipt.
+    ///
+    /// # Errors
+    /// Different repository/run/plan, unsupported schema or atomic-store failure.
+    pub fn record_validation(
+        &mut self,
+        transaction: &validation::RepositoryTransaction<'_>,
+        evidence: validation::ValidationEvidence,
+    ) -> Result<(), validation::ValidationError> {
+        transaction.ensure_repository(&self.repo_root)?;
+        transaction.verify_evaluation_record(&evidence)?;
+        if evidence.schema != validation::VALIDATION_SCHEMA {
+            return Err(validation::ValidationError::Invalid(
+                "unknown validation schema".into(),
+            ));
+        }
+        // Keep each run inspectable after a later retry replaces the current
+        // provenance pointer. Archive first; uncertain/mixed writes leave the
+        // authority journal unfinished and cannot qualify a promotion.
+        validation::persist_validation_evidence(&self.repo_root, &evidence)?;
+        self.provenance.validation = Some(evidence);
+        write_proposal_meta(&self.repo_root, &self.id, &self.provenance)?;
+        Ok(())
+    }
     /// Reattach to a proposal created in an earlier process (e.g. a separate
     /// `promote`/`discard` CLI invocation) so it can be reviewed, promoted (with a
     /// token), or discarded. Reconstructs the handle from the on-disk worktree and
-    /// the persisted provenance, and recomputes the diff summary. The base is the
-    /// proposal commit's parent (`<branch>^`), since [`propose`] commits exactly once
-    /// on the isolated branch. This never mints a token and never writes the main
-    /// branch — the [`ApprovalToken`] gate on [`Self::promote`] is unchanged.
+    /// the persisted provenance, and recomputes the diff summary. New records keep
+    /// their original base explicitly; legacy review falls back to `<branch>^`.
+    /// Dropping this inspection handle preserves the proposal for later review
+    /// or explicit discard. This never mints a token and never writes the main
+    /// branch; promotion still requires a current validated capability.
     ///
     /// # Errors
     /// - [`PatchError::UnknownProposal`] if no worktree or record exists for `branch`;
@@ -195,9 +237,22 @@ impl ProposedPatch {
             .map_err(|_| PatchError::UnknownProposal(branch.to_string()))?;
         let provenance: ChangeProvenance =
             serde_json::from_str(&json).map_err(|e| PatchError::Serde(e.to_string()))?;
-        let base_commit = git::git(repo_root, &["rev-parse", &format!("{branch}^")])?
-            .trim()
-            .to_string();
+        let base_commit = match &provenance.proposal_base {
+            Some(base)
+                if matches!(base.commit.len(), 40 | 64)
+                    && base.commit.bytes().all(|b| b.is_ascii_hexdigit()) =>
+            {
+                base.commit.clone()
+            }
+            Some(_) => {
+                return Err(PatchError::UnsupportedGitPolicy(
+                    "invalid recorded proposal base".into(),
+                ))
+            }
+            None => git::git(repo_root, &["rev-parse", &format!("{branch}^")])?
+                .trim()
+                .to_string(),
+        };
         let diff_summary = compute_diff_summary(worktree.path(), &base_commit)?;
         Ok(Self {
             id: branch.to_string(),
@@ -244,31 +299,15 @@ impl ProposedPatch {
         self.provenance.eval_result = Some(result);
     }
 
-    /// Promote the proposed patch onto the current main branch — the **only** path
-    /// that writes outside the worktree, and it requires an [`ApprovalToken`] that
-    /// authorizes exactly this patch. Conservative: refuses a dirty target working
-    /// tree, fast-forwards only, and never pushes.
-    ///
-    /// # Errors
-    /// - [`PatchError::TokenMismatch`] if the token does not authorize this patch;
-    /// - [`PatchError::DirtyTarget`] if the main working tree has local changes;
-    /// - [`PatchError::NotFastForward`] if the base moved and a rebase is needed;
-    /// - [`PatchError::Git`] on git failure.
-    pub fn promote(&self, token: &ApprovalToken) -> Result<PromoteOutcome, PatchError> {
-        if !token.authorizes(&self.id) {
-            return Err(PatchError::TokenMismatch);
-        }
+    fn fast_forward(&self, revision: &str, reviewer: &str) -> Result<PromoteOutcome, PatchError> {
         if !git::is_clean(&self.repo_root)? {
             return Err(PatchError::DirtyTarget);
         }
         // Fast-forward only: never silently create a merge or resolve conflicts.
-        match git::git(
-            &self.repo_root,
-            &["merge", "--ff-only", self.worktree.branch()],
-        ) {
+        match git::git(&self.repo_root, &["merge", "--ff-only", revision]) {
             Ok(_) => Ok(PromoteOutcome {
                 branch: self.worktree.branch().to_string(),
-                reviewer: token.reviewer().to_string(),
+                reviewer: reviewer.to_string(),
             }),
             Err(PatchError::Git { .. }) => Err(PatchError::NotFastForward),
             Err(other) => Err(other),
@@ -293,8 +332,24 @@ impl ProposedPatch {
     /// rollback path; nothing on the main branch was touched.
     ///
     /// # Errors
-    /// [`PatchError::Git`] if the worktree cannot be removed.
-    pub fn discard(mut self) -> Result<(), PatchError> {
+    /// Busy/pending authority, wrong repository, or failed worktree removal.
+    pub fn discard(self) -> Result<(), validation::ValidationError> {
+        let mut authority = validation::RepositoryAuthority::open(&self.repo_root)?;
+        let transaction = authority.try_transaction()?;
+        self.discard_in_transaction(&transaction)
+    }
+
+    /// Discard while a common caller retains the same guard through its matching
+    /// loop-state cleanup. Historical receipts remain available by run id.
+    ///
+    /// # Errors
+    /// Busy/pending authority, wrong repository, or failed worktree removal.
+    pub fn discard_in_transaction(
+        mut self,
+        transaction: &validation::RepositoryTransaction<'_>,
+    ) -> Result<(), validation::ValidationError> {
+        transaction.check_root(&self.repo_root)?;
+        transaction.require_idle()?;
         self.worktree.remove()?;
         // Best-effort: drop the persisted provenance record too.
         let _ = std::fs::remove_file(proposal_meta_path(&self.repo_root, &self.id));
@@ -328,7 +383,8 @@ fn write_proposal_meta(
     let json = provenance
         .to_json()
         .map_err(|e| PatchError::Serde(e.to_string()))?;
-    std::fs::write(&path, json).map_err(|source| PatchError::Io { path, source })
+    localpilot_store::atomic_write(&path, json.as_bytes())?;
+    Ok(())
 }
 
 /// A plan-agnostic commit subject for the isolated proposal branch.
@@ -349,7 +405,17 @@ fn commit_message(finding_evidence: &str) -> String {
 
 /// Build the diff summary from `base..HEAD` in the worktree.
 fn compute_diff_summary(worktree: &Path, base: &str) -> Result<DiffSummary, PatchError> {
-    let numstat = git::git(worktree, &["diff", "--numstat", base, "HEAD"])?;
+    let numstat = git::git(
+        worktree,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            base,
+            "HEAD",
+        ],
+    )?;
     let mut files = Vec::new();
     let mut insertions = 0_u64;
     let mut deletions = 0_u64;
@@ -365,10 +431,24 @@ fn compute_diff_summary(worktree: &Path, base: &str) -> Result<DiffSummary, Patc
         deletions = deletions.saturating_add(removed.parse().unwrap_or(0));
         files.push(path.replace('\\', "/"));
     }
-    let full = git::git(worktree, &["diff", "--no-color", base, "HEAD"])?;
+    let full = git::git(
+        worktree,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            base,
+            "HEAD",
+        ],
+    )?;
     let (patch, truncated) = if full.len() > MAX_DIFF_BYTES {
         let mut cut = full;
-        cut.truncate(MAX_DIFF_BYTES);
+        let mut boundary = MAX_DIFF_BYTES;
+        while !cut.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        cut.truncate(boundary);
         cut.push_str("\n... (diff truncated)\n");
         (cut, true)
     } else {
@@ -409,6 +489,248 @@ mod tests {
 
     fn provenance() -> ChangeProvenance {
         ChangeProvenance::new("fix the TODO in a.rs", "test-model", "the TODO is stale")
+    }
+
+    #[test]
+    fn inspecting_a_persisted_proposal_does_not_discard_its_worktree() {
+        let repo = init_repo();
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        let patch = propose(repo.path(), "persisted-review", &request, provenance()).unwrap();
+        let path = patch.worktree_path().to_owned();
+        patch.persist().unwrap();
+        {
+            let preview = ProposedPatch::reopen(repo.path(), "persisted-review").unwrap();
+            assert!(preview.diff_summary().patch.contains("fixed"));
+        }
+        assert!(
+            path.is_dir(),
+            "merely viewing a persisted proposal must not delete it"
+        );
+        let again = ProposedPatch::reopen(repo.path(), "persisted-review").unwrap();
+        again.discard().unwrap();
+        assert!(
+            !path.exists(),
+            "explicit discard still removes a persisted proposal"
+        );
+    }
+
+    fn marker_script(path: &Path, marker: &Path) {
+        let quoted = marker
+            .to_str()
+            .unwrap()
+            .replace('\\', "/")
+            .replace('\'', "'\\''");
+        std::fs::write(
+            path,
+            format!("#!/bin/sh\nprintf 'executed\\n' >> '{quoted}'\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    #[test]
+    fn proposal_and_promotion_suppress_hooks_without_changing_user_configuration() {
+        let repo = init_repo();
+        let hooks = tempfile::tempdir().unwrap();
+        let marker = hooks.path().join("marker");
+        for name in [
+            "post-checkout",
+            "pre-commit",
+            "commit-msg",
+            "post-commit",
+            "post-merge",
+        ] {
+            marker_script(&hooks.path().join(name), &marker);
+        }
+        git::git(
+            repo.path(),
+            &["config", "core.hooksPath", hooks.path().to_str().unwrap()],
+        )
+        .unwrap();
+        // Positive sensitivity control: the ordinary Git operation executes the
+        // harmless hook, proving this fixture could detect implicit execution.
+        let control = repo.path().join(".localpilot/control");
+        let output = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                control.to_str().unwrap(),
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let before = std::fs::read(&marker).unwrap();
+        assert!(!before.is_empty());
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        let mut patch = propose(repo.path(), "static-hooks", &request, provenance()).unwrap();
+        validation::promote_fixture(&mut patch);
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+        let setting = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args(["config", "--local", "--get", "core.hooksPath"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(setting.stdout).unwrap().trim(),
+            hooks.path().to_str().unwrap()
+        );
+        git::git(
+            repo.path(),
+            &["worktree", "remove", "--force", control.to_str().unwrap()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn unused_filter_configuration_is_supported_but_active_filters_refuse_before_checkout() {
+        let repo = init_repo();
+        let helpers = tempfile::tempdir().unwrap();
+        let marker = helpers.path().join("marker");
+        let script = helpers.path().join("filter.sh");
+        marker_script(&script, &marker);
+        let command = format!(
+            "sh '{}'",
+            script
+                .to_str()
+                .unwrap()
+                .replace('\\', "/")
+                .replace('\'', "'\\''")
+        );
+        git::git(repo.path(), &["config", "filter.fixture.clean", &command]).unwrap();
+        git::git(repo.path(), &["config", "filter.fixture.smudge", &command]).unwrap();
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        propose(repo.path(), "unused-filter", &request, provenance())
+            .unwrap()
+            .discard()
+            .unwrap();
+        assert!(!marker.exists(), "an unused configured filter never runs");
+
+        // Materialize attributes without invoking conversion: no index/checkout
+        // operation follows until the production guard has inspected them.
+        std::fs::write(repo.path().join(".gitattributes"), "*.rs filter=fixture\n").unwrap();
+        let before = git::head_commit(repo.path()).unwrap();
+        let error = propose(repo.path(), "active-filter", &request, provenance()).unwrap_err();
+        assert!(matches!(error, PatchError::UnsupportedGitPolicy(_)));
+        assert!(!repo
+            .path()
+            .join(".localpilot/worktrees/active-filter")
+            .exists());
+        assert_eq!(git::head_commit(repo.path()).unwrap(), before);
+        assert!(!marker.exists(), "refusal must precede filter execution");
+    }
+
+    #[test]
+    fn diff_helpers_do_not_run_when_producing_the_reviewable_summary() {
+        let repo = init_repo();
+        let helpers = tempfile::tempdir().unwrap();
+        let marker = helpers.path().join("marker");
+        let script = helpers.path().join("diff-helper.sh");
+        marker_script(&script, &marker);
+        let command = format!(
+            "sh '{}'",
+            script
+                .to_str()
+                .unwrap()
+                .replace('\\', "/")
+                .replace('\'', "'\\''")
+        );
+        git::git(repo.path(), &["config", "diff.external", &command]).unwrap();
+        git::git(repo.path(), &["config", "diff.fixture.textconv", &command]).unwrap();
+        std::fs::write(repo.path().join(".gitattributes"), "*.rs diff=fixture\n").unwrap();
+        git::git(repo.path(), &["add", ".gitattributes"]).unwrap();
+        git::git(repo.path(), &["commit", "-m", "controlled diff attributes"]).unwrap();
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        let patch = propose(repo.path(), "static-diff", &request, provenance()).unwrap();
+        assert!(patch.diff_summary().patch.contains("+pub fn fixed()"));
+        assert!(!marker.exists());
+        let output = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args(["diff", "--ext-diff", "HEAD", patch.id()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(
+            marker.exists(),
+            "ordinary Git would execute the configured helper"
+        );
+    }
+
+    #[test]
+    fn large_unicode_diff_stays_bounded_and_reviewable_without_panicking() {
+        let repo = init_repo();
+        for padding in 0..4 {
+            let text = format!("{}{}\n", "x".repeat(padding), "🦀".repeat(20000));
+            let request = proposal(&["a.rs"], &[("a.rs", &text)]);
+            let patch = propose(
+                repo.path(),
+                &format!("unicode-{padding}"),
+                &request,
+                provenance(),
+            )
+            .unwrap();
+            assert!(patch.diff_summary().truncated);
+            assert!(patch
+                .diff_summary()
+                .patch
+                .ends_with("\n... (diff truncated)\n"));
+            assert!(patch.diff_summary().patch.len() <= MAX_DIFF_BYTES + 30);
+        }
+    }
+
+    #[test]
+    fn filter_driver_names_cannot_masquerade_as_unspecified_attribute_sentinels() {
+        let repo = init_repo();
+        let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
+        for (index, attribute) in ["filter=unspecified", "filter=unset", "-filter"]
+            .iter()
+            .enumerate()
+        {
+            std::fs::write(
+                repo.path().join(".gitattributes"),
+                format!("*.rs {attribute}\n"),
+            )
+            .unwrap();
+            assert!(matches!(
+                propose(
+                    repo.path(),
+                    &format!("sentinel-{index}"),
+                    &request,
+                    provenance()
+                ),
+                Err(PatchError::UnsupportedGitPolicy(_))
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proposal_refuses_a_committed_symlink_escape_before_writing() {
+        let repo = init_repo();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("owned.txt"), "original").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("escape")).unwrap();
+        git::git(repo.path(), &["add", "escape"]).unwrap();
+        git::git(repo.path(), &["commit", "-m", "controlled symlink fixture"]).unwrap();
+        let request = proposal(&["escape/owned.txt"], &[("escape/owned.txt", "changed")]);
+        assert!(matches!(
+            propose(repo.path(), "symlink-refused", &request, provenance()),
+            Err(PatchError::OutsideWorktree(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("owned.txt")).unwrap(),
+            "original"
+        );
     }
 
     fn proposal(allowed: &[&str], edits: &[(&str, &str)]) -> PatchProposal {
@@ -498,10 +820,10 @@ mod tests {
     }
 
     #[test]
-    fn promote_requires_a_matching_token_and_never_runs_without_one() {
+    fn source_stays_unpromoted_until_a_validated_capability_is_supplied() {
         let dir = init_repo();
         let root = dir.path();
-        let patch = propose(
+        let mut patch = propose(
             root,
             "sr-3",
             &proposal(&["a.rs"], &[("a.rs", "pub fn f() { /* fixed */ }\n")]),
@@ -509,22 +831,16 @@ mod tests {
         )
         .unwrap();
 
-        // A token for a different patch does not authorize this one.
-        let wrong = ApprovalToken::approve("other", "david");
-        assert!(matches!(
-            patch.promote(&wrong).unwrap_err(),
-            PatchError::TokenMismatch
-        ));
         // main is still untouched.
         assert_eq!(
             std::fs::read_to_string(root.join("a.rs")).unwrap(),
             "pub fn f() {}\n"
         );
 
-        // The matching token (a human act) promotes it: now main carries the fix.
-        let token = ApprovalToken::approve(patch.id(), "david");
-        let outcome = patch.promote(&token).unwrap();
-        assert_eq!(outcome.reviewer, "david");
+        // Unit observations produce the same locked capability as the real
+        // coordinator integration; a token alone cannot call promote.
+        let outcome = validation::promote_fixture(&mut patch);
+        assert_eq!(outcome.reviewer, "fixture owner");
         assert!(std::fs::read_to_string(root.join("a.rs"))
             .unwrap()
             .contains("fixed"));
@@ -549,6 +865,30 @@ mod tests {
             std::fs::read_to_string(root.join("a.rs")).unwrap(),
             "pub fn f() {}\n"
         );
+    }
+
+    #[test]
+    fn discard_rejects_a_guard_from_another_repository_without_removing_the_proposal() {
+        let repo = init_repo();
+        let other = init_repo();
+        let patch = propose(
+            repo.path(),
+            "guarded-discard",
+            &proposal(&["a.rs"], &[("a.rs", "pub fn changed() {}\n")]),
+            provenance(),
+        )
+        .unwrap();
+        let path = patch.worktree_path().to_owned();
+        patch.persist().unwrap();
+        let patch = ProposedPatch::reopen(repo.path(), "guarded-discard").unwrap();
+        let mut authority = validation::RepositoryAuthority::open(other.path()).unwrap();
+        let held = authority.try_transaction().unwrap();
+        assert!(matches!(
+            patch.discard_in_transaction(&held),
+            Err(validation::ValidationError::Stale)
+        ));
+        assert!(path.is_dir());
+        assert!(ProposedPatch::reopen(repo.path(), "guarded-discard").is_ok());
     }
 
     #[test]
@@ -589,7 +929,7 @@ mod tests {
             patch.persist().unwrap();
         }
         // A later invocation reattaches from disk: same diff + provenance restored.
-        let reopened = ProposedPatch::reopen(root, "sr-reopen").unwrap();
+        let mut reopened = ProposedPatch::reopen(root, "sr-reopen").unwrap();
         assert_eq!(reopened.id(), "sr-reopen");
         assert_eq!(reopened.diff_summary().files, vec!["a.rs".to_string()]);
         assert!(reopened.provenance().is_complete());
@@ -598,8 +938,7 @@ mod tests {
             std::fs::read_to_string(root.join("a.rs")).unwrap(),
             "pub fn f() {}\n"
         );
-        let token = ApprovalToken::approve(reopened.id(), "david");
-        reopened.promote(&token).unwrap();
+        validation::promote_fixture(&mut reopened);
         assert!(std::fs::read_to_string(root.join("a.rs"))
             .unwrap()
             .contains("fixed"));

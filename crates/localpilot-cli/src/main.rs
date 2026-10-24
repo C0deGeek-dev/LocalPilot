@@ -57,6 +57,10 @@ mod outward_cmd;
 mod pair_cmd;
 #[cfg(feature = "tui")]
 mod pair_run;
+#[cfg(all(test, feature = "tui"))]
+#[path = "../tests/support/proposal.rs"]
+mod proposal_fixture;
+mod proposal_validation;
 mod propose_patch;
 #[cfg(feature = "tui")]
 mod repl;
@@ -757,9 +761,28 @@ enum SelfdevCommand {
 
 #[derive(Debug, Subcommand)]
 enum SelfImproveCommand {
+    /// Inspect or explicitly acknowledge unfinished repository authority.
+    Recovery(proposal_validation::RecoveryArgs),
     /// Show the current loop state: which stage, what is pending, and whether the
     /// gate is awaiting a human approval token.
     Status,
+    /// Inspect the active proposal's diff, risks and execution plan; runs no code.
+    Preflight,
+    /// Preview or explicitly execute the active proposal's validation plan.
+    Validate {
+        #[arg(long)]
+        reviewer: Option<String>,
+        #[arg(long)]
+        approve_execution: bool,
+        /// Exact execution preview identity, separate from promotion approval.
+        #[arg(long)]
+        review: Option<String>,
+    },
+    /// Inspect current or historical validation evidence without execution.
+    Evidence {
+        #[arg(long)]
+        run: Option<uuid::Uuid>,
+    },
     /// Advance the loop one stage. Past the human gate it refuses to promote
     /// without an explicit `--approve --reviewer <you>`.
     Next {
@@ -781,6 +804,9 @@ enum SelfImproveCommand {
         /// The human reviewer recorded on the approval (required with `--approve`).
         #[arg(long)]
         reviewer: Option<String>,
+        /// Exact passing promotion-review identity printed by evidence.
+        #[arg(long)]
+        review: Option<String>,
     },
     /// Clear the loop state so a fresh pass can start.
     Reset,
@@ -2043,8 +2069,35 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             let cwd = std::env::current_dir()?;
             let mut stdout = io::stdout().lock();
             match command {
+                SelfImproveCommand::Recovery(args) => {
+                    proposal_validation::recovery(&cwd, &args, &mut stdout)?
+                }
                 SelfImproveCommand::Status => {
                     selfimprove_cmd::run_status(&cwd, &mut stdout)?;
+                }
+                SelfImproveCommand::Preflight => {
+                    let id = selfimprove_cmd::pending_id(&cwd)?;
+                    proposal_validation::preflight(&cwd, &id, &mut stdout)?;
+                }
+                SelfImproveCommand::Validate {
+                    reviewer,
+                    approve_execution,
+                    review,
+                } => {
+                    let id = selfimprove_cmd::pending_id(&cwd)?;
+                    proposal_validation::validate(
+                        &cwd,
+                        &id,
+                        reviewer.as_deref(),
+                        approve_execution,
+                        review.as_deref(),
+                        &mut stdout,
+                    )
+                    .await?;
+                }
+                SelfImproveCommand::Evidence { run } => {
+                    let id = selfimprove_cmd::pending_id(&cwd)?;
+                    proposal_validation::evidence(&cwd, &id, run, &mut stdout)?;
                 }
                 SelfImproveCommand::Next {
                     finding,
@@ -2052,6 +2105,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                     provider,
                     approve,
                     reviewer,
+                    review,
                 } => {
                     selfimprove_cmd::run_next(
                         &cwd,
@@ -2061,6 +2115,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                             provider: provider.as_deref(),
                             approve,
                             reviewer: reviewer.as_deref(),
+                            review: review.as_deref(),
                         },
                         &mut stdout,
                     )

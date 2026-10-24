@@ -9,12 +9,19 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+uuid = { workspace = true }
 localpilot-patchgen = { path = "../localpilot-patchgen" }
 localpilot-selfdev = { path = "../localpilot-selfdev" }
 localpilot-selfreview = { path = "../localpilot-selfreview" }
+localpilot-config = { path = "../localpilot-config" }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
+localpilot-harness = { path = "../localpilot-harness" }
+localpilot-store = { path = "../localpilot-store" }
+toml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }

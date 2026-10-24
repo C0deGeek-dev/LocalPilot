@@ -516,8 +516,56 @@ Owns the write half of the self-improvement loop (ADR-0034):
 
 - isolated-worktree proposal generation (never writes `main`)
 - scope/path containment and minimal-diff checks
-- the `ApprovalToken`-gated promotion path (single human-only constructor)
+- source promotion requiring a locked `ValidatedProposal` capability
 - the change-provenance record carried with each proposal
+
+The `validation` library module defines content/plan identities, three separate
+memory-only authorities, structured evidence and a Git-common-dir lock/consumption
+journal. Its canonical hashes preserve field and argv boundaries; old provenance
+without structured evidence is unvalidated. `self-review preflight --id` now
+inspects a recorded proposal and resolves committed-base Rust check configuration
+without running it. Both production patch callers use the common promotion gate;
+the older branch-name approval API is removed. Publication has its own typed
+consent and pending transaction and does not require patch-shaped evidence.
+
+`localpilot-selfimprove::validate_proposal` is the library execution coordinator.
+It holds that common-repository transaction, re-resolves the reviewed plan before
+each command, consumes an `EvaluationToken`, and calls the existing harness
+`CheckRunner::execute`. Exact typed commands add a restriction before the normal
+permission decision; the consumed grant answers matching Ask decisions and never
+overrides Deny. The opt-in owned-process runner reuses tools' process owner
+(Windows jobs or Unix groups), recording cleanup confirmation separately from
+exit status. Existing quality callers retain their previous behavior.
+
+The coordinator persists Running and per-check observations, then recomputes
+source/toolchain/context identity and persists the final receipt before finishing
+the nonce journal. Abandoned futures and uncertain cleanup leave recovery pending.
+This API starts no automatic retries or promotion. CLI and chat execution require
+separate exact-review confirmation. The registered profile declares only a worktree-local target cache and
+no artifacts; future artifact profiles must add bounded collection before passing.
+Promotion reservations also persist their exact old/new ref goal, validation
+run and logical caller-state hashes before effects, so recovery can inspect the
+intended transition. Reset, propose, build, reload and discard also acquire the
+common transaction and refuse unfinished authority. A Windows reload releases
+its guard after child launch, before waiting; a failed launch can roll state back
+while still holding the guard. A complete
+Passed receipt with an unfinished authority journal still cannot qualify a new
+evaluation or promotion reservation.
+
+New proposals retain their original base/target/scope in provenance. Reopening a
+persisted proposal is a nonowning inspection: dropping that handle preserves its
+worktree; explicit discard still removes it, while a newly created unpersisted
+proposal retains rollback-on-drop. Discard holds the common guard and clears
+only its matching unpromoted loop state, retaining historical evidence.
+Provenance writes use the existing atomic
+store primitive. Static identity binds actual bounded source bytes and unchanged
+initialized submodules, refusing dirty, unsupported or unapproved ignored files.
+
+The proposal Git helper independently suppresses implicit hook/signing/diff
+execution and refuses unsupported filter attributes before checkout/index
+effects. Those protections are wired into the existing proposal path. They do
+not isolate approved checks from the host. The execution/promotion gate adds
+separate consent and evidence requirements; final feature acceptance is pending.
 
 ### `localpilot-dist`
 
@@ -573,7 +621,7 @@ outward emitter.
 
 Must not own: any write or publish path — it writes nothing; the
 patch-generating half lives in `localpilot-patchgen` and publication is
-`ApprovalToken`-gated in the CLI. Prior lessons are injected by the host, so
+gated by separate content-bound execution and promotion consent. Prior lessons are injected by the host, so
 the crate carries no memory dependency.
 
 ### `localpilot-selfimprove`
@@ -584,14 +632,14 @@ entrypoints in a fixed order and surfaces the loop state; it holds only
 sequencing and state, no stage logic:
 
 ```text
-review ─▶ propose ─▶ [ human ApprovalToken gate ] ─▶ promote ─▶ build+gauntlet ─▶ reload
+review ─▶ propose ─▶ [ execute consent; passing evidence; promotion consent ] ─▶ promote ─▶ build+gauntlet ─▶ reload
 Found  ─▶ Proposed ─▶            (hard stop)        ─▶ Approved ─▶    Built     ─▶ Reloaded
 ```
 
-- a `contract` of five linear states, each bound to the *existing* entrypoint
-  that produces it, with the Proposed→Approved crossing representable **only**
-  with an `ApprovalToken` — so "no autonomous advance past the gate" is a
-  property of the types, not a convention
+- a `contract` of five descriptive states and a separate validation sidecar.
+  Stage values are public data, not authority. Actual source promotion requires
+  a private ephemeral capability obtained by locked current revalidation of
+  passing local evidence and separate human promotion consent
 - an `Orchestrator` that advances one step at a time, persists the loop state
   under `.localpilot/selfimprove/` (git-ignored, resume-safe across processes),
   and after approval builds the **approved, merged tree** — never the patchgen
@@ -606,7 +654,7 @@ mutation with a human-merge gate (`patchgen`) versus a compiled-binary lifecycle
 with a build gauntlet and rollback breaker (`selfdev`). Merging them would couple
 two unrelated concerns and blur the human gate (ADR-0138).
 
-Must not own: minting the `ApprovalToken` (only an explicit human approval path
+Must not own: minting execution or promotion consent (only an explicit human approval path
 does), and any autonomous build→reload path — the unattended loop stays deferred
 (ADR-0128). It is surfaced by `localpilot selfimprove status` / `next` and by the
 two interactive hosts through `/selfimprove`. Both surfaces call the same
@@ -631,14 +679,14 @@ which reuses the quality-gate `CheckRunner`.)
 **wired** — reached only through the confirm-gated `localpilot self-review
 propose-patch` / `promote` / `discard` commands. `propose-patch` has a model
 author a minimal, scope-confined edit for a ranked finding into an isolated
-worktree and **stops at the `ApprovalToken` gate**; `promote` applies it onto
-`main` only when an explicit human `--approve` mints the token (fast-forward
+worktree and stops before proposed-code execution; `validate` requires exact
+execution consent. `promote` requires current passing local observations and a
+separate exact-review `--approve` (fast-forward
 only, never pushes); `discard` drops the worktree/branch. A proposal persists
 across invocations via its on-disk worktree plus its provenance record, so a
 human reviews the diff between proposing and promoting. The gate stays correct
-by construction: the sole `ApprovalToken` constructor is the explicit-human
-`--approve` path, so no autonomous path constructs a token (see ADR-0034's
-as-shipped note).
+through the common transaction and capability, not the publicly constructible
+stage enum. Unattended transitions never supply execution or promotion consent.
 
 ### `localpilot-quota`
 

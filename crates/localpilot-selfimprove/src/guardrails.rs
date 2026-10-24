@@ -8,14 +8,14 @@
 //! The properties:
 //!
 //! 1. **No unattended loop** — the orchestrator exposes only single-step advance;
-//!    no shipped code path auto-mints an `ApprovalToken` or loops build→reload.
+//!    the orchestrator mints no consent and never loops build→reload.
 //! 2. **Offline evidence is the bar** — a self-dev advance is reachable only after
 //!    the human gate, so it can never auto-satisfy a benchmark/live requirement
 //!    (offline evidence is the bar; live runs are opportunistic, never blocking).
 //! 3. **Rollback is reused** — a failed self-dev advance drives the *existing*
 //!    self-dev circuit breaker; the orchestrator adds no parallel rollback logic.
-//! 4. **`ApprovalToken` bypass is impossible** — exactly one promote path exists,
-//!    and it takes a token the orchestrator cannot construct.
+//! 4. **Source promotion uses the common gate** — both production callers reach
+//!    the same lock-owning capability service. Public Stage data is not authority.
 
 /// The portion of a source file that ships in the binary — everything before its
 /// unit-test module. The guardrail scans run against this so a token mint or a
@@ -41,6 +41,11 @@ mod tests {
 
     const ORCHESTRATOR_SRC: &str = include_str!("orchestrator.rs");
     const CONTRACT_SRC: &str = include_str!("contract.rs");
+    const PROMOTION_SRC: &str = include_str!("promotion.rs");
+    const CAPABILITY_SRC: &str =
+        include_str!("../../localpilot-patchgen/src/validation/promotion.rs");
+    const DIRECT_CLI_SRC: &str = include_str!("../../localpilot-cli/src/propose_patch.rs");
+    const EXECUTION_SRC: &str = include_str!("execution.rs");
 
     /// No unattended loop: the shipped orchestrator mints no token and holds no
     /// self-advancing loop. ADR-0128 keeps the autonomous loop deferred; this is
@@ -58,6 +63,8 @@ mod tests {
             !shipped(CONTRACT_SRC).contains("ApprovalToken::approve("),
             "the contract must never mint an approval token"
         );
+        assert!(!src.contains("EvaluationToken::approve("));
+        assert!(!shipped(CONTRACT_SRC).contains("EvaluationToken::approve("));
         assert!(
             !src.contains("loop {"),
             "the orchestrator must expose only single-step advance — no loop"
@@ -140,6 +147,13 @@ mod tests {
     #[test]
     fn a_failed_build_drives_the_existing_circuit_breaker() {
         let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
         let selfdev = tempfile::tempdir().unwrap();
         seed_state(
             repo.path(),
@@ -175,19 +189,30 @@ mod tests {
         assert!(err.to_string().contains("circuit breaker tripped"));
     }
 
-    /// `ApprovalToken` bypass is impossible by construction: the shipped
-    /// orchestrator has exactly one promote path, and it cannot construct a token.
+    /// Pin the actual service, effect and capability boundaries. Stage enum
+    /// helpers and a count confined to the orchestrator cannot prove this.
     #[test]
-    fn exactly_one_promote_path_and_no_forgeable_token() {
-        let src = shipped(ORCHESTRATOR_SRC);
-        let promotes = src.matches(".promote(").count();
-        assert_eq!(
-            promotes, 1,
-            "there must be exactly one promote path in the orchestrator"
-        );
-        // The single promote path takes a token by reference; the orchestrator
-        // never mints one (checked above), so it cannot forge a valid token — it
-        // can only be handed one by the human-confirmation path.
-        assert!(src.contains("fn approve(&self, token: &ApprovalToken)"));
+    fn production_patch_callers_share_the_locked_capability_gate() {
+        let orchestrator = shipped(ORCHESTRATOR_SRC);
+        let service = shipped(PROMOTION_SRC);
+        let direct = shipped(DIRECT_CLI_SRC);
+        assert!(orchestrator.contains("crate::promotion::promote_for_loop("));
+        assert!(!orchestrator.contains(".promote("));
+        assert!(direct.contains("localpilot_selfimprove::promote_proposal("));
+        assert!(!direct.contains(".promote("));
+        assert_eq!(service.matches(".promote(").count(), 1);
+        let proof = service.find(".prepare_promotion(").unwrap();
+        let effect = service.find("patch.promote(").unwrap();
+        let state = service[effect..].find("write_loop_state(").unwrap() + effect;
+        let finish = service.find("pending.finish(").unwrap();
+        assert!(proof < effect && effect < state && state < finish);
+        let capability = shipped(CAPABILITY_SRC);
+        assert!(capability.contains("validated: ValidatedProposal<'repo>"));
+        assert!(capability.contains("reserve_promotion_with_checkpoint("));
+        assert!(service.contains(".with_caller_checkpoint("));
+        let execution = shipped(EXECUTION_SRC);
+        assert_eq!(execution.matches("CheckRunner::new(").count(), 1);
+        assert!(!execution.contains("Command::new("));
+        assert!(!execution.contains(".spawn("));
     }
 }

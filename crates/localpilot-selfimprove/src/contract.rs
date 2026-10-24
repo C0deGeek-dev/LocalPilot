@@ -6,19 +6,21 @@
 //! The pipeline is linear and total:
 //!
 //! ```text
-//! Found ──review──▶ Proposed ──[ ApprovalToken gate ]──▶ Approved ──build──▶ Built ──reload──▶ Reloaded
+//! Found ──review──▶ Proposed ──[ PatchApprovalToken gate ]──▶ Approved ──build──▶ Built ──reload──▶ Reloaded
 //! ```
 //!
-//! The only way past [`Stage::Proposed`] is [`cross_gate`], which is representable
-//! **only** with an [`ApprovalToken`]. So "no autonomous advance past the gate" is
-//! a property of the types, not a convention (ADR-0034 human-gated loop; ADR-0128
-//! keeps the unattended autonomous loop deferred).
+//! Stage values are public, serializable descriptions, not authority. Descriptive
+//! stage helpers do not enforce production transitions. Production patch
+//! callers use the common locked promotion service and its ephemeral validated
+//! capability; approval tokens alone never authorize the Git effect.
+//! ADR-0128 keeps the unattended autonomous loop deferred.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use localpilot_patchgen::{ApprovalToken, PatchError};
+pub use localpilot_patchgen::validation::PatchApprovalToken;
+pub use localpilot_patchgen::PatchError;
 
 /// One state in the self-improvement pipeline. Declaration order **is** pipeline
 /// order, so the derived [`Ord`] compares states by how far along the loop they
@@ -35,7 +37,7 @@ pub enum Stage {
     Proposed,
     /// The proposal was promoted onto the main branch — produced by
     /// `localpilot_patchgen::ProposedPatch::promote`, which **requires** an
-    /// [`ApprovalToken`]. This is the state on the far side of the human gate.
+    /// [`PatchApprovalToken`]. This is the state on the far side of the human gate.
     Approved,
     /// The approved tree was built, vetted, installed, and a channel promoted —
     /// produced by `localpilot_selfdev::build_gauntlet_promote`.
@@ -87,16 +89,16 @@ impl Stage {
 }
 
 /// The pipeline is at [`Stage::Proposed`] and cannot advance without a human
-/// [`ApprovalToken`]. Returned by [`unattended_next`] to make the gate a value an
+/// [`PatchApprovalToken`]. Returned by [`unattended_next`] to make the gate a value an
 /// unattended caller must handle, rather than a rule it might forget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AwaitingApproval;
 
 /// The next state an **unattended** step may reach. Every non-gate transition
 /// returns `Ok(next)` (with `Ok(None)` at the terminal state); the
-/// Proposed→Approved transition returns `Err(AwaitingApproval)`, because the only
-/// way across it is [`cross_gate`], which demands a token. There is no tokenless
-/// path from `Proposed` to `Approved`.
+/// Proposed→Approved transition returns `Err(AwaitingApproval)`. This descriptive
+/// helper never supplies execution or promotion authority; the common locked
+/// service enforces actual source/state transitions.
 ///
 /// # Errors
 /// [`AwaitingApproval`] at [`Stage::Proposed`] — the human gate.
@@ -107,17 +109,6 @@ pub fn unattended_next(stage: Stage) -> Result<Option<Stage>, AwaitingApproval> 
     }
 }
 
-/// Cross the human gate: the transition from [`Stage::Proposed`] to
-/// [`Stage::Approved`]. Taking an [`ApprovalToken`] by reference makes the
-/// crossing *representable only* when a token exists — a caller cannot even name
-/// the result of this transition without one. The token is minted solely by a
-/// human-confirmation path (`ApprovalToken::approve`); nothing in this crate mints
-/// one.
-#[must_use]
-pub fn cross_gate(_token: &ApprovalToken) -> Stage {
-    Stage::Approved
-}
-
 /// Errors the loop can surface. The propose/promote failure surface is the real
 /// [`PatchError`] from `localpilot-patchgen` — no new failure modes are invented
 /// for those stages. The build/reload stage surfaces its message through
@@ -125,6 +116,12 @@ pub fn cross_gate(_token: &ApprovalToken) -> Stage {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LoopError {
+    /// Proposal validation or authority refused the requested operation.
+    #[error(transparent)]
+    Validation(#[from] localpilot_patchgen::validation::ValidationError),
+    /// Atomic loop-state persistence failed.
+    #[error(transparent)]
+    Store(#[from] localpilot_store::StoreError),
     /// A step was attempted that is not the loop's current step.
     #[error("the loop is at {actual:?}; {attempted} is not the next step")]
     OutOfOrder {
@@ -142,7 +139,7 @@ pub enum LoopError {
     },
 
     /// The loop is parked at the human gate: the proposed patch must be promoted
-    /// with an [`ApprovalToken`] before it can advance.
+    /// with an [`PatchApprovalToken`] before it can advance.
     #[error(
         "awaiting human approval: promote the proposed patch with an approval token \
          before the loop can advance"
@@ -212,10 +209,10 @@ mod tests {
         }
     }
 
-    /// The gate is a hard stop: an unattended step cannot pass `Proposed`, and the
-    /// *only* way to reach `Approved` is [`cross_gate`], which needs a token.
+    /// Unattended sequencing stops at Proposed; serialized stage data alone is
+    /// not proof of validated source promotion.
     #[test]
-    fn the_gate_is_representable_only_with_a_token() {
+    fn unattended_next_stops_at_proposed_while_stage_values_remain_data() {
         // Every non-gate transition advances without a token...
         assert_eq!(unattended_next(Stage::Found), Ok(Some(Stage::Proposed)));
         assert_eq!(unattended_next(Stage::Approved), Ok(Some(Stage::Built)));
@@ -223,10 +220,11 @@ mod tests {
         assert_eq!(unattended_next(Stage::Reloaded), Ok(None));
         // ...but Proposed is a hard stop with no tokenless successor.
         assert_eq!(unattended_next(Stage::Proposed), Err(AwaitingApproval));
-        // The token is the only key through: crossing yields Approved, and it can
-        // only be named by supplying a token (a human act; not minted here).
-        let token = ApprovalToken::approve("some-patch", "a-human");
-        assert_eq!(cross_gate(&token), Stage::Approved);
+        // Public stage data is descriptive; promotion authority is separate.
+        assert_eq!(
+            serde_json::from_str::<Stage>("\"approved\"").unwrap(),
+            Stage::Approved
+        );
     }
 
     /// The propose/promote failure surface is the real `PatchError`, so the
