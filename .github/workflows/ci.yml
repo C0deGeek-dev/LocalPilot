@@ -242,7 +242,10 @@ jobs:
         run: capped cargo nextest run -p localpilot-selfdev --test-threads 2
       - if: runner.os == 'Linux'
         name: 'linux — tests: localpilot-selfimprove'
-        timeout-minutes: 6
+        # These independent validation/crash fixtures hash installed toolchains.
+        # At two concurrent tests, passing cases alone outgrow six minutes.
+        # Keep nextest's per-test hang deadline; budget the complete package.
+        timeout-minutes: 15
         run: capped cargo nextest run -p localpilot-selfimprove --test-threads 2
       - if: runner.os == 'Linux'
         name: 'linux — tests: localpilot-server'

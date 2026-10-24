@@ -169,6 +169,15 @@ The CI workflow enforces three guards beyond `cargo deny`/`audit`/`machete`:
   clean root (`cargo install --path crates/localpilot-cli --locked`) and runs
   the produced binary, so "builds in-tree but does not install" cannot ship.
 
+### CI test budgets
+
+The Linux proposal-validation package step has a 15-minute aggregate budget.
+Independent execution and crash-recovery fixtures repeatedly inspect real
+installed toolchains; passing tests at concurrency two can exceed six minutes
+before the package finishes. Each test retains nextest's five-minute hang
+deadline, and the package still runs with two test threads. The step budget
+allows the complete suite to run; it does not suppress failures or skip tests.
+
 ## 5. Project skills (portable across Claude and Codex)
 
 §1 lists the assistant's *built-in* skills. This section is about **skills we
