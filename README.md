@@ -211,7 +211,9 @@ Additional surfaces include MCP tools, `rpc`, `acp`, `mcp serve`, project
 knowledge ingestion, memory search, skill inspection, handoffs, self-review,
 and redacted session exports. `self-review preflight --id <proposal>` displays a
 persisted proposal's static source proof and committed-base Rust check plan;
-it does not execute the plan or promote the proposal. See the
+it does not execute the plan or promote the proposal. Execution uses a separate
+`validate --approve-execution` review; promotion requires current passing
+evidence and its own confirmation. See the
 [execution and host-access limits](docs/07-security-and-privacy.md#self-improvement-patch-generation).
 `localpilot mcp serve` turns the session runtime
 itself into an MCP server another agent host drives: `prompt` (with mid-turn
@@ -241,7 +243,9 @@ unchanged. Run `localpilot --help` for the complete command tree.
   `/localbox adopt --serve <model>` spelling remains compatible.
 - `/selfimprove` shows the persisted self-improvement stage. Use
   `/selfimprove start [finding-rank]` to review/select and propose,
-  `/selfimprove approve <reviewer>` for the explicit human gate, and
+  `/selfimprove preflight` to inspect the plan, `/selfimprove validate <reviewer>`
+  to authorize proposed checks, `/selfimprove evidence` to inspect their outcome,
+  `/selfimprove approve <reviewer>` for separate promotion consent, and
   `/selfimprove next` for each subsequent build/reload step.
 - `/name` names the session so it can be resumed by name.
 - `/default`, `/relaxed`, `/bypass`, and `/unrestricted` switch the permission

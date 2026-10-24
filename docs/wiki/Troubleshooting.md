@@ -62,6 +62,28 @@ and `bypass` is never the default. Permission profiles (`default` / `relaxed` /
 `bypass`) are set per run; see
 [07-security-and-privacy.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/07-security-and-privacy.md).
 
+## Proposal validation or promotion is blocked
+
+Inspect `localpilot self-review evidence --id <proposal>` and a fresh `preflight`
+for that proposal. A new source/plan/toolchain or private host configuration can
+invalidate old evidence. Missing original base/scope metadata in an old proposal
+requires regeneration; an old narrative pass is not completed validation.
+ReadOnly/Deny and project trust still apply even after execution consent.
+
+If an interrupted intent is reported, use `localpilot selfimprove recovery` and
+then `recovery --nonce <uuid>` to inspect it. Check remaining processes, host
+effects and any remote publication before acknowledging with the exact displayed
+review, reviewer and inspection note. Recovery never retries the interrupted
+action or certifies validation. See the
+[recovery contract and command flags](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/07-security-and-privacy.md#self-improvement-patch-generation).
+
+Do not delete the authority directory, lock or journal to clear a refusal. A
+missing/corrupt lock or journal, changed source/state, or older promotion without
+recorded checkpoint proof needs manual investigation. Stop older LocalPilot
+processes before adoption; they cannot safely co-write the new authority store.
+Keep the existing data for inspection. A slow preview may be hashing source,
+toolchain and host configuration; execution deadlines are not runtime estimates.
+
 ## Transcript scrolling in the REPL
 
 The full-screen chat host runs in an alternate screen buffer and owns timeline

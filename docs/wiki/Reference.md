@@ -8,6 +8,13 @@ which maps every area to its owning doc.
 > under `docs/wiki/` and synced one-way on every push to `main`. Edit the source
 > in `docs/wiki/`; web edits are overwritten on the next sync.
 
+## Self-improvement validation
+
+The [owning security specification](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/07-security-and-privacy.md#self-improvement-patch-generation)
+defines execution, promotion and recovery consent, commands, migration and
+host-access limits. See [[How-To#validate-a-proposed-self-improvement-before-promotion]]
+for the review/execute/evidence/promote sequence.
+
 ## LocalMind CLI contracts
 
 - **Search output format** — non-terminal stdout returns JSON by default, a
