@@ -776,7 +776,7 @@ fn approve_step(
         "promote only this separately confirmed passing proposal review",
     )?;
     let outcome = loop_
-        .approve_validated(&review, token)
+        .approve(&review, token)
         .context("promoting the approved patch onto the main branch")?;
     writeln!(
         out,

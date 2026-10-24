@@ -14350,7 +14350,7 @@ mod tests {
             ),
             (
                 "selfimprove",
-                "Review, propose, approve, build, and reload (/selfimprove [status|start|next|approve|reset])",
+                "Review, validate with execution consent, separately approve, build and reload (/selfimprove [status|preflight|evidence|validate|start|next|approve|reset])",
             ),
             ("new", "Start a fresh session"),
             ("fork", "Branch the conversation into a new session"),

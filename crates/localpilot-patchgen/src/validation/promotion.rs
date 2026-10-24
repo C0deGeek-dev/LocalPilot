@@ -1,5 +1,4 @@
-//! Locked, memory-only proof and an explicit post-effect checkpoint. The legacy
-//! approval caller migration is separate; this module does not claim it is wired.
+//! Locked, memory-only proof and an explicit post-effect checkpoint.
 
 use super::{
     PatchApprovalToken, ProposalIdentity, RepositoryTransaction, ValidationError,
@@ -19,7 +18,7 @@ use std::fmt;
 /// ```compile_fail
 /// use localpilot_patchgen::{ProposedPatch, validation::PatchApprovalToken};
 /// fn bypass(patch: &ProposedPatch, token: PatchApprovalToken) {
-///     patch.promote_validated(token);
+///     patch.promote(token);
 /// }
 /// ```
 pub struct ValidatedProposal<'repo> {
@@ -109,14 +108,14 @@ impl PendingPromotion<'_> {
 
 impl ProposedPatch {
     /// Promote only the exact current proof, retaining the lock through the
-    /// caller's durable checkpoint. This library seam is not yet the mandatory
-    /// signature used by the existing CLI/orchestrator promotion callers.
+    /// caller's durable checkpoint. All source-promotion callers require this
+    /// capability; a patch approval token alone cannot perform the Git effect.
     ///
     /// # Errors
     /// Changed source/plan/receipt/context, expired or wrong grant, interrupted
     /// authority, dirty target or refused fast-forward. Ambiguous Git effects
     /// leave the reserved intent unfinished for inspection.
-    pub fn promote_validated<'repo>(
+    pub fn promote<'repo>(
         &self,
         validated: ValidatedProposal<'repo>,
     ) -> Result<PendingPromotion<'repo>, ValidationError> {
@@ -159,6 +158,19 @@ impl ProposedPatch {
             outcome,
         })
     }
+}
+
+/// Scripted observations for Git-boundary unit fixtures only. The real runner
+/// and trusted profile resolution are covered by coordinator integrations.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) fn promote_fixture(patch: &mut ProposedPatch) -> crate::PromoteOutcome {
+    let mut authority = super::RepositoryAuthority::open(&patch.repo_root).unwrap();
+    let mut transaction = authority.try_transaction().unwrap();
+    let plan = tests::observed_plan(patch, &mut transaction);
+    let token = tests::approval(patch, &transaction, &plan);
+    let proof = transaction.prepare_promotion(patch, &plan, token).unwrap();
+    patch.promote(proof).unwrap().finish().unwrap()
 }
 
 #[cfg(test)]
@@ -204,7 +216,7 @@ mod tests {
         (repo, patch)
     }
 
-    fn observed_plan(
+    pub(super) fn observed_plan(
         patch: &mut ProposedPatch,
         transaction: &mut RepositoryTransaction<'_>,
     ) -> ValidationPlanIdentity {
@@ -294,7 +306,7 @@ mod tests {
         ));
     }
 
-    fn approval(
+    pub(super) fn approval(
         patch: &ProposedPatch,
         transaction: &RepositoryTransaction<'_>,
         plan: &ValidationPlanIdentity,
@@ -323,7 +335,7 @@ mod tests {
             contender.try_transaction(),
             Err(ValidationError::Busy)
         ));
-        let pending = patch.promote_validated(proof).unwrap();
+        let pending = patch.promote(proof).unwrap();
         assert_eq!(
             git::head_commit(repo.path()).unwrap(),
             git::head_commit(patch.worktree_path()).unwrap()
@@ -357,10 +369,7 @@ mod tests {
             "changed after proof\n",
         )
         .unwrap();
-        assert!(matches!(
-            patch.promote_validated(proof),
-            Err(ValidationError::Stale)
-        ));
+        assert!(matches!(patch.promote(proof), Err(ValidationError::Stale)));
         assert_eq!(git::head_commit(repo.path()).unwrap(), base);
         let transaction = authority.try_transaction().unwrap();
         assert_eq!(transaction.events().count(), 1);
@@ -441,10 +450,7 @@ mod tests {
         let plan = observed_plan(&mut patch, &mut transaction);
         let token = approval(&patch, &transaction, &plan);
         let proof = transaction.prepare_promotion(&patch, &plan, token).unwrap();
-        assert!(matches!(
-            other.promote_validated(proof),
-            Err(ValidationError::Stale)
-        ));
+        assert!(matches!(other.promote(proof), Err(ValidationError::Stale)));
         assert_eq!(git::head_commit(repo.path()).unwrap(), base);
         assert_eq!(authority.try_transaction().unwrap().events().count(), 1);
     }
@@ -474,7 +480,7 @@ mod tests {
                 .promote_after_reservation(proof, || std::process::exit(75))
                 .unwrap()
         } else {
-            patch.promote_validated(proof).unwrap()
+            patch.promote(proof).unwrap()
         };
         if matches!(boundary.as_str(), "after_state" | "after_finish") {
             localpilot_store::atomic_write(

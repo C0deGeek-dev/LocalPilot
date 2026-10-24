@@ -661,8 +661,8 @@ Worktrees separate ordinary edits; they do not contain build scripts, proc macro
 tests, network access or arbitrary filesystem/process effects. Cargo `--frozen`
 restricts Cargo's resolution/network use, not invoked code. No default model/GPU
 process belongs to this profile. CLI and chat patch approval now use separate
-execution and promotion authorities. Removal of the older library approval API,
-outward-publication migration and recovery controls remain staged work.
+execution and promotion authorities. The older library approval API is removed.
+Recovery controls and final acceptance remain staged work.
 
 For a persisted proposal, `self-review validate --id <proposal>` displays the
 execution review and stops. Running it requires `--approve-execution`, a human
@@ -722,8 +722,9 @@ and command plan; loading historical JSON alone never grants promotion authority
 The promotion capability retains the repository lock through the fast-forward,
 atomic matching loop-state update and journal completion. An interrupted effect
 leaves its intended refs and commits pending for explicit inspection. Existing
-production patch approval callers use this service. Older library APIs and
-outward publication still need migration before the gate can be globally mandatory.
+production patch approval callers use this service, and the only public source
+promotion API requires its validated capability. Publication uses a distinct
+pending owner and never accepts patch consent.
 
 The self-improvement loop's write half (ADR-0034) is built so the human gate is
 structural, not a convention:
@@ -778,10 +779,13 @@ as patch promotion:
 
 - **No publish without a human.** Authoring or persisting a draft mints no
   approval token and touches no network. The only operation that yields a runnable
-  publish plan requires the same value-typed approval token used to promote a
-  patch, and that token's sole constructor is the explicit `--approve` path. The
+  pending publication requires an `OutwardApprovalToken` bound to the exact
+  draft/argv, target and resolved host/account. Patch/execution tokens cannot
+  substitute for it. Consent is issued only on the explicit `--approve` path. The
   autonomous loop has no path to mint one, so it can propose a draft but never
-  publish — a standing test pins this.
+  publish. The common lock is retained through the effect and durable Published
+  event before journal completion. A failed/ambiguous effect remains pending;
+  another attempt requires explicit inspection, never automatic replay.
 - **Default-off, fail-closed allowlist.** A draft can only be built (let alone
   published) when `[self_improvement] enabled = true` **and** its `owner/repo`
   target is on the `outward_targets` allowlist. Both ship off; an un-allowlisted or
@@ -796,6 +800,12 @@ as patch promotion:
   plan it *would* run and publishes nothing. The human reviews the plan (and the
   resolved `gh` account, surfaced from a `gh auth status` preflight) before
   approving.
+- **Resolved account and outcome.** Approved publication resolves an absolute
+  host `gh` outside the project, requires one active successful host/account in
+  authentication metadata and checks it again before the effect. A JSON exit0
+  alone is insufficient ([GitHub CLI status contract](https://cli.github.com/manual/gh_auth_status)).
+  The emitted object URL must match the selected host, target and issue/PR kind;
+  missing or ambiguous output leaves inspection pending even after exit0.
 - **Redacted, locally inspectable.** The draft title/body are redacted with the
   shared workspace redactor at construction, so a secret never reaches the
   project-local `.localpilot/outward/` store even before publish. The body carries

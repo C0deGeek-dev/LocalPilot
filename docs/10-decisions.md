@@ -2,6 +2,56 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0233: Separate Content-Bound Execution, Promotion And Publication Authority
+
+**Status:** proposed; interaction policy and final feature acceptance pending · **Date:** 2026-10-24.
+
+**Context.** Source approval bound only a branch name, and the same token type
+authorized unrelated outward drafts. Checks ran after source promotion. A gate
+confined to the orchestrator would leave the direct patch command outside it.
+Public Stage data and the unused gate helper never provided security type-state.
+
+**Proposed decision.** Keep the existing loop and post-promotion build, gauntlet,
+reload, health and rollback. Require static committed-base source/plan/toolchain
+review, then explicit `EvaluationToken` consent before proposed code runs. Use
+the existing permission-gated runner: consent answers matching Ask decisions,
+never Deny or hard floors. The initial profile permits registered execute-only
+Rust checks, no artifacts or model/GPU. No fixer, automatic retry or promotion.
+
+Persist bounded redacted observations, source identities and approved plans per
+run. Bind the entire receipt to a locally completed evaluation event, including
+outputs, timing, pipe closure and observed cleanup. Historical data never creates
+consent. Require separate `PatchApprovalToken` consent for current passing
+evidence. Under the Git-common-dir lock, revalidate and construct the opaque,
+memory-only `ValidatedProposal` required by the source-promotion signature.
+Both patch callers use one service retaining the guard through the pinned
+fast-forward, matching atomic loop-state update and journal completion.
+
+Grants expire after ten minutes and passing receipts after24 hours. Consume
+nonces durably before effects. Tokens/capabilities are not serialized; private
+host-context comparisons never expose environment values or their digests.
+Changed, incomplete, expired or uncertain observations cannot pass. Generic
+recovery cannot certify validation. Interruptions retain goals for explicit
+inspection, never automatic replay. All loop-state writers must participate in
+the common transaction before final feature adoption.
+
+Outward publication instead requires `OutwardApprovalToken`, bound to exact
+draft/argv, target and resolved host/account. It needs no patch-shaped evidence.
+Keep its common guard through the effect and durable Published event. Ambiguous
+authentication or created-object identity cannot finish an intent. Default-off
+target policy and draft-only behavior remain. The proposed interaction policy
+requires passing evidence for every source promotion and provides no emergency
+bypass; final interaction acceptance and feature adoption remain pending.
+
+**Consequences and limits.** Replaces the shared token and amends the approval
+boundaries of ADR-0034/0053/0138/0151 while retaining ADR-0009's runner and
+ADR-0128's deferred unattended loop. Old proposals stay inspectable; missing
+original-base metadata requires regeneration. Ordinary quality callers keep
+their behavior. Worktrees separate edits; process groups/jobs and environment
+limits do not contain hostile code or host filesystem, credential, network or
+process access. Cargo `--frozen` is not a network sandbox. No automatic
+self-modification, general-purpose CI or host isolation is added.
+
 ## ADR-0232: Selective Python Rename Continuation Reuses Verified Units
 
 **Status:** accepted, opt-in/default off · **Date:** 2026-10-23.

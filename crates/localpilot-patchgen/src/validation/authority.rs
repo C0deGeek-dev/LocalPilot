@@ -288,6 +288,21 @@ fn outward_binding(
             "resolved publication identity required".into(),
         ));
     }
+    let argv = draft.publish_argv();
+    if !draft.is_draft_only()
+        || account.len() > 512
+        || argv.iter().any(|value| {
+            value.len() > 128 * 1024
+                || value.contains('\0')
+                || localpilot_config::redact::redact(value) != *value
+        })
+        || argv.iter().map(String::len).sum::<usize>() > 256 * 1024
+        || localpilot_config::redact::redact(account) != account
+    {
+        return Err(ValidationError::Invalid(
+            "publication requires bounded redacted draft/account data".into(),
+        ));
+    }
     let mut hash = super::CanonicalHash::new("localpilot-outward-publication-consent-v1");
     hash.field(repository.as_str().as_bytes());
     hash.field(draft.id.as_bytes());

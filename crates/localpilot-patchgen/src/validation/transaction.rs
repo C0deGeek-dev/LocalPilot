@@ -61,6 +61,21 @@ pub struct PromotionIntent {
     pub validation_run: uuid::Uuid,
 }
 
+/// Publication goal retained before an external effect. The reservation's binding
+/// identifies its exact draft content and argv; inspection never replays it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationIntent {
+    /// Draft id used to locate the local review record.
+    pub draft_id: String,
+    /// Exact allowlisted remote repository.
+    pub target_repo: String,
+    /// Whether the intended effect is an issue or draft PR.
+    pub kind: crate::OutwardKind,
+    /// Resolved host/account identity used for publication.
+    pub account: String,
+}
+
 /// Observations committed by the execution coordinator, not reconstructed from
 /// a mutable proposal receipt or a generic recovery/outcome note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +105,9 @@ pub struct AuthorityEvent {
     /// qualify receipt data as passing validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<ValidationCompletion>,
+    /// Missing on legacy publication reservations; manual inspection is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublicationIntent>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -327,7 +345,7 @@ impl RepositoryTransaction<'_> {
     ) -> Result<uuid::Uuid, ValidationError> {
         self.check_repository(proposal)?;
         let reservation = token.reservation(proposal, plan)?;
-        self.reserve_with_environment(reservation, Some(token.environment_identity()), None)
+        self.reserve_with_environment(reservation, Some(token.environment_identity()), None, None)
     }
 
     /// Retire promotion authority before Git effects. This is not itself the
@@ -355,6 +373,7 @@ impl RepositoryTransaction<'_> {
                 proposed_commit: proposal.proposed_commit.clone(),
                 validation_run: receipt.run_id,
             }),
+            None,
         )
     }
 
@@ -425,7 +444,17 @@ impl RepositoryTransaction<'_> {
         draft: &crate::OutwardDraft,
         account: &str,
     ) -> Result<uuid::Uuid, ValidationError> {
-        self.reserve(token.reservation(&self.repository_identity(), draft, account)?)
+        self.reserve_with_environment(
+            token.reservation(&self.repository_identity(), draft, account)?,
+            None,
+            None,
+            Some(PublicationIntent {
+                draft_id: draft.id.clone(),
+                target_repo: draft.target_repo.clone(),
+                kind: draft.kind,
+                account: account.to_owned(),
+            }),
+        )
     }
 
     fn check_repository(&self, proposal: &ProposalIdentity) -> Result<(), ValidationError> {
@@ -435,8 +464,9 @@ impl RepositoryTransaction<'_> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn reserve(&mut self, reservation: Reservation) -> Result<uuid::Uuid, ValidationError> {
-        self.reserve_with_environment(reservation, None, None)
+        self.reserve_with_environment(reservation, None, None, None)
     }
 
     fn reserve_with_environment(
@@ -444,6 +474,7 @@ impl RepositoryTransaction<'_> {
         reservation: Reservation,
         environment: Option<ContentDigest>,
         promotion: Option<PromotionIntent>,
+        publication: Option<PublicationIntent>,
     ) -> Result<uuid::Uuid, ValidationError> {
         if self.poisoned {
             return Err(ValidationError::RecoveryRequired);
@@ -465,6 +496,11 @@ impl RepositoryTransaction<'_> {
                 "promotion requires an exact old/new ref goal".into(),
             ));
         }
+        if (reservation.purpose == AuthorityPurpose::OutwardPublication) != publication.is_some() {
+            return Err(ValidationError::Invalid(
+                "publication requires an exact draft/target/account goal".into(),
+            ));
+        }
         if let Some(environment) = environment {
             self.journal.environments.insert(nonce, environment);
         }
@@ -476,6 +512,7 @@ impl RepositoryTransaction<'_> {
                 outcome: None,
                 promotion,
                 validation: None,
+                publication,
             },
         );
         self.flush()?;

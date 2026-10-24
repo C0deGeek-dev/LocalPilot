@@ -6,8 +6,8 @@
 //! store for human inspection (`propose-issue`/`propose-pr`) — touching nothing
 //! outside the machine. A human inspects drafts (`drafts list`/`show`/`discard`)
 //! and, only with an explicit `--approve`, publishes one as a **draft** issue/PR
-//! via the official `gh` CLI (`emit-draft`). The gate is the same value-typed
-//! `ApprovalToken` that promotes a patch: it is minted only on the `--approve`
+//! via the official `gh` CLI (`emit-draft`). Separate content-bound publication
+//! consent is minted only on the explicit `--approve`
 //! path, so the autonomous loop can propose but never publish. Publication is
 //! draft-only, dry-run by default, restricted to an allowlisted target, and never
 //! marks ready / merges.
@@ -20,10 +20,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context};
 use clap::Subcommand;
 use localpilot_config::{CliOverrides, ConfigPaths, SelfImprovementConfig};
+use localpilot_patchgen::validation::{
+    resolve_host_program, OutwardApprovalToken, RepositoryAuthority,
+};
 use localpilot_patchgen::{
-    discard_outward_draft, list_outward_drafts, record_outward_event, ApprovalToken,
-    ChangeProvenance, DraftRequest, EmitPhase, OutwardDraft, OutwardEvent, OutwardKind,
-    OutwardPolicy, PublishPlan,
+    discard_outward_draft, list_outward_drafts, record_outward_event, ChangeProvenance,
+    DraftRequest, EmitPhase, OutwardDraft, OutwardEvent, OutwardKind, OutwardPolicy, PublishPlan,
 };
 use localpilot_selfreview::{draft_spec_for_finding, review, Finding, ReviewOptions};
 
@@ -281,7 +283,7 @@ fn run_drafts_discard(repo_root: &Path, id: &str, out: &mut dyn Write) -> anyhow
 }
 
 /// `self-review emit-draft`: the human-approved publish step. Dry-run by default;
-/// `--approve` mints the [`ApprovalToken`] (the only place it is minted), preflights
+/// `--approve` mints separate publication consent, preflights
 /// `gh`, and publishes the draft via `gh issue create` / `gh pr create --draft`.
 pub fn run_emit_draft(
     repo_root: &Path,
@@ -325,15 +327,49 @@ pub fn run_emit_draft(
         ));
     }
 
-    // Preflight: gh must be installed and authenticated; surface the account.
-    let account = preflight_gh().context("gh preflight")?;
+    let mut authority = RepositoryAuthority::open(repo_root)?;
+    let transaction = authority.try_transaction()?;
+    transaction.require_idle()?;
+    // Reopen under the common guard: the preview outside it grants no authority.
+    let current = OutwardDraft::load(repo_root, id)?;
+    if current != draft || !load_policy(repo_root)?.allows(&current.target_repo) {
+        return Err(anyhow!(
+            "draft or target policy changed before publication approval"
+        ));
+    }
+    let root = repo_root.canonicalize()?;
+    let program = resolve_host_program("gh", &[&root])?;
+    let host = std::env::var("GH_HOST").unwrap_or_else(|_| "github.com".into());
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+    {
+        return Err(anyhow!(
+            "publication requires an explicit valid GitHub hostname"
+        ));
+    }
+    let account = preflight_gh(&program, &host).context("gh preflight")?;
     writeln!(out, "gh account: {account}")?;
+    writeln!(
+        out,
+        "Exact approved command: {:?} {}",
+        program,
+        render_argv(&draft.publish_argv())
+    )?;
+    out.flush()?;
 
     // Mint the approval token — the single mint path, mirroring `promote`. The
     // autonomous loop never reaches here (it never passes `--approve`).
-    let token = ApprovalToken::approve(draft.id.clone(), reviewer);
-    let plan = draft
-        .publish_plan(&token)
+    let token = OutwardApprovalToken::approve(
+        &transaction.repository_identity(),
+        &draft,
+        &account,
+        reviewer,
+        "publish only this exact inspected draft/target/account",
+    )?;
+    let pending = draft
+        .publish_plan(transaction, token, &account)
         .context("building the gated publish plan")?;
     record_outward_event(
         repo_root,
@@ -347,7 +383,11 @@ pub fn run_emit_draft(
     )
     .context("recording the approved event")?;
 
-    let url = publish(&plan).context("publishing the draft via gh")?;
+    if preflight_gh(&program, &host)? != account {
+        return Err(anyhow!("publication account changed after approval; inspect the pending authority before a fresh attempt"));
+    }
+    let url = publish(pending.plan(), &program, &host)
+        .context("publishing the draft via gh; inspect pending authority before any retry")?;
     record_outward_event(
         repo_root,
         &OutwardEvent {
@@ -359,6 +399,7 @@ pub fn run_emit_draft(
         },
     )
     .context("recording the published event")?;
+    pending.finish("publication observed; local Published event durably recorded")?;
 
     writeln!(
         out,
@@ -371,8 +412,8 @@ pub fn run_emit_draft(
 /// Preflight `gh`: confirm it is installed and authenticated, returning a short
 /// account description for the approval output. Refuses clearly otherwise — a
 /// failed/mis-attributed publish is worse than no publish.
-fn preflight_gh() -> anyhow::Result<String> {
-    let version = Command::new("gh").arg("--version").output();
+fn preflight_gh(program: &Path, host: &str) -> anyhow::Result<String> {
+    let version = Command::new(program).arg("--version").output();
     match version {
         Ok(o) if o.status.success() => {}
         Ok(_) => return Err(anyhow!("`gh` is installed but did not report a version")),
@@ -382,8 +423,16 @@ fn preflight_gh() -> anyhow::Result<String> {
             ))
         }
     }
-    let auth = Command::new("gh")
-        .args(["auth", "status"])
+    let auth = Command::new(program)
+        .args([
+            "auth",
+            "status",
+            "--active",
+            "--hostname",
+            host,
+            "--json",
+            "hosts",
+        ])
         .output()
         .map_err(|e| anyhow!("could not run `gh auth status`: {e}"))?;
     if !auth.status.success() {
@@ -391,36 +440,56 @@ fn preflight_gh() -> anyhow::Result<String> {
             "`gh` is not authenticated; run `gh auth login` first"
         ));
     }
-    // Surface the resolved account so the human sees which account the draft would
-    // be attributed to. `gh auth status` has printed this to stdout in some releases
-    // and stderr in others, so scan both rather than depend on one stream.
-    Ok(parse_gh_account(&auth.stdout, &auth.stderr))
+    parse_gh_account(&auth.stdout, host)
 }
 
-/// Extract the human-readable account line from `gh auth status` output, scanning
-/// both streams (the line has moved between stdout and stderr across `gh`
-/// releases). Falls back to a generic label only when no account line is found.
-fn parse_gh_account(stdout: &[u8], stderr: &[u8]) -> String {
-    let mut text = String::from_utf8_lossy(stdout).into_owned();
-    text.push('\n');
-    text.push_str(&String::from_utf8_lossy(stderr));
-    text.lines()
-        .map(str::trim)
-        .find(|l| l.contains("account") || l.contains("Logged in"))
-        .unwrap_or("authenticated")
-        .to_string()
+/// JSON exit0 alone does not prove authentication. Require exactly one active,
+/// successful identity on the selected host; never log the raw auth document.
+/// https://cli.github.com/manual/gh_auth_status
+fn parse_gh_account(stdout: &[u8], host: &str) -> anyhow::Result<String> {
+    let value: serde_json::Value = serde_json::from_slice(stdout)
+        .map_err(|_| anyhow!("gh returned invalid account metadata"))?;
+    let entries = value
+        .get("hosts")
+        .and_then(|hosts| hosts.get(host))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("gh did not resolve an authenticated account for this host"))?;
+    let active: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.get("active").and_then(serde_json::Value::as_bool) == Some(true))
+        .collect();
+    let entry = match active.as_slice() {
+        [entry] => entry,
+        _ => return Err(anyhow!("gh account is missing or ambiguous")),
+    };
+    let login = entry
+        .get("login")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if entry.get("state").and_then(serde_json::Value::as_str) != Some("success")
+        || entry.get("host").and_then(serde_json::Value::as_str) != Some(host)
+        || login.is_empty()
+        || !login
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(anyhow!("gh active account could not be authenticated"));
+    }
+    Ok(format!("{host}/{login}"))
 }
 
 /// Execute a gated [`PublishPlan`] via `gh`, returning the created issue/PR URL.
 /// Arguments are passed as an argv array (no shell), so the redacted title/body can
 /// never become another command.
-fn publish(plan: &PublishPlan) -> anyhow::Result<String> {
-    let output = Command::new(&plan.program)
+fn publish(plan: &PublishPlan, program: &Path, host: &str) -> anyhow::Result<String> {
+    let output = Command::new(program)
+        .env("GH_HOST", host)
+        .env("GH_PROMPT_DISABLED", "1")
         .args(&plan.args)
         .output()
         .map_err(|e| anyhow!("could not run `{}`: {e}", plan.program))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = localpilot_config::redact::redact(&String::from_utf8_lossy(&output.stderr));
         return Err(anyhow!(
             "`gh` failed (exit {}): {}",
             output.status.code().unwrap_or(-1),
@@ -428,14 +497,27 @@ fn publish(plan: &PublishPlan) -> anyhow::Result<String> {
         ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // `gh issue/pr create` prints the created URL on stdout.
-    let url = stdout
+    // A zero exit without a unique matching object URL leaves the effect
+    // ambiguous. Keep its intent pending instead of silently certifying it.
+    let kind = if plan.args.first().is_some_and(|arg| arg == "pr") {
+        "pull"
+    } else {
+        "issues"
+    };
+    let prefix = format!("https://{host}/{}/{kind}/", plan.target_repo);
+    let urls: Vec<_> = stdout
         .lines()
         .map(str::trim)
-        .find(|l| l.starts_with("http"))
-        .unwrap_or_else(|| stdout.trim())
-        .to_string();
-    Ok(url)
+        .filter(|line| {
+            line.strip_prefix(&prefix).is_some_and(|number| {
+                !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+        .collect();
+    match urls.as_slice() {
+        [url] => Ok((*url).to_owned()),
+        _ => Err(anyhow!("gh did not report one matching published object URL; inspect pending authority and the remote before retrying")),
+    }
 }
 
 /// Render an argv for human display (the dry-run plan), quoting any element that
@@ -611,14 +693,32 @@ mod tests {
     }
 
     #[test]
-    fn gh_account_is_parsed_from_either_stream() {
-        // gh 2.94 prints `auth status` to stdout; older releases used stderr. Both
-        // must surface the account line, not fall back to the generic label.
-        let line = b"  \xe2\x9c\x93 Logged in to github.com account David-c0degeek (keyring)\n";
-        assert!(parse_gh_account(line, b"").contains("David-c0degeek"));
-        assert!(parse_gh_account(b"", line).contains("David-c0degeek"));
-        // No account line ⇒ a generic, non-empty label (never blank).
-        assert_eq!(parse_gh_account(b"nothing here", b""), "authenticated");
+    fn gh_account_requires_one_successful_active_identity_on_the_exact_host() {
+        let good = br#"{"hosts":{"github.com":[{"host":"github.com","state":"success","active":true,"login":"fixture-human"}]}}"#;
+        assert_eq!(
+            parse_gh_account(good, "github.com").unwrap(),
+            "github.com/fixture-human"
+        );
+        assert!(parse_gh_account(good, "other.example").is_err());
+        assert!(parse_gh_account(b"not JSON", "github.com").is_err());
+        assert!(parse_gh_account(br#"{"hosts":{}}"#, "github.com").is_err());
+        for (field, value) in [
+            ("state", serde_json::json!("error")),
+            ("active", serde_json::json!(false)),
+            ("login", serde_json::json!("")),
+            ("host", serde_json::json!("other.example")),
+        ] {
+            let mut broken: serde_json::Value = serde_json::from_slice(good).unwrap();
+            broken["hosts"]["github.com"][0][field] = value;
+            assert!(parse_gh_account(&serde_json::to_vec(&broken).unwrap(), "github.com").is_err());
+        }
+        let mut ambiguous: serde_json::Value = serde_json::from_slice(good).unwrap();
+        let duplicate = ambiguous["hosts"]["github.com"][0].clone();
+        ambiguous["hosts"]["github.com"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(parse_gh_account(&serde_json::to_vec(&ambiguous).unwrap(), "github.com").is_err());
     }
 
     #[test]

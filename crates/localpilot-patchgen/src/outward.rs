@@ -9,9 +9,9 @@
 //!
 //! The gate is structural, not a convention:
 //! - producing or persisting a draft touches no network and mints no token;
-//! - the only operation that yields a runnable [`PublishPlan`] is
-//!   [`OutwardDraft::publish_plan`], which **requires** an [`ApprovalToken`]; the
-//!   token's sole constructor ([`ApprovalToken::approve`]) is called only on an
+//! - the production host retains a [`PendingPublication`] from
+//!   [`OutwardDraft::publish_plan`], requiring a separate publication
+//!   token and common repository transaction. Consent is issued only on an
 //!   explicit human-approval path, never by the autonomous loop;
 //! - a draft can only be built for a target the operator put on an explicit
 //!   allowlist, with the feature switched on — both default off (fail-closed);
@@ -27,8 +27,10 @@ use serde::{Deserialize, Serialize};
 
 use std::path::{Path, PathBuf};
 
-use crate::gate::ApprovalToken;
 use crate::provenance::ChangeProvenance;
+use crate::validation::{
+    OutwardApprovalToken, PendingPublication, RepositoryTransaction, ValidationError,
+};
 
 /// Schema tag so a consumer can pin the persisted draft shape.
 pub const OUTWARD_SCHEMA: &str = "localpilot-outward-draft-v1";
@@ -111,6 +113,9 @@ pub enum OutwardError {
     /// The persisted draft record could not be (de)serialized.
     #[error("outward draft record (de)serialization failed: {0}")]
     Serde(String),
+    /// Durable local outcome persistence failed.
+    #[error(transparent)]
+    Store(#[from] localpilot_store::StoreError),
 }
 
 /// The parts of a draft the caller supplies, before redaction and the
@@ -252,23 +257,26 @@ impl OutwardDraft {
             .all(|a| title_body.contains(&a.as_str()) || !FORBIDDEN.iter().any(|f| a == f))
     }
 
-    /// Turn this draft into a runnable [`PublishPlan`] — the **only** path to a plan
-    /// the CLI will execute, and it requires an [`ApprovalToken`] that authorizes
-    /// exactly this draft. There is no code path from authoring a draft to a
-    /// `PublishPlan` without a token, mirroring [`crate::ProposedPatch::promote`].
+    /// Consume separate publication consent and retain the repository lock
+    /// through the host's external effect and durable local checkpoint. Preview
+    /// command data alone is never proof of authority.
     ///
     /// # Errors
-    /// [`OutwardError::TokenMismatch`] if the token does not authorize this draft.
-    pub fn publish_plan(&self, token: &ApprovalToken) -> Result<PublishPlan, OutwardError> {
-        if !token.authorizes(&self.id) {
-            return Err(OutwardError::TokenMismatch);
-        }
-        Ok(PublishPlan {
-            program: "gh".to_string(),
-            args: self.publish_argv(),
-            target_repo: self.target_repo.clone(),
-            reviewer: token.reviewer().to_string(),
-        })
+    /// Wrong purpose/content/account, expiry, replay, recovery or storage failure.
+    ///
+    /// ```compile_fail
+    /// use localpilot_patchgen::{OutwardDraft, validation::{RepositoryTransaction, PatchApprovalToken}};
+    /// fn substitute(draft: &OutwardDraft, tx: RepositoryTransaction<'_>, token: PatchApprovalToken) {
+    ///     draft.publish_plan(tx, token, "github.com/reviewer");
+    /// }
+    /// ```
+    pub fn publish_plan<'repo>(
+        &self,
+        transaction: RepositoryTransaction<'repo>,
+        token: OutwardApprovalToken,
+        account: &str,
+    ) -> Result<PendingPublication<'repo>, ValidationError> {
+        transaction.prepare_publication(self, token, account)
     }
 
     /// Persist this draft to `.localpilot/outward/{id}.json` so a later process can
@@ -303,9 +311,8 @@ impl OutwardDraft {
     }
 }
 
-/// A runnable publish plan: the program and argv the CLI executes after an explicit
-/// human approval. Obtainable **only** from [`OutwardDraft::publish_plan`] with an
-/// [`ApprovalToken`], so holding one is proof a human approved this exact draft.
+/// Inspectable command data. This record is not authority; production hosts
+/// execute it only while retaining the consumed [`PendingPublication`] owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishPlan {
     /// The program to run (always `gh`).
@@ -406,18 +413,8 @@ pub fn record_event(repo_root: &Path, event: &OutwardEvent) -> Result<(), Outwar
     // Defence in depth: redact the serialized line too, in case a URL or reviewer
     // string ever carried a secret-shaped token.
     line = localpilot_config::redact::redact(&line);
-    line.push('\n');
-    use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|source| OutwardError::Io {
-            path: path.clone(),
-            source,
-        })?;
-    file.write_all(line.as_bytes())
-        .map_err(|source| OutwardError::Io { path, source })
+    localpilot_store::append_line_durable(&path, &line)?;
+    Ok(())
 }
 
 /// Compose the draft body: the human-readable description, then a provenance block
@@ -667,28 +664,66 @@ mod tests {
     #[test]
     fn publish_plan_requires_a_matching_token_and_yields_no_plan_without_one() {
         let draft = issue_draft();
-        // A token for a different draft does not authorize this one — no plan.
-        let wrong = ApprovalToken::approve("other", "david");
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let mut authority = crate::validation::RepositoryAuthority::open(repo.path()).unwrap();
+        let tx = authority.try_transaction().unwrap();
+        let mut other = draft.clone();
+        other.id = "other".into();
+        let wrong = OutwardApprovalToken::approve(
+            &tx.repository_identity(),
+            &other,
+            "github.com/fixture",
+            "david",
+            "publish this exact draft",
+        )
+        .unwrap();
         assert!(matches!(
-            draft.publish_plan(&wrong).unwrap_err(),
-            OutwardError::TokenMismatch
+            draft
+                .publish_plan(tx, wrong, "github.com/fixture")
+                .unwrap_err(),
+            ValidationError::Stale
         ));
-        // The matching token (a human act) yields the runnable plan.
-        let token = ApprovalToken::approve(draft.id.clone(), "david");
-        let plan = draft.publish_plan(&token).unwrap();
+        let tx = authority.try_transaction().unwrap();
+        assert_eq!(tx.events().count(), 0);
+        let token = OutwardApprovalToken::approve(
+            &tx.repository_identity(),
+            &draft,
+            "github.com/fixture",
+            "david",
+            "publish this exact draft",
+        )
+        .unwrap();
+        let pending = draft.publish_plan(tx, token, "github.com/fixture").unwrap();
+        let plan = pending.plan();
         assert_eq!(plan.program, "gh");
         assert_eq!(plan.reviewer, "david");
         assert_eq!(plan.args, draft.publish_argv());
+        let mut competing = crate::validation::RepositoryAuthority::open(repo.path()).unwrap();
+        assert!(matches!(
+            competing.try_transaction(),
+            Err(ValidationError::Busy)
+        ));
+        drop(pending);
+        let tx = authority.try_transaction().unwrap();
+        assert!(matches!(
+            tx.require_idle(),
+            Err(ValidationError::RecoveryRequired)
+        ));
+        let event = tx.events().next().unwrap();
+        let goal = event.publication.as_ref().unwrap();
+        assert_eq!(goal.draft_id, draft.id);
+        assert_eq!(goal.account, "github.com/fixture");
     }
 
-    /// The human-gate proof: the authoring/store surface an autonomous loop
-    /// uses exposes **no** way to obtain an [`ApprovalToken`] and therefore no way
-    /// to reach a runnable [`PublishPlan`]. The only token constructor is
-    /// [`ApprovalToken::approve`], called solely on the explicit `--approve` CLI
-    /// path; `publish_plan` is the sole producer of a plan and it requires the
-    /// token by value. This test pins that shape: every loop-reachable operation
-    /// (build, persist, load, list, preview argv) completes without a token, and
-    /// none of them returns or constructs one.
+    /// Authoring, storage and preview are token-free data operations. Execution
+    /// requires the separate locked publication owner at the host seam.
     #[test]
     fn the_loop_surface_cannot_mint_a_token_or_publish() {
         let dir = tempfile::tempdir().unwrap();
@@ -700,13 +735,7 @@ mod tests {
         assert_eq!(loaded, draft);
         assert_eq!(list(root).unwrap(), vec!["outward-1".to_string()]);
         let _preview = loaded.publish_argv(); // preview is allowed; it runs nothing.
-                                              // The ONLY route to a plan is publish_plan(&ApprovalToken). Without minting
-                                              // a token (which the loop never does), there is no PublishPlan in scope and
-                                              // no `gh` is ever executed. The type system makes this a compile-time fact:
-                                              // `publish_plan` takes `&ApprovalToken` by value-reference, and the sole
-                                              // constructor lives behind the human `--approve` path.
-        let plan_needs_token = OutwardDraft::publish_plan; // fn item; arity proves the gate
-        let _ = plan_needs_token; // referenced so the proof is not dead code
+        assert!(loaded.is_draft_only());
     }
 
     #[test]

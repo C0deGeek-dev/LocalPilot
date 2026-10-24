@@ -1,7 +1,7 @@
 //! The thin orchestrator: it sequences the four self-improvement stages by
 //! calling their **existing** entrypoints in contract order, persists the loop
 //! state so a step can be resumed in a later process, and **stops at the
-//! `ApprovalToken` gate — never minting a token.** After approval it builds the
+//! validated capability gate — never minting consent.** After approval it builds the
 //! *approved, merged* tree, never the proposal worktree.
 //!
 //! It holds only sequencing and state. The stages stay in their own crates: the
@@ -13,9 +13,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use localpilot_patchgen::{
-    propose, ApprovalToken, ChangeProvenance, PatchProposal, PromoteOutcome, ProposedPatch,
-};
+use localpilot_patchgen::{propose, ChangeProvenance, PatchProposal, PromoteOutcome};
 use localpilot_selfdev::AutoReloadBreaker;
 use localpilot_selfreview::{review, Report, ReviewOptions};
 use serde::{Deserialize, Serialize};
@@ -275,36 +273,14 @@ impl<S: SelfDevStage> Orchestrator<S> {
         })
     }
 
-    /// **Proposed → Approved (THE GATE).** Promote the proposed patch onto the main
-    /// branch. The `token` must be handed in by a human-confirmation path; this
-    /// method never constructs one, and `promote` itself rejects a token that does
-    /// not authorize the proposal.
-    ///
-    /// # Errors
-    /// [`LoopError::AwaitingApproval`]-adjacent ordering errors if not at
-    /// `Proposed`; [`LoopError::Patch`] (e.g. `TokenMismatch`, `DirtyTarget`,
-    /// `NotFastForward`) if the promotion is refused.
-    pub fn approve(&self, token: &ApprovalToken) -> Result<PromoteOutcome, LoopError> {
-        let mut state = self.require_stage(Stage::Proposed, "approve")?;
-        let id = state.proposal_id.clone().ok_or(LoopError::NoActiveLoop {
-            attempted: "approve",
-        })?;
-        let patch = ProposedPatch::reopen(&self.root, &id)?;
-        let outcome = patch.promote(token)?;
-        state.stage = Stage::Approved;
-        state.reviewer = Some(outcome.reviewer.clone());
-        self.write_state(&state)?;
-        Ok(outcome)
-    }
-
     /// Approve an exact locally validated review through the common locked
     /// service. The host supplies separate explicit promotion consent. This
-    /// staged API does not replace legacy callers until their migration lands.
+    /// API retains the common guard through source and loop-state persistence.
     ///
     /// # Errors
     /// Missing/changed active loop, stale evidence/consent, unfinished authority
     /// or a failed source/state/journal checkpoint.
-    pub fn approve_validated(
+    pub fn approve(
         &self,
         review: &crate::PromotionReview,
         token: localpilot_patchgen::validation::PatchApprovalToken,
@@ -438,7 +414,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use localpilot_patchgen::{PatchError, ProposedEdit};
+    use localpilot_patchgen::ProposedEdit;
     use std::cell::RefCell;
     use std::sync::Mutex;
 
@@ -603,8 +579,13 @@ mod tests {
         let worktree = proposed.worktree.clone();
 
         // Cross the gate with a human-minted token (the test is the human here).
-        let token = ApprovalToken::approve(&proposed.id, "tester");
-        orch.approve(&token).unwrap();
+        // Test setup starts this build-only fixture after source approval. The
+        // real validation/promotion/state flow is exercised by promotion tests.
+        git(&root, &["merge", "--ff-only", &proposed.id]);
+        let mut state = orch.state().unwrap().unwrap();
+        state.stage = Stage::Approved;
+        state.reviewer = Some("fixture setup".into());
+        orch.write_state(&state).unwrap();
         assert_eq!(orch.state().unwrap().unwrap().stage, Stage::Approved);
         // The fix reached main.
         assert!(!std::fs::read_to_string(root.join("worker.rs"))
@@ -633,10 +614,10 @@ mod tests {
         );
     }
 
-    /// The gate rejects a token that authorizes a different patch — the real
-    /// `PatchError::TokenMismatch` surfaces, and the loop stays at `Proposed`.
+    /// An existing proposal without passing local execution cannot be reviewed
+    /// as approvable; its stage remains Proposed.
     #[test]
-    fn approve_rejects_a_mismatched_token() {
+    fn approve_requires_locally_completed_validation() {
         let _guard = GIT.lock().unwrap();
         let repo = init_repo();
         let selfdev = tempfile::tempdir().unwrap();
@@ -644,9 +625,13 @@ mod tests {
         orch.propose("self-improve-1", &trivial_proposal(), provenance())
             .unwrap();
 
-        let wrong = ApprovalToken::approve("some-other-patch", "tester");
-        let err = orch.approve(&wrong).unwrap_err();
-        assert!(matches!(err, LoopError::Patch(PatchError::TokenMismatch)));
+        let err = crate::promotion_review(repo.path(), "self-improve-1").unwrap_err();
+        assert!(matches!(
+            err,
+            LoopError::Validation(
+                localpilot_patchgen::validation::ValidationError::NotValidated(_)
+            )
+        ));
         assert_eq!(orch.state().unwrap().unwrap().stage, Stage::Proposed);
     }
 }

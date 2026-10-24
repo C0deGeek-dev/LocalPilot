@@ -8,6 +8,7 @@ mod authority;
 mod host;
 mod inspection;
 mod promotion;
+mod publication;
 #[cfg(test)]
 mod tests;
 mod transaction;
@@ -16,10 +17,13 @@ pub use authority::{EvaluationToken, OutwardApprovalToken, PatchApprovalToken};
 pub(crate) use host::trusted_search_directory;
 pub use host::{resolve_host_program, trusted_program_at};
 pub use inspection::ProposalInspection;
+#[cfg(test)]
+pub(crate) use promotion::promote_fixture;
 pub use promotion::{PendingPromotion, ValidatedProposal};
+pub use publication::PendingPublication;
 pub use transaction::{
-    AuthorityEvent, AuthorityPurpose, PromotionIntent, RepositoryAuthority, RepositoryTransaction,
-    Reservation, ValidationCompletion,
+    AuthorityEvent, AuthorityPurpose, PromotionIntent, PublicationIntent, RepositoryAuthority,
+    RepositoryTransaction, Reservation, ValidationCompletion,
 };
 
 use serde::{Deserialize, Serialize};

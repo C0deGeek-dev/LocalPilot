@@ -14,5 +14,5 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 proposal-validation = { max-threads = 2 }
 
 [[profile.default.overrides]]
-filter = 'package(localpilot-selfimprove) and (test(execution::tests::) or test(promotion::tests::))'
+filter = '(package(localpilot-selfimprove) and (test(execution::tests::) or test(promotion::tests::))) or (package(localpilot) and test(explicit_execution_then_separate_))'
 test-group = 'proposal-validation'

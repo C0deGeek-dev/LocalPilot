@@ -1,5 +1,4 @@
-//! Common locked promotion service for direct and orchestrated hosts. This
-//! library service is staged before the existing caller migration.
+//! Common locked promotion service for direct and orchestrated hosts.
 
 use crate::orchestrator::{read_loop_state, write_loop_state};
 use crate::preflight::{preflight_in_transaction, PreflightReport};
@@ -143,7 +142,7 @@ pub(crate) fn promote_for_loop(
         return Err(ValidationError::Stale.into());
     }
     let proof = transaction.prepare_promotion(&patch, &current.preflight.plan, token)?;
-    let pending = patch.promote_validated(proof)?;
+    let pending = patch.promote(proof)?;
     if let Some(state) = state.as_mut().filter(|_| matching) {
         state.stage = Stage::Approved;
         state.reviewer = Some(pending.outcome().reviewer.clone());
@@ -204,6 +203,16 @@ mod tests {
     #[tokio::test]
     async fn common_direct_promotion_checkpoints_the_matching_loop_and_preserves_post_promotion_stages(
     ) {
+        common_promotion_flow(false).await;
+    }
+
+    #[tokio::test]
+    async fn orchestrated_promotion_requires_the_same_evidence_and_preserves_post_promotion_stages()
+    {
+        common_promotion_flow(true).await;
+    }
+
+    async fn common_promotion_flow(orchestrated: bool) {
         let (root, patch, base) = crate::execution::tests::fixture("#[test] fn works() {}\n");
         let receipt = crate::execution::tests::run(
             root.path(),
@@ -223,7 +232,7 @@ mod tests {
             RecordedSelfDev(calls.clone()),
         );
         assert!(matches!(
-            loop_.approve_validated(&review, consent(&review)),
+            loop_.approve(&review, consent(&review)),
             Err(LoopError::NoActiveLoop { .. })
         ));
         write_loop_state(
@@ -236,7 +245,12 @@ mod tests {
             },
         )
         .unwrap();
-        let outcome = promote_proposal(root.path(), patch.id(), &review, consent(&review)).unwrap();
+        let outcome = if orchestrated {
+            loop_.approve(&review, consent(&review))
+        } else {
+            promote_proposal(root.path(), patch.id(), &review, consent(&review))
+        }
+        .unwrap();
         assert_eq!(outcome.reviewer, "fixture owner");
         let state = loop_.state().unwrap().unwrap();
         assert_eq!(state.stage, Stage::Approved);

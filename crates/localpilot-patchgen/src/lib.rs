@@ -9,19 +9,19 @@
 //! plus a human-reviewable [`DiffSummary`]. It then **stops**.
 //!
 //! Applying that change to the main branch — [`ProposedPatch::promote`] — requires
-//! an [`ApprovalToken`], which only a human-confirmation path mints. There is no
+//! an ephemeral [`validation::ValidatedProposal`] capability, constructed only
+//! by current locked revalidation of separate promotion consent. There is no
 //! code path from proposing to promoting without one, the agent never merges to
 //! `main`, nothing here ever pushes, and rollback is to drop the worktree/branch
 //! ([`ProposedPatch::discard`]).
 //!
 //! The same gate guards the *outward* half (ADR-0053): an [`OutwardDraft`] is a
 //! draft issue/PR the agent may author and persist locally, but turning one into a
-//! runnable [`PublishPlan`] requires the same [`ApprovalToken`]. See
+//! pending publication owner requires a distinct [`validation::OutwardApprovalToken`]. See
 //! [`mod@outward`].
 #![forbid(unsafe_code)]
 
 mod error;
-mod gate;
 mod git;
 mod outward;
 mod proposal;
@@ -29,7 +29,6 @@ mod provenance;
 pub mod validation;
 
 pub use error::PatchError;
-pub use gate::ApprovalToken;
 pub use git::{
     check_path_budget, sweep_worktrees, worktrees_root, Worktree, MAX_WORKTREE_NAME, WORKTREES_DIR,
 };
@@ -225,7 +224,7 @@ impl ProposedPatch {
     /// their original base explicitly; legacy review falls back to `<branch>^`.
     /// Dropping this inspection handle preserves the proposal for later review
     /// or explicit discard. This never mints a token and never writes the main
-    /// branch — the [`ApprovalToken`] gate on [`Self::promote`] is unchanged.
+    /// branch; promotion still requires a current validated capability.
     ///
     /// # Errors
     /// - [`PatchError::UnknownProposal`] if no worktree or record exists for `branch`;
@@ -298,23 +297,6 @@ impl ProposedPatch {
     /// Attach an eval-gate result to the provenance.
     pub fn attach_eval_result(&mut self, result: EvalResult) {
         self.provenance.eval_result = Some(result);
-    }
-
-    /// Promote the proposed patch onto the current main branch — the **only** path
-    /// that writes outside the worktree, and it requires an [`ApprovalToken`] that
-    /// authorizes exactly this patch. Conservative: refuses a dirty target working
-    /// tree, fast-forwards only, and never pushes.
-    ///
-    /// # Errors
-    /// - [`PatchError::TokenMismatch`] if the token does not authorize this patch;
-    /// - [`PatchError::DirtyTarget`] if the main working tree has local changes;
-    /// - [`PatchError::NotFastForward`] if the base moved and a rebase is needed;
-    /// - [`PatchError::Git`] on git failure.
-    pub fn promote(&self, token: &ApprovalToken) -> Result<PromoteOutcome, PatchError> {
-        if !token.authorizes(&self.id) {
-            return Err(PatchError::TokenMismatch);
-        }
-        self.fast_forward(self.worktree.branch(), token.reviewer())
     }
 
     fn fast_forward(&self, revision: &str, reviewer: &str) -> Result<PromoteOutcome, PatchError> {
@@ -575,9 +557,8 @@ mod tests {
         let before = std::fs::read(&marker).unwrap();
         assert!(!before.is_empty());
         let request = proposal(&["a.rs"], &[("a.rs", "pub fn fixed() {}\n")]);
-        let patch = propose(repo.path(), "static-hooks", &request, provenance()).unwrap();
-        let token = ApprovalToken::approve(patch.id(), "controlled-fixture-reviewer");
-        patch.promote(&token).unwrap();
+        let mut patch = propose(repo.path(), "static-hooks", &request, provenance()).unwrap();
+        validation::promote_fixture(&mut patch);
         assert_eq!(std::fs::read(&marker).unwrap(), before);
         let setting = std::process::Command::new("git")
             .current_dir(repo.path())
@@ -823,10 +804,10 @@ mod tests {
     }
 
     #[test]
-    fn promote_requires_a_matching_token_and_never_runs_without_one() {
+    fn source_stays_unpromoted_until_a_validated_capability_is_supplied() {
         let dir = init_repo();
         let root = dir.path();
-        let patch = propose(
+        let mut patch = propose(
             root,
             "sr-3",
             &proposal(&["a.rs"], &[("a.rs", "pub fn f() { /* fixed */ }\n")]),
@@ -834,22 +815,16 @@ mod tests {
         )
         .unwrap();
 
-        // A token for a different patch does not authorize this one.
-        let wrong = ApprovalToken::approve("other", "david");
-        assert!(matches!(
-            patch.promote(&wrong).unwrap_err(),
-            PatchError::TokenMismatch
-        ));
         // main is still untouched.
         assert_eq!(
             std::fs::read_to_string(root.join("a.rs")).unwrap(),
             "pub fn f() {}\n"
         );
 
-        // The matching token (a human act) promotes it: now main carries the fix.
-        let token = ApprovalToken::approve(patch.id(), "david");
-        let outcome = patch.promote(&token).unwrap();
-        assert_eq!(outcome.reviewer, "david");
+        // Unit observations produce the same locked capability as the real
+        // coordinator integration; a token alone cannot call promote.
+        let outcome = validation::promote_fixture(&mut patch);
+        assert_eq!(outcome.reviewer, "fixture owner");
         assert!(std::fs::read_to_string(root.join("a.rs"))
             .unwrap()
             .contains("fixed"));
@@ -914,7 +889,7 @@ mod tests {
             patch.persist().unwrap();
         }
         // A later invocation reattaches from disk: same diff + provenance restored.
-        let reopened = ProposedPatch::reopen(root, "sr-reopen").unwrap();
+        let mut reopened = ProposedPatch::reopen(root, "sr-reopen").unwrap();
         assert_eq!(reopened.id(), "sr-reopen");
         assert_eq!(reopened.diff_summary().files, vec!["a.rs".to_string()]);
         assert!(reopened.provenance().is_complete());
@@ -923,8 +898,7 @@ mod tests {
             std::fs::read_to_string(root.join("a.rs")).unwrap(),
             "pub fn f() {}\n"
         );
-        let token = ApprovalToken::approve(reopened.id(), "david");
-        reopened.promote(&token).unwrap();
+        validation::promote_fixture(&mut reopened);
         assert!(std::fs::read_to_string(root.join("a.rs"))
             .unwrap()
             .contains("fixed"));

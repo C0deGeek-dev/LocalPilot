@@ -8,7 +8,7 @@
 //! orchestrator** that sequences them:
 //!
 //! ```text
-//! review  ─▶  propose  ─▶  [ human ApprovalToken gate ]  ─▶  promote  ─▶  build+gauntlet  ─▶  reload
+//! review  ─▶  propose  ─▶  [ separate validation and promotion gates ]  ─▶  promote  ─▶  build+gauntlet  ─▶  reload
 //! ```
 //!
 //! It only sequences and surfaces state. It does **not** merge the crates — source
@@ -33,7 +33,7 @@ pub use promotion::{promote_proposal, promotion_review, PromotionReview};
 pub use preflight::{proposal_preflight, PreflightReport, PreflightRisk};
 
 pub use contract::{
-    cross_gate, unattended_next, ApprovalToken, AwaitingApproval, LoopError, PatchError, Stage,
+    unattended_next, AwaitingApproval, LoopError, PatchApprovalToken, PatchError, Stage,
 };
 pub use orchestrator::{
     BuildRecord, LoopState, Orchestrator, Proposed, SelfDevRunner, SelfDevStage, StageError,
