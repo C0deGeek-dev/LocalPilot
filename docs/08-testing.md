@@ -758,6 +758,16 @@ receipt. The heartbeat fixture is finite even if its controller is terminated.
 Recovery dialogs also refuse stale answers. These are native process/interaction
 tests without a model or network, not model-quality measurements.
 
+An owned disposable sentinel fixture demonstrates the host-access limit: approved
+proposal tests write outside the worktree while the target remains at its clean
+base and the loop remains Proposed. Separate promotion consent then permits the
+real self-dev builder, gauntlet and immutable store to run. Its compiled local
+protocol stand-in reports embedded identity and answers a hello; it is not the
+actual LocalPilot RPC implementation. Wrong-source vetting is rejected, the real
+activation rollback restores the previous channel, and explicit sentinel cleanup
+must succeed. Existing self-dev gauntlet integration tests against the actual CLI
+remain a separate check.
+
 Supply-chain hygiene:
 
 ```powershell

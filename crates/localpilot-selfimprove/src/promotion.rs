@@ -351,6 +351,134 @@ mod tests {
         assert!(transaction.events().all(|event| event.completed));
     }
 
+    #[tokio::test]
+    async fn approved_host_access_is_visible_and_real_build_gauntlet_and_rollback_remain_separate()
+    {
+        let sentinel = tempfile::tempdir().unwrap();
+        let sentinel_root = sentinel.path().to_path_buf();
+        let marker = sentinel_root.join("approved-host-effect");
+        let source = format!(
+            "#[test] fn host_access() {{ std::fs::write({:?}, b\"explicit fixture effect\").unwrap(); }}\n",
+            marker.to_str().unwrap()
+        );
+        let (root, patch, base) = crate::execution::tests::fixture_with_setup(&source, |root| {
+            std::fs::write(root.join("Cargo.toml"), "[package]\nname='localpilot'\nversion='0.0.0'\nedition='2021'\n[profile.selfdev]\ninherits='release'\nopt-level=0\n").unwrap();
+            std::fs::write(
+                root.join("Cargo.lock"),
+                "version = 3\n[[package]]\nname = \"localpilot\"\nversion = \"0.0.0\"\n",
+            )
+            .unwrap();
+            // A compiled local protocol stand-in, not the actual LocalPilot RPC
+            // implementation. Exercise the real builder, gauntlet and store.
+            std::fs::write(root.join("src/main.rs"), r#"
+use std::io::{BufRead, Write};
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("version") {
+        println!("{{\"version\":\"{}\",\"git_hash\":\"{}\",\"fingerprint\":\"{}\"}}", env!("LOCALPILOT_VERSION"), env!("LOCALPILOT_GIT_HASH"), env!("LOCALPILOT_SOURCE_FINGERPRINT"));
+    } else {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        assert!(line.contains("hello"));
+        println!("{{\"v\":1,\"event\":{{\"type\":\"hello\"}}}}");
+        std::io::stdout().flush().unwrap();
+    }
+}
+"#).unwrap();
+        });
+        let selfdev = tempfile::tempdir().unwrap();
+        let mut loop_ = Orchestrator::open(
+            root.path(),
+            selfdev.path(),
+            crate::SelfDevRunner::new(selfdev.path()),
+        );
+        write_loop_state(
+            root.path(),
+            &LoopState {
+                stage: Stage::Proposed,
+                proposal_id: Some(patch.id().into()),
+                built_label: None,
+                reviewer: None,
+            },
+        )
+        .unwrap();
+        let preview = crate::proposal_preflight(root.path(), patch.id()).unwrap();
+        assert!(preview.render().contains("host"));
+        assert!(!marker.exists());
+        assert!(promotion_review(root.path(), patch.id()).is_err());
+        let receipt = crate::execution::tests::run(
+            root.path(),
+            &patch,
+            Profile::Default,
+            CancelSignal::new(),
+        )
+        .await;
+        assert_eq!(receipt.state, ValidationState::Passed);
+        assert!(receipt
+            .checks
+            .iter()
+            .all(|check| check.cleanup_confirmed && check.pipes_closed));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"explicit fixture effect");
+        let current = localpilot_selfdev::SourceState::read(root.path()).unwrap();
+        assert_eq!(current.head.as_deref(), Some(base.as_str()));
+        assert!(!current.dirty);
+        assert_eq!(loop_.state().unwrap().unwrap().stage, Stage::Proposed);
+        let review = promotion_review(root.path(), patch.id()).unwrap();
+        loop_.approve(&review, consent(&review)).unwrap();
+        assert_eq!(loop_.state().unwrap().unwrap().stage, Stage::Approved);
+        let channels = localpilot_selfdev::Channels::new(selfdev.path());
+        channels
+            .set(localpilot_selfdev::CURRENT, "prior-known-good")
+            .unwrap();
+        let built = loop_.build(&mut Vec::new()).unwrap();
+        assert_eq!(loop_.state().unwrap().unwrap().stage, Stage::Built);
+        assert_eq!(
+            channels.label(localpilot_selfdev::CURRENT).as_deref(),
+            Some(built.label.as_str())
+        );
+        let installed = localpilot_selfdev::VersionStore::new(selfdev.path())
+            .get(&built.label)
+            .unwrap();
+        let mut wrong = localpilot_selfdev::SourceState::read(root.path()).unwrap();
+        wrong.fingerprint = "wrong-source-fixture".into();
+        let scratch = tempfile::tempdir().unwrap();
+        assert!(localpilot_selfdev::vet(
+            &installed.executable(),
+            &wrong,
+            scratch.path(),
+            std::time::Duration::from_secs(5)
+        )
+        .is_err());
+        // Inject a failed activation and exercise the existing real rollback
+        // primitive. Source promotion and runtime channel activation differ.
+        channels
+            .set(localpilot_selfdev::CURRENT, "prior-known-good")
+            .unwrap();
+        let guard = localpilot_selfdev::ActivationGuard::new(selfdev.path());
+        guard
+            .begin(
+                &channels,
+                "fixture-activation",
+                localpilot_selfdev::CURRENT.into(),
+                &built.label,
+            )
+            .unwrap();
+        channels
+            .set(localpilot_selfdev::CURRENT, &built.label)
+            .unwrap();
+        assert!(guard.roll_back(&channels, "fixture-activation").unwrap());
+        assert_eq!(
+            channels.label(localpilot_selfdev::CURRENT).as_deref(),
+            Some("prior-known-good")
+        );
+        assert!(guard.pending("fixture-activation").is_none());
+        assert_eq!(loop_.state().unwrap().unwrap().stage, Stage::Built);
+        sentinel.close().unwrap();
+        assert!(
+            !sentinel_root.exists(),
+            "owned host-effect sentinel must be removed"
+        );
+    }
+
     #[test]
     fn an_unvalidated_persisted_proposal_stays_inspectable_and_cannot_be_reviewed_as_passed() {
         let (root, patch, _) = crate::execution::tests::fixture("#[test] fn works() {}\n");

@@ -362,6 +362,13 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn fixture(source: &str) -> (tempfile::TempDir, ProposedPatch, String) {
+        fixture_with_setup(source, |_| {})
+    }
+
+    pub(crate) fn fixture_with_setup(
+        source: &str,
+        setup: impl FnOnce(&Path),
+    ) -> (tempfile::TempDir, ProposedPatch, String) {
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "-b", "main"]);
         git(root.path(), &["config", "user.name", "fixture"]);
@@ -397,6 +404,7 @@ pub(crate) mod tests {
             "[[harness.checks]]\nname='fixture tests'\nprogram='cargo'\nargs=['test','--lib']\n",
         )
         .unwrap();
+        setup(root.path());
         git(root.path(), &["add", "-f", "."]);
         git(
             root.path(),
