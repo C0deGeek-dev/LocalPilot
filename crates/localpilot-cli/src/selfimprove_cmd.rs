@@ -13,8 +13,9 @@ use std::path::Path;
 use anyhow::{anyhow, Context};
 use localpilot_config::{CliOverrides, ConfigPaths};
 use localpilot_llm::ProviderRegistry;
+use localpilot_patchgen::validation::PatchApprovalToken;
 use localpilot_patchgen::ProposedPatch;
-use localpilot_selfimprove::{ApprovalToken, Orchestrator, SelfDevRunner, Stage};
+use localpilot_selfimprove::{Orchestrator, SelfDevRunner, Stage};
 use localpilot_selfreview::{Finding, ReviewOptions};
 #[cfg(feature = "tui")]
 use localpilot_slash::SelfImproveAction;
@@ -33,6 +34,58 @@ fn open_loop(repo_root: &Path) -> anyhow::Result<Orchestrator<SelfDevRunner>> {
     ))
 }
 
+/// Current proposal id, without granting execution or promotion consent.
+pub(crate) fn pending_id(root: &Path) -> anyhow::Result<String> {
+    let state = open_loop(root)?
+        .state()?
+        .ok_or_else(|| anyhow!("no active self-improvement loop"))?;
+    if state.stage != Stage::Proposed {
+        return Err(anyhow!(
+            "proposal operations require PROPOSED; current stage: {:?}",
+            state.stage
+        ));
+    }
+    state
+        .proposal_id
+        .ok_or_else(|| anyhow!("the loop has no proposal id"))
+}
+
+#[cfg(feature = "tui")]
+#[derive(Clone)]
+pub(crate) struct ConfirmedProposal {
+    pub(crate) id: String,
+    pub(crate) review: String,
+}
+
+/// Capture the exact passing review displayed before the host's confirmation.
+#[cfg(feature = "tui")]
+pub(crate) fn render_promotion_review(
+    root: &Path,
+    out: &mut dyn Write,
+) -> anyhow::Result<ConfirmedProposal> {
+    let id = pending_id(root)?;
+    let review = localpilot_selfimprove::promotion_review(root, &id)?;
+    write!(out, "{}", review.render())?;
+    Ok(ConfirmedProposal {
+        id,
+        review: review.digest()?.as_str().to_owned(),
+    })
+}
+
+#[cfg(feature = "tui")]
+pub(crate) fn render_execution_review(
+    root: &Path,
+    out: &mut dyn Write,
+) -> anyhow::Result<ConfirmedProposal> {
+    let id = pending_id(root)?;
+    let review = localpilot_selfimprove::proposal_preflight(root, &id)?;
+    write!(out, "{}", review.render())?;
+    Ok(ConfirmedProposal {
+        id,
+        review: review.digest()?.as_str().to_owned(),
+    })
+}
+
 /// The kind of work an interactive self-improvement action will perform. Hosts
 /// use this preflight only to choose cancellation and confirmation policy; the
 /// persisted orchestrator remains the sole authority for the actual transition.
@@ -40,6 +93,7 @@ fn open_loop(repo_root: &Path) -> anyhow::Result<Orchestrator<SelfDevRunner>> {
 #[cfg(feature = "tui")]
 pub(crate) enum InteractiveStep {
     Read,
+    Validate,
     Propose,
     Gate,
     Approve,
@@ -70,7 +124,10 @@ pub(crate) fn interactive_step(
 #[cfg(feature = "tui")]
 fn interactive_step_for(stage: Option<Stage>, action: &SelfImproveAction) -> InteractiveStep {
     match action {
-        SelfImproveAction::Status => InteractiveStep::Read,
+        SelfImproveAction::Status | SelfImproveAction::Preflight | SelfImproveAction::Evidence => {
+            InteractiveStep::Read
+        }
+        SelfImproveAction::Validate { .. } => InteractiveStep::Validate,
         SelfImproveAction::Reset => InteractiveStep::Reset,
         SelfImproveAction::Approve { .. } => InteractiveStep::Approve,
         SelfImproveAction::Start { .. } => match stage {
@@ -120,9 +177,17 @@ pub fn run_status(repo_root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
                 )?;
                 writeln!(
                     out,
-                    "  Review the diff, then cross the gate:\n    localpilot selfimprove next \
-                     --approve --reviewer <you>",
+                    "  Inspect `localpilot selfimprove preflight`, then explicitly authorize \
+                     `validate`. Inspect `evidence` before separate promotion:\n    \
+                     localpilot selfimprove next --approve --reviewer <you> --review <promotion-review>",
                 )?;
+                if let Ok(patch) = ProposedPatch::reopen(repo_root, id) {
+                    if let Some(receipt) = &patch.provenance().validation {
+                        writeln!(out, "  Recorded validation: {:?}; run {}. `evidence` verifies whether it is still current.", receipt.resumed_state(), receipt.run_id)?;
+                    } else {
+                        writeln!(out, "  Validation: NotRun; approval cannot substitute for execution evidence.")?;
+                    }
+                }
             }
             Stage::Approved => {
                 writeln!(
@@ -229,6 +294,7 @@ fn render_findings(
 /// Render the exact persisted proposal currently behind the gate. Both chat
 /// hosts call this before their explicit approval dialog, and the gate path
 /// reopens the same id before minting the token.
+#[cfg(feature = "tui")]
 pub(crate) fn render_pending_proposal(
     repo_root: &Path,
     out: &mut dyn Write,
@@ -308,7 +374,7 @@ pub(crate) async fn run_interactive(
     repo_root: &Path,
     action: &SelfImproveAction,
     expected_step: InteractiveStep,
-    confirmed_proposal_id: Option<&str>,
+    confirmed_proposal_id: Option<&ConfirmedProposal>,
     model: &str,
     provider: &str,
     out: &mut dyn Write,
@@ -321,9 +387,26 @@ pub(crate) async fn run_interactive(
     }
     match action {
         SelfImproveAction::Status => run_interactive_status(repo_root, out).await?,
+        SelfImproveAction::Preflight => {
+            crate::proposal_validation::preflight(repo_root, &pending_id(repo_root)?, out)?
+        }
+        SelfImproveAction::Evidence => {
+            crate::proposal_validation::evidence(repo_root, &pending_id(repo_root)?, None, out)?
+        }
+        SelfImproveAction::Validate { .. } => {
+            return Err(anyhow!(
+            "execution requires the host's separately confirmed preview and live permission policy"
+        ))
+        }
         SelfImproveAction::Reset => run_reset(repo_root, out)?,
         SelfImproveAction::Approve { reviewer } => {
-            approve_step(repo_root, reviewer, confirmed_proposal_id, false, out)?;
+            let confirmed = confirmed_proposal_id.ok_or_else(|| {
+                anyhow!("a passing proposal review must be displayed before approval")
+            })?;
+            if pending_id(repo_root)? != confirmed.id {
+                return Err(anyhow!("the proposal changed after review"));
+            }
+            approve_step(repo_root, reviewer, Some(&confirmed.review), false, out)?;
         }
         SelfImproveAction::Start { finding } => {
             run_interactive_start(repo_root, *finding, model, provider, out).await?;
@@ -489,6 +572,7 @@ async fn run_interactive_start(
             provider: Some(provider),
             approve: false,
             reviewer: None,
+            review: None,
         },
         &report.findings[selected - 1],
         out,
@@ -514,6 +598,8 @@ pub struct NextArgs<'a> {
     pub approve: bool,
     /// The human reviewer recorded on the approval (required with `--approve`).
     pub reviewer: Option<&'a str>,
+    /// Exact passing promotion-review identity, separate from execution consent.
+    pub review: Option<&'a str>,
 }
 
 /// `selfimprove next`: advance the loop one stage via the orchestrator. Past the
@@ -632,8 +718,9 @@ fn gate_step(repo_root: &Path, args: &NextArgs<'_>, out: &mut dyn Write) -> anyh
         )?;
         writeln!(
             out,
-            "Review the diff, then cross the gate:\n  localpilot selfimprove next --approve \
-             --reviewer <you>",
+            "Inspect `localpilot selfimprove preflight`, explicitly authorize `validate`, \
+             then inspect `evidence`. Separate promotion requires:\n  \
+             localpilot selfimprove next --approve --reviewer <you> --review <promotion-review>",
         )?;
         return Ok(());
     }
@@ -642,7 +729,7 @@ fn gate_step(repo_root: &Path, args: &NextArgs<'_>, out: &mut dyn Write) -> anyh
         .reviewer
         .filter(|r| !r.trim().is_empty())
         .ok_or_else(|| anyhow!("--reviewer must name the human approving this patch"))?;
-    approve_step(repo_root, reviewer, None, true, out)
+    approve_step(repo_root, reviewer, args.review, true, out)
 }
 
 /// The single CLI/chat approval seam. It reopens the persisted proposal, binds
@@ -652,16 +739,13 @@ fn gate_step(repo_root: &Path, args: &NextArgs<'_>, out: &mut dyn Write) -> anyh
 fn approve_step(
     repo_root: &Path,
     reviewer: &str,
-    expected_id: Option<&str>,
+    expected_review: Option<&str>,
     show_proposal: bool,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let reviewer = reviewer.trim();
     if reviewer.is_empty() {
         return Err(anyhow!("reviewer must name the human approving this patch"));
-    }
-    if show_proposal {
-        render_pending_proposal(repo_root, out)?;
     }
     let loop_ = open_loop(repo_root)?;
     let state = loop_
@@ -676,15 +760,23 @@ fn approve_step(
     let id = state
         .proposal_id
         .ok_or_else(|| anyhow!("the loop is at the gate but has no proposal id"))?;
-    if expected_id.is_some_and(|expected| expected != id) {
-        return Err(anyhow!(
-            "the proposal changed after it was displayed; inspect `/selfimprove status` and approve the current diff explicitly"
-        ));
+    let review = localpilot_selfimprove::promotion_review(repo_root, &id)
+        .context("approval requires current locally verified passing validation")?;
+    if show_proposal {
+        write!(out, "{}", review.render())?;
+        out.flush()?;
     }
+    crate::proposal_validation::confirm_review(expected_review, &review.digest()?)?;
     // The deliberate human act mints the token; the orchestrator never mints one.
-    let token = ApprovalToken::approve(&id, reviewer);
+    let token = PatchApprovalToken::approve(
+        &review.preflight.proposal.identity,
+        &review.preflight.plan,
+        &review.evidence,
+        reviewer,
+        "promote only this separately confirmed passing proposal review",
+    )?;
     let outcome = loop_
-        .approve(&token)
+        .approve_validated(&review, token)
         .context("promoting the approved patch onto the main branch")?;
     writeln!(
         out,

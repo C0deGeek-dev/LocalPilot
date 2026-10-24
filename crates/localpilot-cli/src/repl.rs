@@ -770,6 +770,12 @@ pub(crate) fn selfimprove_confirmation(
     proposal_id: Option<&str>,
 ) -> Option<(String, String)> {
     match step {
+        crate::selfimprove_cmd::InteractiveStep::Validate => {
+            let localpilot_slash::SelfImproveAction::Validate { reviewer } = action else {
+                return None;
+            };
+            Some(("selfimprove validate".into(), format!("run the exact displayed proposed-code checks for `{}` as `{reviewer}` with LocalPilot's host filesystem, credential, network and process access. Worktrees are not containment. This does not approve promotion; cancellation never retries checks", proposal_id.unwrap_or("(unknown)"))))
+        }
         crate::selfimprove_cmd::InteractiveStep::Approve => {
             let localpilot_slash::SelfImproveAction::Approve { reviewer } = action else {
                 return None;
@@ -796,9 +802,11 @@ pub(crate) struct SelfImprovePumpRequest {
     pub(crate) model: String,
     pub(crate) provider: String,
     pub(crate) step: crate::selfimprove_cmd::InteractiveStep,
-    pub(crate) confirmed_proposal_id: Option<String>,
+    pub(crate) confirmed_proposal_id: Option<crate::selfimprove_cmd::ConfirmedProposal>,
     pub(crate) approval_tx: mpsc::UnboundedSender<ApprovalCall>,
     pub(crate) cancel: CancellationToken,
+    pub(crate) permissions: localpilot_sandbox::PermissionEngineHandle,
+    pub(crate) trusted: bool,
 }
 
 pub(crate) async fn execute_selfimprove_pump(
@@ -813,10 +821,16 @@ pub(crate) async fn execute_selfimprove_pump(
         confirmed_proposal_id,
         approval_tx,
         cancel,
+        permissions,
+        trusted,
     } = request;
-    if let Some((tool, detail)) =
-        selfimprove_confirmation(step, &action, confirmed_proposal_id.as_deref())
-    {
+    if let Some((tool, detail)) = selfimprove_confirmation(
+        step,
+        &action,
+        confirmed_proposal_id
+            .as_ref()
+            .map(|review| review.id.as_str()),
+    ) {
         let approver = TuiApprover::new(approval_tx);
         let request = PermissionRequest {
             tool,
@@ -837,12 +851,49 @@ pub(crate) async fn execute_selfimprove_pump(
     }
 
     let mut output = Vec::new();
-    let result = if step == crate::selfimprove_cmd::InteractiveStep::Build {
+    let result = if step == crate::selfimprove_cmd::InteractiveStep::Validate {
+        let confirmed = confirmed_proposal_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("execution preview was not displayed"))?;
+        if crate::selfimprove_cmd::pending_id(&cwd)? != confirmed.id {
+            return Err(anyhow::anyhow!(
+                "proposal changed after the execution preview"
+            ));
+        }
+        let localpilot_slash::SelfImproveAction::Validate { reviewer } = &action else {
+            return Err(anyhow::anyhow!(
+                "execution action changed after confirmation"
+            ));
+        };
+        let report = localpilot_selfimprove::proposal_preflight(&cwd, &confirmed.id)?;
+        crate::proposal_validation::confirm_review(Some(&confirmed.review), &report.digest()?)?;
+        let engine = permissions.snapshot();
+        let signal = localpilot_harness::CancelSignal::new();
+        let run = crate::proposal_validation::execute(
+            &cwd,
+            &confirmed.id,
+            &report,
+            reviewer,
+            &engine,
+            trusted,
+            signal.clone(),
+            &mut output,
+        );
+        tokio::pin!(run);
+        let result = tokio::select! {
+            result = &mut run => result,
+            () = cancel.cancelled() => {
+                signal.cancel();
+                run.await
+            }
+        };
+        result.map(|()| crate::selfimprove_cmd::InteractiveOutcome::Complete)
+    } else if step == crate::selfimprove_cmd::InteractiveStep::Build {
         crate::selfimprove_cmd::run_interactive(
             &cwd,
             &action,
             step,
-            confirmed_proposal_id.as_deref(),
+            confirmed_proposal_id.as_ref(),
             &model,
             &provider,
             &mut output,
@@ -854,7 +905,7 @@ pub(crate) async fn execute_selfimprove_pump(
                 &cwd,
                 &action,
                 step,
-                confirmed_proposal_id.as_deref(),
+                confirmed_proposal_id.as_ref(),
                 &model,
                 &provider,
                 &mut output,
@@ -1321,6 +1372,35 @@ mod tests {
             crate::selfimprove_cmd::InteractiveStep::Gate,
             &localpilot_slash::SelfImproveAction::Next,
             None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn selfimprove_execution_confirmation_explains_host_access_and_separate_promotion() {
+        let action = localpilot_slash::SelfImproveAction::Validate {
+            reviewer: "fixture human".into(),
+        };
+        let (tool, detail) = selfimprove_confirmation(
+            crate::selfimprove_cmd::InteractiveStep::Validate,
+            &action,
+            Some("proposal-1"),
+        )
+        .expect("execution confirmation");
+        assert_eq!(tool, "selfimprove validate");
+        for required in [
+            "proposal-1",
+            "fixture human",
+            "credential",
+            "not containment",
+            "does not approve promotion",
+        ] {
+            assert!(detail.contains(required), "{detail}");
+        }
+        assert!(selfimprove_confirmation(
+            crate::selfimprove_cmd::InteractiveStep::Validate,
+            &localpilot_slash::SelfImproveAction::Next,
+            Some("proposal-1")
         )
         .is_none());
     }

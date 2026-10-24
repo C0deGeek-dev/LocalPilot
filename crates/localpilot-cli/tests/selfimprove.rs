@@ -101,10 +101,10 @@ fn preflight_shows_the_base_command_and_preserves_the_proposal_without_execution
     assert_eq!(authority.try_transaction().unwrap().events().count(), 0);
 }
 
-/// Rendering a persisted diff must not drop the resource that the immediately
-/// following explicit approval needs to reopen. No model/build/reload is used.
+/// Legacy proposals remain inspectable, but approval alone cannot invent passing
+/// evidence. No model/build/reload is used.
 #[test]
-fn reviewing_the_persisted_diff_does_not_destroy_the_proposal_before_approval() {
+fn legacy_proposals_remain_inspectable_but_cannot_promote_without_validation() {
     use localpilot_patchgen::{ChangeProvenance, PatchProposal, ProposedEdit};
     let repo = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
@@ -179,21 +179,16 @@ fn reviewing_the_persisted_diff_does_not_destroy_the_proposal_before_approval() 
         .current_dir(repo.path())
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let shown = String::from_utf8_lossy(&output.stdout);
-    assert!(shown.contains("+    return 2"), "{shown}");
-    assert!(shown.contains("Promoted"), "{shown}");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("passing validation"));
+    assert!(localpilot_patchgen::ProposedPatch::reopen(repo.path(), "persisted-review").is_ok());
     assert_eq!(
         std::fs::read_to_string(repo.path().join("sample.py")).unwrap(),
-        "def answer():\n    return 2\n"
+        "def answer():\n    return 1\n"
     );
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
-    assert_eq!(after["stage"], "approved");
+    assert_eq!(after["stage"], "proposed");
 }
 
 /// `selfimprove --help` lists the wired `status` and `next` subcommands — the
@@ -208,6 +203,169 @@ fn help_lists_status_and_next() {
         "help must list `status`: {stdout}"
     );
     assert!(stdout.contains("next"), "help must list `next`: {stdout}");
+    for operation in ["preflight", "validate", "evidence"] {
+        assert!(stdout.contains(operation), "{stdout}");
+    }
+}
+
+/// Real binary flow: viewing grants nothing; execution consent produces evidence;
+/// a distinct promotion review moves the source and matching loop state together.
+#[test]
+fn explicit_execution_then_separate_direct_promotion_updates_the_matching_loop() {
+    use localpilot_patchgen::{ChangeProvenance, PatchProposal, ProposedEdit};
+    let repo = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(repo.path())
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "commit.gpgSign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.name", "fixture"]);
+    git(&["config", "user.email", "fixture@localhost"]);
+    git(&["config", "core.autocrlf", "false"]);
+    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "1.82".into());
+    assert!(toolchain
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')));
+    std::fs::create_dir(repo.path().join("src")).unwrap();
+    for (name, content) in [
+        (".gitignore", ".localpilot/\ntarget/\n".to_owned()),
+        (
+            "Cargo.toml",
+            "[package]\nname='cli_validation_fixture'\nversion='0.0.0'\nedition='2021'\n"
+                .to_owned(),
+        ),
+        (
+            "Cargo.lock",
+            "version = 3\n[[package]]\nname = \"cli_validation_fixture\"\nversion = \"0.0.0\"\n"
+                .to_owned(),
+        ),
+        (
+            "src/lib.rs",
+            "#[test] fn answer() { assert_eq!(1, 1); }\n".to_owned(),
+        ),
+        (
+            "rust-toolchain.toml",
+            format!("[toolchain]\nchannel='{toolchain}'\n"),
+        ),
+        (
+            ".localpilot.toml",
+            "[[harness.checks]]\nname='test'\nprogram='cargo'\nargs=['test','--workspace']\n"
+                .to_owned(),
+        ),
+    ] {
+        std::fs::write(repo.path().join(name), content).unwrap();
+    }
+    git(&["add", "-f", "."]);
+    git(&["commit", "-m", "controlled validation fixture"]);
+    let before = git(&["rev-parse", "HEAD"]);
+    let patch = localpilot_patchgen::propose(
+        repo.path(),
+        "cli-reviewed",
+        &PatchProposal::new(
+            "controlled fixture",
+            vec!["src/lib.rs".into()],
+            vec![ProposedEdit::new(
+                "src/lib.rs",
+                "#[test] fn answer() { assert_eq!(2, 2); }\n",
+            )],
+        ),
+        ChangeProvenance::new("fixture", "scripted", "explicit two-gate flow"),
+    )
+    .unwrap();
+    patch.persist().unwrap();
+    std::fs::create_dir_all(config.path().join("localpilot")).unwrap();
+    std::fs::write(
+        config.path().join("localpilot/trusted-folders.txt"),
+        format!("{}\n", repo.path().canonicalize().unwrap().display()),
+    )
+    .unwrap();
+    let state_path = repo.path().join(".localpilot/selfimprove/state.json");
+    std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &state_path,
+        r#"{"stage":"proposed","proposal_id":"cli-reviewed"}"#,
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let output = bin()
+            .args(args)
+            .env("APPDATA", config.path())
+            .env("XDG_CONFIG_HOME", config.path())
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let preview = run(&["selfimprove", "validate"]);
+    assert!(preview.contains("No execution authorized"));
+    let execution_review = preview
+        .lines()
+        .find_map(|line| line.strip_prefix("Preview identity: "))
+        .unwrap();
+    {
+        let mut authority =
+            localpilot_patchgen::validation::RepositoryAuthority::open(repo.path()).unwrap();
+        assert_eq!(authority.try_transaction().unwrap().events().count(), 0);
+    }
+    let validation = run(&[
+        "selfimprove",
+        "validate",
+        "--approve-execution",
+        "--reviewer",
+        "fixture-human",
+        "--review",
+        execution_review,
+    ]);
+    assert!(validation.contains("Validation Passed"), "{validation}");
+    assert_eq!(git(&["rev-parse", "HEAD"]), before);
+    let proposed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(proposed["stage"], "proposed");
+    let evidence = run(&["selfimprove", "evidence"]);
+    let promotion_review = evidence
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(
+                "Current passing evidence verified locally. Promotion review identity: ",
+            )
+        })
+        .unwrap();
+    assert_ne!(execution_review, promotion_review);
+    let promoted = run(&[
+        "self-review",
+        "promote",
+        "--id",
+        "cli-reviewed",
+        "--approve",
+        "--reviewer",
+        "fixture-human",
+        "--review",
+        promotion_review,
+    ]);
+    assert!(promoted.contains("Promoted"), "{promoted}");
+    let approved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(approved["stage"], "approved");
+    assert!(approved.get("built_label").is_none());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("src/lib.rs")).unwrap(),
+        "#[test] fn answer() { assert_eq!(2, 2); }\n"
+    );
 }
 
 /// On a repo with a finding but no active loop, `status` surfaces the `Found`

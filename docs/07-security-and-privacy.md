@@ -660,9 +660,28 @@ The review states that future approved checks run with LocalPilot's host access.
 Worktrees separate ordinary edits; they do not contain build scripts, proc macros,
 tests, network access or arbitrary filesystem/process effects. Cargo `--frozen`
 restricts Cargo's resolution/network use, not invoked code. No default model/GPU
-process belongs to this profile. Preflight is available independently of the
-still-pending execution/promotion gate; existing approval callers have not yet
-migrated to the new authorities.
+process belongs to this profile. CLI and chat patch approval now use separate
+execution and promotion authorities. Removal of the older library approval API,
+outward-publication migration and recovery controls remain staged work.
+
+For a persisted proposal, `self-review validate --id <proposal>` displays the
+execution review and stops. Running it requires `--approve-execution`, a human
+`--reviewer` and the exact displayed `--review` digest. `self-review evidence
+--id <proposal>` shows bounded recorded observations and separately verifies
+current promotion eligibility. `self-review promote --id <proposal> --approve
+--reviewer <you> --review <promotion-review>` requires that distinct promotion
+review. Viewing evidence never certifies it or executes another check. An old
+proposal without locally completed validation cannot be promoted by approval alone.
+
+The active loop exposes the same operations as `selfimprove preflight`,
+`validate` and `evidence`; `selfimprove next --approve` additionally requires the
+passing promotion review digest. In chat, `/selfimprove validate <reviewer>`
+displays the exact plan before a dedicated host-access confirmation, then uses
+the session's current permission and trust policy. Escape requests cancellation
+and waits for cleanup evidence. `/selfimprove approve <reviewer>` separately
+displays passing observations before promotion confirmation. Neither `next` nor
+a bypass permission profile supplies these confirmations. CLI Ctrl+C cancels
+an active validation run. A retry always needs fresh execution consent.
 
 The library execution coordinator consumes separate evaluation consent before
 calling the existing permission-gated runner. It passes only the displayed
@@ -703,7 +722,8 @@ and command plan; loading historical JSON alone never grants promotion authority
 The promotion capability retains the repository lock through the fast-forward,
 atomic matching loop-state update and journal completion. An interrupted effect
 leaves its intended refs and commits pending for explicit inspection. Existing
-production approval callers have not yet migrated to this library service.
+production patch approval callers use this service. Older library APIs and
+outward publication still need migration before the gate can be globally mandatory.
 
 The self-improvement loop's write half (ADR-0034) is built so the human gate is
 structural, not a convention:

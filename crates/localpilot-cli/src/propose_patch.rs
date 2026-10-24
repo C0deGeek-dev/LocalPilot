@@ -17,9 +17,8 @@ use futures::StreamExt;
 use localpilot_config::{CliOverrides, ConfigPaths};
 use localpilot_core::{Message, Role};
 use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
-use localpilot_patchgen::{
-    propose, ApprovalToken, ChangeProvenance, PatchProposal, ProposedEdit, ProposedPatch,
-};
+use localpilot_patchgen::validation::PatchApprovalToken;
+use localpilot_patchgen::{propose, ChangeProvenance, PatchProposal, ProposedEdit, ProposedPatch};
 use localpilot_selfreview::{review, Finding, ReviewOptions};
 use serde::Deserialize;
 
@@ -34,6 +33,26 @@ pub enum ProposePatchCommand {
         /// Proposal id printed by propose-patch.
         #[arg(long)]
         id: String,
+    },
+    /// Preview or explicitly execute the exact proposed-code validation plan.
+    Validate {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        reviewer: Option<String>,
+        /// Authorize execution only; never promotes or publishes.
+        #[arg(long)]
+        approve_execution: bool,
+        /// Exact preview identity printed by preflight or an unapproved validate.
+        #[arg(long)]
+        review: Option<String>,
+    },
+    /// Show current or historical bounded validation evidence without execution.
+    Evidence {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        run: Option<uuid::Uuid>,
     },
     /// Propose a patch for one ranked self-review finding: a model authors the edit,
     /// it is written to an isolated worktree, and the command stops for human review.
@@ -60,6 +79,9 @@ pub enum ProposePatchCommand {
         /// Explicit confirmation that a human approves promoting this patch.
         #[arg(long)]
         approve: bool,
+        /// Exact passing promotion review identity printed by evidence.
+        #[arg(long)]
+        review: Option<String>,
     },
     /// Discard a previously proposed patch (remove its worktree and branch).
     Discard {
@@ -322,10 +344,26 @@ pub async fn dispatch(cmd: ProposePatchCommand, out: &mut dyn Write) -> anyhow::
     let cwd = std::env::current_dir()?;
     match cmd {
         ProposePatchCommand::Preflight { id } => {
-            let report = localpilot_selfimprove::proposal_preflight(&cwd, &id)
-                .context("preparing static proposal validation review")?;
-            write!(out, "{}", report.render())?;
-            Ok(())
+            crate::proposal_validation::preflight(&cwd, &id, out)
+        }
+        ProposePatchCommand::Validate {
+            id,
+            reviewer,
+            approve_execution,
+            review,
+        } => {
+            crate::proposal_validation::validate(
+                &cwd,
+                &id,
+                reviewer.as_deref(),
+                approve_execution,
+                review.as_deref(),
+                out,
+            )
+            .await
+        }
+        ProposePatchCommand::Evidence { id, run } => {
+            crate::proposal_validation::evidence(&cwd, &id, run, out)
         }
         ProposePatchCommand::ProposePatch {
             finding,
@@ -336,7 +374,8 @@ pub async fn dispatch(cmd: ProposePatchCommand, out: &mut dyn Write) -> anyhow::
             id,
             reviewer,
             approve,
-        } => run_promote(&cwd, &id, &reviewer, approve, out),
+            review,
+        } => run_promote(&cwd, &id, &reviewer, approve, review.as_deref(), out),
         ProposePatchCommand::Discard { id } => run_discard(&cwd, &id, out),
         ProposePatchCommand::ProposeIssue { finding, target } => {
             outward_cmd::run_propose_issue(&cwd, finding, &target, out)
@@ -446,6 +485,7 @@ fn run_promote(
     id: &str,
     reviewer: &str,
     approve: bool,
+    expected_review: Option<&str>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     // The structural gate: no promotion without an explicit human act. `--approve`
@@ -460,10 +500,19 @@ fn run_promote(
             "--reviewer must name the human approving this patch"
         ));
     }
-    let patch = ProposedPatch::reopen(repo_root, id).context("reopening the proposed patch")?;
-    let token = ApprovalToken::approve(patch.id(), reviewer);
-    let outcome = patch
-        .promote(&token)
+    let review = localpilot_selfimprove::promotion_review(repo_root, id)
+        .context("loading current passing validation for promotion")?;
+    write!(out, "{}", review.render())?;
+    out.flush()?;
+    crate::proposal_validation::confirm_review(expected_review, &review.digest()?)?;
+    let token = PatchApprovalToken::approve(
+        &review.preflight.proposal.identity,
+        &review.preflight.plan,
+        &review.evidence,
+        reviewer,
+        "promote only this separately confirmed passing proposal review",
+    )?;
+    let outcome = localpilot_selfimprove::promote_proposal(repo_root, id, &review, token)
         .context("promoting the patch onto the main branch")?;
     writeln!(
         out,
@@ -612,7 +661,7 @@ mod tests {
         // human has not explicitly approved. This fails before any reopen.
         let dir = tempfile::tempdir().unwrap();
         let mut out = Vec::new();
-        let err = run_promote(dir.path(), "any-id", "david", false, &mut out).unwrap_err();
+        let err = run_promote(dir.path(), "any-id", "david", false, None, &mut out).unwrap_err();
         assert!(err.to_string().contains("explicit human approval"));
         assert!(out.is_empty());
     }
@@ -621,7 +670,7 @@ mod tests {
     fn promote_refuses_an_empty_reviewer() {
         let dir = tempfile::tempdir().unwrap();
         let mut out = Vec::new();
-        let err = run_promote(dir.path(), "any-id", "  ", true, &mut out).unwrap_err();
+        let err = run_promote(dir.path(), "any-id", "  ", true, None, &mut out).unwrap_err();
         assert!(err.to_string().contains("--reviewer"));
     }
 }

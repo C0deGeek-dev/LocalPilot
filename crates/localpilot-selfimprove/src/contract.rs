@@ -9,10 +9,11 @@
 //! Found ──review──▶ Proposed ──[ ApprovalToken gate ]──▶ Approved ──build──▶ Built ──reload──▶ Reloaded
 //! ```
 //!
-//! The only way past [`Stage::Proposed`] is [`cross_gate`], which is representable
-//! **only** with an [`ApprovalToken`]. So "no autonomous advance past the gate" is
-//! a property of the types, not a convention (ADR-0034 human-gated loop; ADR-0128
-//! keeps the unattended autonomous loop deferred).
+//! Stage values are public, serializable descriptions, not authority. The unused
+//! [`cross_gate`] helper does not enforce production transitions. Production patch
+//! callers use the common locked promotion service and its ephemeral validated
+//! capability; removal of the legacy library approval API remains staged work.
+//! ADR-0128 keeps the unattended autonomous loop deferred.
 
 use std::path::PathBuf;
 
@@ -107,12 +108,9 @@ pub fn unattended_next(stage: Stage) -> Result<Option<Stage>, AwaitingApproval> 
     }
 }
 
-/// Cross the human gate: the transition from [`Stage::Proposed`] to
-/// [`Stage::Approved`]. Taking an [`ApprovalToken`] by reference makes the
-/// crossing *representable only* when a token exists — a caller cannot even name
-/// the result of this transition without one. The token is minted solely by a
-/// human-confirmation path (`ApprovalToken::approve`); nothing in this crate mints
-/// one.
+/// Describe the approved stage for a legacy token. This unused helper neither
+/// validates evidence nor writes source or loop state. Public stage values can
+/// be constructed independently, so this is not a security boundary.
 #[must_use]
 pub fn cross_gate(_token: &ApprovalToken) -> Stage {
     Stage::Approved

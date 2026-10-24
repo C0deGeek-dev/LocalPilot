@@ -5633,9 +5633,17 @@ async fn drive_selfimprove(
 
     // The exact persisted proposal is visible before the confirmation dialog can
     // yield a positive answer and reach the shared approval-token seam.
-    let confirmed_proposal_id = if step == crate::selfimprove_cmd::InteractiveStep::Approve {
+    let confirmed_proposal_id = if matches!(
+        step,
+        crate::selfimprove_cmd::InteractiveStep::Approve
+            | crate::selfimprove_cmd::InteractiveStep::Validate
+    ) {
         let mut proposal = Vec::new();
-        let result = crate::selfimprove_cmd::render_pending_proposal(ctx.cwd, &mut proposal);
+        let result = if step == crate::selfimprove_cmd::InteractiveStep::Validate {
+            crate::selfimprove_cmd::render_execution_review(ctx.cwd, &mut proposal)
+        } else {
+            crate::selfimprove_cmd::render_promotion_review(ctx.cwd, &mut proposal)
+        };
         let failed = result.is_err();
         let proposal_id = result.as_ref().ok().cloned();
         present_command_report(
@@ -5665,6 +5673,9 @@ async fn drive_selfimprove(
     let root = ctx.cwd.to_path_buf();
     let tx = approval_tx.clone();
     app.begin_work_with_label(match step {
+        crate::selfimprove_cmd::InteractiveStep::Validate => {
+            "Validating proposed code (Escape cancels)"
+        }
         crate::selfimprove_cmd::InteractiveStep::Build => "Building self-improvement",
         crate::selfimprove_cmd::InteractiveStep::Propose => "Preparing self-improvement",
         _ => "Advancing self-improvement",
@@ -5678,6 +5689,8 @@ async fn drive_selfimprove(
         confirmed_proposal_id,
         approval_tx: tx,
         cancel: operation_cancel,
+        permissions: runtime.permission_engine_handle(),
+        trusted: runtime.trusted(),
     });
     let completed_reload = Cell::new(false);
     let mut io = TerminalIo {

@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Wire explicit `self-review`/`selfimprove` validation and evidence commands, and
+  separate content-bound patch promotion confirmations, through the common
+  service. Add `/selfimprove preflight`, `evidence` and `validate <reviewer>` with
+  a distinct host-access confirmation and cooperative cancellation. Production
+  patch callers use the new gate; legacy library API removal, publication
+  migration and recovery controls remain pending.
+
 - Add a staged common promotion service that holds the repository lock through
   source promotion and atomic loop-state persistence. Bind passing receipts to
   locally completed observations, retain per-run evidence and source snapshots,
