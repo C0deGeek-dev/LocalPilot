@@ -22,9 +22,10 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # A green run takes ~5 minutes warm; the cap turns a starved runner
-    # ("lost communication", no logs) into a fast, attributable failure.
-    timeout-minutes: 45
+    # Windows' full process-heavy suite takes over 40 minutes before the TUI
+    # and embedded workspace finish. Keep test/step deadlines separate from
+    # this whole-job budget; Linux and macOS retain their existing cap.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 45 }}
     strategy:
       fail-fast: false
       matrix:
@@ -399,7 +400,7 @@ jobs:
   windows-release-compiler:
     name: Windows release compiler (1.95.0)
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       RUSTUP_TOOLCHAIN: "1.95.0"
     steps:

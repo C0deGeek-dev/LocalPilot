@@ -732,6 +732,12 @@ invoked by those tests. Coverage includes a crash after writing Passed evidence
 but before journal completion: the stored receipt alone must never authorize a
 new run or promotion reservation.
 
+Windows CI jobs allow60 minutes for the complete workspace, embedded workspace
+and TUI sequence. The previous45-minute whole-job cap interrupted runs after
+all4033 workspace tests passed. This job budget does not change the five-minute
+individual test deadline, child-controller limits or proposal execution budgets;
+Linux/macOS retain their45-minute whole-job cap.
+
 Patch-generation tests also terminate subprocesses before promotion reservation,
 before Git, after Git, after the associated state write and after journal finish.
 These fixtures check the durable ref goal and unfinished-authority behavior.
