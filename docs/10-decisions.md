@@ -4,14 +4,14 @@ This file starts the decision log. Add new records at the top.
 
 ## ADR-0233: Separate Content-Bound Execution, Promotion And Publication Authority
 
-**Status:** proposed; interaction policy and final feature acceptance pending · **Date:** 2026-10-24.
+**Status:** accepted · **Date:** 2026-10-24.
 
 **Context.** Source approval bound only a branch name, and the same token type
 authorized unrelated outward drafts. Checks ran after source promotion. A gate
 confined to the orchestrator would leave the direct patch command outside it.
 Public Stage data and the unused gate helper never provided security type-state.
 
-**Proposed decision.** Keep the existing loop and post-promotion build, gauntlet,
+**Decision.** Keep the existing loop and post-promotion build, gauntlet,
 reload, health and rollback. Require static committed-base source/plan/toolchain
 review, then explicit `EvaluationToken` consent before proposed code runs. Use
 the existing permission-gated runner: consent answers matching Ask decisions,
@@ -45,9 +45,9 @@ Outward publication instead requires `OutwardApprovalToken`, bound to exact
 draft/argv, target and resolved host/account. It needs no patch-shaped evidence.
 Keep its common guard through the effect and durable Published event. Ambiguous
 authentication or created-object identity cannot finish an intent. Default-off
-target policy and draft-only behavior remain. The proposed interaction policy
+target policy and draft-only behavior remain. The accepted interaction policy
 requires passing evidence for every source promotion and provides no emergency
-bypass; final interaction acceptance and feature adoption remain pending.
+bypass.
 
 **Consequences and limits.** Replaces the shared token and amends the approval
 boundaries of ADR-0034/0053/0138/0151 while retaining ADR-0009's runner and

@@ -662,8 +662,7 @@ tests, network access or arbitrary filesystem/process effects. Cargo `--frozen`
 restricts Cargo's resolution/network use, not invoked code. No default model/GPU
 process belongs to this profile. CLI and chat patch approval now use separate
 execution and promotion authorities. The older library approval API is removed.
-Recovery controls require separate explicit inspection; final acceptance remains
-pending.
+Recovery controls require separate explicit inspection.
 
 For a persisted proposal, `self-review validate --id <proposal>` displays the
 execution review and stops. Running it requires `--approve-execution`, a human
@@ -718,7 +717,7 @@ launch. Its child search path excludes project directories and the inherited
 `GIT_EXEC_PATH` override is removed. A project-local executable cannot become the
 Git program merely by appearing first on PATH.
 
-The staged common promotion service verifies passing evidence against a locally
+The common promotion service verifies passing evidence against a locally
 completed evaluation journal entry. That entry binds the entire bounded receipt,
 including output, cleanup and termination observations; editing a receipt or
 relabeling a failed run cannot create passing authority. Generic journal recovery

@@ -13,7 +13,7 @@ is SemVer-stable; the configuration schema stability policy is in
   patch callers use the mandatory capability gate. Remove the older branch-name
   approval API and unused descriptive gate helper. Add explicit, review-bound
   recovery inspection and acknowledgement without replaying interrupted effects
-  or certifying validation. Final acceptance remains pending.
+  or certifying validation.
 
 - Serialize reset, proposal creation, build, reload and discard with validation
   and promotion. Journal exact application-state checkpoints for interrupted
@@ -23,7 +23,7 @@ is SemVer-stable; the configuration schema stability policy is in
   authority lock file instead of recreating its inode. Evidence displays compare
   complete receipts before labeling historical data currently verified.
 
-- Add a staged common promotion service that holds the repository lock through
+- Add a common promotion service that holds the repository lock through
   source promotion and atomic loop-state persistence. Bind passing receipts to
   locally completed observations, retain per-run evidence and source snapshots,
   and reject edited or relabeled receipts. Resolve static Git from an absolute

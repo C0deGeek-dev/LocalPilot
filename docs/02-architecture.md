@@ -565,7 +565,7 @@ The proposal Git helper independently suppresses implicit hook/signing/diff
 execution and refuses unsupported filter attributes before checkout/index
 effects. Those protections are wired into the existing proposal path. They do
 not isolate approved checks from the host. The execution/promotion gate adds
-separate consent and evidence requirements; final feature acceptance is pending.
+separate consent and evidence requirements.
 
 ### `localpilot-dist`
 
