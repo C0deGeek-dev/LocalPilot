@@ -13,6 +13,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use localpilot_patchgen::validation::RepositoryAuthority;
 use localpilot_patchgen::{propose, ChangeProvenance, PatchProposal, PromoteOutcome};
 use localpilot_selfdev::AutoReloadBreaker;
 use localpilot_selfreview::{review, Report, ReviewOptions};
@@ -63,6 +64,25 @@ pub trait SelfDevStage {
     /// # Errors
     /// [`StageError`] if the swap could not be started.
     fn reload_onto(&mut self, built: &BuildRecord, out: &mut dyn Write) -> Result<(), StageError>;
+
+    /// Release the host's repository guard only after a successor has started.
+    /// Adapters that spawn and then wait must override this method and call
+    /// `launched` before waiting. Successful Unix exec closes the repository's
+    /// close-on-exec guard handle and does not return. The default supports returning adapters.
+    ///
+    /// # Errors
+    /// [`StageError`] before launch retains the guard for state rollback; after
+    /// launch an error must not imply that no successor exists.
+    fn reload_with_handoff(
+        &mut self,
+        built: &BuildRecord,
+        out: &mut dyn Write,
+        launched: &mut dyn FnMut(),
+    ) -> Result<(), StageError> {
+        self.reload_onto(built, out)?;
+        launched();
+        Ok(())
+    }
 }
 
 /// The real self-dev stage: a thin adapter over `localpilot-selfdev` primitives.
@@ -107,6 +127,15 @@ impl SelfDevStage for SelfDevRunner {
     }
 
     fn reload_onto(&mut self, built: &BuildRecord, out: &mut dyn Write) -> Result<(), StageError> {
+        self.reload_with_handoff(built, out, &mut || {})
+    }
+
+    fn reload_with_handoff(
+        &mut self,
+        built: &BuildRecord,
+        out: &mut dyn Write,
+        launched: &mut dyn FnMut(),
+    ) -> Result<(), StageError> {
         let store = localpilot_selfdev::VersionStore::new(&self.selfdev_root);
         let stored = store
             .get(&built.label)
@@ -119,15 +148,25 @@ impl SelfDevStage for SelfDevRunner {
         match localpilot_selfdev::relaunch(&plan) {
             // Unix `exec` never returns on success; this arm is Windows, where the
             // successor was spawned and the parent must now exit to complete the swap.
-            Ok(mut child) => {
-                let status = child.wait().map_err(|error| {
-                    StageError(format!("waiting for the reloaded process: {error}"))
-                })?;
+            Ok(child) => {
+                let status = wait_after_handoff(child, launched)?;
                 std::process::exit(status.code().unwrap_or(0));
             }
             Err(error) => Err(StageError(format!("relaunch failed: {error}"))),
         }
     }
+}
+
+fn wait_after_handoff(
+    mut child: std::process::Child,
+    launched: &mut dyn FnMut(),
+) -> Result<std::process::ExitStatus, StageError> {
+    launched();
+    child.wait().map_err(|error| {
+        StageError(format!(
+            "successor launched; waiting for it failed: {error}"
+        ))
+    })
 }
 
 /// The persisted loop state — the resume record, written under
@@ -208,11 +247,16 @@ impl<S: SelfDevStage> Orchestrator<S> {
     /// [`LoopError::Io`] if a present record cannot be removed.
     pub fn reset(&self) -> Result<(), LoopError> {
         let path = self.state_path();
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(LoopError::Io { path, source }),
+        if !path.try_exists().map_err(|source| LoopError::Io {
+            path: path.clone(),
+            source,
+        })? {
+            return Ok(());
         }
+        let mut authority = RepositoryAuthority::open(&self.root)?;
+        let transaction = authority.try_transaction()?;
+        transaction.require_idle()?;
+        clear_loop_state(&self.root)
     }
 
     /// The read-only self-review that surfaces the [`Stage::Found`] candidates.
@@ -225,7 +269,8 @@ impl<S: SelfDevStage> Orchestrator<S> {
     /// **Found → Proposed.** Package `proposal` in an isolated worktree on `branch`
     /// (via `localpilot_patchgen::propose`), leave it on disk for review, and park
     /// the loop at [`Stage::Proposed`]. A fresh loop is required — a completed
-    /// (`Reloaded`) loop is cleared first; any other active loop is an error.
+    /// (`Reloaded`) loop is replaced only after the new proposal is persisted;
+    /// any other active loop is an error.
     ///
     /// # Errors
     /// [`LoopError::OutOfOrder`] if a loop is already mid-flight; [`LoopError::Patch`]
@@ -237,9 +282,12 @@ impl<S: SelfDevStage> Orchestrator<S> {
         proposal: &PatchProposal,
         provenance: ChangeProvenance,
     ) -> Result<Proposed, LoopError> {
+        let mut authority = RepositoryAuthority::open(&self.root)?;
+        let transaction = authority.try_transaction()?;
+        transaction.require_idle()?;
         match self.state()? {
             None => {}
-            Some(state) if state.stage == Stage::Reloaded => self.reset()?,
+            Some(state) if state.stage == Stage::Reloaded => {}
             Some(state) => {
                 return Err(LoopError::OutOfOrder {
                     actual: state.stage,
@@ -302,6 +350,10 @@ impl<S: SelfDevStage> Orchestrator<S> {
     /// [`LoopError::OutOfOrder`] if not at `Approved`; [`LoopError::Build`] if the
     /// breaker is tripped or the build/gauntlet fails.
     pub fn build(&mut self, out: &mut dyn Write) -> Result<BuildRecord, LoopError> {
+        self.require_stage(Stage::Approved, "build")?;
+        let mut authority = RepositoryAuthority::open(&self.root)?;
+        let transaction = authority.try_transaction()?;
+        transaction.require_idle()?;
         let mut state = self.require_stage(Stage::Approved, "build")?;
         let breaker = AutoReloadBreaker::new(&self.selfdev_root, AUTO_RELOAD_LIMIT);
         if breaker.is_tripped() {
@@ -338,6 +390,12 @@ impl<S: SelfDevStage> Orchestrator<S> {
     /// [`LoopError::OutOfOrder`] if not at `Built`; [`LoopError::Build`] if the
     /// breaker is tripped or the swap could not be started.
     pub fn reload(&mut self, out: &mut dyn Write) -> Result<(), LoopError> {
+        self.require_stage(Stage::Built, "reload")?;
+        let mut authority = RepositoryAuthority::open(&self.root)?;
+        let mut transaction = Some(authority.try_transaction()?);
+        if let Some(transaction) = &transaction {
+            transaction.require_idle()?;
+        }
         let mut state = self.require_stage(Stage::Built, "reload")?;
         let label = state.built_label.clone().ok_or(LoopError::NoActiveLoop {
             attempted: "reload",
@@ -353,16 +411,25 @@ impl<S: SelfDevStage> Orchestrator<S> {
         let built = BuildRecord { label };
         state.stage = Stage::Reloaded;
         self.write_state(&state)?;
-        match self.selfdev.reload_onto(&built, out) {
+        match self.selfdev.reload_with_handoff(&built, out, &mut || {
+            drop(transaction.take());
+        }) {
             Ok(()) => {
                 let _ = breaker.reset();
                 Ok(())
             }
             Err(error) => {
-                state.stage = Stage::Built;
-                let _ = self.write_state(&state);
                 let _ = breaker.record_attempt();
-                Err(LoopError::Build(error.0))
+                if transaction.is_some() {
+                    state.stage = Stage::Built;
+                    self.write_state(&state)?;
+                    Err(LoopError::Build(error.0))
+                } else {
+                    Err(LoopError::Build(format!(
+                        "{}; successor was launched: inspect it before another reload",
+                        error.0
+                    )))
+                }
             }
         }
     }
@@ -383,6 +450,15 @@ pub(crate) fn loop_state_path(root: &Path) -> PathBuf {
     root.join(".localpilot")
         .join("selfimprove")
         .join("state.json")
+}
+
+pub(crate) fn clear_loop_state(root: &Path) -> Result<(), LoopError> {
+    let path = loop_state_path(root);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(LoopError::Io { path, source }),
+    }
 }
 
 pub(crate) fn read_loop_state(root: &Path) -> Result<Option<LoopState>, LoopError> {
@@ -633,5 +709,221 @@ mod tests {
             )
         ));
         assert_eq!(orch.state().unwrap().unwrap().stage, Stage::Proposed);
+    }
+
+    fn seeded_stage(stage: Stage) -> LoopState {
+        LoopState {
+            stage,
+            proposal_id: Some("controlled".into()),
+            built_label: Some("fixture-build".into()),
+            reviewer: Some("fixture owner".into()),
+        }
+    }
+
+    #[test]
+    fn every_state_writer_refuses_a_competing_common_transaction() {
+        use localpilot_patchgen::validation::ValidationError;
+        let repo = init_repo();
+        let selfdev = tempfile::tempdir().unwrap();
+        let mut orch = Orchestrator::open(repo.path(), selfdev.path(), SpySelfDev::default());
+        orch.write_state(&seeded_stage(Stage::Proposed)).unwrap();
+        let mut authority = RepositoryAuthority::open(repo.path()).unwrap();
+        let _held = authority.try_transaction().unwrap();
+        assert!(matches!(
+            orch.reset(),
+            Err(LoopError::Validation(ValidationError::Busy))
+        ));
+        assert!(matches!(
+            orch.propose("blocked", &trivial_proposal(), provenance()),
+            Err(LoopError::Validation(ValidationError::Busy))
+        ));
+        for stage in [Stage::Approved, Stage::Built] {
+            let state = seeded_stage(stage);
+            orch.write_state(&state).unwrap(); // fixture setup, not a production writer
+            let result = if stage == Stage::Approved {
+                orch.build(&mut Vec::new()).map(|_| ())
+            } else {
+                orch.reload(&mut Vec::new())
+            };
+            assert!(matches!(
+                result,
+                Err(LoopError::Validation(ValidationError::Busy))
+            ));
+            assert_eq!(orch.state().unwrap().unwrap(), state);
+        }
+        assert!(orch.selfdev.built_paths.borrow().is_empty());
+    }
+
+    #[test]
+    fn pending_authority_blocks_reset_propose_build_and_reload() {
+        use localpilot_patchgen::validation::{OutwardApprovalToken, ValidationError};
+        let repo = init_repo();
+        let selfdev = tempfile::tempdir().unwrap();
+        let mut orch = Orchestrator::open(repo.path(), selfdev.path(), SpySelfDev::default());
+        orch.write_state(&seeded_stage(Stage::Proposed)).unwrap();
+        let mut authority = RepositoryAuthority::open(repo.path()).unwrap();
+        let mut tx = authority.try_transaction().unwrap();
+        let draft = localpilot_patchgen::OutwardDraft {
+            schema: localpilot_patchgen::OUTWARD_SCHEMA.into(),
+            id: "pending".into(),
+            kind: localpilot_patchgen::OutwardKind::Issue,
+            target_repo: "fixture/repo".into(),
+            title: "fixture".into(),
+            body: "fixture body".into(),
+            head_branch: None,
+        };
+        let token = OutwardApprovalToken::approve(
+            &tx.repository_identity(),
+            &draft,
+            "fixture-account",
+            "owner",
+            "controlled pending effect",
+        )
+        .unwrap();
+        tx.reserve_outward(token, &draft, "fixture-account")
+            .unwrap();
+        drop(tx);
+        assert!(matches!(
+            orch.reset(),
+            Err(LoopError::Validation(ValidationError::RecoveryRequired))
+        ));
+        assert!(matches!(
+            orch.propose("blocked", &trivial_proposal(), provenance()),
+            Err(LoopError::Validation(ValidationError::RecoveryRequired))
+        ));
+        for stage in [Stage::Approved, Stage::Built] {
+            let state = seeded_stage(stage);
+            orch.write_state(&state).unwrap();
+            let result = if stage == Stage::Approved {
+                orch.build(&mut Vec::new()).map(|_| ())
+            } else {
+                orch.reload(&mut Vec::new())
+            };
+            assert!(matches!(
+                result,
+                Err(LoopError::Validation(ValidationError::RecoveryRequired))
+            ));
+            assert_eq!(orch.state().unwrap().unwrap(), state);
+        }
+        assert!(orch.selfdev.built_paths.borrow().is_empty());
+    }
+
+    struct HandoffStage {
+        root: PathBuf,
+        after_launch: bool,
+    }
+    impl SelfDevStage for HandoffStage {
+        fn build_and_promote(
+            &mut self,
+            _: &Path,
+            _: &mut dyn Write,
+        ) -> Result<BuildRecord, StageError> {
+            unreachable!("reload-only fixture")
+        }
+        fn reload_onto(&mut self, _: &BuildRecord, _: &mut dyn Write) -> Result<(), StageError> {
+            unreachable!("handoff adapter required")
+        }
+        fn reload_with_handoff(
+            &mut self,
+            _: &BuildRecord,
+            _: &mut dyn Write,
+            launched: &mut dyn FnMut(),
+        ) -> Result<(), StageError> {
+            use localpilot_patchgen::validation::ValidationError;
+            let mut competing = RepositoryAuthority::open(&self.root).unwrap();
+            assert!(matches!(
+                competing.try_transaction(),
+                Err(ValidationError::Busy)
+            ));
+            assert_eq!(
+                read_loop_state(&self.root).unwrap().unwrap().stage,
+                Stage::Reloaded
+            );
+            if self.after_launch {
+                launched();
+                let _held = competing.try_transaction().unwrap();
+                Err(StageError("fixture: wait failed after launch".into()))
+            } else {
+                Err(StageError("fixture: launch failed".into()))
+            }
+        }
+    }
+
+    #[test]
+    fn reload_failure_rolls_back_only_when_no_successor_was_launched() {
+        for after_launch in [false, true] {
+            let repo = init_repo();
+            let selfdev = tempfile::tempdir().unwrap();
+            let mut orch = Orchestrator::open(
+                repo.path(),
+                selfdev.path(),
+                HandoffStage {
+                    root: repo.path().into(),
+                    after_launch,
+                },
+            );
+            orch.write_state(&seeded_stage(Stage::Built)).unwrap();
+            let error = orch.reload(&mut Vec::new()).unwrap_err();
+            assert_eq!(
+                orch.state().unwrap().unwrap().stage,
+                if after_launch {
+                    Stage::Reloaded
+                } else {
+                    Stage::Built
+                }
+            );
+            assert_eq!(
+                error.to_string().contains("successor was launched"),
+                after_launch
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for the reload handoff test"]
+    fn reload_handoff_worker() {
+        let root =
+            std::path::PathBuf::from(std::env::var_os("LOCALPILOT_TEST_HANDOFF_ROOT").unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let mut authority = RepositoryAuthority::open(&root).unwrap();
+            if let Ok(_held) = authority.try_transaction() {
+                std::fs::create_dir_all(root.join(".localpilot")).unwrap();
+                std::fs::write(
+                    root.join(".localpilot/handoff-observed"),
+                    "successor acquired the repository lock",
+                )
+                .unwrap();
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parent retained lock while waiting for successor"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn spawned_successor_can_acquire_the_lock_before_parent_wait_completes() {
+        let repo = init_repo();
+        let mut authority = RepositoryAuthority::open(repo.path()).unwrap();
+        let mut held = Some(authority.try_transaction().unwrap());
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "orchestrator::tests::reload_handoff_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("LOCALPILOT_TEST_HANDOFF_ROOT", repo.path())
+            .spawn()
+            .unwrap();
+        let status = wait_after_handoff(child, &mut || {
+            drop(held.take());
+        })
+        .unwrap();
+        assert!(status.success());
+        assert!(repo.path().join(".localpilot/handoff-observed").is_file());
     }
 }

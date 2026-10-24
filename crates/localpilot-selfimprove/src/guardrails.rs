@@ -147,6 +147,13 @@ mod tests {
     #[test]
     fn a_failed_build_drives_the_existing_circuit_breaker() {
         let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
         let selfdev = tempfile::tempdir().unwrap();
         seed_state(
             repo.path(),
@@ -194,14 +201,15 @@ mod tests {
         assert!(direct.contains("localpilot_selfimprove::promote_proposal("));
         assert!(!direct.contains(".promote("));
         assert_eq!(service.matches(".promote(").count(), 1);
-        let proof = service.find("transaction.prepare_promotion(").unwrap();
+        let proof = service.find(".prepare_promotion(").unwrap();
         let effect = service.find("patch.promote(").unwrap();
         let state = service[effect..].find("write_loop_state(").unwrap() + effect;
         let finish = service.find("pending.finish(").unwrap();
         assert!(proof < effect && effect < state && state < finish);
         let capability = shipped(CAPABILITY_SRC);
         assert!(capability.contains("validated: ValidatedProposal<'repo>"));
-        assert!(capability.contains("reserve_promotion("));
+        assert!(capability.contains("reserve_promotion_with_checkpoint("));
+        assert!(service.contains(".with_caller_checkpoint("));
         let execution = shipped(EXECUTION_SRC);
         assert_eq!(execution.matches("CheckRunner::new(").count(), 1);
         assert!(!execution.contains("Command::new("));

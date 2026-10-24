@@ -1,11 +1,11 @@
 //! Common locked promotion service for direct and orchestrated hosts.
 
-use crate::orchestrator::{read_loop_state, write_loop_state};
+use crate::orchestrator::{clear_loop_state, read_loop_state, write_loop_state};
 use crate::preflight::{preflight_in_transaction, PreflightReport};
 use crate::{LoopError, Stage};
 use localpilot_patchgen::validation::{
-    ContentDigest, PatchApprovalToken, RepositoryAuthority, RepositoryTransaction, ValidationError,
-    ValidationEvidence, ValidationState,
+    CallerCheckpoint, ContentDigest, PatchApprovalToken, RepositoryAuthority,
+    RepositoryTransaction, ValidationError, ValidationEvidence, ValidationState,
 };
 use localpilot_patchgen::{PromoteOutcome, ProposedPatch};
 use std::path::Path;
@@ -105,12 +105,52 @@ pub fn promote_proposal(
     promote_for_loop(root, id, review, token, false)
 }
 
+/// Remove a proposal under the common guard and clear a matching unpromoted
+/// loop. Completed loop stages and historical run receipts are preserved.
+///
+/// # Errors
+/// Busy/pending authority, missing proposal, removal or state cleanup failure.
+pub fn discard_proposal(root: &Path, id: &str) -> Result<(), LoopError> {
+    let mut authority = RepositoryAuthority::open(root)?;
+    let transaction = authority.try_transaction()?;
+    transaction.require_idle()?;
+    let state = read_loop_state(root)?;
+    ProposedPatch::reopen(root, id)?.discard_in_transaction(&transaction)?;
+    if state.as_ref().is_some_and(|state| {
+        state.stage == Stage::Proposed && state.proposal_id.as_deref() == Some(id)
+    }) {
+        clear_loop_state(root)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn promote_for_loop(
     root: &Path,
     id: &str,
     review: &PromotionReview,
     token: PatchApprovalToken,
     require_loop: bool,
+) -> Result<PromoteOutcome, LoopError> {
+    promote_at_boundaries(root, id, review, token, require_loop, &mut |_| {})
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromotionBoundary {
+    BeforeSource,
+    AfterSource,
+    AfterState,
+    AfterFinish,
+}
+
+// Private observation seam: production supplies no behavior. Tests terminate a
+// real process at these boundaries; no runtime flag or environment hook exists.
+fn promote_at_boundaries(
+    root: &Path,
+    id: &str,
+    review: &PromotionReview,
+    token: PatchApprovalToken,
+    require_loop: bool,
+    checkpoint: &mut impl FnMut(PromotionBoundary),
 ) -> Result<PromoteOutcome, LoopError> {
     let mut authority = RepositoryAuthority::open(root)?;
     let transaction = authority.try_transaction()?;
@@ -141,14 +181,38 @@ pub(crate) fn promote_for_loop(
     if current != *review || current.digest()? != review.digest()? {
         return Err(ValidationError::Stale.into());
     }
-    let proof = transaction.prepare_promotion(&patch, &current.preflight.plan, token)?;
+    let caller_checkpoint = if let Some(before) = state.as_ref().filter(|_| matching) {
+        let mut after = before.clone();
+        after.stage = Stage::Approved;
+        after.reviewer = Some(token.reviewer());
+        CallerCheckpoint::Required {
+            before: loop_state_digest(before)?,
+            after: loop_state_digest(&after)?,
+        }
+    } else {
+        CallerCheckpoint::None
+    };
+    let proof = transaction
+        .prepare_promotion(&patch, &current.preflight.plan, token)?
+        .with_caller_checkpoint(caller_checkpoint);
+    checkpoint(PromotionBoundary::BeforeSource);
     let pending = patch.promote(proof)?;
+    checkpoint(PromotionBoundary::AfterSource);
     if let Some(state) = state.as_mut().filter(|_| matching) {
         state.stage = Stage::Approved;
         state.reviewer = Some(pending.outcome().reviewer.clone());
         write_loop_state(root, state)?;
     }
-    Ok(pending.finish()?)
+    checkpoint(PromotionBoundary::AfterState);
+    let outcome = pending.finish()?;
+    checkpoint(PromotionBoundary::AfterFinish);
+    Ok(outcome)
+}
+
+pub(crate) fn loop_state_digest(state: &crate::LoopState) -> Result<ContentDigest, LoopError> {
+    let json = serde_json::to_vec(state)
+        .map_err(|_| LoopError::Serde("loop state identity cannot be encoded".into()))?;
+    Ok(ContentDigest::for_bytes(&json))
 }
 
 #[cfg(test)]
@@ -302,5 +366,325 @@ mod tests {
             .exists());
         let mut authority = RepositoryAuthority::open(root.path()).unwrap();
         assert_eq!(authority.try_transaction().unwrap().events().count(), 0);
+    }
+
+    struct Worker(std::process::Child);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+    impl Worker {
+        fn wait(&mut self, deadline: std::time::Instant) -> std::process::ExitStatus {
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    return status;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "common promotion worker exceeded its deadline"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+    fn worker(root: &Path, id: &str, mode: &str) -> Worker {
+        Worker(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "promotion::tests::common_promotion_worker",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("LOCALPILOT_TEST_COMMON_ROOT", root)
+                .env("LOCALPILOT_TEST_COMMON_ID", id)
+                .env("LOCALPILOT_TEST_COMMON_MODE", mode)
+                .spawn()
+                .unwrap(),
+        )
+    }
+    fn wait_marker(path: &Path, deadline: std::time::Instant) {
+        while !path.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "common promotion worker did not reach its boundary"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    fn seed_proposed(root: &Path, id: &str) {
+        write_loop_state(
+            root,
+            &LoopState {
+                stage: Stage::Proposed,
+                proposal_id: Some(id.into()),
+                built_label: None,
+                reviewer: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "actual subprocess helper for common promotion boundaries"]
+    fn common_promotion_worker() {
+        let root =
+            std::path::PathBuf::from(std::env::var_os("LOCALPILOT_TEST_COMMON_ROOT").unwrap());
+        let id = std::env::var("LOCALPILOT_TEST_COMMON_ID").unwrap();
+        let mode = std::env::var("LOCALPILOT_TEST_COMMON_MODE").unwrap();
+        let review = promotion_review(&root, &id).unwrap();
+        let token = consent(&review);
+        if mode == "reserved" {
+            let mut authority = RepositoryAuthority::open(&root).unwrap();
+            let mut tx = authority.try_transaction().unwrap();
+            let before = read_loop_state(&root).unwrap().unwrap();
+            let mut after = before.clone();
+            after.stage = Stage::Approved;
+            after.reviewer = Some(token.reviewer());
+            tx.reserve_promotion_with_checkpoint(
+                token,
+                &review.preflight.proposal.identity,
+                &review.preflight.plan,
+                &review.evidence,
+                CallerCheckpoint::Required {
+                    before: loop_state_digest(&before).unwrap(),
+                    after: loop_state_digest(&after).unwrap(),
+                },
+            )
+            .unwrap();
+            std::process::exit(77);
+        }
+        if mode == "direct" || mode == "orchestrated" {
+            std::fs::write(
+                root.join(format!(".localpilot/{mode}.ready")),
+                "review prepared",
+            )
+            .unwrap();
+            wait_marker(
+                &root.join(".localpilot/promote.go"),
+                std::time::Instant::now() + std::time::Duration::from_secs(120),
+            );
+            let result = promote_for_loop(&root, &id, &review, token, mode == "orchestrated");
+            let result = match result {
+                Ok(_) => "promoted",
+                Err(LoopError::Validation(ValidationError::Busy | ValidationError::Stale))
+                | Err(LoopError::OutOfOrder { .. }) => "refused",
+                Err(error) => panic!("unexpected common promotion outcome: {error}"),
+            };
+            std::fs::write(root.join(format!(".localpilot/{mode}.result")), result).unwrap();
+            return;
+        }
+        let boundary = match mode.as_str() {
+            "before_source" => PromotionBoundary::BeforeSource,
+            "after_source" => PromotionBoundary::AfterSource,
+            "after_state" => PromotionBoundary::AfterState,
+            _ => panic!("unknown controlled common promotion boundary"),
+        };
+        promote_at_boundaries(&root, &id, &review, token, true, &mut |observed| {
+            if observed == boundary {
+                std::process::exit(77);
+            }
+        })
+        .unwrap();
+        panic!("controlled common promotion boundary was not reached");
+    }
+
+    async fn common_crash_recovery(mode: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+        let (root, patch, base) = crate::execution::tests::fixture("#[test] fn works() {}\n");
+        assert_eq!(
+            crate::execution::tests::run(
+                root.path(),
+                &patch,
+                Profile::Default,
+                CancelSignal::new()
+            )
+            .await
+            .state,
+            ValidationState::Passed
+        );
+        seed_proposed(root.path(), patch.id());
+        let mut child = worker(root.path(), patch.id(), mode);
+        assert_eq!(child.wait(deadline).code(), Some(77));
+        let events = crate::pending_authority(root.path()).unwrap();
+        if mode == "before_source" {
+            assert!(events.is_empty());
+            assert_eq!(
+                read_loop_state(root.path()).unwrap().unwrap().stage,
+                Stage::Proposed
+            );
+            assert_eq!(
+                promotion_review(root.path(), patch.id())
+                    .unwrap()
+                    .preflight
+                    .proposal
+                    .identity
+                    .base_commit,
+                base
+            );
+            return;
+        }
+        assert_eq!(events.len(), 1);
+        let nonce = events[0].reservation.nonce;
+        let review = crate::recovery_review(root.path(), nonce).unwrap();
+        assert!(matches!(
+            review.event.promotion.as_ref().unwrap().caller_checkpoint,
+            CallerCheckpoint::Required { .. }
+        ));
+        assert_eq!(
+            review.loop_state.as_ref().unwrap().stage,
+            if mode == "after_state" {
+                Stage::Approved
+            } else {
+                Stage::Proposed
+            }
+        );
+        assert!(crate::acknowledge_recovery(root.path(), &review, "owner", "").is_err());
+        let mut stale = review.clone();
+        stale.event.reservation.intent.push_str("changed review");
+        assert!(matches!(
+            crate::acknowledge_recovery(
+                root.path(),
+                &stale,
+                "owner",
+                "inspected exact source and state"
+            ),
+            Err(LoopError::Validation(ValidationError::Stale))
+        ));
+
+        // Even a freshly displayed review cannot retire inconsistent caller
+        // state, missing state or a dirty source tree.
+        let original = read_loop_state(root.path()).unwrap().unwrap();
+        let mut changed = original.clone();
+        changed.built_label = Some("unexpected-state".into());
+        write_loop_state(root.path(), &changed).unwrap();
+        let bad = crate::recovery_review(root.path(), nonce).unwrap();
+        assert!(
+            crate::acknowledge_recovery(root.path(), &bad, "owner", "inspected changed state")
+                .is_err()
+        );
+        crate::orchestrator::clear_loop_state(root.path()).unwrap();
+        let missing = crate::recovery_review(root.path(), nonce).unwrap();
+        assert!(crate::acknowledge_recovery(
+            root.path(),
+            &missing,
+            "owner",
+            "inspected missing state"
+        )
+        .is_err());
+        write_loop_state(root.path(), &original).unwrap();
+        let dirty = root.path().join("recovery-untracked-control");
+        std::fs::write(&dirty, "must not accept dirty main").unwrap();
+        let bad = crate::recovery_review(root.path(), nonce).unwrap();
+        assert!(
+            crate::acknowledge_recovery(root.path(), &bad, "owner", "inspected dirty source")
+                .is_err()
+        );
+        std::fs::remove_file(dirty).unwrap();
+        let current = crate::recovery_review(root.path(), nonce).unwrap();
+        crate::acknowledge_recovery(
+            root.path(),
+            &current,
+            "owner",
+            "inspected processes and exact journaled source/state; no replay",
+        )
+        .unwrap();
+        assert!(crate::pending_authority(root.path()).unwrap().is_empty());
+        assert_eq!(
+            read_loop_state(root.path()).unwrap().unwrap().stage,
+            if mode == "reserved" {
+                Stage::Proposed
+            } else {
+                Stage::Approved
+            }
+        );
+        assert!(matches!(
+            crate::acknowledge_recovery(root.path(), &current, "owner", "repeat"),
+            Err(LoopError::Validation(ValidationError::Consumed))
+        ));
+    }
+
+    #[tokio::test]
+    async fn common_crash_before_source_keeps_the_validated_loop_unpromoted() {
+        common_crash_recovery("before_source").await;
+    }
+    #[tokio::test]
+    async fn common_reserved_intent_recovers_without_replaying_source_or_advancing_state() {
+        common_crash_recovery("reserved").await;
+    }
+    #[tokio::test]
+    async fn common_crash_after_source_reconciles_only_the_exact_journaled_state() {
+        common_crash_recovery("after_source").await;
+    }
+    #[tokio::test]
+    async fn common_crash_after_state_retires_the_intent_without_a_second_source_effect() {
+        common_crash_recovery("after_state").await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_direct_and_orchestrated_processes_cannot_both_promote() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+        let (root, patch, _) = crate::execution::tests::fixture("#[test] fn works() {}\n");
+        assert_eq!(
+            crate::execution::tests::run(
+                root.path(),
+                &patch,
+                Profile::Default,
+                CancelSignal::new()
+            )
+            .await
+            .state,
+            ValidationState::Passed
+        );
+        seed_proposed(root.path(), patch.id());
+        let mut direct = worker(root.path(), patch.id(), "direct");
+        wait_marker(&root.path().join(".localpilot/direct.ready"), deadline);
+        let mut orchestrated = worker(root.path(), patch.id(), "orchestrated");
+        wait_marker(
+            &root.path().join(".localpilot/orchestrated.ready"),
+            deadline,
+        );
+        std::fs::write(
+            root.path().join(".localpilot/promote.go"),
+            "two independently confirmed attempts",
+        )
+        .unwrap();
+        assert!(direct.wait(deadline).success());
+        assert!(orchestrated.wait(deadline).success());
+        let mut outcomes = [
+            std::fs::read_to_string(root.path().join(".localpilot/direct.result")).unwrap(),
+            std::fs::read_to_string(root.path().join(".localpilot/orchestrated.result")).unwrap(),
+        ];
+        outcomes.sort();
+        assert_eq!(outcomes, ["promoted", "refused"]);
+        assert_eq!(
+            read_loop_state(root.path()).unwrap().unwrap().stage,
+            Stage::Approved
+        );
+        let mut authority = RepositoryAuthority::open(root.path()).unwrap();
+        let tx = authority.try_transaction().unwrap();
+        assert_eq!(tx.events().count(), 2);
+        assert!(tx.events().all(|event| event.completed));
+    }
+
+    #[test]
+    fn discard_obeys_the_common_guard_and_clears_only_a_matching_unpromoted_loop() {
+        let (root, patch, _) = crate::execution::tests::fixture("#[test] fn works() {}\n");
+        seed_proposed(root.path(), patch.id());
+        let mut authority = RepositoryAuthority::open(root.path()).unwrap();
+        let held = authority.try_transaction().unwrap();
+        assert!(matches!(
+            discard_proposal(root.path(), patch.id()),
+            Err(LoopError::Validation(ValidationError::Busy))
+        ));
+        assert!(patch.worktree_path().is_dir());
+        drop(held);
+        discard_proposal(root.path(), patch.id()).unwrap();
+        assert!(!patch.worktree_path().exists());
+        assert!(read_loop_state(root.path()).unwrap().is_none());
     }
 }

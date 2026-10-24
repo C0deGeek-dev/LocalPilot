@@ -11,8 +11,17 @@ is SemVer-stable; the configuration schema stability policy is in
   service. Add `/selfimprove preflight`, `evidence` and `validate <reviewer>` with
   a distinct host-access confirmation and cooperative cancellation. Production
   patch callers use the mandatory capability gate. Remove the older branch-name
-  approval API and unused descriptive gate helper. Full recovery controls and
-  final acceptance remain pending.
+  approval API and unused descriptive gate helper. Add explicit, review-bound
+  recovery inspection and acknowledgement without replaying interrupted effects
+  or certifying validation. Final acceptance remains pending.
+
+- Serialize reset, proposal creation, build, reload and discard with validation
+  and promotion. Journal exact application-state checkpoints for interrupted
+  promotions; reconcile only proven transitions after explicit inspection.
+  Release the reload guard after a successful Windows child launch and before
+  waiting; roll back state only when launch has not occurred. Refuse a lost
+  authority lock file instead of recreating its inode. Evidence displays compare
+  complete receipts before labeling historical data currently verified.
 
 - Add a staged common promotion service that holds the repository lock through
   source promotion and atomic loop-state persistence. Bind passing receipts to

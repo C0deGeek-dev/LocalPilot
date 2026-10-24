@@ -57,6 +57,9 @@ mod outward_cmd;
 mod pair_cmd;
 #[cfg(feature = "tui")]
 mod pair_run;
+#[cfg(all(test, feature = "tui"))]
+#[path = "../tests/support/proposal.rs"]
+mod proposal_fixture;
 mod proposal_validation;
 mod propose_patch;
 #[cfg(feature = "tui")]
@@ -758,6 +761,8 @@ enum SelfdevCommand {
 
 #[derive(Debug, Subcommand)]
 enum SelfImproveCommand {
+    /// Inspect or explicitly acknowledge unfinished repository authority.
+    Recovery(proposal_validation::RecoveryArgs),
     /// Show the current loop state: which stage, what is pending, and whether the
     /// gate is awaiting a human approval token.
     Status,
@@ -2064,6 +2069,9 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             let cwd = std::env::current_dir()?;
             let mut stdout = io::stdout().lock();
             match command {
+                SelfImproveCommand::Recovery(args) => {
+                    proposal_validation::recovery(&cwd, &args, &mut stdout)?
+                }
                 SelfImproveCommand::Status => {
                     selfimprove_cmd::run_status(&cwd, &mut stdout)?;
                 }

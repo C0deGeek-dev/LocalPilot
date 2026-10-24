@@ -662,7 +662,8 @@ tests, network access or arbitrary filesystem/process effects. Cargo `--frozen`
 restricts Cargo's resolution/network use, not invoked code. No default model/GPU
 process belongs to this profile. CLI and chat patch approval now use separate
 execution and promotion authorities. The older library approval API is removed.
-Recovery controls and final acceptance remain staged work.
+Recovery controls require separate explicit inspection; final acceptance remains
+pending.
 
 For a persisted proposal, `self-review validate --id <proposal>` displays the
 execution review and stops. Running it requires `--approve-execution`, a human
@@ -682,6 +683,10 @@ and waits for cleanup evidence. `/selfimprove approve <reviewer>` separately
 displays passing observations before promotion confirmation. Neither `next` nor
 a bypass permission profile supplies these confirmations. CLI Ctrl+C cancels
 an active validation run. A retry always needs fresh execution consent.
+
+In chat, incognito permits only `/selfimprove status`. Other proposal operations,
+including previews and evidence/recovery inspection, can persist authority
+bookkeeping and retain the existing persistence restriction.
 
 The library execution coordinator consumes separate evaluation consent before
 calling the existing permission-gated runner. It passes only the displayed
@@ -726,6 +731,36 @@ production patch approval callers use this service, and the only public source
 promotion API requires its validated capability. Publication uses a distinct
 pending owner and never accepts patch consent.
 
+All loop-state writers acquire the same common-repository transaction: reset,
+proposal creation, build, reload and discard refuse live or unfinished authority.
+Discard clears only its matching Proposed state and retains historical receipts.
+The lock file is stable: a missing file in an initialized authority store is an
+error, never a reason to create a new lock inode. Old processes that do not use
+this protocol must be stopped before adoption; mixed writers are unsupported.
+
+`selfimprove recovery` (also `self-review recovery`) lists unfinished intents.
+Add `--nonce <uuid>` to inspect the exact event and current state. After inspecting
+remaining processes, host effects and any remote publication, acknowledge with
+`--acknowledge-unknown-effects --reviewer <you> --note <inspection> --review
+<displayed-digest>` and the same nonce. Chat uses `/selfimprove recovery [uuid]`
+and `/selfimprove recover <uuid> <reviewer> -- <inspection-note>` with a dedicated
+confirmation. Changed inspection data requires a new review. Acknowledgement
+retires that intent; it never reruns checks, promotes source, publishes or
+certifies stored validation. Host inspection is a human assertion, not proof of
+containment or cleanup supplied by this metadata operation.
+
+Promotion recovery additionally requires a clean target on the recorded branch,
+with its ref and HEAD exactly at the journaled old or new commit. The intent
+records either no matching application state or the exact before/after logical
+state hashes. Recovery can complete only that matching Approved checkpoint after
+the source is already at the new commit. Missing, corrupt, changed or unproven
+application state, divergent source and older intents without this proof remain
+blocked for manual investigation. It never reconstructs an approval from Stage
+data. Evaluation recovery cannot turn an interrupted Passed receipt into locally
+completed validation; a new execution still needs fresh consent. Historical
+evidence is labeled currently verified only when the complete receipt matches
+the current verified observations, not merely its run UUID.
+
 The self-improvement loop's write half (ADR-0034) is built so the human gate is
 structural, not a convention:
 
@@ -768,7 +803,9 @@ structural, not a convention:
 - **Reload happens outside terminal modes.** A Built→Reloaded action requires a
   separate confirmation, asks the interactive host to exit, restores the
   alternate-screen state, and only then calls the existing self-dev reload.
-  A failed process swap rolls persisted state back to Built as before.
+  A failed launch rolls persisted state back to Built while retaining the common
+  guard. On Windows, successful launch releases the guard before waiting for the
+  child. An error after that handoff does not overwrite the successor's state.
 
 ## Outward Draft Emission
 

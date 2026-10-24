@@ -52,7 +52,7 @@ pub(crate) fn pending_id(root: &Path) -> anyhow::Result<String> {
 
 #[cfg(feature = "tui")]
 #[derive(Clone)]
-pub(crate) struct ConfirmedProposal {
+pub(crate) struct ConfirmedReview {
     pub(crate) id: String,
     pub(crate) review: String,
 }
@@ -62,11 +62,11 @@ pub(crate) struct ConfirmedProposal {
 pub(crate) fn render_promotion_review(
     root: &Path,
     out: &mut dyn Write,
-) -> anyhow::Result<ConfirmedProposal> {
+) -> anyhow::Result<ConfirmedReview> {
     let id = pending_id(root)?;
     let review = localpilot_selfimprove::promotion_review(root, &id)?;
     write!(out, "{}", review.render())?;
-    Ok(ConfirmedProposal {
+    Ok(ConfirmedReview {
         id,
         review: review.digest()?.as_str().to_owned(),
     })
@@ -76,12 +76,29 @@ pub(crate) fn render_promotion_review(
 pub(crate) fn render_execution_review(
     root: &Path,
     out: &mut dyn Write,
-) -> anyhow::Result<ConfirmedProposal> {
+) -> anyhow::Result<ConfirmedReview> {
     let id = pending_id(root)?;
     let review = localpilot_selfimprove::proposal_preflight(root, &id)?;
     write!(out, "{}", review.render())?;
-    Ok(ConfirmedProposal {
+    Ok(ConfirmedReview {
         id,
+        review: review.digest()?.as_str().to_owned(),
+    })
+}
+
+#[cfg(feature = "tui")]
+pub(crate) fn render_recovery_review(
+    root: &Path,
+    nonce: &str,
+    out: &mut dyn Write,
+) -> anyhow::Result<ConfirmedReview> {
+    let nonce = nonce
+        .parse()
+        .map_err(|_| anyhow!("recover requires a valid intent UUID"))?;
+    let review = localpilot_selfimprove::recovery_review(root, nonce)?;
+    write!(out, "{}", review.render()?)?;
+    Ok(ConfirmedReview {
+        id: nonce.to_string(),
         review: review.digest()?.as_str().to_owned(),
     })
 }
@@ -94,6 +111,7 @@ pub(crate) fn render_execution_review(
 pub(crate) enum InteractiveStep {
     Read,
     Validate,
+    Recover,
     Propose,
     Gate,
     Approve,
@@ -117,6 +135,12 @@ pub(crate) fn interactive_step(
     repo_root: &Path,
     action: &SelfImproveAction,
 ) -> anyhow::Result<InteractiveStep> {
+    if matches!(action, SelfImproveAction::Recovery { .. }) {
+        return Ok(InteractiveStep::Read);
+    }
+    if matches!(action, SelfImproveAction::Recover { .. }) {
+        return Ok(InteractiveStep::Recover);
+    }
     let stage = open_loop(repo_root)?.state()?.map(|state| state.stage);
     Ok(interactive_step_for(stage, action))
 }
@@ -127,6 +151,8 @@ fn interactive_step_for(stage: Option<Stage>, action: &SelfImproveAction) -> Int
         SelfImproveAction::Status | SelfImproveAction::Preflight | SelfImproveAction::Evidence => {
             InteractiveStep::Read
         }
+        SelfImproveAction::Recovery { .. } => InteractiveStep::Read,
+        SelfImproveAction::Recover { .. } => InteractiveStep::Recover,
         SelfImproveAction::Validate { .. } => InteractiveStep::Validate,
         SelfImproveAction::Reset => InteractiveStep::Reset,
         SelfImproveAction::Approve { .. } => InteractiveStep::Approve,
@@ -183,7 +209,7 @@ pub fn run_status(repo_root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
                 )?;
                 if let Ok(patch) = ProposedPatch::reopen(repo_root, id) {
                     if let Some(receipt) = &patch.provenance().validation {
-                        writeln!(out, "  Recorded validation: {:?}; run {}. `evidence` verifies whether it is still current.", receipt.resumed_state(), receipt.run_id)?;
+                        writeln!(out, "  Recorded validation: {:?}; run {}. Interrupted runs need recovery; `evidence` checks current eligibility.", receipt.state, receipt.run_id)?;
                     } else {
                         writeln!(out, "  Validation: NotRun; approval cannot substitute for execution evidence.")?;
                     }
@@ -374,7 +400,7 @@ pub(crate) async fn run_interactive(
     repo_root: &Path,
     action: &SelfImproveAction,
     expected_step: InteractiveStep,
-    confirmed_proposal_id: Option<&ConfirmedProposal>,
+    confirmed_review: Option<&ConfirmedReview>,
     model: &str,
     provider: &str,
     out: &mut dyn Write,
@@ -386,6 +412,26 @@ pub(crate) async fn run_interactive(
         ));
     }
     match action {
+        SelfImproveAction::Recovery { nonce } => crate::proposal_validation::recovery(
+            repo_root,
+            &crate::proposal_validation::RecoveryArgs {
+                nonce: nonce
+                    .as_deref()
+                    .map(str::parse)
+                    .transpose()
+                    .map_err(|_| anyhow!("recovery requires a valid intent UUID"))?,
+                reviewer: None,
+                acknowledge_unknown_effects: false,
+                review: None,
+                note: None,
+            },
+            out,
+        )?,
+        SelfImproveAction::Recover { .. } => {
+            return Err(anyhow!(
+                "recovery requires the host's separately confirmed inspection"
+            ))
+        }
         SelfImproveAction::Status => run_interactive_status(repo_root, out).await?,
         SelfImproveAction::Preflight => {
             crate::proposal_validation::preflight(repo_root, &pending_id(repo_root)?, out)?
@@ -400,7 +446,7 @@ pub(crate) async fn run_interactive(
         }
         SelfImproveAction::Reset => run_reset(repo_root, out)?,
         SelfImproveAction::Approve { reviewer } => {
-            let confirmed = confirmed_proposal_id.ok_or_else(|| {
+            let confirmed = confirmed_review.ok_or_else(|| {
                 anyhow!("a passing proposal review must be displayed before approval")
             })?;
             if pending_id(repo_root)? != confirmed.id {

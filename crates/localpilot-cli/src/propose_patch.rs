@@ -18,7 +18,7 @@ use localpilot_config::{CliOverrides, ConfigPaths};
 use localpilot_core::{Message, Role};
 use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_patchgen::validation::PatchApprovalToken;
-use localpilot_patchgen::{propose, ChangeProvenance, PatchProposal, ProposedEdit, ProposedPatch};
+use localpilot_patchgen::{propose, ChangeProvenance, PatchProposal, ProposedEdit};
 use localpilot_selfreview::{review, Finding, ReviewOptions};
 use serde::Deserialize;
 
@@ -27,6 +27,8 @@ use crate::outward_cmd;
 /// The `self-review` write-half subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ProposePatchCommand {
+    /// Inspect or explicitly acknowledge unfinished repository authority.
+    Recovery(crate::proposal_validation::RecoveryArgs),
     /// Inspect a persisted proposal and its committed-base validation plan.
     /// Runs no proposed code and issues no execution or promotion authority.
     Preflight {
@@ -343,6 +345,9 @@ pub(crate) fn proposal_branch(finding_rank: usize) -> String {
 pub async fn dispatch(cmd: ProposePatchCommand, out: &mut dyn Write) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     match cmd {
+        ProposePatchCommand::Recovery(args) => {
+            crate::proposal_validation::recovery(&cwd, &args, out)
+        }
         ProposePatchCommand::Preflight { id } => {
             crate::proposal_validation::preflight(&cwd, &id, out)
         }
@@ -523,8 +528,8 @@ fn run_promote(
 }
 
 fn run_discard(repo_root: &Path, id: &str, out: &mut dyn Write) -> anyhow::Result<()> {
-    let patch = ProposedPatch::reopen(repo_root, id).context("reopening the proposed patch")?;
-    patch.discard().context("discarding the proposed patch")?;
+    localpilot_selfimprove::discard_proposal(repo_root, id)
+        .context("discarding the proposed patch")?;
     writeln!(out, "Discarded `{id}` (worktree and branch removed).")?;
     Ok(())
 }

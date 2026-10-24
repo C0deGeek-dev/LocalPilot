@@ -59,6 +59,26 @@ pub struct PromotionIntent {
     pub proposed_commit: String,
     /// Locally completed validation that qualified the proposal.
     pub validation_run: uuid::Uuid,
+    /// Caller metadata expectation, recorded before the source effect.
+    #[serde(default)]
+    pub caller_checkpoint: CallerCheckpoint,
+}
+
+/// Opaque caller-state digests. The owning application interprets its state;
+/// patch generation only journals whether a checkpoint was required.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CallerCheckpoint {
+    /// Historical or standalone library caller without a declared state contract.
+    #[default]
+    Unspecified,
+    /// The host observed no matching application state to update.
+    None,
+    /// The exact canonical logical state before and after the source effect.
+    Required {
+        before: ContentDigest,
+        after: ContentDigest,
+    },
 }
 
 /// Publication goal retained before an external effect. The reservation's binding
@@ -139,10 +159,7 @@ impl RepositoryAuthority {
     /// Invalid Git roots, non-UTF8 locations, filesystem failure or symlinked
     /// authority files. Missing state in an existing store requires recovery.
     pub fn open(repo_root: &Path) -> Result<Self, ValidationError> {
-        let common = crate::git::git(repo_root, &["rev-parse", "--git-common-dir"])
-            .map_err(|e| ValidationError::Invalid(e.to_string()))?;
-        let common = fs::canonicalize(repo_root.join(common.trim()))
-            .map_err(|source| io(repo_root, source))?;
+        let common = common_directory(repo_root)?;
         let common_dir = common
             .to_str()
             .ok_or_else(|| ValidationError::Invalid("non-UTF8 Git common directory".into()))?
@@ -161,7 +178,7 @@ impl RepositoryAuthority {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create_new(initialize)
             .truncate(false)
             .open(&lock_path)
             .map_err(|source| io(&lock_path, source))?;
@@ -244,6 +261,18 @@ pub struct RepositoryTransaction<'a> {
 }
 
 impl RepositoryTransaction<'_> {
+    /// Check that a resource belongs to this locked Git common directory.
+    /// Linked worktrees share an owner; a different repository cannot borrow it.
+    ///
+    /// # Errors
+    /// Unavailable repository metadata or a different authority owner.
+    pub fn check_root(&self, root: &Path) -> Result<(), ValidationError> {
+        let common = common_directory(root)?;
+        if common.to_str() != Some(self.journal.common_dir.as_str()) {
+            return Err(ValidationError::Stale);
+        }
+        Ok(())
+    }
     /// Recheck the consumed run's private host configuration/environment without
     /// exposing values or comparison digests in public evidence.
     ///
@@ -360,6 +389,27 @@ impl RepositoryTransaction<'_> {
         plan: &ValidationPlanIdentity,
         receipt: &ValidationEvidence,
     ) -> Result<uuid::Uuid, ValidationError> {
+        self.reserve_promotion_with_checkpoint(
+            token,
+            proposal,
+            plan,
+            receipt,
+            CallerCheckpoint::Unspecified,
+        )
+    }
+
+    /// Reserve the exact source effect and the owning caller's state checkpoint.
+    ///
+    /// # Errors
+    /// Same current identity/consumption requirements as [`Self::reserve_promotion`].
+    pub fn reserve_promotion_with_checkpoint(
+        &mut self,
+        token: PatchApprovalToken,
+        proposal: &ProposalIdentity,
+        plan: &ValidationPlanIdentity,
+        receipt: &ValidationEvidence,
+        caller_checkpoint: CallerCheckpoint,
+    ) -> Result<uuid::Uuid, ValidationError> {
         self.check_repository(proposal)?;
         let reservation = token.reservation(proposal, plan, receipt)?;
         self.verify_completed_evaluation(proposal, plan, receipt)?;
@@ -372,6 +422,7 @@ impl RepositoryTransaction<'_> {
                 base_commit: proposal.base_commit.clone(),
                 proposed_commit: proposal.proposed_commit.clone(),
                 validation_run: receipt.run_id,
+                caller_checkpoint,
             }),
             None,
         )
@@ -662,11 +713,35 @@ fn regular_directory(path: &Path) -> Result<(), ValidationError> {
     Ok(())
 }
 
+fn common_directory(root: &Path) -> Result<PathBuf, ValidationError> {
+    let common = crate::git::git(root, &["rev-parse", "--git-common-dir"])
+        .map_err(|error| ValidationError::Invalid(error.to_string()))?;
+    fs::canonicalize(root.join(common.trim())).map_err(|source| io(root, source))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::validation::tests::{fixture, git};
+
+    #[test]
+    fn a_missing_lock_file_is_not_recreated_in_an_existing_authority_store() {
+        let repo = repository();
+        let mut authority = RepositoryAuthority::open(repo.path()).unwrap();
+        drop(authority.try_transaction().unwrap());
+        let lock = authority.path.with_file_name("authority.lock");
+        drop(authority);
+        fs::remove_file(&lock).unwrap();
+        assert!(
+            RepositoryAuthority::open(repo.path()).is_err(),
+            "a lost stable lock inode must fail closed instead of being recreated"
+        );
+        assert!(
+            !lock.exists(),
+            "inspection must not replace a missing lock file"
+        );
+    }
 
     fn repository() -> tempfile::TempDir {
         let repo = tempfile::tempdir().unwrap();
@@ -852,6 +927,7 @@ mod tests {
             base_commit: proposal.base_commit.clone(),
             proposed_commit: proposal.proposed_commit.clone(),
             validation_run: run,
+            caller_checkpoint: CallerCheckpoint::Unspecified,
         };
         let persisted: Journal = read_journal(&tx.path).unwrap();
         assert_eq!(persisted.events[&promoted].promotion.as_ref(), Some(&goal));

@@ -332,8 +332,24 @@ impl ProposedPatch {
     /// rollback path; nothing on the main branch was touched.
     ///
     /// # Errors
-    /// [`PatchError::Git`] if the worktree cannot be removed.
-    pub fn discard(mut self) -> Result<(), PatchError> {
+    /// Busy/pending authority, wrong repository, or failed worktree removal.
+    pub fn discard(self) -> Result<(), validation::ValidationError> {
+        let mut authority = validation::RepositoryAuthority::open(&self.repo_root)?;
+        let transaction = authority.try_transaction()?;
+        self.discard_in_transaction(&transaction)
+    }
+
+    /// Discard while a common caller retains the same guard through its matching
+    /// loop-state cleanup. Historical receipts remain available by run id.
+    ///
+    /// # Errors
+    /// Busy/pending authority, wrong repository, or failed worktree removal.
+    pub fn discard_in_transaction(
+        mut self,
+        transaction: &validation::RepositoryTransaction<'_>,
+    ) -> Result<(), validation::ValidationError> {
+        transaction.check_root(&self.repo_root)?;
+        transaction.require_idle()?;
         self.worktree.remove()?;
         // Best-effort: drop the persisted provenance record too.
         let _ = std::fs::remove_file(proposal_meta_path(&self.repo_root, &self.id));
@@ -849,6 +865,30 @@ mod tests {
             std::fs::read_to_string(root.join("a.rs")).unwrap(),
             "pub fn f() {}\n"
         );
+    }
+
+    #[test]
+    fn discard_rejects_a_guard_from_another_repository_without_removing_the_proposal() {
+        let repo = init_repo();
+        let other = init_repo();
+        let patch = propose(
+            repo.path(),
+            "guarded-discard",
+            &proposal(&["a.rs"], &[("a.rs", "pub fn changed() {}\n")]),
+            provenance(),
+        )
+        .unwrap();
+        let path = patch.worktree_path().to_owned();
+        patch.persist().unwrap();
+        let patch = ProposedPatch::reopen(repo.path(), "guarded-discard").unwrap();
+        let mut authority = validation::RepositoryAuthority::open(other.path()).unwrap();
+        let held = authority.try_transaction().unwrap();
+        assert!(matches!(
+            patch.discard_in_transaction(&held),
+            Err(validation::ValidationError::Stale)
+        ));
+        assert!(path.is_dir());
+        assert!(ProposedPatch::reopen(repo.path(), "guarded-discard").is_ok());
     }
 
     #[test]

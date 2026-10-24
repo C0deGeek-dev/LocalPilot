@@ -32,8 +32,14 @@ nonces durably before effects. Tokens/capabilities are not serialized; private
 host-context comparisons never expose environment values or their digests.
 Changed, incomplete, expired or uncertain observations cannot pass. Generic
 recovery cannot certify validation. Interruptions retain goals for explicit
-inspection, never automatic replay. All loop-state writers must participate in
-the common transaction before final feature adoption.
+inspection, never automatic replay. All loop-state writers participate in the
+common transaction. Promotion intents bind the caller's exact before/after state
+hashes or explicit absence of matching state. Recovery requires separate,
+current-review confirmation and an inspection note; it may reconcile only that
+proven checkpoint when source already matches the recorded goal. Unknown or lost
+metadata stays blocked. Reset and discard cannot clear unfinished authority.
+Reload hands off the Windows guard after launch and before waiting; rollback is
+limited to failure before handoff. Stop older writers before feature adoption.
 
 Outward publication instead requires `OutwardApprovalToken`, bound to exact
 draft/argv, target and resolved host/account. It needs no patch-shaped evidence.

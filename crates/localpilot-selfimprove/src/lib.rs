@@ -26,9 +26,11 @@ mod guardrails;
 mod orchestrator;
 mod preflight;
 mod promotion;
+mod recovery;
 
 pub use execution::validate_proposal;
-pub use promotion::{promote_proposal, promotion_review, PromotionReview};
+pub use promotion::{discard_proposal, promote_proposal, promotion_review, PromotionReview};
+pub use recovery::{acknowledge_recovery, pending_authority, recovery_review, RecoveryReview};
 
 pub use preflight::{proposal_preflight, PreflightReport, PreflightRisk};
 

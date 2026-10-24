@@ -770,6 +770,17 @@ pub(crate) fn selfimprove_confirmation(
     proposal_id: Option<&str>,
 ) -> Option<(String, String)> {
     match step {
+        crate::selfimprove_cmd::InteractiveStep::Recover => {
+            let localpilot_slash::SelfImproveAction::Recover {
+                nonce,
+                reviewer,
+                note,
+            } = action
+            else {
+                return None;
+            };
+            Some(("selfimprove recover".into(), format!("acknowledge inspection of unknown processes, host effects and remote publication for intent `{nonce}` as `{reviewer}`: {note}. Retire only this displayed intent and reconcile only its exact known metadata. No check, source promotion or publication is replayed; validation is not certified")))
+        }
         crate::selfimprove_cmd::InteractiveStep::Validate => {
             let localpilot_slash::SelfImproveAction::Validate { reviewer } = action else {
                 return None;
@@ -802,7 +813,7 @@ pub(crate) struct SelfImprovePumpRequest {
     pub(crate) model: String,
     pub(crate) provider: String,
     pub(crate) step: crate::selfimprove_cmd::InteractiveStep,
-    pub(crate) confirmed_proposal_id: Option<crate::selfimprove_cmd::ConfirmedProposal>,
+    pub(crate) confirmed_review: Option<crate::selfimprove_cmd::ConfirmedReview>,
     pub(crate) approval_tx: mpsc::UnboundedSender<ApprovalCall>,
     pub(crate) cancel: CancellationToken,
     pub(crate) permissions: localpilot_sandbox::PermissionEngineHandle,
@@ -818,18 +829,19 @@ pub(crate) async fn execute_selfimprove_pump(
         model,
         provider,
         step,
-        confirmed_proposal_id,
+        confirmed_review,
         approval_tx,
         cancel,
         permissions,
         trusted,
     } = request;
+    if cancel.is_cancelled() {
+        return Ok(SelfImprovePumpResult::Cancelled(Vec::new()));
+    }
     if let Some((tool, detail)) = selfimprove_confirmation(
         step,
         &action,
-        confirmed_proposal_id
-            .as_ref()
-            .map(|review| review.id.as_str()),
+        confirmed_review.as_ref().map(|review| review.id.as_str()),
     ) {
         let approver = TuiApprover::new(approval_tx);
         let request = PermissionRequest {
@@ -839,7 +851,11 @@ pub(crate) async fn execute_selfimprove_pump(
             trusted: true,
             detail,
         };
-        if !approver.approve(&request).await {
+        let approved = tokio::select! {
+            approved = approver.approve(&request) => approved,
+            () = cancel.cancelled() => return Ok(SelfImprovePumpResult::Cancelled(Vec::new())),
+        };
+        if !approved {
             return Ok(SelfImprovePumpResult::Declined(
                 if step == crate::selfimprove_cmd::InteractiveStep::Reload {
                     "reload"
@@ -850,9 +866,41 @@ pub(crate) async fn execute_selfimprove_pump(
         }
     }
 
+    if cancel.is_cancelled() {
+        return Ok(SelfImprovePumpResult::Cancelled(Vec::new()));
+    }
     let mut output = Vec::new();
-    let result = if step == crate::selfimprove_cmd::InteractiveStep::Validate {
-        let confirmed = confirmed_proposal_id
+    let result = if step == crate::selfimprove_cmd::InteractiveStep::Recover {
+        use std::io::Write as _;
+        let confirmed = confirmed_review
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("recovery inspection was not displayed"))?;
+        let localpilot_slash::SelfImproveAction::Recover {
+            nonce,
+            reviewer,
+            note,
+        } = &action
+        else {
+            return Err(anyhow::anyhow!(
+                "recovery action changed after confirmation"
+            ));
+        };
+        let nonce: uuid::Uuid = nonce
+            .parse()
+            .map_err(|_| anyhow::anyhow!("recovery requires a valid intent UUID"))?;
+        if confirmed.id != nonce.to_string() {
+            return Err(anyhow::anyhow!("recovery intent changed after inspection"));
+        }
+        let current = localpilot_selfimprove::recovery_review(&cwd, nonce)?;
+        crate::proposal_validation::confirm_review(Some(&confirmed.review), &current.digest()?)?;
+        localpilot_selfimprove::acknowledge_recovery(&cwd, &current, reviewer, note)?;
+        writeln!(
+            output,
+            "Acknowledged intent {nonce}; no effect replayed or validation certified."
+        )?;
+        Ok(crate::selfimprove_cmd::InteractiveOutcome::Complete)
+    } else if step == crate::selfimprove_cmd::InteractiveStep::Validate {
+        let confirmed = confirmed_review
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("execution preview was not displayed"))?;
         if crate::selfimprove_cmd::pending_id(&cwd)? != confirmed.id {
@@ -867,6 +915,9 @@ pub(crate) async fn execute_selfimprove_pump(
         };
         let report = localpilot_selfimprove::proposal_preflight(&cwd, &confirmed.id)?;
         crate::proposal_validation::confirm_review(Some(&confirmed.review), &report.digest()?)?;
+        if cancel.is_cancelled() {
+            return Ok(SelfImprovePumpResult::Cancelled(output));
+        }
         let engine = permissions.snapshot();
         let signal = localpilot_harness::CancelSignal::new();
         let run = crate::proposal_validation::execute(
@@ -893,7 +944,7 @@ pub(crate) async fn execute_selfimprove_pump(
             &cwd,
             &action,
             step,
-            confirmed_proposal_id.as_ref(),
+            confirmed_review.as_ref(),
             &model,
             &provider,
             &mut output,
@@ -905,7 +956,7 @@ pub(crate) async fn execute_selfimprove_pump(
                 &cwd,
                 &action,
                 step,
-                confirmed_proposal_id.as_ref(),
+                confirmed_review.as_ref(),
                 &model,
                 &provider,
                 &mut output,
@@ -1403,6 +1454,404 @@ mod tests {
             Some("proposal-1")
         )
         .is_none());
+    }
+
+    fn validation_pump_request(
+        root: &std::path::Path,
+        action: localpilot_slash::SelfImproveAction,
+        step: crate::selfimprove_cmd::InteractiveStep,
+        confirmed: crate::selfimprove_cmd::ConfirmedReview,
+        permissions: localpilot_sandbox::PermissionEngineHandle,
+        cancel: CancellationToken,
+    ) -> (
+        SelfImprovePumpRequest,
+        mpsc::UnboundedReceiver<crate::interactive_session::ApprovalCall>,
+    ) {
+        let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+        (
+            SelfImprovePumpRequest {
+                cwd: root.into(),
+                action,
+                model: String::new(),
+                provider: String::new(),
+                step,
+                confirmed_review: Some(confirmed),
+                approval_tx,
+                cancel,
+                permissions,
+                trusted: true,
+            },
+            approval_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn selfimprove_bypass_still_requires_explicit_execution_and_recovery_confirmation() {
+        use crate::selfimprove_cmd::{ConfirmedReview, InteractiveStep};
+        use localpilot_slash::SelfImproveAction;
+        for (step, action, tool) in [
+            (
+                InteractiveStep::Validate,
+                SelfImproveAction::Validate {
+                    reviewer: "fixture human".into(),
+                },
+                "selfimprove validate",
+            ),
+            (
+                InteractiveStep::Recover,
+                SelfImproveAction::Recover {
+                    nonce: "00000000-0000-0000-0000-000000000001".into(),
+                    reviewer: "fixture human".into(),
+                    note: "inspected unknown effects".into(),
+                },
+                "selfimprove recover",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let permissions = localpilot_sandbox::PermissionEngineHandle::new(
+                localpilot_sandbox::PermissionEngine::new(Profile::Bypass, Vec::new()),
+            );
+            let (request, mut approvals) = validation_pump_request(
+                root.path(),
+                action,
+                step,
+                ConfirmedReview {
+                    id: "fixture".into(),
+                    review: "displayed".into(),
+                },
+                permissions,
+                CancellationToken::new(),
+            );
+            let run = execute_selfimprove_pump(request);
+            tokio::pin!(run);
+            let call = tokio::select! { call = approvals.recv() => call.unwrap(), _ = &mut run => panic!("bypass skipped the explicit host confirmation") };
+            assert_eq!(call.request.tool, tool);
+            call.reply.send(false).unwrap();
+            assert!(matches!(
+                run.await.unwrap(),
+                SelfImprovePumpResult::Declined(_)
+            ));
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn selfimprove_cancelled_confirmation_retires_no_authority_or_late_answer() {
+        use crate::selfimprove_cmd::{ConfirmedReview, InteractiveStep};
+        let root = tempfile::tempdir().unwrap();
+        let permissions = localpilot_sandbox::PermissionEngineHandle::new(
+            localpilot_sandbox::PermissionEngine::new(Profile::Default, Vec::new()),
+        );
+        let cancel = CancellationToken::new();
+        let (request, mut approvals) = validation_pump_request(
+            root.path(),
+            localpilot_slash::SelfImproveAction::Validate {
+                reviewer: "fixture human".into(),
+            },
+            InteractiveStep::Validate,
+            ConfirmedReview {
+                id: "fixture".into(),
+                review: "displayed".into(),
+            },
+            permissions,
+            cancel.clone(),
+        );
+        let run = execute_selfimprove_pump(request);
+        tokio::pin!(run);
+        let call = tokio::select! { call = approvals.recv() => call.unwrap(), _ = &mut run => panic!("confirmation was not requested") };
+        cancel.cancel();
+        assert!(matches!(
+            run.await.unwrap(),
+            SelfImprovePumpResult::Cancelled(_)
+        ));
+        assert!(call.reply.is_closed());
+        assert!(call.reply.send(true).is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn selfimprove_validation_pump_observes_live_readonly_policy_over_project_bypass() {
+        use crate::selfimprove_cmd::InteractiveStep;
+        use localpilot_patchgen::validation::ValidationCommandEnd;
+        let fixture = crate::proposal_fixture::fixture("#[test] fn controlled() {}\n");
+        let shown =
+            crate::selfimprove_cmd::render_execution_review(fixture.root.path(), &mut Vec::new())
+                .unwrap();
+        let permissions = localpilot_sandbox::PermissionEngineHandle::new(
+            localpilot_sandbox::PermissionEngine::new(Profile::Default, Vec::new()),
+        );
+        let (request, mut approvals) = validation_pump_request(
+            fixture.root.path(),
+            localpilot_slash::SelfImproveAction::Validate {
+                reviewer: "fixture human".into(),
+            },
+            InteractiveStep::Validate,
+            shown,
+            permissions.clone(),
+            CancellationToken::new(),
+        );
+        let run = execute_selfimprove_pump(request);
+        tokio::pin!(run);
+        let call = tokio::select! { call = approvals.recv() => call.unwrap(), _ = &mut run => panic!("execution consent was not requested") };
+        permissions.set(localpilot_sandbox::PermissionEngine::new(
+            Profile::ReadOnly,
+            Vec::new(),
+        ));
+        call.reply.send(true).unwrap();
+        assert!(matches!(
+            run.await.unwrap(),
+            SelfImprovePumpResult::Finished { result: Err(_), .. }
+        ));
+        let patch =
+            localpilot_patchgen::ProposedPatch::reopen(fixture.root.path(), fixture.patch.id())
+                .unwrap();
+        let receipt = patch.provenance().validation.as_ref().unwrap();
+        assert_eq!(receipt.checks[0].end, ValidationCommandEnd::Denied);
+        assert!(!patch.worktree_path().join("target").exists());
+        assert_eq!(
+            crate::proposal_fixture::git(fixture.root.path(), &["rev-parse", "HEAD"]),
+            fixture.base
+        );
+        assert!(approvals.try_recv().is_err());
+    }
+
+    async fn approve_pump(
+        request: SelfImprovePumpRequest,
+        mut approvals: mpsc::UnboundedReceiver<crate::interactive_session::ApprovalCall>,
+    ) -> anyhow::Result<SelfImprovePumpResult> {
+        let run = execute_selfimprove_pump(request);
+        tokio::pin!(run);
+        let call = tokio::select! { call = approvals.recv() => call.unwrap(), _ = &mut run => panic!("explicit host confirmation was not requested") };
+        call.reply.send(true).unwrap();
+        let result = run.await;
+        assert!(
+            approvals.try_recv().is_err(),
+            "one confirmation must not start another consent operation"
+        );
+        result
+    }
+
+    #[tokio::test]
+    async fn selfimprove_validation_pump_passes_then_requires_a_second_promotion_confirmation() {
+        use crate::selfimprove_cmd::InteractiveStep;
+        use localpilot_slash::SelfImproveAction;
+        let fixture =
+            crate::proposal_fixture::fixture("#[test] fn controlled() { assert_eq!(2, 2); }\n");
+        let permissions = localpilot_sandbox::PermissionEngineHandle::new(
+            localpilot_sandbox::PermissionEngine::new(Profile::Default, Vec::new()),
+        );
+        let shown =
+            crate::selfimprove_cmd::render_execution_review(fixture.root.path(), &mut Vec::new())
+                .unwrap();
+        let (request, approvals) = validation_pump_request(
+            fixture.root.path(),
+            SelfImproveAction::Validate {
+                reviewer: "fixture human".into(),
+            },
+            InteractiveStep::Validate,
+            shown,
+            permissions.clone(),
+            CancellationToken::new(),
+        );
+        assert!(matches!(
+            approve_pump(request, approvals).await.unwrap(),
+            SelfImprovePumpResult::Finished { result: Ok(()), .. }
+        ));
+        assert_eq!(
+            crate::proposal_fixture::git(fixture.root.path(), &["rev-parse", "HEAD"]),
+            fixture.base
+        );
+        let state_path = fixture
+            .root
+            .path()
+            .join(".localpilot/selfimprove/state.json");
+        let state: localpilot_selfimprove::LoopState =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(state.stage, localpilot_selfimprove::Stage::Proposed);
+        let shown =
+            crate::selfimprove_cmd::render_promotion_review(fixture.root.path(), &mut Vec::new())
+                .unwrap();
+        let (request, approvals) = validation_pump_request(
+            fixture.root.path(),
+            SelfImproveAction::Approve {
+                reviewer: "different promotion reviewer".into(),
+            },
+            InteractiveStep::Approve,
+            shown,
+            permissions,
+            CancellationToken::new(),
+        );
+        assert!(matches!(
+            approve_pump(request, approvals).await.unwrap(),
+            SelfImprovePumpResult::Finished { result: Ok(()), .. }
+        ));
+        let state: localpilot_selfimprove::LoopState =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(state.stage, localpilot_selfimprove::Stage::Approved);
+        assert_eq!(
+            state.reviewer.as_deref(),
+            Some("different promotion reviewer")
+        );
+        assert!(state.built_label.is_none());
+        assert_ne!(
+            crate::proposal_fixture::git(fixture.root.path(), &["rev-parse", "HEAD"]),
+            fixture.base
+        );
+        let mut authority =
+            localpilot_patchgen::validation::RepositoryAuthority::open(fixture.root.path())
+                .unwrap();
+        let tx = authority.try_transaction().unwrap();
+        assert_eq!(tx.events().count(), 2);
+        assert!(tx.events().all(|event| event.completed));
+    }
+
+    #[tokio::test]
+    async fn selfimprove_recovery_pump_requires_fresh_inspection_and_never_certifies_validation() {
+        use crate::selfimprove_cmd::InteractiveStep;
+        use localpilot_patchgen::validation::{OutwardApprovalToken, RepositoryAuthority};
+        for changed_after_display in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            crate::proposal_fixture::git(root.path(), &["init", "-b", "main"]);
+            let mut authority = RepositoryAuthority::open(root.path()).unwrap();
+            let mut tx = authority.try_transaction().unwrap();
+            let draft = localpilot_patchgen::OutwardDraft {
+                schema: localpilot_patchgen::OUTWARD_SCHEMA.into(),
+                id: "controlled".into(),
+                kind: localpilot_patchgen::OutwardKind::Issue,
+                target_repo: "fixture/repo".into(),
+                title: "fixture".into(),
+                body: "fixture body".into(),
+                head_branch: None,
+            };
+            let token = OutwardApprovalToken::approve(
+                &tx.repository_identity(),
+                &draft,
+                "fixture/account",
+                "owner",
+                "controlled interrupted publication",
+            )
+            .unwrap();
+            let nonce = tx
+                .reserve_outward(token, &draft, "fixture/account")
+                .unwrap();
+            drop(tx);
+            let shown = crate::selfimprove_cmd::render_recovery_review(
+                root.path(),
+                &nonce.to_string(),
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let permissions = localpilot_sandbox::PermissionEngineHandle::new(
+                localpilot_sandbox::PermissionEngine::new(Profile::Default, Vec::new()),
+            );
+            let (request, mut approvals) = validation_pump_request(
+                root.path(),
+                localpilot_slash::SelfImproveAction::Recover {
+                    nonce: nonce.to_string(),
+                    reviewer: "fixture human".into(),
+                    note: "inspected controlled pending effect; no network used".into(),
+                },
+                InteractiveStep::Recover,
+                shown,
+                permissions,
+                CancellationToken::new(),
+            );
+            let run = execute_selfimprove_pump(request);
+            tokio::pin!(run);
+            let call = tokio::select! { call = approvals.recv() => call.unwrap(), _ = &mut run => panic!("recovery acknowledgement was not requested") };
+            assert_eq!(call.request.tool, "selfimprove recover");
+            assert!(call.request.target.contains("unknown processes"));
+            if changed_after_display {
+                authority
+                    .try_transaction()
+                    .unwrap()
+                    .finish(nonce, "another explicit inspection completed the intent")
+                    .unwrap();
+            }
+            call.reply.send(true).unwrap();
+            let result = run.await;
+            if changed_after_display {
+                assert!(result.is_err());
+            } else {
+                assert!(matches!(
+                    result.unwrap(),
+                    SelfImprovePumpResult::Finished { result: Ok(()), .. }
+                ));
+            }
+            let tx = authority.try_transaction().unwrap();
+            assert_eq!(tx.events().count(), 1);
+            let event = tx.events().next().unwrap();
+            assert!(event.completed && event.validation.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn selfimprove_validation_pump_cancellation_waits_for_owned_cleanup_and_persists_the_receipt(
+    ) {
+        use crate::selfimprove_cmd::InteractiveStep;
+        use localpilot_patchgen::validation::ValidationState;
+        let fixture = crate::proposal_fixture::fixture(
+            r#"#[test] fn controlled() {
+            for tick in 0..1200 { std::fs::write("target/heartbeat", tick.to_string()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50)); }
+            panic!("controlled fixture was not cancelled within sixty seconds");
+        }"#,
+        );
+        let shown =
+            crate::selfimprove_cmd::render_execution_review(fixture.root.path(), &mut Vec::new())
+                .unwrap();
+        let permissions = localpilot_sandbox::PermissionEngineHandle::new(
+            localpilot_sandbox::PermissionEngine::new(Profile::Default, Vec::new()),
+        );
+        let cancel = CancellationToken::new();
+        let (request, mut approvals) = validation_pump_request(
+            fixture.root.path(),
+            localpilot_slash::SelfImproveAction::Validate {
+                reviewer: "fixture human".into(),
+            },
+            InteractiveStep::Validate,
+            shown,
+            permissions,
+            cancel.clone(),
+        );
+        let heartbeat = fixture.patch.worktree_path().join("target/heartbeat");
+        let run = execute_selfimprove_pump(request);
+        tokio::pin!(run);
+        let call = tokio::select! { call = approvals.recv() => call.unwrap(), _ = &mut run => panic!("execution consent was not requested") };
+        call.reply.send(true).unwrap();
+        let started = tokio::select! {
+            _ = &mut run => panic!("the controlled long-running check ended before cancellation"),
+            () = async { while !heartbeat.is_file() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } } => true,
+            () = tokio::time::sleep(std::time::Duration::from_secs(180)) => false,
+        };
+        cancel.cancel();
+        assert!(matches!(
+            run.await.unwrap(),
+            SelfImprovePumpResult::Finished { result: Err(_), .. }
+        ));
+        assert!(
+            started,
+            "the controlled test did not start before its deadline"
+        );
+        let patch =
+            localpilot_patchgen::ProposedPatch::reopen(fixture.root.path(), fixture.patch.id())
+                .unwrap();
+        let receipt = patch.provenance().validation.as_ref().unwrap();
+        assert_eq!(receipt.state, ValidationState::Cancelled);
+        assert!(receipt.checks[0].cleanup_confirmed && receipt.checks[0].pipes_closed);
+        assert!(
+            localpilot_selfimprove::pending_authority(fixture.root.path())
+                .unwrap()
+                .is_empty()
+        );
+        let stopped = std::fs::read(&heartbeat).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(std::fs::read(&heartbeat).unwrap(), stopped);
+        assert_eq!(
+            crate::proposal_fixture::git(fixture.root.path(), &["rev-parse", "HEAD"]),
+            fixture.base
+        );
+        assert!(approvals.try_recv().is_err());
     }
 
     #[test]

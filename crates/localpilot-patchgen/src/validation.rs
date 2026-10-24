@@ -9,6 +9,7 @@ mod host;
 mod inspection;
 mod promotion;
 mod publication;
+mod recovery;
 #[cfg(test)]
 mod tests;
 mod transaction;
@@ -21,9 +22,10 @@ pub use inspection::ProposalInspection;
 pub(crate) use promotion::promote_fixture;
 pub use promotion::{PendingPromotion, ValidatedProposal};
 pub use publication::PendingPublication;
+pub use recovery::{PromotionObservation, PromotionPosition};
 pub use transaction::{
-    AuthorityEvent, AuthorityPurpose, PromotionIntent, PublicationIntent, RepositoryAuthority,
-    RepositoryTransaction, Reservation, ValidationCompletion,
+    AuthorityEvent, AuthorityPurpose, CallerCheckpoint, PromotionIntent, PublicationIntent,
+    RepositoryAuthority, RepositoryTransaction, Reservation, ValidationCompletion,
 };
 
 use serde::{Deserialize, Serialize};

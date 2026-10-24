@@ -543,22 +543,29 @@ the nonce journal. Abandoned futures and uncertain cleanup leave recovery pendin
 This API starts no automatic retries or promotion. CLI and chat execution require
 separate exact-review confirmation. The registered profile declares only a worktree-local target cache and
 no artifacts; future artifact profiles must add bounded collection before passing.
-Promotion reservations also persist their exact old/new ref goal and validation
-run before effects, so recovery can inspect the intended transition. A complete
+Promotion reservations also persist their exact old/new ref goal, validation
+run and logical caller-state hashes before effects, so recovery can inspect the
+intended transition. Reset, propose, build, reload and discard also acquire the
+common transaction and refuse unfinished authority. A Windows reload releases
+its guard after child launch, before waiting; a failed launch can roll state back
+while still holding the guard. A complete
 Passed receipt with an unfinished authority journal still cannot qualify a new
 evaluation or promotion reservation.
 
 New proposals retain their original base/target/scope in provenance. Reopening a
 persisted proposal is a nonowning inspection: dropping that handle preserves its
 worktree; explicit discard still removes it, while a newly created unpersisted
-proposal retains rollback-on-drop. Provenance writes use the existing atomic
+proposal retains rollback-on-drop. Discard holds the common guard and clears
+only its matching unpromoted loop state, retaining historical evidence.
+Provenance writes use the existing atomic
 store primitive. Static identity binds actual bounded source bytes and unchanged
 initialized submodules, refusing dirty, unsupported or unapproved ignored files.
 
 The proposal Git helper independently suppresses implicit hook/signing/diff
 execution and refuses unsupported filter attributes before checkout/index
 effects. Those protections are wired into the existing proposal path. They do
-not constitute the still-pending proposal-validation execution/promotion gate.
+not isolate approved checks from the host. The execution/promotion gate adds
+separate consent and evidence requirements; final feature acceptance is pending.
 
 ### `localpilot-dist`
 

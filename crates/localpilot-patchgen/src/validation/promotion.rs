@@ -26,6 +26,17 @@ pub struct ValidatedProposal<'repo> {
     proposal: ProposalIdentity,
     plan: ValidationPlanIdentity,
     token: PatchApprovalToken,
+    caller_checkpoint: super::CallerCheckpoint,
+}
+
+impl ValidatedProposal<'_> {
+    /// Declare the owning caller's logical state checkpoint while retaining this
+    /// guard. The caller must derive both states under the same transaction.
+    #[must_use]
+    pub fn with_caller_checkpoint(mut self, checkpoint: super::CallerCheckpoint) -> Self {
+        self.caller_checkpoint = checkpoint;
+        self
+    }
 }
 
 impl fmt::Debug for ValidatedProposal<'_> {
@@ -65,6 +76,7 @@ impl<'repo> RepositoryTransaction<'repo> {
             proposal: current.identity,
             plan: plan.clone(),
             token,
+            caller_checkpoint: super::CallerCheckpoint::Unspecified,
         })
     }
 }
@@ -142,11 +154,12 @@ impl ProposedPatch {
             validated
                 .token
                 .reservation(&current.identity, &validated.plan, receipt)?;
-        let nonce = validated.transaction.reserve_promotion(
+        let nonce = validated.transaction.reserve_promotion_with_checkpoint(
             validated.token,
             &current.identity,
             &validated.plan,
             receipt,
+            validated.caller_checkpoint,
         )?;
         before_effect();
         // Pinned commit, never a branch that another actor could retarget.

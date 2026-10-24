@@ -250,6 +250,12 @@ fn patch_binding(
 pub struct PatchApprovalToken(Grant);
 
 impl PatchApprovalToken {
+    /// Human identity already included in the public consumption event. This
+    /// exposes no nonce or reusable authority and does not consume the grant.
+    #[must_use]
+    pub fn reviewer(&self) -> String {
+        localpilot_config::redact::redact(&self.0.reviewer)
+    }
     /// Issue only after explicit human promotion consent for the current receipt.
     ///
     /// # Errors

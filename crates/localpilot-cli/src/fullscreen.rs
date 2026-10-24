@@ -5633,13 +5633,16 @@ async fn drive_selfimprove(
 
     // The exact persisted proposal is visible before the confirmation dialog can
     // yield a positive answer and reach the shared approval-token seam.
-    let confirmed_proposal_id = if matches!(
+    let confirmed_review = if matches!(
         step,
         crate::selfimprove_cmd::InteractiveStep::Approve
             | crate::selfimprove_cmd::InteractiveStep::Validate
+            | crate::selfimprove_cmd::InteractiveStep::Recover
     ) {
         let mut proposal = Vec::new();
-        let result = if step == crate::selfimprove_cmd::InteractiveStep::Validate {
+        let result = if let localpilot_slash::SelfImproveAction::Recover { nonce, .. } = &action {
+            crate::selfimprove_cmd::render_recovery_review(ctx.cwd, nonce, &mut proposal)
+        } else if step == crate::selfimprove_cmd::InteractiveStep::Validate {
             crate::selfimprove_cmd::render_execution_review(ctx.cwd, &mut proposal)
         } else {
             crate::selfimprove_cmd::render_promotion_review(ctx.cwd, &mut proposal)
@@ -5649,7 +5652,7 @@ async fn drive_selfimprove(
         present_command_report(
             app,
             command_report(
-                "selfimprove proposal",
+                "selfimprove action review",
                 crate::repl::bounded_command_output_from_buffer(proposal, result.map(|_| ())),
             ),
         );
@@ -5686,7 +5689,7 @@ async fn drive_selfimprove(
         model,
         provider,
         step,
-        confirmed_proposal_id,
+        confirmed_review,
         approval_tx: tx,
         cancel: operation_cancel,
         permissions: runtime.permission_engine_handle(),
@@ -14350,7 +14353,7 @@ mod tests {
             ),
             (
                 "selfimprove",
-                "Review, validate with execution consent, separately approve, build and reload (/selfimprove [status|preflight|evidence|validate|start|next|approve|reset])",
+                "Review, validate, recover, separately approve, build and reload (/selfimprove [status|preflight|evidence|validate|recovery|recover|start|next|approve|reset])",
             ),
             ("new", "Start a fresh session"),
             ("fork", "Branch the conversation into a new session"),

@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+uuid = { workspace = true }
 localpilot-patchgen = { path = "../localpilot-patchgen" }
 localpilot-selfdev = { path = "../localpilot-selfdev" }
 localpilot-selfreview = { path = "../localpilot-selfreview" }

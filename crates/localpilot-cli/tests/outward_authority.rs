@@ -144,6 +144,68 @@ fn main() {
             let retry = run(true);
             assert!(!retry.status.success());
             assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+            let nonce = authority
+                .try_transaction()
+                .unwrap()
+                .events()
+                .next()
+                .unwrap()
+                .reservation
+                .nonce
+                .to_string();
+            let recover = |args: &[&str]| {
+                Command::new(env!("CARGO_BIN_EXE_localpilot"))
+                    .args(["selfimprove", "recovery", "--nonce", &nonce])
+                    .args(args)
+                    .env("PATH", &path)
+                    .env("APPDATA", config.path())
+                    .env("XDG_CONFIG_HOME", config.path())
+                    .current_dir(repo.path())
+                    .output()
+                    .unwrap()
+            };
+            let shown = recover(&[]);
+            assert!(shown.status.success(), "{shown:?}");
+            let shown = String::from_utf8(shown.stdout).unwrap();
+            assert!(shown.contains("No recovery acknowledged"));
+            let digest = shown
+                .lines()
+                .find_map(|line| line.strip_prefix("Recovery review identity: "))
+                .unwrap();
+            let wrong = recover(&[
+                "--acknowledge-unknown-effects",
+                "--reviewer",
+                "fixture-human",
+                "--note",
+                "inspected local effect marker",
+                "--review",
+                "old-review",
+            ]);
+            assert!(!wrong.status.success());
+            assert!(authority
+                .try_transaction()
+                .unwrap()
+                .events()
+                .any(|event| !event.completed));
+            let recovered = recover(&[
+                "--acknowledge-unknown-effects",
+                "--reviewer",
+                "fixture-human",
+                "--note",
+                "inspected local effect marker; no external network used",
+                "--review",
+                digest,
+            ]);
+            assert!(recovered.status.success(), "{recovered:?}");
+            assert_eq!(
+                std::fs::read_to_string(&marker).unwrap().lines().count(),
+                1,
+                "recovery must not publish again"
+            );
+            let tx = authority.try_transaction().unwrap();
+            tx.require_idle().unwrap();
+            assert_eq!(tx.events().count(), 1);
+            assert!(tx.events().next().unwrap().validation.is_none());
         }
     }
 }

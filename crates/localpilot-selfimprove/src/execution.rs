@@ -675,6 +675,24 @@ pub(crate) mod tests {
                 .is_err());
         }
         assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), head);
+        if receipt.state == ValidationState::Passed {
+            drop(transaction);
+            let recovery = crate::recovery_review(root.path(), receipt.run_id).unwrap();
+            crate::acknowledge_recovery(
+                root.path(),
+                &recovery,
+                "fixture owner",
+                "inspected stopped processes and interrupted receipt; no replay",
+            )
+            .unwrap();
+            assert!(matches!(
+                crate::promotion_review(root.path(), patch.id()),
+                Err(crate::LoopError::Validation(ValidationError::NotValidated(
+                    ValidationState::Invalid
+                )))
+            ));
+            assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), head);
+        }
     }
 
     #[tokio::test]
