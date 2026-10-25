@@ -86,6 +86,10 @@ is SemVer-stable; the configuration schema stability policy is in
   observed outcome and durable local event. Ambiguous publication blocks another
   attempt until explicit inspection; no automatic replay. Require one active
   authenticated account and one matching created-object URL from the host CLI.
+- **Work envelopes measure changes made during the turn.** Ordinary turns now
+  snapshot tracked dirty files at turn start, report the files and counts when a
+  work envelope refuses completion, and retain the refusal as a system notice
+  that tells the model to preserve existing work.
 
 - Update the shared async runtime to Tokio1.51.6 and the TLS security fixes
   while preserving Rust1.82 and existing runtime features. Guard the audit

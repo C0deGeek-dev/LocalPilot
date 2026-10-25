@@ -71,11 +71,15 @@ No-op attempts spend a region, and the preview has an independent computation
 bound. See ADR-0224 for admission and opaque retry recovery.
 Model delegation inherits the policy and spends a region; fan-out is refused.
 Shell/MCP arguments cannot prove their diff size, so repository diffs are checked
-before completion and again after auto-fixes before commit. Ordinary comparisons
-exclude unchanged pre-existing dirty files; prior dirty content in a file changed
-this turn can conservatively trigger refusal. Without a repository baseline,
-model shell/background calls are refused; file tools and permission-gated
-verification remain available. Explicit user shell retains its authorization.
+before completion and again after auto-fixes before commit. Ordinary turn sizing
+snapshots tracked dirty files at turn start, so existing edits in a file changed
+this turn are excluded. If a snapshot cannot be recorded, sizing falls back to
+`HEAD` and the refusal identifies that pre-existing changes may be included.
+Work-envelope refusals report the observed files, changed lines and regions
+against their limits, and are retained as system-generated notices that say to
+preserve the work. Without a repository baseline, model shell/background calls
+are refused; file tools and permission-gated verification remain available.
+Explicit user shell retains its authorization.
 
 An opt-in selective mode, `headless_rename_units` (default0), reuses that
 headless lifecycle only after a size-refused write and bounded proof of a

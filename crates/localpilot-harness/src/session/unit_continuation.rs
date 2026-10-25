@@ -395,7 +395,21 @@ impl SessionRuntime {
                 None
             }
             VerifyGate::GiveUp(detail) => {
-                self.append(Message::text(Role::User, &detail).into_synthetic("bounded unit stop"));
+                if detail.contains("work envelope:") {
+                    self.append(
+                        Message::text(
+                            Role::System,
+                            format!(
+                                "System notice from LocalPilot, not user input: bounded work was refused or could not be completed. Preserve the existing work; do not revert it to free work budget. Diagnostic: {detail}"
+                            ),
+                        )
+                        .into_synthetic("bounded unit stop"),
+                    );
+                } else {
+                    self.append(
+                        Message::text(Role::User, &detail).into_synthetic("bounded unit stop"),
+                    );
+                }
                 Some(self.stop_with_detail(events, StopReason::NoProgress, Some(detail)))
             }
             VerifyGate::UnitCheckpoint(detail) => {

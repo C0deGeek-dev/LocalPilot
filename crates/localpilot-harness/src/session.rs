@@ -3922,16 +3922,15 @@ impl SessionRuntime {
             self.config.granularity.as_ref().and_then(|_| {
                 crate::resume::work_diff_baseline(&self.workspace.process_dir()).ok()
             });
-        // A unit continued after a checkpoint is sized from where it starts.
-        // Without a snapshot it stays sized from `HEAD`, which only over-counts.
-        if self.outstanding_full_check {
+        // Size this turn from the tracked working-tree state it starts with.
+        // A failed snapshot keeps the safe HEAD fallback, which can over-count
+        // pre-existing edits; the refusal diagnostic identifies that fallback.
+        if let Some(baseline) = self.work_diff_baseline.as_mut() {
             let root = self.workspace.process_dir();
-            if let Some(baseline) = self.work_diff_baseline.as_mut() {
-                let paths: Vec<String> = baseline.files.keys().cloned().collect();
-                baseline.diff_base = crate::resume::snapshot_working_tree(&root, &paths)
-                    .ok()
-                    .flatten();
-            }
+            let paths: Vec<String> = baseline.files.keys().cloned().collect();
+            baseline.diff_base = crate::resume::snapshot_working_tree(&root, &paths)
+                .ok()
+                .flatten();
         }
         if let Some(profile) = self.active_work_profile {
             self.tools

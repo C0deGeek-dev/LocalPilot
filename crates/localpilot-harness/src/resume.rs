@@ -695,6 +695,7 @@ pub(crate) fn inspect_work_diff(
     paths.sort();
     paths.dedup();
     let mut changed = Vec::new();
+    let mut pre_existing_changes_may_be_counted = false;
     for path in paths {
         if is_runtime_state_path(&path) || (ignore_progress && path == "PROGRESS.md") {
             continue;
@@ -704,13 +705,21 @@ pub(crate) fn inspect_work_diff(
             if old == &work_fingerprint(root, &path)? {
                 continue;
             }
+            if baseline.is_some_and(|before| before.diff_base.is_none()) {
+                pre_existing_changes_may_be_counted = true;
+            }
         }
         changed.push(path);
     }
     let paths = changed;
     let mut lines = 0usize;
     let mut regions = 0usize;
+    let mut region_count_is_lower_bound = false;
+    let mut file_summaries = Vec::with_capacity(paths.len());
     for path in &paths {
+        let mut file_lines = 0usize;
+        let file_regions;
+        let mut file_region_count_is_lower_bound = false;
         let stat = quiet_git(
             root,
             &[
@@ -751,6 +760,7 @@ pub(crate) fn inspect_work_diff(
                     after,
                 });
             regions += 1;
+            file_regions = 1;
         } else if stat.is_empty() {
             // New files have no tracked diff. Bound bytes before reading and
             // reject opaque/binary material rather than treating it as zero.
@@ -774,7 +784,8 @@ pub(crate) fn inspect_work_diff(
                 .filter(|_| !bytes.contains(&0))
             {
                 Some(body) => {
-                    lines = lines.saturating_add(body.lines().count().max(body.len().div_ceil(80)));
+                    file_lines = body.lines().count().max(body.len().div_ceil(80));
+                    lines = lines.saturating_add(file_lines);
                 }
                 None => {
                     inspection.binary_bytes =
@@ -793,17 +804,19 @@ pub(crate) fn inspect_work_diff(
                 }
             }
             regions += 1;
+            file_regions = 1;
         } else {
             for row in stat.lines() {
                 let counts: Vec<_> = row.split('\t').take(2).map(str::parse::<usize>).collect();
                 if let [Ok(added), Ok(removed)] = counts.as_slice() {
-                    lines = lines.saturating_add(*added).saturating_add(*removed);
+                    file_lines = file_lines.saturating_add(*added).saturating_add(*removed);
                 } else {
                     return Ok(inspection.refuse(
                         "work envelope: unknown diff requires an explicit smaller reviewed unit",
                     ));
                 }
             }
+            lines = lines.saturating_add(file_lines);
             // First reject a huge diff before materializing its patch.
             if lines <= profile.max_changed_lines {
                 let diff = quiet_git(
@@ -830,15 +843,47 @@ pub(crate) fn inspect_work_diff(
                 if material > profile.max_changed_lines {
                     return Ok(inspection.refuse("work envelope: changed byte material exceeds the profile (including giant single lines); preserve and split the work"));
                 }
-                regions += diff.lines().filter(|line| line.starts_with("@@ ")).count();
+                file_regions = diff.lines().filter(|line| line.starts_with("@@ ")).count();
+            } else {
+                // The line limit already refuses this unit. Retain a useful
+                // lower bound without materializing an unbounded patch.
+                file_regions = usize::from(file_lines > 0);
+                file_region_count_is_lower_bound = file_regions > 0;
             }
+            regions = regions.saturating_add(file_regions);
+            region_count_is_lower_bound |= file_region_count_is_lower_bound;
         }
-        if paths.len() > profile.max_files
-            || lines > profile.max_changed_lines
-            || regions > profile.max_regions
-        {
-            return Ok(inspection.refuse("work envelope: observed files, regions or changed lines exceed the effective profile; work is preserved, split/review it before committing"));
-        }
+        let file_region_count = if file_region_count_is_lower_bound {
+            format!("at least {file_regions}")
+        } else {
+            file_regions.to_string()
+        };
+        file_summaries.push(format!(
+            "{path} ({file_lines} changed lines, {file_region_count} regions)"
+        ));
+    }
+    if paths.len() > profile.max_files
+        || lines > profile.max_changed_lines
+        || regions > profile.max_regions
+    {
+        let prior = if pre_existing_changes_may_be_counted {
+            "; pre-existing changes may be included because the turn-start snapshot was unavailable"
+        } else {
+            "; counts are relative to the turn-start snapshot"
+        };
+        let region_count = if region_count_is_lower_bound {
+            format!("at least {regions}")
+        } else {
+            regions.to_string()
+        };
+        return Ok(inspection.refuse(format!(
+            "work envelope: observed {} files (limit {}), {lines} changed lines (limit {}), and {region_count} regions (limit {}) across [{}]{prior}; work is preserved, split/review it before committing",
+            paths.len(),
+            profile.max_files,
+            profile.max_changed_lines,
+            profile.max_regions,
+            file_summaries.join(", "),
+        )));
     }
     Ok(inspection)
 }
