@@ -1,5 +1,13 @@
 # Test Plan
 
+Mesh renewal controls retain the endpoint's bytes and generation when its lease
+expires while atomic replacement is blocked by a real Windows file handle.
+Successful renewal rotates the token; expired leases and stale tokens cannot
+renew. Store controls cover conditional creation/refusal, retry revalidation,
+owned-temp cleanup and preservation of unrelated temporary files. The existing
+CLI lease-expiry and lock-wait controls remain unchanged. These are offline
+filesystem/protocol tests and require no model server.
+
 Headless checkpoint controls distinguish host-ended and model-ended units.
 Real CLI request assertions inspect the next provider boundary while the refused
 site remains unapplied; failed-full feedback identifies that write as pending. Answer-led

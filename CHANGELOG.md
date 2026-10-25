@@ -13,6 +13,10 @@ is SemVer-stable; the configuration schema stability policy is in
   It carries bounded, redacted context for the unexecuted edit; long-turn splits
   keep the task and its leading review together without increasing budgets.
 
+- Mesh endpoint renewal now rechecks lease validity before each atomic file
+  replacement attempt. A Windows sharing violation can no longer leave a
+  pending renewal that publishes a new generation after the lease expires.
+
 - A shell call authoritatively refused before invocation no longer counts as
   an opaque launch when checking opt-in headless checkpoint eligibility.
   Actual launches, including failed commands, still disqualify the unit.

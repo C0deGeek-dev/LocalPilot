@@ -71,6 +71,21 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), MeshError>
     Ok(())
 }
 
+/// As [`write_json`], checking the caller's publication condition before each
+/// atomic replacement attempt. A refusal leaves the destination unchanged.
+///
+/// # Errors
+/// As [`write_json`].
+pub(crate) fn write_json_if<T: Serialize>(
+    path: &Path,
+    value: &T,
+    may_publish: impl FnMut() -> bool,
+) -> Result<bool, MeshError> {
+    let mut body = serde_json::to_vec(value)?;
+    body.push(b'\n');
+    Ok(localpilot_store::atomic_write_if(path, &body, may_publish)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

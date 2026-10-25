@@ -45,6 +45,23 @@ const RENAME_PAUSE: Duration = Duration::from_millis(50);
 /// Returns [`StoreError::Io`] if a directory, write, flush or rename fails.
 /// The temporary file is removed on every failure.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    atomic_write_if(path, bytes, || true).map(|_| ())
+}
+
+/// Publish `bytes` atomically only while `may_publish` permits it. The
+/// predicate is checked after flushing the temporary file and before EVERY
+/// replacement attempt, including retries after Windows sharing violations.
+/// Returns `false` when publication is refused; the destination is unchanged
+/// and this call's temporary file is removed. The caller holds any lock needed
+/// to protect the state on which its predicate depends.
+///
+/// # Errors
+/// As [`atomic_write`].
+pub fn atomic_write_if(
+    path: &Path,
+    bytes: &[u8],
+    mut may_publish: impl FnMut() -> bool,
+) -> Result<bool, StoreError> {
     ensure_parent(path)?;
     let (tmp, mut file) = create_temp_sibling(path)?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
@@ -55,11 +72,12 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     }
     // `rename` replaces an existing destination atomically on all tier-1
     // platforms, so readers see either the old file or the complete new one.
-    rename_retrying(&tmp, path).map_err(|e| {
-        // Best-effort cleanup; the error below is the one that matters.
+    let result = rename_retrying(&tmp, path, &mut may_publish);
+    if !matches!(result, Ok(true)) {
+        // Only this call's exclusively created temporary file is ours.
         let _ = fs::remove_file(&tmp);
-        StoreError::io(path, e)
-    })
+    }
+    result.map_err(|e| StoreError::io(path, e))
 }
 
 /// Append one newline-terminated record to a line-delimited log, creating
@@ -170,15 +188,22 @@ fn is_transient_rename_error(e: &io::Error) -> bool {
             || e.raw_os_error() == Some(SHARING_VIOLATION))
 }
 
-fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
+fn rename_retrying(
+    from: &Path,
+    to: &Path,
+    may_publish: &mut impl FnMut() -> bool,
+) -> io::Result<bool> {
     let mut attempt = 1;
     loop {
+        if !may_publish() {
+            return Ok(false);
+        }
         match fs::rename(from, to) {
             Err(e) if is_transient_rename_error(&e) && attempt < RENAME_ATTEMPTS => {
                 attempt += 1;
                 std::thread::sleep(RENAME_PAUSE);
             }
-            other => return other,
+            other => return other.map(|()| true),
         }
     }
 }
@@ -212,6 +237,55 @@ mod tests {
         atomic_write(&path, b"first").unwrap();
         atomic_write(&path, b"second").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    #[test]
+    fn refused_publication_preserves_destination_and_unrelated_temporary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record");
+        let unrelated = dir.path().join("unrelated.tmp");
+        atomic_write(&path, b"old").unwrap();
+        fs::write(&unrelated, b"keep").unwrap();
+        assert!(!atomic_write_if(&path, b"new", || false).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        assert_eq!(fs::read(&unrelated).unwrap(), b"keep");
+        assert_eq!(temps(dir.path()), ["unrelated.tmp"]);
+    }
+
+    #[test]
+    fn guarded_creation_publishes_only_when_permitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record");
+        assert!(!atomic_write_if(&path, b"new", || false).unwrap());
+        assert!(!path.exists());
+        assert!(temps(dir.path()).is_empty());
+        assert!(atomic_write_if(&path, b"new", || true).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert!(temps(dir.path()).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publication_is_rechecked_after_a_blocked_replacement() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record");
+        atomic_write(&path, b"old").unwrap();
+        let _held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        let mut checks = 0;
+        let published = atomic_write_if(&path, b"new", || {
+            checks += 1;
+            checks == 1
+        })
+        .unwrap();
+        assert!(!published);
+        assert_eq!(checks, 2);
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        assert!(temps(dir.path()).is_empty());
     }
 
     #[test]

@@ -1902,6 +1902,12 @@ and retires the endpoint on exit. The endpoint is an owner-only named pipe
 peer-uid check. Every writer, `pair.py` and `localpilot mesh` alike, is only a
 push client. `serve` gains no mailbox role.
 
+Renewal checks the old lease under the role lock and again before every atomic
+replacement attempt. Windows replacement retries can outlast a previously
+valid lease; a pending renewal must then refuse without changing the record.
+The shared atomic writer exposes conditional publication with the same flush,
+retry and owned-temp cleanup behavior. Ordinary writes remain unconditional.
+
 **Consequences.** No resident service is needed for a push: an endpoint exists
 only while something waits. A missed or refused push costs at most one poll
 interval, because the mailbox stays the record. Other OS users are kept out by

@@ -281,13 +281,22 @@ impl Mesh {
                     .map(format_utc)
             });
             let token = new_token();
-            fsio::write_json(
+            // Replacement can itself wait on Windows. A lease that expires
+            // during that wait must not publish the already-prepared renewal.
+            let published = fsio::write_json_if(
                 &p,
                 &json!({"participant": role, "transport": transport, "address": address,
                         "session_id": sid(&s), "generation": gen, "active": true,
                         "registered_at": utc_now(), "expires_at": exp,
                         "token_sha256": sha256_hex(&token)}),
+                || !renewing || live(&old),
             )?;
+            if !published {
+                return Ok(Done::Refused(refuse(
+                    "expired_endpoint",
+                    &format!("{role}'s lease expired while its renewal waited to be published"),
+                )));
+            }
             (gen, token)
         };
         Ok(Done::Registered {
@@ -448,5 +457,117 @@ mod tests {
         assert!(!addressed_to(&m, "claude"));
         let d: Obj = serde_json::from_value(json!({"role": "claude", "to": ["codex"]})).unwrap();
         assert!(!addressed_to(&d, "localpilot"));
+    }
+
+    fn registered_endpoint() -> (tempfile::TempDir, Mesh, std::path::PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let mesh = Mesh::at(dir.path(), "flag");
+        let id = "20260101T000000Z-abcdef12";
+        let session = serde_json::from_value(json!({
+            "protocol":"1.0", "session_id":id, "driver":"claude",
+            "navigator":"localpilot", "owner":"claude", "status":"active",
+            "participants":["claude","localpilot"],
+            "phase":"review", "work_unit":"w", "unit_id":"1-abc"
+        }))
+        .unwrap();
+        mesh.save(&session).unwrap();
+        let (_, token) = mesh
+            .register_endpoint("localpilot", "pipe", "fixture", Some(60), "")
+            .unwrap()
+            .unwrap();
+        let record = mesh.mb.endpoint(id, "localpilot");
+        (dir, mesh, record, token)
+    }
+
+    #[test]
+    fn renewal_requires_a_live_lease_and_its_current_token() {
+        let (_dir, mesh, record, token) = registered_endpoint();
+        let (generation, renewed_token) = mesh
+            .renew_endpoint("localpilot", "pipe", "fixture", Some(60), &token)
+            .unwrap()
+            .unwrap();
+        assert_eq!(generation, 2);
+        assert!(renewed_token != token);
+        let before = std::fs::read(&record).unwrap();
+        let refusal = mesh
+            .renew_endpoint("localpilot", "pipe", "fixture", Some(60), &token)
+            .unwrap()
+            .unwrap_err();
+        assert!(refusal.stderr.contains("token"));
+        assert_eq!(std::fs::read(&record).unwrap(), before);
+        let mut expired: Value = fsio::read_json(&record, "endpoint").unwrap().unwrap();
+        expired["expires_at"] = json!(format_utc(
+            time::OffsetDateTime::from_unix_timestamp(now_secs() - 1).unwrap()
+        ));
+        fsio::write_json(&record, &expired).unwrap();
+        let before = std::fs::read(&record).unwrap();
+        let refusal = mesh
+            .renew_endpoint("localpilot", "pipe", "fixture", Some(60), &renewed_token)
+            .unwrap()
+            .unwrap_err();
+        assert!(refusal.stderr.contains("expired_endpoint"));
+        assert_eq!(std::fs::read(&record).unwrap(), before);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn renewal_cannot_publish_after_expiry_while_atomic_replace_is_blocked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::{Duration, Instant};
+
+        let (_dir, mesh, record, token) = registered_endpoint();
+        let mut old: Value = fsio::read_json(&record, "endpoint").unwrap().unwrap();
+        // Leave 1-1.5 seconds for the real write to become pending, less
+        // than the store's Windows replacement-retry window.
+        while time::OffsetDateTime::now_utc().millisecond() < 500 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let expires = now_secs() + 2;
+        old["expires_at"] = json!(format_utc(
+            time::OffsetDateTime::from_unix_timestamp(expires).unwrap()
+        ));
+        fsio::write_json(&record, &old).unwrap();
+        let before = std::fs::read(&record).unwrap();
+        // Share reads/writes but deny deletion: even an atomic replacement
+        // must wait until this owned handle closes.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&record)
+            .unwrap();
+        let renewing = mesh.clone();
+        let worker = std::thread::spawn(move || {
+            renewing.renew_endpoint("localpilot", "pipe", "fixture", Some(60), &token)
+        });
+        let end = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_dir(record.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with(".localpilot.json.") && name.ends_with(".tmp")
+            })
+        {
+            assert!(
+                Instant::now() < end,
+                "renewal never reached atomic publication"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        while now_secs() < expires {
+            assert!(Instant::now() < end, "fixture clock did not reach expiry");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(held);
+        let result = worker.join().unwrap().unwrap();
+        assert!(
+            matches!(result, Err(ref out) if out.stderr.contains("expired_endpoint")),
+            "a blocked renewal published after the original lease expired"
+        );
+        assert_eq!(std::fs::read(&record).unwrap(), before);
+        assert_eq!(
+            std::fs::read_dir(record.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 }
