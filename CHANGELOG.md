@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A shell call authoritatively refused before invocation no longer counts as
+  an opaque launch when checking opt-in headless checkpoint eligibility.
+  Actual launches, including failed commands, still disqualify the unit.
+
+- Opt-in headless checkpoint feedback now distinguishes earlier applied edits
+  from the refused write that ended a unit. That write remains pending and
+  requires an ordinary retry; a checkpoint never reports it as complete.
+
 - Opt-in selective Python rename continuation now refuses supported multi-hunk
   rename requests before mutation and suggests one bounded exact edit. Normal
   permission checks, unit budgets, checkpoints and final verification still

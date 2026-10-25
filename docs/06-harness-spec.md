@@ -111,16 +111,26 @@ Headless `eval` can continue in bounded units when the user sets
 full check fails at the end of a unit, the harness may run a narrow unit check:
 `python -I -m ast` on each changed file, permission-gated, only when every
 changed path is a contained regular Python file, the unit launched no shell,
-background process or MCP call and no write failed. `HEAD` and every material
+background process or MCP call and no write failed.
+Pre-invocation permission denials remain visible errors but are not opaque
+launches. This distinction uses typed dispatch evidence; an actual shell run,
+including a nonzero exit, still prevents the checkpoint. Attempts remain spent.
+`HEAD` and every material
 path must be identical before the full check, after it and after the unit
 check, and the unit's bounds are inspected again before the checkpoint; a check
 that moved the workspace stops the task, preserving the work. A unit check that
 is denied or errors stops the task with that status. If every unit check passes,
 the turn ends with the `UnitCheckpoint` stop (never `Done`) and the host repeats
 the original task with a synthetic unit note. The note keeps the scope rule
-(continue only if the original request still needs changes; repair only
-failures the changes caused and report unrelated existing ones) rather than
-making a full pass the goal, which drove models into unrelated repairs. The next unit is sized from an
+and distinguishes applied work from pending work: when a refused write caused
+the host to end the unit, it explicitly says that call was not executed and
+needs a normal retry if still required. Model-ended checkpoints do not invent
+a pending refusal. A checkpoint never certifies that the task or a refused edit
+is complete; the host never automatically replays the write.
+The scope rule is to continue only if the original request still needs changes,
+repair only failures the changes caused and report unrelated existing ones.
+Making a full pass the goal drove models into unrelated repairs.
+The next unit is sized from an
 unreferenced tree of the tracked material paths written through a temporary
 index (the real index, `HEAD` and refs are untouched), so earlier units are not
 counted again. The snapshot is refused when a path has a `filter` attribute

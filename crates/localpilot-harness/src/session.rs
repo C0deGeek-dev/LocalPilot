@@ -5143,8 +5143,11 @@ impl SessionRuntime {
                                 Some(dispatch) => {
                                     bounded_write_dispatched =
                                         is_file_write_tool(name) && dispatch.mutation_may_have_run;
+                                    // A typed pre-invoke denial never launched
+                                    // the process; invoked failures still latch.
                                     self.work_opaque_launch_dispatched |=
-                                        is_opaque_launch(name, &active_call.input);
+                                        is_opaque_launch(name, &active_call.input)
+                                            && dispatch.permission_denial.is_none();
                                     unavailable_backend = dispatch.unavailable_backend;
                                     work_envelope_refusal = dispatch.work_envelope_refusal;
                                     if let Some(denial) = &dispatch.permission_denial {

@@ -256,7 +256,10 @@ config or environment only) lets `eval` run up to that many units. When a
 unit's full check fails, a narrow unit check may run: an isolated Python syntax
 check of each changed file, through the permission-gated runner, only if every
 changed path is a contained regular `.py` file and no shell/background/MCP
-launch or failed write happened in the unit. `HEAD` and all material paths must
+launch or failed write happened in the unit. A typed pre-invocation permission
+denial is not a launch; output text or a failed exit from an invoked process
+cannot claim that exemption. Errors and attempted budgets remain unchanged.
+`HEAD` and all material paths must
 be identical before the full check, after it and after the unit check, and the
 unit's bounds are re-inspected before granting; a check that moved the workspace,
 or a unit check that is denied or errors, stops the task. All passing ends the
@@ -269,10 +272,13 @@ then falls back to `HEAD` without running any helper). Because small models
 retry refused edits rather than answer, a size-refused write in a unit that
 already changed the workspace ends the unit at the end of that tool batch
 (remaining calls answered as skipped); a full check passing there is a
-checkpoint, never `Done`. Only the refusal that ends a unit this way tells the
-model its unit is complete; every other envelope refusal keeps the default
-text, since telling the model a unit ended when the host did not end it left
-the model stalled across tasks.
+checkpoint, never `Done`. Only the refusal that ends a unit this way names the
+host check and next unit; every other envelope refusal keeps its default text.
+The refusal and next checkpoint note explicitly say the triggering write was
+not executed and remains pending for an ordinary retry if still required.
+Earlier successful edits remain applied. Model-ended checkpoints do not invent
+a pending refusal. This is factual feedback, not automatic replay, completion,
+additional authority or a change to default0.
 
 **Consequences.** Syntax validity is not semantic correctness: a unit chain can
 accumulate incomplete work, bounded by the unit cap, the outstanding full check

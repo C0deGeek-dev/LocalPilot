@@ -328,6 +328,8 @@ enum Plan {
     StopAfterFirst,
     /// Rename the first site, run a shell command, then end the unit.
     ShellInUnit,
+    FailedShellInUnit,
+    DeniedShellInUnit,
     NumericFirst,
     CallSubstitution,
     DirtyBaseline,
@@ -361,6 +363,42 @@ impl Respond for Workspace {
             .cloned()
             .unwrap_or(Value::Null);
         let last_text = last["content"].to_string();
+        if self.plan == Plan::Rename && last["role"] == "user" {
+            if let Some(note) = body["messages"].as_array().and_then(|messages| {
+                messages
+                    .iter()
+                    .rev()
+                    .map(|m| m["content"].to_string())
+                    .find(|text| text.contains("Unit ") && text.contains("is recorded:"))
+            }) {
+                assert!(
+                    note.contains("The write that ended this unit was refused"),
+                    "{note}"
+                );
+                assert!(note.contains("was not executed"), "{note}");
+                let completed: usize = note
+                    .split("Unit ")
+                    .nth(1)
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let applied = SITES
+                    .iter()
+                    .filter(|(file, old, _)| {
+                        !std::fs::read_to_string(self.root.join(file))
+                            .unwrap()
+                            .contains(old)
+                    })
+                    .count();
+                assert_eq!(
+                    applied, completed,
+                    "the refused next site must remain unapplied"
+                );
+            }
+        }
         let whole_first = matches!(
             self.plan,
             Plan::WholeWriteFirst
@@ -476,6 +514,24 @@ impl Respond for Workspace {
                     n,
                     "run_shell",
                     &json!({"program": "git", "args": ["status"]}),
+                )
+            }
+            (Plan::DeniedShellInUnit, _)
+                if renamed_any && last["role"] == "tool" && last_text.contains("edited") =>
+            {
+                calls_tool(
+                    n,
+                    "run_shell",
+                    &json!({"command":"python -c \"open('denied-shell-marker', 'w').write('ran')\""}),
+                )
+            }
+            (Plan::FailedShellInUnit, _)
+                if renamed_any && last["role"] == "tool" && last_text.contains("edited") =>
+            {
+                calls_tool(
+                    n,
+                    "run_shell",
+                    &json!({"program":"git","args":["diff","--exit-code"]}),
                 )
             }
             (_, Some((file, old, new))) => calls_tool(
@@ -701,7 +757,12 @@ async fn units_finish_a_multi_site_rename_only_through_a_passing_full_check() {
         assert!(!all.contains(
             "complete only when you give your final answer and the full verification passes"
         ));
-        assert!(all.contains("this unit is complete"), "{all}");
+        assert!(all.contains("this call was not executed"), "{all}");
+        assert!(
+            all.contains("The write that ended this unit was refused"),
+            "{all}"
+        );
+        assert!(all.contains("It is still pending"), "{all}");
     }
 }
 
@@ -717,7 +778,7 @@ async fn without_the_setting_the_task_stops_as_before() {
         assert!(!run.turn_stops().iter().any(|s| s == "UnitCheckpoint"));
         let all = all_messages(&run);
         assert!(all.contains("verify it, and checkpoint before continuing"));
-        assert!(!all.contains("this unit is complete"));
+        assert!(!all.contains("this call was not executed"));
         assert!(!all.contains("next bounded unit"));
     }
 }
@@ -838,6 +899,15 @@ async fn selective_renames_finish_only_through_verified_units() {
         let run = run_eval_mode(Plan::Rename, None, Some("8"), verify, true).await;
         assert_eq!(run.sites_renamed(), 4, "{}", text(&run));
         assert_eq!(run.exit_reason(), "Done", "{}", text(&run));
+        let messages = all_messages(&run);
+        assert!(
+            messages.contains("The write that ended this unit was refused"),
+            "{messages}"
+        );
+        assert!(
+            messages.contains("Only earlier successful edits remain applied"),
+            "{messages}"
+        );
         assert_eq!(
             run.turn_stops()
                 .iter()
@@ -888,6 +958,23 @@ async fn selective_admission_refuses_multi_hunk_writes_then_allows_bounded_retri
 }
 
 #[tokio::test]
+async fn a_denied_opaque_call_does_not_invent_execution_or_block_verified_units() {
+    if !python_available() {
+        return;
+    }
+    for (global, selective) in [(Some("8"), None), (None, Some("8"))] {
+        let run = run_eval_mode(Plan::DeniedShellInUnit, global, selective, true, true).await;
+        assert!(all_messages(&run).contains("permission denied for run_shell"));
+        assert!(!run.root.path().join("denied-shell-marker").exists());
+        assert_eq!(run.sites_renamed(), 4, "{}", text(&run));
+        assert_eq!(run.exit_reason(), "Done", "{}", text(&run));
+    }
+    let off = run_eval_mode(Plan::DeniedShellInUnit, None, None, true, true).await;
+    assert_ne!(off.exit_reason(), "Done", "{}", text(&off));
+    assert_eq!(off.sites_renamed(), 1, "{}", text(&off));
+}
+
+#[tokio::test]
 async fn selective_mode_preserves_safety_and_source_identity_refusals() {
     if !python_available() {
         return;
@@ -898,10 +985,21 @@ async fn selective_mode_preserves_safety_and_source_identity_refusals() {
         (Plan::DirtyBaseline, "8", true),
         (Plan::FailedWrite, "8", true),
         (Plan::ShellInUnit, "8", true),
+        (Plan::FailedShellInUnit, "8", true),
         (Plan::StopAfterFirst, "8", true),
         (Plan::Rename, "8", false),
     ] {
         let run = run_eval_mode(plan, None, Some(units), true, grant).await;
+        if plan == Plan::FailedShellInUnit {
+            assert!(all_messages(&run).contains("exit: 1"), "{}", text(&run));
+        }
+        if plan == Plan::ShellInUnit {
+            assert!(
+                all_messages(&run).contains(r"tool: run_shell\nstatus: success"),
+                "{}",
+                text(&run)
+            );
+        }
         assert_ne!(run.exit_reason(), "Done", "{}", text(&run));
         assert!(
             !run.turn_stops().iter().any(|s| s == "UnitCheckpoint"),

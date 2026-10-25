@@ -19,8 +19,9 @@ use crate::rules::Trigger;
 const MOVED: &str = "unit checkpoint refused: a verification command changed the workspace; the work is preserved for review";
 const REFUSAL_STEP: &str =
     "split into a smaller coherent unit, verify it, and checkpoint before continuing";
-const UNIT_STEP: &str = "this unit is complete: the harness now checks it and, when the \
-     check allows, opens the next unit with the same task";
+const UNIT_STEP: &str = "this call was not executed; the harness now checks earlier successful \
+     changes and, when the check allows, opens the next unit with the same task. Retry this \
+     refused edit in that unit if it is still needed";
 
 #[derive(Default)]
 pub(super) struct RenameContinuation {
@@ -454,7 +455,10 @@ impl SessionRuntime {
         )
     }
 
-    fn grant_unit(&mut self, outcome: String) -> UnitAttempt {
+    fn grant_unit(&mut self, mut outcome: String) -> UnitAttempt {
+        if self.settling_host_unit {
+            outcome.push_str(". The write that ended this unit was refused and was not executed. It is still pending: use its last tool result to retry it in the next bounded unit if the original task still requires it. Only earlier successful edits remain applied");
+        }
         self.unit_checkpoints_remaining -= 1;
         self.last_unit_outcome = Some(outcome.clone());
         UnitAttempt::Checkpoint(format!("unit checkpoint: {outcome}"))
@@ -560,7 +564,7 @@ impl SessionRuntime {
                 Message::text(
                     Role::User,
                     format!(
-                        "Unit {} of at most {units} is recorded: {}. If the original request still needs changes, continue with the next bounded unit. Repair only failures your changes caused; report unrelated existing failures instead of fixing them.",
+                        "Unit {} of at most {units} is recorded: {}. A checkpoint does not mean the task or any refused edit is complete. If the original request still needs changes, continue with the next bounded unit. Repair only failures your changes caused; report unrelated existing failures instead of fixing them.",
                         unit - 1,
                         outcome
                     ),
@@ -608,7 +612,7 @@ mod tests {
         let kept = SessionRuntime::unit_refusal_guidance(message.clone(), false);
         assert_eq!(kept, message);
         let replaced = SessionRuntime::unit_refusal_guidance(message, true);
-        assert!(replaced.contains("this unit is complete"));
+        assert!(replaced.contains("this call was not executed"));
         assert!(!replaced.contains(REFUSAL_STEP));
     }
 }

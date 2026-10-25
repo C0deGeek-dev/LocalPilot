@@ -1,5 +1,16 @@
 # Test Plan
 
+Headless checkpoint controls distinguish host-ended and model-ended units.
+Real CLI request assertions inspect the next provider boundary while the refused
+site remains unapplied; feedback identifies that write as pending. Answer-led
+checkpoint events do not claim a refused write. Original prompts and default-off
+controls remain unchanged. Live completion requires independent frozen checks.
+
+Real CLI controls place a permission-denied opaque shell call between rename
+edits, assert its workspace marker was never created, and complete through
+verified units in both opt-in modes. Default0 remains blocked. Successful shell
+and actual Git exit1 controls still prevent unit checkpoints.
+
 `localpilot-harness/tests/granularity.rs` drives real dispatch for implicit
 oversized-line and explicit-range read refusals, oversized writes, permission
 denials, a completed nonzero Git command, missing-file I/O and typed backend

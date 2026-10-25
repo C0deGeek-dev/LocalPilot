@@ -337,6 +337,12 @@ async fn the_failed_full_check_stays_outstanding_after_an_unfinished_task() {
         );
         let stop = units(&mut runtime).await;
         assert_ne!(stop, StopReason::Done);
+        let saved = format!(
+            "{:?}",
+            runtime.store().read_events(runtime.session_id()).unwrap()
+        );
+        assert!(saved.contains("A checkpoint does not mean"), "{saved}");
+        assert!(!saved.contains("The write that ended this unit"), "{saved}");
         let statuses = check_statuses(&runtime);
         assert!(
             statuses.len() >= 2 && statuses[1].contains("passed"),
@@ -813,7 +819,7 @@ async fn a_refusal_that_ends_no_unit_keeps_the_default_text() {
     };
     let off = refusal_with_units(two_site_repository(BOTH).path(), 0, script()).await;
     let on = refusal_with_units(two_site_repository(BOTH).path(), 2, script()).await;
-    assert!(!on.contains("this unit is complete"), "{on}");
+    assert!(!on.contains("this call was not executed"), "{on}");
     assert_eq!(on, off);
 }
 
@@ -824,9 +830,9 @@ async fn a_refusal_that_ends_the_unit_says_so() {
     }
     let edits = [edit("x", "x = 1", "x = 2"), edit("y", "y = 1", "y = 2")];
     let on = refusal_with_units(two_site_repository(BOTH).path(), 2, stubborn(&edits, 3)).await;
-    assert!(on.contains("this unit is complete"), "{on}");
+    assert!(on.contains("this call was not executed"), "{on}");
     let off = refusal_with_units(two_site_repository(BOTH).path(), 0, stubborn(&edits, 3)).await;
-    assert!(!off.contains("this unit is complete"), "{off}");
+    assert!(!off.contains("this call was not executed"), "{off}");
 }
 
 /// Every request the model saw, rendered for byte comparison.
