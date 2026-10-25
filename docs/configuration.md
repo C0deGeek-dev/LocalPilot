@@ -1384,6 +1384,58 @@ to `core`, or set `broker = false` to advertise everything. Without `prompt_reve
 could not see and solved 18 of 36. Each reveal adds its schema to later
 requests.
 
+**Prompt cache and the tool list.** A reveal changes the `tools` list, and the
+chat templates tried render the tools before the part that follows them, so a
+changed list changes the prompt from that point on. Measured by replaying real
+first requests (16k window, one slot, `--cache-reuse 256`):
+
+| Model | First request partly cached, broker off / on | Reveal in the middle of a session |
+|---|---|---|
+| Bonsai 27B Q1_0 (hybrid, recurrent layers), llama.cpp b11415, b11026 and prism b10754 | 35/36 / 25/36 | whole conversation re-processed: 8,808 tokens, 6.4-8.5 s instead of 0.6-0.8 s |
+| Qwen3-4B-Instruct-2507 Q4_K_M (no recurrent layers), b11415 | 35/36 / 36/36 | everything after the changed tool re-processed: 5,268 of 8,582 tokens, 0.96 s instead of 0.12 s |
+
+A hybrid model can only resume from a stored context checkpoint, and
+llama-server places checkpoints near the end of each earlier prompt, not at the
+shared prefix. Where a new prompt differs from the cached one before every
+checkpoint, the whole prompt is re-processed. That is why the first request of a
+session is seldom cached on Bonsai when the revealed tools differ from the
+previous session's (about 3 s more prefill than a cached start). A model without
+recurrent layers does not show that gap, but still re-processes the text after a
+mid-session reveal; `--cache-reuse` did not shift it back in this test, and the
+cause was not found. Adding the tools a workload always needs to `core` avoids
+the reveal for those tools, at the cost of a larger fixed prompt.
+
+End to end (real `localpilot eval` sessions against Bonsai 27B, six small tasks,
+five runs each, answers checked by substring): adding `git_status`, `git_diff`,
+`git_log` and `search_definitions` to the default core (14 to 18 tools, about
+560 more prompt tokens on a task that reveals nothing) solved 30 of 30 against
+20 of 30, mostly because two history/status tasks whose wording did not trigger
+a request reveal (default core: `run_shell` instead of the git tools, 0 of 10)
+were answered with the git tools (10 of 10). Mean provider prefill per session
+was 1.5 s against 2.1 s and no session changed its tool list after the first
+request in either setup, so that run did not exercise the mid-session case. A
+second run did: eight three-turn sessions per setup through `localpilot rpc`
+(turns one and two read files, turn three asks for the git diff). With the
+default core, turn three's request reveal added `git_diff` to the tool list in
+all eight sessions, and the first request of that turn re-processed the whole
+conversation (about 4,076 tokens, median 3.3 s). With `git_diff` in `core` the
+list never changed and the same request processed about 33 new tokens (median
+0.29 s). Median session time was 14.1 s against 8.4 s; all sixteen sessions
+answered correctly. The conversation was only about 4,200 tokens long, so the
+gap grows with the conversation up to the window. One model, one fixture, one
+scripted follow-up. Advertising a revealed tool only through the reveal text,
+without listing it in `tools`, does not work for Bonsai: it did not call it in 0
+of 10 attempts (5 of 5 when listed).
+
+The first-request hit rate depends on session order: a session is cached only
+when the previous one had the same tool list. Replaying 36 sessions on Bonsai, 5
+of 36 were cached when seven different tails took turns, 15 of 36 in random
+order, 1 of 36 with twelve tails including eight MCP-like tools, and 35 of 36
+with the broker off (constant list). That matches the 7 of 36 of the 16k pilot
+(twelve different tasks, run on another machine), which could not be rerun on
+its own build. Only one non-hybrid model, one llama.cpp mainline and one prism
+build were tried.
+
 `readable_errors` defaults **on** — a pure message improvement with no behaviour
 change beyond the text the model reads — so a shape-invalid tool call is answered
 with an actionable, schema-aware correction by default.
