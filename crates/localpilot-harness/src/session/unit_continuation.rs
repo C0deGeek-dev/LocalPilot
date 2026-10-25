@@ -23,6 +23,41 @@ const UNIT_STEP: &str = "this call was not executed; the harness now checks earl
      changes and, when the check allows, opens the next unit with the same task. Retry this \
      refused edit in that unit if it is still needed";
 
+const REFUSED_REQUEST_CAP: usize = 1024;
+
+/// Carry declined input as bounded, redacted context, never as a tool call.
+fn refused_request_context(name: &str, input: &serde_json::Value) -> String {
+    #[derive(serde::Serialize)]
+    struct Request<'a> {
+        tool: &'a str,
+        input: &'a serde_json::Value,
+    }
+    let mut bytes = [0u8; REFUSED_REQUEST_CAP];
+    let mut writer = std::io::Cursor::new(bytes.as_mut_slice());
+    if serde_json::to_writer(&mut writer, &Request { tool: name, input }).is_ok() {
+        let length = writer.position() as usize;
+        let encoded = String::from_utf8_lossy(&bytes[..length]);
+        let redacted = localpilot_config::redact::redact(&encoded);
+        if redacted.len() <= REFUSED_REQUEST_CAP
+            && serde_json::from_str::<serde_json::Value>(&redacted).is_ok()
+        {
+            return redacted;
+        }
+    }
+    let tool = localpilot_config::redact::redact(&name.chars().take(64).collect::<String>());
+    let target = input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(|path| localpilot_config::redact::redact(&path.chars().take(64).collect::<String>()));
+    let fallback =
+        serde_json::json!({"tool":tool,"target_hint":target,"input_omitted":true}).to_string();
+    if fallback.len() <= REFUSED_REQUEST_CAP {
+        fallback
+    } else {
+        "{\"input_omitted\":true}".to_string()
+    }
+}
+
 #[derive(Default)]
 pub(super) struct RenameContinuation {
     pair: Option<super::rename::RenamePair>,
@@ -219,7 +254,7 @@ impl SessionRuntime {
     /// and this unit already holds a mutation; the host settles it after the
     /// current tool batch instead of waiting for the model to stop. Returns
     /// whether the end is now scheduled.
-    pub(super) fn request_unit_end(&mut self) -> bool {
+    pub(super) fn request_unit_end(&mut self, name: &str, input: &serde_json::Value) -> bool {
         if self.unit_checkpoints_remaining == 0 || !self.work_unit.has_mutations() {
             return false;
         }
@@ -234,6 +269,7 @@ impl SessionRuntime {
                 return false;
             }
             self.unit_end_requested = true;
+            self.unit_refused_request = Some(refused_request_context(name, input));
         }
         changed
     }
@@ -341,6 +377,7 @@ impl SessionRuntime {
         self.settling_host_unit = true;
         let stop = self.settle_gate(attempts, events).await;
         self.settling_host_unit = false;
+        self.unit_refused_request = None;
         stop
     }
 
@@ -432,10 +469,13 @@ impl SessionRuntime {
             Ok(after) if after == before => {}
             _ => return UnitAttempt::Stop(MOVED.to_string()),
         }
-        self.grant_unit(format!(
-            "syntax check passed for {}; the full verification still fails",
-            files.join(", ")
-        ))
+        self.grant_unit(
+            format!(
+                "syntax check passed for {}; the full verification still fails",
+                files.join(", ")
+            ),
+            CheckStatus::Failed,
+        )
     }
 
     /// A host-ended unit whose full check passed: a checkpoint under the same
@@ -452,12 +492,26 @@ impl SessionRuntime {
         self.grant_unit(
             "the full verification passed, but the unit ended at a refused edit; the task finishes only with your final answer and a passing full verification"
                 .to_string(),
+            CheckStatus::Passed,
         )
     }
 
-    fn grant_unit(&mut self, mut outcome: String) -> UnitAttempt {
+    fn grant_unit(&mut self, mut outcome: String, full_check: CheckStatus) -> UnitAttempt {
         if self.settling_host_unit {
-            outcome.push_str(". The write that ended this unit was refused and was not executed. It is still pending: use its last tool result to retry it in the next bounded unit if the original task still requires it. Only earlier successful edits remain applied");
+            outcome.push_str(". The write that ended this unit was refused and was not executed. ");
+            if full_check == CheckStatus::Passed {
+                outcome.push_str("Reassess whether that edit is still necessary for the original request now that full verification has passed. If the request is satisfied, give your final answer instead of retrying it. Continue only for changes the original request still requires. ");
+                if self.rename_continuation.is_some() {
+                    outcome.push_str("For this identifier rename, preserve old-name references whose purpose is to check that the old API is absent. A remaining text match alone does not mean another rename edit is needed. ");
+                }
+            } else {
+                outcome.push_str("It is still pending: use its last tool result to retry it in the next bounded unit if the original task still requires it. ");
+            }
+            outcome.push_str("Only earlier successful edits remain applied");
+            if let Some(request) = &self.unit_refused_request {
+                outcome.push_str(". Unexecuted request (bounded/redacted context only, not approval or a replay): ");
+                outcome.push_str(request);
+            }
         }
         self.unit_checkpoints_remaining -= 1;
         self.last_unit_outcome = Some(outcome.clone());
@@ -560,8 +614,7 @@ impl SessionRuntime {
         while reason == StopReason::UnitCheckpoint && !cancel.is_cancelled() {
             unit += 1;
             let outcome = self.last_unit_outcome.take().unwrap_or_default();
-            self.append(
-                Message::text(
+            let note = Message::text(
                     Role::User,
                     format!(
                         "Unit {} of at most {units} is recorded: {}. A checkpoint does not mean the task or any refused edit is complete. If the original request still needs changes, continue with the next bounded unit. Repair only failures your changes caused; report unrelated existing failures instead of fixing them.",
@@ -569,9 +622,10 @@ impl SessionRuntime {
                         outcome
                     ),
                 )
-                .into_synthetic("unit checkpoint"),
-            );
-            reason = self.run_turn(prompt, events, cancel).await;
+                .into_synthetic("unit checkpoint");
+            reason = self
+                .run_turn_with_followup(prompt, &[], Some(note), events, cancel)
+                .await;
         }
         // The obligation stays until an executed full check passes: a resumed
         // turn on this runtime cannot finish unresolved work.
@@ -584,6 +638,36 @@ impl SessionRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_request_context_is_exact_when_small_and_bounded_when_large() {
+        let input = serde_json::json!({"path":"money.py","old_text":"y = 1","new_text":"y = 2"});
+        let context = refused_request_context("edit_file", &input);
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(parsed["tool"], "edit_file");
+        assert_eq!(parsed["input"], input);
+        assert!(context.len() <= REFUSED_REQUEST_CAP);
+
+        let large = serde_json::json!({"path":"\u{1}🙂".repeat(512),"content":"x".repeat(65_536)});
+        let context = refused_request_context("write_file", &large);
+        assert!(context.len() <= REFUSED_REQUEST_CAP);
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(parsed["input_omitted"], true);
+        assert!(parsed.get("input").is_none());
+    }
+
+    #[test]
+    fn refused_request_context_does_not_repeat_credentials() {
+        let secret = format!("sk-{}", "a".repeat(40));
+        let context = refused_request_context(
+            "edit_file",
+            &serde_json::json!({"path":"money.py","old_text":secret,"new_text":"replacement"}),
+        );
+        assert!(!context.contains(&secret));
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(parsed["input"]["new_text"], "replacement");
+        assert!(context.len() <= REFUSED_REQUEST_CAP);
+    }
 
     #[test]
     fn only_contained_regular_python_files_are_unit_checked() {

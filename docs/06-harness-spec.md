@@ -124,7 +124,25 @@ the turn ends with the `UnitCheckpoint` stop (never `Done`) and the host repeats
 the original task with a synthetic unit note. The note keeps the scope rule
 and distinguishes applied work from pending work: when a refused write caused
 the host to end the unit, it explicitly says that call was not executed and
-needs a normal retry if still required. Model-ended checkpoints do not invent
+needs a normal retry if still required. If full verification passed, the note
+instead asks the model to reassess the refused edit against the original request
+and give its final answer if that request is satisfied. A queued refusal is not
+automatically remaining work. The model can still perform a necessary edit;
+passing checks alone never end a host-led unit as `Done`.
+Selective identifier-rename feedback also distinguishes intentional old-API
+absence references from code uses: a remaining text match alone is not another
+required rename. This is guidance, not a write restriction or completion proof.
+The synthetic note follows the unchanged original-task message and is tracked
+as a current-turn instruction. Compaction retains it with that task; if either
+instruction is missing from the projected request, the host stops before sending
+it. A note persisted only in older history is insufficient evidence of delivery.
+The handoff carries bounded, redacted JSON for the unexecuted request, since the
+old tool result may be trimmed. Small requests retain their input; large requests
+explicitly omit it and carry a target hint. This is context, not approval or an
+automatic replay. Splitting a long current exchange retains its leading task
+and synthetic follow-ups together, using the existing budget and paired-tool
+cut points. User steering clears obsolete pending-request context.
+Model-ended checkpoints do not invent
 a pending refusal. A checkpoint never certifies that the task or a refused edit
 is complete; the host never automatically replays the write.
 The scope rule is to continue only if the original request still needs changes,

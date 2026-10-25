@@ -489,13 +489,202 @@ async fn a_passing_full_check_at_a_refused_edit_is_not_the_end_of_the_task() {
         ScriptedApprover::always(),
         true,
     );
-    assert_eq!(units(&mut runtime).await, StopReason::Done);
+    let (events, _rx) = broadcast::channel(1024);
+    assert_eq!(
+        runtime
+            .run_turn_in_units(
+                "Change both x and y to 2.",
+                &events,
+                &CancellationToken::new()
+            )
+            .await,
+        StopReason::Done
+    );
     // Host checkpoint at the passing check, then the model's own final answer.
     assert_eq!(check_statuses(&runtime), ["passed", "passed"]);
     // Both edits landed before Done: the refused y was not dropped by an
     // early finish at the passing check.
     let text = std::fs::read_to_string(dir.path().join("money.py")).unwrap();
     assert!(text.contains("x = 2") && text.contains("y = 2"), "{text}");
+    let saved = format!(
+        "{:?}",
+        runtime.store().read_events(runtime.session_id()).unwrap()
+    );
+    assert!(
+        saved.contains("Reassess whether that edit is still necessary"),
+        "{saved}"
+    );
+    assert!(!saved.contains("It is still pending"), "{saved}");
+}
+
+#[tokio::test]
+async fn selective_completion_review_still_allows_a_required_caller_edit() {
+    if !python() {
+        return;
+    }
+    let dir = repository(PASSES);
+    std::fs::write(
+        dir.path().join("money.py"),
+        "def old_name():\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("app.py"), "from money import old_name\n").unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-qm", "caller fixture"]);
+    let caller = json!({"path":"app.py","old_text":"from money import old_name","new_text":"from money import new_name"});
+    let provider = FakeProvider::new()
+        .tool_call(
+            "declaration",
+            "edit_file",
+            json!({"path":"money.py","old_text":"def old_name","new_text":"def new_name"}),
+        )
+        .tool_call("refused-caller", "edit_file", caller.clone())
+        .tool_call("needed-caller", "edit_file", caller)
+        .text("done");
+    let mut runtime = SessionRuntime::new(
+        Arc::new(provider),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::ephemeral(),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            granularity: Some(GranularityConfig {
+                headless_rename_units: 2,
+                ..GranularityConfig::default()
+            }),
+            verify_before_done: true,
+            verify_command: Some("python verify.py".to_string()),
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    let (events, _rx) = broadcast::channel(1024);
+    assert_eq!(
+        runtime
+            .run_turn_in_units(
+                "Rename old_name to new_name in both files.",
+                &events,
+                &CancellationToken::new()
+            )
+            .await,
+        StopReason::Done
+    );
+    assert_eq!(check_statuses(&runtime), ["passed", "passed"]);
+    assert!(std::fs::read_to_string(dir.path().join("money.py"))
+        .unwrap()
+        .contains("def new_name"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("app.py")).unwrap(),
+        "from money import new_name\n"
+    );
+    let saved = format!(
+        "{:?}",
+        runtime.store().read_events(runtime.session_id()).unwrap()
+    );
+    assert!(
+        saved.contains(
+            "preserve old-name references whose purpose is to check that the old API is absent"
+        ),
+        "{saved}"
+    );
+}
+
+#[tokio::test]
+async fn the_provider_receives_current_checkpoint_review_under_context_pressure() {
+    if !python() {
+        return;
+    }
+    let dir = two_site_repository(PASSES);
+    let provider = FakeProvider::new()
+        .tool_call(
+            "x",
+            "edit_file",
+            json!({"path":"money.py","old_text":"x = 1","new_text":"x = 2"}),
+        )
+        .script(vec![
+            Ok(ModelEvent::TextDelta("old unit reasoning ".repeat(12_000))),
+            Ok(ModelEvent::ToolCall {
+                id: "unneeded-y".into(),
+                name: "edit_file".into(),
+                input_json: json!({"path":"money.py","old_text":"y = 1","new_text":"y = 2"}),
+                provider_metadata: None,
+            }),
+            Ok(ModelEvent::Done),
+        ])
+        .text("The requested x change is complete; y does not need changing.");
+    let observed = Arc::new(provider);
+    let mut runtime = SessionRuntime::new(
+        observed.clone(),
+        ToolRegistry::with_builtins().narrowed(&["edit_file".to_string(), "read_file".to_string()]),
+        PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::ephemeral(),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            context_token_limit: 16_384,
+            granularity: Some(GranularityConfig {
+                headless_units: 2,
+                ..GranularityConfig::default()
+            }),
+            verify_before_done: true,
+            verify_command: Some("python verify.py".to_string()),
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    let task = "Change only x to 2.";
+    let (events, _rx) = broadcast::channel(1024);
+    assert_eq!(
+        runtime
+            .run_turn_in_units(task, &events, &CancellationToken::new())
+            .await,
+        StopReason::Done
+    );
+    let requests = observed.requests();
+    let request = requests.last().unwrap();
+    let task_position = request
+        .messages
+        .iter()
+        .rposition(|message| {
+            message.role == localpilot_core::Role::User
+                && !message.is_synthetic()
+                && format!("{message:?}").contains(task)
+        })
+        .unwrap();
+    let review_position = request.messages.iter().rposition(|message| {
+        message.metadata.synthetic.as_deref() == Some("unit checkpoint")
+            && format!("{message:?}").contains("Reassess whether that edit is still necessary")
+    });
+    assert!(
+        review_position.is_some(),
+        "the actual provider request lost the checkpoint review"
+    );
+    let review_position = review_position.unwrap();
+    let review = format!("{:?}", request.messages[review_position]);
+    assert!(
+        review.contains("Unexecuted request"),
+        "the handoff must carry the refused request, not reference discarded history: {review}"
+    );
+    assert!(
+        review.contains("money.py") && review.contains("y = 1") && review.contains("y = 2"),
+        "{review}"
+    );
+    assert!(
+        review_position > task_position,
+        "review must follow the unchanged task"
+    );
+    let saved = runtime.store().read_events(runtime.session_id()).unwrap();
+    assert!(
+        saved
+            .iter()
+            .any(|event| matches!(event.kind, SessionEventKind::Compacted { .. })),
+        "context pressure must exercise compaction"
+    );
+    let text = std::fs::read_to_string(dir.path().join("money.py")).unwrap();
+    assert!(text.contains("x = 2") && text.contains("y = 1"));
 }
 
 #[tokio::test]

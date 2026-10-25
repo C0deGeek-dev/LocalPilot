@@ -80,6 +80,8 @@ fn git(root: &Path, args: &[&str]) {
         .success());
 }
 
+const TEST: &str = "import contextlib\nimport io\nimport sys\nimport unittest\nsys.path.insert(0, '.')\n\n\nclass Rename(unittest.TestCase):\n    def test_every_site_uses_new_name(self):\n        import app\n        import money\n        self.assertFalse(hasattr(money, 'old_name'))\n        self.assertEqual(money.doubled(1.234), 2.46)\n        out = io.StringIO()\n        with contextlib.redirect_stdout(out):\n            app.main()\n        self.assertEqual(out.getvalue(), '3\\n')\n";
+
 fn fixture(root: &Path, config: &Path, server: &str) {
     std::fs::create_dir_all(config.join("localpilot")).unwrap();
     std::fs::write(
@@ -112,11 +114,7 @@ args_prefix = [\"-m\", \"unittest\", \"discover\", \"-s\", \"tests\"]
     )
     .unwrap();
     std::fs::create_dir(root.join("tests")).unwrap();
-    std::fs::write(
-        root.join("tests/test_rename.py"),
-        "import contextlib\nimport io\nimport sys\nimport unittest\nsys.path.insert(0, '.')\n\n\nclass Rename(unittest.TestCase):\n    def test_every_site_uses_new_name(self):\n        import app\n        import money\n        self.assertFalse(hasattr(money, 'old_name'))\n        self.assertEqual(money.doubled(1.234), 2.46)\n        out = io.StringIO()\n        with contextlib.redirect_stdout(out):\n            app.main()\n        self.assertEqual(out.getvalue(), '3\\n')\n",
-    )
-    .unwrap();
+    std::fs::write(root.join("tests/test_rename.py"), TEST).unwrap();
     std::fs::write(root.join(".gitignore"), ".localpilot/\n.localmind/\n").unwrap();
     git(root, &["init", "-q"]);
     git(root, &["add", "-A"]);
@@ -330,6 +328,7 @@ enum Plan {
     ShellInUnit,
     FailedShellInUnit,
     DeniedShellInUnit,
+    ReviewAfterPass,
     NumericFirst,
     CallSubstitution,
     DirtyBaseline,
@@ -472,6 +471,46 @@ impl Respond for Workspace {
                 .unwrap_or_default()
                 .contains(old)
         });
+        if self.plan == Plan::ReviewAfterPass && remaining.is_none() {
+            let review = body["messages"].as_array().and_then(|messages| {
+                messages
+                    .iter()
+                    .rev()
+                    .map(|m| m["content"].to_string())
+                    .find(|text| {
+                        text.contains("Unit ") && text.contains("the full verification passed")
+                    })
+            });
+            if let Some(review) = review {
+                assert!(
+                    review.contains("was refused and was not executed"),
+                    "{review}"
+                );
+                assert!(
+                    review.contains("Reassess whether that edit is still necessary"),
+                    "{review}"
+                );
+                assert!(!review.contains("It is still pending"), "{review}");
+                assert!(
+                    !review.contains("use its last tool result to retry"),
+                    "{review}"
+                );
+                assert!(
+                    last_text.contains("Reassess whether that edit is still necessary"),
+                    "the actual last instruction must be the current review: {last_text}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(self.root.join("tests/test_rename.py")).unwrap(),
+                    TEST
+                );
+                return says("The source rename is complete; the original negative assertion correctly checks that the old name is absent.");
+            }
+            return calls_tool(
+                n,
+                "edit_file",
+                &json!({"path":"tests/test_rename.py","old_text":"hasattr(money, 'old_name')","new_text":"hasattr(money, 'new_name')"}),
+            );
+        }
         let renamed_any = !std::fs::read_to_string(self.root.join("money.py"))
             .unwrap_or_default()
             .contains("def old_name");
@@ -972,6 +1011,37 @@ async fn a_denied_opaque_call_does_not_invent_execution_or_block_verified_units(
     let off = run_eval_mode(Plan::DeniedShellInUnit, None, None, true, true).await;
     assert_ne!(off.exit_reason(), "Done", "{}", text(&off));
     assert_eq!(off.sites_renamed(), 1, "{}", text(&off));
+}
+
+#[tokio::test]
+async fn a_passing_full_check_reviews_a_queued_edit_before_retrying_it() {
+    if !python_available() {
+        return;
+    }
+    for (global, selective) in [(Some("8"), None), (None, Some("8"))] {
+        let run = run_eval_mode(Plan::ReviewAfterPass, global, selective, true, true).await;
+        assert_eq!(run.sites_renamed(), 4, "{}", text(&run));
+        assert_eq!(run.exit_reason(), "Done", "{}", text(&run));
+        assert_eq!(
+            std::fs::read_to_string(run.root.path().join("tests/test_rename.py")).unwrap(),
+            TEST
+        );
+        assert_eq!(
+            run.turn_stops()
+                .iter()
+                .filter(|s| *s == "UnitCheckpoint")
+                .count(),
+            4
+        );
+        let messages = all_messages(&run);
+        assert_eq!(
+            messages.contains(
+                "preserve old-name references whose purpose is to check that the old API is absent"
+            ),
+            selective.is_some(),
+            "{messages}"
+        );
+    }
 }
 
 #[tokio::test]

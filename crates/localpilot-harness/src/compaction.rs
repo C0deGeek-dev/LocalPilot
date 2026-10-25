@@ -458,22 +458,26 @@ fn split_oversized_exchange(
     if exchange.first().map(|message| message.role) != Some(Role::User) {
         return None;
     }
-    let user = &exchange[0];
+    // A real user task may be immediately followed by host instructions for
+    // the same turn. Keep that whole leading group, not only the task.
+    let anchor_len = exchange.iter().take_while(|m| m.role == Role::User).count();
     // Cut points: the start of each fresh assistant sub-turn after the user
     // message. Cutting there keeps every tool_use with its tool_result. The
     // smallest cut past the first sub-turn yields the largest fitting suffix.
-    for cut in 2..exchange.len() {
+    for cut in anchor_len + 1..exchange.len() {
         if exchange[cut].role != Role::Assistant
             || !matches!(exchange[cut - 1].role, Role::Tool | Role::User)
         {
             continue;
         }
-        let suffix: Vec<Message> = std::iter::once(user.clone())
+        let suffix: Vec<Message> = exchange[..anchor_len]
+            .iter()
+            .cloned()
             .chain(exchange[cut..].iter().cloned())
             .collect();
         let candidate = build_messages(system, summary, std::slice::from_ref(&suffix));
         if estimate_tokens(&candidate) <= token_limit {
-            return Some((exchange[1..cut].to_vec(), suffix));
+            return Some((exchange[anchor_len..cut].to_vec(), suffix));
         }
     }
     None
@@ -1449,6 +1453,49 @@ mod tests {
             .filter_map(first_text)
             .any(|t| t.contains("big task")));
         assert!(!call_ids.is_empty(), "a recent sub-turn suffix is kept");
+    }
+
+    #[test]
+    fn split_turn_retains_the_leading_task_and_checkpoint_review() {
+        let task = user("Rename the function without changing tests.");
+        let review = user("Unit check passed. The refused body edit remains unexecuted.")
+            .into_synthetic("unit checkpoint");
+        let mut messages = vec![
+            Message::text(Role::System, "sys"),
+            task.clone(),
+            review.clone(),
+        ];
+        for index in 0..8 {
+            messages.extend(tool_exchange(&format!("read-{index}")));
+        }
+        let result = compact_with_summary(messages, 300);
+        assert!(result.compacted);
+        assert!(estimate_tokens(&result.messages) <= 300);
+        assert!(result.messages.contains(&task));
+        assert!(
+            result.messages.contains(&review),
+            "splitting discarded the current checkpoint instruction"
+        );
+        let calls: BTreeSet<_> = result
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse(call) => Some(call.id.to_string()),
+                _ => None,
+            })
+            .collect();
+        let replies: BTreeSet<_> = result
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult(reply) => Some(reply.id.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(!calls.is_empty());
+        assert_eq!(calls, replies);
     }
 
     fn compacted_with_summary_fixture() -> CompactionResult {

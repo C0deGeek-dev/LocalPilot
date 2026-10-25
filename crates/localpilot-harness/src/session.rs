@@ -1339,6 +1339,8 @@ pub struct SessionRuntime {
     /// A bounds-refused write ended a unit that already holds a successful
     /// mutation; the host settles it after the current tool batch.
     unit_end_requested: bool,
+    /// Bounded, redacted data for the write that requested this unit boundary.
+    unit_refused_request: Option<String>,
     /// The verify gate is settling a host-ended unit (see `unit_end_requested`).
     settling_host_unit: bool,
     /// What the last granted unit checkpoint established, for the next unit's note.
@@ -1552,6 +1554,7 @@ impl SessionRuntime {
             rename_continuation: None,
             outstanding_full_check: false,
             unit_end_requested: false,
+            unit_refused_request: None,
             settling_host_unit: false,
             last_unit_outcome: None,
             provider,
@@ -1683,7 +1686,7 @@ impl SessionRuntime {
                 let mut unit_ended = false;
                 if is_file_write_tool(name) && refusal.blocks_opaque_retry {
                     self.work_opaque_retry_blocked = true;
-                    unit_ended = self.request_unit_end();
+                    unit_ended = self.request_unit_end(name, input);
                 }
                 return Some(Self::unit_refusal_guidance(refusal.message, unit_ended));
             }
@@ -1753,7 +1756,7 @@ impl SessionRuntime {
         let mut unit_ended = false;
         if is_file_write_tool(name) && refusal.blocks_opaque_retry {
             self.work_opaque_retry_blocked = true;
-            unit_ended = self.request_unit_end();
+            unit_ended = self.request_unit_end(name, input);
         }
         Some(Self::unit_refusal_guidance(refusal.message, unit_ended))
     }
@@ -2019,6 +2022,7 @@ impl SessionRuntime {
         self.work_opaque_launch_dispatched = false;
         self.work_write_error_may_have_run = false;
         self.unit_end_requested = false;
+        self.unit_refused_request = None;
         self.rename_continuation = None;
         self.work_unit = crate::granularity::WorkUnit::default();
     }
@@ -3864,6 +3868,21 @@ impl SessionRuntime {
         events: &broadcast::Sender<RuntimeEvent>,
         cancel: &CancellationToken,
     ) -> StopReason {
+        self.run_turn_with_followup(user_input, attachments, None, events, cancel)
+            .await
+    }
+
+    /// Keep a host's current-turn instruction after the unchanged user task.
+    /// Synthetic notes before that task belong to the preceding exchange and
+    /// may be dropped when it is compacted.
+    async fn run_turn_with_followup(
+        &mut self,
+        user_input: &str,
+        attachments: &[ContentBlock],
+        followup: Option<Message>,
+        events: &broadcast::Sender<RuntimeEvent>,
+        cancel: &CancellationToken,
+    ) -> StopReason {
         // Context hooks contribute system context for this turn. It is computed
         // once from the prompt and injected into the outgoing request adjacent to
         // the leading system prompt — never appended to history or persisted — so
@@ -3891,6 +3910,7 @@ impl SessionRuntime {
         self.work_opaque_launch_dispatched = false;
         self.work_write_error_may_have_run = false;
         self.unit_end_requested = false;
+        self.unit_refused_request = None;
         if let Some(state) = &mut self.rename_continuation {
             state.proof = None;
             state.attempted = false;
@@ -4012,6 +4032,10 @@ impl SessionRuntime {
         };
         self.turn_instructions = vec![input_message.clone()];
         self.append(input_message);
+        if let Some(followup) = followup {
+            self.turn_instructions.push(followup.clone());
+            self.append(followup);
+        }
         self.reveal_for_request(user_input);
         self.last_quota = None;
         self.tool_failure_guard.reset();
@@ -4079,6 +4103,7 @@ impl SessionRuntime {
             // the previous iteration's tool calls, before the next provider call.
             let admission = self.admit_soft_interrupts("after_tools", events);
             if admission.user {
+                self.unit_refused_request = None;
                 self.reset_progress_breakers(
                     &mut no_progress,
                     &mut unproductive_streak,
@@ -4725,6 +4750,7 @@ impl SessionRuntime {
                     if admission.user {
                         // User steering outranks a host-ended unit boundary.
                         self.unit_end_requested = false;
+                        self.unit_refused_request = None;
                         if let Some(state) = &mut self.rename_continuation {
                             state.proof = None;
                             state.attempted = false;

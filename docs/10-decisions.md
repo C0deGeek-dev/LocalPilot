@@ -275,10 +275,29 @@ already changed the workspace ends the unit at the end of that tool batch
 checkpoint, never `Done`. Only the refusal that ends a unit this way names the
 host check and next unit; every other envelope refusal keeps its default text.
 The refusal and next checkpoint note explicitly say the triggering write was
-not executed and remains pending for an ordinary retry if still required.
+not executed. A syntax-only checkpoint identifies it as pending for an ordinary
+retry if still required.
 Earlier successful edits remain applied. Model-ended checkpoints do not invent
 a pending refusal. This is factual feedback, not automatic replay, completion,
 additional authority or a change to default0.
+After a passing full check, the host note asks for completion review instead of
+describing the refused write as pending work to retry. The original request
+decides whether it is still needed; only the model's final answer and the final
+verification can finish the task. Syntax-only/failed-full handoffs retain the
+bounded retry guidance. No automatic completion or repair-budget exemption.
+Selective rename review additionally warns that intentional old-API absence
+references are not code uses to rename. Text matches alone do not establish
+remaining work; this supplies no mutation authority or semantic completion proof.
+Place the synthetic checkpoint note after the unchanged replayed task and track
+both as current-turn instructions. A note before the task belongs to the old
+exchange and can be compacted away; persistence does not prove provider receipt.
+The existing missing-instruction guard stops the turn if projection loses either.
+Carry a bounded, redacted snapshot of the unexecuted request as note data, not
+an executable call. The transient snapshot is cleared at turn/session starts,
+host settlement and user steering; no persistence schema changes. Oversized
+inputs are explicitly omitted rather than expanding context. Oversized-exchange
+splitting keeps the contiguous leading user-instruction group together and
+retains the existing token limit and tool-call/result pairing rules.
 
 **Consequences.** Syntax validity is not semantic correctness: a unit chain can
 accumulate incomplete work, bounded by the unit cap, the outstanding full check

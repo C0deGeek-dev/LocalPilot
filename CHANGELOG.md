@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Opt-in host checkpoints with passing full verification now request completion
+  review before retrying a refused edit. The model can finish a satisfied task
+  or continue necessary work through the existing limits and final verifier.
+  The review follows the original task and is tracked through compaction.
+  It carries bounded, redacted context for the unexecuted edit; long-turn splits
+  keep the task and its leading review together without increasing budgets.
+
 - A shell call authoritatively refused before invocation no longer counts as
   an opaque launch when checking opt-in headless checkpoint eligibility.
   Actual launches, including failed commands, still disqualify the unit.
