@@ -113,13 +113,11 @@ fn top(need: &str) -> String {
 #[test]
 fn requests_that_name_a_capability_reveal_its_tool() {
     let rows: &[(&str, &str)] = &[
-        ("What is the message of the most recent git commit in this repository? Quote it exactly.", "git_log"),
-        ("There is a staged change in this repository. In one sentence, say which file it changes and what it adds.", "git_diff"),
         ("Fetch http://127.0.0.1:8080/status and report the build id it returns.", "fetch"),
         ("First record a two-step task plan with the plan tool, then read README.md and tell me its first line.", "update_plan"),
         ("What is the internal codename of release 2.4.0? Use the release tooling.", "release_codename"),
         ("Find out which team owns the 'stable' release train.", "release_owner"),
-        ("Where is the class `RetryPolicy` defined? Give the file path.", "search_definitions"),
+        ("Commit my staged changes with a message.", "git_commit"),
     ];
     for (request, expected) in rows {
         let names = revealed(request);
@@ -128,6 +126,32 @@ fn requests_that_name_a_capability_reveal_its_tool() {
             "{request:?} -> {names:?}, expected {expected}"
         );
     }
+}
+
+/// `git_status`, `git_diff`, `git_log` and `search_definitions` are in the
+/// default core (ADR-0234), so they are already advertised and a request that
+/// names them reveals nothing for them.
+#[test]
+fn a_tool_in_the_default_core_is_not_revealed_again() {
+    let rows: &[(&str, &str)] = &[
+        ("There is a staged change in this repository. In one sentence, say which file it changes and what it adds.", "git_diff"),
+        ("Show me the git history of this file.", "git_log"),
+        ("Use git_log to show what happened recently.", "git_log"),
+        ("Where is the class `RetryPolicy` defined? Give the file path.", "search_definitions"),
+    ];
+    for (request, core_tool) in rows {
+        let names = revealed(request);
+        assert!(
+            !names.iter().any(|n| n == core_tool),
+            "{request:?} -> {names:?}: {core_tool} is already advertised"
+        );
+    }
+    // Known edge: with git_log advertised, this wording's next-best match is the
+    // write tool, so it is revealed too. Nothing above relies on it.
+    let names = revealed(
+        "What is the message of the most recent git commit in this repository? Quote it exactly.",
+    );
+    assert!(!names.iter().any(|n| n == "git_log"), "{names:?}");
 }
 
 #[test]
@@ -166,16 +190,16 @@ fn history_and_write_intents_rank_their_own_tools() {
 
 #[test]
 fn an_explicitly_named_tool_is_revealed_and_lookalikes_are_not() {
-    let names = revealed("Use git_log to show what happened recently.");
-    assert!(names.iter().any(|n| n == "git_log"), "{names:?}");
+    let names = revealed("Use git_add to stage the new file.");
+    assert!(names.iter().any(|n| n == "git_add"), "{names:?}");
     // A different identifier that merely contains the name is not a mention.
     for request in [
-        "Rename the not_git_log helper.",
-        "Configure the git_logger module.",
+        "Rename the not_git_add helper.",
+        "Configure the git_adder module.",
     ] {
         let names = revealed(request);
         assert!(
-            !names.iter().any(|n| n == "git_log"),
+            !names.iter().any(|n| n == "git_add"),
             "{request:?} -> {names:?}"
         );
     }

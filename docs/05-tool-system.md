@@ -850,7 +850,8 @@ path. Sub-agents run without a broker.
 With the broker on:
 
 - **Working set.** Each turn advertises only a small **working set** of tool
-  schemas — a configurable core default (a lean read/edit/search/shell set) plus
+  schemas — a configurable core default (a read/edit/search/shell set plus the read-only
+  git tools and definition search) plus
   the broker's own tools plus any tools revealed this session. Tool *names* are
   still listed in the prompt (cheap); only the *schemas* (the token cost) are
   narrowed.

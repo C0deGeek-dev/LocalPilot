@@ -47,9 +47,14 @@ pub const DEFAULT_WORKING_SET_CAP: usize = 24;
 pub const DEFAULT_SCORE_FLOOR: u32 = 1;
 
 /// The default core working set: the always-advertised builtins a coding turn
-/// needs from turn one. Everything else (git, fetch, knowledge expand/fetch,
-/// memory, skills, MCP tools) is revealed on demand. This core takes effect
-/// when the broker is enabled; turning it off advertises the full registry.
+/// needs from turn one, including the read-only git tools and definition search.
+/// A tool revealed in the middle of a session changes the `tools` list, which
+/// makes some models (hybrid ones that resume only from checkpoints) re-process
+/// the whole conversation; keeping these in the core avoids that for the most
+/// common follow-ups. Everything else (git writes, fetch, knowledge
+/// expand/fetch, memory, skills, MCP tools) is revealed on demand. This core
+/// takes effect when the broker is enabled; turning it off advertises the full
+/// registry.
 pub const DEFAULT_CORE: &[&str] = &[
     "read_file",
     "read_image",
@@ -63,6 +68,10 @@ pub const DEFAULT_CORE: &[&str] = &[
     "run_shell",
     "read_tool_output",
     "knowledge_search",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "search_definitions",
 ];
 
 /// Tuning the broker reads. The `enabled` switch lives a level up: the session
@@ -1200,6 +1209,32 @@ mod tests {
         let broker = Broker::new(BrokerConfig::default());
         broker.set_catalog(catalog());
         broker
+    }
+
+    /// A reveal in the middle of a session changes the tool list, which makes a
+    /// hybrid model re-process the whole conversation (ADR-0234). The read-only
+    /// git tools and definition search are therefore always advertised, and the
+    /// ones that change the repository are not.
+    #[test]
+    fn the_default_core_has_the_read_only_git_tools_and_no_mutating_ones() {
+        for needed in ["git_status", "git_diff", "git_log", "search_definitions"] {
+            assert!(
+                DEFAULT_CORE.contains(&needed),
+                "{needed} must be in the core"
+            );
+        }
+        for mutating in ["git_add", "git_commit", "git_restore"] {
+            assert!(
+                !DEFAULT_CORE.contains(&mutating),
+                "{mutating} changes the repository and stays revealed on demand"
+            );
+        }
+        let mut unique = DEFAULT_CORE.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), DEFAULT_CORE.len(), "no tool is listed twice");
+        let config = BrokerConfig::default();
+        assert_eq!(config.core.len(), DEFAULT_CORE.len());
     }
 
     #[test]

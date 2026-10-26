@@ -1355,7 +1355,7 @@ available tool set.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `broker` | bool | `true` | Enable the broker. On narrows advertised schemas to the working set, reveals tools a request names and resolves/reveals on a miss; `false` advertises the full available registry (the rollback path). |
-| `core` | array of string | `[]` | The core working set always advertised when the broker is on. Empty uses the built-in default (a lean read/edit/search/shell set). |
+| `core` | array of string | `[]` | The core working set always advertised when the broker is on. Empty uses the built-in default (a read/edit/search/shell set plus `git_status`, `git_diff`, `git_log` and `search_definitions`). |
 | `working_set_cap` | int | `24` | Maximum revealed tools retained before LRU eviction. |
 | `score_floor` | int | `1` | Minimum resolution score to reveal; below it a miss is a clean "no match". |
 | `marker` | bool | `false` | Enable the loose `NEED: <capability>` marker trigger. Off by default; the always-on failure-driven trigger does not need it. |
@@ -1406,7 +1406,9 @@ previous session's (about 3 s more prefill than a cached start). A model without
 recurrent layers does not show that gap, but still re-processes the text after a
 mid-session reveal; `--cache-reuse` did not shift it back in this test, and the
 cause was not found. Adding the tools a workload always needs to `core` avoids
-the reveal for those tools, at the cost of a larger fixed prompt.
+the reveal for those tools, at the cost of a larger fixed prompt. The default
+core therefore includes `git_status`, `git_diff`, `git_log` and
+`search_definitions` (ADR-0234).
 
 End to end (real `localpilot eval` sessions against Bonsai 27B, six small tasks,
 five runs each, answers checked by substring): adding `git_status`, `git_diff`,

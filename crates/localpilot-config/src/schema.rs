@@ -565,7 +565,8 @@ pub struct ToolsConfig {
     pub broker: bool,
     /// The core working set always advertised when the broker is on, in addition
     /// to the broker's own `tool_search`/`tool_load`. Empty uses the built-in
-    /// default (a lean read/edit/search/shell set).
+    /// default (a read/edit/search/shell set plus the read-only git tools and
+    /// definition search).
     pub core: Vec<String>,
     /// Maximum revealed tools retained before LRU eviction.
     pub working_set_cap: usize,

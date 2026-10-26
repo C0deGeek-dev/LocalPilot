@@ -2,6 +2,42 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0234: The Default Tool Core Includes The Read-Only Git Tools And Definition Search
+
+**Status:** accepted · **Date:** 2026-10-26.
+
+**Context.** With the broker on, a tool revealed in the middle of a session
+changes the `tools` list. The chat templates tried render the tools before the
+text that follows, so the conversation after the changed tool is re-processed;
+a hybrid model (recurrent layers, for example Bonsai 27B) can resume a cached
+prompt only from a context checkpoint, so it re-processes the whole
+conversation. In three-turn sessions on Bonsai 27B (16k window, eight per arm)
+a `git_diff` reveal at turn three re-processed about 3,700 tokens and delayed
+the first token by about 2 s; with `git_diff` in `core` the list never changed.
+Short single-task runs without a reveal showed no difference.
+
+**Decision.** Add `git_status`, `git_diff`, `git_log` and `search_definitions`
+to `DEFAULT_CORE` (12 to 16 tools, about 560 more prompt tokens on a request).
+A configured `[tools] core` still replaces the default. No per-workspace tail
+and no hybrid-model detection: a tail helps only from the second session in a
+workspace and grows with every tool ever revealed there, and detection has
+nothing to switch without it.
+
+**Consequences.** Common git and definition follow-ups no longer change the
+tool list mid-session. The fixed prompt is larger on every request, also for
+models that show no gap. A small dense model (Qwen3-4B) given all four git
+tools chose `git_status` over `git_diff` for a question about a staged change
+and, when it continued, often called `git_diff` without `staged`; with only
+`git_diff` added it answered correctly in 8 of 8 sessions. That model is
+considered too small for this test; the measurements are one scripted
+follow-up, one fixture, two models and eight sessions per cell, and are in
+LocalHub#249.
+
+Request reveal only picks tools that are not advertised, so a request that
+names a core tool reveals nothing for it. One wording ("the message of the most
+recent git commit") now reveals `git_commit` as its next-best match, because
+`git_log` is already advertised.
+
 ## ADR-0233: Separate Content-Bound Execution, Promotion And Publication Authority
 
 **Status:** accepted · **Date:** 2026-10-24.

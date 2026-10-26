@@ -180,7 +180,7 @@ fn finished_tools(rx: &mut broadcast::Receiver<RuntimeEvent>) -> Vec<(String, bo
 #[tokio::test]
 async fn a_call_to_an_unadvertised_tool_reveals_it_without_running_it() {
     let provider = FakeProvider::new()
-        .tool_call("c1", "git_log", serde_json::json!({}))
+        .tool_call("c1", "git_add", serde_json::json!({}))
         .text("done");
     let mut h = build_broker_harness(provider, BrokerConfig::default());
     let mut rx = h.events.subscribe();
@@ -191,34 +191,34 @@ async fn a_call_to_an_unadvertised_tool_reveals_it_without_running_it() {
         .await;
 
     let requests = h.provider.requests();
-    // Turn 1 did not advertise git_log; turn 2 does, because the failed call
+    // Turn 1 did not advertise git_add; turn 2 does, because the failed call
     // revealed it.
     assert!(
-        !advertised_at(&requests, 0).contains(&"git_log".to_string()),
-        "git_log should be unadvertised on turn 1"
+        !advertised_at(&requests, 0).contains(&"git_add".to_string()),
+        "git_add should be unadvertised on turn 1"
     );
     assert!(
-        advertised_at(&requests, 1).contains(&"git_log".to_string()),
-        "git_log should be revealed and advertised on turn 2"
+        advertised_at(&requests, 1).contains(&"git_add".to_string()),
+        "git_add should be revealed and advertised on turn 2"
     );
     // The attempted call did not run: its result is the re-resolution redirect,
     // not git output, and it is not an error.
     let finished = finished_tools(&mut rx);
     let c1 = finished
         .iter()
-        .find(|(name, _, _)| name == "git_log")
-        .expect("a git_log tool result");
+        .find(|(name, _, _)| name == "git_add")
+        .expect("a git_add tool result");
     assert!(
         !c1.1,
         "the re-resolution is a redirect, not an error: {c1:?}"
     );
     assert!(
-        c1.2.to_lowercase().contains("retry") && c1.2.contains("git_log"),
+        c1.2.to_lowercase().contains("retry") && c1.2.contains("git_add"),
         "expected a re-resolution message, got: {}",
         c1.2
     );
     assert!(
-        h.broker.is_advertised("git_log"),
+        h.broker.is_advertised("git_add"),
         "revealed by the failed call"
     );
 }
@@ -229,7 +229,7 @@ async fn a_retired_tool_routes_to_its_overlay_replacement() {
         .tool_call("c1", "legacy_log", serde_json::json!({}))
         .text("done");
     let mut h = build_broker_harness(provider, BrokerConfig::default());
-    h.broker.deprecate("legacy_log", "git_log");
+    h.broker.deprecate("legacy_log", "git_add");
     let mut rx = h.events.subscribe();
 
     let _ = h
@@ -243,11 +243,11 @@ async fn a_retired_tool_routes_to_its_overlay_replacement() {
         .find(|(name, _, _)| name == "legacy_log")
         .expect("a legacy_log tool result");
     assert!(
-        c1.2.contains("retired") && c1.2.contains("git_log"),
+        c1.2.contains("retired") && c1.2.contains("git_add"),
         "expected a retired-tool redirect, got: {}",
         c1.2
     );
-    assert!(h.broker.is_advertised("git_log"), "replacement revealed");
+    assert!(h.broker.is_advertised("git_add"), "replacement revealed");
 }
 
 #[tokio::test]
@@ -335,8 +335,8 @@ async fn the_broker_recovers_an_unadvertised_tool_where_the_baseline_errors() {
     // Broker on: the model calls an unadvertised tool, the failure-driven reveal
     // makes it available, and the retry dispatches it — the task completes.
     let provider = FakeProvider::new()
-        .tool_call("c1", "git_log", serde_json::json!({}))
-        .tool_call("c2", "git_log", serde_json::json!({}))
+        .tool_call("c1", "git_add", serde_json::json!({}))
+        .tool_call("c2", "git_add", serde_json::json!({}))
         .text("done");
     let mut h = build_broker_harness(provider, BrokerConfig::default());
     let mut rx = h.events.subscribe();
@@ -346,20 +346,20 @@ async fn the_broker_recovers_an_unadvertised_tool_where_the_baseline_errors() {
         .await;
 
     let finished = finished_tools(&mut rx);
-    // Two git_log results: the first is the re-resolution redirect, the second is
+    // Two git_add results: the first is the re-resolution redirect, the second is
     // an actual dispatch (it ran — on a non-repo it errors, but it executed).
-    let git_log_results: Vec<&(String, bool, String)> =
-        finished.iter().filter(|(n, _, _)| n == "git_log").collect();
-    assert_eq!(git_log_results.len(), 2, "got {finished:?}");
+    let git_add_results: Vec<&(String, bool, String)> =
+        finished.iter().filter(|(n, _, _)| n == "git_add").collect();
+    assert_eq!(git_add_results.len(), 2, "got {finished:?}");
     assert!(
-        git_log_results[0].2.to_lowercase().contains("retry"),
+        git_add_results[0].2.to_lowercase().contains("retry"),
         "first call is the redirect: {}",
-        git_log_results[0].2
+        git_add_results[0].2
     );
     assert!(
-        !git_log_results[1].2.to_lowercase().contains("retry"),
+        !git_add_results[1].2.to_lowercase().contains("retry"),
         "second call actually dispatched: {}",
-        git_log_results[1].2
+        git_add_results[1].2
     );
     assert_eq!(reason, localpilot_harness::StopReason::Done);
 }
@@ -450,7 +450,7 @@ fn resolution_events(store: &Store, id: localpilot_core::SessionId) -> usize {
 #[tokio::test]
 async fn with_learning_on_a_resolution_is_recorded_to_the_event_log() {
     let provider = FakeProvider::new()
-        .tool_call("c1", "git_log", serde_json::json!({}))
+        .tool_call("c1", "git_add", serde_json::json!({}))
         .text("done");
     let mut h = build_broker_harness(
         provider,
@@ -470,13 +470,13 @@ async fn with_learning_on_a_resolution_is_recorded_to_the_event_log() {
 #[tokio::test]
 async fn with_learning_off_no_resolution_telemetry_is_written() {
     let provider = FakeProvider::new()
-        .tool_call("c1", "git_log", serde_json::json!({}))
+        .tool_call("c1", "git_add", serde_json::json!({}))
         .text("done");
     let mut h = build_broker_harness(provider, BrokerConfig::default()); // learning off
     let _ = h.runtime.run_turn("history", &h.events, &h.cancel).await;
-    // The broker still works (git_log was revealed) but nothing was learned.
+    // The broker still works (git_add was revealed) but nothing was learned.
     assert!(
-        h.broker.is_advertised("git_log"),
+        h.broker.is_advertised("git_add"),
         "mechanical freshness still works"
     );
     assert_eq!(
@@ -491,8 +491,8 @@ async fn a_hot_tool_graduates_across_repeated_reveals() {
     // With learning on and a low threshold, repeated failure-driven reveals of the
     // same tool graduate it into the always-advertised set.
     let provider = FakeProvider::new()
-        .tool_call("c1", "git_log", serde_json::json!({}))
-        .tool_call("c2", "git_log", serde_json::json!({}))
+        .tool_call("c1", "git_add", serde_json::json!({}))
+        .tool_call("c2", "git_add", serde_json::json!({}))
         .text("done");
     let mut h = build_broker_harness(
         provider,
@@ -506,10 +506,10 @@ async fn a_hot_tool_graduates_across_repeated_reveals() {
     // cross the threshold (the second turn's c2 call dispatches the now-advertised
     // tool, so drive the count via the broker to keep the test deterministic).
     let _ = h.runtime.run_turn("history", &h.events, &h.cancel).await;
-    h.broker.reveal("git_log");
+    h.broker.reveal("git_add");
     assert!(
-        h.broker.graduated_names().contains(&"git_log".to_string()),
-        "git_log should graduate after crossing the threshold"
+        h.broker.graduated_names().contains(&"git_add".to_string()),
+        "git_add should graduate after crossing the threshold"
     );
 }
 
@@ -748,14 +748,14 @@ async fn a_reveal_appends_to_the_tools_without_changing_the_bytes_before_it() {
         .runtime
         .run_turn("hello again", &h.events, &h.cancel)
         .await;
-    h.broker.reveal("git_log");
+    h.broker.reveal("git_add");
     let _ = h.runtime.run_turn("and again", &h.events, &h.cancel).await;
 
     let requests = h.provider.requests();
     let names = advertised_per_request(&requests);
     let stable = names[0].len();
     assert_eq!(&names[1][stable..], ["git_commit", "fetch"], "reveal order");
-    assert_eq!(&names[2][stable..], ["git_commit", "fetch", "git_log"]);
+    assert_eq!(&names[2][stable..], ["git_commit", "fetch", "git_add"]);
     // The prefix is byte-identical as the provider would serialize it.
     let bytes = |tools: &[localpilot_llm::ToolSpec]| serde_json::to_vec(tools).unwrap();
     assert_eq!(
@@ -821,11 +821,11 @@ async fn an_evicted_tool_leaves_the_request_and_returns_at_the_end() {
             ..BrokerConfig::default()
         },
     );
-    for name in ["fetch", "git_log", "git_commit"] {
+    for name in ["fetch", "git_add", "git_commit"] {
         h.broker.reveal(name); // the third evicts fetch
     }
     let _ = h.runtime.run_turn("hello", &h.events, &h.cancel).await;
-    h.broker.reveal("fetch"); // evicts git_log; fetch returns last
+    h.broker.reveal("fetch"); // evicts git_add; fetch returns last
     let _ = h
         .runtime
         .run_turn("hello again", &h.events, &h.cancel)
@@ -833,9 +833,9 @@ async fn an_evicted_tool_leaves_the_request_and_returns_at_the_end() {
 
     let names = advertised_per_request(&h.provider.requests());
     let tail = |names: &[String]| names[names.len() - 2..].to_vec();
-    assert_eq!(tail(&names[0]), ["git_log", "git_commit"]);
+    assert_eq!(tail(&names[0]), ["git_add", "git_commit"]);
     assert_eq!(tail(&names[1]), ["git_commit", "fetch"]);
-    assert!(!names[1].contains(&"git_log".to_string()));
+    assert!(!names[1].contains(&"git_add".to_string()));
 }
 
 #[tokio::test]

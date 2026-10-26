@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The default tool core now includes `git_status`, `git_diff`, `git_log` and
+  `search_definitions`. With the broker on, revealing one of them in the middle
+  of a session changed the tool list and made hybrid models re-process the
+  whole conversation (about 3,700 tokens and 2 s on Bonsai 27B at turn three of
+  a scripted session). The cost is about 560 more prompt tokens per request. A
+  configured `[tools] core` is unchanged (ADR-0234).
+
 - `eval` now continues uniform Python identifier renames in verified bounded
   units by default (`[harness.granularity] headless_rename_units`, default 8).
   A four-site rename under the conservative work envelope can now finish in a
