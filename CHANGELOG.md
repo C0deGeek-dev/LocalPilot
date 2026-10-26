@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/harness-resume` in a folder that is not a git repository no longer ends with
+  git's own "not a git repository" after the plan was approved. The review of
+  what approval does now says the folder gets a repository, and approving runs
+  `git init` with the harness's local files kept out through
+  `.git/info/exclude`; nothing else is committed. Without that approval
+  (`harness resume`, `rpc`, `eval`) the harness stops before a step starts with
+  an error that names `localpilot init --git` (ADR-0235).
+
 ## v6.0.0 - 2026-10-26
 
 Coordinated LocalX release.

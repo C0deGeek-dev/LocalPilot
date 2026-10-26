@@ -122,6 +122,11 @@ pub async fn resume_one_step_with_events(
         .next_incomplete()
         .ok_or(crate::workspace_state::NotResumable::Complete)?
         .clone();
+    // Every step is sized and checkpointed through git. Say so here, with the
+    // remedy, rather than letting the first `git status` fail with git's own text.
+    if !is_git_workspace(root) {
+        return Err(HarnessError::NotGitRepository);
+    }
     // Before the baseline is recorded: the baseline is a commit, and the plan
     // documents must be part of it rather than counted as the step's own work.
     commit_plan_documents(root)?;
@@ -1077,6 +1082,64 @@ pub(crate) fn path_has_link(root: &Path, path: &str) -> Result<bool, HarnessErro
     Ok(false)
 }
 
+/// Whether `root` is inside a git work tree (a parent's repository counts).
+#[must_use]
+pub fn is_git_workspace(root: &Path) -> bool {
+    bounded_git(
+        root,
+        None,
+        &["rev-parse", "--is-inside-work-tree"],
+        SNAPSHOT_TIMEOUT,
+    )
+    .is_ok_and(|out| out.trim() == "true")
+}
+
+/// What the harness and its tools keep in a project folder, and a repository the
+/// harness creates must not track: the runtime state, and the local config that
+/// is never committed.
+const HARNESS_LOCAL_PATHS: [&str; 4] = [
+    ".localpilot/",
+    ".localpilot.toml",
+    ".localmind/",
+    ".localmind.toml",
+];
+
+/// Create a git repository at `root` when there is none, and keep the harness's
+/// own local files out of it through `.git/info/exclude`, so no `.gitignore` is
+/// added to the user's project. Returns whether a repository was created; a folder
+/// that is already inside one is left alone. No commit is made here: the plan
+/// documents are committed by the first resume.
+///
+/// # Errors
+/// [`HarnessError`] if git cannot create the repository or the exclude file
+/// cannot be written.
+pub fn init_git_workspace(root: &Path) -> Result<bool, HarnessError> {
+    if is_git_workspace(root) {
+        return Ok(false);
+    }
+    git(root, &["init", "-q"])?;
+    let exclude = git(root, &["rev-parse", "--git-path", "info/exclude"])?;
+    let exclude = root.join(exclude.trim());
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| HarnessError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    for entry in HARNESS_LOCAL_PATHS {
+        if !text.lines().any(|line| line.trim() == entry) {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(entry);
+            text.push('\n');
+        }
+    }
+    write(&exclude, &text)?;
+    Ok(true)
+}
+
 /// The documents `intake` and `plan` write and nothing commits.
 const PLAN_DOCUMENTS: [&str; 2] = ["brief.md", "PROGRESS.md"];
 
@@ -1680,6 +1743,64 @@ mod artifact_tests {
         git(dir.path(), &["config", "core.autocrlf", "false"]).unwrap();
         git(dir.path(), &["commit", "--allow-empty", "-qm", "baseline"]).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_folder_without_git_is_not_a_workspace_and_a_repository_is() {
+        let bare = tempfile::tempdir().unwrap();
+        assert!(!is_git_workspace(bare.path()));
+        let repo = repository();
+        assert!(is_git_workspace(repo.path()));
+    }
+
+    #[test]
+    fn init_creates_a_repository_that_keeps_harness_files_out_and_lets_the_plan_be_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("brief.md"), "# Brief\n").unwrap();
+        std::fs::write(root.join("PROGRESS.md"), "# Progress\n").unwrap();
+        std::fs::write(root.join(".localpilot.toml"), "[harness]\n").unwrap();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\n").unwrap();
+        std::fs::create_dir_all(root.join(".localpilot")).unwrap();
+        std::fs::write(root.join(".localpilot/state"), "x").unwrap();
+        std::fs::create_dir_all(root.join(".localmind")).unwrap();
+        std::fs::write(root.join(".localmind/store"), "x").unwrap();
+
+        assert!(init_git_workspace(root).unwrap(), "a repository is created");
+        assert!(is_git_workspace(root));
+        git(root, &["config", "user.name", "Fixture"]).unwrap();
+        git(root, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+
+        // Only the plan documents are left to commit: the tool and harness files
+        // never reach the user's history, and no .gitignore was added.
+        let mut dirty = committable_status_paths(root).unwrap();
+        dirty.sort();
+        assert_eq!(
+            dirty,
+            vec!["PROGRESS.md".to_string(), "brief.md".to_string()]
+        );
+        assert!(!root.join(".gitignore").exists());
+
+        commit_plan_documents(root).unwrap();
+        assert!(committable_status_paths(root).unwrap().is_empty());
+        let log = git(root, &["log", "--format=%s"]).unwrap();
+        assert_eq!(log.trim(), "harness: add brief and plan");
+        let tracked = git(root, &["ls-files"]).unwrap();
+        assert!(!tracked.contains(".localpilot") && !tracked.contains(".localmind"));
+    }
+
+    #[test]
+    fn init_leaves_an_existing_repository_alone() {
+        let repo = repository();
+        let before = git(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        assert!(!init_git_workspace(repo.path()).unwrap());
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]).unwrap(), before);
+        let exclude = repo.path().join(".git/info/exclude");
+        let text = std::fs::read_to_string(exclude).unwrap_or_default();
+        assert!(
+            !text.contains(".localpilot"),
+            "an existing repository's excludes are not touched"
+        );
     }
 
     fn profile() -> WorkProfile {

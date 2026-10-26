@@ -2,6 +2,35 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0235: The Interactive Harness Creates The Git Repository When The User Approves A Resume
+
+**Status:** accepted · **Date:** 2026-10-26.
+
+**Context.** The harness sizes and checkpoints every step through git, and the
+first resume commits `brief.md` and `PROGRESS.md` as its baseline (#231). A
+project that starts with `/brief` and `/plan` in an empty folder has no
+repository, and `/harness-resume` ended with git's own `fatal: not a git
+repository` after the user had approved the resume. The only place that ran
+`git init` was the opt-in `localpilot init --git` (#250).
+
+**Decision.** The library never creates a repository: `resume_one_step` stops
+before a step starts with `HarnessError::NotGitRepository`, whose message names
+`localpilot init --git`. The interactive harness already asks "resume this
+plan?" with a review of what approval does; when the folder is not a repository
+that review now says so, and approving runs `init_git_workspace`: `git init`,
+with `.localpilot/`, `.localmind/` and their `.toml` files added to
+`.git/info/exclude` (no `.gitignore` is written into the user's project). No
+commit is made there; the first resume commits `brief.md` and `PROGRESS.md` as
+before, so anything else already in the folder stays uncommitted and the
+existing unrelated-changes rule applies. A folder inside a parent repository is
+left alone. If creation fails, the resume does not start.
+
+**Consequences.** One approval covers both the resume and the new repository,
+and the review shows it first. Non-interactive callers (`harness resume`,
+`rpc`, `eval`, mesh) get the named error instead of a repository they did not
+ask for. The interactive path was not run in a terminal; the library behaviour
+and the repository creation are covered by tests.
+
 ## ADR-0234: The Default Tool Core Includes The Read-Only Git Tools And Definition Search
 
 **Status:** accepted · **Date:** 2026-10-26.

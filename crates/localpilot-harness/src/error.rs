@@ -30,6 +30,14 @@ pub enum HarnessError {
     #[error("provider error: {0}")]
     Provider(String),
 
+    /// The folder is not a git repository. The harness sizes and checkpoints
+    /// every step through git, so it cannot start one without a repository.
+    #[error(
+        "this folder is not a git repository, and the harness needs one to size and checkpoint \
+         steps; confirm creating it in the interactive harness, or run `localpilot init --git` here"
+    )]
+    NotGitRepository,
+
     /// The project's lifecycle state does not permit execution. Carries the
     /// named reason so a caller can say which one it is.
     #[error("{0}")]

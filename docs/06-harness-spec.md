@@ -543,6 +543,14 @@ Inputs:
 - `brief.md`
 - `PROGRESS.md`
 
+A step is sized and checkpointed through git, so the folder must be a git
+repository. The library stops before any step starts with an error that names
+`localpilot init --git` when it is not. The interactive harness
+(`/harness-resume`) says in its review that approving creates one; on approval
+it runs `git init`, keeps `.localpilot/`, `.localmind/` and their `.toml` files
+out through `.git/info/exclude` (no `.gitignore` is added), and the first resume
+commits `brief.md` and `PROGRESS.md` as before (ADR-0235).
+
 Output:
 
 - code changes

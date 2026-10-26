@@ -94,7 +94,10 @@ pub use quality::{
     CheckOutcome, CheckRunner, CheckSeverity, CheckStatus, CleanupOutcome, CommandEnd, CommandRun,
     EnvPolicy, GateRatification, ProposedCheck, ToolchainProfile, QUALITY_CHECK_TOOL,
 };
-pub use resume::{resume_one_step, resume_one_step_with_events, ResumeOutcome, QUOTA_PAUSE_KEY};
+pub use resume::{
+    init_git_workspace, is_git_workspace, resume_one_step, resume_one_step_with_events,
+    ResumeOutcome, QUOTA_PAUSE_KEY,
+};
 pub use retrospective::{
     append_lessons, run_and_record, run_retrospective, Retrospective, RETROSPECTIVE_PROMPT,
 };

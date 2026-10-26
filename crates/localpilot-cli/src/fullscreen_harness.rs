@@ -117,6 +117,19 @@ pub(super) fn confirm_resume(
     let current = ResumeConsent::capture(runtime, ctx);
     if let (Some(captured), Some(current)) = (&captured, &current) {
         if captured == current {
+            // The review said this folder gets a repository when approved.
+            match localpilot_harness::init_git_workspace(ctx.cwd) {
+                Ok(true) => app.apply_runtime(RuntimeUpdate::Notice(
+                    "created a git repository here (git init)".to_string(),
+                )),
+                Ok(false) => {}
+                Err(error) => {
+                    app.apply_runtime(RuntimeUpdate::Warning(format!(
+                        "could not create a git repository here: {error}; run `git init` yourself and resume again"
+                    )));
+                    return false;
+                }
+            }
             ctx.stages.end(localpilot_harness::StageOutcome::Approved);
             return true;
         }
@@ -145,6 +158,12 @@ fn offer_resume(app: &mut AppModel, runtime: &SessionRuntime, ctx: &mut SlashCon
             ));
             if let Some(profile) = resume_work_profile(runtime, progress) {
                 lines.push(profile.instruction());
+            }
+            if !localpilot_harness::is_git_workspace(ctx.cwd) {
+                lines.push(
+                    "  git: this folder is not a repository, and every step is sized and checkpointed through git; approving creates one here (git init). .localpilot/, .localmind/ and their .toml files stay out of it, and brief.md and PROGRESS.md are committed first"
+                        .to_string(),
+                );
             }
             present_command_report(
                 app,
