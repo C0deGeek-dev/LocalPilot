@@ -1,7 +1,8 @@
 //! Bounded unit continuation for a headless task under a conservative work
-//! profile: a unit whose full verification fails may still end as a unit
-//! checkpoint when its own executed check passes, and the host then opens the
-//! next unit. Completion still requires an actual passing full check.
+//! profile: a unit that reached its work-envelope limit and whose full
+//! verification fails may still end as a unit checkpoint when its own executed
+//! check passes, and the host then opens the next unit. A passing full check
+//! never opens one. Completion still requires an actual passing full check.
 
 use std::path::Path;
 
@@ -255,7 +256,10 @@ impl SessionRuntime {
     /// current tool batch instead of waiting for the model to stop. Returns
     /// whether the end is now scheduled.
     pub(super) fn request_unit_end(&mut self, name: &str, input: &serde_json::Value) -> bool {
-        if self.unit_checkpoints_remaining == 0 || !self.work_unit.has_mutations() {
+        if self.unit_checkpoints_remaining == 0
+            || self.host_unit_declined
+            || !self.work_unit.has_mutations()
+        {
             return false;
         }
         // An attempt budget is not a change: require the actual workspace to
@@ -366,9 +370,9 @@ impl SessionRuntime {
         true
     }
 
-    /// Settle a unit the host ended after a bounds refusal. A passing full
-    /// check is not a finished task here: the refused write shows more work
-    /// was intended, so it can only become a checkpoint.
+    /// Settle a unit the host ended after a bounds refusal. A failing full
+    /// check may become a checkpoint; a passing one opens no further unit: the
+    /// model stays in the same bounded unit and must answer for completion.
     pub(super) async fn settle_host_unit(
         &mut self,
         attempts: &mut usize,
@@ -483,44 +487,16 @@ impl SessionRuntime {
             Ok(after) if after == before => {}
             _ => return UnitAttempt::Stop(MOVED.to_string()),
         }
-        self.grant_unit(
-            format!(
-                "syntax check passed for {}; the full verification still fails",
-                files.join(", ")
-            ),
-            CheckStatus::Failed,
-        )
+        self.grant_unit(format!(
+            "syntax check passed for {}; the full verification still fails",
+            files.join(", ")
+        ))
     }
 
-    /// A host-ended unit whose full check passed: a checkpoint under the same
-    /// eligibility, never a finished task.
-    pub(super) fn host_unit_after_pass(
-        &mut self,
-        root: &Path,
-        diff_mutated: bool,
-        before_full_check: Option<&crate::resume::WorkDiffBaseline>,
-    ) -> UnitAttempt {
-        if let Err(attempt) = self.unit_precheck(root, diff_mutated, before_full_check) {
-            return attempt;
-        }
-        self.grant_unit(
-            "the full verification passed, but the unit ended at a refused edit; the task finishes only with your final answer and a passing full verification"
-                .to_string(),
-            CheckStatus::Passed,
-        )
-    }
-
-    fn grant_unit(&mut self, mut outcome: String, full_check: CheckStatus) -> UnitAttempt {
+    fn grant_unit(&mut self, mut outcome: String) -> UnitAttempt {
         if self.settling_host_unit {
             outcome.push_str(". The write that ended this unit was refused and was not executed. ");
-            if full_check == CheckStatus::Passed {
-                outcome.push_str("Reassess whether that edit is still necessary for the original request now that full verification has passed. If the request is satisfied, give your final answer instead of retrying it. Continue only for changes the original request still requires. ");
-                if self.rename_continuation.is_some() {
-                    outcome.push_str("For this identifier rename, preserve old-name references whose purpose is to check that the old API is absent. A remaining text match alone does not mean another rename edit is needed. ");
-                }
-            } else {
-                outcome.push_str("It is still pending: use its last tool result to retry it in the next bounded unit if the original task still requires it. ");
-            }
+            outcome.push_str("It is still pending: use its last tool result to retry it in the next bounded unit if the original task still requires it. ");
             outcome.push_str("Only earlier successful edits remain applied");
             if let Some(request) = &self.unit_refused_request {
                 outcome.push_str(". Unexecuted request (bounded/redacted context only, not approval or a replay): ");

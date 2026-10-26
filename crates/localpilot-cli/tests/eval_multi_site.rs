@@ -472,33 +472,10 @@ impl Respond for Workspace {
                 .contains(old)
         });
         if self.plan == Plan::ReviewAfterPass && remaining.is_none() {
-            let review = body["messages"].as_array().and_then(|messages| {
-                messages
-                    .iter()
-                    .rev()
-                    .map(|m| m["content"].to_string())
-                    .find(|text| {
-                        text.contains("Unit ") && text.contains("the full verification passed")
-                    })
-            });
-            if let Some(review) = review {
-                assert!(
-                    review.contains("was refused and was not executed"),
-                    "{review}"
-                );
-                assert!(
-                    review.contains("Reassess whether that edit is still necessary"),
-                    "{review}"
-                );
-                assert!(!review.contains("It is still pending"), "{review}");
-                assert!(
-                    !review.contains("use its last tool result to retry"),
-                    "{review}"
-                );
-                assert!(
-                    last_text.contains("Reassess whether that edit is still necessary"),
-                    "the actual last instruction must be the current review: {last_text}"
-                );
+            if last_text.contains("this unit is at its limit") {
+                // The full check passed: no unit opened, the edit stayed
+                // refused, and the model is asked only for its answer.
+                assert!(!last_text.contains("Unexecuted request"), "{last_text}");
                 assert_eq!(
                     std::fs::read_to_string(self.root.join("tests/test_rename.py")).unwrap(),
                     TEST
@@ -823,17 +800,18 @@ async fn without_the_setting_the_task_stops_as_before() {
 }
 
 #[tokio::test]
-async fn a_checkpoint_followed_by_no_edits_never_finishes() {
+async fn an_answer_without_a_refused_write_never_checkpoints_or_finishes() {
     if !python_available() {
         return;
     }
     for verify in [true, false] {
+        // One site, then answers only: the unit never reached its limit, so a
+        // failed check stays ordinary feedback and no unit opens.
         let run = run_eval(Plan::StopAfterFirst, Some("8"), verify, true).await;
         let stops = run.turn_stops();
-        assert_eq!(
-            stops.first().map(String::as_str),
-            Some("UnitCheckpoint"),
-            "{}",
+        assert!(
+            stops.iter().all(|s| s != "UnitCheckpoint"),
+            "{stops:?} {}",
             text(&run)
         );
         assert_ne!(run.exit_reason(), "Done", "verify={verify} {}", text(&run));
@@ -1014,7 +992,7 @@ async fn a_denied_opaque_call_does_not_invent_execution_or_block_verified_units(
 }
 
 #[tokio::test]
-async fn a_passing_full_check_reviews_a_queued_edit_before_retrying_it() {
+async fn a_passing_full_check_keeps_a_queued_test_edit_refused() {
     if !python_available() {
         return;
     }
@@ -1026,21 +1004,15 @@ async fn a_passing_full_check_reviews_a_queued_edit_before_retrying_it() {
             std::fs::read_to_string(run.root.path().join("tests/test_rename.py")).unwrap(),
             TEST
         );
+        // One checkpoint per failing site boundary; none after the pass.
         assert_eq!(
             run.turn_stops()
                 .iter()
                 .filter(|s| *s == "UnitCheckpoint")
                 .count(),
-            4
+            3
         );
-        let messages = all_messages(&run);
-        assert_eq!(
-            messages.contains(
-                "preserve old-name references whose purpose is to check that the old API is absent"
-            ),
-            selective.is_some(),
-            "{messages}"
-        );
+        assert!(!all_messages(&run).contains("Reassess"));
     }
 }
 

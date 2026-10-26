@@ -6,12 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
-- Opt-in host checkpoints with passing full verification now request completion
-  review before retrying a refused edit. The model can finish a satisfied task
-  or continue necessary work through the existing limits and final verifier.
-  The review follows the original task and is tracked through compaction.
-  It carries bounded, redacted context for the unexecuted edit; long-turn splits
-  keep the task and its leading review together without increasing budgets.
+- Opt-in headless units no longer open a unit when the full verification
+  passes at a refused edit; the edit stays refused and the model is asked for
+  its final answer, as with units off. A failed check opens a unit only after
+  the work envelope refused a write in the current unit; otherwise the unit
+  keeps its ordinary repair attempts. Checkpoint notes carry bounded, redacted
+  context for the unexecuted edit and stay with the task through compaction.
 
 - Mesh endpoint renewal now rechecks lease validity before each atomic file
   replacement attempt. A Windows sharing violation can no longer leave a

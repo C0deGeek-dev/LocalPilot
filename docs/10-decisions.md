@@ -252,8 +252,9 @@ a four-site rename stopped with one site done (`NoProgress`): every later edit
 was refused and the full test suite cannot pass a half-renamed tree.
 
 **Decision.** `[harness.granularity] headless_units` (0–8, default 0; user
-config or environment only) lets `eval` run up to that many units. When a
-unit's full check fails, a narrow unit check may run: an isolated Python syntax
+config or environment only) lets `eval` run up to that many units. When the
+work envelope refused a write in a unit and its full check fails, a narrow unit
+check may run: an isolated Python syntax
 check of each changed file, through the permission-gated runner, only if every
 changed path is a contained regular `.py` file and no shell/background/MCP
 launch or failed write happened in the unit. A typed pre-invocation permission
@@ -271,8 +272,9 @@ through a temporary index, refused for paths with a `filter` attribute (sizing
 then falls back to `HEAD` without running any helper). Because small models
 retry refused edits rather than answer, a size-refused write in a unit that
 already changed the workspace ends the unit at the end of that tool batch
-(remaining calls answered as skipped); a full check passing there is a
-checkpoint, never `Done`. Only the refusal that ends a unit this way names the
+(remaining calls answered as skipped). A full check passing there opens no
+unit and is not `Done`: the model is asked for its final answer, and later
+refusals in that unit keep their default text and do not end it. Only the refusal that ends a unit this way names the
 host check and next unit; every other envelope refusal keeps its default text.
 The refusal and next checkpoint note explicitly say the triggering write was
 not executed. A syntax-only checkpoint identifies it as pending for an ordinary
@@ -280,14 +282,16 @@ retry if still required.
 Earlier successful edits remain applied. Model-ended checkpoints do not invent
 a pending refusal. This is factual feedback, not automatic replay, completion,
 additional authority or a change to default0.
-After a passing full check, the host note asks for completion review instead of
-describing the refused write as pending work to retry. The original request
-decides whether it is still needed; only the model's final answer and the final
-verification can finish the task. Syntax-only/failed-full handoffs retain the
-bounded retry guidance. No automatic completion or repair-budget exemption.
-Selective rename review additionally warns that intentional old-API absence
-references are not code uses to rename. Text matches alone do not establish
-remaining work; this supplies no mutation authority or semantic completion proof.
+Amended 2026-10-25: a passing full check no longer opens a unit with
+completion review, and a failed full check in a unit the envelope never refused
+keeps the ordinary verify-attempt feedback in that unit. Opening another unit
+therefore requires a refused write while the task-owned check fails. A
+host-ended unit whose check passes still adds that check and feedback, which
+units-off does not run at that point. This narrows the opportunity for extra edits after a
+pass (a live run edited a protected negative assertion after review); it is not
+a proof against an external grader that the in-run check does not imply. A
+weak check that passes before requested work is complete leaves that work
+refused, as with units off.
 Place the synthetic checkpoint note after the unchanged replayed task and track
 both as current-turn instructions. A note before the task belongs to the old
 exchange and can be compacted away; persistence does not prove provider receipt.

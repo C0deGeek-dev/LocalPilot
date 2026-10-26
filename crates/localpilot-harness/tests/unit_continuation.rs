@@ -78,16 +78,12 @@ fn runtime(
     )
 }
 
-fn edit_then_answers(answers: usize) -> FakeProvider {
-    let mut provider = FakeProvider::new().tool_call(
-        "edit",
-        "edit_file",
-        json!({"path": "money.py", "old_text": "x = 1", "new_text": "x = 2"}),
-    );
-    for _ in 0..answers {
-        provider = provider.text("unit done");
-    }
-    provider
+/// Edit x, then a y edit the one-region unit refuses, then plain answers.
+fn walled_then_answers(answers: usize) -> FakeProvider {
+    stubborn(
+        &[edit("x", "x = 1", "x = 2"), edit("y", "y = 1", "y = 2")],
+        answers,
+    )
 }
 
 async fn units(runtime: &mut SessionRuntime) -> StopReason {
@@ -275,10 +271,10 @@ async fn a_verifier_that_rewrites_the_unit_earns_no_checkpoint() {
         // Moves HEAD.
         "import subprocess, sys\nsubprocess.run(['git', 'commit', '-qam', 'by verifier'])\nsys.exit(1)\n",
     ] {
-        let dir = repository(verifier);
+        let dir = two_site_repository(verifier);
         let mut runtime = runtime(
             dir.path(),
-            edit_then_answers(6),
+            walled_then_answers(6),
             Profile::Unrestricted,
             ScriptedApprover::always(),
             true,
@@ -296,12 +292,12 @@ async fn a_unit_check_that_cannot_run_stops_with_its_status() {
     if !python() {
         return;
     }
-    let dir = repository(FAILS);
+    let dir = two_site_repository(FAILS);
     // Approve the full check; deny the unit check that follows it.
     let approver = ScriptedApprover::new(vec![true, false]);
     let mut runtime = runtime(
         dir.path(),
-        edit_then_answers(6),
+        walled_then_answers(6),
         Profile::Default,
         approver,
         true,
@@ -325,12 +321,12 @@ async fn the_failed_full_check_stays_outstanding_after_an_unfinished_task() {
         return;
     }
     for verify_before_done in [true, false] {
-        let dir = repository(FAILS);
-        // Unit 1 checkpoints; unit 2 answers without edits until it stops;
-        // a later turn answers immediately without touching anything.
+        let dir = two_site_repository(FAILS);
+        // Unit 1 checkpoints at its refused edit; unit 2 answers without
+        // edits until it stops; a later turn answers without touching anything.
         let mut runtime = runtime(
             dir.path(),
-            edit_then_answers(12),
+            walled_then_answers(12),
             Profile::Unrestricted,
             ScriptedApprover::always(),
             verify_before_done,
@@ -342,7 +338,6 @@ async fn the_failed_full_check_stays_outstanding_after_an_unfinished_task() {
             runtime.store().read_events(runtime.session_id()).unwrap()
         );
         assert!(saved.contains("A checkpoint does not mean"), "{saved}");
-        assert!(!saved.contains("The write that ended this unit"), "{saved}");
         let statuses = check_statuses(&runtime);
         assert!(
             statuses.len() >= 2 && statuses[1].contains("passed"),
@@ -369,42 +364,81 @@ async fn the_failed_full_check_stays_outstanding_after_an_unfinished_task() {
 }
 
 #[tokio::test]
-async fn a_passing_full_check_finishes_after_a_checkpoint() {
+async fn a_failed_check_before_any_refusal_returns_its_diagnostics_first() {
     if !python() {
         return;
     }
-    // Passes only once both separated lines are changed.
+    // No write was refused when the model answered, so the failed check goes
+    // back to the same unit as ordinary feedback instead of a checkpoint. The
+    // conservative unit refuses the repair, which then ends the unit; the
+    // repair lands in the next unit.
     let dir = repository(
-        "import sys\ntext = open('money.py').read()\nsys.exit(0 if 'x = 2' in text and 'y = 2' in text else 1)\n",
+        "import sys
+sys.exit(0 if 'x = 2' in open('money.py').read() else 1)
+",
     );
-    std::fs::write(dir.path().join("money.py"), "x = 1\n\n\n\ny = 1\n").unwrap();
-    git(dir.path(), &["commit", "-qam", "two sites"]);
-    let mut runtime = runtime(
-        dir.path(),
+    let repair = json!({"path": "money.py", "old_text": "x = 3", "new_text": "x = 2"});
+    let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
-                "x",
+                "wrong",
                 "edit_file",
-                json!({"path": "money.py", "old_text": "x = 1", "new_text": "x = 2"}),
-            )
-            .text("unit done")
-            .tool_call(
-                "y",
-                "edit_file",
-                json!({"path": "money.py", "old_text": "y = 1", "new_text": "y = 2"}),
+                json!({"path": "money.py", "old_text": "x = 1", "new_text": "x = 3"}),
             )
             .text("done")
+            .tool_call("refused-repair", "edit_file", repair.clone())
+            .tool_call("repair", "edit_file", repair)
+            .text("done")
             .text("done"),
-        Profile::Unrestricted,
-        ScriptedApprover::always(),
-        true,
+    );
+    let mut runtime = SessionRuntime::new(
+        provider.clone(),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::ephemeral(),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            granularity: Some(GranularityConfig {
+                headless_units: 2,
+                ..GranularityConfig::default()
+            }),
+            verify_before_done: true,
+            verify_command: Some("python verify.py".to_string()),
+            ..SessionConfig::default()
+        },
+        Vec::new(),
     );
     assert_eq!(units(&mut runtime).await, StopReason::Done);
-    let statuses = check_statuses(&runtime);
-    // Full Failed, unit check Passed (checkpoint), then full Passed.
-    assert_eq!(statuses.len(), 3, "{statuses:?}");
-    assert!(statuses[0].contains("failed") && statuses[1].contains("passed"));
-    assert!(statuses[2].contains("passed"));
+    // Full failed (feedback), full failed + unit check passed at the refused
+    // repair (checkpoint), then full passed.
+    assert_eq!(
+        check_statuses(&runtime),
+        ["failed", "failed", "passed", "passed"]
+    );
+    assert_eq!(unit_checkpoints(&runtime), 1);
+    // The request after the first answer carried the failure, not a unit note.
+    let third = format!("{:?}", provider.requests()[2]);
+    assert!(!third.contains("of at most"), "{third}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("money.py")).unwrap(),
+        "x = 2
+"
+    );
+}
+
+/// Turns this session ended as unit checkpoints.
+fn unit_checkpoints(runtime: &SessionRuntime) -> usize {
+    runtime
+        .store()
+        .read_events(runtime.session_id())
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            matches!(&e.kind, SessionEventKind::TurnEnded { stop, .. } if stop == "UnitCheckpoint")
+        })
+        .count()
 }
 
 /// A two-region file: `x` near the top, `y` far below, so editing both
@@ -470,24 +504,38 @@ async fn the_host_ends_a_unit_at_a_refused_edit_and_the_model_finishes_later() {
 }
 
 #[tokio::test]
-async fn a_passing_full_check_at_a_refused_edit_is_not_the_end_of_the_task() {
+async fn a_passing_full_check_at_a_refused_edit_opens_no_further_unit() {
     if !python() {
         return;
     }
-    // The checker passes from the start: a host-ended unit must still not
-    // finish the task; only the model's own final answer can.
+    // The checker passes from the start. The host-ended unit settles without
+    // a new unit; the repeated y edit is refused in the same unit without
+    // another host end or check; only the final answer runs the check again.
     let dir = two_site_repository(PASSES);
     let edits = [
         edit("x", "x = 1", "x = 2"),
         edit("y1", "y = 1", "y = 2"),
         edit("y2", "y = 1", "y = 2"),
     ];
-    let mut runtime = runtime(
-        dir.path(),
-        stubborn(&edits, 3),
-        Profile::Unrestricted,
-        ScriptedApprover::always(),
-        true,
+    let provider = Arc::new(stubborn(&edits, 3));
+    let mut runtime = SessionRuntime::new(
+        provider.clone(),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Unrestricted, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::ephemeral(),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            granularity: Some(GranularityConfig {
+                headless_units: 2,
+                ..GranularityConfig::default()
+            }),
+            verify_before_done: true,
+            verify_command: Some("python verify.py".to_string()),
+            ..SessionConfig::default()
+        },
+        Vec::new(),
     );
     let (events, _rx) = broadcast::channel(1024);
     assert_eq!(
@@ -500,25 +548,27 @@ async fn a_passing_full_check_at_a_refused_edit_is_not_the_end_of_the_task() {
             .await,
         StopReason::Done
     );
-    // Host checkpoint at the passing check, then the model's own final answer.
+    // One check settles the host-ended unit; one checks the final answer.
     assert_eq!(check_statuses(&runtime), ["passed", "passed"]);
-    // Both edits landed before Done: the refused y was not dropped by an
-    // early finish at the passing check.
+    assert_eq!(unit_checkpoints(&runtime), 0);
+    // As without units, the refused y stays unapplied.
     let text = std::fs::read_to_string(dir.path().join("money.py")).unwrap();
-    assert!(text.contains("x = 2") && text.contains("y = 2"), "{text}");
-    let saved = format!(
-        "{:?}",
-        runtime.store().read_events(runtime.session_id()).unwrap()
+    assert!(text.contains("x = 2") && text.contains("y = 1"), "{text}");
+    let all = format!("{:?}", provider.requests());
+    assert!(!all.contains("of at most"), "a unit note was sent: {all}");
+    // Only the first refusal ended the unit; the second keeps the default step.
+    let seen = format!("{:?}", provider.requests().last().unwrap());
+    assert_eq!(
+        seen.matches("this call was not executed; the harness")
+            .count(),
+        1,
+        "{seen}"
     );
-    assert!(
-        saved.contains("Reassess whether that edit is still necessary"),
-        "{saved}"
-    );
-    assert!(!saved.contains("It is still pending"), "{saved}");
+    assert!(seen.contains("checkpoint before continuing"), "{seen}");
 }
 
 #[tokio::test]
-async fn selective_completion_review_still_allows_a_required_caller_edit() {
+async fn selective_units_open_no_unit_after_a_passing_check() {
     if !python() {
         return;
     }
@@ -571,23 +621,16 @@ async fn selective_completion_review_still_allows_a_required_caller_edit() {
             .await,
         StopReason::Done
     );
+    // This check passes with only the declaration renamed. Without units the
+    // caller edit stays refused, so it stays refused here too.
     assert_eq!(check_statuses(&runtime), ["passed", "passed"]);
+    assert_eq!(unit_checkpoints(&runtime), 0);
     assert!(std::fs::read_to_string(dir.path().join("money.py"))
         .unwrap()
         .contains("def new_name"));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("app.py")).unwrap(),
-        "from money import new_name\n"
-    );
-    let saved = format!(
-        "{:?}",
-        runtime.store().read_events(runtime.session_id()).unwrap()
-    );
-    assert!(
-        saved.contains(
-            "preserve old-name references whose purpose is to check that the old API is absent"
-        ),
-        "{saved}"
+        "from money import old_name\n"
     );
 }
 
@@ -596,7 +639,7 @@ async fn the_provider_receives_current_checkpoint_review_under_context_pressure(
     if !python() {
         return;
     }
-    let dir = two_site_repository(PASSES);
+    let dir = two_site_repository(BOTH);
     let provider = FakeProvider::new()
         .tool_call(
             "x",
@@ -606,14 +649,19 @@ async fn the_provider_receives_current_checkpoint_review_under_context_pressure(
         .script(vec![
             Ok(ModelEvent::TextDelta("old unit reasoning ".repeat(12_000))),
             Ok(ModelEvent::ToolCall {
-                id: "unneeded-y".into(),
+                id: "refused-y".into(),
                 name: "edit_file".into(),
                 input_json: json!({"path":"money.py","old_text":"y = 1","new_text":"y = 2"}),
                 provider_metadata: None,
             }),
             Ok(ModelEvent::Done),
         ])
-        .text("The requested x change is complete; y does not need changing.");
+        .tool_call(
+            "y",
+            "edit_file",
+            json!({"path":"money.py","old_text":"y = 1","new_text":"y = 2"}),
+        )
+        .text("Both x and y are 2.");
     let observed = Arc::new(provider);
     let mut runtime = SessionRuntime::new(
         observed.clone(),
@@ -635,7 +683,7 @@ async fn the_provider_receives_current_checkpoint_review_under_context_pressure(
         },
         Vec::new(),
     );
-    let task = "Change only x to 2.";
+    let task = "Change x and y to 2.";
     let (events, _rx) = broadcast::channel(1024);
     assert_eq!(
         runtime
@@ -656,7 +704,7 @@ async fn the_provider_receives_current_checkpoint_review_under_context_pressure(
         .unwrap();
     let review_position = request.messages.iter().rposition(|message| {
         message.metadata.synthetic.as_deref() == Some("unit checkpoint")
-            && format!("{message:?}").contains("Reassess whether that edit is still necessary")
+            && format!("{message:?}").contains("It is still pending")
     });
     assert!(
         review_position.is_some(),
@@ -684,7 +732,7 @@ async fn the_provider_receives_current_checkpoint_review_under_context_pressure(
         "context pressure must exercise compaction"
     );
     let text = std::fs::read_to_string(dir.path().join("money.py")).unwrap();
-    assert!(text.contains("x = 2") && text.contains("y = 1"));
+    assert!(text.contains("x = 2") && text.contains("y = 2"));
 }
 
 #[tokio::test]

@@ -13,13 +13,13 @@ Real CLI request assertions inspect the next provider boundary while the refused
 site remains unapplied; failed-full feedback identifies that write as pending. Answer-led
 checkpoint events do not claim a refused write. Original prompts and default-off
 controls remain unchanged. Live completion requires independent frozen checks.
-When the full check passes at a refused edit, a real-CLI control reviews the
-unapplied negative-assertion edit before answering, retaining the original test
-bytes in both opt-in modes. A separate control keeps a legitimate remaining edit
-despite a checker that already passes; completion is never forced by a pass.
-The same early-pass control covers a selective declaration-to-caller chain.
-Old-API absence guidance appears only in selective rename completion review;
-it does not block required caller edits or change global-unit feedback.
+When the full check passes at a refused edit, a real-CLI control shows the
+negative-assertion edit stays refused with no further unit, retaining the
+original test bytes in both opt-in modes. Harness controls show the same for a
+weak checker that passes early (global and selective), that a repeated refusal
+in that unit neither ends it nor reruns the check, and that a failed check in a
+unit the envelope never refused returns ordinary diagnostics first; the repair
+is then refused (a second hunk), which ends the unit and lands in the next.
 A pressure regression fills the preceding unit with oversized history and
 inspects the actual provider request after compaction: the unchanged original
 task and the complete synthetic review must both remain, in that order.

@@ -1343,6 +1343,12 @@ pub struct SessionRuntime {
     unit_refused_request: Option<String>,
     /// The verify gate is settling a host-ended unit (see `unit_end_requested`).
     settling_host_unit: bool,
+    /// The work envelope refused a write in this unit. Only such a unit can
+    /// earn a checkpoint; otherwise a failed check keeps its normal repair path.
+    unit_write_refused: bool,
+    /// A host-ended unit's full check passed: no further unit opens after a
+    /// pass, and later refusals in this unit do not end it again.
+    host_unit_declined: bool,
     /// What the last granted unit checkpoint established, for the next unit's note.
     last_unit_outcome: Option<String>,
     provider: Arc<dyn ModelProvider>,
@@ -1556,6 +1562,8 @@ impl SessionRuntime {
             unit_end_requested: false,
             unit_refused_request: None,
             settling_host_unit: false,
+            unit_write_refused: false,
+            host_unit_declined: false,
             last_unit_outcome: None,
             provider,
             tools,
@@ -1677,6 +1685,7 @@ impl SessionRuntime {
             let active = *active;
             if let Some(guidance) = self.rename_admission_guidance(name, input) {
                 self.work_opaque_retry_blocked = true;
+                self.unit_write_refused = true;
                 if let Some(state) = &mut self.rename_continuation {
                     state.batch_refused = true;
                 }
@@ -1686,6 +1695,7 @@ impl SessionRuntime {
                 let mut unit_ended = false;
                 if is_file_write_tool(name) && refusal.blocks_opaque_retry {
                     self.work_opaque_retry_blocked = true;
+                    self.unit_write_refused = true;
                     unit_ended = self.request_unit_end(name, input);
                 }
                 return Some(Self::unit_refusal_guidance(refusal.message, unit_ended));
@@ -1756,6 +1766,7 @@ impl SessionRuntime {
         let mut unit_ended = false;
         if is_file_write_tool(name) && refusal.blocks_opaque_retry {
             self.work_opaque_retry_blocked = true;
+            self.unit_write_refused = true;
             unit_ended = self.request_unit_end(name, input);
         }
         Some(Self::unit_refusal_guidance(refusal.message, unit_ended))
@@ -2023,6 +2034,8 @@ impl SessionRuntime {
         self.work_write_error_may_have_run = false;
         self.unit_end_requested = false;
         self.unit_refused_request = None;
+        self.unit_write_refused = false;
+        self.host_unit_declined = false;
         self.rename_continuation = None;
         self.work_unit = crate::granularity::WorkUnit::default();
     }
@@ -3243,23 +3256,13 @@ impl SessionRuntime {
         match outcome.status {
             CheckStatus::Passed => {
                 if self.settling_host_unit {
-                    return match self.host_unit_after_pass(
-                        &root,
-                        diff_mutated,
-                        before_full_check.as_ref(),
-                    ) {
-                        unit_continuation::UnitAttempt::Checkpoint(detail) => {
-                            VerifyGate::UnitCheckpoint(detail)
-                        }
-                        unit_continuation::UnitAttempt::Stop(detail) => {
-                            let _ = events.send(RuntimeEvent::Warning(detail.clone()));
-                            VerifyGate::GiveUp(detail)
-                        }
-                        unit_continuation::UnitAttempt::NotEarned => VerifyGate::Retry(
-                            "The edit was refused because this unit is at its limit. If the task is complete, give your final answer; otherwise describe the remaining changes."
-                                .to_string(),
-                        ),
-                    };
+                    // A passing check opens no further unit: the unit keeps
+                    // its refused edit refused, as it would without units.
+                    self.host_unit_declined = true;
+                    return VerifyGate::Retry(
+                        "The edit was refused because this unit is at its limit. If the task is complete, give your final answer; otherwise describe the remaining changes."
+                            .to_string(),
+                    );
                 }
                 self.outstanding_full_check = false;
                 if self.harness_checkpoint_owner {
@@ -3321,18 +3324,22 @@ impl SessionRuntime {
                 if bounded_mutation {
                     self.capability_evidence.observe_outcome(false);
                 }
-                match self
-                    .try_unit_checkpoint(&root, diff_mutated, before_full_check.as_ref())
-                    .await
-                {
-                    unit_continuation::UnitAttempt::Checkpoint(detail) => {
-                        return VerifyGate::UnitCheckpoint(detail);
+                // A unit the envelope never refused can still repair within
+                // its own budget; only a unit at its limit may checkpoint.
+                if self.unit_write_refused {
+                    match self
+                        .try_unit_checkpoint(&root, diff_mutated, before_full_check.as_ref())
+                        .await
+                    {
+                        unit_continuation::UnitAttempt::Checkpoint(detail) => {
+                            return VerifyGate::UnitCheckpoint(detail);
+                        }
+                        unit_continuation::UnitAttempt::Stop(detail) => {
+                            let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                            return VerifyGate::GiveUp(detail);
+                        }
+                        unit_continuation::UnitAttempt::NotEarned => {}
                     }
-                    unit_continuation::UnitAttempt::Stop(detail) => {
-                        let _ = events.send(RuntimeEvent::Warning(detail.clone()));
-                        return VerifyGate::GiveUp(detail);
-                    }
-                    unit_continuation::UnitAttempt::NotEarned => {}
                 }
                 if self.failed_on_unchanged_material(&root, diff_mutated) {
                     let detail = format!(
@@ -3911,6 +3918,8 @@ impl SessionRuntime {
         self.work_write_error_may_have_run = false;
         self.unit_end_requested = false;
         self.unit_refused_request = None;
+        self.unit_write_refused = false;
+        self.host_unit_declined = false;
         if let Some(state) = &mut self.rename_continuation {
             state.proof = None;
             state.attempted = false;
