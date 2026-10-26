@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v6.0.0 - 2026-10-26
+
+Coordinated LocalX release.
+
 - The default tool core now includes `git_status`, `git_diff`, `git_log` and
   `search_definitions`. With the broker on, revealing one of them in the middle
   of a session changed the tool list and made hybrid models re-process the

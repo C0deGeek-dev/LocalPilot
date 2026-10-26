@@ -1515,7 +1515,7 @@ checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
 name = "localmind-codegraph"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-core"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-inference"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "fs2",
  "idna_adapter",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-mcp"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-review"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-core",
  "serde",
@@ -1587,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-search"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-store"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "crypto_box",
  "ed25519-dalek",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-agents"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "serde",
  "tempfile",
@@ -1698,7 +1698,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-config"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "figment",
  "globset",
@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-contextcheck"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-store",
  "localpilot-config",
@@ -1733,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-core"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-dist"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "flate2",
  "reqwest",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-harness"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-llm"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-llm-anthropic"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-llm-core"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1840,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-llm-openai"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-localmind"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "dunce",
@@ -1893,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-mcp"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "localpilot-core",
@@ -1908,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-mesh"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "dunce",
  "ignore",
@@ -1927,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-patchgen"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "fd-lock",
  "localpilot-config",
@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-quota"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localpilot-config",
  "localpilot-llm",
@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-recovery"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "proptest",
  "serde",
@@ -1962,7 +1962,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-render"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-research"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-rpc"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localpilot-core",
  "localpilot-harness",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-sandbox"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "dunce",
  "futures",
@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-selfdev"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localpilot-dist",
  "serde",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-selfimprove"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localpilot-config",
  "localpilot-harness",
@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-selfreview"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "ignore",
  "regex",
@@ -2060,7 +2060,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-server"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-skills"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "fd-lock",
@@ -2106,11 +2106,11 @@ dependencies = [
 
 [[package]]
 name = "localpilot-slash"
-version = "5.0.0"
+version = "6.0.0"
 
 [[package]]
 name = "localpilot-stack"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "localpilot-dist",
@@ -2122,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-store"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localpilot-config",
  "localpilot-core",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-taskgraph"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-terminal-ui"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localpilot-config",
  "localpilot-slash",
@@ -2154,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-tools"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-verify"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localpilot-core",
  "localpilot-sandbox",
@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-winsec"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "tempfile",
  "tokio",
@@ -2200,7 +2200,7 @@ dependencies = [
 
 [[package]]
 name = "localx"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "clap",

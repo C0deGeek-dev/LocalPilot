@@ -5,7 +5,7 @@
   <p><strong>A coding assistant that works with your local model or hosted provider.</strong></p>
   <p><a href="#install-localx">Install</a> · <a href="#your-first-coding-session">First use</a> · <a href="#updates-and-troubleshooting">Updates &amp; help</a> · <a href="docs/README.md">All guides</a></p>
   <p>
-    <img alt="version 5.0.0" src="https://img.shields.io/badge/version-5.0.0-7da7ff?style=flat-square">
+    <img alt="version 6.0.0" src="https://img.shields.io/badge/version-6.0.0-7da7ff?style=flat-square">
     <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-59636e?style=flat-square">
     <img alt="built with Rust" src="https://img.shields.io/badge/built%20with-Rust-b7410e?style=flat-square">
     <img alt="GitHub stars" src="https://img.shields.io/github/stars/C0deGeek-dev/LocalPilot?style=flat-square&amp;label=stars">
@@ -23,7 +23,7 @@ risky parts stay behind explicit permission boundaries.
 | **Connects to** | OpenAI-compatible local servers and supported official provider APIs |
 | **Works as** | An interactive coding assistant in your terminal; integrations and automation are available too |
 | **Remembers through** | Embedded [LocalMind](https://github.com/C0deGeek-dev/LocalMind), with review before durable memory |
-| **Status** | `5.0.0` stable; Windows, Linux, and macOS |
+| **Status** | `6.0.0` stable; Windows, Linux, and macOS |
 
 <a name="quick-start"></a>
 
