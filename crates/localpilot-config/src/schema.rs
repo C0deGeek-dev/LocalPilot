@@ -1232,7 +1232,7 @@ impl Default for HarnessConfig {
 
 /// Optional stricter ceilings for automatic work sizing. Zero is clamped to one.
 /// There is no switch or broad override that waives permission or verification.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GranularityConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1251,14 +1251,38 @@ pub struct GranularityConfig {
     /// check; the task still needs its full verification to pass.
     #[serde(skip_serializing_if = "is_zero")]
     pub headless_units: u8,
-    /// Eval-only uniform Python identifier continuation; user/env only, 0 = off.
+    /// Eval-only uniform Python identifier continuation; user/env only.
+    /// On by default ([`DEFAULT_HEADLESS_RENAME_UNITS`]); 0 turns it off.
     /// Positive `headless_units` takes precedence. Same hard unit ceiling.
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(skip_serializing_if = "is_default_rename_units")]
     pub headless_rename_units: u8,
+}
+
+impl Default for GranularityConfig {
+    fn default() -> Self {
+        Self {
+            max_files: None,
+            max_regions: None,
+            max_read_lines: None,
+            max_changed_lines: None,
+            max_decisions: None,
+            headless_units: 0,
+            headless_rename_units: DEFAULT_HEADLESS_RENAME_UNITS,
+        }
+    }
 }
 
 /// The hard ceiling for `[harness.granularity] headless_units`.
 pub const MAX_HEADLESS_UNITS: u8 = 8;
+
+/// Default `[harness.granularity] headless_rename_units`.
+pub const DEFAULT_HEADLESS_RENAME_UNITS: u8 = MAX_HEADLESS_UNITS;
+
+// Only the default is omitted, so an explicit 0 survives a save.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if signature
+fn is_default_rename_units(value: &u8) -> bool {
+    *value == DEFAULT_HEADLESS_RENAME_UNITS
+}
 
 #[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if signature
 fn is_zero(value: &u8) -> bool {

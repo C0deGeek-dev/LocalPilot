@@ -60,7 +60,22 @@ self-modification, general-purpose CI or host isolation is added.
 
 ## ADR-0232: Selective Python Rename Continuation Reuses Verified Units
 
-**Status:** accepted, opt-in/default off · **Date:** 2026-10-23.
+**Status:** accepted; default on (8) since 2026-10-26 · **Date:** 2026-10-23.
+
+**Amended 2026-10-26 (default on).** After ADR-0227's amendment stopped any unit
+opening while the task's check passes, `headless_rename_units` defaults to 8;
+users opt out with 0, projects still cannot set it, and `headless_units` stays
+default 0. Only the default value is omitted when the configuration is
+serialized, so an explicit 0 survives. Evidence on a saved balanced Qwen3.6 tune
+and the frozen fixtures: in the broad eight-task harness (16 paired cases) the
+mode never engaged and no admission, checkpoint or unit text was observed;
+outcome differences were consistent with sampling. On the frozen focused
+four-site rename, the same binary finished 0 of 4 cases with the mode off and 3
+of 4 with it on (all captures valid; three paired gains, no losses). These are
+small single-model screens, not a general uplift measurement. Eligibility is inferred
+from applied code shape, not from the request, so it also admits a consistent
+wrong-target rename; the task check and final verification still decide
+completion.
 
 **Context.** Conservative single-turn bounds prevent a four-site rename from
 finishing. Global verified units can finish it but cost unrelated tasks, so

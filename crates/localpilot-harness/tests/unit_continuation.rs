@@ -804,6 +804,8 @@ async fn host_ended_units_respect_the_cap_and_the_off_setting() {
     if !python() {
         return;
     }
+    // With global units 0 the default selective rename mode stays on; these
+    // x/y value edits are not a rename, so it never makes them eligible.
     for units_setting in [0u8, 1] {
         let dir = two_site_repository(BOTH);
         let edits = [

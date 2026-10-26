@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `eval` now continues uniform Python identifier renames in verified bounded
+  units by default (`[harness.granularity] headless_rename_units`, default 8).
+  A four-site rename under the conservative work envelope can now finish in a
+  single headless prompt. Set the value to 0 in user configuration or the
+  environment to turn it off; project files still cannot set it, and the
+  general `headless_units` mode stays off by default.
+
 - Opt-in headless units no longer open a unit when the full verification
   passes at a refused edit; the edit stays refused and the model is asked for
   its final answer, as with units off. A failed check opens a unit only after

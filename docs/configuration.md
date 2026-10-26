@@ -1056,10 +1056,10 @@ had no failed write. The task still ends as done only after the full
 verification passes. Per-unit caps are unchanged. `print`, `rpc` and
 interactive sessions do not use it. See ADR-0227.
 
-`headless_rename_units` (0–8, default0 = off) enables a narrower `eval`
-experiment for uniform Python identifier renames (ADR-0232). Set it in user
-configuration or `LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_RENAME_UNITS`;
-project configuration cannot enable it. Positive `headless_units` takes
+`headless_rename_units` (0–8, default 8) is a narrower `eval` continuation for
+uniform Python identifier renames (ADR-0232). It is on by default; set it to 0
+in user configuration or `LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_RENAME_UNITS`
+to turn it off. Project configuration cannot set it in either direction. Positive `headless_units` takes
 precedence, retaining the existing general continuation behavior.
 
 The narrow mode requires a real size-refused write after a change, one tracked
@@ -1071,8 +1071,11 @@ qualify; changed string/comment content, extra formatting, mixed edits, dirty
 starting material and unavailable proof cannot. Large or unsupported source
 declines conservatively. The usual read permission, opaque-process/failed-write
 exclusions, per-unit caps, unit checks and final full verification still apply.
-This is syntactic evidence, not a semantic refactoring guarantee. It is off by
-default and does not establish a measured task-quality improvement.
+This is syntactic evidence, not a semantic refactoring guarantee: eligibility
+is inferred from the shape of the applied code, not from the request, so a
+consistent rename to the wrong name also qualifies; the task's own check and
+final verification remain what decides completion. A unit never opens while
+that check passes.
 
 Plan review and execution disclosure show the strategy; idle `/harness-status`
 also shows the current agent profile. `harness resume` prints the fresh executor's

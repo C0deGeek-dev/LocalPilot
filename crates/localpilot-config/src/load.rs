@@ -484,6 +484,69 @@ mod tests {
     }
 
     #[test]
+    fn selective_rename_units_default_on_and_an_explicit_zero_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let paths = ConfigPaths {
+            user: Some(user.clone()),
+            project: None,
+        };
+        // No user file and no section: the eval-only selective mode is on;
+        // global units stay off.
+        let config = load(&paths, &CliOverrides::default()).unwrap();
+        assert_eq!(config.harness.granularity.headless_rename_units, 8);
+        assert_eq!(config.harness.granularity.headless_units, 0);
+
+        // The user opts out with an explicit 0.
+        std::fs::write(
+            &user,
+            "[harness.granularity]
+headless_rename_units = 0
+",
+        )
+        .unwrap();
+        let config = load(&paths, &CliOverrides::default()).unwrap();
+        assert_eq!(config.harness.granularity.headless_rename_units, 0);
+
+        // Serializing that configuration (as the loader does for its own
+        // defaults layer) keeps the explicit 0 instead of reverting to 8.
+        let reloaded: Config = Figment::from(Serialized::defaults(config))
+            .extract()
+            .unwrap();
+        assert_eq!(reloaded.harness.granularity.headless_rename_units, 0);
+        let default_reloaded: Config = Figment::from(Serialized::defaults(Config::default()))
+            .extract()
+            .unwrap();
+        assert_eq!(
+            default_reloaded.harness.granularity.headless_rename_units,
+            8
+        );
+    }
+
+    #[test]
+    fn saving_an_unrelated_change_keeps_the_rename_units_opt_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        std::fs::write(
+            &user,
+            "[harness.granularity]
+headless_rename_units = 0
+",
+        )
+        .unwrap();
+        let paths = ConfigPaths {
+            user: Some(user.clone()),
+            project: None,
+        };
+        let mut config = load(&paths, &CliOverrides::default()).unwrap();
+        config.provider.default = "elsewhere".to_string();
+        std::fs::write(&user, toml::to_string(&config).unwrap()).unwrap();
+        let saved = load(&paths, &CliOverrides::default()).unwrap();
+        assert_eq!(saved.provider.default, "elsewhere");
+        assert_eq!(saved.harness.granularity.headless_rename_units, 0);
+    }
+
+    #[test]
     fn allow_commands_come_from_the_user_config_and_never_from_the_project() {
         // Bug it prevents: a repository granting its own agent a vetted
         // command by shipping one in `.localpilot.toml`.

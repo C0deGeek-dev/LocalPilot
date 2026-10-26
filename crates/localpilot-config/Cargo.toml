@@ -32,3 +32,4 @@ localpilot-core = { path = "../localpilot-core" }
 insta = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+toml = { workspace = true }

@@ -81,7 +81,7 @@ preserve the work. Without a repository baseline, model shell/background calls
 are refused; file tools and permission-gated verification remain available.
 Explicit user shell retains its authorization.
 
-An opt-in selective mode, `headless_rename_units` (default0), reuses that
+A selective mode, `headless_rename_units` (on by default, 8; 0 = off), reuses that
 headless lifecycle only after a size-refused write and bounded proof of a
 uniform Python identifier change (ADR-0232). The existing read permission gate
 runs before source access. Exact attested base/current bytes must have matching

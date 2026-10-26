@@ -783,12 +783,12 @@ async fn units_finish_a_multi_site_rename_only_through_a_passing_full_check() {
 }
 
 #[tokio::test]
-async fn without_the_setting_the_task_stops_as_before() {
+async fn with_both_settings_off_the_task_stops_as_before() {
     if !python_available() {
         return;
     }
     for units in [None, Some("0")] {
-        let run = run_eval(Plan::Rename, units, true, true).await;
+        let run = run_eval_mode(Plan::Rename, units, Some("0"), true, true).await;
         assert_eq!(run.sites_renamed(), 1, "{}", text(&run));
         assert_eq!(run.exit_reason(), "NoProgress", "{}", text(&run));
         assert!(!run.turn_stops().iter().any(|s| s == "UnitCheckpoint"));
@@ -965,7 +965,7 @@ async fn selective_admission_refuses_multi_hunk_writes_then_allows_bounded_retri
             .requests
             .iter()
             .any(|r| r.to_string().contains("Nothing was written")));
-        let off = run_eval_mode(plan, None, None, true, true).await;
+        let off = run_eval_mode(plan, None, Some("0"), true, true).await;
         assert_ne!(off.exit_reason(), "Done", "{}", text(&off));
         assert!(!off
             .requests
@@ -986,7 +986,7 @@ async fn a_denied_opaque_call_does_not_invent_execution_or_block_verified_units(
         assert_eq!(run.sites_renamed(), 4, "{}", text(&run));
         assert_eq!(run.exit_reason(), "Done", "{}", text(&run));
     }
-    let off = run_eval_mode(Plan::DeniedShellInUnit, None, None, true, true).await;
+    let off = run_eval_mode(Plan::DeniedShellInUnit, None, Some("0"), true, true).await;
     assert_ne!(off.exit_reason(), "Done", "{}", text(&off));
     assert_eq!(off.sites_renamed(), 1, "{}", text(&off));
 }
@@ -1091,6 +1091,18 @@ async fn selective_units_above_the_ceiling_fail_before_provider_requests() {
     assert!(!run.output.status.success());
     assert!(run.requests.is_empty());
     assert!(text(&run).contains("headless_rename_units"));
+}
+
+#[tokio::test]
+async fn by_default_eval_finishes_a_rename_through_selective_units() {
+    if !python_available() {
+        return;
+    }
+    // Neither setting given: selective rename units are on by default.
+    let run = run_eval_mode(Plan::Rename, None, None, true, true).await;
+    assert_eq!(run.sites_renamed(), 4, "{}", text(&run));
+    assert_eq!(run.exit_reason(), "Done", "{}", text(&run));
+    assert!(run.turn_stops().iter().any(|s| s == "UnitCheckpoint"));
 }
 
 #[tokio::test]
