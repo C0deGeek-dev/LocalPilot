@@ -261,6 +261,24 @@ const TOOL_LOOP_SECTION: &str = concat!(
     working around it.",
 );
 
+/// Which operating system and shell the agent's commands run in, and the
+/// commands from the other platforms that do not exist here. Without it a model
+/// reaches for the most common spelling: `open` to view a page, which is not a
+/// command on Windows (#253). One short line per platform, with the host fixed
+/// at build time, so the prompt stays stable within a session.
+pub(crate) fn host_section() -> &'static str {
+    if cfg!(windows) {
+        "Host: Windows, shell: PowerShell. `open`, `xdg-open` and `&&` do not apply; \
+        `start <file>` opens a file."
+    } else if cfg!(target_os = "macos") {
+        "Host: macOS, shell: POSIX sh. `open <file>` opens a file; `xdg-open` and \
+        `start` do not apply."
+    } else {
+        "Host: Linux, shell: POSIX sh. `xdg-open <file>` opens a file; `open` and \
+        `start` do not apply."
+    }
+}
+
 /// The closing instruction. Always present: without it a model has no contract
 /// for how to end a turn.
 const CLOSING_SECTION: &str =
@@ -301,6 +319,7 @@ fn compose_with(
     }
     if parts.include_tool_instructions {
         sections.push(TOOL_LOOP_SECTION.to_string());
+        sections.push(host_section().to_string());
     }
     sections.push(CLOSING_SECTION.to_string());
     sections.join(
@@ -569,6 +588,30 @@ mod tests {
     }
 
     #[test]
+    fn prompt_names_the_host_and_rules_out_the_other_platforms_commands() {
+        let prompt = build_prompt(&["read_file", "run_shell"]);
+        let expected = if cfg!(windows) {
+            "Host: Windows, shell: PowerShell."
+        } else if cfg!(target_os = "macos") {
+            "Host: macOS, shell: POSIX sh."
+        } else {
+            "Host: Linux, shell: POSIX sh."
+        };
+        assert!(prompt.contains(expected), "missing host line: {prompt}");
+        // Exactly one host line, and none of the other platforms'.
+        assert_eq!(prompt.matches("Host: ").count(), 1, "{prompt}");
+        // The command the model must not pick here is named as not applying.
+        let ruled_out = if cfg!(windows) {
+            "`open`, `xdg-open` and `&&` do not apply"
+        } else if cfg!(target_os = "macos") {
+            "`xdg-open` and `start` do not apply"
+        } else {
+            "`open` and `start` do not apply"
+        };
+        assert!(prompt.contains(ruled_out), "{prompt}");
+    }
+
+    #[test]
     fn prompt_carries_shell_and_missing_tool_discipline() {
         let prompt = build_prompt(&["read_file"]);
         // Steer multiline/quoted shell to a script file rather than fighting
@@ -663,6 +706,10 @@ mod composition_tests {
         assert!(
             !prompt.contains("Shell discipline"),
             "shell discipline dropped"
+        );
+        assert!(
+            !prompt.contains("Host: "),
+            "an agent without tool instructions has no use for the host line"
         );
         assert!(
             prompt.contains("Respect the permission profile"),

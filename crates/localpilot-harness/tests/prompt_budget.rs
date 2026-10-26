@@ -24,7 +24,9 @@ use tokio_util::sync::CancellationToken;
 const TOOL_SPEC_CEILING: usize = 16_000;
 /// Ceiling for the agent system prompt of a default session in an empty
 /// workspace (no instruction files, no hooks). Measured at 2,499 bytes after
-/// the prompt was rewritten (3,919 before).
+/// the prompt was rewritten (3,919 before), and at 2,605 on Windows once it
+/// named the host OS and shell (#253); the Linux and macOS lines are a few
+/// bytes longer.
 const SYSTEM_PROMPT_CEILING: usize = 2_700;
 
 #[tokio::test]

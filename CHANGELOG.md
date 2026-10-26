@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The agent's system prompt now says which operating system and shell it runs
+  on, and which commands from other platforms do not apply there (on Windows:
+  PowerShell, no `open`, `xdg-open` or `&&`, `start <file>` opens a file). A
+  model that was not told reached for `open` to view a page on Windows, a
+  command that does not exist there (#253). The prompts that write and revise a
+  plan carry the same line and say a step's `verify:` command must exist on this
+  host: a plan is written without tools, so the shell hint a tool carries never
+  reached the planner, and the harness runs that command as written.
+
 - `/harness-resume` in a folder that is not a git repository no longer ends with
   git's own "not a git repository" after the plan was approved. The review of
   what approval does now says the folder gets a repository, and approving runs

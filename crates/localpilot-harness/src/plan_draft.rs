@@ -156,6 +156,20 @@ step for it.\n\
 Respond with ONLY the complete Markdown plan, in the shape you were given, and \
 nothing else.";
 
+/// A planner prompt followed by the host it plans for. A plan is written without
+/// tools, so the shell hint a tool carries never reaches the planner, and a step's
+/// `verify:` command comes out in whatever platform the model assumes: `open` for
+/// "see the page in a browser", a command Windows does not have (#253). The
+/// harness runs that command as written, so it has to exist here.
+fn with_host(prompt: &str) -> String {
+    format!(
+        "{prompt}
+
+{} A `verify:` command must exist on this host; never write one from another platform.",
+        crate::system_prompt::host_section()
+    )
+}
+
 /// What an automatic work profile adds to a planning request.
 ///
 /// The planner and replan prompts show a step with three metadata lines and say
@@ -324,7 +338,7 @@ pub async fn draft_plan_with_profile(
         "Project brief:\n\n{}\n\nRepository summary:\n\n{repo_summary}",
         brief.render()
     );
-    let mut seed = vec![Message::text(Role::System, PLANNER_PROMPT)];
+    let mut seed = vec![Message::text(Role::System, with_host(PLANNER_PROMPT))];
     if let Some(profile) = work_profile {
         seed.push(scope_addendum(profile, ""));
     }
@@ -402,7 +416,7 @@ Finished steps, to reproduce verbatim:\n\n{finished}",
         brief.render()
     );
     let mut seed = vec![
-        Message::text(Role::System, PLANNER_PROMPT),
+        Message::text(Role::System, with_host(PLANNER_PROMPT)),
         Message::text(Role::System, REPLAN_PROMPT),
     ];
     if let Some(profile) = work_profile {
@@ -465,7 +479,7 @@ pub async fn revise_plan(
         "Current plan:\n\n{}\n\nInstruction:\n\n{instruction}",
         draft.progress.render()
     );
-    let mut seed = vec![Message::text(Role::System, REVISE_PROMPT)];
+    let mut seed = vec![Message::text(Role::System, with_host(REVISE_PROMPT))];
     if let Some(profile) = draft.work_profile {
         seed.push(scope_addendum(
             profile,
@@ -786,6 +800,25 @@ mod tests {
 
     const SCOPED: &str = "# Progress: thing\nBranch: feature/thing\n\n## Steps\n\n\
 - [ ] 1. Write the parser\n  - covers: AC1\n  - verify: cargo test parser\n  - scope: 1, 1, 1, 80\n  - depends: none\n";
+
+    #[tokio::test]
+    async fn the_planner_is_told_which_host_its_verify_commands_run_on() {
+        let provider = FakeProvider::new().text(SCOPED);
+        draft_plan_with_profile(&provider, "m", &brief(), "rev", "repo", None)
+            .await
+            .unwrap();
+
+        let texts = request_texts(&provider);
+        let planner = &texts[0].1;
+        assert!(planner.contains("exactly this shape"), "{planner}");
+        assert!(planner.contains("Host: "), "the host is named: {planner}");
+        assert!(
+            planner.contains("A `verify:` command must exist on this host"),
+            "{planner}"
+        );
+        // One system message still carries the template: the host rides with it.
+        assert_eq!(texts.iter().filter(|(system, _)| *system).count(), 1);
+    }
 
     #[tokio::test]
     async fn a_profiled_draft_shows_the_scope_line_after_the_template_it_overrides() {
