@@ -1036,6 +1036,19 @@ only uncommitted files, `resume` commits them first as their own commit
 first one. Any other uncommitted file still blocks, and then the documents are
 left uncommitted so nothing of the user's is swept into a harness commit.
 
+The files a step itself left are not unrelated either. When a step stops without
+committing (a blocking finding, a turn that did not complete, a failed
+verification, a pause), the harness records what is in the tree, with a
+fingerprint of each file, in `.localpilot/cache/step-leftover.json`. The next
+`resume` of the same step, on the same `HEAD`, treats a dirty file that still
+matches its record as the step's own: it does not block, the step continues from
+it, and the work envelope keeps measuring from the baseline the blocked attempt
+started at, so the files are not free work. A file changed since, a new file, a
+different step or a moved `HEAD` is not covered and blocks as before. A step
+refused for its work envelope records nothing: that work is kept for an explicit
+split or review. The interactive resume review names the files it will continue
+from; to start the step over, discard them first (ADR-0236).
+
 #### `suite_green`
 
 Before step completion, configured tests must pass. `suite_green` is the

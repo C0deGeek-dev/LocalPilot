@@ -2,6 +2,35 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0236: A Blocked Step's Own Files Do Not Block Its Next Resume
+
+**Status:** accepted · **Date:** 2026-10-26.
+
+**Context.** `no_stale_uncommitted` blocks a resume on any uncommitted file, so
+that user changes are never mixed into a harness commit. A step that stops without
+committing (a blocking finding, a turn that did not complete, a verification that
+could not run) leaves its own files in the tree, and the next resume then refused
+them as unrelated: the step could not start again until the user committed or
+stashed by hand (#251).
+
+**Decision.** When a step that began stops without committing, the harness
+records the dirty paths with a fingerprint each, the baseline its work envelope
+was measured against, the step number and `HEAD`, in the store's cache. The next
+resume of the same step on the same `HEAD` treats a dirty path whose fingerprint
+still matches as the step's own: the rule does not fire on it, and the attempt
+continues against the recorded baseline, so the envelope counts the earlier work
+too. Anything else still blocks, including a recorded file the user has since
+changed. A step refused for its work envelope records nothing. Nothing is
+committed, stashed or discarded on the user's behalf; the resume review names the
+files, and discarding them first starts the step over.
+
+**Consequences.** A blocked step is no longer a dead end that only a manual
+commit clears. The files are committed with the step once it passes, like any of
+its work. A record is only a claim about which files the step wrote: it widens
+what the rule lets through by exactly those fingerprints and no more. A refused
+envelope still ends on the generic rule message, which does not say why; that is
+left for a follow-up.
+
 ## ADR-0235: The Interactive Harness Creates The Git Repository When The User Approves A Resume
 
 **Status:** accepted · **Date:** 2026-10-26.

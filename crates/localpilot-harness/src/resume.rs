@@ -109,6 +109,48 @@ pub async fn resume_one_step_with_events(
     events: &broadcast::Sender<RuntimeEvent>,
     cancel: &CancellationToken,
 ) -> Result<ResumeOutcome, HarnessError> {
+    let mut trace = StepTrace::default();
+    let outcome = run_step(
+        runtime,
+        root,
+        rule_engine,
+        test_command,
+        checks,
+        max_attempts,
+        events,
+        cancel,
+        &mut trace,
+    )
+    .await;
+    if let Ok(outcome) = &outcome {
+        settle_step_leftover(runtime.store(), root, outcome, &trace);
+    }
+    outcome
+}
+
+/// What the step body tells its caller about how far it got, so the files a
+/// blocked step left behind can be recorded as the step's own (#251).
+#[derive(Default)]
+struct StepTrace {
+    /// The step began its attempt: the session-start rules passed, so anything
+    /// dirty when it stops is the step's own work.
+    started: bool,
+    /// The work-envelope baseline this attempt was measured against.
+    baseline: Option<WorkDiffBaseline>,
+}
+
+#[allow(clippy::too_many_arguments)] // the host owns event/cancel wiring
+async fn run_step(
+    runtime: &mut SessionRuntime,
+    root: &Path,
+    rule_engine: &RuleEngine,
+    test_command: Option<&str>,
+    checks: &[CheckConfig],
+    max_attempts: u32,
+    events: &broadcast::Sender<RuntimeEvent>,
+    cancel: &CancellationToken,
+    trace: &mut StepTrace,
+) -> Result<ResumeOutcome, HarnessError> {
     // The gate lives in the executor, not only in the callers. This function is
     // public, so a library consumer reaching it directly must meet the same
     // conditions as the CLI and the interactive host: an unbound, stale, or
@@ -130,15 +172,22 @@ pub async fn resume_one_step_with_events(
     // Before the baseline is recorded: the baseline is a commit, and the plan
     // documents must be part of it rather than counted as the step's own work.
     commit_plan_documents(root)?;
-    let work_baseline = runtime
-        .work_profile()
-        .and_then(|_| work_diff_baseline(root).ok());
+    // A step that was blocked after it wrote files left them in the tree. They
+    // are the step's own, so they neither block this resume nor count as new
+    // work: the attempt continues against the baseline the blocked one started
+    // from, and the work envelope keeps measuring the whole step (#251).
+    let carried = step_leftover(runtime.store(), root).filter(|left| left.step == step.number);
+    let work_baseline = runtime.work_profile().and_then(|_| match &carried {
+        Some(left) => Some(left.baseline()),
+        None => work_diff_baseline(root).ok(),
+    });
+    trace.baseline = work_baseline.clone();
     runtime.set_harness_checkpoint_owner(step.scope);
     let progress_path = root.join("PROGRESS.md");
     let mut progress = progress.clone();
 
     let session_start_ctx = RuleContext {
-        uncommitted_unrelated: has_unrelated_uncommitted_changes(root)?,
+        uncommitted_unrelated: has_unrelated_uncommitted_changes(root, carried.as_ref())?,
         ..RuleContext::default()
     };
     if let Some(reason) =
@@ -154,6 +203,18 @@ pub async fn resume_one_step_with_events(
     }
 
     let commit_message = format!("harness: {}", step.description);
+
+    trace.started = true;
+    if let Some(left) = &carried {
+        let owned = left.owned_paths(root);
+        if !owned.is_empty() {
+            let _ = events.send(RuntimeEvent::Warning(format!(
+                "continuing step {} with the files its blocked attempt left: {}",
+                step.number,
+                owned.join(", ")
+            )));
+        }
+    }
 
     // The step is a branch in the event tree: attempts chain from here, an
     // abandoned attempt closes with a structured summary, and a fresh attempt
@@ -1170,8 +1231,146 @@ fn commit_plan_documents(root: &Path) -> Result<(), HarnessError> {
     Ok(())
 }
 
-fn has_unrelated_uncommitted_changes(root: &Path) -> Result<bool, HarnessError> {
-    Ok(!committable_status_paths(root)?.is_empty())
+/// Whether the tree holds uncommitted changes that are not the step's own: any
+/// dirty path other than the files a blocked attempt of this step left, still as
+/// it left them.
+fn has_unrelated_uncommitted_changes(
+    root: &Path,
+    carried: Option<&StepLeftover>,
+) -> Result<bool, HarnessError> {
+    let own = carried
+        .map(|left| left.owned_paths(root))
+        .unwrap_or_default();
+    Ok(committable_status_paths(root)?
+        .iter()
+        .any(|path| !own.contains(path)))
+}
+
+/// The store key under which a blocked step records the files it left.
+const STEP_LEFTOVER_KEY: &str = "step-leftover.json";
+
+/// The files a blocked step left in the working tree, kept so the next resume
+/// of the same step can tell them from changes that are not the harness's.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StepLeftover {
+    step: usize,
+    /// `HEAD` when the step stopped; a record from before a later commit is stale.
+    head: String,
+    /// The paths already dirty when the attempt started, with their fingerprints:
+    /// what its work envelope was measured against.
+    baseline: std::collections::BTreeMap<String, String>,
+    /// What the attempt left, fingerprinted as it stopped. A file the user has
+    /// changed since no longer matches, and is treated as theirs.
+    files: std::collections::BTreeMap<String, String>,
+}
+
+impl StepLeftover {
+    fn baseline(&self) -> WorkDiffBaseline {
+        WorkDiffBaseline {
+            head: self.head.clone(),
+            files: self.baseline.clone(),
+            diff_base: None,
+        }
+    }
+
+    /// The recorded files that are still in the tree exactly as the step left them.
+    fn owned_paths(&self, root: &Path) -> Vec<String> {
+        self.files
+            .iter()
+            .filter(|(path, hash)| work_fingerprint(root, path).is_ok_and(|now| &now == *hash))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+}
+
+/// The leftover record, when it belongs to the repository's current `HEAD`.
+fn step_leftover(store: &localpilot_store::Store, root: &Path) -> Option<StepLeftover> {
+    let bytes = store.get_cache(STEP_LEFTOVER_KEY).ok().flatten()?;
+    let left: StepLeftover = serde_json::from_slice(&bytes).ok()?;
+    (git(root, &["rev-parse", "HEAD"]).ok()?.trim() == left.head.trim()).then_some(left)
+}
+
+/// The files a blocked step left and the next resume of it will continue from,
+/// for a host to disclose before the user approves a resume. Empty when there are
+/// none. Nothing is changed.
+#[must_use]
+pub fn step_leftover_paths(store: &localpilot_store::Store, root: &Path) -> Vec<String> {
+    step_leftover(store, root)
+        .map(|left| {
+            let owned = left.owned_paths(root);
+            let dirty = committable_status_paths(root).unwrap_or_default();
+            owned
+                .into_iter()
+                .filter(|path| dirty.contains(path))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Record what a step that did not commit left in the tree, or clear the record
+/// when it left nothing. A step refused for its work envelope records nothing:
+/// that work is kept for an explicit split or review, not continued.
+fn settle_step_leftover(
+    store: &localpilot_store::Store,
+    root: &Path,
+    outcome: &ResumeOutcome,
+    trace: &StepTrace,
+) {
+    if !trace.started {
+        return;
+    }
+    let clear = || {
+        let _ = store.delete_cache(STEP_LEFTOVER_KEY);
+    };
+    if outcome.committed
+        || outcome
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("work envelope"))
+    {
+        clear();
+        return;
+    }
+    let (Ok(dirty), Ok(head)) = (
+        committable_status_paths(root),
+        git(root, &["rev-parse", "HEAD"]),
+    ) else {
+        return;
+    };
+    let mut files = std::collections::BTreeMap::new();
+    for path in dirty {
+        let Ok(hash) = work_fingerprint(root, &path) else {
+            clear();
+            return;
+        };
+        files.insert(path, hash);
+    }
+    if files.is_empty() {
+        clear();
+        return;
+    }
+    let record = StepLeftover {
+        step: outcome.step_number,
+        head: head.trim().to_string(),
+        baseline: trace
+            .baseline
+            .as_ref()
+            .map(|baseline| baseline.files.clone())
+            .unwrap_or_default(),
+        files,
+    };
+    match serde_json::to_vec(&record) {
+        Ok(json) => {
+            if let Err(error) = store.put_cache(STEP_LEFTOVER_KEY, &json) {
+                tracing::warn!(
+                    target: "localpilot::harness",
+                    %error,
+                    "could not record the files a blocked step left; the next resume will stop on them"
+                );
+            }
+        }
+        Err(_) => clear(),
+    }
 }
 
 fn committable_status_paths(root: &Path) -> Result<Vec<String>, HarnessError> {

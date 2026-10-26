@@ -1177,3 +1177,113 @@ async fn each_ratified_check_run_is_recorded_so_a_fail_then_pass_can_be_read_bac
         "the same command, recognisable across runs"
     );
 }
+
+// --- a blocked step's own files (#251) --------------------------------------
+
+/// A step the audit blocks after it wrote `hello.txt`: the file stays in the tree.
+async fn block_a_step_after_it_wrote_hello(root: &Path) {
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "hello.txt", "content": "hello" }),
+            )
+            .text("done"),
+    );
+    let mut rt = runtime(root, provider);
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let audit = failing_check("audit", Some(RuleSeverity::Block));
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[audit], 3)
+        .await
+        .unwrap();
+    assert!(!outcome.committed, "{:?}", outcome.blocked_reason);
+    assert!(
+        root.join("hello.txt").is_file(),
+        "the blocked step left its file"
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_step_resumes_over_the_files_it_left_and_commits_them() {
+    let dir = sample_repo();
+    let root = dir.path();
+    block_a_step_after_it_wrote_hello(root).await;
+
+    // The next resume does not stop on its own file; it continues the step.
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    assert_eq!(provider.requests().len(), 1, "the step ran again");
+    assert!(git_output(root, &["ls-files"]).contains("hello.txt"));
+    assert!(git_output(root, &["status", "--porcelain"])
+        .lines()
+        .all(|line| line.contains(".localpilot")));
+}
+
+#[tokio::test]
+async fn a_file_changed_after_the_block_is_no_longer_the_steps_and_blocks() {
+    let dir = sample_repo();
+    let root = dir.path();
+    block_a_step_after_it_wrote_hello(root).await;
+    std::fs::write(root.join("hello.txt"), "edited by the user").unwrap();
+
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+
+    assert!(!outcome.committed);
+    assert!(outcome
+        .blocked_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("no_stale_uncommitted"));
+    assert_eq!(provider.requests().len(), 0, "provider must not be called");
+}
+
+#[tokio::test]
+async fn another_file_next_to_a_blocked_steps_leftover_still_blocks() {
+    let dir = sample_repo();
+    let root = dir.path();
+    block_a_step_after_it_wrote_hello(root).await;
+    std::fs::write(root.join("user-note.txt"), "not the harness's").unwrap();
+
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+
+    assert!(!outcome.committed);
+    assert!(outcome
+        .blocked_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("no_stale_uncommitted"));
+    assert_eq!(provider.requests().len(), 0, "provider must not be called");
+    // Nothing of the user's was committed.
+    assert!(!git_output(root, &["ls-files"]).contains("user-note.txt"));
+}
+
+#[tokio::test]
+async fn the_files_a_blocked_step_left_can_be_disclosed_before_a_resume() {
+    let dir = sample_repo();
+    let root = dir.path();
+    let store = Store::open(root);
+    assert!(localpilot_harness::step_leftover_paths(&store, root).is_empty());
+
+    block_a_step_after_it_wrote_hello(root).await;
+    assert_eq!(
+        localpilot_harness::step_leftover_paths(&store, root),
+        ["hello.txt"]
+    );
+}

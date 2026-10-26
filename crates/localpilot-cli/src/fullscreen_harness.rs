@@ -165,6 +165,13 @@ fn offer_resume(app: &mut AppModel, runtime: &SessionRuntime, ctx: &mut SlashCon
                         .to_string(),
                 );
             }
+            let left = localpilot_harness::step_leftover_paths(runtime.store(), ctx.cwd);
+            if !left.is_empty() {
+                lines.push(format!(
+                    "  left by the blocked step: {}; approving continues from these files. To start the step over, discard them first (git restore / git clean)",
+                    left.join(", ")
+                ));
+            }
             present_command_report(
                 app,
                 command_report(

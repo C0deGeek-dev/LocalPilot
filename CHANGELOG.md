@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A step that stops without committing no longer blocks its own next resume. The
+  files it left in the working tree are recorded, and the next resume of the same
+  step continues from them instead of stopping on `no_stale_uncommitted`; the work
+  envelope still counts them as that step's work. A file changed since, or any
+  other uncommitted file, still blocks. The resume review names the files
+  (ADR-0236).
 - The agent's system prompt now says which operating system and shell it runs
   on, and which commands from other platforms do not apply there (on Windows:
   PowerShell, no `open`, `xdg-open` or `&&`, `start <file>` opens a file). A
