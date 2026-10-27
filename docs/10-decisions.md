@@ -2,6 +2,35 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0237: A Verify Command That Cannot Run Is Sent Back To The Planner, Not Refused At Approval
+
+**Status:** accepted · **Date:** 2026-10-26.
+
+**Context.** A step's `verify:` line is free text. The gate runs it directly:
+split on whitespace, the first word started as a program, no shell. A line that
+names a program that is not on this host, uses a pipe or `&&`, quotes an
+argument, wraps itself in backticks or is a shell builtin or a PowerShell cmdlet
+cannot run, and the step then stops as unverified after its work was done (#252).
+The planner prompts named no host, and a plan is written without tools, so the
+shell hint a tool carries never reached it.
+
+**Decision.** The planner, replan and revise prompts say that the command is run
+directly, with a host-specific example. `unrunnable_verify_reason` judges a
+command statically (shell syntax, quotes, backticks, then a `PATH` lookup with
+`PATHEXT` on Windows) and `PlanDefect::UnrunnableVerify` feeds it through the
+existing repair rounds for steps that are not finished. It is not part of
+`validate_for_approval`: a step may install the tool a later one runs, and an
+approval that refuses it would leave the user unable to proceed except by
+editing the line. The resume review names the next step's command when it cannot
+run, and the gate's stop names the step's `verify:` line. A program named by a
+path is not judged. The stop itself stays: a check that could not run is not a
+pass.
+
+**Consequences.** Most unrunnable lines are rewritten before the user sees the
+plan. One that is not (a tool a step installs, an unlucky model) still reaches the
+review, named, and can be edited in `PROGRESS.md`. The check reads `PATH` of the
+process that plans, which is the one that runs the plan.
+
 ## ADR-0236: A Blocked Step's Own Files Do Not Block Its Next Resume
 
 **Status:** accepted · **Date:** 2026-10-26.

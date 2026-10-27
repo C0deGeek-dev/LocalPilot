@@ -17,9 +17,15 @@ is SemVer-stable; the configuration schema stability policy is in
   PowerShell, no `open`, `xdg-open` or `&&`, `start <file>` opens a file). A
   model that was not told reached for `open` to view a page on Windows, a
   command that does not exist there (#253). The prompts that write and revise a
-  plan carry the same line and say a step's `verify:` command must exist on this
-  host: a plan is written without tools, so the shell hint a tool carries never
-  reached the planner, and the harness runs that command as written.
+  plan say how a step's `verify:` command is run (directly, split on spaces, no
+  shell) and name the host, because a plan is written without tools and the
+  shell hint a tool carries never reached the planner.
+- A plan whose `verify:` command cannot run on this host (a program that is not
+  on `PATH`, a pipe or `&&`, a quoted argument, backticks around the command, a
+  shell builtin or a PowerShell cmdlet) is sent back to the planner with the
+  reason, like a missing scope line, instead of ending its first step as
+  unverified. The resume review names the next step's command when it cannot run,
+  and the stop names the step's `verify:` line (#252, ADR-0237).
 
 - `/harness-resume` in a folder that is not a git repository no longer ends with
   git's own "not a git repository" after the plan was approved. The review of

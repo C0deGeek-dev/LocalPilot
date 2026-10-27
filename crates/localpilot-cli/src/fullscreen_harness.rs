@@ -165,6 +165,16 @@ fn offer_resume(app: &mut AppModel, runtime: &SessionRuntime, ctx: &mut SlashCon
                         .to_string(),
                 );
             }
+            if let Some(step) = progress.next_incomplete() {
+                if let Some(localpilot_harness::Verification::Command(command)) = &step.verify {
+                    if let Some(reason) = localpilot_harness::unrunnable_verify_reason(command) {
+                        lines.push(format!(
+                            "  verify: step {} will stop unverified: '{command}' cannot run, because {reason}. Change its verify line in PROGRESS.md, or plan again, before resuming",
+                            step.number
+                        ));
+                    }
+                }
+            }
             let left = localpilot_harness::step_leftover_paths(runtime.store(), ctx.cwd);
             if !left.is_empty() {
                 lines.push(format!(

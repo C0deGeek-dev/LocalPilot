@@ -3315,7 +3315,16 @@ impl SessionRuntime {
                     }
                 )));
                 if bounded_mutation || self.outstanding_full_check {
-                    VerifyGate::GiveUp(format!("verification {}: {:?}; unit remains unverified; restore the verifier and resume", check.program, outcome.status))
+                    let planned = self
+                        .unit_verify_command
+                        .as_deref()
+                        .map(|command| {
+                            format!(
+                                " (the step's verify line is `{command}`; change it in PROGRESS.md or plan again)"
+                            )
+                        })
+                        .unwrap_or_default();
+                    VerifyGate::GiveUp(format!("verification {}: {:?}; unit remains unverified; restore the verifier and resume{planned}", check.program, outcome.status))
                 } else {
                     VerifyGate::Finalize
                 }

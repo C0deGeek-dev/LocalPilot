@@ -156,17 +156,18 @@ step for it.\n\
 Respond with ONLY the complete Markdown plan, in the shape you were given, and \
 nothing else.";
 
-/// A planner prompt followed by the host it plans for. A plan is written without
-/// tools, so the shell hint a tool carries never reaches the planner, and a step's
-/// `verify:` command comes out in whatever platform the model assumes: `open` for
-/// "see the page in a browser", a command Windows does not have (#253). The
-/// harness runs that command as written, so it has to exist here.
+/// A planner prompt followed by how its `verify:` commands will be run. A plan is
+/// written without tools, so the shell hint a tool carries never reaches the
+/// planner, and a step's `verify:` command comes out in whatever platform the model
+/// assumes: `open` for "see the page in a browser", a command Windows does not
+/// have (#253). The gate runs the command directly, not through a shell, so it has
+/// to be a program that exists here with plain arguments (#252).
 fn with_host(prompt: &str) -> String {
     format!(
         "{prompt}
 
-{} A `verify:` command must exist on this host; never write one from another platform.",
-        crate::system_prompt::host_section()
+{}",
+        crate::system_prompt::planner_host_section()
     )
 }
 
@@ -230,6 +231,7 @@ fn repairable_defects(
             .err()
             .unwrap_or_default(),
     );
+    defects.extend(crate::plan_review::unrunnable_verify_defects(plan));
     defects
 }
 
@@ -287,8 +289,10 @@ async fn generate_fitted(
 Reply again with ONLY the complete corrected Markdown plan. Fix exactly these \
 defects: give every acceptance criterion at least one step that covers it, add or \
 correct scope lines, and split any oversized step into several, renumbering from \
-1 with no gaps. Keep every dependency pointing at an earlier step, and leave \
-everything else as it is."
+1 with no gaps. Rewrite any verify command that cannot run so that it is a \
+program that exists on this host with plain arguments, or 'verify: none - <why>'. \
+Keep every dependency pointing at an earlier step, and leave everything else as \
+it is."
             ),
         ));
         match generate(
@@ -813,7 +817,13 @@ mod tests {
         assert!(planner.contains("exactly this shape"), "{planner}");
         assert!(planner.contains("Host: "), "the host is named: {planner}");
         assert!(
-            planner.contains("A `verify:` command must exist on this host"),
+            planner.contains(
+                "A verify: command is run directly and split on spaces, not through a shell"
+            ),
+            "{planner}"
+        );
+        assert!(
+            planner.contains("with no backticks, quotes, pipes"),
             "{planner}"
         );
         // One system message still carries the template: the host rides with it.
@@ -959,6 +969,45 @@ mod tests {
             text_of(&second[second.len() - 2]).contains("scope: 2, 2, 1, 300"),
             "the model is shown the plan it wrote"
         );
+    }
+
+    #[tokio::test]
+    async fn a_verify_command_that_cannot_run_is_sent_back_and_the_runnable_one_is_kept() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let unrunnable = SCOPED.replace("cargo test parser", "no-such-program-xyzzy index.html");
+        let provider = FakeProvider::new().text(&unrunnable).text(SCOPED);
+        let draft = draft_plan_with_profile(&provider, "m", &brief(), "rev", "repo", Some(profile))
+            .await
+            .unwrap();
+
+        assert_eq!(provider.requests().len(), 2, "one draft, one repair");
+        let sent = &provider.requests()[1].messages;
+        let feedback = format!("{:?}", sent.last().unwrap().content);
+        assert!(
+            feedback.contains("no-such-program-xyzzy is not a program on this host"),
+            "{feedback}"
+        );
+        assert!(feedback.contains("verify: none"), "{feedback}");
+        assert_eq!(
+            draft.progress.steps[0].verify,
+            Some(crate::progress::Verification::Command(
+                "cargo test parser".to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_syntax_in_a_verify_command_is_sent_back_too() {
+        let profile = profile_with(&localpilot_config::GranularityConfig::default());
+        let piped = SCOPED.replace("cargo test parser", "cargo test && cargo clippy");
+        let provider = FakeProvider::new().text(&piped).text(SCOPED);
+        draft_plan_with_profile(&provider, "m", &brief(), "rev", "repo", Some(profile))
+            .await
+            .unwrap();
+
+        let sent = &provider.requests()[1].messages;
+        let feedback = format!("{:?}", sent.last().unwrap().content);
+        assert!(feedback.contains("shell syntax (&&)"), "{feedback}");
     }
 
     #[tokio::test]

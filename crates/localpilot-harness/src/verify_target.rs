@@ -60,6 +60,110 @@ pub fn detect_verify_command(root: &Path) -> Option<CheckConfig> {
     None
 }
 
+/// Tokens that only mean something to a shell.
+const SHELL_TOKENS: [&str; 8] = ["&&", "||", "|", ";", ">", ">>", "<", "2>&1"];
+
+/// Why a plan's `verify:` command cannot run as written, or `None` when nothing
+/// stands in its way.
+///
+/// The gate splits the line on whitespace and starts the first word as a program,
+/// with the rest as plain arguments: no shell, so no pipes, `&&`, redirects,
+/// quotes, backticks, shell builtins or PowerShell cmdlets. Nothing is run here;
+/// the program is only looked up on `PATH`. A program named by a path is not
+/// judged: a step may build it.
+#[must_use]
+pub fn unrunnable_verify_reason(command: &str) -> Option<String> {
+    unrunnable_with(
+        command,
+        std::env::var_os("PATH").as_deref(),
+        std::env::var_os("PATHEXT").as_deref(),
+    )
+}
+
+fn unrunnable_with(
+    command: &str,
+    path: Option<&std::ffi::OsStr>,
+    pathext: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    let command = command.trim();
+    let mut words = command.split_whitespace();
+    let program = words.next()?;
+    if command.starts_with('`') || command.ends_with('`') {
+        return Some(
+            "it is wrapped in backticks, which would be part of the command that is run; write it bare"
+                .to_string(),
+        );
+    }
+    let arguments: Vec<&str> = words.collect();
+    if let Some(token) = arguments.iter().find(|word| SHELL_TOKENS.contains(word)) {
+        return Some(format!(
+            "it uses shell syntax ({token}), but the command is run directly, not through a shell"
+        ));
+    }
+    if arguments
+        .iter()
+        .any(|word| word.starts_with('"') || word.starts_with('\''))
+    {
+        return Some(
+            "it quotes an argument, but the command is split on spaces and the quote characters would reach the program"
+                .to_string(),
+        );
+    }
+    if program.contains(['/', '\\']) {
+        return None;
+    }
+    (!program_on_path(program, path, pathext)).then(|| {
+        format!(
+            "{program} is not a program on this host (a shell builtin or cmdlet cannot be run directly)"
+        )
+    })
+}
+
+/// Whether `program` is an executable in a `PATH` directory, with the extensions
+/// `PATHEXT` lists on Windows and the execute bit elsewhere.
+fn program_on_path(
+    program: &str,
+    path: Option<&std::ffi::OsStr>,
+    pathext: Option<&std::ffi::OsStr>,
+) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        let extensions: Vec<String> = pathext
+            .map_or_else(
+                || ".COM;.EXE;.BAT;.CMD".to_string(),
+                |value| value.to_string_lossy().into_owned(),
+            )
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        let lower = program.to_ascii_lowercase();
+        let has_extension = extensions
+            .iter()
+            .any(|extension| lower.ends_with(extension));
+        std::env::split_paths(path).any(|dir| {
+            if has_extension {
+                return dir.join(program).is_file();
+            }
+            extensions
+                .iter()
+                .any(|extension| dir.join(format!("{program}{extension}")).is_file())
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = pathext;
+        std::env::split_paths(path).any(|dir| {
+            std::fs::metadata(dir.join(program))
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+    }
+}
+
 fn is_pytest_command(command: &CheckCommand) -> bool {
     matches!(command.program.as_str(), "python" | "python3")
         && command.args.first().is_some_and(|arg| arg == "-m")
@@ -345,5 +449,79 @@ mod tests {
         ).unwrap();
         assert_eq!(run_python_check(dir.path(), "auto").status.code(), Some(5));
         assert!(dir.path().join("pytest-selected").is_file());
+    }
+
+    #[cfg(windows)]
+    const FAKE_TOOL: &str = "fake-tool.exe";
+    #[cfg(not(windows))]
+    const FAKE_TOOL: &str = "fake-tool";
+
+    /// A directory holding one program, as a `PATH` value.
+    fn path_with_fake_tool() -> (tempfile::TempDir, std::ffi::OsString) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FAKE_TOOL);
+        std::fs::write(&file, b"").unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths([dir.path()]).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_program_on_path_with_plain_arguments_is_runnable() {
+        let (_dir, path) = path_with_fake_tool();
+        let ext = std::ffi::OsString::from(".EXE;.CMD");
+        for command in [
+            "fake-tool",
+            "fake-tool --flag value index.html",
+            "  fake-tool test  ",
+        ] {
+            assert_eq!(
+                unrunnable_with(command, Some(path.as_os_str()), Some(ext.as_os_str())),
+                None,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_program_that_is_not_on_path_names_itself_and_why() {
+        let (_dir, path) = path_with_fake_tool();
+        let reason = unrunnable_with("open index.html", Some(path.as_os_str()), None).unwrap();
+        assert!(
+            reason.starts_with("open is not a program on this host"),
+            "{reason}"
+        );
+        assert!(
+            unrunnable_with("anything", None, None).is_some(),
+            "no PATH at all"
+        );
+    }
+
+    #[test]
+    fn shell_syntax_quotes_and_backticks_are_refused_before_the_program_is_looked_up() {
+        let (_dir, path) = path_with_fake_tool();
+        let path = Some(path.as_os_str());
+        let reason = unrunnable_with("fake-tool a && fake-tool b", path, None).unwrap();
+        assert!(reason.contains("shell syntax (&&)"), "{reason}");
+        let reason = unrunnable_with("fake-tool a | fake-tool", path, None).unwrap();
+        assert!(reason.contains("shell syntax (|)"), "{reason}");
+        let reason = unrunnable_with("fake-tool -q \"Hello\" index.html", path, None).unwrap();
+        assert!(reason.contains("quotes an argument"), "{reason}");
+        let reason = unrunnable_with("`fake-tool index.html`", path, None).unwrap();
+        assert!(reason.contains("backticks"), "{reason}");
+    }
+
+    #[test]
+    fn a_program_named_by_a_path_is_not_judged() {
+        // A step may build it, so a path is left for the step to make true.
+        assert_eq!(unrunnable_with("./gradlew test", None, None), None);
+        assert_eq!(
+            unrunnable_with("target\\debug\\app --check", None, None),
+            None
+        );
     }
 }

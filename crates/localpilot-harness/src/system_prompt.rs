@@ -266,7 +266,7 @@ const TOOL_LOOP_SECTION: &str = concat!(
 /// reaches for the most common spelling: `open` to view a page, which is not a
 /// command on Windows (#253). One short line per platform, with the host fixed
 /// at build time, so the prompt stays stable within a session.
-pub(crate) fn host_section() -> &'static str {
+fn host_section() -> &'static str {
     if cfg!(windows) {
         "Host: Windows, shell: PowerShell. `open`, `xdg-open` and `&&` do not apply; \
         `start <file>` opens a file."
@@ -276,6 +276,30 @@ pub(crate) fn host_section() -> &'static str {
     } else {
         "Host: Linux, shell: POSIX sh. `xdg-open <file>` opens a file; `open` and \
         `start` do not apply."
+    }
+}
+
+/// What the planner needs to know about this host to write a `verify:` command
+/// that runs. The gate starts the command directly and splits it on spaces, with
+/// no shell, so it has to be a program that exists here with plain arguments;
+/// Windows has no `grep`, and a PowerShell cmdlet needs its host program.
+pub(crate) fn planner_host_section() -> &'static str {
+    if cfg!(windows) {
+        "Host: Windows. A verify: command is run directly and split on spaces, not \
+        through a shell: write a program that exists on this host followed by plain \
+        arguments, bare, with no backticks, quotes, pipes, && or redirects. A \
+        PowerShell cmdlet needs its host program, for example: powershell -NoProfile \
+        -Command Select-String -Path index.html -Pattern Hello"
+    } else if cfg!(target_os = "macos") {
+        "Host: macOS. A verify: command is run directly and split on spaces, not \
+        through a shell: write a program that exists on this host followed by plain \
+        arguments, bare, with no backticks, quotes, pipes, && or redirects, for \
+        example: grep -q Hello index.html"
+    } else {
+        "Host: Linux. A verify: command is run directly and split on spaces, not \
+        through a shell: write a program that exists on this host followed by plain \
+        arguments, bare, with no backticks, quotes, pipes, && or redirects, for \
+        example: grep -q Hello index.html"
     }
 }
 

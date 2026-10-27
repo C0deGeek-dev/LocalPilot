@@ -127,6 +127,7 @@ pub use summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerT
 pub use system_prompt::{
     agent_system_prompt, assignment_contract, swarm_coordinator_directive, SwarmDepth,
 };
+pub use verify_target::unrunnable_verify_reason;
 pub use verify_target::{detect_verify_command, resolve_verify_check, VERIFY_CHECK_NAME};
 // Part of the public `RuntimeEvent::Recovery` payload, so consumers can match it.
 pub use localpilot_recovery::ModelHealth;

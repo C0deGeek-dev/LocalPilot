@@ -40,6 +40,16 @@ pub enum PlanDefect {
     /// A dependency on a later step, or on itself. Declared order that points
     /// forward is not an order, and it is how a cycle gets in.
     ForwardDependency { step: usize, depends_on: usize },
+    /// A step's `verify:` command cannot run as written on this host: the gate
+    /// starts it directly rather than through a shell, so a missing program, shell
+    /// syntax or a cmdlet ends the step as unverified (#252). Not part of approval,
+    /// which cannot know what an earlier step will install; the planner is asked
+    /// to repair it, and the resume review names it.
+    UnrunnableVerify {
+        step: usize,
+        command: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for PlanDefect {
@@ -72,6 +82,14 @@ impl std::fmt::Display for PlanDefect {
             Self::ForwardDependency { step, depends_on } => write!(
                 f,
                 "step {step} depends on step {depends_on}, which does not come before it"
+            ),
+            Self::UnrunnableVerify {
+                step,
+                command,
+                reason,
+            } => write!(
+                f,
+                "step {step}: the verify command '{command}' cannot run, because {reason}; write a program that exists on this host with plain arguments, or 'verify: none - <why>'"
             ),
         }
     }
@@ -142,6 +160,29 @@ pub fn validate_work_scope(
     } else {
         Err(defects)
     }
+}
+
+/// The unfinished steps whose `verify:` command cannot run on this host as
+/// written. Looks programs up on `PATH`; runs nothing.
+#[must_use]
+pub fn unrunnable_verify_defects(progress: &Progress) -> Vec<PlanDefect> {
+    progress
+        .steps
+        .iter()
+        .filter(|step| !step.done)
+        .filter_map(|step| match &step.verify {
+            Some(Verification::Command(command)) => {
+                crate::verify_target::unrunnable_verify_reason(command).map(|reason| {
+                    PlanDefect::UnrunnableVerify {
+                        step: step.number,
+                        command: command.clone(),
+                        reason,
+                    }
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Check a draft against the brief it would be bound to.

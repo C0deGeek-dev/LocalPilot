@@ -395,6 +395,18 @@ from 1; `depends` names step numbers. An explicit nothing is written out
 `verify: none` is malformed on purpose — claiming a step needs no check is
 exactly the claim that should carry its reason into the document.
 
+A `verify:` command is run directly: the line is split on whitespace, the first
+word is started as a program and the rest are its arguments. There is no shell, so
+a pipe, `&&`, a redirect, a quoted argument, backticks around the command, a shell
+builtin or a PowerShell cmdlet cannot run, and neither can a program that is not
+on this host's `PATH`; the step then ends as unverified. The planner is told this
+and which host it plans for. A draft whose `verify:` command cannot run is sent
+back with the reason, within the same repair budget as a missing scope line, and
+the resume review names the next step's command when it cannot run. Approval does
+not refuse it: a step may install the tool a later step runs, so only the planner
+and the reviewer can judge that (ADR-0237). A program named by a path is not
+judged.
+
 Absence is different from nothing: a step that omits a line states *unknown*, and
 every plan written before this format did. Such a plan is still parsed, executed
 and retains its recorded fields when rendered. The three lines are required for
