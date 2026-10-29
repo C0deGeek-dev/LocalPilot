@@ -1572,6 +1572,9 @@ pub enum RuntimeUpdate {
         name: String,
         count: u32,
     },
+    /// A hosted turn began. The terminal already shows work from its own
+    /// submit, so this changes nothing on screen.
+    TurnStarted,
     FilesTouched,
     SoftInterruptInjected,
     Stopped(StopState),
@@ -2675,7 +2678,7 @@ impl AppModel {
                     format!("tool {name} stopped after {count} repeated failures"),
                 );
             }
-            RuntimeUpdate::FilesTouched => {}
+            RuntimeUpdate::FilesTouched | RuntimeUpdate::TurnStarted => {}
             RuntimeUpdate::SoftInterruptInjected => {
                 Self::style_transcript_on(projection);
                 projection.active_assistant = None;

@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Served sessions number their events. A client that declares `resume` on
+  `attach` can reconnect with `since: {epoch, seq}` and get exactly the records it
+  missed, or a `snapshot` of the session (turn state, plan, pending asks, the
+  current turn's text and the stored transcript tail) when they are no longer
+  held. A client that falls behind gets `resync_required` instead of silently
+  losing events, and a closed session sends `session_closed`. The server now
+  refuses records with a newer protocol version, as the stdio path does.
+  Library users: `RuntimeEvent` gains `TurnStarted` (ADR-0240).
 - Several clients attached to one `localpilot serve` session now share its
   permission asks. Every attached client is shown every ask, including one that
   attaches after it was raised; any of them may answer, the first answer wins,

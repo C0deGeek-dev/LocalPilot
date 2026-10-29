@@ -10793,6 +10793,7 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
         }),
         RuntimeEvent::ToolStuck { name, count } => RuntimeUpdate::ToolStuck { name, count },
         RuntimeEvent::FilesTouched(_) => RuntimeUpdate::FilesTouched,
+        RuntimeEvent::TurnStarted => RuntimeUpdate::TurnStarted,
         RuntimeEvent::SoftInterruptInjected { .. } => RuntimeUpdate::SoftInterruptInjected,
         RuntimeEvent::Stopped(reason) => RuntimeUpdate::Stopped(match reason {
             StopReason::Done => StopState::Done,
@@ -14386,6 +14387,14 @@ mod tests {
             ("harness-status", "Show harness document and operation state"),
             ("harness-feature", "Add a feature to the approved current brief and plan"),
             ("harness-stop", "Stop harness work and discard its unapproved draft"),
+            (
+                "disable-envelope",
+                "Turn the work envelope's size limits off (not advised without a reason)",
+            ),
+            (
+                "enable-envelope",
+                "Turn the work envelope's size limits back on",
+            ),
             ("wait-resume", "Wait for quota, then resume"),
             ("harness-intake", "Turn an idea into a reviewed brief"),
             ("harness-brief", "Review the brief, or approve/reject a draft"),
@@ -14429,7 +14438,7 @@ mod tests {
                 "Incognito: save nothing; new files need approval (`/incognito off` to end)",
             ),
         ];
-        assert_eq!(full_screen.len(), 48);
+        assert_eq!(full_screen.len(), 50);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }

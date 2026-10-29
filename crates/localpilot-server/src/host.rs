@@ -235,6 +235,9 @@ impl SessionHost {
         self.set_turn_token(Some(token.clone()));
         self.admission().starting = None;
         self.flush_interventions(&mut runtime);
+        // Mark the turn's start in the same ordered stream as its events, so a
+        // consumer attributes every later event to this turn.
+        let _ = self.events.send(RuntimeEvent::TurnStarted);
         let reason = runtime.run_turn(input, &self.events, &token).await;
         self.flush_interventions(&mut runtime);
         let assistant_text = runtime.current_turn_assistant_text();

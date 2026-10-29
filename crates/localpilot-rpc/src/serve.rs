@@ -86,6 +86,7 @@ async fn emit<W: AsyncWrite + Unpin>(
     event: ServerEvent,
 ) -> Result<(), RpcError> {
     let record = ServerRecord {
+        seq: None,
         v: RPC_PROTOCOL_VERSION,
         id,
         event,
@@ -461,7 +462,11 @@ pub fn map_event(event: RuntimeEvent) -> Option<ServerEvent> {
         },
         RuntimeEvent::ToolStuck { name, count } => ServerEvent::ToolStuck { name, count },
         // Handled above; the early return keeps every other arm a plain value.
-        RuntimeEvent::FilesTouched(_) | RuntimeEvent::SoftInterruptInjected { .. } => return None,
+        // A turn start is a lifecycle marker for hosts that sequence their own
+        // feed (the IPC server); the stdio, ACP and MCP streams never carried it.
+        RuntimeEvent::FilesTouched(_)
+        | RuntimeEvent::SoftInterruptInjected { .. }
+        | RuntimeEvent::TurnStarted => return None,
     })
 }
 

@@ -26,7 +26,7 @@
 //! the session lives on for any other attached client (lifecycle/reaping is a
 //! later subject).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -39,9 +39,9 @@ use localpilot_harness::{
 use localpilot_llm::{ModelProvider, ProviderRegistry};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_rpc::{
-    map_event, AskRegistry, AskView, AttachTarget, ClientCommand, ClientRecord, InputDisposition,
-    JsonRecordReader, PendingAsk, Principal, RejectCode, ReplyRefusal, RpcApprover, ServerEvent,
-    ServerRecord, CAPABILITY_ACKS, RPC_PROTOCOL_VERSION, SERVER_VERSION,
+    AskRegistry, AttachTarget, ClientCommand, ClientRecord, InputDisposition, JsonRecordReader,
+    PendingAsk, Principal, RejectCode, ReplyRefusal, RpcApprover, ServerEvent, ServerRecord,
+    CAPABILITY_ACKS, CAPABILITY_RESUME, RPC_PROTOCOL_VERSION, SERVER_VERSION,
 };
 use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile, ScriptedApprover};
 use localpilot_server::host::Admit;
@@ -53,6 +53,8 @@ use localpilot_store::Store;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
+
+use crate::server_feed::{stored_history, Admission, SessionFeed};
 
 // --- The shared session-construction recipe ---------------------------------
 
@@ -467,10 +469,17 @@ impl ConnectionFactory for ServerFactory {
 #[derive(Clone, Default)]
 struct HostMap {
     inner: Arc<Mutex<HashMap<SessionId, Arc<SessionHost>>>>,
-    /// Each hosted session's permission asks. The asks belong to the session,
-    /// not to the connection that happened to create it: every attached client
-    /// sees them and any of them may answer.
-    asks: Arc<StdMutex<HashMap<SessionId, AskRegistry>>>,
+    /// Each hosted session's permission asks and sequenced feed. The asks
+    /// belong to the session, not to the connection that happened to create
+    /// it: every attached client sees them and any of them may answer.
+    served: Arc<StdMutex<HashMap<SessionId, Served>>>,
+}
+
+/// What the server keeps for one hosted session besides its host.
+#[derive(Clone)]
+struct Served {
+    asks: Option<AskRegistry>,
+    feed: Arc<SessionFeed>,
 }
 
 impl HostMap {
@@ -488,7 +497,7 @@ impl HostMap {
         registry: &SessionRegistry,
         factory: &F,
         store: &Store,
-    ) -> Result<(SessionId, Arc<SessionHost>, Option<AskRegistry>), AttachError> {
+    ) -> Result<(SessionId, Arc<SessionHost>, Served), AttachError> {
         let mut map = self.inner.lock().await;
         // A resume target whose session is already hosted short-circuits to the
         // live host — never a second `attach`, so the store known-id guard (for
@@ -496,7 +505,8 @@ impl HostMap {
         // freshly opened session with no store entry yet is still joinable.
         if let Some(id) = existing_id(&target, store)? {
             if let Some(host) = map.get(&id) {
-                return Ok((id, host.clone(), self.asks_for(id)));
+                let served = self.served_for(id, host, None);
+                return Ok((id, host.clone(), served));
             }
         }
         let id = attach(target, registry, factory, store).await?;
@@ -507,33 +517,62 @@ impl HostMap {
         let host = Arc::new(SessionHost::new(handle).await);
         map.insert(id, host.clone());
         let asks = factory.take_asks().map(|halves| {
-            // Connections read asks from the registry's broadcast; this only
+            // The feed reads asks from the registry's broadcast; this only
             // keeps the approver's channel open (a closed one denies every ask)
             // and ends with the session's approver.
             let mut ask_rx = halves.ask_rx;
             tokio::spawn(async move { while ask_rx.recv().await.is_some() {} });
-            self.asks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(id, halves.asks.clone());
             halves.asks
         });
-        Ok((id, host, asks))
+        let served = self.served_for(id, &host, Some(asks));
+        Ok((id, host, served))
     }
 
-    fn asks_for(&self, id: SessionId) -> Option<AskRegistry> {
-        self.asks
+    /// The served-session record for `id`, created (with its feed) on first
+    /// use. `fresh_asks` is the ask registry of a session just built.
+    fn served_for(
+        &self,
+        id: SessionId,
+        host: &SessionHost,
+        fresh_asks: Option<Option<AskRegistry>>,
+    ) -> Served {
+        let mut served = self.served.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(asks) = fresh_asks {
+            // A fresh build replaces whatever an earlier host of this id left.
+            if let Some(old) = served.remove(&id) {
+                old.feed.close("replaced");
+            }
+            let feed = SessionFeed::start(host.subscribe(), asks.clone());
+            served.insert(id, Served { asks, feed });
+        }
+        served
+            .entry(id)
+            .or_insert_with(|| Served {
+                asks: None,
+                feed: SessionFeed::start(host.subscribe(), None),
+            })
+            .clone()
+    }
+
+    /// The served-session record for `id`, if any.
+    fn served(&self, id: SessionId) -> Option<Served> {
+        self.served
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&id)
             .cloned()
     }
 
-    fn forget_asks(&self, id: SessionId) {
-        self.asks
+    /// Close the session's feed (attached clients are told why) and forget it.
+    fn close_served(&self, id: SessionId, reason: &str) {
+        let removed = self
+            .served
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
+        if let Some(served) = removed {
+            served.feed.close(reason);
+        }
     }
 }
 
@@ -640,7 +679,11 @@ impl Reaper {
             }
             let idle_expired =
                 now.saturating_duration_since(host.last_active()) >= self.config.idle;
-            let reap = if host.subscriber_count() == 0 {
+            let attached = self
+                .hosts
+                .served(*id)
+                .map_or_else(|| host.subscriber_count(), |served| served.feed.clients());
+            let reap = if attached == 0 {
                 let since = *self.first_empty.entry(*id).or_insert(now);
                 now.saturating_duration_since(since) >= self.config.grace || idle_expired
             } else {
@@ -687,7 +730,7 @@ impl Reaper {
             drop(runtime);
             self.registry.remove(id).await;
             map.remove(&id);
-            self.hosts.forget_asks(id);
+            self.hosts.close_served(id, "closed after inactivity");
             self.first_empty.remove(&id);
             reaped.push(id);
         }
@@ -724,6 +767,7 @@ impl Reaper {
 /// and host map so the endpoint is released with nothing left in memory.
 async fn close_all_sessions(registry: &SessionRegistry, hosts: &HostMap) {
     for id in registry.list().await {
+        hosts.close_served(id, "the server is shutting down");
         if let Some(handle) = registry.get(id).await {
             handle.lock().await.close();
         }
@@ -771,11 +815,23 @@ where
         }
     };
     let reply_id = record.id;
-    let (target, capabilities) = match record.command {
+    if record.v > RPC_PROTOCOL_VERSION {
+        emit(
+            &mut write,
+            reply_id,
+            ServerEvent::Error {
+                message: unsupported_version(record.v),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+    let (target, capabilities, since) = match record.command {
         ClientCommand::Attach {
             target,
             capabilities,
-        } => (target, capabilities),
+            since,
+        } => (target, capabilities, since),
         _ => {
             emit(
                 &mut write,
@@ -791,7 +847,8 @@ where
     };
 
     let acks = capabilities.iter().any(|name| name == CAPABILITY_ACKS);
-    let (session_id, host, asks) = match hosts.bind(target, registry, factory, store).await {
+    let resume = capabilities.iter().any(|name| name == CAPABILITY_RESUME);
+    let (session_id, host, served) = match hosts.bind(target, registry, factory, store).await {
         Ok(bound) => bound,
         Err(error) => {
             emit(
@@ -806,19 +863,21 @@ where
         }
     };
 
-    // Subscribe before confirming the attach, so a client that has observed
-    // `attached` is guaranteed to receive every subsequent event — including a
-    // turn another client drives.
-    let mut events = host.subscribe();
-    // This connection's view of the session's asks: subscribed before the
-    // outstanding asks are read, so nothing raised or resolved in between is
-    // lost.
-    let (mut ask_view, initial_asks) = match asks.clone() {
-        Some(registry) => {
-            let (view, initial) = AskView::attach(registry, acks);
-            (Some(view), initial)
-        }
-        None => (None, Vec::new()),
+    // Attach to the session's feed before confirming, so a client that has
+    // observed `attached` is guaranteed every later record — including a turn
+    // another client drives. The stored history is read first, never under
+    // the feed lock.
+    let history = read_history(store, session_id, resume);
+    let attachment = served
+        .feed
+        .attach(since.as_ref(), resume, &history, &|| admission_of(&host));
+    let mut live = attachment.live;
+    let _guard = attachment.guard;
+    let mut view = ConnectionView {
+        acks,
+        resume,
+        floor: attachment.floor,
+        shown: HashSet::new(),
     };
     emit(
         &mut write,
@@ -826,34 +885,64 @@ where
         ServerEvent::Attached {
             session_id,
             server_version: SERVER_VERSION.to_string(),
+            epoch: if resume {
+                attachment.epoch
+            } else {
+                String::new()
+            },
         },
     )
     .await?;
-    for record in initial_asks {
-        emit(&mut write, None, record).await?;
+    let feed_ctx = FeedContext {
+        feed: &served.feed,
+        store,
+        session_id,
+        host: &host,
+    };
+    // The replay, snapshot or closure goes through the same delivery as live
+    // records, so a replayed resync or closure is handled the same way.
+    for (seq, event) in attachment.initial {
+        if deliver(&mut write, &mut view, &feed_ctx, seq, event).await? == Flow::Stop {
+            return Ok(());
+        }
     }
 
     loop {
         tokio::select! {
-            // Fanout: every session event, whoever drove the turn, to this writer.
-            event = events.recv() => match event {
-                Ok(event) => {
-                    if let Some(mapped) = map_event(event) {
-                        emit(&mut write, None, mapped).await?;
+            // The session's numbered feed: every record, whoever drove the turn
+            // and whoever answered an ask.
+            record = live.recv() => match record {
+                Ok((seq, event)) => {
+                    if seq <= view.floor {
+                        continue; // already covered by the replay or snapshot
+                    }
+                    if deliver(&mut write, &mut view, &feed_ctx, Some(seq), event).await?
+                        == Flow::Stop
+                    {
+                        break;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // This connection fell behind: never a silent skip.
+                    if view.resume {
+                        let (_, position) = served.feed.pending_asks();
+                        if position.closed.is_none() {
+                            emit(
+                                &mut write,
+                                None,
+                                ServerEvent::ResyncRequired {
+                                    epoch: position.epoch,
+                                    seq: position.head,
+                                },
+                            )
+                            .await?;
+                        }
+                    }
+                    if resync(&mut write, &mut view, &feed_ctx).await? == Flow::Stop {
+                        break;
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
-            },
-            // The session's permission asks, raised and resolved, whoever drove
-            // the turn and whoever answered.
-            records = next_ask_records(&mut ask_view) => match records {
-                Some(records) => {
-                    for record in records {
-                        emit(&mut write, None, record).await?;
-                    }
-                }
-                None => ask_view = None, // the session's registry is gone
             },
             // Client commands.
             record = reader.next() => {
@@ -864,7 +953,7 @@ where
                     &session_id,
                     &model,
                     &profile_label,
-                    asks.as_ref(),
+                    served.asks.as_ref(),
                     acks,
                     &mut write,
                 )
@@ -876,6 +965,193 @@ where
         }
     }
     Ok(())
+}
+
+/// Which feed records one connection is sent, and what it has been shown.
+struct ConnectionView {
+    acks: bool,
+    resume: bool,
+    /// Live records at or below this feed position are already covered.
+    floor: u64,
+    /// Asks this connection shows as pending.
+    shown: HashSet<String>,
+}
+
+impl ConnectionView {
+    /// Whether a record type is one this connection declared it can read.
+    fn visible(&self, event: &ServerEvent) -> bool {
+        match event {
+            ServerEvent::TurnStarted
+            | ServerEvent::Snapshot { .. }
+            | ServerEvent::ResyncRequired { .. }
+            | ServerEvent::SessionClosed { .. } => self.resume,
+            ServerEvent::PermissionResolved { .. } | ServerEvent::AsksResync { .. } => {
+                self.acks || self.resume
+            }
+            _ => true,
+        }
+    }
+
+    fn note(&mut self, event: &ServerEvent) {
+        match event {
+            ServerEvent::PermissionAsk { ask_id, .. } => {
+                self.shown.insert(ask_id.clone());
+            }
+            ServerEvent::PermissionResolved { ask_id, .. } => {
+                self.shown.remove(ask_id);
+            }
+            ServerEvent::Snapshot { asks, .. } | ServerEvent::AsksResync { asks } => {
+                self.shown = asks.iter().map(|ask| ask.ask_id.clone()).collect();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a connection keeps reading after a record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Stop,
+}
+
+/// What a connection needs to reach its session's feed state.
+struct FeedContext<'a> {
+    feed: &'a SessionFeed,
+    store: &'a Store,
+    session_id: SessionId,
+    host: &'a SessionHost,
+}
+
+/// The host's current admission state, for a snapshot.
+fn admission_of(host: &SessionHost) -> Admission {
+    Admission {
+        busy: host.is_busy(),
+        queued: host.queued_follow_ups(),
+    }
+}
+
+/// Deliver one feed record to a connection: forward it when the connection
+/// reads its type, resynchronise on `resync_required`, and stop after the
+/// session closes.
+async fn deliver<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    view: &mut ConnectionView,
+    ctx: &FeedContext<'_>,
+    seq: Option<u64>,
+    event: ServerEvent,
+) -> std::io::Result<Flow> {
+    match event {
+        ServerEvent::SessionClosed { reason } => {
+            emit_closure(write, view, seq, reason).await?;
+            Ok(Flow::Stop)
+        }
+        ServerEvent::ResyncRequired { .. } => {
+            // The server lost records; everyone reconciles.
+            if view.resume {
+                emit_at(write, None, seq, event).await?;
+            }
+            resync(write, view, ctx).await
+        }
+        event => {
+            if view.visible(&event) {
+                view.note(&event);
+                emit_at(write, None, seq, event).await?;
+            }
+            Ok(Flow::Continue)
+        }
+    }
+}
+
+/// Tell a connection its session closed, in the record type it reads.
+async fn emit_closure<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    view: &ConnectionView,
+    seq: Option<u64>,
+    reason: String,
+) -> std::io::Result<()> {
+    let closing = if view.resume {
+        ServerEvent::SessionClosed { reason }
+    } else {
+        ServerEvent::Closed
+    };
+    emit_at(write, None, seq, closing).await
+}
+
+/// Bring a connection that missed records back to the feed's state: a fresh
+/// snapshot for `resume` clients, the pending set for `acks` clients, and any
+/// not-yet-shown pending ask for everyone else. A closed feed ends the
+/// connection instead.
+async fn resync<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    view: &mut ConnectionView,
+    ctx: &FeedContext<'_>,
+) -> std::io::Result<Flow> {
+    if view.resume {
+        let history = read_history(ctx.store, ctx.session_id, true);
+        let (snapshot, head) = ctx.feed.snapshot(&history, &|| admission_of(ctx.host));
+        if let ServerEvent::SessionClosed { reason } = snapshot {
+            emit_closure(write, view, None, reason).await?;
+            return Ok(Flow::Stop);
+        }
+        view.floor = view.floor.max(head);
+        view.note(&snapshot);
+        emit(write, None, snapshot).await?;
+        return Ok(Flow::Continue);
+    }
+    let (asks, position) = ctx.feed.pending_asks();
+    if let Some(reason) = position.closed {
+        emit_closure(write, view, None, reason).await?;
+        return Ok(Flow::Stop);
+    }
+    view.floor = view.floor.max(position.head);
+    if view.acks {
+        let resync = ServerEvent::AsksResync { asks };
+        view.note(&resync);
+        emit(write, None, resync).await?;
+        return Ok(Flow::Continue);
+    }
+    let pending: HashSet<String> = asks.iter().map(|ask| ask.ask_id.clone()).collect();
+    view.shown.retain(|id| pending.contains(id));
+    for ask in asks {
+        if view.shown.insert(ask.ask_id.clone()) {
+            emit(
+                write,
+                None,
+                ServerEvent::PermissionAsk {
+                    ask_id: ask.ask_id,
+                    tool: ask.tool,
+                    detail: ask.detail,
+                    risk: ask.risk,
+                    expires_at_ms: ask.expires_at_ms,
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(Flow::Continue)
+}
+
+/// The stored transcript tail a snapshot carries (empty unless the client
+/// reads snapshots). A store error leaves it empty and marked truncated.
+fn read_history(
+    store: &Store,
+    session_id: SessionId,
+    wanted: bool,
+) -> (Vec<localpilot_rpc::HistoryMessage>, bool) {
+    if !wanted {
+        return (Vec::new(), false);
+    }
+    match store.read_transcript(session_id) {
+        Ok(messages) => stored_history(&messages),
+        Err(_) => (Vec::new(), true),
+    }
+}
+
+fn unsupported_version(v: u32) -> String {
+    format!(
+        "protocol version {v} is newer than this server supports (up to {RPC_PROTOCOL_VERSION})"
+    )
 }
 
 /// Route one decoded client command. Returns `true` when the connection should
@@ -917,6 +1193,17 @@ async fn handle_command<W: AsyncWrite + Unpin>(
         }
     };
     let id = record.id;
+    if record.v > RPC_PROTOCOL_VERSION {
+        reject(
+            write,
+            id,
+            acks,
+            RejectCode::UnsupportedVersion,
+            unsupported_version(record.v),
+        )
+        .await?;
+        return Ok(false);
+    }
     match record.command {
         ClientCommand::Hello => {
             emit(
@@ -1113,16 +1400,6 @@ async fn handle_command<W: AsyncWrite + Unpin>(
     Ok(false)
 }
 
-/// Await the records for the session's next ask event, or park forever when
-/// this connection has no ask view — so the `select!` arm is inert rather than
-/// busy-looping.
-async fn next_ask_records(view: &mut Option<AskView>) -> Option<Vec<ServerEvent>> {
-    match view {
-        Some(view) => view.next().await,
-        None => std::future::pending().await,
-    }
-}
-
 /// Acknowledge a command that is being acted on now (`acks` clients only).
 async fn accept<W: AsyncWrite + Unpin>(
     write: &mut W,
@@ -1158,7 +1435,18 @@ async fn emit<W: AsyncWrite + Unpin>(
     id: Option<String>,
     event: ServerEvent,
 ) -> std::io::Result<()> {
+    emit_at(write, id, None, event).await
+}
+
+/// Emit a record carrying its feed position.
+async fn emit_at<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    id: Option<String>,
+    seq: Option<u64>,
+    event: ServerEvent,
+) -> std::io::Result<()> {
     let record = ServerRecord {
+        seq,
         v: RPC_PROTOCOL_VERSION,
         id,
         event,
@@ -1327,6 +1615,7 @@ async fn run_client(conn: Conn, target: AttachTarget) -> anyhow::Result<()> {
     send_command(
         &mut write,
         ClientCommand::Attach {
+            since: None,
             target,
             capabilities: vec![CAPABILITY_ACKS.to_string()],
         },
@@ -1427,6 +1716,7 @@ fn render_event(event: ServerEvent, last_ask: &mut Option<String>) -> anyhow::Re
         ServerEvent::Attached {
             session_id,
             server_version,
+            ..
         } => {
             let version = if server_version.is_empty() {
                 "unknown".to_string()
@@ -1717,11 +2007,20 @@ mod tests {
     /// and completes only once every client has disconnected — the clean-stop
     /// signal the tests await.
     fn spawn_server(factory: Arc<FakeFactory>, count: usize) -> (Endpoint, JoinHandle<()>) {
+        spawn_server_on(factory, count, HostMap::default())
+    }
+
+    /// [`spawn_server`] over a host map the test keeps, to act on hosted
+    /// sessions (close them) while clients are attached.
+    fn spawn_server_on(
+        factory: Arc<FakeFactory>,
+        count: usize,
+        hosts: HostMap,
+    ) -> (Endpoint, JoinHandle<()>) {
         let endpoint = unique_endpoint();
         let listener = Listener::bind(&endpoint).unwrap();
         let store = factory.store();
         let registry = SessionRegistry::new();
-        let hosts = HostMap::default();
         let handle = tokio::spawn(async move {
             let mut connections = Vec::new();
             for _ in 0..count {
@@ -1797,6 +2096,7 @@ mod tests {
         send_command(
             write,
             ClientCommand::Attach {
+                since: None,
                 target,
                 capabilities,
             },
@@ -1893,6 +2193,7 @@ mod tests {
             send_command(
                 &mut write,
                 ClientCommand::Attach {
+                    since: None,
                     target: AttachTarget::OpenNew,
                     capabilities: Vec::new(),
                 },
@@ -2287,6 +2588,10 @@ mod tests {
                 ServerEvent::Accepted { .. }
                     | ServerEvent::Rejected { .. }
                     | ServerEvent::PermissionResolved { .. }
+                    | ServerEvent::TurnStarted
+                    | ServerEvent::Snapshot { .. }
+                    | ServerEvent::ResyncRequired { .. }
+                    | ServerEvent::SessionClosed { .. }
             )),
             "no record type the legacy client cannot read: {seen:?}"
         );
@@ -2367,6 +2672,452 @@ mod tests {
 
         drop((write, reader));
         timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    // --- sequenced feed: replay, snapshot, closure, protocol version ---------
+
+    fn resume_caps() -> Vec<String> {
+        vec![CAPABILITY_ACKS.to_string(), CAPABILITY_RESUME.to_string()]
+    }
+
+    /// Attach with capabilities and an optional cursor; returns the session id
+    /// and the feed epoch from `attached`.
+    async fn attach_resume<W: AsyncWrite + Unpin>(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        write: &mut W,
+        target: AttachTarget,
+        since: Option<localpilot_rpc::FeedCursor>,
+    ) -> (SessionId, String) {
+        send_command(
+            write,
+            ClientCommand::Attach {
+                target,
+                capabilities: resume_caps(),
+                since,
+            },
+        )
+        .await
+        .unwrap();
+        match read_event(reader).await {
+            ServerEvent::Attached {
+                session_id, epoch, ..
+            } => (session_id, epoch),
+            other => panic!("expected `attached`, got {other:?}"),
+        }
+    }
+
+    /// Read whole records (with their feed position) until `pred` matches.
+    async fn read_records_until(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        pred: impl Fn(&ServerEvent) -> bool,
+    ) -> Vec<ServerRecord> {
+        let mut seen = Vec::new();
+        loop {
+            let value = timeout(DEADLINE, reader.next())
+                .await
+                .expect("read timed out")
+                .unwrap()
+                .expect("server closed early");
+            let record: ServerRecord = serde_json::from_value(value).unwrap();
+            let done = pred(&record.event);
+            seen.push(record);
+            if done {
+                return seen;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reconnecting_client_replays_exactly_what_it_missed() {
+        let factory = Arc::new(FakeFactory::new(
+            FakeProvider::new()
+                .text("first answer")
+                .text("second answer"),
+        ));
+        let (endpoint, server) = spawn_server(factory, 3);
+
+        // A resume client follows one turn, noting its last position.
+        let (read1, mut write1) = tokio::io::split(dial(&endpoint).await);
+        let mut reader1 = JsonRecordReader::new(read1);
+        let (id, epoch) =
+            attach_resume(&mut reader1, &mut write1, AttachTarget::OpenNew, None).await;
+        assert!(!epoch.is_empty(), "resume clients learn the feed epoch");
+        let first = read_records_until(&mut reader1, |event| {
+            matches!(event, ServerEvent::Snapshot { .. })
+        })
+        .await;
+        assert!(matches!(first[0].event, ServerEvent::Snapshot { .. }));
+        send_command(
+            &mut write1,
+            ClientCommand::Prompt {
+                text: "one".to_string(),
+                disposition: InputDisposition::Immediate,
+            },
+        )
+        .await
+        .unwrap();
+        let turn = read_records_until(&mut reader1, is_stop).await;
+        assert!(turn
+            .iter()
+            .any(|record| record.event == ServerEvent::TurnStarted));
+        let last = turn.iter().filter_map(|record| record.seq).max().unwrap();
+        drop((write1, reader1));
+
+        // Meanwhile another client drives a second turn.
+        let (read2, mut write2) = tokio::io::split(dial(&endpoint).await);
+        let mut reader2 = JsonRecordReader::new(read2);
+        attach_client(
+            &mut reader2,
+            &mut write2,
+            AttachTarget::ResumeId { session_id: id },
+        )
+        .await;
+        send_command(
+            &mut write2,
+            ClientCommand::Prompt {
+                text: "two".to_string(),
+                disposition: InputDisposition::Immediate,
+            },
+        )
+        .await
+        .unwrap();
+        collect_turn(&mut reader2).await;
+
+        // The first client comes back with its cursor and gets the second turn
+        // replayed: no snapshot, no gap, nothing it already had.
+        let (read3, mut write3) = tokio::io::split(dial(&endpoint).await);
+        let mut reader3 = JsonRecordReader::new(read3);
+        attach_resume(
+            &mut reader3,
+            &mut write3,
+            AttachTarget::ResumeId { session_id: id },
+            Some(localpilot_rpc::FeedCursor { epoch, seq: last }),
+        )
+        .await;
+        let replay = read_records_until(&mut reader3, is_stop).await;
+        assert!(!replay
+            .iter()
+            .any(|record| matches!(record.event, ServerEvent::Snapshot { .. })));
+        let seqs: Vec<u64> = replay.iter().map(|record| record.seq.unwrap()).collect();
+        assert_eq!(seqs[0], last + 1, "starts right after the cursor");
+        assert!(
+            seqs.windows(2).all(|pair| pair[1] > pair[0]),
+            "in order: {seqs:?}"
+        );
+        assert!(replay.iter().any(|record| matches!(
+            &record.event,
+            ServerEvent::TextDelta { text } if text.contains("second answer")
+        )));
+        assert!(!replay.iter().any(|record| matches!(
+            &record.event,
+            ServerEvent::TextDelta { text } if text.contains("first answer")
+        )));
+
+        drop((write2, reader2, write3, reader3));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_during_a_running_turn_does_not_wait_for_it() {
+        let factory = Arc::new(FakeFactory::asking(asking_provider(&[])));
+        let (endpoint, server) = spawn_server(factory, 2);
+
+        let (read1, mut write1) = tokio::io::split(dial(&endpoint).await);
+        let mut reader1 = JsonRecordReader::new(read1);
+        let id = attach_client_with(&mut reader1, &mut write1, AttachTarget::OpenNew, acks()).await;
+        send_command(
+            &mut write1,
+            ClientCommand::Prompt {
+                text: "clean up".to_string(),
+                disposition: InputDisposition::Immediate,
+            },
+        )
+        .await
+        .unwrap();
+        // The turn is now parked on its ask, holding the session runtime.
+        let ask = ask_id_of(&read_until(&mut reader1, is_ask).await);
+
+        // A resume client attaching now gets the state at once.
+        let (read2, mut write2) = tokio::io::split(dial(&endpoint).await);
+        let mut reader2 = JsonRecordReader::new(read2);
+        attach_resume(
+            &mut reader2,
+            &mut write2,
+            AttachTarget::ResumeId { session_id: id },
+            None,
+        )
+        .await;
+        match read_event(&mut reader2).await {
+            ServerEvent::Snapshot { turn, asks, .. } => {
+                assert_eq!(turn, localpilot_rpc::TurnState::Running);
+                assert_eq!(asks.len(), 1);
+                assert_eq!(asks[0].ask_id, ask);
+            }
+            other => panic!("expected a snapshot, got {other:?}"),
+        }
+
+        send_command(
+            &mut write1,
+            ClientCommand::PermissionReply {
+                ask_id: ask,
+                allow: false,
+            },
+        )
+        .await
+        .unwrap();
+        // Both clients read the turn to its end before going away.
+        read_until(&mut reader1, is_stop).await;
+        read_until(&mut reader2, is_stop).await;
+        drop((write1, reader1, write2, reader2));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn closing_a_session_tells_every_attached_client() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 2, hosts.clone());
+
+        let (read1, mut write1) = tokio::io::split(dial(&endpoint).await);
+        let mut reader1 = JsonRecordReader::new(read1);
+        let (id, _) = attach_resume(&mut reader1, &mut write1, AttachTarget::OpenNew, None).await;
+        read_event(&mut reader1).await; // the initial snapshot
+        let (read2, mut write2) = tokio::io::split(dial(&endpoint).await);
+        let mut reader2 = JsonRecordReader::new(read2);
+        attach_client(
+            &mut reader2,
+            &mut write2,
+            AttachTarget::ResumeId { session_id: id },
+        )
+        .await;
+        assert_eq!(hosts.served(id).unwrap().feed.clients(), 2);
+
+        hosts.close_served(id, "closed after inactivity");
+        assert!(matches!(
+            read_event(&mut reader1).await,
+            ServerEvent::SessionClosed { reason } if reason == "closed after inactivity"
+        ));
+        assert_eq!(
+            read_event(&mut reader2).await,
+            ServerEvent::Closed,
+            "a legacy client gets the closing record it knows"
+        );
+        drop((write1, reader1, write2, reader2));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_newer_protocol_version_is_refused() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let (endpoint, server) = spawn_server(factory, 2);
+
+        // On an attached connection: rejected, nothing runs.
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        attach_client_with(&mut reader, &mut write, AttachTarget::OpenNew, acks()).await;
+        write
+            .write_all(
+                b"{\"v\":99,\"id\":\"n1\",\"command\":{\"type\":\"prompt\",\"text\":\"hi\"}}\n",
+            )
+            .await
+            .unwrap();
+        write.flush().await.unwrap();
+        let value = timeout(DEADLINE, reader.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let record: ServerRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(record.id.as_deref(), Some("n1"));
+        assert!(matches!(
+            record.event,
+            ServerEvent::Rejected {
+                code: RejectCode::UnsupportedVersion,
+                ..
+            }
+        ));
+
+        // As the first record: an error, and the connection ends.
+        let (read2, mut write2) = tokio::io::split(dial(&endpoint).await);
+        let mut reader2 = JsonRecordReader::new(read2);
+        write2
+            .write_all(b"{\"v\":99,\"command\":{\"type\":\"attach\",\"target\":{\"mode\":\"open_new\"}}}\n")
+            .await
+            .unwrap();
+        write2.flush().await.unwrap();
+        assert!(matches!(
+            read_event(&mut reader2).await,
+            ServerEvent::Error { .. }
+        ));
+        assert!(timeout(DEADLINE, reader2.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none());
+
+        drop((write, reader, write2, reader2));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    fn view(acks: bool, resume: bool) -> ConnectionView {
+        ConnectionView {
+            acks,
+            resume,
+            floor: 0,
+            shown: HashSet::new(),
+        }
+    }
+
+    fn written(buffer: &[u8]) -> Vec<ServerEvent> {
+        String::from_utf8_lossy(buffer)
+            .lines()
+            .map(|line| serde_json::from_str::<ServerRecord>(line).unwrap().event)
+            .collect()
+    }
+
+    /// A hosted session with its feed, as `bind` would set it up.
+    async fn served_session(
+        factory: &Arc<FakeFactory>,
+    ) -> (
+        SessionRegistry,
+        HostMap,
+        SessionId,
+        Arc<SessionHost>,
+        Served,
+    ) {
+        let registry = SessionRegistry::new();
+        let hosts = HostMap::default();
+        let (id, host) = open_hosted_session(factory, &registry, &hosts).await;
+        let served = hosts.served_for(id, &host, Some(None));
+        (registry, hosts, id, host, served)
+    }
+
+    #[tokio::test]
+    async fn a_resync_after_the_session_closed_ends_the_connection() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let store = factory.store();
+        let (_registry, hosts, id, host, served) = served_session(&factory).await;
+        hosts.close_served(id, "closed after inactivity");
+        let ctx = FeedContext {
+            feed: &served.feed,
+            store: &store,
+            session_id: id,
+            host: &host,
+        };
+
+        // A resume client that lagged across the close gets the closure, not a
+        // snapshot, and stops; so does a legacy one, in the record it knows.
+        for (resume, expected) in [
+            (
+                true,
+                ServerEvent::SessionClosed {
+                    reason: "closed after inactivity".to_string(),
+                },
+            ),
+            (false, ServerEvent::Closed),
+        ] {
+            let mut out = Vec::new();
+            let mut connection = view(true, resume);
+            assert_eq!(
+                resync(&mut out, &mut connection, &ctx).await.unwrap(),
+                Flow::Stop
+            );
+            assert_eq!(written(&out), vec![expected.clone()]);
+
+            // A replayed or live `resync_required` reaches the same end.
+            let mut out = Vec::new();
+            let flow = deliver(
+                &mut out,
+                &mut connection,
+                &ctx,
+                Some(7),
+                ServerEvent::ResyncRequired {
+                    epoch: "e".to_string(),
+                    seq: 7,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(flow, Flow::Stop);
+            assert_eq!(written(&out).last(), Some(&expected));
+        }
+
+        // An attach that races the close sees only the closure.
+        let attached = served
+            .feed
+            .attach(None, true, &(Vec::new(), false), &|| admission_of(&host));
+        assert!(matches!(
+            attached.initial.as_slice(),
+            [(None, ServerEvent::SessionClosed { .. })]
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_snapshot_shows_accepted_work_as_busy_before_its_turn_starts() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let (registry, _hosts, id, host, served) = served_session(&factory).await;
+
+        // Hold the session so the accepted turn cannot start.
+        let handle = registry.get(id).await.unwrap();
+        let guard = handle.lock().await;
+        assert_eq!(host.submit("go".to_string(), false), Admit::Started);
+        match served
+            .feed
+            .snapshot(&(Vec::new(), false), &|| admission_of(&host))
+            .0
+        {
+            ServerEvent::Snapshot { turn, busy, .. } => {
+                assert_eq!(turn, localpilot_rpc::TurnState::Idle, "no turn started yet");
+                assert!(busy, "accepted work is reported busy");
+            }
+            other => panic!("expected a snapshot, got {other:?}"),
+        }
+        drop(guard);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_between_follow_ups_is_busy() {
+        // The follow-up turn parks on a permission ask, so the session stays
+        // busy after the first turn stops.
+        let provider = FakeProvider::new()
+            .text("first answer")
+            .tool_call(
+                "c1",
+                "run_shell",
+                serde_json::json!({ "program": "rm", "args": ["-rf", "no-such-dir"] }),
+            )
+            .text("second answer");
+        let factory = Arc::new(FakeFactory::asking(provider));
+        let (_registry, hosts, id, host, served) = served_session(&factory).await;
+        let mut live = served
+            .feed
+            .attach(None, true, &(Vec::new(), false), &|| admission_of(&host))
+            .live;
+
+        assert_eq!(host.submit("one".to_string(), false), Admit::Started);
+        assert_eq!(host.submit("two".to_string(), true), Admit::Queued);
+        timeout(DEADLINE, async {
+            loop {
+                if let Ok((_, ServerEvent::Stopped { .. })) = live.recv().await {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the first turn stopped");
+
+        match served
+            .feed
+            .snapshot(&(Vec::new(), false), &|| admission_of(&host))
+            .0
+        {
+            ServerEvent::Snapshot { busy, .. } => {
+                assert!(busy, "the follow-up is admitted, so the session is busy");
+            }
+            other => panic!("expected a snapshot, got {other:?}"),
+        }
+        host.cancel_all();
+        hosts.close_served(id, "test over");
     }
 
     // --- the plain-text client renderer --------------------------------------

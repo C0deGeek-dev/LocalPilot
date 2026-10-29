@@ -34,6 +34,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::approver::{AskRegistry, PendingAsk};
+use crate::feed::SeqRing;
 use crate::framing::JsonRecordReader;
 use crate::protocol::{InputDisposition, ServerEvent};
 use crate::serve::{map_event, next_incomplete_step, RpcError};
@@ -80,47 +81,33 @@ pub struct McpServeOptions {
     pub idle_timeout: Option<Duration>,
 }
 
-/// One session event with its feed sequence number.
-struct FeedEntry {
-    seq: u64,
-    event: ServerEvent,
-}
-
 /// Bounded, monotonically numbered event feed.
 struct EventFeed {
-    entries: VecDeque<FeedEntry>,
-    next_seq: u64,
+    ring: SeqRing<ServerEvent>,
     dropped: u64,
 }
 
 impl EventFeed {
     fn new() -> Self {
         Self {
-            entries: VecDeque::new(),
-            next_seq: 1,
+            ring: SeqRing::new(EVENT_FEED_CAP),
             dropped: 0,
         }
     }
 
     fn push(&mut self, event: ServerEvent) {
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        self.entries.push_back(FeedEntry { seq, event });
-        while self.entries.len() > EVENT_FEED_CAP {
-            self.entries.pop_front();
-            self.dropped += 1;
-        }
+        self.ring.push(event);
+        self.dropped = self.ring.dropped();
     }
 
     /// Entries after `cursor`, serialized for the wire.
     fn page_after(&self, cursor: u64) -> Vec<Value> {
-        self.entries
-            .iter()
-            .filter(|entry| entry.seq > cursor)
-            .map(|entry| {
+        self.ring
+            .after(cursor)
+            .map(|(seq, event)| {
                 json!({
-                    "seq": entry.seq,
-                    "event": serde_json::to_value(&entry.event).unwrap_or_else(|_| json!({})),
+                    "seq": seq,
+                    "event": serde_json::to_value(event).unwrap_or_else(|_| json!({})),
                 })
             })
             .collect()
@@ -129,7 +116,7 @@ impl EventFeed {
     /// The highest sequence number handed out so far (the cursor a client
     /// should pass next).
     fn head(&self) -> u64 {
-        self.next_seq - 1
+        self.ring.head()
     }
 }
 

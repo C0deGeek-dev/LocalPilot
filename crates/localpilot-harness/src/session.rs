@@ -174,7 +174,10 @@ pub enum RuntimeEvent {
     /// Context usage for the current request. Emitted first from the calibrated
     /// local estimate before the request, then corrected to the provider's
     /// authoritative prompt count when usage arrives.
-    ContextUsage { used: usize, limit: usize },
+    ContextUsage {
+        used: usize,
+        limit: usize,
+    },
     /// Context was compacted automatically — by the pre-request budget check or
     /// an overflow retry, not a manual `/compact`. Carries how many exchanges
     /// were trimmed and the resulting projection size, so a host can show why the
@@ -192,12 +195,19 @@ pub enum RuntimeEvent {
     Plan(Vec<PlanStep>),
     /// The provider rate-limited or exhausted quota; carries a human-readable
     /// description of when a retry is eligible, for the UI.
-    QuotaPaused { reset: String },
+    QuotaPaused {
+        reset: String,
+    },
     /// A recovery event occurred; model health is attached.
-    Recovery { health: ModelHealth },
+    Recovery {
+        health: ModelHealth,
+    },
     /// A tool has failed repeatedly (≥ 6 times in this turn). The safeguard
     /// stops issuing that tool and notifies the user.
-    ToolStuck { name: String, count: u32 },
+    ToolStuck {
+        name: String,
+        count: u32,
+    },
     /// A tool reported touching files. Published on the ordinary event stream so
     /// anything that cares — today, a swarm's advisory conflict alerts —
     /// subscribes rather than being wired into the tool path. A session nobody
@@ -206,8 +216,13 @@ pub enum RuntimeEvent {
     /// One queued soft interrupt was admitted into the model-visible history.
     /// Hosts use this only to advance presentation state; content stays private
     /// in the durable message/event path.
-    SoftInterruptInjected { point: String, source: String },
+    SoftInterruptInjected {
+        point: String,
+        source: String,
+    },
     /// The loop stopped.
+    /// A turn began (published before any of its other events).
+    TurnStarted,
     Stopped(StopReason),
 }
 

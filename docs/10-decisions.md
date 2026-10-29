@@ -2,6 +2,49 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0240: A Served Session's Events Form One Numbered Feed With Replay And Snapshots
+
+**Status:** accepted · **Date:** 2026-10-29. Builds on ADR-0239.
+
+**Context.** A client that attached late or reconnected saw only events from
+then on, and a client that fell behind the event broadcast skipped what it
+missed without being told. Nothing could tell a reconnecting client what the
+session looked like.
+
+**Decision.**
+
+1. Each served session has one feed with a single writer, a pump task that
+   reads the session's runtime events and its permission asks. It numbers every
+   record, keeps the last 2,048 in a ring, and applies each to a projection (turn
+   state, plan, current-turn text, pending asks) under the same lock. A snapshot
+   is that projection at one feed position, so it never mixes two moments. It
+   takes no runtime lock and does no file I/O under the feed lock; the stored
+   transcript tail is read before and labelled as stored.
+2. `RuntimeEvent::TurnStarted` is published by the session host in the same
+   ordered stream as the turn's events, so every event is attributed to the turn
+   that precedes it. The stdio, ACP and MCP streams do not carry it.
+3. When the pump falls behind a source it resubscribes (dropping its backlog),
+   rebuilds pending asks from the registry, starts a new epoch, marks turn state,
+   plan and text unknown until the next turn starts or stops, and announces
+   `resync_required`.
+4. Closure is terminal feed state: after `session_closed` the feed takes no
+   more records, and an attach, replay or resync that happens after it gets only
+   the closure. A snapshot's `busy` and `queued` come from the host's admission
+   state read under the feed lock, so accepted work that has not started yet is
+   never shown as idle.
+5. Recovery is opt-in with the `resume` capability: `since` cursors replay
+   within an epoch, otherwise a snapshot; a lagging connection is resynced, never
+   skipped; a closing session sends `session_closed`. Other clients see no new
+   record types.
+6. The reaper counts attached connections on the feed (the pump also subscribes
+   to the host) and closes the feed when it removes a session.
+7. The IPC path refuses records with a protocol version newer than it supports,
+   as the stdio path does.
+
+**Consequences.** A phone or second terminal can drop and reattach without
+losing its place. Not done: idempotent retries (next), discovery of commands
+and sessions, and typed slash invocation.
+
 ## ADR-0239: Permission Asks Belong To The Served Session, And Clients Opt Into Acknowledgements
 
 **Status:** accepted · **Date:** 2026-10-29. Amends ADR-0123 (per-client ask routing deferred).

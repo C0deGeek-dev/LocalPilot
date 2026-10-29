@@ -32,6 +32,19 @@ pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// client that does not declare it receives none of these record types.
 pub const CAPABILITY_ACKS: &str = "acks";
 
+/// The attach capability that opts a connection into sequenced recovery: an
+/// attach `since` cursor, `snapshot`, `resync_required`, `turn_started` and
+/// `session_closed` records.
+pub const CAPABILITY_RESUME: &str = "resume";
+
+/// A position in a served session's event feed. `epoch` names one unbroken
+/// numbering of the feed; `seq` is the last record the client applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedCursor {
+    pub epoch: String,
+    pub seq: u64,
+}
+
 /// One client-to-agent record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientRecord {
@@ -75,6 +88,11 @@ pub enum ClientCommand {
         /// [`CAPABILITY_ACKS`]). Omitted by older clients.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,
+        /// Where a reconnecting [`CAPABILITY_RESUME`] client left off. The
+        /// server replays what it missed when it still holds it, and sends a
+        /// `snapshot` otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<FeedCursor>,
     },
 }
 
@@ -114,6 +132,11 @@ pub struct ServerRecord {
     /// Correlation id of the command this record directly replies to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// The record's position in the session's event feed (served sessions
+    /// only). Records a connection is not sent leave gaps; a gap is not a lost
+    /// record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
     pub event: ServerEvent,
 }
 
@@ -138,6 +161,9 @@ pub enum ServerEvent {
         session_id: SessionId,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         server_version: String,
+        /// The feed epoch this connection is reading (served sessions).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        epoch: String,
     },
     TextDelta {
         text: String,
@@ -233,6 +259,52 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dropped_follow_ups: Option<usize>,
     },
+    /// A turn began on the session. [`CAPABILITY_RESUME`] clients only.
+    TurnStarted,
+    /// The state of the session at feed position `seq` of `epoch`, sent on
+    /// attach (and after `resync_required`) when the client's cursor cannot be
+    /// replayed. Live records follow with `seq` greater than this one.
+    /// [`CAPABILITY_RESUME`] clients only.
+    Snapshot {
+        epoch: String,
+        seq: u64,
+        /// `running`, `idle`, or `unknown` (after a server-side loss of events,
+        /// until the next turn starts or stops — never treat it as idle).
+        turn: TurnState,
+        /// Whether the session has work now: a running turn, or accepted input
+        /// about to start. Read from the server's admission state when the
+        /// snapshot is taken, so it can be true while `turn` is still `idle`.
+        /// Never offer "start a turn" controls while it is true.
+        busy: bool,
+        /// Follow-ups waiting behind the running turn, read with `busy`.
+        queued: usize,
+        /// The latest plan, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<Vec<PlanStepWire>>,
+        asks: Vec<AskDetail>,
+        /// The current (or last) turn's assistant text, when known. Absent when
+        /// it was lost; `turn_text_truncated` when only its tail is kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_text: Option<String>,
+        #[serde(default)]
+        turn_text_truncated: bool,
+        /// The session's stored transcript tail. It may not include the
+        /// current turn.
+        history: Vec<HistoryMessage>,
+        #[serde(default)]
+        history_truncated: bool,
+    },
+    /// The connection (or the server) lost feed records it cannot replay. A
+    /// `snapshot` follows for [`CAPABILITY_RESUME`] clients.
+    ResyncRequired {
+        epoch: String,
+        seq: u64,
+    },
+    /// The server closed the session (reaped after inactivity, or the server
+    /// is shutting down). Attach again by id to resume it.
+    SessionClosed {
+        reason: String,
+    },
     /// The client fell behind and missed ask events. `asks` is the complete set
     /// of asks pending now: show exactly these, and drop any other ask still
     /// shown. Sent only to clients that declared [`CAPABILITY_ACKS`].
@@ -268,6 +340,23 @@ pub struct AskDetail {
     pub expires_at_ms: u64,
 }
 
+/// Whether a turn is running, as known to a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnState {
+    Running,
+    Idle,
+    Unknown,
+}
+
+/// One stored transcript message in a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryMessage {
+    /// `user`, `assistant`, `tool`, or `system`.
+    pub role: String,
+    pub text: String,
+}
+
 /// Why a command was rejected. A closed set: clients may match on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -291,6 +380,8 @@ pub enum RejectCode {
     SessionClosed,
     /// The record could not be parsed.
     Malformed,
+    /// The record's protocol version is newer than this server supports.
+    UnsupportedVersion,
     /// This server does not understand the command.
     UnsupportedCommand,
 }
@@ -358,6 +449,7 @@ mod tests {
     #[test]
     fn server_records_roundtrip() {
         let record = ServerRecord {
+            seq: None,
             v: RPC_PROTOCOL_VERSION,
             id: None,
             event: ServerEvent::PermissionAsk {
@@ -383,6 +475,7 @@ mod tests {
                 v: RPC_PROTOCOL_VERSION,
                 id: Some("a1".to_string()),
                 command: ClientCommand::Attach {
+                    since: None,
                     target: AttachTarget::OpenNew,
                     capabilities: Vec::new(),
                 },
@@ -391,6 +484,7 @@ mod tests {
                 v: RPC_PROTOCOL_VERSION,
                 id: None,
                 command: ClientCommand::Attach {
+                    since: None,
                     target: AttachTarget::ResumeId { session_id: id },
                     capabilities: Vec::new(),
                 },
@@ -399,6 +493,7 @@ mod tests {
                 v: RPC_PROTOCOL_VERSION,
                 id: None,
                 command: ClientCommand::Attach {
+                    since: None,
                     target: AttachTarget::ResumeName {
                         name: "nightly".to_string(),
                     },
@@ -417,6 +512,7 @@ mod tests {
     fn attach_target_uses_the_mode_internal_tag() {
         let id = localpilot_core::SessionId::new();
         let json = serde_json::to_value(ClientCommand::Attach {
+            since: None,
             target: AttachTarget::ResumeId { session_id: id },
             capabilities: Vec::new(),
         })
@@ -429,9 +525,11 @@ mod tests {
     #[test]
     fn attached_event_roundtrips_with_server_version() {
         let record = ServerRecord {
+            seq: None,
             v: RPC_PROTOCOL_VERSION,
             id: Some("a1".to_string()),
             event: ServerEvent::Attached {
+                epoch: String::new(),
                 session_id: localpilot_core::SessionId::new(),
                 server_version: SERVER_VERSION.to_string(),
             },
@@ -459,6 +557,7 @@ mod tests {
         assert_eq!(
             record.event,
             ServerEvent::Attached {
+                epoch: String::new(),
                 session_id: id,
                 server_version: String::new(),
             },
@@ -471,6 +570,7 @@ mod tests {
         // The skip-serializing half of the discipline: a default-valued field
         // does not bloat the wire, so it round-trips through the empty default.
         let event = ServerEvent::Attached {
+            epoch: String::new(),
             session_id: localpilot_core::SessionId::new(),
             server_version: String::new(),
         };

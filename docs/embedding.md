@@ -198,6 +198,52 @@ moment it is accepted, and the idle-session reaper never closes a session with
 accepted or queued work; once the reaper closes a session, input still sent on
 an old connection is rejected as `session_closed`.
 
+**Sequenced recovery is opt-in too.** Every record from a served session
+carries `seq`, its position in the session's event feed (a record a connection
+is not sent leaves a gap; a gap is not a lost record). One task writes the
+feed; a bounded ring keeps the most recent 2,048 records. A client that
+declares `"resume"`:
+
+- learns the feed's `epoch` in `attached`, and may pass `since: {epoch, seq}`
+  on a later `attach`. When the server still holds every record after that
+  position in the same epoch it replays them; otherwise — another epoch, a
+  position older than the ring or ahead of its head — it sends a `snapshot`;
+- receives a `snapshot` on a plain attach: `epoch`, `seq` (the feed position it
+  describes; live records follow with higher `seq`), `turn` (`running`, `idle`,
+  or `unknown`, bound to that feed position), `busy` and `queued` (the server's
+  admission state when the snapshot was taken: `busy` is true while accepted
+  input is about to start even if `turn` is still `idle` — never offer "start a
+  turn" while it is true), the latest `plan`, pending `asks` with
+  detail, `turn_text` (the current or last turn's text, a 64 KiB tail with
+  `turn_text_truncated`; absent when it was lost), and `history` (the stored
+  transcript's last 20 messages within 64 KiB, `history_truncated`). The stored
+  history may not include the current turn. A snapshot never waits for a
+  running turn;
+- receives `turn_started` before each turn's other records;
+- receives `resync_required` followed by a fresh `snapshot` when it fell behind,
+  or when the server itself lost events. In the second case the server starts a
+  new epoch and reports `turn: unknown` and no `turn_text` until the next turn
+  starts or stops. Treat `unknown` as unknown, never as idle;
+- receives `session_closed` with a reason when the server closes the session
+  (reaped after inactivity, or shutting down), and nothing after it; the
+  connection then ends. A client that attaches, replays or resynchronises after
+  the close gets only the closure. Attach again by id to resume the session from
+  the store; that starts a new epoch.
+
+A client without `resume` sees none of these record types: a closing session
+sends it `closed`, and after falling behind it is re-shown the pending asks
+(`acks` clients get `asks_resync`). Records whose `v` is newer than the server
+supports are refused (`rejected`/`unsupported_version`, or `error` and the end
+of the connection when it is the first record).
+
+The next protocol step adds idempotent retries: a mutating command will carry
+`request: {instance, client, n}` — the server instance from `attached`, a
+client-chosen id, and a number that only increases per client. A retry of a
+request the server still remembers returns its original reply; one it no
+longer remembers, or one addressed to an earlier server instance, is refused
+as `outcome_unknown` without effect. Until then, a client that loses a reply
+cannot tell whether its command ran.
+
 Under the hood each connection sends one `attach` (open-new / resume-by-id /
 resume-by-name), the server confirms with `attached`, and the connection is
 bound to that session for its lifetime — the exact handshake documented above.

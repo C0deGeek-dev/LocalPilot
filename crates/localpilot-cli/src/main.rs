@@ -71,6 +71,7 @@ mod selfdev_cmd;
 mod selfdev_reload;
 mod selfimprove_cmd;
 mod server_cmd;
+mod server_feed;
 mod session_cmd;
 mod skill_discovery;
 mod skill_output;
