@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A work step can now create one ordinary file and correct it. A file the step
+  creates is sized against its own allowance (200 lines under a 32,000-token
+  context budget, otherwise 600) instead of the 80 or 200 line edit budget, counts
+  as one region however long it is, and edits to it in the same step no longer
+  need a second region. The refusal names the figures that were exceeded.
+  `/disable-envelope` and `/enable-envelope` switch the work envelope's size limits
+  off and on for the session, including `/harness-resume`; not advised without a
+  reason, and permission and verification still apply (ADR-0238, #254).
 - A step that stops without committing no longer blocks its own next resume. The
   files it left in the working tree are recorded, and the next resume of the same
   step continues from them instead of stopping on `no_stale_uncommitted`; the work

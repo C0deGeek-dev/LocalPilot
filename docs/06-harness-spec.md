@@ -756,6 +756,7 @@ An unapproved draft does not survive a restart; approved documents do.
 | `/harness-resume` | Review execution settings, then confirm the existing runner |
 | `/harness-feature <description>` | Reuse CLI feature extension on a current approved brief/plan; refuse an unapproved document conversation |
 | `/harness-stop` | Signal the active harness operation and await cancellation, or discard its idle unapproved conversation |
+| `/disable-envelope`, `/enable-envelope` | Switch the work envelope's size limits off or on for this session, including the steps `/harness-resume` runs. Disabling is not advised without a reason; permission and verification are unchanged |
 
 No arguments are accepted by status, resume or stop; feature requires a
 nonempty description. Names/help/autocomplete/typed actions come from one shared
@@ -1489,6 +1490,22 @@ of stopping; on a pass (or no detectable target, or the gate off) the turn
 finalizes as before for read-only legacy opt-in checks. Changed bounded units
 also require this gate when the optional setting is off (ADR-0199), unless their
 harness step has an explicitly reviewed `verify: none - reason` exemption.
+
+A file the unit creates is sized against its own allowance, `max_new_file_lines`
+(200 lines under a 32,000-token context budget, otherwise 600; a configured
+`max_changed_lines` caps it too), apart from the edit budget, and counts as one
+region however long it is: the repository diff sees a created file as one new
+region, so edits to it in the same unit spend lines but no further region. A
+rewrite of a file the unit created replaces its cost. Existing files keep the
+edit budget and one region per hunk. A refusal names the figures that were
+exceeded (`files 1/1, regions 1/1, changed lines 0/80, new-file lines 201/200`).
+The user can switch the sizing limits off with `/disable-envelope` and back on with
+`/enable-envelope`; the model and the plan cannot. While off, no write is sized
+and no step's diff is inspected against a profile; the switch is announced when
+it is set and at the start of each run. It is not advised without a reason, because
+the envelope is what keeps a weak model's edits small and reviewable. It waives
+nothing else: permission, the verify gate and the commit rules apply as before
+(ADR-0238).
 
 Refused mutation attempts still consume the cumulative work envelope, but an
 unchanged readonly review is not implementation work requiring owner-style

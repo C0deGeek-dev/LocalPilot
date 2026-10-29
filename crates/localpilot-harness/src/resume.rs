@@ -779,6 +779,7 @@ pub(crate) fn inspect_work_diff(
     }
     let paths = changed;
     let mut lines = 0usize;
+    let mut new_file_lines = 0usize;
     let mut regions = 0usize;
     let mut region_count_is_lower_bound = false;
     let mut file_summaries = Vec::with_capacity(paths.len());
@@ -839,8 +840,12 @@ pub(crate) fn inspect_work_diff(
             if !metadata.is_file() || path_has_link(root, path)? {
                 return Ok(inspection.refuse("work envelope: new/opaque link or special file requires explicit review; preserve the work"));
             }
-            let read_limit = crate::granularity::MAX_BINARY_CHANGE_BYTES
-                .max(profile.max_changed_lines.saturating_mul(80) as u64);
+            let read_limit = crate::granularity::MAX_BINARY_CHANGE_BYTES.max(
+                profile
+                    .max_changed_lines
+                    .max(profile.max_new_file_lines)
+                    .saturating_mul(80) as u64,
+            );
             if metadata.len() > read_limit {
                 return Ok(inspection.refuse(format!("work envelope: new file of {} bytes exceeds bounded inspection material; split or request explicit review", metadata.len())));
             }
@@ -850,8 +855,10 @@ pub(crate) fn inspect_work_diff(
                 .filter(|_| !bytes.contains(&0))
             {
                 Some(body) => {
+                    // A created file is sized against its own allowance, as the
+                    // admission check does, not against the edit budget.
                     file_lines = body.lines().count().max(body.len().div_ceil(80));
-                    lines = lines.saturating_add(file_lines);
+                    new_file_lines = new_file_lines.saturating_add(file_lines);
                 }
                 None => {
                     inspection.binary_bytes =
@@ -930,6 +937,7 @@ pub(crate) fn inspect_work_diff(
     }
     if paths.len() > profile.max_files
         || lines > profile.max_changed_lines
+        || new_file_lines > profile.max_new_file_lines
         || regions > profile.max_regions
     {
         let prior = if pre_existing_changes_may_be_counted {
@@ -943,10 +951,11 @@ pub(crate) fn inspect_work_diff(
             regions.to_string()
         };
         return Ok(inspection.refuse(format!(
-            "work envelope: observed {} files (limit {}), {lines} changed lines (limit {}), and {region_count} regions (limit {}) across [{}]{prior}; work is preserved, split/review it before committing",
+            "work envelope: observed {} files (limit {}), {lines} changed lines (limit {}), {new_file_lines} lines in new files (limit {}), and {region_count} regions (limit {}) across [{}]{prior}; work is preserved, split/review it before committing",
             paths.len(),
             profile.max_files,
             profile.max_changed_lines,
+            profile.max_new_file_lines,
             profile.max_regions,
             file_summaries.join(", "),
         )));
@@ -2230,6 +2239,39 @@ mod artifact_tests {
                 .unwrap()
                 .blocked
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn a_created_file_is_sized_against_the_new_file_allowance_not_the_edit_budget() {
+        let dir = repository();
+        let baseline = work_diff_baseline(dir.path()).unwrap();
+        let unknown = WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 64_000,
+                provenance: ContextProvenance::ResolvedBudget,
+            },
+            Reliability::Unknown,
+            &localpilot_config::GranularityConfig::default(),
+        );
+        let row = "<p class=\"row\">item one two three four five</p>
+";
+        write(dir.path(), "index.html", row.repeat(250).as_bytes());
+        let inspection = inspect_work_diff(dir.path(), unknown, Some(&baseline), false).unwrap();
+        assert!(
+            inspection.blocked.is_none(),
+            "250 lines fit the 600-line allowance: {:?}",
+            inspection.blocked
+        );
+        write(dir.path(), "index.html", row.repeat(610).as_bytes());
+        let blocked = inspect_work_diff(dir.path(), unknown, Some(&baseline), false)
+            .unwrap()
+            .blocked
+            .expect("610 lines exceed the allowance");
+        assert!(
+            blocked.contains("610 lines in new files (limit 600)"),
+            "{blocked}"
         );
     }
 

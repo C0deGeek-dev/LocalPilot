@@ -153,6 +153,10 @@ pub enum SlashAction {
     HarnessFeature(String),
     /// Stop only harness work or its unapproved conversation.
     HarnessStop,
+    /// Switch the work envelope's sizing limits off for this session.
+    DisableEnvelope,
+    /// Switch the work envelope's sizing limits back on.
+    EnableEnvelope,
     WaitResume,
     /// Start a conversation that turns an idea into a reviewed `brief.md`.
     /// `Some(idea)` supplies it up front; `None` asks for it.
@@ -389,6 +393,8 @@ impl SlashAction {
             | Self::HarnessResume
             | Self::HarnessStatus
             | Self::HarnessStop
+            | Self::DisableEnvelope
+            | Self::EnableEnvelope
             | Self::WaitResume
             // Starting a brief conversation writes nothing: the draft lives in
             // the session until someone approves it. Approval is classified
@@ -694,6 +700,7 @@ slash_commands! {
         Model, Localbox, Selfimprove, New, Fork, Clone, Tree, Sessions, Session, Name,
         Continue, Clear, Compact, HarnessResume, WaitResume, HarnessIntake, HarnessBrief,
         HarnessPlan, HarnessReplan, HarnessStatus, HarnessFeature, HarnessStop,
+        DisableEnvelope, EnableEnvelope,
         Ingest, Knowledge,
         Context, Research, Agents, Skills, Bg, Exit,
         // Full-screen/pair takeover identities: `parse_slash_for(Fullscreen|Pair)`
@@ -758,6 +765,8 @@ slash_commands! {
         HarnessStatus => fullscreen_only("harness-status", NoArg, Reject, "Show harness document and operation state"),
         HarnessFeature => fullscreen_only("harness-feature", Required, Reject, "Add a feature to the approved current brief and plan"),
         HarnessStop => fullscreen_only("harness-stop", NoArg, Reject, "Stop harness work and discard its unapproved draft"),
+        DisableEnvelope => fullscreen_only("disable-envelope", NoArg, Reject, "Turn the work envelope's size limits off (not advised without a reason)"),
+        EnableEnvelope => fullscreen_only("enable-envelope", NoArg, Reject, "Turn the work envelope's size limits back on"),
         WaitResume => fullscreen_only("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
         HarnessIntake => fullscreen_only(
             "harness-intake",
@@ -940,6 +949,8 @@ impl SlashAction {
             SlashAction::HarnessStatus => C::HarnessStatus,
             SlashAction::HarnessFeature(_) => C::HarnessFeature,
             SlashAction::HarnessStop => C::HarnessStop,
+            SlashAction::DisableEnvelope => C::DisableEnvelope,
+            SlashAction::EnableEnvelope => C::EnableEnvelope,
             SlashAction::HarnessIntake(_) => C::HarnessIntake,
             SlashAction::HarnessBrief(_) => C::HarnessBrief,
             SlashAction::HarnessPlan(_) => C::HarnessPlan,
@@ -1252,6 +1263,8 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
         }
         C::HarnessStatus => no_arg(spelling, name, args, command, SlashAction::HarnessStatus),
         C::HarnessStop => no_arg(spelling, name, args, command, SlashAction::HarnessStop),
+        C::DisableEnvelope => no_arg(spelling, name, args, command, SlashAction::DisableEnvelope),
+        C::EnableEnvelope => no_arg(spelling, name, args, command, SlashAction::EnableEnvelope),
         C::HarnessFeature => {
             if args.trim().is_empty() {
                 SlashAction::Invalid {
@@ -1619,7 +1632,23 @@ mod tests {
             from_table, from_enum,
             "SLASH_SPELLINGS identities must equal SlashCommand::ALL"
         );
-        assert_eq!(from_enum.len(), 46, "expected 46 command identities");
+        assert_eq!(from_enum.len(), 48, "expected 48 command identities");
+    }
+
+    #[test]
+    fn the_envelope_switches_are_full_screen_commands_without_arguments() {
+        assert_eq!(
+            parse("/disable-envelope"),
+            Some(SlashAction::DisableEnvelope)
+        );
+        assert_eq!(parse("/enable-envelope"), Some(SlashAction::EnableEnvelope));
+        assert!(
+            matches!(
+                parse("/disable-envelope now"),
+                Some(SlashAction::Invalid { .. })
+            ),
+            "it takes no argument"
+        );
     }
 
     #[test]
@@ -1635,7 +1664,7 @@ mod tests {
         // 41→43 adds `harness-intake` and `harness-brief`, the reviewable brief
         // conversation; 43→45 adds `harness-plan` and `harness-replan`, the same
         // review conversation for `PROGRESS.md`.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 48);
+        assert_eq!(specs_for(Host::Fullscreen).len(), 50);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 

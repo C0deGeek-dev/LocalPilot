@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0238: A Created File Has Its Own Allowance In The Work Envelope, And The User Can Switch The Envelope Off
+
+**Status:** accepted · **Date:** 2026-10-28.
+
+**Context.** Every harness step starts with `Reliability::Unknown` and never
+earns more, so its limits are the floor: one file, one region, 80 or 200 changed
+lines. A write was costed against that edit budget, and a created file counted as
+the one region, so a step that had to create one ordinary file (an `index.html`
+with a stylesheet and a script) was refused on the write, or succeeded and had
+every later edit refused (#254). The post-step diff inspection sized new files the
+same way.
+
+**Decision.** `WorkProfile` gains `max_new_file_lines` (200 under a 32,000-token
+context budget, otherwise 600; tightened by a configured `max_changed_lines`).
+The admission check (`WorkUnit`) and the diff inspection (`inspect_work_diff`)
+size created files against it, apart from the edit budget, and both count the file
+as one region; edits to a file the unit created cost lines but no further region,
+as the repository diff counts it. A rewrite of a created file replaces its cost.
+Refusals name the figures. `/disable-envelope` and `/enable-envelope` switch the
+sizing limits off and on for the session and for the steps `/harness-resume`
+runs; only the user can, the switch is announced, and the commands say it is not
+advised without a reason. The line cost per text (`max(lines, bytes / 80)`), the
+refusal of `replace_in_file`, the overwrite rule for existing files and the
+step's declared `scope:` ceiling are unchanged.
+
+**Consequences.** One new file of a normal size and its first corrections fit one
+step under the default profile. Edits to existing files are as tight as before. A
+step that needs several files, or a file above the allowance, is still split.
+Not done: starting a step's limits from its approved `scope:` (the profile stays
+derived from reliability and context).
+
 ## ADR-0237: A Verify Command That Cannot Run Is Sent Back To The Planner, Not Refused At Approval
 
 **Status:** accepted · **Date:** 2026-10-26.

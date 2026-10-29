@@ -268,7 +268,9 @@ you reply `resume`. Existing briefs first ask whether changes are needed; reply
 `no` to keep the brief unchanged. Use `/harness-status` for read-only inspection,
 `/harness-feature <description>` to extend approved current work, or
 `/harness-stop` to cancel harness work and discard unapproved drafts. `/agent`
-leaves the guided flow. Entering `/harness` executes no plan step.
+leaves the guided flow. `/disable-envelope` and `/enable-envelope` switch the work
+envelope's size limits off and on for the session; leave them on unless you have
+a reason, because they are what keeps a small model's edits small. Entering `/harness` executes no plan step.
 
 The direct `/harness-resume` command also asks for confirmation before it
 continues plan steps and `/wait-resume` waits for quota and then

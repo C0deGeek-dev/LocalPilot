@@ -1488,3 +1488,89 @@ async fn checkpoint_reinspection_excludes_artifacts_from_the_passing_check_and_c
         localpilot_store::SessionEventKind::WorkUnitInspected { ignored_generated, binary_changes, .. }
         if ignored_generated.contains(&"__pycache__/from_check.pyc".to_string()) && binary_changes.len() == 1)));
 }
+
+fn html_rows(rows: usize) -> String {
+    "<p class=\"row\">item one two three four five</p>
+"
+    .repeat(rows)
+}
+
+#[tokio::test]
+async fn a_step_can_create_one_ordinary_file_and_correct_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "create",
+                "write_file",
+                json!({"path":"index.html", "content":format!("<h1>Title</h1>
+{}", html_rows(110))}),
+            )
+            .tool_call(
+                "fix",
+                "edit_file",
+                json!({"path":"index.html", "old_text":"<h1>Title</h1>", "new_text":"<h1>Heading</h1>"}),
+            )
+            .text("created and corrected"),
+    );
+    let mut agent = runtime(
+        dir.path(),
+        provider,
+        Profile::Bypass,
+        Some("git status --short".to_string()),
+    );
+    let (_, events) = turn(&mut agent).await;
+    for id in ["create", "fix"] {
+        assert!(
+            events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id: call_id, is_error: false, .. } if call_id == id)),
+            "{id} must be admitted: {events:?}"
+        );
+    }
+    let written = std::fs::read_to_string(dir.path().join("index.html")).unwrap();
+    assert!(written.starts_with("<h1>Heading</h1>"));
+}
+
+#[tokio::test]
+async fn a_file_beyond_the_allowance_is_refused_with_the_limit_it_hit() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "big",
+                "write_file",
+                json!({"path":"index.html", "content":html_rows(900)}),
+            )
+            .text("stopped"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Bypass, None);
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "big" && output.contains("new-file lines 900/"))));
+    assert!(!dir.path().join("index.html").exists());
+}
+
+#[tokio::test]
+async fn the_user_can_switch_the_envelope_off_and_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "big",
+                "write_file",
+                json!({"path":"index.html", "content":html_rows(900)}),
+            )
+            .text("written while off"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Bypass, None);
+    assert!(agent.envelope_enabled() && agent.work_profile().is_some());
+    agent.set_envelope_enabled(false);
+    assert!(!agent.envelope_enabled() && agent.work_profile().is_none());
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "big")
+    ));
+    agent.set_envelope_enabled(true);
+    assert!(
+        agent.work_profile().is_some(),
+        "switching it back on restores the configured caps"
+    );
+}

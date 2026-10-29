@@ -880,6 +880,7 @@ pub async fn resume(
             trusted: true,
             approver: || Box::new(ScriptedApprover::new(Vec::new())),
             closeout_updates: None,
+            envelope: true,
         },
         &events,
         &cancel,
@@ -922,6 +923,8 @@ where
     pub approver: A,
     pub closeout_updates:
         Option<tokio::sync::mpsc::UnboundedSender<crate::context_inject::CloseOutUpdate>>,
+    /// `false` when the user switched the work envelope off for this session.
+    pub envelope: bool,
 }
 
 /// A full-screen close-out runs independently so progress and input remain live.
@@ -1270,6 +1273,12 @@ where
             (run.approver)(),
         );
         runtime.set_granularity(config.harness.granularity.clone());
+        if !run.envelope {
+            runtime.set_envelope_enabled(false);
+            let _ = events.send(RuntimeEvent::Warning(
+                "work envelope is off for this run (/enable-envelope turns it back on): writes and step diffs are not sized".to_string(),
+            ));
+        }
         runtime.set_verify_before_done(
             config.harness.verify_before_done,
             config.harness.verify_command.clone(),
@@ -1396,6 +1405,7 @@ pub async fn wait_resume(
             trusted: true,
             approver: || Box::new(ScriptedApprover::new(Vec::new())),
             closeout_updates: None,
+            envelope: true,
         },
         &events,
         &cancel,
@@ -1848,6 +1858,7 @@ mod tests {
             trusted: false,
             approver: || Box::new(ScriptedApprover::new(Vec::new())) as Box<dyn Approver>,
             closeout_updates: None,
+            envelope: true,
         }
     }
 
@@ -2205,6 +2216,7 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
             trusted: false,
             approver: || Box::new(ScriptedApprover::new(Vec::new())) as Box<dyn Approver>,
             closeout_updates: None,
+            envelope: true,
         };
         let mut out: Vec<u8> = Vec::new();
         let waiter = wait_resume_with_events(
@@ -2788,6 +2800,7 @@ base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key = \"x\"\n",
             trusted: true,
             approver: || Box::new(ScriptedApprover::always()) as Box<dyn Approver>,
             closeout_updates: None,
+            envelope: true,
         };
         let (events_tx, _rx) = broadcast::channel::<RuntimeEvent>(64);
         let cancel = CancellationToken::new();

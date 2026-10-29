@@ -118,6 +118,10 @@ pub struct WorkProfile {
     pub max_regions: usize,
     pub max_read_lines: usize,
     pub max_changed_lines: usize,
+    /// Cost allowed for the files a unit creates, counted apart from
+    /// `max_changed_lines`: a new file is one region however long it is, and the
+    /// edits that follow it do not add regions.
+    pub max_new_file_lines: usize,
     pub max_decisions: usize,
     pub max_output_bytes: usize,
     pub stop_after_checkpoint: bool,
@@ -163,6 +167,7 @@ impl WorkProfile {
             },
             max_read_lines: if small { 80 } else { 200 },
             max_changed_lines: if small { 80 } else { 200 },
+            max_new_file_lines: if small { 200 } else { 600 },
             max_decisions: if strong { 2 } else { 1 },
             max_output_bytes: if small { 4 * 1024 } else { 12 * 1024 },
             stop_after_checkpoint: small || !strong,
@@ -186,6 +191,10 @@ impl WorkProfile {
                 *bound = (*bound).min(cap.max(1));
             }
         }
+        // A configured line cap is the user's ceiling for a whole file too.
+        if let Some(cap) = caps.max_changed_lines {
+            self.max_new_file_lines = self.max_new_file_lines.min(cap.max(1));
+        }
     }
 
     /// A reviewed step's declared footprint is a ceiling, including zero for
@@ -204,6 +213,7 @@ impl WorkProfile {
         self.max_regions = self.max_regions.min(next.max_regions);
         self.max_read_lines = self.max_read_lines.min(next.max_read_lines);
         self.max_changed_lines = self.max_changed_lines.min(next.max_changed_lines);
+        self.max_new_file_lines = self.max_new_file_lines.min(next.max_new_file_lines);
         self.max_decisions = self.max_decisions.min(next.max_decisions);
         self.max_output_bytes = self.max_output_bytes.min(next.max_output_bytes);
         self.stop_after_checkpoint |= next.stop_after_checkpoint;
@@ -235,9 +245,9 @@ impl WorkProfile {
             ""
         };
         format!(
-            "Work unit: change at most {} files, {} regions, {} decisions and {} lines; read at most {} lines at a time; prefer exact edits to rewriting large files. These limits also apply through shell and MCP commands, and compaction does not reset them. Verify the unit with the smallest relevant check, keeping every acceptance criterion and required quality gate.{stop}",
+            "Work unit: change at most {} files, {} regions, {} decisions and {} lines; read at most {} lines at a time; a new file may be up to {} lines; prefer exact edits to rewriting large files. These limits also apply through shell and MCP commands, and compaction does not reset them. Verify the unit with the smallest relevant check, keeping every acceptance criterion and required quality gate.{stop}",
             self.max_files, self.max_regions, self.max_decisions, self.max_changed_lines,
-            self.max_read_lines,
+            self.max_read_lines, self.max_new_file_lines,
         )
     }
 }
@@ -249,6 +259,10 @@ pub(crate) struct WorkUnit {
     files: BTreeSet<std::path::PathBuf>,
     regions: usize,
     lines: usize,
+    /// Files this unit created, with the cost of their content so far. The
+    /// repository diff sees such a file as one new region, so edits to it spend
+    /// lines but no further region.
+    created: std::collections::BTreeMap<std::path::PathBuf, usize>,
 }
 
 /// Keep recovery guidance separate from a bounds denial: only the latter
@@ -271,6 +285,24 @@ impl WorkUnit {
     }
     pub(crate) fn has_mutations(&self) -> bool {
         self.regions != 0
+    }
+
+    fn new_lines(&self) -> usize {
+        self.created.values().sum()
+    }
+
+    fn usage(&self, profile: WorkProfile) -> String {
+        format!(
+            "files {}/{}, regions {}/{}, changed lines {}/{}, new-file lines {}/{}",
+            self.files.len(),
+            profile.max_files,
+            self.regions,
+            profile.max_regions,
+            self.lines,
+            profile.max_changed_lines,
+            self.new_lines(),
+            profile.max_new_file_lines,
+        )
     }
     pub(crate) fn check_and_reserve(
         &mut self,
@@ -339,20 +371,35 @@ impl WorkUnit {
                 Err(_) => return reject("write target cannot be normalized for bounded sizing"),
             };
             let action = op.get("action").and_then(Value::as_str).unwrap_or(name);
-            if matches!(action, "delete" | "write_file") {
+            let on_disk = std::fs::metadata(&path);
+            let writes_content = matches!(name, "write_file" | "append_file")
+                || (name == "apply_patch" && action == "create");
+            let creates =
+                writes_content && on_disk.is_err() && !proposed.created.contains_key(&path);
+            let ours = creates || proposed.created.contains_key(&path);
+            if matches!(action, "delete" | "write_file") && !ours {
                 // Bounds deletion/overwrite of existing material, not just its replacement.
-                if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(meta) = &on_disk {
                     if meta.len() > profile.max_changed_lines as u64 {
-                        return reject(
-                            "whole-file overwrite/deletion is unbounded; use exact region edits",
-                        );
+                        return reject(&format!(
+                            "whole-file overwrite/deletion is unbounded ({} bytes against {} changed lines); use exact region edits",
+                            meta.len(),
+                            profile.max_changed_lines
+                        ));
                     }
                     // Byte length is a conservative upper bound on removed
                     // lines, without reading content before permission.
                     proposed.lines = proposed.lines.saturating_add(meta.len() as usize);
                 }
             }
-            proposed.files.insert(path);
+            if action == "write_file" && ours && !creates {
+                // Rewriting what this unit created replaces its cost, not adds to it.
+                proposed.created.insert(path.clone(), 0);
+            }
+            if creates {
+                proposed.created.insert(path.clone(), 0);
+            }
+            proposed.files.insert(path.clone());
             let hunks: Vec<&Value> = match name {
                 "multi_edit" => op.get("edits").and_then(Value::as_array)?.iter().collect(),
                 "apply_patch" if action == "update" => {
@@ -361,20 +408,30 @@ impl WorkUnit {
                 _ => vec![op],
             };
             for hunk in hunks {
+                let mut cost = 0usize;
                 for field in ["old_text", "new_text", "content"] {
                     if let Some(text) = hunk.get(field).and_then(Value::as_str) {
                         // Byte-equivalent cost also bounds giant single lines.
-                        proposed.lines = proposed
-                            .lines
-                            .saturating_add(text.lines().count().max(text.len().div_ceil(80)));
+                        cost =
+                            cost.saturating_add(text.lines().count().max(text.len().div_ceil(80)));
                     }
+                }
+                if ours {
+                    if let Some(spent) = proposed.created.get_mut(&path) {
+                        *spent = spent.saturating_add(cost);
+                    }
+                } else {
+                    proposed.lines = proposed.lines.saturating_add(cost);
                 }
                 // Bound material before allocating the argument-only diff. A
                 // single submitted hunk can hide edits separated by equal lines.
-                if proposed.lines > profile.max_changed_lines {
-                    return reject(
-                        "cumulative files, regions or patch size exceeds the active profile",
-                    );
+                if proposed.lines > profile.max_changed_lines
+                    || proposed.new_lines() > profile.max_new_file_lines
+                {
+                    return reject(&format!(
+                        "cumulative files, regions or patch size exceeds the active profile ({})",
+                        proposed.usage(profile)
+                    ));
                 }
                 let regions = match (
                     hunk.get("old_text").and_then(Value::as_str),
@@ -386,14 +443,21 @@ impl WorkUnit {
                     },
                     _ => 1,
                 };
+                // The repository diff counts a created file as one region, so
+                // edits to it spend no further region; its creation spent one.
+                let regions = if ours && !creates { 0 } else { regions };
                 proposed.regions = proposed.regions.saturating_add(regions);
             }
         }
         if proposed.files.len() > profile.max_files
             || proposed.regions > profile.max_regions
             || proposed.lines > profile.max_changed_lines
+            || proposed.new_lines() > profile.max_new_file_lines
         {
-            return reject("cumulative files, regions or patch size exceeds the active profile");
+            return reject(&format!(
+                "cumulative files, regions or patch size exceeds the active profile ({})",
+                proposed.usage(profile)
+            ));
         }
         *self = proposed;
         None
@@ -771,5 +835,124 @@ mod tests {
         evidence.observe_input(false);
         evidence.observe_tool_outcome(ToolOutcome::Unusable, false);
         assert_eq!(evidence.reliability(), Reliability::Malformed);
+    }
+
+    fn unknown_profile(limit: usize) -> WorkProfile {
+        WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit,
+                provenance: ContextProvenance::ResolvedBudget,
+            },
+            Reliability::Unknown,
+            &GranularityConfig::default(),
+        )
+    }
+
+    fn page(lines: usize) -> String {
+        "<p class=\"row\">item one two three four five</p>
+"
+        .repeat(lines)
+    }
+
+    #[test]
+    fn a_created_file_has_its_own_allowance_and_its_edits_cost_no_region() {
+        for limit in [64_000, 16_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let workspace = Workspace::new(dir.path()).unwrap();
+            let profile = unknown_profile(limit);
+            let mut unit = WorkUnit::default();
+            // Far above the 80/200 line edit budget, inside the file allowance.
+            let write = serde_json::json!({"path":"index.html","content":page(110)});
+            assert!(unit
+                .check_and_reserve(profile, "write_file", &write, &workspace)
+                .is_none());
+            std::fs::write(dir.path().join("index.html"), page(110)).unwrap();
+            let edit = serde_json::json!({"path":"index.html","old_text":"item one","new_text":"item two"});
+            assert!(
+                unit.check_and_reserve(profile, "edit_file", &edit, &workspace)
+                    .is_none(),
+                "the file the unit created can be corrected in the same unit (context {limit})"
+            );
+            // Another file is still a second file and a second region.
+            let other = serde_json::json!({"path":"other.html","content":"x
+"});
+            assert!(unit
+                .check_and_reserve(profile, "write_file", &other, &workspace)
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn a_file_above_the_allowance_names_the_limit_it_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let profile = unknown_profile(16_000);
+        let write = serde_json::json!({"path":"index.html","content":page(201)});
+        let refusal = WorkUnit::default()
+            .check_and_reserve(profile, "write_file", &write, &workspace)
+            .expect("201 lines exceed the 200-line allowance under 32k context");
+        assert!(refusal.message.contains("new-file lines 201/200"));
+        assert!(refusal.message.contains("active profile"));
+    }
+
+    #[test]
+    fn rewriting_a_created_file_replaces_its_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let profile = unknown_profile(16_000);
+        let mut unit = WorkUnit::default();
+        for _ in 0..3 {
+            let write = serde_json::json!({"path":"index.html","content":page(100)});
+            assert!(unit
+                .check_and_reserve(profile, "write_file", &write, &workspace)
+                .is_none());
+            std::fs::write(dir.path().join("index.html"), page(100)).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_existing_file_keeps_the_edit_budget_and_one_region() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.html"),
+            "a
+",
+        )
+        .unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let profile = unknown_profile(64_000);
+        let mut unit = WorkUnit::default();
+        let first = serde_json::json!({"path":"a.html","old_text":"a","new_text":"b"});
+        assert!(unit
+            .check_and_reserve(profile, "edit_file", &first, &workspace)
+            .is_none());
+        let second = serde_json::json!({"path":"a.html","old_text":"b
+","new_text":"b
+c
+"});
+        assert!(
+            unit.check_and_reserve(profile, "edit_file", &second, &workspace)
+                .is_some(),
+            "edits to a tracked file still count one region each"
+        );
+    }
+
+    #[test]
+    fn a_configured_line_cap_also_bounds_a_created_file() {
+        let caps = GranularityConfig {
+            max_changed_lines: Some(40),
+            ..GranularityConfig::default()
+        };
+        let profile = WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 64_000,
+                provenance: ContextProvenance::ResolvedBudget,
+            },
+            Reliability::Unknown,
+            &caps,
+        );
+        assert_eq!(profile.max_new_file_lines, 40);
     }
 }

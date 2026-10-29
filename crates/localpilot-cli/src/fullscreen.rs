@@ -3792,6 +3792,18 @@ async fn execute_fullscreen_slash_action(
             harness_router::status(app, cwd, stages, runtime.work_profile())
         }
         SlashAction::HarnessStop => harness_router::stop(app, stages),
+        SlashAction::DisableEnvelope => {
+            runtime.set_envelope_enabled(false);
+            app.apply_runtime(RuntimeUpdate::Warning(
+                "work envelope off: this session's writes and harness steps are no longer sized. Not advised without a reason; permission and verification still apply. /enable-envelope turns it back on".to_string(),
+            ));
+        }
+        SlashAction::EnableEnvelope => {
+            runtime.set_envelope_enabled(true);
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "work envelope on: the configured size limits apply again".to_string(),
+            ));
+        }
         SlashAction::HarnessFeature(description) => {
             if stages.brief().is_some() || stages.plan().is_some() {
                 app.apply_runtime(RuntimeUpdate::Warning(
@@ -6342,6 +6354,7 @@ struct ResumeDispatch {
     provider_id: String,
     profile: localpilot_sandbox::Profile,
     trusted: bool,
+    envelope: bool,
 }
 
 /// Read the LIVE model/provider/profile/trust off the runtime — the authority the
@@ -6355,6 +6368,7 @@ fn resume_dispatch_snapshot(runtime: &SessionRuntime) -> ResumeDispatch {
         provider_id: runtime.active_provider_id().to_string(),
         profile: runtime.permission_engine_handle().profile(),
         trusted: runtime.trusted(),
+        envelope: runtime.envelope_enabled(),
     }
 }
 
@@ -8245,6 +8259,7 @@ async fn drive_harness_resume(
                 trusted: snapshot.trusted,
                 approver: resume_approver_factory(approval_tx),
                 closeout_updates: Some(closeout_tx),
+                envelope: snapshot.envelope,
             };
             let provider = Some(snapshot.provider_id.as_str());
             let result = match kind {

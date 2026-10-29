@@ -1311,6 +1311,10 @@ pub struct SessionRuntime {
     work_diff_baseline: Option<crate::resume::WorkDiffBaseline>,
     harness_checkpoint_owner: bool,
     unit_scope: Option<crate::granularity::WorkScope>,
+    /// The user switched the work envelope off for this session; the caps are
+    /// kept so switching it back on restores exactly what was configured.
+    envelope_off: bool,
+    suspended_granularity: Option<localpilot_config::GranularityConfig>,
     work_context_provenance: crate::granularity::ContextProvenance,
     unit_verification_exempt: Option<String>,
     unit_verify_command: Option<String>,
@@ -1547,6 +1551,8 @@ impl SessionRuntime {
             work_diff_baseline: None,
             harness_checkpoint_owner: false,
             unit_scope: None,
+            envelope_off: false,
+            suspended_granularity: None,
             work_context_provenance: crate::granularity::ContextProvenance::RuntimeUsage,
             unit_verification_exempt: None,
             unit_verify_command: None,
@@ -2536,7 +2542,36 @@ impl SessionRuntime {
     }
 
     pub fn set_granularity(&mut self, caps: localpilot_config::GranularityConfig) {
-        self.config.granularity = Some(caps);
+        if self.envelope_off {
+            self.suspended_granularity = Some(caps);
+        } else {
+            self.config.granularity = Some(caps);
+        }
+    }
+
+    /// Switch the work envelope's sizing limits off or on for this runtime. Only
+    /// the user does this (`/disable-envelope`, `/enable-envelope`): permission
+    /// and verification are separate and unaffected. Off, no profile resolves, so
+    /// no write is sized and no step's diff is inspected against one.
+    pub fn set_envelope_enabled(&mut self, enabled: bool) {
+        if enabled != self.envelope_off {
+            return;
+        }
+        self.envelope_off = !enabled;
+        if enabled {
+            if let Some(caps) = self.suspended_granularity.take() {
+                self.config.granularity = Some(caps);
+            }
+        } else {
+            self.suspended_granularity = self.config.granularity.take();
+        }
+        self.active_work_profile = None;
+        self.work_unit = crate::granularity::WorkUnit::default();
+    }
+
+    #[must_use]
+    pub fn envelope_enabled(&self) -> bool {
+        !self.envelope_off
     }
 
     /// The reviewed step selects timely verification; a stated exemption does
