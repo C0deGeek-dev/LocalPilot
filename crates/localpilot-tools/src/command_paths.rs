@@ -15,6 +15,15 @@ pub(crate) fn effects(
     ctx: &ToolContext<'_>,
 ) -> Result<Vec<Effect>, ToolError> {
     let class = execution_class(execution)?;
+    // One read-only cmdlet in a `powershell -Command` string is a command whose
+    // reads are known, not code with unknown targets.
+    if let Some(paths) = crate::inline_powershell::read_only_paths(execution) {
+        let mut effects = vec![Effect::RunCommand(CommandClass::ReadOnly)];
+        for path in paths {
+            add_path(&mut effects, &path, false, ctx);
+        }
+        return Ok(effects);
+    }
     let mut effects = vec![Effect::RunCommand(class)];
     if class == CommandClass::Network {
         effects.push(Effect::Network);
@@ -184,11 +193,24 @@ fn visible_path_args(
     effects: &mut Vec<Effect>,
     ctx: &ToolContext<'_>,
 ) {
+    let code = inline_code_start(stem, args);
     for (index, arg) in args.iter().enumerate() {
         // An interpreter's script source is executable authority, covered by
         // the opaque-code gate and an exact user grant. It is not an output
         // target. Other explicit path arguments retain the path decision.
         if script_source(stem, args, index) {
+            continue;
+        }
+        // The same holds for code given inline: its `=` or `/` is program text,
+        // not a path. PowerShell joins everything after `-Command` into one
+        // command; the other interpreters take exactly the next argument.
+        if code.is_some_and(|start| {
+            if matches!(stem, "powershell" | "pwsh") {
+                index >= start
+            } else {
+                index == start
+            }
+        }) {
             continue;
         }
         let target = arg.split_once('=').map_or(arg.as_str(), |(_, value)| value);
@@ -204,6 +226,28 @@ fn visible_path_args(
             add_path(effects, target, true, ctx);
         }
     }
+}
+
+/// Where inline code starts, for an interpreter invoked as `<program> -c <code>`.
+fn inline_code_start(stem: &str, args: &[String]) -> Option<usize> {
+    let carries = |arg: &str| {
+        let arg = arg.to_ascii_lowercase();
+        match stem {
+            "powershell" | "pwsh" => {
+                arg == "-c"
+                    || (arg.len() >= 2
+                        && arg.starts_with('-')
+                        && ("-command".starts_with(&arg) || "-encodedcommand".starts_with(&arg)))
+            }
+            "cmd" => matches!(arg.as_str(), "/c" | "/k"),
+            "sh" | "bash" | "zsh" | "dash" | "ksh" => arg == "-c",
+            "python" | "python3" | "node" | "ruby" | "perl" | "php" => {
+                matches!(arg.as_str(), "-c" | "-e" | "-r")
+            }
+            _ => false,
+        }
+    };
+    args.iter().position(|arg| carries(arg)).map(|at| at + 1)
 }
 
 fn opaque_arguments(stem: &str, args: &[String]) -> bool {
@@ -327,7 +371,7 @@ fn inspect_powershell_writer(
     true
 }
 
-fn literal_target(target: &str) -> bool {
+pub(crate) fn literal_target(target: &str) -> bool {
     !target.is_empty()
         && !target.starts_with('~')
         && (!target.contains(':') || Path::new(target).is_absolute())
@@ -514,6 +558,97 @@ mod tests {
                 "{program}: {actual:?}"
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_read_only_inline_cmdlet_is_a_read_and_inline_code_text_is_not_a_path() {
+        use localpilot_sandbox::{
+            Decision, Interactivity, PermissionEngine, PermissionRequest, Profile, Workspace,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(root.path()).unwrap();
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        let shell = |command: &str| RunShellExecution::Shell {
+            command: command.to_string(),
+        };
+        let bypass = PermissionEngine::new(Profile::Bypass, Vec::new());
+        let decide = |effect: Effect| {
+            bypass.decide(&PermissionRequest {
+                tool: "run_shell".to_string(),
+                effect,
+                interactivity: Interactivity::Interactive,
+                trusted: true,
+                detail: String::new(),
+            })
+        };
+
+        // The pattern holds `|` and `=`, which are data inside quotes.
+        let inside = effects(
+            &shell("powershell -NoProfile -Command \"Select-String -Path index.html -Pattern 'a|type=module'\""),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(inside[0], Effect::RunCommand(CommandClass::ReadOnly));
+        assert!(!inside.contains(&Effect::UnscopedCommand), "{inside:?}");
+        assert!(inside.iter().any(|effect| matches!(
+            effect,
+            Effect::ReadPath {
+                inside_workspace: true,
+                ..
+            }
+        )));
+        for effect in inside {
+            assert_eq!(decide(effect), Decision::Allow, "bypass reads it unasked");
+        }
+
+        // A path outside the workspace keeps its own gate.
+        let target = outside.path().join("notes.txt").display().to_string();
+        let external = effects(
+            &shell(&format!("powershell -Command \"Get-Content '{target}'\"")),
+            &ctx,
+        )
+        .unwrap();
+        assert!(!external.contains(&Effect::UnscopedCommand));
+        let gated: Vec<_> = external
+            .into_iter()
+            .filter(|effect| decide(*effect) != Decision::Allow)
+            .collect();
+        assert!(
+            gated.iter().any(|effect| matches!(
+                effect,
+                Effect::ReadPath {
+                    inside_workspace: false,
+                    ..
+                }
+            )),
+            "{gated:?}"
+        );
+
+        // Code that is more than one cmdlet stays opaque, and its text is not a path.
+        let opaque = effects(
+            &shell("powershell -NoProfile -Command \"Get-Content a | Select-String -Pattern 'type=module'\""),
+            &ctx,
+        )
+        .unwrap();
+        assert!(opaque.contains(&Effect::UnscopedCommand));
+        assert!(
+            !opaque
+                .iter()
+                .any(|effect| matches!(effect, Effect::WritePath { .. })),
+            "inline code is not a write target: {opaque:?}"
+        );
+        assert_eq!(decide(Effect::UnscopedCommand), Decision::Ask);
     }
 
     #[test]

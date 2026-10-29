@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A read-only PowerShell check no longer stops on "run code with uninspectable
+  file targets" under `--permission bypass`. A `powershell -Command` string that
+  is one of `Select-String`, `Get-Content`, `Get-ChildItem`, `Get-Item`,
+  `Test-Path` or `Resolve-Path` with literal arguments and paths is inspected as
+  a read of those paths; anything else, a pipe, `;`, `$`, a redirect or an
+  unknown parameter, is still asked about. The code string of a command that
+  stays opaque is no longer read as a path, so a pattern with `=` is not refused
+  as "outside the workspace" (ADR-0243, #256).
 - A served session can be discovered and driven without a terminal. `commands`
   lists the slash commands a remote client may run (`compact`, `clear`, `name`,
   `effort`, with their arguments and the scope they need), `sessions` lists live

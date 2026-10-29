@@ -440,6 +440,19 @@ Rules:
   commands. Structured `run_background` starts use the same grants. Under
   bypass a grant can authorize opaque code; unrestricted already grants full
   authority. Inspectable path effects and session floors still apply.
+- **One read-only cmdlet in a `powershell -Command` string is inspected, not
+  treated as opaque code.** `powershell`/`pwsh` with `-Command` is otherwise
+  `Unknown` and opaque (`UnscopedCommand`), as `bash -c` is. When the whole
+  string is one of `Select-String`, `Get-Content`, `Get-ChildItem`, `Get-Item`,
+  `Test-Path` or `Resolve-Path` (or `sls`, `gc`, `gci`, `gi`) with known
+  parameters, literal arguments and literal file paths, its effects are
+  `RunCommand(ReadOnly)` plus a read of each path, so bypass reads it unasked
+  and an outside-workspace or secret-like path keeps its own gate. Anything else
+  stays opaque: a pipeline, `;`, `&`, a redirect, `$` or a backtick, a doubled
+  quote, a quote inside an argument, an unknown cmdlet, parameter or
+  abbreviation, a wildcard or list as a path, a path-less `Select-String`, or
+  any other host flag. For an opaque command the code string itself is not read
+  as a path (ADR-0243).
 - **An unknown profile name is an error.** Every `--permission` flag accepts
   only `default`, `relaxed`, `readonly`, `bypass` and `unrestricted`; any
   other value is a usage error (exit 2). A name that silently became

@@ -2,6 +2,34 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0243: A Single Read-Only PowerShell Cmdlet In `-Command` Is Inspected, And Inline Code Is Not Read As A Path
+
+**Status:** accepted · **Date:** 2026-10-30.
+
+**Context.** `powershell -Command "<code>"` is `CommandClass::Unknown` and gets
+`Effect::UnscopedCommand`, which `Profile::Bypass` always asks about (or denies
+when non-interactive), because the code is invisible, as with `bash -c`. The
+agent prompt names PowerShell as the host (#253), so models write read-only
+checks this way, and each one stopped on an approval. A second defect:
+`visible_path_args` took every argument of an opaque command as a path and read
+the text after the first `=` as a write target, so a search pattern containing
+`type="module"` was refused as "the path is outside the workspace" (#256).
+
+**Decision.** `inline_powershell` accepts a command only when it is one cmdlet
+from a short read-only list with known parameters and literal paths, in text that
+both the running shell and the PowerShell child read the same way (literal words,
+quoted strings without expansion). Its effects are `RunCommand(ReadOnly)` plus a
+read of each path, so path gates, secret-like paths and the workspace boundary
+still apply. Everything else, including every doubt, stays opaque and keeps the
+bypass question. For an opaque command the argument after `-Command`/`-c`/`/c`
+is code, like a script source, and is no longer read as a path. Not changed:
+bypass still asks for opaque code, and exact command grants still vet it.
+
+**Consequences.** Read-only checks in `powershell -Command` run unasked under
+bypass; a pattern or URL with `=` no longer produces an outside-workspace
+refusal. The list is short on purpose: a cmdlet or parameter that is added needs
+its parameter grammar written down. A string that is correct PowerShell but not
+in the accepted subset (a pipe, a doubled quote) is still asked about.
 ## ADR-0242: A Served Session Lists Its Commands And Sessions And Runs A Small Set Of Slash Commands By Name
 
 **Status:** accepted · **Date:** 2026-10-29. Builds on ADR-0239 to ADR-0241.

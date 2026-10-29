@@ -19,6 +19,7 @@ mod command_paths;
 mod contract;
 mod error;
 mod image;
+mod inline_powershell;
 mod registry;
 mod repair;
 mod schema_intent;
