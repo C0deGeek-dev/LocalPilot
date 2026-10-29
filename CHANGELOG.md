@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Mutating commands on a served session can be retried safely. A `prompt`,
+  `cancel` or `permission_reply` carrying `request: {instance, client, n}` runs at
+  most once: a retry gets the original reply, a reused number with another command
+  is refused, and a request the server no longer remembers, or one issued to an
+  earlier server process, is refused as `outcome_unknown` without running. This
+  holds across a session being closed after inactivity and resumed (ADR-0241).
 - Served sessions number their events. A client that declares `resume` on
   `attach` can reconnect with `since: {epoch, seq}` and get exactly the records it
   missed, or a `snapshot` of the session (turn state, plan, pending asks, the

@@ -18,6 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 fn record(id: Option<&str>, command: ClientCommand) -> String {
     let mut line = serde_json::to_string(&ClientRecord {
+        request: None,
         v: RPC_PROTOCOL_VERSION,
         id: id.map(str::to_string),
         command,

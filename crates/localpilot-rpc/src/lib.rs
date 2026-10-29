@@ -27,7 +27,7 @@ pub use mcp::{
 };
 pub use protocol::{
     AskDetail, AttachTarget, ClientCommand, ClientRecord, FeedCursor, HistoryMessage,
-    InputDisposition, PlanStepWire, RejectCode, ServerEvent, ServerRecord, TurnState,
+    InputDisposition, PlanStepWire, RejectCode, RequestKey, ServerEvent, ServerRecord, TurnState,
     CAPABILITY_ACKS, CAPABILITY_RESUME, RPC_PROTOCOL_VERSION, SERVER_VERSION,
 };
 pub use serve::{map_event, serve, RpcError, ServeContext};

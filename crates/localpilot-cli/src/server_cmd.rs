@@ -55,6 +55,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::server_feed::{stored_history, Admission, SessionFeed};
+use crate::server_requests::{canonical_payload, Admission as RequestAdmission, RequestStore};
 
 // --- The shared session-construction recipe ---------------------------------
 
@@ -473,6 +474,10 @@ struct HostMap {
     /// belong to the session, not to the connection that happened to create
     /// it: every attached client sees them and any of them may answer.
     served: Arc<StdMutex<HashMap<SessionId, Served>>>,
+    /// Retry keys of mutating commands, per session. Kept beside the host map
+    /// (not in a host) so a session closed after inactivity and resumed still
+    /// answers a retry with its original reply.
+    requests: Arc<RequestStore>,
 }
 
 /// What the server keeps for one hosted session besides its host.
@@ -883,6 +888,7 @@ where
         &mut write,
         reply_id,
         ServerEvent::Attached {
+            instance: hosts.requests.instance().to_string(),
             session_id,
             server_version: SERVER_VERSION.to_string(),
             epoch: if resume {
@@ -947,6 +953,79 @@ where
             // Client commands.
             record = reader.next() => {
                 let Some(value) = record? else { break }; // EOF: detach this connection
+                // A mutating command with a retry key runs at most once; a
+                // retry gets the original reply. Other records run as before.
+                if let Some((id, key, payload)) = retry_key(&value) {
+                    // A remembered reply is replayed to whichever connection
+                    // retries, so keyed commands are only taken from clients
+                    // that read acknowledgements. Refused before anything is
+                    // reserved or run.
+                    if !acks {
+                        reject(
+                            &mut write,
+                            id,
+                            acks,
+                            RejectCode::Malformed,
+                            "a request key needs the `acks` capability; nothing ran".to_string(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                    let Ok(payload) = payload else {
+                        reject(
+                            &mut write,
+                            id,
+                            acks,
+                            RejectCode::Malformed,
+                            "the command could not be encoded for its request key; nothing ran"
+                                .to_string(),
+                        )
+                        .await?;
+                        continue;
+                    };
+                    let principal = Principal::Local.label();
+                    // The dedupe lock is taken and released inside `admit` and
+                    // `complete`; it is never held across the command.
+                    match hosts.requests.admit(session_id, principal, &key, &payload) {
+                        RequestAdmission::Run => {
+                            let mut reply = Vec::new();
+                            let outcome = handle_command(
+                                value,
+                                &host,
+                                &session_id,
+                                &model,
+                                &profile_label,
+                                served.asks.as_ref(),
+                                acks,
+                                &mut reply,
+                            )
+                            .await;
+                            // Record the outcome before trying to deliver it,
+                            // so a lost connection never leaves it pending.
+                            hosts.requests.complete(
+                                session_id,
+                                principal,
+                                &key,
+                                reply_events(&reply),
+                            );
+                            write.write_all(&reply).await?;
+                            write.flush().await?;
+                            if outcome? {
+                                break;
+                            }
+                        }
+                        RequestAdmission::Replay(reply) => {
+                            // The original outcome, under this retry's id.
+                            for event in reply {
+                                emit(&mut write, id.clone(), event).await?;
+                            }
+                        }
+                        RequestAdmission::Refuse(code, message) => {
+                            reject(&mut write, id, acks, code, message).await?;
+                        }
+                    }
+                    continue;
+                }
                 let stop = handle_command(
                     value,
                     &host,
@@ -1006,6 +1085,43 @@ impl ConnectionView {
             _ => {}
         }
     }
+}
+
+/// The retry key of a mutating command, with its correlation id and the
+/// canonical bytes of the command it binds. `None` for records without a key, for commands that
+/// change nothing, and for records that do not parse or use a newer protocol
+/// version (those are refused as usual).
+/// A correlation id, a request key, and the canonical bytes of the command it
+/// binds (or the encoding error, which is refused).
+type RetryKey = (
+    Option<String>,
+    localpilot_rpc::RequestKey,
+    serde_json::Result<Vec<u8>>,
+);
+
+fn retry_key(value: &serde_json::Value) -> Option<RetryKey> {
+    let record: ClientRecord = serde_json::from_value(value.clone()).ok()?;
+    let key = record.request?;
+    let mutating = matches!(
+        record.command,
+        ClientCommand::Prompt { .. }
+            | ClientCommand::Cancel
+            | ClientCommand::PermissionReply { .. }
+    );
+    if !mutating || record.v > RPC_PROTOCOL_VERSION {
+        return None;
+    }
+    Some((record.id, key, canonical_payload(&record.command)))
+}
+
+/// The events of the reply records a command wrote, for replaying them later
+/// under another correlation id.
+fn reply_events(reply: &[u8]) -> Vec<ServerEvent> {
+    String::from_utf8_lossy(reply)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<ServerRecord>(line).ok())
+        .map(|record| record.event)
+        .collect()
 }
 
 /// Whether a connection keeps reading after a record.
@@ -1687,6 +1803,7 @@ async fn send_command<W: AsyncWrite + Unpin>(
     command: ClientCommand,
 ) -> std::io::Result<()> {
     let record = ClientRecord {
+        request: None,
         v: RPC_PROTOCOL_VERSION,
         id: None,
         command,
@@ -2017,10 +2134,20 @@ mod tests {
         count: usize,
         hosts: HostMap,
     ) -> (Endpoint, JoinHandle<()>) {
+        spawn_server_with(factory, count, hosts, SessionRegistry::new())
+    }
+
+    /// [`spawn_server_on`] over a registry the test keeps too, so it can run
+    /// the reaper against the served sessions.
+    fn spawn_server_with(
+        factory: Arc<FakeFactory>,
+        count: usize,
+        hosts: HostMap,
+        registry: SessionRegistry,
+    ) -> (Endpoint, JoinHandle<()>) {
         let endpoint = unique_endpoint();
         let listener = Listener::bind(&endpoint).unwrap();
         let store = factory.store();
-        let registry = SessionRegistry::new();
         let handle = tokio::spawn(async move {
             let mut connections = Vec::new();
             for _ in 0..count {
@@ -2344,6 +2471,7 @@ mod tests {
 
     async fn send_with_id<W: AsyncWrite + Unpin>(write: &mut W, id: &str, command: ClientCommand) {
         let record = ClientRecord {
+            request: None,
             v: RPC_PROTOCOL_VERSION,
             id: Some(id.to_string()),
             command,
@@ -3118,6 +3246,356 @@ mod tests {
         }
         host.cancel_all();
         hosts.close_served(id, "test over");
+    }
+
+    // --- idempotent retries -----------------------------------------------------
+
+    /// Attach declaring `acks`; returns the session id and the server instance.
+    async fn attach_for_retries<W: AsyncWrite + Unpin>(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        write: &mut W,
+        target: AttachTarget,
+    ) -> (SessionId, String) {
+        send_command(
+            write,
+            ClientCommand::Attach {
+                target,
+                capabilities: acks(),
+                since: None,
+            },
+        )
+        .await
+        .unwrap();
+        match read_event(reader).await {
+            ServerEvent::Attached {
+                session_id,
+                instance,
+                ..
+            } => (session_id, instance),
+            other => panic!("expected `attached`, got {other:?}"),
+        }
+    }
+
+    async fn send_keyed<W: AsyncWrite + Unpin>(
+        write: &mut W,
+        id: &str,
+        instance: &str,
+        n: u64,
+        command: ClientCommand,
+    ) {
+        let record = ClientRecord {
+            v: RPC_PROTOCOL_VERSION,
+            id: Some(id.to_string()),
+            request: Some(localpilot_rpc::RequestKey {
+                instance: instance.to_string(),
+                client: "phone".to_string(),
+                n,
+            }),
+            command,
+        };
+        let mut line = serde_json::to_vec(&record).unwrap();
+        line.push(b'\n');
+        write.write_all(&line).await.unwrap();
+        write.flush().await.unwrap();
+    }
+
+    fn prompt(text: &str) -> ClientCommand {
+        ClientCommand::Prompt {
+            text: text.to_string(),
+            disposition: InputDisposition::Immediate,
+        }
+    }
+
+    /// Read the next record; `None` if nothing arrives within `wait`.
+    async fn next_record_within(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        wait: Duration,
+    ) -> Option<ServerRecord> {
+        match timeout(wait, reader.next()).await {
+            Ok(Ok(Some(value))) => Some(serde_json::from_value(value).unwrap()),
+            _ => None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_retried_request_gets_its_original_reply_and_runs_once() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("only answer")));
+        let (endpoint, server) = spawn_server(factory, 1);
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        let (_, instance) =
+            attach_for_retries(&mut reader, &mut write, AttachTarget::OpenNew).await;
+        assert!(!instance.is_empty(), "`attached` names the server instance");
+
+        send_keyed(&mut write, "p1", &instance, 1, prompt("go")).await;
+        let first = read_records_until(&mut reader, is_stop).await;
+        assert!(first.iter().any(|record| record.id.as_deref() == Some("p1")
+            && matches!(record.event, ServerEvent::Accepted { .. })));
+
+        // The reply was lost; the client retries the same request under a new
+        // correlation id, and the original outcome comes back under that id.
+        send_keyed(&mut write, "p1-retry", &instance, 1, prompt("go")).await;
+        let replay = next_record_within(&mut reader, DEADLINE).await.unwrap();
+        assert_eq!(replay.id.as_deref(), Some("p1-retry"));
+        assert!(matches!(replay.event, ServerEvent::Accepted { .. }));
+        assert!(
+            next_record_within(&mut reader, Duration::from_millis(400))
+                .await
+                .is_none(),
+            "the retry started no second turn"
+        );
+
+        // The same number for another command is refused.
+        send_keyed(&mut write, "p2", &instance, 1, prompt("something else")).await;
+        let refused = next_record_within(&mut reader, DEADLINE).await.unwrap();
+        assert!(matches!(
+            refused.event,
+            ServerEvent::Rejected {
+                code: RejectCode::IdReused,
+                ..
+            }
+        ));
+        // A request issued to an earlier server instance has an unknown outcome.
+        send_keyed(&mut write, "p3", "an-earlier-server", 2, prompt("go")).await;
+        let refused = next_record_within(&mut reader, DEADLINE).await.unwrap();
+        assert!(matches!(
+            refused.event,
+            ServerEvent::Rejected {
+                code: RejectCode::OutcomeUnknown,
+                ..
+            }
+        ));
+
+        drop((write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_request_retried_after_the_session_was_reaped_is_not_run_again() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("only answer")));
+        let hosts = HostMap::default();
+        let registry = SessionRegistry::new();
+        let (endpoint, server) = spawn_server_with(factory, 2, hosts.clone(), registry.clone());
+
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        let (id, instance) =
+            attach_for_retries(&mut reader, &mut write, AttachTarget::OpenNew).await;
+        send_keyed(&mut write, "p1", &instance, 1, prompt("go")).await;
+        read_until(&mut reader, is_stop).await;
+
+        // The session sits idle and is reaped while the client is attached.
+        let mut reaper = Reaper::new(
+            registry.clone(),
+            hosts.clone(),
+            ReaperConfig {
+                grace: Duration::from_secs(3600),
+                idle: Duration::ZERO,
+                tick: Duration::from_secs(1),
+            },
+        );
+        assert_eq!(reaper.reap_once(Instant::now()).await, vec![id]);
+        assert_eq!(read_event(&mut reader).await, ServerEvent::Closed);
+        drop((write, reader));
+
+        // The client resumes the session and retries the request it never saw
+        // answered: the original reply, and no second turn.
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        let (resumed, same_instance) = attach_for_retries(
+            &mut reader,
+            &mut write,
+            AttachTarget::ResumeId { session_id: id },
+        )
+        .await;
+        assert_eq!(resumed, id);
+        assert_eq!(same_instance, instance);
+        send_keyed(&mut write, "p1", &instance, 1, prompt("go")).await;
+        let replay = next_record_within(&mut reader, DEADLINE).await.unwrap();
+        assert_eq!(replay.id.as_deref(), Some("p1"));
+        assert!(matches!(replay.event, ServerEvent::Accepted { .. }));
+        assert!(
+            next_record_within(&mut reader, Duration::from_millis(400))
+                .await
+                .is_none(),
+            "nothing ran again"
+        );
+
+        drop((write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_request_whose_reply_was_never_read_replays_on_another_connection() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("only answer")));
+        let (endpoint, server) = spawn_server(factory, 2);
+
+        // The first connection sends and never reads its reply.
+        let (read1, mut write1) = tokio::io::split(dial(&endpoint).await);
+        let mut reader1 = JsonRecordReader::new(read1);
+        let (id, instance) =
+            attach_for_retries(&mut reader1, &mut write1, AttachTarget::OpenNew).await;
+        send_keyed(&mut write1, "p1", &instance, 1, prompt("go")).await;
+
+        // The client comes back on a new connection and retries.
+        let (read2, mut write2) = tokio::io::split(dial(&endpoint).await);
+        let mut reader2 = JsonRecordReader::new(read2);
+        attach_for_retries(
+            &mut reader2,
+            &mut write2,
+            AttachTarget::ResumeId { session_id: id },
+        )
+        .await;
+        // Let the first copy finish, then retry: never run twice.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        send_keyed(&mut write2, "p1-again", &instance, 1, prompt("go")).await;
+        let mut replies = Vec::new();
+        while let Some(record) = next_record_within(&mut reader2, Duration::from_millis(400)).await
+        {
+            replies.push(record);
+        }
+        let to_retry: Vec<_> = replies
+            .iter()
+            .filter(|record| record.id.as_deref() == Some("p1-again"))
+            .collect();
+        assert_eq!(to_retry.len(), 1, "one reply to the retry: {replies:?}");
+        assert!(matches!(to_retry[0].event, ServerEvent::Accepted { .. }));
+        let stops = replies
+            .iter()
+            .filter(|record| matches!(record.event, ServerEvent::Stopped { .. }))
+            .count();
+        assert!(stops <= 1, "at most the original turn's stop: {replies:?}");
+
+        drop((write1, reader1, write2, reader2));
+        let _ = timeout(DEADLINE, server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_copies_of_a_request_sent_together_run_once() {
+        let factory = Arc::new(FakeFactory::new(
+            FakeProvider::new()
+                .text("only answer")
+                .text("a second turn"),
+        ));
+        let (endpoint, server) = spawn_server(factory, 3);
+
+        // A resume watcher counts the turns that start.
+        let (read0, mut write0) = tokio::io::split(dial(&endpoint).await);
+        let mut watcher = JsonRecordReader::new(read0);
+        let (id, _) = attach_resume(&mut watcher, &mut write0, AttachTarget::OpenNew, None).await;
+        read_event(&mut watcher).await; // initial snapshot
+
+        let mut clients = Vec::new();
+        for _ in 0..2 {
+            let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+            let mut reader = JsonRecordReader::new(read);
+            let (_, instance) = attach_for_retries(
+                &mut reader,
+                &mut write,
+                AttachTarget::ResumeId { session_id: id },
+            )
+            .await;
+            clients.push((reader, write, instance));
+        }
+        let (_, _, instance) = &clients[0];
+        let instance = instance.clone();
+        let (first, second) = clients.split_at_mut(1);
+        tokio::join!(
+            send_keyed(&mut first[0].1, "a", &instance, 1, prompt("go")),
+            send_keyed(&mut second[0].1, "b", &instance, 1, prompt("go")),
+        );
+
+        let mut started = 0;
+        while let Some(record) = next_record_within(&mut watcher, Duration::from_millis(600)).await
+        {
+            if record.event == ServerEvent::TurnStarted {
+                started += 1;
+            }
+        }
+        assert_eq!(started, 1, "the duplicate did not start a second turn");
+        for (reader, _, _) in clients.iter_mut() {
+            let reply = loop {
+                let record = next_record_within(reader, DEADLINE).await.unwrap();
+                if record.id.is_some() {
+                    break record;
+                }
+            };
+            assert!(
+                matches!(
+                    reply.event,
+                    ServerEvent::Accepted { .. }
+                        | ServerEvent::Rejected {
+                            code: RejectCode::InProgress,
+                            ..
+                        }
+                ),
+                "each copy is accepted, replayed, or told it is in progress: {reply:?}"
+            );
+        }
+
+        drop((write0, watcher, clients));
+        let _ = timeout(DEADLINE, server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_request_key_needs_the_acks_capability() {
+        let factory = Arc::new(FakeFactory::new(
+            FakeProvider::new().text("only answer").text("second"),
+        ));
+        let (endpoint, server) = spawn_server(factory, 2);
+
+        // A client without `acks` sends a keyed prompt: refused, nothing runs,
+        // nothing is remembered.
+        let (read1, mut write1) = tokio::io::split(dial(&endpoint).await);
+        let mut reader1 = JsonRecordReader::new(read1);
+        send_command(
+            &mut write1,
+            ClientCommand::Attach {
+                target: AttachTarget::OpenNew,
+                capabilities: Vec::new(),
+                since: None,
+            },
+        )
+        .await
+        .unwrap();
+        let (id, instance) = match read_event(&mut reader1).await {
+            ServerEvent::Attached {
+                session_id,
+                instance,
+                ..
+            } => (session_id, instance),
+            other => panic!("expected `attached`, got {other:?}"),
+        };
+        send_keyed(&mut write1, "p1", &instance, 1, prompt("go")).await;
+        let refused = next_record_within(&mut reader1, DEADLINE).await.unwrap();
+        assert_eq!(refused.id.as_deref(), Some("p1"));
+        assert!(
+            matches!(refused.event, ServerEvent::Error { .. }),
+            "a legacy client gets the record type it knows"
+        );
+        assert!(next_record_within(&mut reader1, Duration::from_millis(300))
+            .await
+            .is_none());
+
+        // The same key from an `acks` client then runs normally: the refused
+        // copy reserved nothing.
+        let (read2, mut write2) = tokio::io::split(dial(&endpoint).await);
+        let mut reader2 = JsonRecordReader::new(read2);
+        attach_for_retries(
+            &mut reader2,
+            &mut write2,
+            AttachTarget::ResumeId { session_id: id },
+        )
+        .await;
+        send_keyed(&mut write2, "p1", &instance, 1, prompt("go")).await;
+        let records = read_records_until(&mut reader2, is_stop).await;
+        assert!(records
+            .iter()
+            .any(|record| record.id.as_deref() == Some("p1")
+                && matches!(record.event, ServerEvent::Accepted { .. })));
+
+        drop((write1, reader1, write2, reader2));
+        let _ = timeout(DEADLINE, server).await;
     }
 
     // --- the plain-text client renderer --------------------------------------

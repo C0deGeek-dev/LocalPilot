@@ -236,13 +236,32 @@ sends it `closed`, and after falling behind it is re-shown the pending asks
 supports are refused (`rejected`/`unsupported_version`, or `error` and the end
 of the connection when it is the first record).
 
-The next protocol step adds idempotent retries: a mutating command will carry
-`request: {instance, client, n}` — the server instance from `attached`, a
-client-chosen id, and a number that only increases per client. A retry of a
-request the server still remembers returns its original reply; one it no
-longer remembers, or one addressed to an earlier server instance, is refused
-as `outcome_unknown` without effect. Until then, a client that loses a reply
-cannot tell whether its command ran.
+**Retrying a command safely.** `attached` names the server process in
+`instance`. A `prompt`, `cancel` or `permission_reply` may carry
+`request: {instance, client, n}` — that instance, an id the client chooses, and
+a number that only increases per client:
+
+```text
+→ {"v":1,"id":"7","request":{"instance":"…","client":"phone-1","n":42},"command":{"type":"prompt","text":"run the tests"}}
+← {"v":1,"id":"7","event":{"type":"accepted"}}
+```
+
+Per session and client the server remembers the highest `n` it ran and the
+replies of the last 128 requests. A new `n` (higher than any before) is reserved
+before it runs, so two copies never both run; a copy arriving meanwhile is
+`rejected` as `in_progress`. Sending a remembered `n` again with the same
+command returns the original reply and runs nothing; with a different command
+it is `id_reused`. An `n` the server no longer remembers, or a key naming
+another `instance` (the server restarted), is `outcome_unknown`: nothing runs,
+and the client must check the session's state (a `snapshot`) rather than assume
+either outcome. The record survives the session being closed after inactivity
+and resumed, within one server process. A session tracks at most 64 client ids;
+more are refused as `too_many_clients`. A request key is accepted only from a
+connection that declared `acks` (the remembered reply is replayed to whichever
+connection retries); from any other connection it is refused without effect.
+The command is matched by its exact canonical form, not a hash, so a retry may
+use a new correlation id but must repeat the same command. Commands without
+`request` behave as before.
 
 Under the hood each connection sends one `attach` (open-new / resume-by-id /
 resume-by-name), the server confirms with `attached`, and the connection is

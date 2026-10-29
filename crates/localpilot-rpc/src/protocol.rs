@@ -45,6 +45,16 @@ pub struct FeedCursor {
     pub seq: u64,
 }
 
+/// Makes a mutating command safe to retry on a served session. `instance` is
+/// the server instance from `attached`, `client` an id the client chooses, and
+/// `n` a number that only increases per client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestKey {
+    pub instance: String,
+    pub client: String,
+    pub n: u64,
+}
+
 /// One client-to-agent record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientRecord {
@@ -53,6 +63,9 @@ pub struct ClientRecord {
     /// Optional correlation id, echoed on the direct reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Optional retry key for a mutating command (served sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<RequestKey>,
     pub command: ClientCommand,
 }
 
@@ -164,6 +177,10 @@ pub enum ServerEvent {
         /// The feed epoch this connection is reading (served sessions).
         #[serde(default, skip_serializing_if = "String::is_empty")]
         epoch: String,
+        /// This server process's instance id, for request keys (served
+        /// sessions).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        instance: String,
     },
     TextDelta {
         text: String,
@@ -382,6 +399,15 @@ pub enum RejectCode {
     Malformed,
     /// The record's protocol version is newer than this server supports.
     UnsupportedVersion,
+    /// A retried request whose outcome the server cannot tell: issued to an
+    /// earlier server instance, or older than it remembers. Nothing ran.
+    OutcomeUnknown,
+    /// A copy of this request is still being handled.
+    InProgress,
+    /// The request key was already used for a different command.
+    IdReused,
+    /// The session tracks the maximum number of client request streams.
+    TooManyClients,
     /// This server does not understand the command.
     UnsupportedCommand,
 }
@@ -405,11 +431,13 @@ mod tests {
     fn client_records_roundtrip() {
         let records = vec![
             ClientRecord {
+                request: None,
                 v: RPC_PROTOCOL_VERSION,
                 id: Some("1".to_string()),
                 command: ClientCommand::Hello,
             },
             ClientRecord {
+                request: None,
                 v: RPC_PROTOCOL_VERSION,
                 id: None,
                 command: ClientCommand::Prompt {
@@ -418,6 +446,7 @@ mod tests {
                 },
             },
             ClientRecord {
+                request: None,
                 v: RPC_PROTOCOL_VERSION,
                 id: None,
                 command: ClientCommand::PermissionReply {
@@ -472,6 +501,7 @@ mod tests {
         let id = localpilot_core::SessionId::new();
         let records = vec![
             ClientRecord {
+                request: None,
                 v: RPC_PROTOCOL_VERSION,
                 id: Some("a1".to_string()),
                 command: ClientCommand::Attach {
@@ -481,6 +511,7 @@ mod tests {
                 },
             },
             ClientRecord {
+                request: None,
                 v: RPC_PROTOCOL_VERSION,
                 id: None,
                 command: ClientCommand::Attach {
@@ -490,6 +521,7 @@ mod tests {
                 },
             },
             ClientRecord {
+                request: None,
                 v: RPC_PROTOCOL_VERSION,
                 id: None,
                 command: ClientCommand::Attach {
@@ -529,6 +561,7 @@ mod tests {
             v: RPC_PROTOCOL_VERSION,
             id: Some("a1".to_string()),
             event: ServerEvent::Attached {
+                instance: String::new(),
                 epoch: String::new(),
                 session_id: localpilot_core::SessionId::new(),
                 server_version: SERVER_VERSION.to_string(),
@@ -557,6 +590,7 @@ mod tests {
         assert_eq!(
             record.event,
             ServerEvent::Attached {
+                instance: String::new(),
                 epoch: String::new(),
                 session_id: id,
                 server_version: String::new(),
@@ -570,6 +604,7 @@ mod tests {
         // The skip-serializing half of the discipline: a default-valued field
         // does not bloat the wire, so it round-trips through the empty default.
         let event = ServerEvent::Attached {
+            instance: String::new(),
             epoch: String::new(),
             session_id: localpilot_core::SessionId::new(),
             server_version: String::new(),

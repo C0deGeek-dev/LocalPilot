@@ -2,6 +2,36 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0241: Mutating Commands On A Served Session Carry Retry Keys And Run At Most Once
+
+**Status:** accepted · **Date:** 2026-10-29. Builds on ADR-0240.
+
+**Context.** A client that loses a reply (a dropped phone connection, a session
+closed after inactivity) cannot tell whether its command ran. Retrying blindly
+can start a second turn or answer a permission ask twice; not retrying can drop
+the command.
+
+**Decision.** `attached` names the server process (`instance`). A `prompt`,
+`cancel` or `permission_reply` may carry `request: {instance, client, n}` with
+`n` increasing per client. The server keeps, per session, principal and client,
+the highest `n` admitted and a window of the last 128 requests with the exact
+canonical bytes of their command and their reply events. Keyed commands are
+taken only from connections that declared `acks`, so a replayed reply is always
+one the retrying connection can read; a pending request is never forgotten to
+make room (a window full of pending requests refuses new ones). Admission and reservation are one locked step: a
+new `n` is reserved as pending before it runs; a copy meanwhile is
+`in_progress`; a remembered `n` replays its reply, or is `id_reused` for another
+command; a forgotten `n`, or a key naming another instance, is `outcome_unknown`
+and never runs as new. A client stream is never forgotten while the process
+lives; a session accepts at most 64 and refuses more as `too_many_clients`. The
+store sits beside the host map, keyed by session, so it survives reap and
+resume. Records without `request` are unchanged.
+
+**Consequences.** A reconnecting client can resend whatever it did not see
+answered without double effects. A daemon restart makes earlier retries
+`outcome_unknown`, which the client resolves from a snapshot. Not done: discovery
+of commands and sessions, and typed slash invocation.
+
 ## ADR-0240: A Served Session's Events Form One Numbered Feed With Replay And Snapshots
 
 **Status:** accepted · **Date:** 2026-10-29. Builds on ADR-0239.
