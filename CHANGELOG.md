@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Several clients attached to one `localpilot serve` session now share its
+  permission asks. Every attached client is shown every ask, including one that
+  attaches after it was raised; any of them may answer, the first answer wins,
+  and an ask no longer dies with the client whose prompt raised it (it still
+  expires after 300 seconds unanswered). A `follow_up` prompt sent while a turn
+  runs is queued and runs next instead of being refused; `cancel` drops queued
+  follow-ups. Clients that declare the new `acks` capability on `attach` get
+  `accepted` / `rejected` (with a fixed set of codes) replies and
+  `permission_resolved` events; other clients see no new record types.
+  Permission answers, steers and cancels are recorded in the session log with
+  who made them (ADR-0239).
 - A work step can now create one ordinary file and correct it. A file the step
   creates is sized against its own allowance (200 lines under a 32,000-token
   context budget, otherwise 600) instead of the 80 or 200 line edit budget, counts

@@ -24,3 +24,5 @@ localpilot-llm = { path = "../localpilot-llm" }
 localpilot-recovery = { path = "../localpilot-recovery" }
 localpilot-tools = { path = "../localpilot-tools" }
 tempfile = { workspace = true }
+# Paused time for the approver's deadline tests.
+tokio = { workspace = true, features = ["test-util"] }

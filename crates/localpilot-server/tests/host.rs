@@ -22,7 +22,7 @@ use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{
     Effect, Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace,
 };
-use localpilot_server::host::{Control, ControlOutcome, SessionHost};
+use localpilot_server::host::{Admit, Control, ControlOutcome, SessionHost, FOLLOW_UP_CAPACITY};
 use localpilot_server::registry::SessionHandle;
 use localpilot_store::Store;
 use localpilot_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry};
@@ -408,4 +408,257 @@ async fn two_clients_one_steers_while_the_other_watches_end_to_end() {
         ControlOutcome::Status(status) => assert!(!status.busy, "idle after the turn"),
         other => panic!("expected a status snapshot, got {other:?}"),
     }
+}
+
+// --- admission: follow-up queue and cancellation ----------------------------
+
+/// Wait until `count` stops have been observed on `rx`, collecting every event.
+async fn until_stops(
+    rx: &mut broadcast::Receiver<RuntimeEvent>,
+    count: usize,
+) -> Vec<RuntimeEvent> {
+    let mut seen = Vec::new();
+    timeout(PROMPT, async {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    seen.push(event);
+                    let stops = seen
+                        .iter()
+                        .filter(|event| matches!(event, RuntimeEvent::Stopped(_)))
+                        .count();
+                    if stops >= count {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+    .await
+    .expect("the expected turns stopped in time");
+    seen
+}
+
+fn barrier_host_parts(
+    provider: FakeProvider,
+) -> (
+    Arc<Notify>,
+    Arc<Notify>,
+    SessionHandle,
+    Store,
+    tempfile::TempDir,
+) {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (runtime, store, dir) = build_runtime(
+        provider,
+        vec![Box::new(Barrier {
+            entered: entered.clone(),
+            release: release.clone(),
+        })],
+    );
+    (entered, release, Arc::new(Mutex::new(runtime)), store, dir)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_follow_up_waits_for_the_running_turn_then_runs_in_order() {
+    let provider = FakeProvider::new()
+        .tool_call("c1", "barrier", json!({}))
+        .text("first done")
+        .text("second done");
+    let (entered, release, handle, store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle).await);
+    let mut rx = host.subscribe();
+
+    assert_eq!(host.submit("go".to_string(), false), Admit::Started);
+    timeout(PROMPT, entered.notified()).await.unwrap();
+
+    assert_eq!(host.submit("then this".to_string(), true), Admit::Queued);
+    assert_eq!(host.submit("right now".to_string(), false), Admit::Busy);
+    assert_eq!(host.queued_follow_ups(), 1);
+
+    release.notify_one();
+    let events = until_stops(&mut rx, 2).await;
+    let first = events
+        .iter()
+        .position(|event| matches!(event, RuntimeEvent::Text(text) if text.contains("first done")))
+        .expect("first turn text");
+    let second = events
+        .iter()
+        .position(|event| matches!(event, RuntimeEvent::Text(text) if text.contains("second done")))
+        .expect("follow-up turn text");
+    assert!(first < second, "the follow-up ran after the first turn");
+    assert!(transcript_text(&store, host.id()).contains("then this"));
+    assert!(!transcript_text(&store, host.id()).contains("right now"));
+    assert_eq!(host.queued_follow_ups(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_stops_the_turn_and_drops_waiting_follow_ups() {
+    let provider = FakeProvider::new()
+        .tool_call("c1", "barrier", json!({}))
+        .text("must not run");
+    let (entered, _release, handle, _store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle).await);
+    let mut rx = host.subscribe();
+
+    assert_eq!(host.submit("go".to_string(), false), Admit::Started);
+    timeout(PROMPT, entered.notified()).await.unwrap();
+    assert_eq!(host.submit("a".to_string(), true), Admit::Queued);
+    assert_eq!(host.submit("b".to_string(), true), Admit::Queued);
+
+    let cancelled = host.cancel_all();
+    assert!(cancelled.turn);
+    assert_eq!(cancelled.dropped_follow_ups, 2);
+
+    let events = until_stops(&mut rx, 1).await;
+    assert!(saw_stop(&events, StopReason::Cancelled));
+    // Nothing queued starts after the cancelled turn.
+    tokio::time::sleep(HELD).await;
+    let later = drain(&mut rx);
+    assert!(
+        !later
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::Stopped(_))),
+        "no follow-up turn ran: {later:?}"
+    );
+    assert!(!saw_text(&later, "must not run"));
+    assert_eq!(host.queued_follow_ups(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_follow_up_queue_is_bounded() {
+    let provider = FakeProvider::new().tool_call("c1", "barrier", json!({}));
+    let (entered, _release, handle, _store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle).await);
+
+    assert_eq!(host.submit("go".to_string(), false), Admit::Started);
+    timeout(PROMPT, entered.notified()).await.unwrap();
+    for n in 0..FOLLOW_UP_CAPACITY {
+        assert_eq!(host.submit(format!("f{n}"), true), Admit::Queued);
+    }
+    assert_eq!(
+        host.submit("one too many".to_string(), true),
+        Admit::QueueFull
+    );
+    host.cancel_all();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_follow_up_popped_but_not_started_does_not_escape_cancel() {
+    // A turn driven outside admission holds the session; a follow-up submitted
+    // now is popped at once and waits on the runtime mutex with its token not
+    // yet published. Cancel must still stop it.
+    let provider = FakeProvider::new()
+        .tool_call("c1", "barrier", json!({}))
+        .text("must not run");
+    let (entered, _release, handle, _store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle).await);
+    let mut rx = host.subscribe();
+
+    let outside = {
+        let host = host.clone();
+        tokio::spawn(async move { host.drive("go").await })
+    };
+    timeout(PROMPT, entered.notified()).await.unwrap();
+    assert_eq!(host.submit("queued".to_string(), true), Admit::Queued);
+    assert_eq!(host.queued_follow_ups(), 0, "popped, waiting to start");
+
+    let cancelled = host.cancel_all();
+    assert!(cancelled.turn);
+    assert_eq!(
+        timeout(PROMPT, outside).await.unwrap().unwrap(),
+        StopReason::Cancelled
+    );
+    tokio::time::sleep(HELD).await;
+    let events = drain(&mut rx);
+    assert!(
+        !saw_text(&events, "must not run"),
+        "the popped follow-up never ran"
+    );
+}
+
+// --- intervention audit -------------------------------------------------------
+
+fn interventions(store: &Store, id: SessionId) -> Vec<(String, String)> {
+    store
+        .read_events(id)
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            localpilot_store::SessionEventKind::DriverIntervention { action, client, .. } => {
+                Some((action, client))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interventions_reach_the_session_log_with_their_principal() {
+    let provider = FakeProvider::new()
+        .tool_call("c1", "barrier", json!({}))
+        .text("done");
+    let (entered, release, handle, store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle.clone()).await);
+    let mut rx = host.subscribe();
+
+    // Idle: written at once.
+    host.record_intervention("allow", "run_shell: ls".to_string(), "local");
+
+    // Busy: kept until the turn lets go of the runtime.
+    assert_eq!(host.submit("go".to_string(), false), Admit::Started);
+    timeout(PROMPT, entered.notified()).await.unwrap();
+    host.record_intervention("steer", "look at the tests".to_string(), "local");
+    release.notify_one();
+    until_stops(&mut rx, 1).await;
+
+    let id = host.id();
+    let mut runtime = timeout(PROMPT, handle.lock()).await.unwrap();
+    host.flush_interventions(&mut runtime);
+    runtime.close();
+    drop(runtime);
+    assert_eq!(
+        interventions(&store, id),
+        vec![
+            ("allow".to_string(), "local".to_string()),
+            ("steer".to_string(), "local".to_string()),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_work_is_busy_before_it_starts_and_blocks_closing() {
+    let provider = FakeProvider::new().text("done");
+    let (_entered, _release, handle, _store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle.clone()).await);
+    let mut rx = host.subscribe();
+
+    // Hold the runtime so the admitted turn waits to start.
+    let guard = handle.lock().await;
+    assert!(!host.is_busy());
+    assert_eq!(host.submit("go".to_string(), false), Admit::Started);
+    assert!(
+        host.is_busy(),
+        "accepted input counts as busy before its turn starts"
+    );
+    assert!(
+        !host.close_admission(),
+        "a session with admitted work stays open"
+    );
+    drop(guard);
+
+    until_stops(&mut rx, 1).await;
+    // The admission loop clears `running` after its last turn.
+    timeout(PROMPT, async {
+        while host.is_busy() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(host.close_admission());
+    assert_eq!(host.submit("late".to_string(), false), Admit::Closed);
 }

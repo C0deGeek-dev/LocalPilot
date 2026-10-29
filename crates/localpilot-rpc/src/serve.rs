@@ -361,17 +361,7 @@ fn parse(bytes: &[u8]) -> Result<(Option<String>, ClientCommand), String> {
 }
 
 async fn emit_ask<W: AsyncWrite + Unpin>(writer: &mut W, ask: &PendingAsk) -> Result<(), RpcError> {
-    emit(
-        writer,
-        None,
-        ServerEvent::PermissionAsk {
-            ask_id: ask.ask_id.clone(),
-            tool: ask.tool.clone(),
-            detail: ask.detail.clone(),
-            risk: ask.risk.clone(),
-        },
-    )
-    .await
+    emit(writer, None, ask.wire_event()).await
 }
 
 fn status_event(
@@ -388,6 +378,11 @@ fn status_event(
         busy,
         pending_asks: asks.outstanding(),
         next_step: context.root.as_deref().and_then(next_incomplete_step),
+        asks: asks
+            .outstanding_detail()
+            .iter()
+            .map(PendingAsk::detail)
+            .collect(),
     }
 }
 

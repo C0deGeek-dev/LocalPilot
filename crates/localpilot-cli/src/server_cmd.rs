@@ -39,11 +39,12 @@ use localpilot_harness::{
 use localpilot_llm::{ModelProvider, ProviderRegistry};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_rpc::{
-    map_event, AskRegistry, AttachTarget, ClientCommand, ClientRecord, InputDisposition,
-    JsonRecordReader, PendingAsk, RpcApprover, ServerEvent, ServerRecord, RPC_PROTOCOL_VERSION,
-    SERVER_VERSION,
+    map_event, AskRegistry, AskView, AttachTarget, ClientCommand, ClientRecord, InputDisposition,
+    JsonRecordReader, PendingAsk, Principal, RejectCode, ReplyRefusal, RpcApprover, ServerEvent,
+    ServerRecord, CAPABILITY_ACKS, RPC_PROTOCOL_VERSION, SERVER_VERSION,
 };
 use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile, ScriptedApprover};
+use localpilot_server::host::Admit;
 use localpilot_server::{
     acquire, attach, ensure_running, Acquired, AttachError, Conn, Endpoint, Listener,
     RegistryError, SessionFactory, SessionHost, SessionRegistry, TransportError,
@@ -466,13 +467,18 @@ impl ConnectionFactory for ServerFactory {
 #[derive(Clone, Default)]
 struct HostMap {
     inner: Arc<Mutex<HashMap<SessionId, Arc<SessionHost>>>>,
+    /// Each hosted session's permission asks. The asks belong to the session,
+    /// not to the connection that happened to create it: every attached client
+    /// sees them and any of them may answer.
+    asks: Arc<StdMutex<HashMap<SessionId, AskRegistry>>>,
 }
 
 impl HostMap {
     /// Bind a connection to its session: reuse the live host when the target id
     /// is already hosted, otherwise create+register the session via the registry
     /// and wrap its handle in a fresh host. Returns the bound id, the shared
-    /// host, and — only on a fresh create — the wire approver halves.
+    /// host, and the session's ask registry (absent only when the factory built
+    /// no wire approver).
     ///
     /// Binding is serialized by the map mutex, which also fences the factory's
     /// single-slot approver hand-off.
@@ -482,7 +488,7 @@ impl HostMap {
         registry: &SessionRegistry,
         factory: &F,
         store: &Store,
-    ) -> Result<(SessionId, Arc<SessionHost>, Option<ApproverHalves>), AttachError> {
+    ) -> Result<(SessionId, Arc<SessionHost>, Option<AskRegistry>), AttachError> {
         let mut map = self.inner.lock().await;
         // A resume target whose session is already hosted short-circuits to the
         // live host — never a second `attach`, so the store known-id guard (for
@@ -490,7 +496,7 @@ impl HostMap {
         // freshly opened session with no store entry yet is still joinable.
         if let Some(id) = existing_id(&target, store)? {
             if let Some(host) = map.get(&id) {
-                return Ok((id, host.clone(), None));
+                return Ok((id, host.clone(), self.asks_for(id)));
             }
         }
         let id = attach(target, registry, factory, store).await?;
@@ -500,7 +506,34 @@ impl HostMap {
             .ok_or(AttachError::Registry(RegistryError::NotFound))?;
         let host = Arc::new(SessionHost::new(handle).await);
         map.insert(id, host.clone());
-        Ok((id, host, factory.take_asks()))
+        let asks = factory.take_asks().map(|halves| {
+            // Connections read asks from the registry's broadcast; this only
+            // keeps the approver's channel open (a closed one denies every ask)
+            // and ends with the session's approver.
+            let mut ask_rx = halves.ask_rx;
+            tokio::spawn(async move { while ask_rx.recv().await.is_some() {} });
+            self.asks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id, halves.asks.clone());
+            halves.asks
+        });
+        Ok((id, host, asks))
+    }
+
+    fn asks_for(&self, id: SessionId) -> Option<AskRegistry> {
+        self.asks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned()
+    }
+
+    fn forget_asks(&self, id: SessionId) {
+        self.asks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
     }
 }
 
@@ -639,11 +672,22 @@ impl Reaper {
             let Ok(mut runtime) = handle.try_lock() else {
                 continue;
             };
-            // Persist the event log before the session disappears.
+            // Input admitted after the busy check above (it may not hold the
+            // runtime yet) keeps the session; otherwise stop admitting, so
+            // nothing can start on a session that is going away.
+            if let Some(host) = map.get(&id) {
+                if !host.close_admission() {
+                    continue;
+                }
+                // Persist the event log (and any interventions still waiting
+                // for the runtime) before the session disappears.
+                host.flush_interventions(&mut runtime);
+            }
             runtime.close();
             drop(runtime);
             self.registry.remove(id).await;
             map.remove(&id);
+            self.hosts.forget_asks(id);
             self.first_empty.remove(&id);
             reaped.push(id);
         }
@@ -727,8 +771,11 @@ where
         }
     };
     let reply_id = record.id;
-    let target = match record.command {
-        ClientCommand::Attach { target } => target,
+    let (target, capabilities) = match record.command {
+        ClientCommand::Attach {
+            target,
+            capabilities,
+        } => (target, capabilities),
         _ => {
             emit(
                 &mut write,
@@ -743,7 +790,8 @@ where
         }
     };
 
-    let (session_id, host, approver) = match hosts.bind(target, registry, factory, store).await {
+    let acks = capabilities.iter().any(|name| name == CAPABILITY_ACKS);
+    let (session_id, host, asks) = match hosts.bind(target, registry, factory, store).await {
         Ok(bound) => bound,
         Err(error) => {
             emit(
@@ -762,9 +810,15 @@ where
     // `attached` is guaranteed to receive every subsequent event — including a
     // turn another client drives.
     let mut events = host.subscribe();
-    let (mut ask_rx, asks) = match approver {
-        Some(halves) => (Some(halves.ask_rx), Some(halves.asks)),
-        None => (None, None),
+    // This connection's view of the session's asks: subscribed before the
+    // outstanding asks are read, so nothing raised or resolved in between is
+    // lost.
+    let (mut ask_view, initial_asks) = match asks.clone() {
+        Some(registry) => {
+            let (view, initial) = AskView::attach(registry, acks);
+            (Some(view), initial)
+        }
+        None => (None, Vec::new()),
     };
     emit(
         &mut write,
@@ -775,6 +829,9 @@ where
         },
     )
     .await?;
+    for record in initial_asks {
+        emit(&mut write, None, record).await?;
+    }
 
     loop {
         tokio::select! {
@@ -788,16 +845,28 @@ where
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             },
-            // Permission asks for this session (only if this connection owns them).
-            ask = next_ask(&mut ask_rx) => match ask {
-                Some(ask) => emit_ask(&mut write, &ask).await?,
-                None => ask_rx = None, // the approver's sender is gone; stop polling
+            // The session's permission asks, raised and resolved, whoever drove
+            // the turn and whoever answered.
+            records = next_ask_records(&mut ask_view) => match records {
+                Some(records) => {
+                    for record in records {
+                        emit(&mut write, None, record).await?;
+                    }
+                }
+                None => ask_view = None, // the session's registry is gone
             },
             // Client commands.
             record = reader.next() => {
                 let Some(value) = record? else { break }; // EOF: detach this connection
                 let stop = handle_command(
-                    value, &host, &session_id, &model, &profile_label, asks.as_ref(), &mut write,
+                    value,
+                    &host,
+                    &session_id,
+                    &model,
+                    &profile_label,
+                    asks.as_ref(),
+                    acks,
+                    &mut write,
                 )
                 .await?;
                 if stop {
@@ -811,6 +880,11 @@ where
 
 /// Route one decoded client command. Returns `true` when the connection should
 /// detach (a `shutdown`).
+///
+/// A connection that declared the `acks` capability gets an explicit
+/// `accepted` / `queued` / `rejected` reply to every mutating command; an older
+/// client gets the records it always got (`error` on refusal, `queued` for a
+/// steer or follow-up, nothing on success).
 #[allow(clippy::too_many_arguments)] // the loop genuinely threads these
 async fn handle_command<W: AsyncWrite + Unpin>(
     value: serde_json::Value,
@@ -819,17 +893,24 @@ async fn handle_command<W: AsyncWrite + Unpin>(
     model: &str,
     profile_label: &str,
     asks: Option<&AskRegistry>,
+    acks: bool,
     write: &mut W,
 ) -> anyhow::Result<bool> {
+    // Keep the correlation id of a record that fails to parse, when it has a
+    // usable one, so the client can match the rejection to its command.
+    let raw_id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let record: ClientRecord = match serde_json::from_value(value) {
         Ok(record) => record,
         Err(error) => {
-            emit(
+            reject(
                 write,
-                None,
-                ServerEvent::Error {
-                    message: format!("malformed record: {error}"),
-                },
+                raw_id,
+                acks,
+                RejectCode::Malformed,
+                format!("malformed record: {error}"),
             )
             .await?;
             return Ok(false);
@@ -850,6 +931,9 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             .await?;
         }
         ClientCommand::Status => {
+            let outstanding = asks
+                .map(AskRegistry::outstanding_detail)
+                .unwrap_or_default();
             emit(
                 write,
                 id,
@@ -858,39 +942,69 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                     model: model.to_string(),
                     profile: profile_label.to_string(),
                     busy: host.is_busy(),
-                    pending_asks: asks.map(AskRegistry::outstanding).unwrap_or_default(),
+                    pending_asks: outstanding.iter().map(|ask| ask.ask_id.clone()).collect(),
                     next_step: None,
+                    asks: outstanding.iter().map(PendingAsk::detail).collect(),
                 },
             )
             .await?;
         }
         ClientCommand::Prompt { text, disposition } => match disposition {
-            // Immediate (and follow-up) start a turn when the session is idle.
-            // A running turn rejects immediate input; steer injects into it.
             InputDisposition::Immediate | InputDisposition::FollowUp => {
-                if host.is_busy() {
-                    emit(
-                        write,
-                        id,
-                        ServerEvent::Error {
-                            message: "a turn is already running on this session; cancel it \
-                                      first, or send a steer disposition to inject into it"
+                let follow_up = disposition == InputDisposition::FollowUp;
+                // Drive on its own task; events (including the terminal
+                // `stopped`) reach this and every other attached connection
+                // via the host broadcast. A turn keeps running for other
+                // clients if this connection detaches.
+                match host.submit(text, follow_up) {
+                    Admit::Started => accept(write, id, acks, None).await?,
+                    Admit::Queued => {
+                        emit(
+                            write,
+                            id,
+                            ServerEvent::Queued {
+                                disposition: InputDisposition::FollowUp,
+                            },
+                        )
+                        .await?;
+                    }
+                    Admit::Busy => {
+                        reject(
+                            write,
+                            id,
+                            acks,
+                            RejectCode::Busy,
+                            "a turn is already running on this session; cancel it first, \
+                             send a steer disposition to inject into it, or send a follow-up"
                                 .to_string(),
-                        },
-                    )
-                    .await?;
-                } else {
-                    let host = host.clone();
-                    // Drive on its own task; events (including the terminal
-                    // `stopped`) reach this and every other attached connection
-                    // via the host broadcast. Detached on purpose: a turn keeps
-                    // running for other clients if this connection detaches.
-                    tokio::spawn(async move {
-                        host.drive(&text).await;
-                    });
+                        )
+                        .await?;
+                    }
+                    Admit::QueueFull => {
+                        reject(
+                            write,
+                            id,
+                            acks,
+                            RejectCode::QueueFull,
+                            "too many follow-ups are already waiting for this session".to_string(),
+                        )
+                        .await?;
+                    }
+                    Admit::Closed => {
+                        reject(
+                            write,
+                            id,
+                            acks,
+                            RejectCode::SessionClosed,
+                            "this session was closed after inactivity; attach again to resume it"
+                                .to_string(),
+                        )
+                        .await?;
+                    }
                 }
             }
             InputDisposition::Steer => {
+                host.record_intervention("steer", text.clone(), Principal::Local.label());
                 host.steer(text);
                 emit(
                     write,
@@ -903,65 +1017,95 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             }
         },
         ClientCommand::Cancel => {
-            if !host.cancel() {
-                emit(
+            let cancelled = host.cancel_all();
+            if cancelled.turn || cancelled.dropped_follow_ups > 0 {
+                host.record_intervention(
+                    "cancel",
+                    format!(
+                        "dropped {} queued follow-up(s)",
+                        cancelled.dropped_follow_ups
+                    ),
+                    Principal::Local.label(),
+                );
+                accept(write, id, acks, Some(cancelled.dropped_follow_ups)).await?;
+            } else {
+                reject(
                     write,
                     id,
-                    ServerEvent::Error {
-                        message: "no turn is running".to_string(),
-                    },
+                    acks,
+                    RejectCode::NoTurnRunning,
+                    "no turn is running".to_string(),
                 )
                 .await?;
             }
         }
-        ClientCommand::PermissionReply { ask_id, allow } => match asks {
-            Some(asks) if asks.resolve(&ask_id, allow) => {}
-            Some(_) => {
-                emit(
+        ClientCommand::PermissionReply { ask_id, allow } => {
+            let Some(asks) = asks else {
+                reject(
                     write,
                     id,
-                    ServerEvent::Error {
-                        message: format!("unknown ask id {ask_id}"),
-                    },
+                    acks,
+                    RejectCode::UnknownAsk,
+                    format!("unknown ask id {ask_id}"),
                 )
                 .await?;
+                return Ok(false);
+            };
+            let context = asks
+                .outstanding_detail()
+                .into_iter()
+                .find(|ask| ask.ask_id == ask_id)
+                .map(|ask| format!("{}: {}", ask.tool, ask.detail));
+            match asks.reply(&ask_id, allow, Principal::Local) {
+                Ok(_) => {
+                    host.record_intervention(
+                        if allow { "allow" } else { "deny" },
+                        context.unwrap_or_else(|| ask_id.clone()),
+                        Principal::Local.label(),
+                    );
+                    accept(write, id, acks, None).await?;
+                }
+                Err(refusal) => {
+                    let (code, message) = match refusal {
+                        ReplyRefusal::AlreadyResolved(outcome) => (
+                            RejectCode::AlreadyResolved,
+                            format!("ask {ask_id} was already resolved ({outcome:?})"),
+                        ),
+                        ReplyRefusal::Expired => (
+                            RejectCode::Expired,
+                            format!("ask {ask_id} expired before the reply arrived"),
+                        ),
+                        ReplyRefusal::Unknown => {
+                            (RejectCode::UnknownAsk, format!("unknown ask id {ask_id}"))
+                        }
+                    };
+                    reject(write, id, acks, code, message).await?;
+                }
             }
-            None => {
-                emit(
-                    write,
-                    id,
-                    ServerEvent::Error {
-                        message: "this connection does not own this session's permission asks \
-                                  (another client attached first)"
-                            .to_string(),
-                    },
-                )
-                .await?;
-            }
-        },
+        }
         ClientCommand::Shutdown => {
             emit(write, id, ServerEvent::Closed).await?;
             return Ok(true);
         }
         ClientCommand::Attach { .. } => {
-            emit(
+            reject(
                 write,
                 id,
-                ServerEvent::Error {
-                    message: "already attached; a connection binds its session once".to_string(),
-                },
+                acks,
+                RejectCode::AlreadyAttached,
+                "already attached; a connection binds its session once".to_string(),
             )
             .await?;
         }
         // `ClientCommand` is `#[non_exhaustive]`: an unknown command is a typed
         // error, never a panic.
         _ => {
-            emit(
+            reject(
                 write,
                 id,
-                ServerEvent::Error {
-                    message: "this server build does not understand that command".to_string(),
-                },
+                acks,
+                RejectCode::UnsupportedCommand,
+                "this server build does not understand that command".to_string(),
             )
             .await?;
         }
@@ -969,13 +1113,44 @@ async fn handle_command<W: AsyncWrite + Unpin>(
     Ok(false)
 }
 
-/// Await the next permission ask, or park forever when this connection owns no
-/// approver — so the `select!` arm is inert rather than busy-looping.
-async fn next_ask(rx: &mut Option<mpsc::UnboundedReceiver<PendingAsk>>) -> Option<PendingAsk> {
-    match rx {
-        Some(rx) => rx.recv().await,
+/// Await the records for the session's next ask event, or park forever when
+/// this connection has no ask view — so the `select!` arm is inert rather than
+/// busy-looping.
+async fn next_ask_records(view: &mut Option<AskView>) -> Option<Vec<ServerEvent>> {
+    match view {
+        Some(view) => view.next().await,
         None => std::future::pending().await,
     }
+}
+
+/// Acknowledge a command that is being acted on now (`acks` clients only).
+async fn accept<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    id: Option<String>,
+    acks: bool,
+    dropped_follow_ups: Option<usize>,
+) -> std::io::Result<()> {
+    if acks {
+        emit(write, id, ServerEvent::Accepted { dropped_follow_ups }).await?;
+    }
+    Ok(())
+}
+
+/// Refuse a command: a typed `rejected` for `acks` clients, the legacy `error`
+/// record for everyone else.
+async fn reject<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    id: Option<String>,
+    acks: bool,
+    code: RejectCode,
+    message: String,
+) -> std::io::Result<()> {
+    let event = if acks {
+        ServerEvent::Rejected { code, message }
+    } else {
+        ServerEvent::Error { message }
+    };
+    emit(write, id, event).await
 }
 
 async fn emit<W: AsyncWrite + Unpin>(
@@ -992,20 +1167,6 @@ async fn emit<W: AsyncWrite + Unpin>(
     line.push(b'\n');
     write.write_all(&line).await?;
     write.flush().await
-}
-
-async fn emit_ask<W: AsyncWrite + Unpin>(write: &mut W, ask: &PendingAsk) -> std::io::Result<()> {
-    emit(
-        write,
-        None,
-        ServerEvent::PermissionAsk {
-            ask_id: ask.ask_id.clone(),
-            tool: ask.tool.clone(),
-            detail: ask.detail.clone(),
-            risk: ask.risk.clone(),
-        },
-    )
-    .await
 }
 
 // --- `localpilot serve` -----------------------------------------------------
@@ -1163,7 +1324,14 @@ pub async fn connect(resume: Option<&str>, auto_spawn: bool) -> anyhow::Result<(
 async fn run_client(conn: Conn, target: AttachTarget) -> anyhow::Result<()> {
     let (read, mut write) = tokio::io::split(conn);
     let mut reader = JsonRecordReader::new(read);
-    send_command(&mut write, ClientCommand::Attach { target }).await?;
+    send_command(
+        &mut write,
+        ClientCommand::Attach {
+            target,
+            capabilities: vec![CAPABILITY_ACKS.to_string()],
+        },
+    )
+    .await?;
 
     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
     let mut last_ask: Option<String> = None;
@@ -1240,6 +1408,15 @@ async fn send_command<W: AsyncWrite + Unpin>(
     write.flush().await
 }
 
+fn outcome_label(outcome: localpilot_rpc::AskOutcome) -> &'static str {
+    match outcome {
+        localpilot_rpc::AskOutcome::Allowed => "allowed",
+        localpilot_rpc::AskOutcome::Denied => "denied",
+        localpilot_rpc::AskOutcome::Expired => "expired unanswered",
+        localpilot_rpc::AskOutcome::Cancelled => "cancelled with its turn",
+    }
+}
+
 /// Render one server event as plain text. Session text goes to stdout; status,
 /// tool, and lifecycle notes go to stderr so a piped stdout stays the answer.
 /// Returns `true` when the server has closed the session.
@@ -1297,6 +1474,7 @@ fn render_event(event: ServerEvent, last_ask: &mut Option<String>) -> anyhow::Re
             busy,
             pending_asks,
             next_step,
+            ..
         } => eprintln!(
             "localpilot: session {session_id} · model {model} · profile {profile} · {}{}{}",
             if busy { "busy" } else { "idle" },
@@ -1314,12 +1492,51 @@ fn render_event(event: ServerEvent, last_ask: &mut Option<String>) -> anyhow::Re
             tool,
             detail,
             risk,
+            ..
         } => {
             eprintln!("localpilot: permission needed — {tool} ({risk}): {detail}");
             eprintln!("           type /allow or /deny to answer.");
             *last_ask = Some(ask_id);
         }
-        ServerEvent::Error { message } => eprintln!("localpilot: error: {message}"),
+        ServerEvent::AsksResync { asks } => {
+            // The authoritative pending set after this client fell behind: the
+            // ask to answer is one that is still pending, never a stale one.
+            if !asks
+                .iter()
+                .any(|ask| last_ask.as_deref() == Some(ask.ask_id.as_str()))
+            {
+                *last_ask = None;
+            }
+            match asks.last() {
+                Some(ask) => {
+                    if last_ask.is_none() {
+                        eprintln!(
+                            "localpilot: permission needed — {} ({}): {}",
+                            ask.tool, ask.risk, ask.detail
+                        );
+                        eprintln!("           type /allow or /deny to answer.");
+                        *last_ask = Some(ask.ask_id.clone());
+                    }
+                }
+                None => eprintln!("localpilot: no permission asks pending"),
+            }
+        }
+        ServerEvent::PermissionResolved {
+            ask_id,
+            outcome,
+            by,
+        } => {
+            if last_ask.as_deref() == Some(ask_id.as_str()) {
+                *last_ask = None;
+            }
+            let who = by
+                .map(|by| format!(" by {}", by.label()))
+                .unwrap_or_default();
+            eprintln!("localpilot: permission {}{who}", outcome_label(outcome));
+        }
+        ServerEvent::Rejected { message, .. } | ServerEvent::Error { message } => {
+            eprintln!("localpilot: error: {message}");
+        }
         ServerEvent::Closed => {
             eprintln!("localpilot: session closed by the server");
             return Ok(true);
@@ -1402,6 +1619,10 @@ mod tests {
     struct FakeFactory {
         dir: Arc<tempfile::TempDir>,
         provider: Arc<FakeProvider>,
+        /// Build sessions that ask the wire client (default profile, interactive,
+        /// wire approver) instead of bypass sessions that never ask.
+        asking: bool,
+        pending: StdMutex<Option<ApproverHalves>>,
     }
 
     impl FakeFactory {
@@ -1409,6 +1630,15 @@ mod tests {
             Self {
                 dir: Arc::new(tempfile::tempdir().unwrap()),
                 provider: Arc::new(provider),
+                asking: false,
+                pending: StdMutex::new(None),
+            }
+        }
+
+        fn asking(provider: FakeProvider) -> Self {
+            Self {
+                asking: true,
+                ..Self::new(provider)
             }
         }
 
@@ -1422,16 +1652,32 @@ mod tests {
             let root = self.dir.path();
             let workspace =
                 Workspace::new(root).map_err(|error| RegistryError::Factory(error.to_string()))?;
+            let (profile, approver, interactivity): (Profile, Box<dyn Approver>, Interactivity) =
+                if self.asking {
+                    let (approver, ask_rx, asks) = RpcApprover::new();
+                    *self.pending.lock().unwrap() = Some(ApproverHalves { ask_rx, asks });
+                    (
+                        Profile::Default,
+                        Box::new(approver),
+                        Interactivity::Interactive,
+                    )
+                } else {
+                    (
+                        Profile::Bypass,
+                        Box::new(ScriptedApprover::always()),
+                        Interactivity::NonInteractive,
+                    )
+                };
             Ok(SessionRuntime::new(
                 self.provider.clone(),
                 ToolRegistry::with_builtins(),
-                PermissionEngine::new(Profile::Bypass, Vec::new()),
-                Box::new(ScriptedApprover::always()),
+                PermissionEngine::new(profile, Vec::new()),
+                approver,
                 Store::open(root),
                 workspace,
                 RecoveryEngine::new(RecoveryBudget::default()),
                 SessionConfig {
-                    interactivity: Interactivity::NonInteractive,
+                    interactivity,
                     trusted: true,
                     ..SessionConfig::default()
                 },
@@ -1442,7 +1688,7 @@ mod tests {
 
     impl ConnectionFactory for FakeFactory {
         fn take_asks(&self) -> Option<ApproverHalves> {
-            None
+            self.pending.lock().unwrap().take()
         }
         fn model(&self) -> &str {
             "fake-model"
@@ -1538,9 +1784,25 @@ mod tests {
         write: &mut W,
         target: AttachTarget,
     ) -> SessionId {
-        send_command(write, ClientCommand::Attach { target })
-            .await
-            .unwrap();
+        attach_client_with(reader, write, target, Vec::new()).await
+    }
+
+    /// Attach declaring `capabilities` (empty = a legacy client).
+    async fn attach_client_with<W: AsyncWrite + Unpin>(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        write: &mut W,
+        target: AttachTarget,
+        capabilities: Vec<String>,
+    ) -> SessionId {
+        send_command(
+            write,
+            ClientCommand::Attach {
+                target,
+                capabilities,
+            },
+        )
+        .await
+        .unwrap();
         match read_event(reader).await {
             ServerEvent::Attached { session_id, .. } => session_id,
             other => panic!("expected `attached`, got {other:?}"),
@@ -1632,6 +1894,7 @@ mod tests {
                 &mut write,
                 ClientCommand::Attach {
                     target: AttachTarget::OpenNew,
+                    capabilities: Vec::new(),
                 },
             )
             .await
@@ -1740,7 +2003,418 @@ mod tests {
             .unwrap();
     }
 
+    // --- session-owned permission asks and command acknowledgements -----------
+
+    /// A provider whose first turn runs a command the default profile asks
+    /// about, then answers; later turns answer with `then`.
+    fn asking_provider(then: &[&str]) -> FakeProvider {
+        let mut provider = FakeProvider::new()
+            .tool_call(
+                "c1",
+                "run_shell",
+                serde_json::json!({ "program": "rm", "args": ["-rf", "no-such-dir"] }),
+            )
+            .text("first answer");
+        for text in then {
+            provider = provider.text(text);
+        }
+        provider
+    }
+
+    fn acks() -> Vec<String> {
+        vec![CAPABILITY_ACKS.to_string()]
+    }
+
+    /// Read events until `pred` matches one, returning everything read.
+    async fn read_until(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        pred: impl Fn(&ServerEvent) -> bool,
+    ) -> Vec<ServerEvent> {
+        let mut seen = Vec::new();
+        loop {
+            let event = read_event(reader).await;
+            let done = pred(&event);
+            seen.push(event);
+            if done {
+                return seen;
+            }
+        }
+    }
+
+    async fn send_with_id<W: AsyncWrite + Unpin>(write: &mut W, id: &str, command: ClientCommand) {
+        let record = ClientRecord {
+            v: RPC_PROTOCOL_VERSION,
+            id: Some(id.to_string()),
+            command,
+        };
+        let mut line = serde_json::to_vec(&record).unwrap();
+        line.push(b'\n');
+        write.write_all(&line).await.unwrap();
+        write.flush().await.unwrap();
+    }
+
+    fn ask_id_of(events: &[ServerEvent]) -> String {
+        events
+            .iter()
+            .find_map(|event| match event {
+                ServerEvent::PermissionAsk { ask_id, .. } => Some(ask_id.clone()),
+                _ => None,
+            })
+            .expect("a permission ask")
+    }
+
+    fn is_ask(event: &ServerEvent) -> bool {
+        matches!(event, ServerEvent::PermissionAsk { .. })
+    }
+
+    fn is_stop(event: &ServerEvent) -> bool {
+        matches!(event, ServerEvent::Stopped { .. })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn any_attached_client_may_answer_and_the_first_answer_wins() {
+        let factory = Arc::new(FakeFactory::asking(asking_provider(&[])));
+        let (endpoint, server) = spawn_server(factory, 2);
+
+        let (read1, mut write1) = tokio::io::split(dial(&endpoint).await);
+        let mut reader1 = JsonRecordReader::new(read1);
+        let id = attach_client_with(&mut reader1, &mut write1, AttachTarget::OpenNew, acks()).await;
+        let (read2, mut write2) = tokio::io::split(dial(&endpoint).await);
+        let mut reader2 = JsonRecordReader::new(read2);
+        attach_client_with(
+            &mut reader2,
+            &mut write2,
+            AttachTarget::ResumeId { session_id: id },
+            acks(),
+        )
+        .await;
+
+        send_with_id(
+            &mut write1,
+            "p1",
+            ClientCommand::Prompt {
+                text: "clean up".to_string(),
+                disposition: InputDisposition::Immediate,
+            },
+        )
+        .await;
+        let seen1 = read_until(&mut reader1, is_ask).await;
+        assert!(
+            seen1
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Accepted { .. })),
+            "the prompt was acknowledged: {seen1:?}"
+        );
+        let ask = ask_id_of(&seen1);
+        let seen2 = read_until(&mut reader2, is_ask).await;
+        assert_eq!(
+            ask_id_of(&seen2),
+            ask,
+            "the second client sees the same ask"
+        );
+
+        // The client that did not start the turn answers first and wins.
+        send_with_id(
+            &mut write2,
+            "r2",
+            ClientCommand::PermissionReply {
+                ask_id: ask.clone(),
+                allow: true,
+            },
+        )
+        .await;
+        send_with_id(
+            &mut write1,
+            "r1",
+            ClientCommand::PermissionReply {
+                ask_id: ask.clone(),
+                allow: false,
+            },
+        )
+        .await;
+
+        let rest1 = read_until(&mut reader1, is_stop).await;
+        let rest2 = read_until(&mut reader2, is_stop).await;
+        assert!(
+            rest1.iter().any(|event| matches!(
+                event,
+                ServerEvent::Rejected {
+                    code: RejectCode::AlreadyResolved,
+                    ..
+                }
+            )),
+            "the late answer is refused: {rest1:?}"
+        );
+        assert!(
+            rest2
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Accepted { .. })),
+            "the winning answer is acknowledged: {rest2:?}"
+        );
+        for (label, rest) in [("1", &rest1), ("2", &rest2)] {
+            let resolved: Vec<_> = rest
+                .iter()
+                .filter(|event| matches!(event, ServerEvent::PermissionResolved { .. }))
+                .collect();
+            assert_eq!(
+                resolved.len(),
+                1,
+                "client {label} hears exactly one outcome: {rest:?}"
+            );
+            assert!(matches!(
+                resolved[0],
+                ServerEvent::PermissionResolved {
+                    outcome: localpilot_rpc::AskOutcome::Allowed,
+                    by: Some(Principal::Local),
+                    ..
+                }
+            ));
+        }
+
+        drop((write1, reader1, write2, reader2));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_ask_outlives_the_client_whose_prompt_raised_it() {
+        let factory = Arc::new(FakeFactory::asking(asking_provider(&[])));
+        let (endpoint, server) = spawn_server(factory, 2);
+
+        // A legacy client starts the turn, sees the ask, and goes away.
+        let (read1, mut write1) = tokio::io::split(dial(&endpoint).await);
+        let mut reader1 = JsonRecordReader::new(read1);
+        let id = attach_client(&mut reader1, &mut write1, AttachTarget::OpenNew).await;
+        send_command(
+            &mut write1,
+            ClientCommand::Prompt {
+                text: "clean up".to_string(),
+                disposition: InputDisposition::Immediate,
+            },
+        )
+        .await
+        .unwrap();
+        let ask = ask_id_of(&read_until(&mut reader1, is_ask).await);
+        drop((write1, reader1));
+
+        // A client that attaches afterwards is shown the outstanding ask and
+        // may answer it.
+        let (read2, mut write2) = tokio::io::split(dial(&endpoint).await);
+        let mut reader2 = JsonRecordReader::new(read2);
+        attach_client_with(
+            &mut reader2,
+            &mut write2,
+            AttachTarget::ResumeId { session_id: id },
+            acks(),
+        )
+        .await;
+        let shown = read_until(&mut reader2, is_ask).await;
+        assert!(matches!(
+            shown.last(),
+            Some(ServerEvent::PermissionAsk { ask_id, expires_at_ms, .. })
+                if *ask_id == ask && *expires_at_ms > 0
+        ));
+        send_with_id(
+            &mut write2,
+            "deny",
+            ClientCommand::PermissionReply {
+                ask_id: ask.clone(),
+                allow: false,
+            },
+        )
+        .await;
+        let rest = read_until(&mut reader2, is_stop).await;
+        assert!(rest
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Accepted { .. })));
+        assert!(rest.iter().any(|event| matches!(
+            event,
+            ServerEvent::PermissionResolved {
+                outcome: localpilot_rpc::AskOutcome::Denied,
+                ..
+            }
+        )));
+
+        drop((write2, reader2));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_legacy_client_receives_no_new_record_types() {
+        let factory = Arc::new(FakeFactory::asking(asking_provider(&[])));
+        let (endpoint, server) = spawn_server(factory, 1);
+
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        attach_client(&mut reader, &mut write, AttachTarget::OpenNew).await;
+        send_command(
+            &mut write,
+            ClientCommand::Prompt {
+                text: "clean up".to_string(),
+                disposition: InputDisposition::Immediate,
+            },
+        )
+        .await
+        .unwrap();
+        let mut seen = read_until(&mut reader, is_ask).await;
+        let ask = ask_id_of(&seen);
+        for _ in 0..2 {
+            send_command(
+                &mut write,
+                ClientCommand::PermissionReply {
+                    ask_id: ask.clone(),
+                    allow: false,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        seen.extend(read_until(&mut reader, is_stop).await);
+        // The second reply's refusal may arrive before or after the stop.
+        if !seen
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Error { .. }))
+        {
+            seen.extend(
+                read_until(&mut reader, |event| {
+                    matches!(event, ServerEvent::Error { .. })
+                })
+                .await,
+            );
+        }
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                ServerEvent::Accepted { .. }
+                    | ServerEvent::Rejected { .. }
+                    | ServerEvent::PermissionResolved { .. }
+            )),
+            "no record type the legacy client cannot read: {seen:?}"
+        );
+
+        drop((write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_follow_up_sent_while_busy_is_queued_and_runs_next() {
+        let factory = Arc::new(FakeFactory::asking(asking_provider(&["second answer"])));
+        let (endpoint, server) = spawn_server(factory, 1);
+
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        attach_client_with(&mut reader, &mut write, AttachTarget::OpenNew, acks()).await;
+        send_with_id(
+            &mut write,
+            "p1",
+            ClientCommand::Prompt {
+                text: "clean up".to_string(),
+                disposition: InputDisposition::Immediate,
+            },
+        )
+        .await;
+        // The turn is now parked on the ask: it is running.
+        let ask = ask_id_of(&read_until(&mut reader, is_ask).await);
+
+        send_with_id(
+            &mut write,
+            "f1",
+            ClientCommand::Prompt {
+                text: "and then this".to_string(),
+                disposition: InputDisposition::FollowUp,
+            },
+        )
+        .await;
+        send_with_id(
+            &mut write,
+            "i1",
+            ClientCommand::Prompt {
+                text: "right now".to_string(),
+                disposition: InputDisposition::Immediate,
+            },
+        )
+        .await;
+        send_with_id(
+            &mut write,
+            "r1",
+            ClientCommand::PermissionReply {
+                ask_id: ask,
+                allow: false,
+            },
+        )
+        .await;
+
+        let mut seen = read_until(&mut reader, is_stop).await;
+        seen.extend(read_until(&mut reader, is_stop).await);
+        assert!(seen.iter().any(|event| matches!(
+            event,
+            ServerEvent::Queued {
+                disposition: InputDisposition::FollowUp
+            }
+        )));
+        assert!(seen.iter().any(|event| matches!(
+            event,
+            ServerEvent::Rejected {
+                code: RejectCode::Busy,
+                ..
+            }
+        )));
+        assert!(
+            seen.iter().any(
+                |event| matches!(event, ServerEvent::TextDelta { text } if text.contains("second answer"))
+            ),
+            "the follow-up ran as its own turn: {seen:?}"
+        );
+
+        drop((write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
     // --- the plain-text client renderer --------------------------------------
+
+    fn detail(id: &str) -> localpilot_rpc::AskDetail {
+        localpilot_rpc::AskDetail {
+            ask_id: id.to_string(),
+            tool: "run_shell".to_string(),
+            detail: "cargo test".to_string(),
+            risk: "run a command".to_string(),
+            expires_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn an_empty_resync_clears_a_stale_ask_without_a_resolution() {
+        // The shown ask expired and its outcome aged out of the server's memory,
+        // so no `permission_resolved` precedes the resync.
+        let mut last_ask = Some("ask-old".to_string());
+        render_event(ServerEvent::AsksResync { asks: Vec::new() }, &mut last_ask).unwrap();
+        assert_eq!(last_ask, None, "/allow no longer targets the gone ask");
+    }
+
+    #[test]
+    fn a_resync_exposes_an_ask_only_it_announced() {
+        let mut last_ask = Some("ask-old".to_string());
+        render_event(
+            ServerEvent::AsksResync {
+                asks: vec![detail("ask-new")],
+            },
+            &mut last_ask,
+        )
+        .unwrap();
+        assert_eq!(last_ask.as_deref(), Some("ask-new"));
+    }
+
+    #[test]
+    fn a_resync_keeps_a_still_pending_ask_selected() {
+        let mut last_ask = Some("ask-a".to_string());
+        render_event(
+            ServerEvent::AsksResync {
+                asks: vec![detail("ask-a"), detail("ask-b")],
+            },
+            &mut last_ask,
+        )
+        .unwrap();
+        assert_eq!(last_ask.as_deref(), Some("ask-a"));
+    }
 
     #[test]
     fn render_event_tracks_a_permission_ask_and_signals_close() {
@@ -1754,6 +2428,7 @@ mod tests {
                 tool: "run_shell".into(),
                 detail: "ls".into(),
                 risk: "run a command".into(),
+                expires_at_ms: 0,
             },
             &mut last_ask,
         )
@@ -1983,6 +2658,95 @@ mod tests {
             "the idle rule reaps independently of grace"
         );
         assert!(registry.get(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_reaped_session_admits_no_more_input() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("idle")));
+        let registry = SessionRegistry::new();
+        let hosts = HostMap::default();
+        let (id, host) = open_hosted_session(&factory, &registry, &hosts).await;
+
+        let mut reaper = Reaper::new(
+            registry.clone(),
+            hosts.clone(),
+            ReaperConfig {
+                grace: Duration::from_secs(3600),
+                idle: Duration::ZERO,
+                tick: Duration::from_secs(1),
+            },
+        );
+        assert_eq!(reaper.reap_once(Instant::now()).await, vec![id]);
+        // A connection still holding the host cannot start work on the closed
+        // session.
+        assert_eq!(host.submit("late".to_string(), false), Admit::Closed);
+        assert_eq!(host.submit("late".to_string(), true), Admit::Closed);
+    }
+
+    #[tokio::test]
+    async fn a_session_with_admitted_work_is_not_reaped() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("busy")));
+        let registry = SessionRegistry::new();
+        let hosts = HostMap::default();
+        let (id, host) = open_hosted_session(&factory, &registry, &hosts).await;
+
+        // Hold the runtime so the admitted turn cannot start: it is accepted
+        // but has not published its token.
+        let handle = registry.get(id).await.unwrap();
+        let guard = handle.lock().await;
+        assert_eq!(host.submit("go".to_string(), false), Admit::Started);
+        assert!(
+            host.is_busy(),
+            "accepted work counts as busy before it starts"
+        );
+
+        let mut reaper = Reaper::new(
+            registry.clone(),
+            hosts.clone(),
+            ReaperConfig {
+                grace: Duration::ZERO,
+                idle: Duration::ZERO,
+                tick: Duration::from_secs(1),
+            },
+        );
+        assert!(reaper.reap_once(Instant::now()).await.is_empty());
+        drop(guard);
+        assert!(registry.get(id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_record_is_rejected_with_its_correlation_id() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let (endpoint, server) = spawn_server(factory, 1);
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        attach_client_with(&mut reader, &mut write, AttachTarget::OpenNew, acks()).await;
+
+        write
+            .write_all(
+                b"{\"v\":1,\"id\":\"m1\",\"command\":{\"type\":\"prompt\"}}
+",
+            )
+            .await
+            .unwrap();
+        write.flush().await.unwrap();
+        let record = timeout(DEADLINE, reader.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let record: ServerRecord = serde_json::from_value(record).unwrap();
+        assert_eq!(record.id.as_deref(), Some("m1"));
+        assert!(matches!(
+            record.event,
+            ServerEvent::Rejected {
+                code: RejectCode::Malformed,
+                ..
+            }
+        ));
+
+        drop((write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
     }
 
     /// A multi-provider config resolves a model→provider route for each

@@ -9,6 +9,8 @@
 use localpilot_core::SessionId;
 use serde::{Deserialize, Serialize};
 
+use crate::approver::{AskOutcome, Principal};
+
 /// The current RPC protocol version. Version negotiation happens in `hello`:
 /// a client built for a newer version than this build receives a typed error
 /// rather than silently mismatched records.
@@ -24,6 +26,11 @@ pub const RPC_PROTOCOL_VERSION: u32 = 1;
 /// constant is a human-facing build string a bound connection can log or
 /// display — it coexists with the version handshake rather than replacing it.
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The attach capability that opts a connection into command acknowledgements
+/// (`accepted` / `queued` / `rejected`) and `permission_resolved` events. A
+/// client that does not declare it receives none of these record types.
+pub const CAPABILITY_ACKS: &str = "acks";
 
 /// One client-to-agent record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,7 +69,13 @@ pub enum ClientCommand {
     /// (one connection names its session once, then is bound to it). The server
     /// confirms with [`ServerEvent::Attached`]. The stdio drive is
     /// one-session-per-process and never uses this handshake.
-    Attach { target: AttachTarget },
+    Attach {
+        target: AttachTarget,
+        /// Optional protocol extensions this client understands (see
+        /// [`CAPABILITY_ACKS`]). Omitted by older clients.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+    },
 }
 
 /// Where a [`ClientCommand::Attach`] binds the connection: a brand-new session,
@@ -182,6 +195,19 @@ pub enum ServerEvent {
         tool: String,
         detail: String,
         risk: String,
+        /// When the ask expires unanswered, in milliseconds since the Unix
+        /// epoch. Zero (and omitted) from older servers.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        expires_at_ms: u64,
+    },
+    /// An ask ended: answered by a client, expired, or cancelled with its turn.
+    /// Sent to every attached client that declared [`CAPABILITY_ACKS`].
+    PermissionResolved {
+        ask_id: String,
+        outcome: AskOutcome,
+        /// Who answered; absent when the ask expired or was cancelled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Principal>,
     },
     /// Reply to `status`.
     Status {
@@ -191,10 +217,33 @@ pub enum ServerEvent {
         busy: bool,
         pending_asks: Vec<String>,
         next_step: Option<String>,
+        /// The pending asks with full detail, so a client that attached late
+        /// can render them. Empty (and omitted) from older servers.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        asks: Vec<AskDetail>,
     },
     /// Queued input was accepted with the given disposition.
     Queued {
         disposition: InputDisposition,
+    },
+    /// A command was accepted and is being acted on now. Sent only to clients
+    /// that declared [`CAPABILITY_ACKS`]. For a `cancel`,
+    /// `dropped_follow_ups` counts the queued follow-ups it discarded.
+    Accepted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dropped_follow_ups: Option<usize>,
+    },
+    /// The client fell behind and missed ask events. `asks` is the complete set
+    /// of asks pending now: show exactly these, and drop any other ask still
+    /// shown. Sent only to clients that declared [`CAPABILITY_ACKS`].
+    AsksResync {
+        asks: Vec<AskDetail>,
+    },
+    /// A command was refused; the connection stays open. Sent only to clients
+    /// that declared [`CAPABILITY_ACKS`] (others receive [`ServerEvent::Error`]).
+    Rejected {
+        code: RejectCode,
+        message: String,
     },
     /// A command could not be honored; the connection stays open.
     Error {
@@ -207,6 +256,47 @@ pub enum ServerEvent {
         name: String,
         count: u32,
     },
+}
+
+/// A pending permission ask with everything needed to render it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskDetail {
+    pub ask_id: String,
+    pub tool: String,
+    pub detail: String,
+    pub risk: String,
+    pub expires_at_ms: u64,
+}
+
+/// Why a command was rejected. A closed set: clients may match on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectCode {
+    /// A turn is already running; cancel it, steer, or send a follow-up.
+    Busy,
+    /// `cancel` with no turn running.
+    NoTurnRunning,
+    /// The follow-up queue is full.
+    QueueFull,
+    /// No such permission ask.
+    UnknownAsk,
+    /// The ask was already answered, expired, or cancelled.
+    AlreadyResolved,
+    /// The reply arrived after the ask's deadline.
+    Expired,
+    /// A second `attach` on a bound connection.
+    AlreadyAttached,
+    /// The session has been closed (reaped after inactivity); attach again to
+    /// resume it.
+    SessionClosed,
+    /// The record could not be parsed.
+    Malformed,
+    /// This server does not understand the command.
+    UnsupportedCommand,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// One plan step on the wire.
@@ -275,6 +365,7 @@ mod tests {
                 tool: "run_shell".to_string(),
                 detail: "rm -rf build".to_string(),
                 risk: "run a command".to_string(),
+                expires_at_ms: 1_700_000_000_000,
             },
         };
         let line = serde_json::to_string(&record).unwrap();
@@ -293,6 +384,7 @@ mod tests {
                 id: Some("a1".to_string()),
                 command: ClientCommand::Attach {
                     target: AttachTarget::OpenNew,
+                    capabilities: Vec::new(),
                 },
             },
             ClientRecord {
@@ -300,6 +392,7 @@ mod tests {
                 id: None,
                 command: ClientCommand::Attach {
                     target: AttachTarget::ResumeId { session_id: id },
+                    capabilities: Vec::new(),
                 },
             },
             ClientRecord {
@@ -309,6 +402,7 @@ mod tests {
                     target: AttachTarget::ResumeName {
                         name: "nightly".to_string(),
                     },
+                    capabilities: vec![CAPABILITY_ACKS.to_string()],
                 },
             },
         ];
@@ -324,6 +418,7 @@ mod tests {
         let id = localpilot_core::SessionId::new();
         let json = serde_json::to_value(ClientCommand::Attach {
             target: AttachTarget::ResumeId { session_id: id },
+            capabilities: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["type"], "attach");

@@ -57,6 +57,17 @@ running turn without waiting for it:
   `control(Control::{Cancel, Steer, Status})` dispatch maps a decoded control
   request onto these methods, ready for a transport to route control frames
   through.
+- **Admission and follow-ups.** `submit(text, queue_if_busy)` decides under one
+  short lock whether input starts a turn (`Admit::Started`), waits behind the
+  running turn as a follow-up (`Admit::Queued`, at most `FOLLOW_UP_CAPACITY` =
+  16), or is refused (`Admit::Busy`, `Admit::QueueFull`). Follow-ups run in
+  order, each as its own turn, once the running turn ends. `cancel_all()` (and
+  `cancel()`) cancels the running turn **and drops every waiting follow-up**,
+  including one already taken off the queue whose turn has not started: a Stop
+  means stop, not "start the next thing".
+- **Intervention audit.** `record_intervention(action, detail, client)` writes a
+  `DriverIntervention` to the session log, at once when no turn holds the
+  session, otherwise when the running turn ends (or the session is reaped).
 
 This is the library surface the `serve`/`connect` commands drive over the wire
 (see [Running the opt-in server](#running-the-opt-in-server-serve--connect)).
@@ -135,6 +146,57 @@ with `connect`, note the session id it prints, and attach another with
 turn's text, tool activity, and stop), and any of them can drive a turn, steer
 it, cancel it, or read `status`. In the plain-text client, a permission ask is
 answered by typing `/allow` or `/deny`; `Ctrl-C` cancels the running turn.
+
+**Permission asks belong to the session**, not to the connection whose prompt
+raised them. Every attached client is shown every ask — including a client that
+attaches after the ask was raised — and any of them may answer. The first
+answer wins; a later one is refused as already resolved. An ask outlives the
+client that started the turn, and with no client attached it still expires
+after 300 seconds and is denied. Answers, steers and cancels are recorded in
+the session log with who made them (today always `local`).
+
+**Acknowledgements are opt-in.** An `attach` may list `capabilities`. A client
+that declares `"acks"` gets:
+
+- `accepted` when a prompt starts a turn, a cancel lands (with
+  `dropped_follow_ups`, the queued follow-ups it discarded), or a permission
+  reply decides its ask; `queued` (`disposition: follow_up`) when a follow-up
+  waits behind the running turn;
+- `rejected` with a `code` from a closed set — `busy`, `no_turn_running`,
+  `queue_full`, `unknown_ask`, `already_resolved`, `expired`,
+  `already_attached`, `session_closed`, `malformed`, `unsupported_command` — and
+  a message. A record that cannot be parsed is rejected as `malformed` with its
+  `id` when the `id` itself was readable;
+- `permission_resolved` (`ask_id`, `outcome`: `allowed` / `denied` / `expired` /
+  `cancelled`, and `by` when a client answered) for every ask that ends;
+- `asks_resync` (`asks`: the complete pending set) when the connection fell
+  behind and missed ask events. Show exactly those asks and drop any other ask
+  still shown. Before it, the client gets `permission_resolved` for each shown
+  ask that ended, while the server still remembers the outcome; an outcome the
+  server no longer remembers is never invented.
+
+A client that declares nothing receives no record type it did not receive
+before: refusals stay `error` records, and there is no `accepted`, `rejected`
+or `permission_resolved`. Existing records gain only defaulted fields, per the
+additive-evolution rule above: `permission_ask` carries `expires_at_ms`, and
+`status` carries `asks` with each pending ask's tool, detail, risk and expiry.
+`connect` declares `acks`.
+
+```text
+→ {"v":1,"id":"1","command":{"type":"attach","target":{"mode":"resume_id","session_id":"…"},"capabilities":["acks"]}}
+← {"v":1,"id":"1","event":{"type":"attached","session_id":"…","server_version":"…"}}
+← {"v":1,"event":{"type":"permission_ask","ask_id":"ask-…","tool":"run_shell","detail":"cargo test","risk":"run a command","expires_at_ms":1761750000000}}
+→ {"v":1,"id":"2","command":{"type":"permission_reply","ask_id":"ask-…","allow":true}}
+← {"v":1,"id":"2","event":{"type":"accepted"}}
+← {"v":1,"event":{"type":"permission_resolved","ask_id":"ask-…","outcome":"allowed","by":{"kind":"local"}}}
+```
+
+A `follow_up` prompt sent while a turn runs is queued on the server and runs
+next as its own turn (at most 16 wait; `cancel` drops them). Earlier servers
+refused it while busy. Accepted input counts as busy in `status` from the
+moment it is accepted, and the idle-session reaper never closes a session with
+accepted or queued work; once the reaper closes a session, input still sent on
+an old connection is rejected as `session_closed`.
 
 Under the hood each connection sends one `attach` (open-new / resume-by-id /
 resume-by-name), the server confirms with `attached`, and the connection is

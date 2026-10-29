@@ -2,6 +2,52 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0239: Permission Asks Belong To The Served Session, And Clients Opt Into Acknowledgements
+
+**Status:** accepted · **Date:** 2026-10-29. Amends ADR-0123 (per-client ask routing deferred).
+
+**Context.** On `localpilot serve`, a session's permission asks went only to the
+connection that created the session. Another attached client's reply was an
+error, and when that first connection went away every later ask was denied. A
+`follow_up` prompt was refused while a turn ran, although the protocol describes
+it as queued. A client could not tell an accepted command from one the server
+silently acted on, and the server path recorded no interventions (the MCP path
+does).
+
+**Decision.**
+
+1. Asks belong to the session. The ask registry is kept beside the session host;
+   every attached connection is shown every ask, including the outstanding ones
+   when it attaches, and any connection may answer.
+2. Every way an ask ends (a reply, the 300 s deadline, the turn dropping the ask)
+   is one transition under the registry lock, so exactly one wins. A reply at or
+   after the deadline expires the ask. The approver reads the winner; it never
+   decides on its own. With no client attached the deadline still denies.
+3. The registry publishes raised and resolved asks on its own broadcast;
+   connections subscribe to it separately from the session's event stream, so
+   attach counts and the reaper are unchanged. A connection that falls behind
+   drops the stale backlog, rereads the registry and receives the remembered
+   outcomes of asks it showed, then `asks_resync` with the full pending set; no
+   outcome is invented for an ask the registry has forgotten.
+4. Admission is one short lock on the host: input starts a turn, waits as a
+   follow-up (FIFO, at most 16), or is refused as busy. Cancel stops the turn and
+   drops every waiting follow-up, including one taken off the queue whose turn
+   has not started. Accepted or queued input counts as busy; the reaper closes
+   admission under the runtime lock before it persists a session and skips one
+   with admitted work, so nothing starts on a session that is going away.
+5. Acknowledgements are opt-in: an `attach` declaring the `acks` capability gets
+   `accepted`, `rejected` (a closed set of codes) and `permission_resolved`.
+   Other clients get no new record types; existing records gain only defaulted
+   fields. `RPC_PROTOCOL_VERSION` stays 1.
+6. Answers, steers and cancels are recorded as `DriverIntervention` events with a
+   principal. `Principal::Local` is the only principal until paired devices
+   exist.
+
+**Consequences.** Several local clients can share one session's approvals
+safely, and a client can render an ask it never saw raised. A legacy client
+keeps working unchanged. Not done: per-device principals and scopes, event
+sequence numbers and replay on reconnect, and command idempotency keys.
+
 ## ADR-0238: A Created File Has Its Own Allowance In The Work Envelope, And The User Can Switch The Envelope Off
 
 **Status:** accepted · **Date:** 2026-10-28.

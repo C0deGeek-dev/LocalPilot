@@ -29,12 +29,21 @@
 //! The std mutex guarding the turn token is only ever held for a trivial
 //! read/assign and is always dropped before any `.await`, so it never blocks a
 //! turn and never trips `clippy::await_holding_lock`.
+//!
+//! **Admission** ([`submit`](SessionHost::submit)) decides, under one short std
+//! mutex, whether input starts a turn, joins the bounded follow-up queue, or is
+//! refused because a turn is running. The loop that drives admitted turns pops
+//! the next follow-up under that same lock, so starting, queueing and draining
+//! never race each other, and [`cancel`](SessionHost::cancel) can reach a
+//! follow-up that was popped but whose turn has not published its token yet.
 
-use std::sync::{Mutex, PoisonError};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use localpilot_core::{SessionId, TokenUsage};
-use localpilot_harness::{RuntimeEvent, SoftInterrupt, SteerQueue, StopReason};
+use localpilot_harness::{RuntimeEvent, SessionRuntime, SoftInterrupt, SteerQueue, StopReason};
+use localpilot_store::SessionEventKind;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -45,6 +54,45 @@ use crate::registry::SessionHandle;
 /// anyway observes [`broadcast::error::RecvError::Lagged`] and resynchronises
 /// rather than stalling the turn.
 const EVENT_CAPACITY: usize = 1024;
+
+/// How many follow-ups may wait behind a running turn.
+pub const FOLLOW_UP_CAPACITY: usize = 16;
+
+/// Admission state: whether the admission loop is driving turns, the
+/// follow-ups waiting for it, and the token of a follow-up it has popped but
+/// not yet started.
+#[derive(Default)]
+struct Admission {
+    running: bool,
+    follow_ups: VecDeque<String>,
+    starting: Option<CancellationToken>,
+    /// Set once by the reaper: the session is being closed and admits nothing.
+    closed: bool,
+}
+
+/// What [`SessionHost::submit`] did with the input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    /// The session was idle; a turn is starting now.
+    Started,
+    /// A turn is running; the input waits as a follow-up.
+    Queued,
+    /// A turn is running and the input asked to run now.
+    Busy,
+    /// A turn is running and the follow-up queue is full.
+    QueueFull,
+    /// The session has been closed and admits no more input.
+    Closed,
+}
+
+/// What [`SessionHost::cancel_all`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled {
+    /// A turn was running, or about to start, and was cancelled.
+    pub turn: bool,
+    /// Follow-ups that were waiting and will not run.
+    pub dropped_follow_ups: usize,
+}
 
 /// A per-session host giving multiple clients a shared event stream and
 /// lock-free out-of-band control over the in-flight turn.
@@ -72,6 +120,12 @@ pub struct SessionHost {
     /// measure idle time. Guarded by a std mutex held only for a trivial
     /// read/assign, never across an `.await`.
     last_active: Mutex<Instant>,
+    /// Admission state for [`submit`](Self::submit). Guarded by a std mutex held
+    /// only for short reads/assignments, never across an `.await`.
+    admission: Mutex<Admission>,
+    /// Client interventions (steer, cancel, permission answers) waiting to be
+    /// written to the session log, which needs the runtime mutex.
+    interventions: Mutex<Vec<SessionEventKind>>,
     /// The hosted session's id, read once at construction.
     id: SessionId,
 }
@@ -109,6 +163,8 @@ impl SessionHost {
             steer,
             turn_cancel: Mutex::new(None),
             last_active: Mutex::new(Instant::now()),
+            admission: Mutex::new(Admission::default()),
+            interventions: Mutex::new(Vec::new()),
             id,
         }
     }
@@ -165,14 +221,22 @@ impl SessionHost {
     /// the runtime scopes the capture to the turn) never a stale prior message
     /// when this turn produced no assistant text.
     pub(crate) async fn drive_captured(&self, input: &str) -> DriveCapture {
+        self.drive_with(input, CancellationToken::new()).await
+    }
+
+    /// [`drive_captured`](Self::drive_captured) with a caller-made token, so an
+    /// admitted turn can be cancelled before it publishes the token itself.
+    async fn drive_with(&self, input: &str, token: CancellationToken) -> DriveCapture {
         self.touch();
-        let token = CancellationToken::new();
         // Acquire the runtime mutex first, then publish this turn's token, so the
         // slot always names the turn that actually holds the mutex (a concurrent
         // `drive` waiting on the lock cannot clobber the running turn's token).
         let mut runtime = self.runtime.lock().await;
         self.set_turn_token(Some(token.clone()));
+        self.admission().starting = None;
+        self.flush_interventions(&mut runtime);
         let reason = runtime.run_turn(input, &self.events, &token).await;
+        self.flush_interventions(&mut runtime);
         let assistant_text = runtime.current_turn_assistant_text();
         let usage = runtime.current_turn_usage();
         self.set_turn_token(None);
@@ -183,25 +247,161 @@ impl SessionHost {
         }
     }
 
+    /// Admit user input without taking the runtime mutex.
+    ///
+    /// When the session is idle the input starts a turn on its own task, and
+    /// every follow-up queued behind it runs after it in order. When a turn is
+    /// running, a follow-up (`queue_if_busy`) waits in a bounded queue and
+    /// anything else is refused as [`Admit::Busy`]. Events from every admitted
+    /// turn reach all attached clients through the host broadcast.
+    pub fn submit(self: &Arc<Self>, text: String, queue_if_busy: bool) -> Admit {
+        let token = {
+            let mut admission = self.admission();
+            if admission.closed {
+                return Admit::Closed;
+            }
+            // Lock order: admission, then the turn-token slot. Nothing takes
+            // them the other way round while holding both.
+            if admission.running || self.turn_in_flight() {
+                if !queue_if_busy {
+                    return Admit::Busy;
+                }
+                if admission.follow_ups.len() >= FOLLOW_UP_CAPACITY {
+                    return Admit::QueueFull;
+                }
+                admission.follow_ups.push_back(text);
+                if !admission.running {
+                    // A turn driven outside admission is running: start the
+                    // loop so the follow-up runs once that turn releases the
+                    // session.
+                    admission.running = true;
+                    let token = CancellationToken::new();
+                    admission.starting = Some(token.clone());
+                    let next = admission.follow_ups.pop_front();
+                    drop(admission);
+                    if let Some(next) = next {
+                        self.spawn_admitted(next, token);
+                    }
+                }
+                return Admit::Queued;
+            }
+            admission.running = true;
+            let token = CancellationToken::new();
+            admission.starting = Some(token.clone());
+            token
+        };
+        self.spawn_admitted(text, token);
+        Admit::Started
+    }
+
+    /// Drive `text`, then each queued follow-up, until the queue is empty.
+    fn spawn_admitted(self: &Arc<Self>, text: String, token: CancellationToken) {
+        let host = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut next = Some((text, token));
+            while let Some((text, token)) = next.take() {
+                // A follow-up cancelled between being popped and starting never
+                // runs; `cancel_all` counted it as dropped.
+                if !token.is_cancelled() {
+                    host.drive_with(&text, token).await;
+                }
+                let mut admission = host.admission();
+                admission.starting = None;
+                match admission.follow_ups.pop_front() {
+                    Some(text) => {
+                        let token = CancellationToken::new();
+                        admission.starting = Some(token.clone());
+                        next = Some((text, token));
+                    }
+                    None => admission.running = false,
+                }
+            }
+        });
+    }
+
     /// Cancel the in-flight turn, if any, without taking the runtime mutex.
     ///
-    /// Returns `true` if a turn was in flight (a token was published), `false`
-    /// when idle. Cancelling is a one-way signal the running turn observes at
-    /// its next cancellation check — a safe boundary or an executing tool, both
-    /// of which race the token — so this returns promptly even while
-    /// [`drive`](Self::drive) holds the runtime mutex.
+    /// Returns `true` if a turn was in flight or about to start, `false` when
+    /// idle. Waiting follow-ups are dropped too (see
+    /// [`cancel_all`](Self::cancel_all)). Cancelling is a one-way signal the
+    /// running turn observes at its next cancellation check — a safe boundary
+    /// or an executing tool, both of which race the token — so this returns
+    /// promptly even while [`drive`](Self::drive) holds the runtime mutex.
     pub fn cancel(&self) -> bool {
+        self.cancel_all().turn
+    }
+
+    /// Cancel the in-flight turn and drop every waiting follow-up. A Stop means
+    /// stop: queued work does not start the moment the cancelled turn ends.
+    pub fn cancel_all(&self) -> Cancelled {
+        let (starting, dropped_follow_ups) = {
+            let mut admission = self.admission();
+            let dropped = admission.follow_ups.len();
+            admission.follow_ups.clear();
+            (admission.starting.take(), dropped)
+        };
+        let mut turn = false;
+        if let Some(token) = starting {
+            token.cancel();
+            turn = true;
+        }
         let guard = self
             .turn_cancel
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        match guard.as_ref() {
-            Some(token) => {
-                token.cancel();
-                true
-            }
-            None => false,
+        if let Some(token) = guard.as_ref() {
+            token.cancel();
+            turn = true;
         }
+        Cancelled {
+            turn,
+            dropped_follow_ups,
+        }
+    }
+
+    /// How many follow-ups are waiting behind the running turn.
+    #[must_use]
+    pub fn queued_follow_ups(&self) -> usize {
+        self.admission().follow_ups.len()
+    }
+
+    /// Record a client intervention in the session log, attributed to
+    /// `client`. Written at once when no turn holds the runtime; otherwise
+    /// kept until the running turn ends (or the session is reaped).
+    pub fn record_intervention(&self, action: &str, detail: String, client: &str) {
+        let activity = self.is_busy().then(|| "turn running".to_string());
+        self.interventions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(SessionEventKind::DriverIntervention {
+                action: action.to_string(),
+                detail,
+                activity,
+                client: client.to_string(),
+            });
+        if let Ok(mut runtime) = self.runtime.try_lock() {
+            self.flush_interventions(&mut runtime);
+        }
+    }
+
+    /// Write every waiting intervention to the session log. The caller holds
+    /// the runtime.
+    pub fn flush_interventions(&self, runtime: &mut SessionRuntime) {
+        let waiting = std::mem::take(
+            &mut *self
+                .interventions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for kind in waiting {
+            runtime.record_event(kind);
+        }
+    }
+
+    fn admission(&self) -> std::sync::MutexGuard<'_, Admission> {
+        self.admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Steer the in-flight (or next) turn without taking the runtime mutex.
@@ -227,18 +427,36 @@ impl SessionHost {
         self.steer.push_interrupt(interrupt);
     }
 
-    /// Whether a turn is in flight, read without blocking on it.
+    /// Whether the session has work: a turn in flight, or admitted input that
+    /// is about to start or waiting behind it. Read without blocking on a turn.
     ///
-    /// This reads the short turn-token slot, so it never contends the runtime
-    /// mutex a running turn holds — a strictly non-blocking status read (a
-    /// `try_lock` on the runtime would report the same "held" state, but this
-    /// never so much as reaches for that lock).
+    /// This reads the short admission and turn-token slots (one at a time), so
+    /// it never contends the runtime mutex a running turn holds — a strictly
+    /// non-blocking status read.
     #[must_use]
     pub fn is_busy(&self) -> bool {
+        self.admission().running || self.turn_in_flight()
+    }
+
+    /// Whether a turn has published its token (is actually running).
+    fn turn_in_flight(&self) -> bool {
         self.turn_cancel
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .is_some()
+    }
+
+    /// Stop admitting input so the session can be closed. Returns `false`, and
+    /// changes nothing, when admitted work is running or waiting: such a
+    /// session must not be closed. Once this returns `true`, every later
+    /// [`submit`](Self::submit) is refused as [`Admit::Closed`].
+    pub fn close_admission(&self) -> bool {
+        let mut admission = self.admission();
+        if admission.running || self.turn_in_flight() {
+            return false;
+        }
+        admission.closed = true;
+        true
     }
 
     /// The instant of this session's most recent activity — its creation, or the

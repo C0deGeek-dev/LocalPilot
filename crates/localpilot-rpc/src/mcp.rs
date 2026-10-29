@@ -696,12 +696,7 @@ fn events_result(state: &McpState, busy: bool, page: Vec<Value>) -> Value {
 }
 
 fn ask_event(ask: &PendingAsk) -> ServerEvent {
-    ServerEvent::PermissionAsk {
-        ask_id: ask.ask_id.clone(),
-        tool: ask.tool.clone(),
-        detail: ask.detail.clone(),
-        risk: ask.risk.clone(),
-    }
+    ask.wire_event()
 }
 
 fn prompt_text(args: &Value) -> Result<String, String> {
