@@ -888,6 +888,7 @@ where
         &mut write,
         reply_id,
         ServerEvent::Attached {
+            capabilities: server_capabilities(),
             instance: hosts.requests.instance().to_string(),
             session_id,
             server_version: SERVER_VERSION.to_string(),
@@ -899,6 +900,7 @@ where
         },
     )
     .await?;
+    let server_ctx = ServerContext { hosts, store };
     let feed_ctx = FeedContext {
         feed: &served.feed,
         store,
@@ -997,6 +999,7 @@ where
                                 &profile_label,
                                 served.asks.as_ref(),
                                 acks,
+                                &server_ctx,
                                 &mut reply,
                             )
                             .await;
@@ -1034,6 +1037,7 @@ where
                     &profile_label,
                     served.asks.as_ref(),
                     acks,
+                    &server_ctx,
                     &mut write,
                 )
                 .await?;
@@ -1107,6 +1111,7 @@ fn retry_key(value: &serde_json::Value) -> Option<RetryKey> {
         ClientCommand::Prompt { .. }
             | ClientCommand::Cancel
             | ClientCommand::PermissionReply { .. }
+            | ClientCommand::RunCommand { .. }
     );
     if !mutating || record.v > RPC_PROTOCOL_VERSION {
         return None;
@@ -1286,6 +1291,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
     profile_label: &str,
     asks: Option<&AskRegistry>,
     acks: bool,
+    server: &ServerContext<'_>,
     write: &mut W,
 ) -> anyhow::Result<bool> {
     // Keep the correlation id of a record that fails to parse, when it has a
@@ -1329,6 +1335,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                     protocol_version: RPC_PROTOCOL_VERSION,
                     session_id: session_id.to_string(),
                     model: model.to_string(),
+                    capabilities: server_capabilities(),
                 },
             )
             .await?;
@@ -1490,6 +1497,23 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             emit(write, id, ServerEvent::Closed).await?;
             return Ok(true);
         }
+        ClientCommand::Commands => {
+            emit(
+                write,
+                id,
+                ServerEvent::Commands {
+                    items: remote_commands(),
+                },
+            )
+            .await?;
+        }
+        ClientCommand::Sessions => {
+            let items = list_sessions(server).await;
+            emit(write, id, ServerEvent::Sessions { items }).await?;
+        }
+        ClientCommand::RunCommand { name, args } => {
+            run_command(write, id, host, session_id, server, acks, &name, &args).await?;
+        }
         ClientCommand::Attach { .. } => {
             reject(
                 write,
@@ -1514,6 +1538,230 @@ async fn handle_command<W: AsyncWrite + Unpin>(
         }
     }
     Ok(false)
+}
+
+/// What `handle_command` needs from the server beyond the session itself.
+struct ServerContext<'a> {
+    hosts: &'a HostMap,
+    store: &'a Store,
+}
+
+/// Sessions listed by `sessions`, at most.
+const SESSIONS_LISTED: usize = 50;
+
+/// The opt-ins a served session implements, for `attached` and `hello`.
+fn server_capabilities() -> Vec<String> {
+    localpilot_rpc::SERVER_CAPABILITIES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+/// The slash commands a remote client may run, with their argument shape and
+/// the device scope they need.
+fn remote_commands() -> Vec<localpilot_rpc::CommandInfo> {
+    localpilot_slash::specs_for(localpilot_slash::Host::Remote)
+        .into_iter()
+        .map(|(name, description)| {
+            let args = match localpilot_slash::lookup(name).map(|spelling| spelling.args) {
+                Some(localpilot_slash::ArgSpec::Required) => "required",
+                Some(localpilot_slash::ArgSpec::Optional) => "optional",
+                _ => "none",
+            };
+            localpilot_rpc::CommandInfo {
+                name: name.to_string(),
+                description: description.to_string(),
+                args: args.to_string(),
+                scope: "control".to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The workspace's sessions: every live one first (never pushed out by
+/// history), then stored ones by most recent update, each id once, at most
+/// [`SESSIONS_LISTED`] in all (live ones are always included).
+async fn list_sessions(server: &ServerContext<'_>) -> Vec<localpilot_rpc::SessionInfo> {
+    let live: Vec<SessionId> = server.hosts.inner.lock().await.keys().copied().collect();
+    let mut stored = server.store.list_sessions().unwrap_or_default();
+    stored.sort_by(|a, b| b.updated_unix.cmp(&a.updated_unix));
+    let mut items: Vec<localpilot_rpc::SessionInfo> = live
+        .iter()
+        .map(|id| {
+            let entry = stored.iter().find(|entry| entry.id == *id);
+            localpilot_rpc::SessionInfo {
+                id: *id,
+                name: entry.and_then(|entry| entry.name.clone()),
+                live: true,
+                message_count: entry.map_or(0, |entry| entry.message_count),
+                updated_unix: entry.map_or(0, |entry| entry.updated_unix),
+            }
+        })
+        .collect();
+    for entry in stored {
+        if items.len() >= SESSIONS_LISTED.max(live.len()) {
+            break;
+        }
+        if live.contains(&entry.id) {
+            continue;
+        }
+        items.push(localpilot_rpc::SessionInfo {
+            id: entry.id,
+            name: entry.name,
+            live: false,
+            message_count: entry.message_count,
+            updated_unix: entry.updated_unix,
+        });
+    }
+    items
+}
+
+/// Run one advertised slash command against the session. It needs the
+/// session to itself, so it runs only when no turn is running or admitted;
+/// an unknown command or bad arguments are refused and never become a prompt.
+#[allow(clippy::too_many_arguments)] // one command's whole context
+async fn run_command<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    id: Option<String>,
+    host: &Arc<SessionHost>,
+    session_id: &SessionId,
+    server: &ServerContext<'_>,
+    acks: bool,
+    name: &str,
+    args: &str,
+) -> std::io::Result<()> {
+    // The name must be exactly one advertised command: arguments travel only in
+    // `args`, so a name like "compact force" is refused rather than parsed.
+    let advertised = localpilot_slash::specs_for(localpilot_slash::Host::Remote)
+        .iter()
+        .any(|(spelling, _)| *spelling == name);
+    if !advertised {
+        return reject(
+            write,
+            id,
+            acks,
+            RejectCode::UnknownCommand,
+            format!(
+                "`{name}` is not a command a remote client can run; send `commands` to list them"
+            ),
+        )
+        .await;
+    }
+    let line = if args.trim().is_empty() {
+        format!("/{name}")
+    } else {
+        format!("/{name} {}", args.trim())
+    };
+    let action = localpilot_slash::parse_slash_for(localpilot_slash::Host::Remote, &line);
+    let action = match action {
+        Some(localpilot_slash::SlashAction::Unknown(_)) | None => {
+            return reject(
+                write,
+                id,
+                acks,
+                RejectCode::UnknownCommand,
+                format!("`{name}` is not a command a remote client can run; send `commands` to list them"),
+            )
+            .await;
+        }
+        Some(localpilot_slash::SlashAction::Invalid { reason, .. }) => {
+            return reject(write, id, acks, RejectCode::InvalidArguments, reason).await;
+        }
+        Some(action) => action,
+    };
+    let Some(reservation) = host.reserve_command() else {
+        return reject(
+            write,
+            id,
+            acks,
+            RejectCode::Busy,
+            "the session is busy; run the command when no turn is running".to_string(),
+        )
+        .await;
+    };
+    let outcome = {
+        let mut runtime = reservation.runtime().await;
+        let outcome = match &action {
+            localpilot_slash::SlashAction::Compact { force } => {
+                let result = if *force {
+                    runtime.compact_conversation_force().await
+                } else {
+                    runtime.compact_conversation().await
+                };
+                Ok(if result.compacted {
+                    format!(
+                        "compacted the context to {} of {} tokens",
+                        result.context_used, result.context_limit
+                    )
+                } else {
+                    format!(
+                        "nothing to compact: the context uses {} of {} tokens",
+                        result.context_used, result.context_limit
+                    )
+                })
+            }
+            localpilot_slash::SlashAction::Clear => {
+                runtime.clear_conversation();
+                Ok(
+                    "the model starts on an empty context; the stored transcript is kept"
+                        .to_string(),
+                )
+            }
+            localpilot_slash::SlashAction::NameSession(new_name) => server
+                .store
+                .set_session_name(*session_id, new_name)
+                .map(|()| format!("named this session \"{}\"", new_name.trim()))
+                .map_err(|error| (RejectCode::InvalidArguments, error.to_string())),
+            localpilot_slash::SlashAction::SetEffort(level) => {
+                match localpilot_llm::ReasoningEffort::parse(level.trim()) {
+                    Some(effort) => {
+                        runtime.set_reasoning_effort(Some(effort));
+                        Ok(format!("reasoning effort set to {}", level.trim()))
+                    }
+                    None => Err((
+                        RejectCode::InvalidArguments,
+                        "reasoning effort is one of minimal, low, medium, high".to_string(),
+                    )),
+                }
+            }
+            _ => Err((
+                RejectCode::UnknownCommand,
+                format!("`{name}` cannot run on a served session"),
+            )),
+        };
+        if outcome.is_ok()
+            && matches!(
+                action,
+                localpilot_slash::SlashAction::Compact { .. }
+                    | localpilot_slash::SlashAction::Clear
+            )
+        {
+            // New context usage reaches every client through the session's
+            // own ordered stream.
+            let (used, limit) = runtime.context_usage();
+            host.publish(localpilot_harness::RuntimeEvent::ContextUsage { used, limit });
+        }
+        outcome
+    };
+    drop(reservation);
+    match outcome {
+        Ok(message) => {
+            host.record_intervention("command", line.clone(), Principal::Local.label());
+            if acks {
+                emit(
+                    write,
+                    id,
+                    ServerEvent::CommandResult {
+                        name: name.to_string(),
+                        message,
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        Err((code, message)) => reject(write, id, acks, code, message).await,
+    }
 }
 
 /// Acknowledge a command that is being acted on now (`acks` clients only).
@@ -3596,6 +3844,245 @@ mod tests {
 
         drop((write1, reader1, write2, reader2));
         let _ = timeout(DEADLINE, server).await;
+    }
+
+    // --- discovery and typed slash commands -----------------------------------
+
+    fn run(name: &str, args: &str) -> ClientCommand {
+        ClientCommand::RunCommand {
+            name: name.to_string(),
+            args: args.to_string(),
+        }
+    }
+
+    /// The first record that answers correlation id `id`.
+    async fn reply_to(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        id: &str,
+    ) -> ServerEvent {
+        loop {
+            let record = next_record_within(reader, DEADLINE)
+                .await
+                .expect("a reply arrived");
+            if record.id.as_deref() == Some(id) {
+                return record.event;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_catalogue_lists_only_remote_commands_with_their_scope() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let (endpoint, server) = spawn_server(factory, 1);
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        send_command(
+            &mut write,
+            ClientCommand::Attach {
+                target: AttachTarget::OpenNew,
+                capabilities: acks(),
+                since: None,
+            },
+        )
+        .await
+        .unwrap();
+        match read_event(&mut reader).await {
+            ServerEvent::Attached { capabilities, .. } => {
+                assert_eq!(capabilities, ["acks", "resume", "retry", "commands"]);
+            }
+            other => panic!("expected `attached`, got {other:?}"),
+        }
+
+        send_with_id(&mut write, "c1", ClientCommand::Commands).await;
+        match reply_to(&mut reader, "c1").await {
+            ServerEvent::Commands { items } => {
+                let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+                assert_eq!(names, ["effort", "name", "rename", "clear", "compact"]);
+                assert!(items.iter().all(|item| item.scope == "control"));
+                let shape = |name: &str| {
+                    items
+                        .iter()
+                        .find(|item| item.name == name)
+                        .map(|item| item.args.clone())
+                        .unwrap()
+                };
+                assert_eq!(shape("clear"), "none");
+                assert_eq!(shape("compact"), "optional");
+                assert_eq!(shape("name"), "required");
+                assert!(!names.contains(&"bypass") && !names.contains(&"model"));
+            }
+            other => panic!("expected `commands`, got {other:?}"),
+        }
+
+        drop((write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_remote_command_changes_session_state_and_unknown_ones_never_reach_the_model() {
+        // The provider answers one turn at most: any command that leaked into
+        // a prompt would start a turn the watcher sees.
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let (endpoint, server) = spawn_server(factory, 2);
+
+        let (read0, mut write0) = tokio::io::split(dial(&endpoint).await);
+        let mut watcher = JsonRecordReader::new(read0);
+        let (id, _) = attach_resume(&mut watcher, &mut write0, AttachTarget::OpenNew, None).await;
+        read_event(&mut watcher).await; // initial snapshot
+
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        attach_client_with(
+            &mut reader,
+            &mut write,
+            AttachTarget::ResumeId { session_id: id },
+            acks(),
+        )
+        .await;
+
+        // Naming the session changes what `sessions` reports.
+        send_with_id(&mut write, "n1", run("name", "nightly")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "n1").await,
+            ServerEvent::CommandResult { name, .. } if name == "name"
+        ));
+        send_with_id(&mut write, "s1", ClientCommand::Sessions).await;
+        match reply_to(&mut reader, "s1").await {
+            ServerEvent::Sessions { items } => {
+                let this = items.iter().find(|item| item.id == id).unwrap();
+                assert!(this.live);
+                assert_eq!(this.name.as_deref(), Some("nightly"));
+                assert_eq!(items[0].id, id, "live sessions come first");
+            }
+            other => panic!("expected `sessions`, got {other:?}"),
+        }
+
+        // Clearing reports new context usage to every client.
+        send_with_id(&mut write, "c1", run("clear", "")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "c1").await,
+            ServerEvent::CommandResult { .. }
+        ));
+        let usage = read_records_until(&mut watcher, |event| {
+            matches!(event, ServerEvent::ContextUsage { .. })
+        })
+        .await;
+        assert!(
+            usage.last().unwrap().seq.is_some(),
+            "through the numbered feed"
+        );
+
+        // Unknown, local-only and malformed commands are refused, and the name
+        // field cannot smuggle arguments.
+        for (rid, command, code) in [
+            ("u4", run("compact force", ""), RejectCode::UnknownCommand),
+            ("u5", run("name nightly", ""), RejectCode::UnknownCommand),
+            ("u6", run("/clear", ""), RejectCode::UnknownCommand),
+            ("u1", run("bypass", ""), RejectCode::UnknownCommand),
+            ("u2", run("nope", "x"), RejectCode::UnknownCommand),
+            ("u3", run("effort", "extreme"), RejectCode::InvalidArguments),
+        ] {
+            send_with_id(&mut write, rid, command).await;
+            match reply_to(&mut reader, rid).await {
+                ServerEvent::Rejected { code: got, .. } => assert_eq!(got, code, "{rid}"),
+                other => panic!("{rid}: expected a rejection, got {other:?}"),
+            }
+        }
+        // None of it started a turn.
+        let mut started = false;
+        while let Some(record) = next_record_within(&mut watcher, Duration::from_millis(300)).await
+        {
+            started |= record.event == ServerEvent::TurnStarted;
+        }
+        assert!(!started, "no command reached the model as a prompt");
+
+        drop((write0, watcher, write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_remote_command_waits_for_no_turn_and_is_refused_while_busy() {
+        let factory = Arc::new(FakeFactory::asking(asking_provider(&[])));
+        let (endpoint, server) = spawn_server(factory, 1);
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        attach_client_with(&mut reader, &mut write, AttachTarget::OpenNew, acks()).await;
+        send_with_id(&mut write, "p1", prompt("clean up")).await;
+        // The turn parks on its ask, holding the session.
+        let ask = ask_id_of(&read_until(&mut reader, is_ask).await);
+
+        send_with_id(&mut write, "k1", run("compact", "")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "k1").await,
+            ServerEvent::Rejected {
+                code: RejectCode::Busy,
+                ..
+            }
+        ));
+
+        send_with_id(
+            &mut write,
+            "r1",
+            ClientCommand::PermissionReply {
+                ask_id: ask,
+                allow: false,
+            },
+        )
+        .await;
+        read_until(&mut reader, is_stop).await;
+        drop((write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_legacy_client_running_a_command_gets_only_known_records() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let (endpoint, server) = spawn_server(factory, 1);
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        attach_client(&mut reader, &mut write, AttachTarget::OpenNew).await;
+
+        send_with_id(&mut write, "c1", run("clear", "")).await;
+        send_with_id(&mut write, "u1", run("bypass", "")).await;
+        match reply_to(&mut reader, "u1").await {
+            ServerEvent::Error { .. } => {}
+            other => panic!("a legacy refusal is an `error`, got {other:?}"),
+        }
+        drop((write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_retried_remote_command_runs_once() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let (endpoint, server) = spawn_server(factory, 1);
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        let (_, instance) =
+            attach_for_retries(&mut reader, &mut write, AttachTarget::OpenNew).await;
+
+        send_keyed(&mut write, "n1", &instance, 1, run("name", "first")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "n1").await,
+            ServerEvent::CommandResult { .. }
+        ));
+        // The same request under a new id replays; a new number with another
+        // payload runs.
+        send_keyed(&mut write, "n1-again", &instance, 1, run("name", "first")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "n1-again").await,
+            ServerEvent::CommandResult { .. }
+        ));
+        send_keyed(&mut write, "n1-other", &instance, 1, run("name", "second")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "n1-other").await,
+            ServerEvent::Rejected {
+                code: RejectCode::IdReused,
+                ..
+            }
+        ));
+        drop((write, reader));
+        timeout(DEADLINE, server).await.unwrap().unwrap();
     }
 
     // --- the plain-text client renderer --------------------------------------

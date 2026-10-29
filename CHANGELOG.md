@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A served session can be discovered and driven without a terminal. `commands`
+  lists the slash commands a remote client may run (`compact`, `clear`, `name`,
+  `effort`, with their arguments and the scope they need), `sessions` lists live
+  and recent sessions, `attached`/`hello` advertise the server's capabilities, and
+  `run_command {name, args}` runs one of those commands while no turn runs. Unknown
+  or local-only commands are refused and never sent to the model (ADR-0242).
 - Mutating commands on a served session can be retried safely. A `prompt`,
   `cancel` or `permission_reply` carrying `request: {instance, client, n}` runs at
   most once: a retry gets the original reply, a reused number with another command

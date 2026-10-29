@@ -68,6 +68,8 @@ struct Admission {
     starting: Option<CancellationToken>,
     /// Set once by the reaper: the session is being closed and admits nothing.
     closed: bool,
+    /// A session command (compact, clear, …) holds the session exclusively.
+    command: bool,
 }
 
 /// What [`SessionHost::submit`] did with the input.
@@ -263,6 +265,11 @@ impl SessionHost {
             if admission.closed {
                 return Admit::Closed;
             }
+            if admission.command {
+                // A session command owns the session; nothing is admitted
+                // until it finishes.
+                return Admit::Busy;
+            }
             // Lock order: admission, then the turn-token slot. Nothing takes
             // them the other way round while holding both.
             if admission.running || self.turn_in_flight() {
@@ -438,7 +445,35 @@ impl SessionHost {
     /// non-blocking status read.
     #[must_use]
     pub fn is_busy(&self) -> bool {
-        self.admission().running || self.turn_in_flight()
+        let busy = {
+            let admission = self.admission();
+            admission.running || admission.command
+        };
+        busy || self.turn_in_flight()
+    }
+
+    /// Reserve the session for one command that needs the runtime while no
+    /// turn runs (compacting or clearing the context, say). Decided under the
+    /// admission lock that [`submit`](Self::submit) and
+    /// [`close_admission`](Self::close_admission) use, so a reserved command
+    /// never overlaps admitted work, the reaper never closes the session under
+    /// it, and input arriving meanwhile is refused as busy. `None` when the
+    /// session has work, another command runs, or it is closed. Dropping the
+    /// reservation (also when its future is cancelled) releases the session.
+    pub fn reserve_command(&self) -> Option<CommandReservation<'_>> {
+        let mut admission = self.admission();
+        if admission.closed || admission.running || admission.command || self.turn_in_flight() {
+            return None;
+        }
+        admission.command = true;
+        Some(CommandReservation { host: self })
+    }
+
+    /// Deliver an event to every subscriber, as if the session had emitted it.
+    /// For hosts reporting the effect of a session command (new context usage
+    /// after a compaction) in the same ordered stream as turn events.
+    pub fn publish(&self, event: RuntimeEvent) {
+        let _ = self.events.send(event);
     }
 
     /// Whether a turn has published its token (is actually running).
@@ -455,7 +490,7 @@ impl SessionHost {
     /// [`submit`](Self::submit) is refused as [`Admit::Closed`].
     pub fn close_admission(&self) -> bool {
         let mut admission = self.admission();
-        if admission.running || self.turn_in_flight() {
+        if admission.running || admission.command || self.turn_in_flight() {
             return false;
         }
         admission.closed = true;
@@ -517,6 +552,26 @@ impl SessionHost {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         *guard = token;
+    }
+}
+
+/// Exclusive use of a session for one command; see
+/// [`SessionHost::reserve_command`].
+pub struct CommandReservation<'a> {
+    host: &'a SessionHost,
+}
+
+impl CommandReservation<'_> {
+    /// The session's runtime. No admitted turn can hold it while the
+    /// reservation lives; a turn driven outside admission is waited for.
+    pub async fn runtime(&self) -> tokio::sync::MutexGuard<'_, SessionRuntime> {
+        self.host.runtime.lock().await
+    }
+}
+
+impl Drop for CommandReservation<'_> {
+    fn drop(&mut self) {
+        self.host.admission().command = false;
     }
 }
 

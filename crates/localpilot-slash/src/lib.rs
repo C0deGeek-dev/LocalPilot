@@ -328,6 +328,29 @@ pub enum StrayArgs {
 pub enum Host {
     Fullscreen,
     Pair,
+    /// A client of a served session with no terminal (a paired phone, another
+    /// program). Only commands the server can run against session state are
+    /// available; see [`remote_description`].
+    Remote,
+}
+
+/// The description a remote client is shown for `command`, or `None` when the
+/// command is not available remotely. The set is deliberately small: commands
+/// that change what the agent may do (permission profiles), which provider it
+/// reaches (`/model`), or that need the terminal stay local.
+#[must_use]
+pub const fn remote_description(command: SlashCommand) -> Option<&'static str> {
+    match command {
+        SlashCommand::Compact => {
+            Some("Summarize and compact the model's context (/compact [force])")
+        }
+        SlashCommand::Clear => {
+            Some("Start the model on an empty context; the stored transcript is kept")
+        }
+        SlashCommand::Name => Some("Name this session (/name <text>)"),
+        SlashCommand::Effort => Some("Set reasoning effort: minimal|low|medium|high"),
+        _ => None,
+    }
 }
 
 /// Whether a slash action leaves anything on disk — the axis an incognito
@@ -649,6 +672,11 @@ impl Spelling {
         match host {
             Host::Fullscreen => self.fullscreen,
             Host::Pair => self.pair,
+            // Only spellings the full-screen host lists (not hidden aliases).
+            Host::Remote => match self.fullscreen {
+                Some(_) => remote_description(self.command),
+                None => None,
+            },
         }
     }
 }
@@ -992,6 +1020,14 @@ pub fn parse_slash_for(host: Host, line: &str) -> Option<SlashAction> {
     let Some(spelling) = lookup(name) else {
         return Some(SlashAction::Unknown(command.to_string()));
     };
+    if host == Host::Remote {
+        // Remote commands parse exactly as the full-screen host parses them;
+        // everything else is unknown remotely.
+        if remote_description(spelling.command).is_none() {
+            return Some(SlashAction::Unknown(command.to_string()));
+        }
+        return Some(dispatch(spelling, Host::Fullscreen, name, args, command));
+    }
     Some(dispatch(spelling, host, name, args, command))
 }
 
@@ -1355,7 +1391,7 @@ fn routed_fullscreen(
 ) -> SlashAction {
     match host {
         Host::Fullscreen => build(),
-        Host::Pair => SlashAction::Unknown(command.to_string()),
+        Host::Pair | Host::Remote => SlashAction::Unknown(command.to_string()),
     }
 }
 
@@ -1666,6 +1702,8 @@ mod tests {
         // review conversation for `PROGRESS.md`.
         assert_eq!(specs_for(Host::Fullscreen).len(), 50);
         assert_eq!(specs_for(Host::Pair).len(), 8);
+        let remote: Vec<&str> = specs_for(Host::Remote).iter().map(|s| s.0).collect();
+        assert_eq!(remote, ["effort", "name", "rename", "clear", "compact"]);
     }
 
     #[test]
@@ -2293,5 +2331,54 @@ mod tests {
             parse("/selfimprove approve"),
             Some(SlashAction::Invalid { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    #[test]
+    fn remote_commands_parse_like_the_full_screen_host() {
+        assert_eq!(
+            parse_slash_for(Host::Remote, "/compact force"),
+            Some(SlashAction::Compact { force: true })
+        );
+        assert_eq!(
+            parse_slash_for(Host::Remote, "/name nightly"),
+            Some(SlashAction::NameSession("nightly".to_string()))
+        );
+        assert_eq!(
+            parse_slash_for(Host::Remote, "/clear"),
+            Some(SlashAction::Clear)
+        );
+    }
+
+    #[test]
+    fn everything_else_is_unknown_remotely() {
+        for line in [
+            "/bypass",
+            "/model x y",
+            "/exit",
+            "/harness",
+            "/localmind",
+            "/nope",
+        ] {
+            assert!(
+                matches!(
+                    parse_slash_for(Host::Remote, line),
+                    Some(SlashAction::Unknown(_))
+                ),
+                "{line} must not run remotely"
+            );
+        }
+    }
+
+    #[test]
+    fn no_remote_command_runs_during_a_turn() {
+        for line in ["/compact", "/clear", "/name x", "/effort low"] {
+            let action = parse_slash_for(Host::Remote, line).unwrap();
+            assert!(!action.runs_live(Host::Remote), "{line}");
+        }
     }
 }

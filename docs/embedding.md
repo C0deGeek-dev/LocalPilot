@@ -263,6 +263,33 @@ The command is matched by its exact canonical form, not a hash, so a retry may
 use a new correlation id but must repeat the same command. Commands without
 `request` behave as before.
 
+**Discovery and slash commands.** `attached` and `hello` list the opt-ins the
+server implements in `capabilities` (`acks`, `resume`, `retry` — which also
+needs `acks` — and `commands`). Then:
+
+- `commands` returns the slash commands a remote client may run, each with its
+  `description`, `args` (`none`, `optional`, `required`) and the device `scope`
+  it needs (`control` for all of them today). The set is deliberately small:
+  `compact [force]`, `clear`, `name <text>` (and `rename`), `effort <level>`.
+  Commands that change what the agent may do (permission profiles), which
+  provider it reaches (`/model`), or that need a terminal are local-only;
+- `sessions` lists the workspace's sessions: every live one first (a long
+  history never hides it), then stored ones by most recent update, each id
+  once, 50 in all;
+- `run_command {name, args}` runs one of those commands (`name` without its
+  `/`) and answers `command_result {name, message}`. It runs only when the
+  session has no turn running or admitted — otherwise `rejected`/`busy` — and
+  holds the session meanwhile, so input arriving during it is refused as busy
+  and the session is not reaped under it. An unknown or local-only command is
+  `unknown_command`, bad arguments are `invalid_arguments`; neither ever becomes
+  a prompt. `clear` starts the model on an empty context: the stored transcript
+  and the feed's turn text are kept (they describe what happened, not what the
+  model sees next); `compact` and `clear` publish the new `context_usage` on the
+  feed. A `run_command` may carry a retry key like any other mutating command.
+
+A prompt whose text starts with `/` is still a prompt (paths are legitimate
+input); slash commands go only through `run_command`.
+
 Under the hood each connection sends one `attach` (open-new / resume-by-id /
 resume-by-name), the server confirms with `attached`, and the connection is
 bound to that session for its lifetime — the exact handshake documented above.

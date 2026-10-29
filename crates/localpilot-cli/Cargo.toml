@@ -29,7 +29,6 @@ tui = [
     "dep:parking_lot",
     "dep:ratatui",
     "dep:localpilot-terminal-ui",
-    "dep:localpilot-slash",
     "dep:ignore",
     "dep:arboard",
     "dep:base64",
@@ -123,7 +122,7 @@ localpilot-selfdev = { path = "../localpilot-selfdev" }
 # self-dev behind the human ApprovalToken gate (the `selfimprove` surface).
 localpilot-selfimprove = { path = "../localpilot-selfimprove" }
 localpilot-selfreview = { path = "../localpilot-selfreview" }
-localpilot-slash = { path = "../localpilot-slash", optional = true }
+localpilot-slash = { path = "../localpilot-slash" }
 # The opt-in local-IPC server (`serve`/`connect`): transport, daemon lifecycle,
 # session registry, per-session host, and attach dispatch. Strictly opt-in — the
 # default chat/ask/print/harness in-process path never touches it (D003).

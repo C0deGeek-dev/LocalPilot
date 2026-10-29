@@ -37,6 +37,22 @@ pub const CAPABILITY_ACKS: &str = "acks";
 /// `session_closed` records.
 pub const CAPABILITY_RESUME: &str = "resume";
 
+/// Advertised in `attached`/`hello` when mutating commands accept a retry key
+/// (`request`). Using it also needs [`CAPABILITY_ACKS`].
+pub const CAPABILITY_RETRY: &str = "retry";
+
+/// Advertised in `attached`/`hello` when the server answers `commands`,
+/// `sessions` and `run_command`.
+pub const CAPABILITY_COMMANDS: &str = "commands";
+
+/// The opt-ins a served session implements, in the order they are advertised.
+pub const SERVER_CAPABILITIES: [&str; 4] = [
+    CAPABILITY_ACKS,
+    CAPABILITY_RESUME,
+    CAPABILITY_RETRY,
+    CAPABILITY_COMMANDS,
+];
+
 /// A position in a served session's event feed. `epoch` names one unbroken
 /// numbering of the feed; `seq` is the last record the client applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +123,18 @@ pub enum ClientCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         since: Option<FeedCursor>,
     },
+    /// List the slash commands a remote client may run with `run_command`.
+    Commands,
+    /// List the workspace's sessions: live ones first, then recent stored ones.
+    Sessions,
+    /// Run one advertised slash command (without its `/`) against the session.
+    /// Never sent to the model: an unknown command or bad arguments are
+    /// refused.
+    RunCommand {
+        name: String,
+        #[serde(default)]
+        args: String,
+    },
 }
 
 /// Where a [`ClientCommand::Attach`] binds the connection: a brand-new session,
@@ -164,6 +192,9 @@ pub enum ServerEvent {
         protocol_version: u32,
         session_id: String,
         model: String,
+        /// The opt-ins this server implements (served sessions).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
     /// Confirms a [`ClientCommand::Attach`]: the connection is now bound to
     /// `session_id`. `server_version` names the server build (see
@@ -181,6 +212,9 @@ pub enum ServerEvent {
         /// sessions).
         #[serde(default, skip_serializing_if = "String::is_empty")]
         instance: String,
+        /// The opt-ins this server implements (served sessions).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
     TextDelta {
         text: String,
@@ -276,6 +310,19 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dropped_follow_ups: Option<usize>,
     },
+    /// Reply to `commands`.
+    Commands {
+        items: Vec<CommandInfo>,
+    },
+    /// Reply to `sessions`.
+    Sessions {
+        items: Vec<SessionInfo>,
+    },
+    /// Reply to a `run_command` that ran.
+    CommandResult {
+        name: String,
+        message: String,
+    },
     /// A turn began on the session. [`CAPABILITY_RESUME`] clients only.
     TurnStarted,
     /// The state of the session at feed position `seq` of `epoch`, sent on
@@ -357,6 +404,29 @@ pub struct AskDetail {
     pub expires_at_ms: u64,
 }
 
+/// One slash command a remote client may run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandInfo {
+    pub name: String,
+    pub description: String,
+    /// `none`, `optional`, or `required`.
+    pub args: String,
+    /// The device scope the command needs (`control` for every command today).
+    pub scope: String,
+}
+
+/// One session in a `sessions` reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Hosted by this server right now.
+    pub live: bool,
+    pub message_count: usize,
+    pub updated_unix: u64,
+}
+
 /// Whether a turn is running, as known to a snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -408,6 +478,10 @@ pub enum RejectCode {
     IdReused,
     /// The session tracks the maximum number of client request streams.
     TooManyClients,
+    /// `run_command` named a command that is not available here.
+    UnknownCommand,
+    /// `run_command` arguments do not fit the command.
+    InvalidArguments,
     /// This server does not understand the command.
     UnsupportedCommand,
 }
@@ -561,6 +635,7 @@ mod tests {
             v: RPC_PROTOCOL_VERSION,
             id: Some("a1".to_string()),
             event: ServerEvent::Attached {
+                capabilities: Vec::new(),
                 instance: String::new(),
                 epoch: String::new(),
                 session_id: localpilot_core::SessionId::new(),
@@ -590,6 +665,7 @@ mod tests {
         assert_eq!(
             record.event,
             ServerEvent::Attached {
+                capabilities: Vec::new(),
                 instance: String::new(),
                 epoch: String::new(),
                 session_id: id,
@@ -604,6 +680,7 @@ mod tests {
         // The skip-serializing half of the discipline: a default-valued field
         // does not bloat the wire, so it round-trips through the empty default.
         let event = ServerEvent::Attached {
+            capabilities: Vec::new(),
             instance: String::new(),
             epoch: String::new(),
             session_id: localpilot_core::SessionId::new(),

@@ -662,3 +662,63 @@ async fn admitted_work_is_busy_before_it_starts_and_blocks_closing() {
     assert!(host.close_admission());
     assert_eq!(host.submit("late".to_string(), false), Admit::Closed);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_reservation_excludes_turns_the_reaper_and_other_commands() {
+    let provider = FakeProvider::new().text("done");
+    let (_entered, _release, handle, _store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle.clone()).await);
+
+    let reservation = host
+        .reserve_command()
+        .expect("an idle session can be reserved");
+    assert!(host.is_busy(), "a running command makes the session busy");
+    assert!(host.reserve_command().is_none(), "one command at a time");
+    assert_eq!(host.submit("go".to_string(), false), Admit::Busy);
+    assert_eq!(host.submit("later".to_string(), true), Admit::Busy);
+    assert!(
+        !host.close_admission(),
+        "the reaper does not close it under a command"
+    );
+    {
+        let _runtime = timeout(PROMPT, reservation.runtime())
+            .await
+            .expect("the runtime is free for the command");
+    }
+    drop(reservation);
+
+    assert!(!host.is_busy());
+    assert_eq!(host.submit("go".to_string(), false), Admit::Started);
+    assert!(
+        host.reserve_command().is_none(),
+        "no command while a turn is admitted"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_command_releases_the_session() {
+    let provider = FakeProvider::new().text("done");
+    let (_entered, _release, handle, _store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle.clone()).await);
+
+    // The runtime is held elsewhere, so the command waits; then it is
+    // cancelled (its future dropped).
+    let outside = handle.lock().await;
+    let command = {
+        let host = host.clone();
+        tokio::spawn(async move {
+            let reservation = host.reserve_command().unwrap();
+            let _runtime = reservation.runtime().await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(host.is_busy());
+    command.abort();
+    let _ = command.await;
+    drop(outside);
+    assert!(
+        !host.is_busy(),
+        "the reservation was released on cancellation"
+    );
+    assert!(host.reserve_command().is_some());
+}

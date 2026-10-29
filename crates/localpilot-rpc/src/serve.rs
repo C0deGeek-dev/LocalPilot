@@ -147,6 +147,7 @@ where
                     &mut writer,
                     id,
                     ServerEvent::Hello {
+                        capabilities: Vec::new(),
                         protocol_version: RPC_PROTOCOL_VERSION,
                         session_id: session_id.clone(),
                         model: model.clone(),
@@ -198,6 +199,22 @@ where
                     ServerEvent::Error {
                         message: "attach is not supported on the stdio drive; \
                                   this connection is already bound to its session"
+                            .to_string(),
+                    },
+                )
+                .await?;
+                continue;
+            }
+            // Discovery and typed commands belong to served sessions.
+            ClientCommand::Commands
+            | ClientCommand::Sessions
+            | ClientCommand::RunCommand { .. } => {
+                emit(
+                    &mut writer,
+                    id,
+                    ServerEvent::Error {
+                        message: "this command is available on a served session \
+                                  (`localpilot serve`), not the stdio drive"
                             .to_string(),
                     },
                 )
@@ -316,6 +333,7 @@ where
                             }
                             ClientCommand::Hello => {
                                 emit(writer, id, ServerEvent::Hello {
+                                    capabilities: Vec::new(),
                                     protocol_version: RPC_PROTOCOL_VERSION,
                                     session_id: session_id.to_string(),
                                     model: model.to_string(),
@@ -328,6 +346,15 @@ where
                             ClientCommand::Attach { .. } => {
                                 emit(writer, id, ServerEvent::Error {
                                     message: "attach is not supported on the stdio drive"
+                                        .to_string(),
+                                }).await?;
+                            }
+                            ClientCommand::Commands
+                            | ClientCommand::Sessions
+                            | ClientCommand::RunCommand { .. } => {
+                                emit(writer, id, ServerEvent::Error {
+                                    message: "this command is available on a served session, \
+                                              not the stdio drive"
                                         .to_string(),
                                 }).await?;
                             }

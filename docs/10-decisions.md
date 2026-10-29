@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0242: A Served Session Lists Its Commands And Sessions And Runs A Small Set Of Slash Commands By Name
+
+**Status:** accepted · **Date:** 2026-10-29. Builds on ADR-0239 to ADR-0241.
+
+**Context.** A client without a terminal (a paired phone) could only send prompts.
+Slash commands lived in the terminal UI, and a client typing `/compact` would send
+the text to the model.
+
+**Decision.**
+
+1. `localpilot-slash` gains `Host::Remote` with a fixed allowlist: `compact`,
+   `clear`, `name`/`rename`, `effort`. Remote commands parse exactly as the
+   full-screen host parses them; everything else is `Unknown` remotely. Permission
+   profiles, `/model` and terminal-bound commands stay local. The crate is now a
+   regular dependency of the CLI (it has no dependencies of its own).
+2. `commands`, `sessions` and `run_command {name, args}` join the served-session
+   protocol; `attached` and `hello` list the implemented capabilities. Each
+   command carries the device scope it will need (`control`).
+3. A command needs the runtime, so `SessionHost::reserve_command` takes the session
+   under the same admission lock as `submit` and `close_admission`: only when no
+   turn runs or is admitted, exclusive of turns, other commands and the reaper,
+   and released by its guard even when cancelled.
+4. Effects reach clients through the session's ordered stream (`compact` and
+   `clear` publish new context usage). `clear` changes only the model's context;
+   the stored transcript and the feed's turn text are kept.
+5. Unknown commands and bad arguments are refused (`unknown_command`,
+   `invalid_arguments`); nothing falls back to a prompt. A prompt starting with
+   `/` stays a prompt.
+
+**Consequences.** A phone can rename, compact or clear a session and pick a
+session to attach to. Adding a remote command is an explicit allowlist change. Not
+done: per-device scope enforcement (the scope is reported, the only principal is
+local).
+
 ## ADR-0241: Mutating Commands On A Served Session Carry Retry Keys And Run At Most Once
 
 **Status:** accepted · **Date:** 2026-10-29. Builds on ADR-0240.
