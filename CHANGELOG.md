@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A work step is no longer refused for a probe script it writes to its own scratch
+  directory (it is not part of the repository diff), and `replace_in_file` with
+  `regex: false` and `all: false` is accepted as the exact edit it is. A regex or
+  every-occurrence replacement is still refused, with a message that names the
+  accepted form, and the work-unit instruction now says so (ADR-0244, #257).
 - A read-only PowerShell check no longer stops on "run code with uninspectable
   file targets" under `--permission bypass`. A `powershell -Command` string that
   is one of `Select-String`, `Get-Content`, `Get-ChildItem`, `Get-Item`,

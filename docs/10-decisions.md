@@ -2,6 +2,32 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0244: The Work Envelope Does Not Size Scratch Writes, And Sizes One Literal replace_in_file Like An Exact Edit
+
+**Status:** accepted · **Date:** 2026-10-30.
+
+**Context.** Inside a bounded unit two refusals still stopped a sound step (#257).
+A probe script written to the session's scratch directory counted as a second
+file of the step, though it is not part of the repository diff the envelope
+inspects. And `replace_in_file` was refused on every call, while the system prompt
+says "to change an existing file use `replace_in_file`" and the tool's own
+description calls it the default way: a model that follows the guidance is refused
+each time.
+
+**Decision.** `WorkUnit` skips a write whose target is inside the session's scratch
+directory (`Workspace::scratch_contains`); permission checks still apply to it, and
+other external paths keep spending the budget. `replace_in_file` with
+`regex: false` and `all: false` is sized as the `edit_file` of the same text, one
+exact block replaced once. A regex or the default every-occurrence replacement is
+still refused, because its number of regions depends on file content, which
+admission does not read; the refusal says what form is accepted, and the work-unit
+instruction names it.
+
+**Consequences.** A check script no longer uses up the step's file, and the tool the
+prompt recommends works in the form that can be bounded. Not done: bounding the size
+of scratch writes (the tools' own output and size limits apply) and admitting the
+every-occurrence form by counting matches after the fact.
+
 ## ADR-0243: A Single Read-Only PowerShell Cmdlet In `-Command` Is Inspected, And Inline Code Is Not Read As A Path
 
 **Status:** accepted · **Date:** 2026-10-30.

@@ -1507,6 +1507,16 @@ the envelope is what keeps a weak model's edits small and reviewable. It waives
 nothing else: permission, the verify gate and the commit rules apply as before
 (ADR-0238).
 
+Two inputs are sized differently from a plain write (ADR-0244). A write into the
+session's own scratch directory spends no file, region or line budget: the budget
+sizes changes to the repository, which the diff inspection after the step
+measures, and a scratch script reaches the repository only through a command,
+which is gated and inspected on its own. Other external paths still spend it.
+`replace_in_file` with `regex: false` and `all: false` replaces one literal block
+once, so it is sized exactly as the `edit_file` of the same text; a regex, or the
+default replacement of every occurrence, has no bound derived from its arguments
+and is refused with a message that says so.
+
 Refused mutation attempts still consume the cumulative work envelope, but an
 unchanged readonly review is not implementation work requiring owner-style
 verification. It finalizes `Done` when no write-capable invocation ran and it

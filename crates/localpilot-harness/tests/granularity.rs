@@ -1574,3 +1574,46 @@ async fn the_user_can_switch_the_envelope_off_and_on() {
         "switching it back on restores the configured caps"
     );
 }
+
+#[tokio::test]
+async fn one_literal_replace_in_file_is_admitted_and_the_default_form_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.txt"),
+        "before
+keep
+",
+    )
+    .unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "default",
+                "replace_in_file",
+                json!({"path":"a.txt", "find":"keep", "replace":"kept"}),
+            )
+            .tool_call(
+                "once",
+                "replace_in_file",
+                json!({"path":"a.txt", "find":"before", "replace":"after", "regex":false, "all":false}),
+            )
+            .text("done"),
+    );
+    let mut agent = runtime(
+        dir.path(),
+        provider,
+        Profile::Bypass,
+        Some("git status --short".to_string()),
+    );
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. } if id == "default" && output.contains("regex false and all false"))));
+    assert!(events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "once")
+    ));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "after
+keep
+"
+    );
+}

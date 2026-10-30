@@ -245,7 +245,7 @@ impl WorkProfile {
             ""
         };
         format!(
-            "Work unit: change at most {} files, {} regions, {} decisions and {} lines; read at most {} lines at a time; a new file may be up to {} lines; prefer exact edits to rewriting large files. These limits also apply through shell and MCP commands, and compaction does not reset them. Verify the unit with the smallest relevant check, keeping every acceptance criterion and required quality gate.{stop}",
+            "Work unit: change at most {} files, {} regions, {} decisions and {} lines; read at most {} lines at a time; a new file may be up to {} lines; prefer exact edits to rewriting large files, and use replace_in_file only for one exact block (regex false, all false). These limits also apply through shell and MCP commands, and compaction does not reset them. Verify the unit with the smallest relevant check, keeping every acceptance criterion and required quality gate.{stop}",
             self.max_files, self.max_regions, self.max_decisions, self.max_changed_lines,
             self.max_read_lines, self.max_new_file_lines,
         )
@@ -346,9 +346,25 @@ impl WorkUnit {
             return None;
         }
         if name == "replace_in_file" {
-            // Regex/global substitution has no argument-derived region bound.
+            // One literal block replaced once is an exact edit: the same text in
+            // the same place, so it is sized as one. A regex, or a replacement of
+            // every occurrence (the tool's default), has no argument-derived
+            // region bound.
+            let literal_once = input.get("regex").and_then(Value::as_bool) != Some(true)
+                && input.get("all").and_then(Value::as_bool) == Some(false);
+            if literal_once {
+                let (Some(path), Some(find), Some(replace)) = (
+                    input.get("path").and_then(Value::as_str),
+                    input.get("find").and_then(Value::as_str),
+                    input.get("replace").and_then(Value::as_str),
+                ) else {
+                    return None; // The tool reports the malformed input itself.
+                };
+                let edit = serde_json::json!({"path": path, "old_text": find, "new_text": replace});
+                return self.check_and_reserve(profile, "edit_file", &edit, workspace);
+            }
             return Some(WorkRefusal {
-                message: "work envelope: use bounded exact edit_file hunks instead of global/regex replacement; split into a smaller coherent unit, verify it, and checkpoint before continuing".to_string(),
+                message: "work envelope: use bounded exact edit_file hunks instead of global/regex replacement (replace_in_file is admitted only as one exact block: regex false and all false); split into a smaller coherent unit, verify it, and checkpoint before continuing".to_string(),
                 blocks_opaque_retry: false,
             });
         }
@@ -370,6 +386,14 @@ impl WorkUnit {
                 Ok(path) => path,
                 Err(_) => return reject("write target cannot be normalized for bounded sizing"),
             };
+            // The unit's budget sizes changes to the repository, which the diff
+            // inspection after the step measures. The session's own scratch
+            // directory is outside it, and a script written there changes the
+            // repository only through a command, which is gated and inspected on
+            // its own. Other external paths still spend the budget.
+            if workspace.scratch_contains(&path) {
+                continue;
+            }
             let action = op.get("action").and_then(Value::as_str).unwrap_or(name);
             let on_disk = std::fs::metadata(&path);
             let writes_content = matches!(name, "write_file" | "append_file")
@@ -532,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn scratch_and_external_targets_spend_the_same_mutation_budget() {
+    fn external_targets_spend_the_mutation_budget_and_the_sessions_scratch_does_not() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let mut workspace = Workspace::new(dir.path()).unwrap();
@@ -551,21 +575,88 @@ mod tests {
             Reliability::Unknown,
             &GranularityConfig::default(),
         );
-        for path in [scratch, external] {
-            let mut unit = WorkUnit::default();
-            let input = serde_json::json!({"path":path, "content":"small\n"});
+        // An external path still spends the budget.
+        let mut unit = WorkUnit::default();
+        let input = serde_json::json!({"path":external, "content":"small
+"});
+        assert!(unit
+            .check_and_reserve(profile, "write_file", &input, &workspace)
+            .is_none());
+        assert!(
+            unit.has_mutations(),
+            "non-workspace targets must be counted"
+        );
+        let second = serde_json::json!({"path":"tracked.txt", "old_text":"a", "new_text":"b"});
+        assert!(unit
+            .check_and_reserve(profile, "edit_file", &second, &workspace)
+            .is_some());
+
+        // The session's scratch does not: any number of probe files, however
+        // long, leave the unit's own file and region free.
+        let mut unit = WorkUnit::default();
+        for name in ["probe.ps1", "second.ps1", "third.ps1"] {
+            let path = workspace.scratch_dir().unwrap().join(name);
+            let input = serde_json::json!({"path":path, "content":"x
+".repeat(500)});
             assert!(unit
                 .check_and_reserve(profile, "write_file", &input, &workspace)
                 .is_none());
-            assert!(
-                unit.has_mutations(),
-                "non-workspace targets must be counted"
-            );
-            let second = serde_json::json!({"path":"tracked.txt", "old_text":"a", "new_text":"b"});
-            assert!(unit
-                .check_and_reserve(profile, "edit_file", &second, &workspace)
-                .is_some());
         }
+        assert!(!unit.has_mutations(), "scratch is not repository work");
+        let own = serde_json::json!({"path":"tracked.txt", "old_text":"a", "new_text":"b"});
+        assert!(unit
+            .check_and_reserve(profile, "edit_file", &own, &workspace)
+            .is_none());
+        let _ = scratch;
+    }
+
+    #[test]
+    fn replace_in_file_is_sized_as_an_exact_edit_only_for_one_literal_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let profile = WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 64_000,
+                provenance: ContextProvenance::ResolvedBudget,
+            },
+            Reliability::Unknown,
+            &GranularityConfig::default(),
+        );
+        let once = serde_json::json!({
+            "path":"a.html", "find":"old", "replace":"new", "regex":false, "all":false
+        });
+        let mut unit = WorkUnit::default();
+        assert!(unit
+            .check_and_reserve(profile, "replace_in_file", &once, &workspace)
+            .is_none());
+        assert!(unit.has_mutations(), "it spends a region like an edit");
+        let again = serde_json::json!({
+            "path":"a.html", "find":"other", "replace":"new", "all":false
+        });
+        assert!(
+            unit.check_and_reserve(profile, "replace_in_file", &again, &workspace)
+                .is_some(),
+            "the second block is a second region"
+        );
+        for input in [
+            serde_json::json!({"path":"a.html","find":"x","replace":"y"}),
+            serde_json::json!({"path":"a.html","find":"x","replace":"y","all":true}),
+            serde_json::json!({"path":"a.html","find":"x.*","replace":"y","regex":true,"all":false}),
+        ] {
+            let refusal = WorkUnit::default()
+                .check_and_reserve(profile, "replace_in_file", &input, &workspace)
+                .expect("a regex or every-occurrence replacement has no bound");
+            assert!(refusal.message.contains("regex false and all false"));
+        }
+        // A replacement that is itself too large is refused like an edit.
+        let big = serde_json::json!({
+            "path":"a.html", "find":"old", "replace":"line
+        ".repeat(250), "all":false
+        });
+        assert!(WorkUnit::default()
+            .check_and_reserve(profile, "replace_in_file", &big, &workspace)
+            .is_some());
     }
 
     #[test]
