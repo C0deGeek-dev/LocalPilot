@@ -145,6 +145,18 @@ pub fn decide_step(
     inputs: &CompletionInputs,
     gate_outcomes: Vec<CheckOutcome>,
 ) -> StepAction {
+    decide_step_with_cdn(engine, inputs, gate_outcomes, Vec::new())
+}
+
+/// [`decide_step`] with the CDN URLs lacking an exact version that the step
+/// left in its changed files (the `cdn_version_pinned` rule's input).
+#[must_use]
+pub fn decide_step_with_cdn(
+    engine: &RuleEngine,
+    inputs: &CompletionInputs,
+    gate_outcomes: Vec<CheckOutcome>,
+    unpinned_cdn: Vec<String>,
+) -> StepAction {
     let ctx = RuleContext {
         tests_passed: inputs.tests_passed,
         progress_reflects_completion: Some(inputs.progress_reflects_completion),
@@ -152,6 +164,7 @@ pub fn decide_step(
         attempts: inputs.attempts,
         max_attempts: inputs.max_attempts,
         gate_outcomes,
+        unpinned_cdn,
         ..RuleContext::default()
     };
 

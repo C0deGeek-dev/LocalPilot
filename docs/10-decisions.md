@@ -2,6 +2,50 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0246: A Step That Leaves A CDN Library Without An Exact Version Is Sent Back With The Way To Fix It
+
+**Status:** accepted · **Date:** 2026-10-30. Refs LocalHub#258.
+
+**Context.** A brief that lets a page load a library from a CDN with a pinned
+version gave the agent no way to find a version and import paths that exist. In
+one run it spent more than twenty calls on guesses (a cdnjs API that answered
+404, an expired proxy URL, searches with no results) and ended with two CDNs for
+one library. A prompt line in every run would cost tokens in projects that never
+load a page, and a small model may ignore it.
+
+**Decision.**
+
+1. After a step, the files it changed are scanned for URLs on `cdn.jsdelivr.net`,
+   `unpkg.com`, `esm.sh`, `cdn.skypack.dev` and `cdnjs.cloudflare.com`. Only web
+   files are read (`html`, `htm`, `js`, `mjs`, `cjs`, `jsx`, `ts`, `tsx`, `vue`,
+   `svelte`, `astro`), up to 1 MiB each. A project without such a URL is never
+   touched. Nothing uses the network: the scan can say a version is missing, not
+   that the one written exists.
+2. A URL is unpinned when it has no version, `latest`, a range or a bare major.
+   An npm CDN needs a full `x.y.z` (pre-release allowed); a cdnjs URL names its
+   version in the path, so any version segment counts and `latest` or a missing
+   one does not. URLs built at run time (`${`, `{{`) are left alone.
+3. The `cdn_version_pinned` rule fires at step completion with a `retry` verdict.
+   Its message lists up to eight `path: url` lines and carries the procedure:
+   `npm view <pkg> version` (or the registry URL), the file listing at
+   `unpkg.com/<pkg>@<version>/?meta`, a check that every import URL returns 200,
+   one CDN per library and its addons, and the full version in every URL. The
+   procedure lives in the message, so it costs nothing until it is needed.
+4. Severity follows the other rules: `warn` softens it, `discard` escalates it,
+   `off` disables it. The step is judged against a baseline taken at the start of
+   the step, with or without a work envelope, so files that were already in the
+   repository are not the step's to fix.
+5. A step whose description is about a page (a web-file name, `CDN`, `import map`,
+   `<script`, `web page`, `browser`) also gets one line up front with the rule, to
+   save the round trip. Other steps do not.
+
+**Consequences.** The check runs in `/harness` runs, not in a free chat session.
+A weak model that ignores the hint is corrected after one step instead of
+shipping `@latest`. Which version is right (latest or an older one the model
+knows better) stays the model's choice. A comment or a markdown example is not
+read unless it sits in a web file; a web file that quotes `@latest` in a comment
+is a false positive the model can fix by rewording.
+
 ## ADR-0245: Paired Devices Are Authorized By The Daemon Against A Per-User Registry
 
 **Status:** accepted · **Date:** 2026-10-29. Builds on ADR-0239 to ADR-0242.

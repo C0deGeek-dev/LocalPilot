@@ -9,6 +9,7 @@
 pub mod agent_run;
 mod binding;
 mod brief;
+mod cdn_pin;
 mod claim;
 mod compaction;
 mod decisions;

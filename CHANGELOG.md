@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A step that leaves a library on a CDN without an exact version (`@latest`, a
+  range, a bare major or none, on jsDelivr, unpkg, esm.sh, Skypack or cdnjs) is
+  sent back with the way to fix it: look up the version with `npm view`, list the
+  files at `unpkg.com/<pkg>@<version>/?meta`, check every import URL, and write the
+  full version. The check reads only the web files the step changed, runs in
+  `/harness` for every project and costs nothing without such a URL; a step about
+  a page also gets a one-line hint. Tune it with `[harness.rules] cdn_version_pinned`
+  (ADR-0246, #258).
 - Devices can be paired with your `localpilot serve` sessions. `localpilot devices pair
   [--name] [--scope observe|control] [--url https://…] [--this-workspace-only]`
   prints a single-use code (a QR code with `--url`), and one pairing reaches every

@@ -993,7 +993,7 @@ advertised surface.
 > rule only fires in a live run when the runtime populates its trigger facts.
 > These are **runtime-active** (facts populated on the real path):
 > `no_stale_uncommitted`, `suite_green`, `quality_gate`, `commit_message_clean`,
-> `check_before_launch`, `attempt_limit` (the effective step cap is the
+> `check_before_launch`, `cdn_version_pinned`, `attempt_limit` (the effective step cap is the
 > `StepLoop`; the rule receives `attempts = 1`), and `progress_updated` (the
 > headless completion gate re-reads `PROGRESS.md` after the turn and reports
 > whether the model actually ticked its step).
@@ -1116,6 +1116,23 @@ the nudge reaches the model), tunable to `block` (refuses the launch before it
 runs) or `off`. It is tighten-only — it never grants a side effect the permission
 engine would deny — and the launch/probe pattern set is curated and extensible, so
 an unrecognised launcher is a documented miss, not a guarantee. See ADR-0030.
+
+#### `cdn_version_pinned`
+
+After a step, if a web file it changed loads a library from a CDN
+(`cdn.jsdelivr.net/npm`, `unpkg.com`, `esm.sh`, `cdn.skypack.dev`,
+`cdnjs.cloudflare.com`) without an exact version (no version, `latest`, a range or
+a bare major), send the finding back to the model and retry the step. The message
+lists the `path: url` lines and the way to fix them: look up the version
+(`npm view <pkg> version`), list that version's files
+(`https://unpkg.com/<pkg>@<version>/?meta`), check every import URL returns 200, use
+one CDN for a library and its addons, and write the full version.
+
+Text-only: it reads the changed web files and never the network, so it can say a
+version is missing, not that the one written exists. A project with no such URL
+is untouched. Non-critical, default `retry`; `warn` softens it, `discard` escalates
+it, `off` disables it. A step about a page also gets a one-line hint with the rule
+in its prompt. See ADR-0246.
 
 ## Quality Gate
 

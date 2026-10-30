@@ -72,6 +72,10 @@ pub struct RuleContext {
     /// The action being gated starts a local HTTP server or scaffolds a competing
     /// entry file. Consumed by the `check_before_launch` rule.
     pub launch_or_scaffold_attempt: bool,
+    /// CDN URLs without an exact version in the files the step changed, as
+    /// `path: url` lines ending in the procedure to fix them. Consumed by the
+    /// `cdn_version_pinned` rule.
+    pub unpinned_cdn: Vec<String>,
 }
 
 /// A harness rule.
@@ -177,6 +181,15 @@ rule!(
     default = RuleSeverity::Warn,
     triggers = [PreShell, PreTool]
 );
+rule!(
+    CdnVersionPinned,
+    "cdn_version_pinned",
+    critical = false,
+    // Enforced as `retry`: the finding goes back to the model with the way to
+    // fix it. `discard` escalates it, `warn` softens it, `off` disables it.
+    default = RuleSeverity::Block,
+    triggers = [StepComplete]
+);
 
 const PROHIBITED_COMMIT_TERMS: &[&str] = &["leaked", "source-map", "private endpoint"];
 
@@ -261,6 +274,19 @@ impl CheckBeforeLaunch {
         } else {
             RuleVerdict::Allow
         }
+    }
+}
+
+impl CdnVersionPinned {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
+        if ctx.unpinned_cdn.is_empty() {
+            return RuleVerdict::Allow;
+        }
+        let reason = format!(
+            "a library is loaded from a CDN without an exact version:\n{}",
+            ctx.unpinned_cdn.join("\n")
+        );
+        apply_ceiling(RuleVerdict::Retry(reason), severity)
     }
 }
 
@@ -370,6 +396,7 @@ impl RuleEngine {
             Box::new(AttemptLimit),
             Box::new(QualityGate),
             Box::new(CheckBeforeLaunch),
+            Box::new(CdnVersionPinned),
         ];
         Self {
             rules,
@@ -707,6 +734,67 @@ mod tests {
                     RuleVerdict::Allow | RuleVerdict::Warn(_) | RuleVerdict::Block(_)
                 ),
                 "rule produced a non-tightening verdict: {verdict:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod cdn_version_pinned_tests {
+    use super::*;
+
+    fn finding() -> RuleContext {
+        RuleContext {
+            unpinned_cdn: vec!["index.html: unpkg.com/three@latest/x.js".to_string()],
+            ..RuleContext::default()
+        }
+    }
+
+    fn engine(severity: Option<RuleSeverity>) -> RuleEngine {
+        let mut map = IndexMap::new();
+        if let Some(severity) = severity {
+            map.insert("cdn_version_pinned".to_string(), severity);
+        }
+        RuleEngine::with_baseline(&map)
+    }
+
+    fn verdict(engine: &RuleEngine, ctx: &RuleContext) -> Option<RuleVerdict> {
+        engine
+            .evaluate(Trigger::StepComplete, ctx)
+            .into_iter()
+            .find_map(|(name, verdict)| (name == "cdn_version_pinned").then_some(verdict))
+    }
+
+    #[test]
+    fn a_finding_retries_by_default_and_names_the_url() {
+        let Some(RuleVerdict::Retry(reason)) = verdict(&engine(None), &finding()) else {
+            panic!("expected a retry");
+        };
+        assert!(reason.contains("without an exact version"), "{reason}");
+        assert!(reason.contains("three@latest"), "{reason}");
+    }
+
+    #[test]
+    fn no_finding_is_silent_and_the_severity_is_tunable() {
+        assert_eq!(verdict(&engine(None), &RuleContext::default()), None);
+        assert!(matches!(
+            verdict(&engine(Some(RuleSeverity::Warn)), &finding()),
+            Some(RuleVerdict::Warn(_))
+        ));
+        assert!(matches!(
+            verdict(&engine(Some(RuleSeverity::Discard)), &finding()),
+            Some(RuleVerdict::Discard(_))
+        ));
+        assert_eq!(verdict(&engine(Some(RuleSeverity::Off)), &finding()), None);
+    }
+
+    #[test]
+    fn it_runs_at_step_completion_only() {
+        let engine = engine(None);
+        for trigger in [Trigger::PreShell, Trigger::PreTool, Trigger::PreCommit] {
+            assert!(
+                engine.evaluate(trigger, &finding()).is_empty(),
+                "{trigger:?}"
             );
         }
     }

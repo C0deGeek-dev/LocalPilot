@@ -23,7 +23,7 @@ use crate::quality::CheckOutcome;
 use crate::rules::{RuleContext, RuleEngine, RuleVerdict, Trigger};
 use crate::session::{RuntimeEvent, SessionRuntime, StopReason};
 use crate::worker::{
-    decide_step, AttemptResult, CompletionInputs, StepAction, StepDecision, StepLoop,
+    decide_step_with_cdn, AttemptResult, CompletionInputs, StepAction, StepDecision, StepLoop,
 };
 
 const WORKER_PROMPT: &str = "\
@@ -32,6 +32,37 @@ using the available tools, then briefly confirm completion. If the change alters
 observable behaviour, configuration, or interfaces, update the matching \
 documentation in a bounded follow-up step in this plan before completing the feature. Do not start any other step. \
 Do not edit PROGRESS.md: the harness marks the step complete and commits it.\n\nStep: ";
+
+/// Added to a step that is about a browser page. The check after the step
+/// (`cdn_version_pinned`) runs for every project; this line only saves the
+/// round trip, so it is left out of steps that are not about the web.
+const CDN_HINT: &str = "\n\nIf a page loads a library from a CDN, write its exact version \
+(x.y.z) in the URL, never @latest or a range.";
+
+/// Whether a step's description is about a page a browser loads.
+fn describes_a_web_page(description: &str) -> bool {
+    let text = description.to_ascii_lowercase();
+    let words = [
+        "cdn",
+        "import map",
+        "importmap",
+        "<script",
+        "web page",
+        "webpage",
+        "browser",
+    ];
+    // `.js` is a page file, `.json` is not.
+    let files = [".html", ".htm", ".js", ".mjs", ".jsx", ".tsx", ".vue"];
+    words.iter().any(|word| text.contains(word))
+        || files.iter().any(|file| {
+            text.match_indices(file).any(|(at, _)| {
+                !text[at + file.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|next| next.is_ascii_alphanumeric())
+            })
+        })
+}
 
 /// The store key under which a paused run is persisted (an inspectable file
 /// under `.localpilot/cache/`).
@@ -182,6 +213,12 @@ async fn run_step(
         None => work_diff_baseline(root).ok(),
     });
     trace.baseline = work_baseline.clone();
+    // The CDN check judges what the step changed whether or not a work
+    // envelope is configured, so it needs a baseline of its own then.
+    let cdn_baseline = work_baseline.clone().or_else(|| match &carried {
+        Some(left) => Some(left.baseline()),
+        None => work_diff_baseline(root).ok(),
+    });
     runtime.set_harness_checkpoint_owner(step.scope);
     let progress_path = root.join("PROGRESS.md");
     let mut progress = progress.clone();
@@ -237,6 +274,9 @@ async fn run_step(
     // step, runs the step-cadence gate, and turns the findings into a verdict.
     let mut step_loop = StepLoop::new(max_attempts.max(1), MAX_REPLANS);
     let mut prompt = format!("{WORKER_PROMPT}{}. {}", step.number, step.description);
+    if describes_a_web_page(&step.description) {
+        prompt.push_str(CDN_HINT);
+    }
     if let Some(profile) = runtime.work_profile() {
         if let Some(verification) = &step.verify {
             runtime.set_work_unit_verification(verification);
@@ -377,7 +417,14 @@ async fn run_step(
         // `attempts = max_attempts` would let the rule block an otherwise
         // passing step — a behaviour change out of scope for a doc/dead-surface
         // pass.
-        let action = decide_step(
+        // Only what this step changed is judged; files that were already
+        // dirty or committed are not the step's to fix.
+        let unpinned_cdn = cdn_baseline
+            .as_ref()
+            .and_then(|before| work_changed_paths(root, before).ok())
+            .map(|changed| crate::cdn_pin::unpinned_in_files(root, &changed))
+            .unwrap_or_default();
+        let action = decide_step_with_cdn(
             rule_engine,
             &CompletionInputs {
                 tests_passed,
@@ -387,6 +434,7 @@ async fn run_step(
                 max_attempts,
             },
             final_gate.clone(),
+            unpinned_cdn,
         );
 
         match action {
@@ -2782,5 +2830,31 @@ mod snapshot_tests {
         assert!(counted.blocked.is_some(), "two regions since HEAD");
         // Equality ignores where sizing starts.
         assert_eq!(baseline, from_head);
+    }
+}
+
+#[cfg(test)]
+mod web_step_tests {
+    use super::describes_a_web_page;
+
+    #[test]
+    fn the_hint_is_for_steps_about_a_browser_page_only() {
+        for web in [
+            "Create index.html with a canvas",
+            "Add the three import map to the page",
+            "Load Three.js from a CDN",
+            "Write app.js and wire it into the web page",
+            "Open it in the browser and fix the layout",
+        ] {
+            assert!(describes_a_web_page(web), "{web}");
+        }
+        for other in [
+            "Add a Rust parser for the config",
+            "Update package.json scripts",
+            "Write the jsonl reader",
+            "Create hello.txt",
+        ] {
+            assert!(!describes_a_web_page(other), "{other}");
+        }
     }
 }

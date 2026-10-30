@@ -1287,3 +1287,136 @@ async fn the_files_a_blocked_step_left_can_be_disclosed_before_a_resume() {
         ["hello.txt"]
     );
 }
+
+// --- cdn_version_pinned -----------------------------------------------------
+
+const PAGE_PROGRESS: &str = "# Progress: page\nBranch: feature/page\n\n## Steps\n\n- [ ] 1. Create index.html that loads three from a CDN\n";
+
+const UNPINNED_PAGE: &str = "<script type=\"module\" src=\"https://unpkg.com/three@latest/build/three.module.js\"></script>\n";
+const PINNED_PAGE: &str = "<script type=\"module\" src=\"https://unpkg.com/three@0.186.1/build/three.module.js\"></script>\n";
+
+fn page_repo(progress: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_bound_project(root, progress);
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-m", "initial"]);
+    dir
+}
+
+#[tokio::test]
+async fn a_page_with_an_unpinned_cdn_url_is_sent_back_and_commits_once_pinned() {
+    let dir = page_repo(PAGE_PROGRESS);
+    let root = dir.path();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "index.html", "content": UNPINNED_PAGE }),
+            )
+            .text("done")
+            .tool_call(
+                "c2",
+                "write_file",
+                json!({ "path": "index.html", "content": PINNED_PAGE }),
+            )
+            .text("pinned"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    let page = std::fs::read_to_string(root.join("index.html")).unwrap();
+    assert!(page.contains("three@0.186.1"), "{page}");
+    // The retry was told which URL, and how to resolve the version.
+    let requests = provider.requests();
+    let retry = requests
+        .iter()
+        .map(|request| format!("{request:?}"))
+        .find(|text| text.contains("without an exact version"))
+        .expect("a retry prompt naming the finding");
+    assert!(retry.contains("unpkg.com/three@latest"));
+    assert!(retry.contains("npm view three version"));
+    // The page step carries the one-line hint up front.
+    assert!(format!("{:?}", requests[0]).contains("exact version"));
+}
+
+#[tokio::test]
+async fn the_cdn_rule_can_be_switched_off_and_never_touches_other_projects() {
+    // Off: the unpinned page commits at once.
+    let dir = page_repo(PAGE_PROGRESS);
+    let root = dir.path();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "index.html", "content": UNPINNED_PAGE }),
+            )
+            .text("done"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let mut config = indexmap::IndexMap::new();
+    config.insert("cdn_version_pinned".to_string(), RuleSeverity::Off);
+    let rules = RuleEngine::with_baseline(&config);
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+
+    // A step that is not about a page gets no hint, and a file that is not a web
+    // file is never read, whatever it mentions.
+    let dir = sample_repo();
+    let root = dir.path();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "hello.txt", "content": "see https://unpkg.com/three@latest/x.js" }),
+            )
+            .text("done"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    assert!(!format!("{:?}", provider.requests()[0]).contains("exact version"));
+}
+
+#[tokio::test]
+async fn an_unpinned_url_already_in_the_repository_is_not_the_steps_to_fix() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_bound_project(root, PROGRESS);
+    std::fs::write(root.join("old.html"), UNPINNED_PAGE).unwrap();
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-m", "initial"]);
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "hello.txt", "content": "hello" }),
+            )
+            .text("done"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+}

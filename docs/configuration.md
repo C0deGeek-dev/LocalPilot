@@ -1008,6 +1008,7 @@ Notable rule key:
 | Rule | Default | Meaning |
 | --- | --- | --- |
 | `check_before_launch` | `warn` | When the task prompt named a local serveable target (a loopback host, or any `host:port` with an explicit port) that has not been probed this session, an attempt to launch a local server or scaffold a competing `index.html` is nudged (`warn`, the call still runs), refused (`block`), or ignored (`off`). Auto-extracted from the prompt — an external reference URL without a port is not a target. Advisory, tighten-only, best-effort. See [06-harness-spec.md](06-harness-spec.md). |
+| `cdn_version_pinned` | `block` (retry) | After a step, a web file it changed that loads a library from a CDN (jsDelivr, unpkg, esm.sh, Skypack, cdnjs) without an exact version (`@latest`, a range, a bare major or none) is sent back to the model with the way to resolve and pin it. `warn` only reports it, `discard` restarts the attempt, `off` disables it. Text-only: no network, no effect on a project without such a URL. |
 
 ### `[harness.granularity]`
 
