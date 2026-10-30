@@ -71,6 +71,7 @@ mod selfdev_cmd;
 mod selfdev_reload;
 mod selfimprove_cmd;
 mod server_cmd;
+mod server_devices;
 mod server_feed;
 mod server_requests;
 mod session_cmd;
@@ -432,6 +433,13 @@ enum Command {
         /// Start a server for this workspace if none is running, then connect.
         #[arg(long)]
         server: bool,
+    },
+    /// Pair, list or revoke devices (a phone running the companion app).
+    /// A pairing reaches every workspace you serve unless limited; a
+    /// revocation applies everywhere.
+    Devices {
+        #[command(subcommand)]
+        action: DevicesAction,
     },
     /// Internal: run the detached server the auto-spawn (`connect --server`)
     /// path starts. Not for direct use — `localpilot serve` is the entry point.
@@ -845,6 +853,36 @@ enum AgentsCommand {
         /// Only project-local definitions; ignore the per-user global baseline.
         #[arg(long)]
         project: bool,
+    },
+}
+
+/// `localpilot devices` actions.
+#[derive(Subcommand, Debug)]
+enum DevicesAction {
+    /// Pair a phone (or another device): prints a single-use code, as a QR code
+    /// when `--url` gives the gateway address the device will use. Needs a
+    /// running `localpilot serve` in this workspace.
+    Pair {
+        /// A name for the device, shown when listing devices.
+        #[arg(long, default_value = "phone")]
+        name: String,
+        /// What the device may do: `observe` (watch) or `control` (also prompt,
+        /// answer permission asks and run commands).
+        #[arg(long, default_value = "control", value_parser = ["observe", "control"])]
+        scope: String,
+        /// The address the device reaches the gateway at (for the QR code).
+        #[arg(long)]
+        url: Option<String>,
+        /// Limit the device to this workspace.
+        #[arg(long)]
+        this_workspace_only: bool,
+    },
+    /// List paired devices.
+    List,
+    /// Revoke a paired device everywhere.
+    Revoke {
+        /// The device id (from `localpilot devices list`).
+        id: String,
     },
 }
 
@@ -1998,6 +2036,24 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         Command::Connect { resume, server } => {
             server_cmd::connect(resume.as_deref(), server).await?;
         }
+        Command::Devices { action } => match action {
+            DevicesAction::Pair {
+                name,
+                scope,
+                url,
+                this_workspace_only,
+            } => {
+                let scope = if scope == "observe" {
+                    localpilot_rpc::Scope::Observe
+                } else {
+                    localpilot_rpc::Scope::Control
+                };
+                server_cmd::pair(&name, scope, this_workspace_only, url.as_deref()).await?;
+            }
+            DevicesAction::List => server_cmd::devices_list()?,
+            DevicesAction::Revoke { id } => server_cmd::devices_revoke(&id)?,
+        },
+
         Command::ServerServe => {
             // The detached daemon the auto-spawn path starts: the spawn argv
             // carries no flags, so resolve model/provider from config and use the

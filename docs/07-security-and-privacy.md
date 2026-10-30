@@ -501,7 +501,7 @@ auto-approval behavior.
 
 ## Pair Collaboration
 
-`localpilot pair` resolves one permission profile for the run and applies it to
+`localpilot devices pair` resolves one permission profile for the run and applies it to
 two independent permission engines. The peers do not share approval state: each
 tool call is authorized by the engine attached to the session that requested it.
 Interactive approval and `ask_user` dialogs identify the originating peer and
@@ -1112,6 +1112,64 @@ Safety gates:
 - use bounded backoff with jitter when reset metadata is approximate
 - record pause/resume reasons in local state
 - do not present the feature as bypassing or outsmarting limits
+
+## Paired Devices
+
+A phone (or another device) can be paired with `localpilot devices pair` and then
+reach your `localpilot serve` sessions through a gateway. Pairing opens no
+network access by itself; the gateway and how it is reached are a separate,
+opt-in step.
+
+- **One registry per user.** Paired devices live in
+  `~/.localpilot/devices/registry.json`. One pairing reaches every workspace you
+  serve, unless it was made with `--this-workspace-only`. Each workspace's
+  server reads the registry before every decision, so pairing or revoking from
+  any workspace — or from `localpilot devices revoke` — takes effect everywhere:
+  at a device's next request, and within a second on its open connections.
+  `localpilot devices pair` says before creating the code what the pairing will
+  reach — by default every workspace you serve as this user, now and in the
+  future. Without a home directory there is no per-user registry and devices
+  are unavailable; no other location stands in for it.
+- **Credentials.** A device credential is 32 random bytes from the operating
+  system. Only its SHA-256 is stored, and it is compared in constant time.
+  Pairing codes are single use, expire after five minutes, and are withdrawn
+  after five wrong attempts. Codes, credentials and the gateway capability never
+  appear in logs, the audit log or error messages; they are sent once, to the
+  party they belong to.
+- **Files.** The `devices` directory and its files are readable by your user
+  only (a protected owner-only DACL on Windows, `0700`/`0600` elsewhere) and
+  carry a `.gitignore`. Changes take an exclusive lock and replace the file
+  atomically (retrying while another process briefly holds it open on
+  Windows); a reader never takes a registry that was written but cannot be
+  found for an empty one. A registry that cannot be read disables devices until it is fixed;
+  it is never replaced with an empty one. Local use is unaffected.
+- **Who a connection is.** A connection's first record decides it once: a local
+  client (the same OS user, over the owner-only pipe), the gateway's control
+  channel, or a paired device. A device connection must carry a live gateway
+  capability (valid only while the gateway's control channel is open) and a
+  valid credential, or it is refused and closed; it is never treated as local.
+- **What a device may do.** `observe` devices can attach to existing sessions,
+  read status and receive events. `control` devices can also open sessions,
+  prompt, steer, cancel, answer permission asks and run the remote slash
+  commands. Device management, pairing and the gateway are for this computer
+  only. Every command is checked against the device's current standing; actions
+  and answers are recorded under the device's identity, not as local.
+- **Revocation.** Revoking a device ends its open connections, refuses its next
+  request and retry, and drops its follow-ups that have not started. Work that
+  already started keeps running until it ends or is cancelled; revocation does
+  not undo effects that already happened. Open connections notice within a
+  second. Every write to a device, live records and command replies included,
+  re-checks every 250 ms while it is stuck, and the connection is dropped once
+  access ends; a command that already started still runs to completion. Data
+  already handed to the network before the revocation cannot be taken back.
+- **Rate limits.** Wrong credentials and pairing codes are answered after a
+  growing delay (up to five seconds per device id or code); a valid credential
+  is never delayed or refused because of others' failures. At most 16 device
+  handshakes are verified at once, so under a flood a valid device may wait for
+  a slot.
+- **Audit.** `~/.localpilot/devices/audit.jsonl` records pairings, attaches,
+  refusals, revocations and gateway registrations with time, workspace and
+  device id — never session content or secrets.
 
 ## Telemetry
 

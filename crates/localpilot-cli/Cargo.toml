@@ -86,6 +86,12 @@ serde_json.workspace = true
 # is used on a non-test code path.
 tempfile.workspace = true
 thiserror.workspace = true
+# Device credentials: OS randomness and their stored SHA-256.
+ring = { workspace = true }
+subtle = { workspace = true }
+sha2 = { workspace = true }
+qrcode = { workspace = true }
+fd-lock = { workspace = true }
 time = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
@@ -148,5 +154,4 @@ localmind-store = { path = "../../external/localmind/crates/localmind-store" }
 crossterm = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }
-sha2 = { workspace = true }
 wiremock = { workspace = true }

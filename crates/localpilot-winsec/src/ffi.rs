@@ -17,12 +17,13 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-    SE_KERNEL_OBJECT,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, SetFileSecurityW, TokenUser, DACL_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+    TOKEN_USER,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -194,6 +195,52 @@ pub(crate) fn dacl_sddl(server: &NamedPipeServer) -> io::Result<String> {
         GetSecurityInfo(
             server.as_raw_handle(),
             SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(
+            i32::try_from(rc).unwrap_or(i32::MAX),
+        ));
+    }
+    dacl_text(&SecurityDescriptor(sd))
+}
+
+/// Replace the DACL of the file or directory at `path` with `sd`'s, protected
+/// from inheritance.
+pub(crate) fn set_path_dacl(path: &std::path::Path, sd: &SecurityDescriptor) -> io::Result<()> {
+    let w = wide(&path.to_string_lossy());
+    // SAFETY: `w` is NUL-terminated and `sd` a valid descriptor this module
+    // owns; both outlive the call, which copies what it keeps.
+    let ok = unsafe {
+        SetFileSecurityW(
+            w.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            sd.0,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The DACL of the file or directory at `path`, as SDDL.
+pub(crate) fn path_dacl_sddl(path: &std::path::Path) -> io::Result<String> {
+    let w = wide(&path.to_string_lossy());
+    let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: `w` is NUL-terminated and outlives the call; only the
+    // descriptor out-parameter is requested, which the call LocalAllocs and
+    // `SecurityDescriptor` then owns.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            w.as_ptr(),
+            SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION,
             ptr::null_mut(),
             ptr::null_mut(),

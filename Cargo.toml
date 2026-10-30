@@ -115,6 +115,12 @@ regex = "=1.11.3"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 tempfile = "=3.14.0"
 sha2 = "=0.10.8"
+# OS randomness for device credentials and pairing codes (already locked via rustls).
+ring = "=0.17.14"
+# Constant-time digest comparison for device credentials (already locked).
+subtle = "=2.6.1"
+# Terminal QR codes for device pairing (no image backends).
+qrcode = { version = "=0.14.1", default-features = false }
 tar = "=0.4.45"
 flate2 = "=1.0.35"
 # Security-reviewed lockfile resolutions: rustls 0.23.46, rustls-webpki

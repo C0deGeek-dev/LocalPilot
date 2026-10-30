@@ -192,7 +192,11 @@ where
             // The stdio drive is one-session-per-process: its session is fixed
             // at process start, so the connection-scoped attach handshake does
             // not apply here. Reject it without disturbing the bound session.
-            ClientCommand::Attach { .. } => {
+            ClientCommand::Attach { .. }
+            | ClientCommand::GatewayRegister
+            | ClientCommand::DeviceAttach { .. }
+            | ClientCommand::PairBegin { .. }
+            | ClientCommand::PairExchange { .. } => {
                 emit(
                     &mut writer,
                     id,
@@ -208,7 +212,8 @@ where
             // Discovery and typed commands belong to served sessions.
             ClientCommand::Commands
             | ClientCommand::Sessions
-            | ClientCommand::RunCommand { .. } => {
+            | ClientCommand::RunCommand { .. }
+            | ClientCommand::RevokeSelf => {
                 emit(
                     &mut writer,
                     id,
@@ -343,7 +348,11 @@ where
                                 cancel.cancel();
                                 shutdown = true;
                             }
-                            ClientCommand::Attach { .. } => {
+                            ClientCommand::Attach { .. }
+            | ClientCommand::GatewayRegister
+            | ClientCommand::DeviceAttach { .. }
+            | ClientCommand::PairBegin { .. }
+            | ClientCommand::PairExchange { .. } => {
                                 emit(writer, id, ServerEvent::Error {
                                     message: "attach is not supported on the stdio drive"
                                         .to_string(),
@@ -351,7 +360,8 @@ where
                             }
                             ClientCommand::Commands
                             | ClientCommand::Sessions
-                            | ClientCommand::RunCommand { .. } => {
+                            | ClientCommand::RunCommand { .. }
+            | ClientCommand::RevokeSelf => {
                                 emit(writer, id, ServerEvent::Error {
                                     message: "this command is available on a served session, \
                                               not the stdio drive"

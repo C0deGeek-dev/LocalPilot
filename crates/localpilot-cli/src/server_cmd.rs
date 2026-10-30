@@ -54,6 +54,10 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+use crate::server_devices::{
+    presented_device_id, DeviceRegistry, FailureDelays, GatewayLeases, PairingRefusal, Pairings,
+    Refusal, PAIRING_TTL,
+};
 use crate::server_feed::{stored_history, Admission, SessionFeed};
 use crate::server_requests::{canonical_payload, Admission as RequestAdmission, RequestStore};
 
@@ -478,6 +482,27 @@ struct HostMap {
     /// (not in a host) so a session closed after inactivity and resumed still
     /// answers a retry with its original reply.
     requests: Arc<RequestStore>,
+    /// This workspace's paired devices (in memory unless opened on a store).
+    devices: Arc<DeviceRegistry>,
+    /// The gateway's live capabilities.
+    gateways: Arc<GatewayLeases>,
+    /// Outstanding pairing codes.
+    pairings: Arc<Pairings>,
+    /// Growing delays for failed device credentials.
+    delays: Arc<FailureDelays>,
+    /// Device handshakes (attach, pairing exchange) verified at once.
+    handshakes: Arc<Handshakes>,
+}
+
+/// Bounds the device handshakes the server verifies at once. Under a flood a
+/// valid device waits for a slot like everyone else; it is never refused for
+/// others' failures.
+struct Handshakes(tokio::sync::Semaphore);
+
+impl Default for Handshakes {
+    fn default() -> Self {
+        Self(tokio::sync::Semaphore::new(16))
+    }
 }
 
 /// What the server keeps for one hosted session besides its host.
@@ -502,8 +527,13 @@ impl HostMap {
         registry: &SessionRegistry,
         factory: &F,
         store: &Store,
-    ) -> Result<(SessionId, Arc<SessionHost>, Served), AttachError> {
+        authorized: &(dyn Fn() -> Result<(), String> + Sync),
+    ) -> Result<(SessionId, Arc<SessionHost>, Served), BindError> {
         let mut map = self.inner.lock().await;
+        // The authorization point: checked while holding the host map, before
+        // any session is opened, resumed or joined. A device whose gateway
+        // closed or whose pairing was revoked while this waited gets nothing.
+        authorized().map_err(BindError::Unauthorized)?;
         // A resume target whose session is already hosted short-circuits to the
         // live host — never a second `attach`, so the store known-id guard (for
         // an on-disk resume) is correctly skipped for a live session, and a
@@ -520,6 +550,18 @@ impl HostMap {
             .await
             .ok_or(AttachError::Registry(RegistryError::NotFound))?;
         let host = Arc::new(SessionHost::new(handle).await);
+        {
+            // Queued work from a device starts only while that device is still
+            // paired and granted this workspace.
+            let devices = self.devices.clone();
+            host.set_origin_gate(Arc::new(move |origin: &str| {
+                origin.strip_prefix("device:").is_none_or(|id| {
+                    devices
+                        .standing(id)
+                        .is_ok_and(|standing| standing.scope >= localpilot_rpc::Scope::Control)
+                })
+            }));
+        }
         map.insert(id, host.clone());
         let asks = factory.take_asks().map(|halves| {
             // The feed reads asks from the registry's broadcast; this only
@@ -577,6 +619,65 @@ impl HostMap {
             .remove(&id);
         if let Some(served) = removed {
             served.feed.close(reason);
+        }
+    }
+}
+
+/// How often a write that has not finished re-checks a device's access.
+const ACCESS_POLL: Duration = Duration::from_millis(250);
+
+/// Run `work` (a write to the client) while the connection's principal keeps
+/// its access: `None` as soon as the gateway lease ends or `authorized` fails,
+/// checked before `work` starts and every [`ACCESS_POLL`] while it is blocked.
+/// For the local machine `authorized` always holds and the lease never ends.
+async fn while_authorized<T>(
+    lease: &CancellationToken,
+    authorized: &(dyn Fn() -> Result<(), String> + Sync),
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    // Checked here, synchronously: an interval's first tick still waits for
+    // the timer driver, which a write that is ready at once would beat.
+    if lease.is_cancelled() || authorized().is_err() {
+        return None;
+    }
+    let lost = async {
+        let mut poll =
+            tokio::time::interval_at(tokio::time::Instant::now() + ACCESS_POLL, ACCESS_POLL);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            poll.tick().await;
+            if authorized().is_err() {
+                return;
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        () = lease.cancelled() => None,
+        () = lost => None,
+        result = work => Some(result),
+    }
+}
+
+/// Why a connection could not be bound to a session.
+#[derive(Debug)]
+enum BindError {
+    Attach(AttachError),
+    /// The principal was no longer authorized when binding.
+    Unauthorized(String),
+}
+
+impl From<AttachError> for BindError {
+    fn from(error: AttachError) -> Self {
+        Self::Attach(error)
+    }
+}
+
+impl std::fmt::Display for BindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Attach(error) => error.fmt(f),
+            Self::Unauthorized(reason) => f.write_str(reason),
         }
     }
 }
@@ -812,7 +913,7 @@ where
                 &mut write,
                 None,
                 ServerEvent::Error {
-                    message: format!("malformed record: {error}"),
+                    message: malformed(&error),
                 },
             )
             .await?;
@@ -831,12 +932,61 @@ where
         .await?;
         return Ok(());
     }
-    let (target, capabilities, since) = match record.command {
+    // The first record decides what this connection is, once: the local
+    // machine, the gateway's control channel, or a paired device. A device
+    // connection that fails any check is refused and closed; it never becomes
+    // local.
+    let (principal, lease, target, capabilities, since) = match record.command {
         ClientCommand::Attach {
             target,
             capabilities,
             since,
-        } => (target, capabilities, since),
+        } => (Principal::Local, None, target, capabilities, since),
+        ClientCommand::GatewayRegister => {
+            return serve_gateway_control(&mut reader, &mut write, hosts, reply_id).await;
+        }
+        ClientCommand::DeviceAttach {
+            capability,
+            credential,
+            target,
+            capabilities,
+            since,
+        } => match admit_device(hosts, capability.expose(), credential.expose(), &target).await {
+            Ok((principal, lease)) => (principal, Some(lease), target, capabilities, since),
+            Err(message) => {
+                emit(&mut write, reply_id, ServerEvent::Error { message }).await?;
+                return Ok(());
+            }
+        },
+        ClientCommand::PairBegin {
+            name,
+            scope,
+            this_workspace_only,
+        } => {
+            // A local connection (same OS user over the owner-only pipe).
+            let event = match hosts.pairings.begin(&name, scope, this_workspace_only) {
+                Ok(code) => ServerEvent::PairingCode {
+                    code: localpilot_rpc::WireSecret::new(code.expose()),
+                    expires_in_secs: PAIRING_TTL.as_secs(),
+                },
+                Err(error) => ServerEvent::Error {
+                    message: error.to_string(),
+                },
+            };
+            emit(&mut write, reply_id, event).await?;
+            return Ok(());
+        }
+        ClientCommand::PairExchange {
+            capability,
+            pairing,
+        } => {
+            let event = match exchange_pairing(hosts, capability.expose(), pairing.expose()).await {
+                Ok(event) => event,
+                Err(message) => ServerEvent::Error { message },
+            };
+            emit(&mut write, reply_id, event).await?;
+            return Ok(());
+        }
         _ => {
             emit(
                 &mut write,
@@ -850,10 +1000,54 @@ where
             return Ok(());
         }
     };
+    let lease = lease.unwrap_or_default();
+    if lease.is_cancelled() {
+        emit(
+            &mut write,
+            reply_id.clone(),
+            ServerEvent::Error {
+                message: "the gateway disconnected".to_string(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+    // A device's pairing can be revoked from any workspace's server or the CLI;
+    // its open connection re-checks on this tick as well as on every record.
+    let mut standing_tick = tokio::time::interval(Duration::from_secs(1));
+    standing_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let acks = capabilities.iter().any(|name| name == CAPABILITY_ACKS);
     let resume = capabilities.iter().any(|name| name == CAPABILITY_RESUME);
-    let (session_id, host, served) = match hosts.bind(target, registry, factory, store).await {
+    // What the principal must still hold at each point it gains access: for a
+    // device, a live gateway lease and a current pairing.
+    let authorized = || -> Result<(), String> {
+        let Principal::Device { id } = &principal else {
+            return Ok(());
+        };
+        if lease.is_cancelled() {
+            return Err("the gateway disconnected".to_string());
+        }
+        hosts
+            .devices
+            .standing(id)
+            .map(|_| ())
+            .map_err(|_| "this device is no longer allowed".to_string())
+    };
+    // A write to the client under `while_authorized`: access lost drops the
+    // connection without a closing record.
+    macro_rules! guarded {
+        ($work:expr) => {
+            match while_authorized(&lease, &authorized, $work).await {
+                Some(result) => result?,
+                None => return Ok(()),
+            }
+        };
+    }
+    let bound = hosts
+        .bind(target, registry, factory, store, &authorized)
+        .await;
+    let (session_id, host, served) = match bound {
         Ok(bound) => bound,
         Err(error) => {
             emit(
@@ -878,13 +1072,23 @@ where
         .attach(since.as_ref(), resume, &history, &|| admission_of(&host));
     let mut live = attachment.live;
     let _guard = attachment.guard;
+    // Checked again right before anything of the session is sent.
+    if let Err(message) = authorized() {
+        emit(&mut write, reply_id, ServerEvent::Error { message }).await?;
+        return Ok(());
+    }
     let mut view = ConnectionView {
         acks,
         resume,
         floor: attachment.floor,
         shown: HashSet::new(),
     };
-    emit(
+    // Every write until the live loop takes over is guarded: if a device's
+    // access ends while a write is blocked or between writes, the connection
+    // is dropped at once (no closing record is attempted on a transport that
+    // is not draining). Bytes already handed to the transport cannot be taken
+    // back.
+    let attached = emit(
         &mut write,
         reply_id,
         ServerEvent::Attached {
@@ -898,8 +1102,8 @@ where
                 String::new()
             },
         },
-    )
-    .await?;
+    );
+    guarded!(attached);
     let server_ctx = ServerContext { hosts, store };
     let feed_ctx = FeedContext {
         feed: &served.feed,
@@ -908,15 +1112,38 @@ where
         host: &host,
     };
     // The replay, snapshot or closure goes through the same delivery as live
-    // records, so a replayed resync or closure is handled the same way.
+    // records, so a replayed resync or closure is handled the same way, each
+    // under the same guard.
     for (seq, event) in attachment.initial {
-        if deliver(&mut write, &mut view, &feed_ctx, seq, event).await? == Flow::Stop {
+        if guarded!(deliver(&mut write, &mut view, &feed_ctx, seq, event)) == Flow::Stop {
             return Ok(());
         }
     }
 
     loop {
         tokio::select! {
+            // Closing and revocation win over anything else that is ready.
+            biased;
+            // A revoked (or no longer granted) device stops receiving at once.
+            _ = standing_tick.tick(), if matches!(principal, Principal::Device { .. }) => {
+                if let Principal::Device { id } = &principal {
+                    if let Err(refusal) = hosts.devices.standing(id) {
+                        let reason = match refusal {
+                            Refusal::Revoked => "this device was revoked",
+                            Refusal::NotGranted => "this device is no longer allowed in this workspace",
+                            Refusal::Unavailable => "paired devices are disabled on this server",
+                            Refusal::BadCredential => "this device is no longer paired",
+                        };
+                        farewell(&mut write, &view, reason.to_string()).await;
+                        break;
+                    }
+                }
+            }
+            // A device connection ends when its gateway's control channel does.
+            () = lease.cancelled() => {
+                farewell(&mut write, &view, "the gateway disconnected".to_string()).await;
+                break;
+            }
             // The session's numbered feed: every record, whoever drove the turn
             // and whoever answered an ask.
             record = live.recv() => match record {
@@ -924,7 +1151,10 @@ where
                     if seq <= view.floor {
                         continue; // already covered by the replay or snapshot
                     }
-                    if deliver(&mut write, &mut view, &feed_ctx, Some(seq), event).await?
+                    // Every live write keeps watching the device's access, so
+                    // a client that stops reading cannot be handed a protected
+                    // record after its access ended.
+                    if guarded!(deliver(&mut write, &mut view, &feed_ctx, Some(seq), event))
                         == Flow::Stop
                     {
                         break;
@@ -935,18 +1165,17 @@ where
                     if view.resume {
                         let (_, position) = served.feed.pending_asks();
                         if position.closed.is_none() {
-                            emit(
+                            guarded!(emit(
                                 &mut write,
                                 None,
                                 ServerEvent::ResyncRequired {
                                     epoch: position.epoch,
                                     seq: position.head,
                                 },
-                            )
-                            .await?;
+                            ));
                         }
                     }
-                    if resync(&mut write, &mut view, &feed_ctx).await? == Flow::Stop {
+                    if guarded!(resync(&mut write, &mut view, &feed_ctx)) == Flow::Stop {
                         break;
                     }
                 }
@@ -955,6 +1184,20 @@ where
             // Client commands.
             record = reader.next() => {
                 let Some(value) = record? else { break }; // EOF: detach this connection
+                // A device is checked against its current standing before
+                // anything runs or is replayed: revoked ends the connection,
+                // a command beyond its scope is refused.
+                match authorize(hosts, &principal, &value) {
+                    Authorized::Yes => {}
+                    Authorized::Refused(id, message) => {
+                        guarded!(reject(&mut write, id, acks, RejectCode::Forbidden, message));
+                        continue;
+                    }
+                    Authorized::Gone(reason) => {
+                        farewell(&mut write, &view, reason).await;
+                        break;
+                    }
+                }
                 // A mutating command with a retry key runs at most once; a
                 // retry gets the original reply. Other records run as before.
                 if let Some((id, key, payload)) = retry_key(&value) {
@@ -963,32 +1206,30 @@ where
                     // that read acknowledgements. Refused before anything is
                     // reserved or run.
                     if !acks {
-                        reject(
+                        guarded!(reject(
                             &mut write,
                             id,
                             acks,
                             RejectCode::Malformed,
                             "a request key needs the `acks` capability; nothing ran".to_string(),
-                        )
-                        .await?;
+                        ));
                         continue;
                     }
                     let Ok(payload) = payload else {
-                        reject(
+                        guarded!(reject(
                             &mut write,
                             id,
                             acks,
                             RejectCode::Malformed,
                             "the command could not be encoded for its request key; nothing ran"
                                 .to_string(),
-                        )
-                        .await?;
+                        ));
                         continue;
                     };
-                    let principal = Principal::Local.label();
+                    let stream = principal.label();
                     // The dedupe lock is taken and released inside `admit` and
                     // `complete`; it is never held across the command.
-                    match hosts.requests.admit(session_id, principal, &key, &payload) {
+                    match hosts.requests.admit(session_id, &stream, &key, &payload) {
                         RequestAdmission::Run => {
                             let mut reply = Vec::new();
                             let outcome = handle_command(
@@ -1000,6 +1241,7 @@ where
                                 served.asks.as_ref(),
                                 acks,
                                 &server_ctx,
+                                &principal,
                                 &mut reply,
                             )
                             .await;
@@ -1007,12 +1249,11 @@ where
                             // so a lost connection never leaves it pending.
                             hosts.requests.complete(
                                 session_id,
-                                principal,
+                                &stream,
                                 &key,
                                 reply_events(&reply),
                             );
-                            write.write_all(&reply).await?;
-                            write.flush().await?;
+                            guarded!(send_raw(&mut write, &reply));
                             if outcome? {
                                 break;
                             }
@@ -1020,15 +1261,18 @@ where
                         RequestAdmission::Replay(reply) => {
                             // The original outcome, under this retry's id.
                             for event in reply {
-                                emit(&mut write, id.clone(), event).await?;
+                                guarded!(emit(&mut write, id.clone(), event));
                             }
                         }
                         RequestAdmission::Refuse(code, message) => {
-                            reject(&mut write, id, acks, code, message).await?;
+                            guarded!(reject(&mut write, id, acks, code, message));
                         }
                     }
                     continue;
                 }
+                // The command runs to completion whatever happens to the
+                // transport; only delivering its reply is guarded.
+                let mut reply = Vec::new();
                 let stop = handle_command(
                     value,
                     &host,
@@ -1038,10 +1282,12 @@ where
                     served.asks.as_ref(),
                     acks,
                     &server_ctx,
-                    &mut write,
+                    &principal,
+                    &mut reply,
                 )
-                .await?;
-                if stop {
+                .await;
+                guarded!(send_raw(&mut write, &reply));
+                if stop? {
                     break;
                 }
             }
@@ -1129,6 +1375,418 @@ fn reply_events(reply: &[u8]) -> Vec<ServerEvent> {
         .collect()
 }
 
+/// Serve the gateway's control channel: issue a capability valid while this
+/// connection stays open, accept nothing else, and revoke the capability (which
+/// closes every device connection bound to it) when the channel ends.
+async fn serve_gateway_control<R, W>(
+    reader: &mut JsonRecordReader<R>,
+    write: &mut W,
+    hosts: &HostMap,
+    reply_id: Option<String>,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let lease = match hosts.gateways.register() {
+        Ok(lease) => lease,
+        Err(error) => {
+            emit(
+                write,
+                reply_id,
+                ServerEvent::Error {
+                    message: error.to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    hosts.devices.audit("gateway_registered", None, "");
+    emit(
+        write,
+        reply_id,
+        ServerEvent::GatewayRegistered {
+            capability: localpilot_rpc::WireSecret::new(lease.capability.expose()),
+        },
+    )
+    .await?;
+    while let Some(value) = reader.next().await? {
+        let record: Option<ClientRecord> = serde_json::from_value(value).ok();
+        let id = record.as_ref().and_then(|record| record.id.clone());
+        if matches!(
+            record.map(|record| record.command),
+            Some(ClientCommand::Shutdown)
+        ) {
+            emit(write, id, ServerEvent::Closed).await?;
+            break;
+        }
+        emit(
+            write,
+            id,
+            ServerEvent::Rejected {
+                code: RejectCode::Forbidden,
+                message: "this is a gateway control channel; it carries no session commands"
+                    .to_string(),
+            },
+        )
+        .await?;
+    }
+    drop(lease);
+    hosts.devices.audit("gateway_closed", None, "");
+    Ok(())
+}
+
+/// Check a device attach: a live gateway capability, a valid credential, and
+/// enough scope for the attach target. Returns the device principal and the
+/// gateway lease the connection ends with.
+async fn admit_device(
+    hosts: &HostMap,
+    capability: &str,
+    credential: &str,
+    target: &AttachTarget,
+) -> Result<(Principal, CancellationToken), String> {
+    let lease = hosts
+        .gateways
+        .lease(capability)
+        .ok_or_else(|| "device connections must come through a registered gateway".to_string())?;
+    let _slot = wait_for_slot(hosts, &lease).await?;
+    let key = presented_device_id(credential).unwrap_or_default();
+    // Verified only while the gateway's capability is still live.
+    let verified = hosts
+        .gateways
+        .while_live(capability, |_| hosts.devices.verify(credential))
+        .ok_or_else(|| "the gateway disconnected".to_string())?;
+    let standing = match verified {
+        Ok(standing) => {
+            hosts.delays.succeeded(&key);
+            hosts.devices.audit("attached", Some(&standing.id), "");
+            standing
+        }
+        Err(refusal) => {
+            hosts.devices.audit(
+                "refused",
+                (!key.is_empty()).then_some(key.as_str()),
+                &format!("{refusal:?}"),
+            );
+            // A wrong credential waits longer each time; a valid one never
+            // does.
+            tokio::time::sleep(hosts.delays.failed(&key)).await;
+            return Err(match refusal {
+                Refusal::Unavailable => "paired devices are disabled on this server".to_string(),
+                Refusal::BadCredential | Refusal::Revoked | Refusal::NotGranted => {
+                    "this device is not paired with this workspace".to_string()
+                }
+            });
+        }
+    };
+    if standing.scope < target.requirement() {
+        return Err("this device may watch existing sessions but not open new ones".to_string());
+    }
+    Ok((Principal::Device { id: standing.id }, lease))
+}
+
+/// Wait for a handshake slot, giving up if the gateway's control channel
+/// closes meanwhile.
+async fn wait_for_slot<'a>(
+    hosts: &'a HostMap,
+    lease: &CancellationToken,
+) -> Result<tokio::sync::SemaphorePermit<'a>, String> {
+    tokio::select! {
+        biased;
+        () = lease.cancelled() => Err("the gateway disconnected".to_string()),
+        slot = hosts.handshakes.0.acquire() => {
+            slot.map_err(|_| "the server is shutting down".to_string())
+        }
+    }
+}
+
+/// Exchange a pairing code, arriving through a registered gateway, for a
+/// device credential.
+async fn exchange_pairing(
+    hosts: &HostMap,
+    capability: &str,
+    pairing: &str,
+) -> Result<ServerEvent, String> {
+    let lease = hosts
+        .gateways
+        .lease(capability)
+        .ok_or_else(|| "pairing must come through a registered gateway".to_string())?;
+    let _slot = wait_for_slot(hosts, &lease).await?;
+    // The device is registered only while the gateway's capability is live: a
+    // control channel that closed while this waited creates nothing.
+    let exchanged = hosts
+        .gateways
+        .while_live(capability, |_| {
+            hosts.pairings.exchange(pairing, &hosts.devices)
+        })
+        .ok_or_else(|| "the gateway disconnected".to_string())?;
+    match exchanged {
+        Ok((standing, credential)) => {
+            hosts.devices.audit(
+                "paired",
+                Some(&standing.id),
+                &format!("{:?}", standing.scope),
+            );
+            Ok(ServerEvent::DevicePaired {
+                device_id: standing.id,
+                credential: localpilot_rpc::WireSecret::new(credential.expose()),
+                scope: standing.scope,
+            })
+        }
+        Err(PairingRefusal::Invalid) => {
+            hosts
+                .devices
+                .audit("pairing_refused", None, "invalid or expired code");
+            let key = format!("pairing:{}", pairing.split('.').next().unwrap_or_default());
+            tokio::time::sleep(hosts.delays.failed(&key)).await;
+            Err("this pairing code is not valid (it may have expired or been used)".to_string())
+        }
+        Err(PairingRefusal::Registry(reason)) => Err(reason),
+    }
+}
+
+/// Start pairing a device from this computer: ask the workspace's server for
+/// a single-use code and show it, as a QR code of `<url>#pair=<code>` when the
+/// address the phone will use is known.
+pub async fn pair(
+    name: &str,
+    scope: localpilot_rpc::Scope,
+    this_workspace_only: bool,
+    url: Option<&str>,
+) -> anyhow::Result<()> {
+    // Checked before anything is asked of the server: the QR code must point
+    // only at a trusted HTTPS origin, carrying nothing but the pairing code.
+    let origin = url.map(pairing_origin).transpose()?;
+    // Say what the pairing will grant before creating the code.
+    let reach = if this_workspace_only {
+        format!(
+            "only this workspace ({})",
+            crate::server_devices::workspace_id(&std::env::current_dir()?)
+        )
+    } else {
+        "every workspace you serve as this user, now and in the future \
+         (pass --this-workspace-only to limit it to this one)"
+            .to_string()
+    };
+    let can = match scope {
+        localpilot_rpc::Scope::Observe => "watch sessions",
+        localpilot_rpc::Scope::Control => {
+            "watch sessions, prompt, answer permission asks, cancel and run remote commands"
+        }
+    };
+    eprintln!("Pairing \"{name}\": it will be able to {can} in {reach}.");
+    let cwd = std::env::current_dir()?;
+    let endpoint = Endpoint::resolve(&cwd)?;
+    let conn = match localpilot_server::connect(&endpoint).await {
+        Ok(conn) => conn,
+        Err(TransportError::NotRunning) => anyhow::bail!(
+            "no localpilot server is running for this workspace ({}). Start one with \
+             `localpilot serve` first.",
+            endpoint.display()
+        ),
+        Err(error) => return Err(error.into()),
+    };
+    let (read, mut write) = tokio::io::split(conn);
+    let mut reader = JsonRecordReader::new(read);
+    send_command(
+        &mut write,
+        ClientCommand::PairBegin {
+            name: name.to_string(),
+            scope,
+            this_workspace_only,
+        },
+    )
+    .await?;
+    let Some(value) = reader.next().await? else {
+        anyhow::bail!("the server closed the connection without a pairing code");
+    };
+    let record: ServerRecord = serde_json::from_value(value)?;
+    let (code, expires_in_secs) = match record.event {
+        ServerEvent::PairingCode {
+            code,
+            expires_in_secs,
+        } => (code.expose().to_string(), expires_in_secs),
+        ServerEvent::Error { message } => anyhow::bail!("{message}"),
+        other => anyhow::bail!("unexpected reply from the server: {other:?}"),
+    };
+    let mut out = std::io::stdout().lock();
+    use std::io::Write as _;
+    match origin {
+        Some(origin) => {
+            let link = format!("{origin}/#pair={code}");
+            match qrcode::QrCode::new(link.as_bytes()) {
+                Ok(qr) => writeln!(
+                    out,
+                    "{}",
+                    qr.render::<qrcode::render::unicode::Dense1x2>()
+                        .quiet_zone(true)
+                        .build()
+                )?,
+                Err(error) => writeln!(out, "(could not draw a QR code: {error})")?,
+            }
+            writeln!(out, "Scan this with the phone, or open: {link}")?;
+        }
+        None => {
+            writeln!(out, "Pairing code: {code}")?;
+            writeln!(
+                out,
+                "Pairing only authorizes the device; it does not open any network access. \
+                 The device also needs the HTTPS address of your LocalPilot gateway; pass \
+                 --url <that address> to show both as a QR code."
+            )?;
+        }
+    }
+    writeln!(
+        out,
+        "The code works once and expires in {} minutes.",
+        expires_in_secs / 60
+    )?;
+    Ok(())
+}
+
+/// The origin a pairing QR code may point at: `https`, a host, an optional
+/// port, and nothing else (no user info, path, query or fragment that could
+/// carry other data or send the device somewhere unexpected). Nothing is
+/// requested from it.
+fn pairing_origin(url: &str) -> anyhow::Result<String> {
+    let parsed = reqwest::Url::parse(url.trim())
+        .map_err(|error| anyhow::anyhow!("--url is not a valid address: {error}"))?;
+    if parsed.scheme() != "https" {
+        anyhow::bail!(
+            "--url must be an https:// address (the gateway is reached over trusted HTTPS)"
+        );
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("--url must not contain a user name or password");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        anyhow::bail!("--url must not contain a query or fragment");
+    }
+    if !matches!(parsed.path(), "" | "/") {
+        anyhow::bail!("--url must be the gateway's origin, without a path");
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("--url must name a host"))?;
+    Ok(match parsed.port() {
+        Some(port) => format!("https://{host}:{port}"),
+        None => format!("https://{host}"),
+    })
+}
+
+/// `localpilot devices list`: every paired device, newest first.
+pub fn devices_list() -> anyhow::Result<()> {
+    let registry = cli_registry()?;
+    let devices = registry.list()?;
+    if devices.is_empty() {
+        println!("No paired devices.");
+    }
+    for device in devices {
+        let reach = match &device.workspaces {
+            None => "all workspaces".to_string(),
+            Some(roots) => roots.join(", "),
+        };
+        let state = match device.revoked_unix {
+            Some(_) => "revoked",
+            None => "active",
+        };
+        println!(
+            "{}  {:<20} {:<8} {:<8} {}",
+            device.id,
+            device.name,
+            format!("{:?}", device.scope).to_lowercase(),
+            state,
+            reach
+        );
+    }
+    Ok(())
+}
+
+/// `localpilot devices revoke <id>`: revoke a device everywhere. Every
+/// workspace's server sees it at the device's next record (open connections
+/// within a second).
+pub fn devices_revoke(id: &str) -> anyhow::Result<()> {
+    let registry = cli_registry()?;
+    if registry.revoke(id)? {
+        registry.audit("revoked", Some(id), "from the command line");
+        println!("Revoked {id}.");
+    } else {
+        println!("No active device {id}.");
+    }
+    Ok(())
+}
+
+fn cli_registry() -> anyhow::Result<DeviceRegistry> {
+    let cwd = std::env::current_dir()?;
+    let registry = DeviceRegistry::for_user(&cwd);
+    if let Some(reason) = registry.unavailable() {
+        anyhow::bail!("the device registry cannot be used: {reason}");
+    }
+    Ok(registry)
+}
+
+/// Whether a principal may send a record now.
+enum Authorized {
+    Yes,
+    /// Refused, with the record's correlation id and why.
+    Refused(Option<String>, String),
+    /// The device is no longer valid: end the connection.
+    Gone(String),
+}
+
+/// Check one record against the principal's current standing. The local
+/// machine may send anything; a device is re-read from the registry each time
+/// and needs the scope the command requires.
+fn authorize(hosts: &HostMap, principal: &Principal, value: &serde_json::Value) -> Authorized {
+    let Principal::Device { id: device } = principal else {
+        return Authorized::Yes;
+    };
+    let standing = match hosts.devices.standing(device) {
+        Ok(standing) => standing,
+        Err(Refusal::Revoked) => return Authorized::Gone("this device was revoked".to_string()),
+        Err(Refusal::Unavailable) => {
+            return Authorized::Gone("paired devices are disabled on this server".to_string())
+        }
+        Err(Refusal::BadCredential) => {
+            return Authorized::Gone("this device is no longer paired".to_string())
+        }
+        Err(Refusal::NotGranted) => {
+            return Authorized::Gone(
+                "this device is no longer allowed in this workspace".to_string(),
+            )
+        }
+    };
+    // A record that does not parse is refused by the dispatcher as malformed;
+    // it can run nothing.
+    let Ok(record) = serde_json::from_value::<ClientRecord>(value.clone()) else {
+        return Authorized::Yes;
+    };
+    match record.command.requirement() {
+        localpilot_rpc::Requirement::AtLeast(scope) if standing.scope >= scope => Authorized::Yes,
+        localpilot_rpc::Requirement::AtLeast(_) => Authorized::Refused(
+            record.id,
+            "this device may watch this session but not act on it".to_string(),
+        ),
+        localpilot_rpc::Requirement::LocalOnly => Authorized::Refused(
+            record.id,
+            "only this computer may send that command".to_string(),
+        ),
+    }
+}
+
+/// Describe a record that failed to parse without quoting any of it: parse
+/// errors can echo the values they rejected, and a malformed record may carry
+/// a credential or pairing code.
+fn malformed(error: &serde_json::Error) -> String {
+    let what = match error.classify() {
+        serde_json::error::Category::Data => "a field is missing or has the wrong type",
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => "not valid JSON",
+        serde_json::error::Category::Io => "it could not be read",
+    };
+    format!("malformed record: {what}")
+}
+
 /// Whether a connection keeps reading after a record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
@@ -1182,6 +1840,19 @@ async fn deliver<W: AsyncWrite + Unpin>(
             Ok(Flow::Continue)
         }
     }
+}
+
+/// Write already-encoded records to the client.
+async fn send_raw<W: AsyncWrite + Unpin>(write: &mut W, bytes: &[u8]) -> std::io::Result<()> {
+    write.write_all(bytes).await?;
+    write.flush().await
+}
+
+/// Best-effort closing record for a connection whose access just ended: the
+/// connection is dropped either way, and never waits on a client that is not
+/// reading.
+async fn farewell<W: AsyncWrite + Unpin>(write: &mut W, view: &ConnectionView, reason: String) {
+    let _ = tokio::time::timeout(ACCESS_POLL, emit_closure(write, view, None, reason)).await;
 }
 
 /// Tell a connection its session closed, in the record type it reads.
@@ -1292,6 +1963,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
     asks: Option<&AskRegistry>,
     acks: bool,
     server: &ServerContext<'_>,
+    principal: &Principal,
     write: &mut W,
 ) -> anyhow::Result<bool> {
     // Keep the correlation id of a record that fails to parse, when it has a
@@ -1308,7 +1980,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 raw_id,
                 acks,
                 RejectCode::Malformed,
-                format!("malformed record: {error}"),
+                malformed(&error),
             )
             .await?;
             return Ok(false);
@@ -1366,7 +2038,9 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 // `stopped`) reach this and every other attached connection
                 // via the host broadcast. A turn keeps running for other
                 // clients if this connection detaches.
-                match host.submit(text, follow_up) {
+                let origin =
+                    matches!(principal, Principal::Device { .. }).then(|| principal.label());
+                match host.submit_from(text, follow_up, origin) {
                     Admit::Started => accept(write, id, acks, None).await?,
                     Admit::Queued => {
                         emit(
@@ -1414,7 +2088,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 }
             }
             InputDisposition::Steer => {
-                host.record_intervention("steer", text.clone(), Principal::Local.label());
+                host.record_intervention("steer", text.clone(), &principal.label());
                 host.steer(text);
                 emit(
                     write,
@@ -1435,7 +2109,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                         "dropped {} queued follow-up(s)",
                         cancelled.dropped_follow_ups
                     ),
-                    Principal::Local.label(),
+                    &principal.label(),
                 );
                 accept(write, id, acks, Some(cancelled.dropped_follow_ups)).await?;
             } else {
@@ -1466,12 +2140,12 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 .into_iter()
                 .find(|ask| ask.ask_id == ask_id)
                 .map(|ask| format!("{}: {}", ask.tool, ask.detail));
-            match asks.reply(&ask_id, allow, Principal::Local) {
+            match asks.reply(&ask_id, allow, principal.clone()) {
                 Ok(_) => {
                     host.record_intervention(
                         if allow { "allow" } else { "deny" },
                         context.unwrap_or_else(|| ask_id.clone()),
-                        Principal::Local.label(),
+                        &principal.label(),
                     );
                     accept(write, id, acks, None).await?;
                 }
@@ -1497,6 +2171,40 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             emit(write, id, ServerEvent::Closed).await?;
             return Ok(true);
         }
+        ClientCommand::RevokeSelf => {
+            let Principal::Device { id: device } = principal else {
+                reject(
+                    write,
+                    id,
+                    acks,
+                    RejectCode::Forbidden,
+                    "only a paired device can revoke itself".to_string(),
+                )
+                .await?;
+                return Ok(false);
+            };
+            return match server.hosts.devices.revoke(device) {
+                Ok(_) => {
+                    server
+                        .hosts
+                        .devices
+                        .audit("revoked", Some(device), "by the device itself");
+                    accept(write, id, acks, None).await?;
+                    Ok(true)
+                }
+                Err(error) => {
+                    emit(
+                        write,
+                        id,
+                        ServerEvent::Error {
+                            message: error.to_string(),
+                        },
+                    )
+                    .await?;
+                    Ok(false)
+                }
+            };
+        }
         ClientCommand::Commands => {
             emit(
                 write,
@@ -1512,7 +2220,10 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             emit(write, id, ServerEvent::Sessions { items }).await?;
         }
         ClientCommand::RunCommand { name, args } => {
-            run_command(write, id, host, session_id, server, acks, &name, &args).await?;
+            run_command(
+                write, id, host, session_id, server, principal, acks, &name, &args,
+            )
+            .await?;
         }
         ClientCommand::Attach { .. } => {
             reject(
@@ -1626,6 +2337,7 @@ async fn run_command<W: AsyncWrite + Unpin>(
     host: &Arc<SessionHost>,
     session_id: &SessionId,
     server: &ServerContext<'_>,
+    principal: &Principal,
     acks: bool,
     name: &str,
     args: &str,
@@ -1746,7 +2458,7 @@ async fn run_command<W: AsyncWrite + Unpin>(
     drop(reservation);
     match outcome {
         Ok(message) => {
-            host.record_intervention("command", line.clone(), Principal::Local.label());
+            host.record_intervention("command", line.clone(), &principal.label());
             if acks {
                 emit(
                     write,
@@ -1855,7 +2567,14 @@ pub async fn serve(
     let setup = SessionSetup::resolve(model, provider_id, profile).await?;
     let store = Store::open(&cwd);
     let registry = SessionRegistry::new();
-    let hosts = HostMap::default();
+    let hosts = HostMap {
+        // One registry per user, shared by every workspace's server.
+        devices: Arc::new(DeviceRegistry::for_user(&cwd)),
+        ..HostMap::default()
+    };
+    if let Some(reason) = hosts.devices.unavailable() {
+        eprintln!("localpilot: paired devices are disabled until this is fixed: {reason}");
+    }
     let factory = Arc::new(ServerFactory::new(setup));
 
     // The session reaper runs beside the accept loop, sharing its registry and
@@ -2800,6 +3519,12 @@ mod tests {
             },
         )
         .await;
+        // Its acknowledgement arrives before the other client answers, so the
+        // order of the two answers is fixed.
+        let mut early2 = read_until(&mut reader2, |event| {
+            matches!(event, ServerEvent::Accepted { .. })
+        })
+        .await;
         send_with_id(
             &mut write1,
             "r1",
@@ -2810,8 +3535,21 @@ mod tests {
         )
         .await;
 
-        let rest1 = read_until(&mut reader1, is_stop).await;
-        let rest2 = read_until(&mut reader2, is_stop).await;
+        let mut rest1 = read_until(&mut reader1, is_stop).await;
+        // The late answer's refusal may arrive after the turn has stopped.
+        if !rest1
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Rejected { .. }))
+        {
+            rest1.extend(
+                read_until(&mut reader1, |event| {
+                    matches!(event, ServerEvent::Rejected { .. })
+                })
+                .await,
+            );
+        }
+        early2.extend(read_until(&mut reader2, is_stop).await);
+        let rest2 = early2;
         assert!(
             rest1.iter().any(|event| matches!(
                 event,
@@ -4044,9 +4782,20 @@ mod tests {
 
         send_with_id(&mut write, "c1", run("clear", "")).await;
         send_with_id(&mut write, "u1", run("bypass", "")).await;
-        match reply_to(&mut reader, "u1").await {
-            ServerEvent::Error { .. } => {}
-            other => panic!("a legacy refusal is an `error`, got {other:?}"),
+        // Read until both the refusal and the context usage `clear` publishes
+        // have arrived, so nothing is written after the client goes away.
+        let (mut refused, mut usage) = (false, false);
+        while !(refused && usage) {
+            let record = next_record_within(&mut reader, DEADLINE).await.unwrap();
+            match (record.id.as_deref(), &record.event) {
+                (Some("u1"), ServerEvent::Error { .. }) => refused = true,
+                (Some("u1"), other) => panic!("a legacy refusal is an `error`, got {other:?}"),
+                (_, ServerEvent::ContextUsage { .. }) => usage = true,
+                (_, ServerEvent::CommandResult { .. }) => {
+                    panic!("a legacy client gets no `command_result`")
+                }
+                _ => {}
+            }
         }
         drop((write, reader));
         timeout(DEADLINE, server).await.unwrap().unwrap();
@@ -4083,6 +4832,829 @@ mod tests {
         ));
         drop((write, reader));
         timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_pairing_url_must_be_a_bare_https_origin() {
+        assert_eq!(
+            pairing_origin("https://pc.example.ts.net").unwrap(),
+            "https://pc.example.ts.net"
+        );
+        assert_eq!(
+            pairing_origin("https://pc.example.ts.net:8443/").unwrap(),
+            "https://pc.example.ts.net:8443"
+        );
+        for bad in [
+            "http://pc.example.ts.net",
+            "https://user:pw@pc.example.ts.net",
+            "https://pc.example.ts.net/?next=evil",
+            "https://pc.example.ts.net/#x",
+            "https://pc.example.ts.net/some/path",
+            "ftp://pc.example.ts.net",
+            "not a url",
+        ] {
+            assert!(pairing_origin(bad).is_err(), "{bad} must be refused");
+        }
+    }
+
+    // --- paired devices ---------------------------------------------------------
+
+    /// Open a connection and send `command` as its first record.
+    async fn first_record(
+        endpoint: &Endpoint,
+        command: ClientCommand,
+    ) -> (
+        JsonRecordReader<tokio::io::ReadHalf<Conn>>,
+        tokio::io::WriteHalf<Conn>,
+        ServerEvent,
+    ) {
+        let (read, mut write) = tokio::io::split(dial(endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        send_command(&mut write, command).await.unwrap();
+        let reply = read_event(&mut reader).await;
+        (reader, write, reply)
+    }
+
+    /// Register a gateway; returns its control channel (keep it open) and the
+    /// capability.
+    async fn register_gateway(
+        endpoint: &Endpoint,
+    ) -> (
+        (
+            JsonRecordReader<tokio::io::ReadHalf<Conn>>,
+            tokio::io::WriteHalf<Conn>,
+        ),
+        String,
+    ) {
+        let (reader, write, reply) = first_record(endpoint, ClientCommand::GatewayRegister).await;
+        match reply {
+            ServerEvent::GatewayRegistered { capability } => {
+                ((reader, write), capability.expose().to_string())
+            }
+            other => panic!("expected `gateway_registered`, got {other:?}"),
+        }
+    }
+
+    /// Pair a device through the gateway; returns its id and credential.
+    async fn pair_device(
+        endpoint: &Endpoint,
+        hosts: &HostMap,
+        capability: &str,
+        scope: localpilot_rpc::Scope,
+    ) -> (String, String) {
+        let code = hosts.pairings.begin("phone", scope, false).unwrap();
+        let (_, _, reply) = first_record(
+            endpoint,
+            ClientCommand::PairExchange {
+                capability: localpilot_rpc::WireSecret::new(capability),
+                pairing: localpilot_rpc::WireSecret::new(code.expose()),
+            },
+        )
+        .await;
+        match reply {
+            ServerEvent::DevicePaired {
+                device_id,
+                credential,
+                ..
+            } => (device_id, credential.expose().to_string()),
+            other => panic!("expected `device_paired`, got {other:?}"),
+        }
+    }
+
+    fn device_attach(capability: &str, credential: &str, target: AttachTarget) -> ClientCommand {
+        ClientCommand::DeviceAttach {
+            capability: localpilot_rpc::WireSecret::new(capability),
+            credential: localpilot_rpc::WireSecret::new(credential),
+            target,
+            capabilities: resume_caps(),
+            since: None,
+        }
+    }
+
+    /// A local session to attach devices to.
+    async fn local_session(
+        endpoint: &Endpoint,
+    ) -> (
+        JsonRecordReader<tokio::io::ReadHalf<Conn>>,
+        tokio::io::WriteHalf<Conn>,
+        SessionId,
+    ) {
+        let (read, mut write) = tokio::io::split(dial(endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        let id = attach_client_with(&mut reader, &mut write, AttachTarget::OpenNew, acks()).await;
+        (reader, write, id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_observing_device_may_watch_but_not_act() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 5, hosts.clone());
+        let (local_reader, local_write, session) = local_session(&endpoint).await;
+        let (gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Observe,
+        )
+        .await;
+
+        // Watching an existing session: allowed.
+        let (mut reader, mut write, reply) = first_record(
+            &endpoint,
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: session,
+                },
+            ),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Attached { .. }), "{reply:?}");
+        read_event(&mut reader).await; // snapshot
+        send_with_id(&mut write, "s1", ClientCommand::Status).await;
+        assert!(matches!(
+            reply_to(&mut reader, "s1").await,
+            ServerEvent::Status { .. }
+        ));
+        // Acting: refused, every kind.
+        for (rid, command) in [
+            ("p1", prompt("go")),
+            ("c1", ClientCommand::Cancel),
+            ("r1", run("name", "x")),
+            (
+                "a1",
+                ClientCommand::PermissionReply {
+                    ask_id: "ask-1".to_string(),
+                    allow: true,
+                },
+            ),
+            ("g1", ClientCommand::GatewayRegister),
+        ] {
+            send_with_id(&mut write, rid, command).await;
+            assert!(
+                matches!(
+                    reply_to(&mut reader, rid).await,
+                    ServerEvent::Rejected {
+                        code: RejectCode::Forbidden,
+                        ..
+                    }
+                ),
+                "{rid}"
+            );
+        }
+        drop((reader, write));
+
+        // Opening a new session needs `control`: refused, and never local.
+        let (_, _, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, AttachTarget::OpenNew),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
+
+        drop((gateway, local_reader, local_write));
+        let _ = timeout(DEADLINE, server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_controlling_device_acts_under_its_own_identity() {
+        let factory = Arc::new(FakeFactory::asking(asking_provider(&[])));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 3, hosts.clone());
+        let (gateway, capability) = register_gateway(&endpoint).await;
+        let (device_id, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (mut reader, mut write, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, AttachTarget::OpenNew),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Attached { .. }), "{reply:?}");
+        read_event(&mut reader).await; // snapshot
+
+        send_with_id(&mut write, "p1", prompt("clean up")).await;
+        let ask = ask_id_of(&read_until(&mut reader, is_ask).await);
+        send_with_id(
+            &mut write,
+            "r1",
+            ClientCommand::PermissionReply {
+                ask_id: ask,
+                allow: false,
+            },
+        )
+        .await;
+        let rest = read_until(&mut reader, is_stop).await;
+        assert!(
+            rest.iter().any(|event| matches!(
+                event,
+                ServerEvent::PermissionResolved {
+                    by: Some(Principal::Device { id }),
+                    ..
+                } if *id == device_id
+            )),
+            "the answer is attributed to the device, not to this computer: {rest:?}"
+        );
+        assert!(hosts
+            .devices
+            .audit_lines()
+            .iter()
+            .any(|line| line.contains("\"attached\"") && line.contains(&device_id)));
+
+        drop((reader, write, gateway));
+        let _ = timeout(DEADLINE, server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_connection_never_falls_back_to_local() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 6, hosts.clone());
+        let (gateway, capability) = register_gateway(&endpoint).await;
+        let (device_id, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let forged = format!("lpd1.{device_id}.{}", "0".repeat(64));
+
+        for (label, command) in [
+            (
+                "no capability",
+                device_attach("lpg1.forged", &credential, AttachTarget::OpenNew),
+            ),
+            (
+                "bad credential",
+                device_attach(&capability, &forged, AttachTarget::OpenNew),
+            ),
+            (
+                "garbage credential",
+                device_attach(&capability, "nope", AttachTarget::OpenNew),
+            ),
+        ] {
+            let (mut reader, _write, reply) = first_record(&endpoint, command).await;
+            assert!(
+                matches!(reply, ServerEvent::Error { .. }),
+                "{label}: {reply:?}"
+            );
+            assert!(
+                timeout(DEADLINE, reader.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none(),
+                "{label}: the connection ends"
+            );
+        }
+
+        // The gateway's control channel carries no session commands.
+        let ((mut control_reader, mut control_write), _) = (gateway, ());
+        send_with_id(&mut control_write, "x1", prompt("go")).await;
+        assert!(matches!(
+            reply_to(&mut control_reader, "x1").await,
+            ServerEvent::Rejected {
+                code: RejectCode::Forbidden,
+                ..
+            }
+        ));
+
+        // Its capability dies with it, and so do the device connections on it.
+        let (mut device, _device_write, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, AttachTarget::OpenNew),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Attached { .. }));
+        read_event(&mut device).await; // snapshot
+        drop((control_reader, control_write));
+        let closed = read_records_until(&mut device, |event| {
+            matches!(event, ServerEvent::SessionClosed { .. })
+        })
+        .await;
+        assert!(closed.iter().any(|record| matches!(
+            &record.event,
+            ServerEvent::SessionClosed { reason } if reason.contains("gateway")
+        )));
+        let _ = timeout(DEADLINE, server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_revoked_device_stops_receiving_and_cannot_retry() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 4, hosts.clone());
+        let (gateway, capability) = register_gateway(&endpoint).await;
+        let (device_id, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (mut reader, _write, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, AttachTarget::OpenNew),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Attached { .. }));
+        read_event(&mut reader).await; // snapshot
+
+        // Revoked elsewhere (the CLI, another workspace): the open stream ends
+        // within the standing tick, without the device sending anything.
+        assert!(hosts.devices.revoke(&device_id).unwrap());
+        let closed = timeout(Duration::from_secs(5), async {
+            loop {
+                if let ServerEvent::SessionClosed { reason } = read_event(&mut reader).await {
+                    break reason;
+                }
+            }
+        })
+        .await
+        .expect("closed promptly");
+        assert!(closed.contains("revoked"));
+
+        // A new attach with the same credential is refused.
+        let (_, _, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, AttachTarget::OpenNew),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Error { .. }));
+        drop(gateway);
+        let _ = timeout(DEADLINE, server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn no_secret_reaches_the_audit_log_or_an_error() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 4, hosts.clone());
+        let (gateway, capability) = register_gateway(&endpoint).await;
+        let code = hosts
+            .pairings
+            .begin("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let wrong = format!(
+            "{}.{}",
+            code.expose().split('.').next().unwrap(),
+            "f".repeat(64)
+        );
+        let (_, _, refused) = first_record(
+            &endpoint,
+            ClientCommand::PairExchange {
+                capability: localpilot_rpc::WireSecret::new(capability.clone()),
+                pairing: localpilot_rpc::WireSecret::new(wrong.clone()),
+            },
+        )
+        .await;
+        let (_, _, paired) = first_record(
+            &endpoint,
+            ClientCommand::PairExchange {
+                capability: localpilot_rpc::WireSecret::new(capability.clone()),
+                pairing: localpilot_rpc::WireSecret::new(code.expose()),
+            },
+        )
+        .await;
+        let ServerEvent::DevicePaired { credential, .. } = paired else {
+            panic!("expected `device_paired`, got {paired:?}");
+        };
+        let credential = credential.expose().to_string();
+        let (_, _, bad) = first_record(
+            &endpoint,
+            device_attach(
+                &capability,
+                &format!("{credential}x"),
+                AttachTarget::OpenNew,
+            ),
+        )
+        .await;
+
+        let mut seen = hosts.devices.audit_lines().join("\n");
+        seen.push_str(&format!("{refused:?} {bad:?}"));
+        let code_secret = code.expose().split('.').nth(1).unwrap();
+        let credential_secret = credential.rsplit('.').next().unwrap();
+        for secret in [code_secret, credential_secret, &capability, &wrong] {
+            assert!(!seen.contains(secret), "a secret leaked: {seen}");
+        }
+        drop(gateway);
+        let _ = timeout(DEADLINE, server).await;
+    }
+
+    #[test]
+    fn a_malformed_record_never_echoes_what_it_carried() {
+        let sentinel = "SENTINEL-credential-text";
+        for raw in [
+            format!(
+                r#"{{"v":1,"command":{{"type":"device_attach","capability":"{sentinel}","credential":7}}}}"#
+            ),
+            format!(
+                r#"{{"v":1,"command":{{"type":"pair_begin","name":"x","scope":"{sentinel}"}}}}"#
+            ),
+            format!(r#"{{"v":1,"command":{{"type":"{sentinel}"}}}}"#),
+        ] {
+            let error = serde_json::from_str::<ClientRecord>(&raw).unwrap_err();
+            let message = malformed(&error);
+            assert!(!message.contains(sentinel), "{message}");
+            assert!(message.starts_with("malformed record"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_closed_gateway_creates_no_device_and_attaches_nothing_after_its_wait() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 4, hosts.clone());
+        let (gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let code = hosts
+            .pairings
+            .begin("tablet", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+
+        // Every handshake slot is taken: both requests below wait.
+        let held = hosts.handshakes.0.acquire_many(16).await.unwrap();
+        let pairing = tokio::spawn({
+            let endpoint = endpoint.clone();
+            let capability = capability.clone();
+            let code = code.expose().to_string();
+            async move {
+                first_record(
+                    &endpoint,
+                    ClientCommand::PairExchange {
+                        capability: localpilot_rpc::WireSecret::new(capability),
+                        pairing: localpilot_rpc::WireSecret::new(code),
+                    },
+                )
+                .await
+                .2
+            }
+        });
+        let attach = tokio::spawn({
+            let endpoint = endpoint.clone();
+            let capability = capability.clone();
+            async move {
+                first_record(
+                    &endpoint,
+                    device_attach(&capability, &credential, AttachTarget::OpenNew),
+                )
+                .await
+                .2
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The gateway's control channel closes while they wait.
+        drop(gateway);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(held);
+
+        let pairing = timeout(DEADLINE, pairing).await.unwrap().unwrap();
+        let attach = timeout(DEADLINE, attach).await.unwrap().unwrap();
+        assert!(matches!(pairing, ServerEvent::Error { .. }), "{pairing:?}");
+        assert!(matches!(attach, ServerEvent::Error { .. }), "{attach:?}");
+        assert_eq!(
+            hosts.devices.list().unwrap().len(),
+            1,
+            "no device was created under the closed gateway"
+        );
+        assert!(hosts.inner.lock().await.is_empty(), "no session was opened");
+        let _ = timeout(DEADLINE, server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn access_lost_while_waiting_to_bind_opens_and_sends_nothing() {
+        for revoke in [false, true] {
+            let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+            let hosts = HostMap::default();
+            let (endpoint, server) = spawn_server_on(factory, 3, hosts.clone());
+            let (gateway, capability) = register_gateway(&endpoint).await;
+            let (device_id, credential) = pair_device(
+                &endpoint,
+                &hosts,
+                &capability,
+                localpilot_rpc::Scope::Control,
+            )
+            .await;
+
+            // Hold the host map: the device's handshake succeeds, then waits
+            // to bind.
+            let map = hosts.inner.lock().await;
+            let attach = tokio::spawn({
+                let endpoint = endpoint.clone();
+                let capability = capability.clone();
+                async move {
+                    first_record(
+                        &endpoint,
+                        device_attach(&capability, &credential, AttachTarget::OpenNew),
+                    )
+                    .await
+                    .2
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            // Access ends while it waits.
+            let _gateway = if revoke {
+                assert!(hosts.devices.revoke(&device_id).unwrap());
+                Some(gateway)
+            } else {
+                drop(gateway);
+                None
+            };
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(map);
+
+            let reply = timeout(DEADLINE, attach).await.unwrap().unwrap();
+            assert!(
+                matches!(reply, ServerEvent::Error { .. }),
+                "revoke={revoke}: refused, got {reply:?}"
+            );
+            assert!(
+                hosts.inner.lock().await.is_empty(),
+                "revoke={revoke}: no session was opened"
+            );
+            drop(_gateway);
+            let _ = timeout(DEADLINE, server).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_revoked_while_its_first_write_is_blocked_gets_nothing_more() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let registry = SessionRegistry::new();
+        let store = factory.store();
+        let lease = hosts.gateways.register().unwrap();
+        let capability = lease.capability.expose().to_string();
+        let (standing, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+
+        // Client to server: roomy. Server to client: 32 bytes, so the
+        // `attached` record blocks part-way while nobody reads.
+        let (server_read, mut client_write) = tokio::io::duplex(64 * 1024);
+        let (mut client_read, server_write) = tokio::io::duplex(32);
+        let connection = tokio::spawn({
+            let hosts = hosts.clone();
+            let factory = factory.clone();
+            async move {
+                serve_connection(
+                    server_read,
+                    server_write,
+                    &registry,
+                    &hosts,
+                    factory.as_ref(),
+                    &store,
+                    Profile::Bypass,
+                )
+                .await
+            }
+        });
+        send_command(
+            &mut client_write,
+            ClientCommand::DeviceAttach {
+                capability: localpilot_rpc::WireSecret::new(capability),
+                credential: localpilot_rpc::WireSecret::new(credential.expose()),
+                target: AttachTarget::OpenNew,
+                capabilities: resume_caps(),
+                since: None,
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Revoked from elsewhere while the write is blocked; wait past the
+        // poll bound, then drain what reached the client.
+        assert!(hosts.devices.revoke(&standing.id).unwrap());
+        tokio::time::sleep(ACCESS_POLL * 3).await;
+        let mut received = Vec::new();
+        timeout(
+            DEADLINE,
+            tokio::io::AsyncReadExt::read_to_end(&mut client_read, &mut received),
+        )
+        .await
+        .expect("the connection was dropped")
+        .unwrap();
+        timeout(DEADLINE, connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            received.len() <= 32,
+            "nothing beyond what was already buffered: {} bytes",
+            received.len()
+        );
+        let text = String::from_utf8_lossy(&received);
+        assert!(!text.contains("snapshot"), "no snapshot was sent: {text}");
+        drop(lease);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_revoked_while_a_live_write_is_blocked_gets_nothing_more() {
+        let answer = "y".repeat(16 * 1024);
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text(&answer)));
+        let hosts = HostMap::default();
+        let registry = SessionRegistry::new();
+        let store = factory.store();
+        let lease = hosts.gateways.register().unwrap();
+        let capability = lease.capability.expose().to_string();
+        let (standing, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+
+        // Server to client: 4 KiB, enough for the attachment but not for the
+        // 16 KiB answer, which blocks once the client stops reading.
+        let (server_read, mut client_write) = tokio::io::duplex(64 * 1024);
+        let (client_read, server_write) = tokio::io::duplex(4 * 1024);
+        let connection = tokio::spawn({
+            let hosts = hosts.clone();
+            let factory = factory.clone();
+            async move {
+                serve_connection(
+                    server_read,
+                    server_write,
+                    &registry,
+                    &hosts,
+                    factory.as_ref(),
+                    &store,
+                    Profile::Bypass,
+                )
+                .await
+            }
+        });
+        let mut reader = JsonRecordReader::new(client_read);
+        send_command(
+            &mut client_write,
+            ClientCommand::DeviceAttach {
+                capability: localpilot_rpc::WireSecret::new(capability),
+                credential: localpilot_rpc::WireSecret::new(credential.expose()),
+                target: AttachTarget::OpenNew,
+                capabilities: resume_caps(),
+                since: None,
+            },
+        )
+        .await
+        .unwrap();
+        read_until(&mut reader, |event| {
+            matches!(event, ServerEvent::Snapshot { .. })
+        })
+        .await;
+
+        // Attached and caught up; now a turn's answer is written while
+        // nobody reads.
+        send_command(
+            &mut client_write,
+            ClientCommand::Prompt {
+                text: "go".to_string(),
+                disposition: InputDisposition::Immediate,
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Revoked from elsewhere while the live write is blocked; wait past
+        // the poll bound, then drain what reached the client.
+        assert!(hosts.devices.revoke(&standing.id).unwrap());
+        tokio::time::sleep(ACCESS_POLL * 3).await;
+        let mut after = Vec::new();
+        // Until EOF, or the record cut off when the connection was dropped.
+        while let Ok(Some(value)) = timeout(DEADLINE, reader.next())
+            .await
+            .expect("the connection was dropped")
+        {
+            after.push(value);
+        }
+        timeout(DEADLINE, connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let delivered: usize = after
+            .iter()
+            .filter_map(|value| serde_json::from_value::<ServerRecord>(value.clone()).ok())
+            .map(|record| match record.event {
+                ServerEvent::TextDelta { text } => text.len(),
+                _ => 0,
+            })
+            .sum();
+        assert!(
+            delivered < answer.len(),
+            "the blocked answer was not delivered after revocation"
+        );
+        drop(lease);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_revoked_while_its_command_runs_never_gets_the_reply() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap::default();
+        let registry = SessionRegistry::new();
+        let store = factory.store();
+        let lease = hosts.gateways.register().unwrap();
+        let capability = lease.capability.expose().to_string();
+        let (standing, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+
+        let (server_read, mut client_write) = tokio::io::duplex(64 * 1024);
+        let (client_read, server_write) = tokio::io::duplex(64 * 1024);
+        let connection = tokio::spawn({
+            let hosts = hosts.clone();
+            let factory = factory.clone();
+            async move {
+                serve_connection(
+                    server_read,
+                    server_write,
+                    &registry,
+                    &hosts,
+                    factory.as_ref(),
+                    &store,
+                    Profile::Bypass,
+                )
+                .await
+            }
+        });
+        let mut reader = JsonRecordReader::new(client_read);
+        send_command(
+            &mut client_write,
+            ClientCommand::DeviceAttach {
+                capability: localpilot_rpc::WireSecret::new(capability),
+                credential: localpilot_rpc::WireSecret::new(credential.expose()),
+                target: AttachTarget::OpenNew,
+                capabilities: resume_caps(),
+                since: None,
+            },
+        )
+        .await
+        .unwrap();
+        let attachment = read_until(&mut reader, |event| {
+            matches!(event, ServerEvent::Snapshot { .. })
+        })
+        .await;
+        let instance = attachment
+            .iter()
+            .find_map(|event| match event {
+                ServerEvent::Attached { instance, .. } => Some(instance.clone()),
+                _ => None,
+            })
+            .unwrap();
+
+        // Hold the session list so the command is still running when the
+        // device is revoked; the transport stays writable throughout.
+        let held = hosts.inner.lock().await;
+        send_keyed(
+            &mut client_write,
+            "s1",
+            &instance,
+            1,
+            ClientCommand::Sessions,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(hosts.devices.revoke(&standing.id).unwrap());
+        drop(held);
+
+        let mut after = Vec::new();
+        // Until EOF, or a record cut off when the connection was dropped.
+        while let Ok(Some(value)) = timeout(DEADLINE, reader.next())
+            .await
+            .expect("the connection was dropped")
+        {
+            after.push(value);
+        }
+        timeout(DEADLINE, connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let replied = after
+            .iter()
+            .filter_map(|value| serde_json::from_value::<ServerRecord>(value.clone()).ok())
+            .any(|record| matches!(record.event, ServerEvent::Sessions { .. }));
+        assert!(
+            !replied,
+            "the reply was delivered after revocation: {after:?}"
+        );
+        drop(lease);
     }
 
     // --- the plain-text client renderer --------------------------------------

@@ -61,10 +61,23 @@ pub const FOLLOW_UP_CAPACITY: usize = 16;
 /// Admission state: whether the admission loop is driving turns, the
 /// follow-ups waiting for it, and the token of a follow-up it has popped but
 /// not yet started.
+/// Decides whether queued work from an origin (a device, say) may still start.
+pub type OriginGate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// A follow-up waiting behind the running turn, with who sent it.
+struct FollowUp {
+    text: String,
+    /// `None` for input from this machine; otherwise checked against the
+    /// origin gate when the follow-up is about to start.
+    origin: Option<String>,
+}
+
 #[derive(Default)]
 struct Admission {
     running: bool,
-    follow_ups: VecDeque<String>,
+    follow_ups: VecDeque<FollowUp>,
+    /// Checked when a follow-up with an origin is about to start.
+    gate: Option<OriginGate>,
     starting: Option<CancellationToken>,
     /// Set once by the reaper: the session is being closed and admits nothing.
     closed: bool,
@@ -229,19 +242,29 @@ impl SessionHost {
     /// [`drive_captured`](Self::drive_captured) with a caller-made token, so an
     /// admitted turn can be cancelled before it publishes the token itself.
     async fn drive_with(&self, input: &str, token: CancellationToken) -> DriveCapture {
-        self.touch();
-        // Acquire the runtime mutex first, then publish this turn's token, so the
-        // slot always names the turn that actually holds the mutex (a concurrent
-        // `drive` waiting on the lock cannot clobber the running turn's token).
         let mut runtime = self.runtime.lock().await;
+        self.run_locked(&mut runtime, input, token).await
+    }
+
+    /// Run one turn on a runtime the caller holds.
+    async fn run_locked(
+        &self,
+        runtime: &mut SessionRuntime,
+        input: &str,
+        token: CancellationToken,
+    ) -> DriveCapture {
+        self.touch();
+        // The caller holds the runtime mutex; only now is this turn's token
+        // published, so the slot always names the turn that actually holds the
+        // mutex (a concurrent `drive` waiting on the lock cannot clobber it).
         self.set_turn_token(Some(token.clone()));
         self.admission().starting = None;
-        self.flush_interventions(&mut runtime);
+        self.flush_interventions(runtime);
         // Mark the turn's start in the same ordered stream as its events, so a
         // consumer attributes every later event to this turn.
         let _ = self.events.send(RuntimeEvent::TurnStarted);
         let reason = runtime.run_turn(input, &self.events, &token).await;
-        self.flush_interventions(&mut runtime);
+        self.flush_interventions(runtime);
         let assistant_text = runtime.current_turn_assistant_text();
         let usage = runtime.current_turn_usage();
         self.set_turn_token(None);
@@ -260,6 +283,19 @@ impl SessionHost {
     /// anything else is refused as [`Admit::Busy`]. Events from every admitted
     /// turn reach all attached clients through the host broadcast.
     pub fn submit(self: &Arc<Self>, text: String, queue_if_busy: bool) -> Admit {
+        self.submit_from(text, queue_if_busy, None)
+    }
+
+    /// [`submit`](Self::submit) on behalf of `origin`. A follow-up from an
+    /// origin runs only if the origin gate (see
+    /// [`set_origin_gate`](Self::set_origin_gate)) still allows it when its
+    /// turn is about to start; otherwise it is dropped.
+    pub fn submit_from(
+        self: &Arc<Self>,
+        text: String,
+        queue_if_busy: bool,
+        origin: Option<String>,
+    ) -> Admit {
         let token = {
             let mut admission = self.admission();
             if admission.closed {
@@ -279,17 +315,16 @@ impl SessionHost {
                 if admission.follow_ups.len() >= FOLLOW_UP_CAPACITY {
                     return Admit::QueueFull;
                 }
-                admission.follow_ups.push_back(text);
+                admission.follow_ups.push_back(FollowUp { text, origin });
                 if !admission.running {
                     // A turn driven outside admission is running: start the
                     // loop so the follow-up runs once that turn releases the
                     // session.
-                    admission.running = true;
-                    let token = CancellationToken::new();
-                    admission.starting = Some(token.clone());
-                    let next = admission.follow_ups.pop_front();
-                    drop(admission);
-                    if let Some(next) = next {
+                    if let Some(next) = admission.follow_ups.pop_front() {
+                        admission.running = true;
+                        let token = CancellationToken::new();
+                        admission.starting = Some(token.clone());
+                        drop(admission);
                         self.spawn_admitted(next, token);
                     }
                 }
@@ -300,33 +335,56 @@ impl SessionHost {
             admission.starting = Some(token.clone());
             token
         };
-        self.spawn_admitted(text, token);
+        self.spawn_admitted(FollowUp { text, origin }, token);
         Admit::Started
     }
 
-    /// Drive `text`, then each queued follow-up, until the queue is empty.
-    fn spawn_admitted(self: &Arc<Self>, text: String, token: CancellationToken) {
+    /// Drive `first`, then each queued follow-up, until the queue is empty.
+    fn spawn_admitted(self: &Arc<Self>, first: FollowUp, token: CancellationToken) {
         let host = Arc::clone(self);
         tokio::spawn(async move {
-            let mut next = Some((text, token));
-            while let Some((text, token)) = next.take() {
+            let mut next = Some((first, token));
+            while let Some((work, token)) = next.take() {
                 // A follow-up cancelled between being popped and starting never
                 // runs; `cancel_all` counted it as dropped.
                 if !token.is_cancelled() {
-                    host.drive_with(&text, token).await;
+                    host.drive_admitted(&work, token).await;
                 }
                 let mut admission = host.admission();
                 admission.starting = None;
                 match admission.follow_ups.pop_front() {
-                    Some(text) => {
+                    Some(work) => {
                         let token = CancellationToken::new();
                         admission.starting = Some(token.clone());
-                        next = Some((text, token));
+                        next = Some((work, token));
                     }
                     None => admission.running = false,
                 }
             }
         });
+    }
+
+    /// Drive one admitted piece of work. Its origin is checked against the
+    /// gate at the last moment before the turn starts — after the session is
+    /// held, so nothing can start in between — and without the admission lock
+    /// (the gate may read the device registry). Work refused there never
+    /// starts; work already started continues.
+    async fn drive_admitted(&self, work: &FollowUp, token: CancellationToken) {
+        let mut runtime = self.runtime.lock().await;
+        if let Some(origin) = &work.origin {
+            let gate = self.admission().gate.clone();
+            if gate.is_some_and(|gate| !gate(origin)) {
+                return;
+            }
+        }
+        self.run_locked(&mut runtime, &work.text, token).await;
+    }
+
+    /// Install the check that decides, when work from an origin is about to
+    /// start, whether that origin may still start work (a revoked device, or
+    /// one without the scope to act, may not).
+    pub fn set_origin_gate(&self, gate: OriginGate) {
+        self.admission().gate = Some(gate);
     }
 
     /// Cancel the in-flight turn, if any, without taking the runtime mutex.

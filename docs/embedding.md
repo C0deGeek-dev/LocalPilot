@@ -263,6 +263,27 @@ The command is matched by its exact canonical form, not a hash, so a retry may
 use a new correlation id but must repeat the same command. Commands without
 `request` behave as before.
 
+**Paired devices.** Besides `attach`, a connection's first record may be:
+
+- `pair_begin {name, scope, this_workspace_only}` (this computer only) — answers
+  `pairing_code {code, expires_in_secs}` and ends. `localpilot devices pair` uses it;
+- `gateway_register` (this computer only) — answers
+  `gateway_registered {capability}`. The capability is valid while this
+  connection stays open; the connection accepts nothing else;
+- `pair_exchange {capability, pairing}` (through the gateway) — answers
+  `device_paired {device_id, credential, scope}` once and ends;
+- `device_attach {capability, credential, target, capabilities, since}`
+  (through the gateway) — the connection then acts as that device, or is refused
+  and closed. It never falls back to local.
+
+Every command carries a requirement (`ClientCommand::requirement`): `observe`
+(`hello`, `status`, `commands`, `sessions`, `shutdown`, `revoke_self`),
+`control` (`prompt`, `cancel`, `permission_reply`, `run_command`), or this
+computer only. Attaching to an existing session needs `observe`; opening one
+needs `control`. A device beyond its scope gets `rejected`/`forbidden`; a
+revoked device's connection ends with `session_closed`. Answers and actions
+carry the device's identity (`by: {"kind": "device", "id": …}`).
+
 **Discovery and slash commands.** `attached` and `hello` list the opt-ins the
 server implements in `capabilities` (`acks`, `resume`, `retry` — which also
 needs `acks` — and `commands`). Then:

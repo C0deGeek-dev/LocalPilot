@@ -722,3 +722,97 @@ async fn a_cancelled_command_releases_the_session() {
     );
     assert!(host.reserve_command().is_some());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_follow_up_from_a_refused_origin_never_starts() {
+    let provider = FakeProvider::new()
+        .tool_call("c1", "barrier", json!({}))
+        .text("first done")
+        .text("local runs");
+    let (entered, release, handle, store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle).await);
+    let allowed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let allowed = allowed.clone();
+        host.set_origin_gate(Arc::new(move |origin: &str| {
+            origin != "device:revoked" || allowed.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+    }
+    let mut rx = host.subscribe();
+
+    assert_eq!(host.submit("go".to_string(), false), Admit::Started);
+    timeout(PROMPT, entered.notified()).await.unwrap();
+    assert_eq!(
+        host.submit_from(
+            "from device".to_string(),
+            true,
+            Some("device:revoked".to_string())
+        ),
+        Admit::Queued
+    );
+    assert_eq!(host.submit("from here".to_string(), true), Admit::Queued);
+    // The device is revoked while its follow-up waits.
+    allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+    release.notify_one();
+
+    let events = until_stops(&mut rx, 2).await;
+    assert!(
+        saw_text(&events, "local runs"),
+        "this machine's follow-up ran"
+    );
+    tokio::time::sleep(HELD).await;
+    let later = drain(&mut rx);
+    assert!(
+        !later
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::Stopped(_))),
+        "no third turn"
+    );
+    let transcript = transcript_text(&store, host.id());
+    assert!(transcript.contains("from here"));
+    assert!(
+        !transcript.contains("from device"),
+        "the revoked device's follow-up never started"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepted_device_work_waiting_for_the_session_is_rechecked_before_it_starts() {
+    let provider = FakeProvider::new().text("must not run");
+    let (_entered, _release, handle, store, _dir) = barrier_host_parts(provider);
+    let host = Arc::new(SessionHost::new(handle.clone()).await);
+    let allowed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let allowed = allowed.clone();
+        host.set_origin_gate(Arc::new(move |_origin: &str| {
+            allowed.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+    }
+
+    // The device's prompt is accepted while the session is held elsewhere:
+    // dequeued, waiting for the runtime.
+    let held = handle.lock().await;
+    assert_eq!(
+        host.submit_from(
+            "from device".to_string(),
+            false,
+            Some("device:x".to_string())
+        ),
+        Admit::Started
+    );
+    // Revoked before it could start.
+    allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+    drop(held);
+
+    timeout(PROMPT, async {
+        while host.is_busy() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !transcript_text(&store, host.id()).contains("from device"),
+        "work from a revoked device never started"
+    );
+}

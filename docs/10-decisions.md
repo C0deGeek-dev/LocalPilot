@@ -2,6 +2,50 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0245: Paired Devices Are Authorized By The Daemon Against A Per-User Registry
+
+**Status:** accepted · **Date:** 2026-10-29. Builds on ADR-0239 to ADR-0242.
+
+**Context.** A phone should follow and steer `localpilot serve` sessions. Until
+now everything on the owner-only pipe was the local machine, with full
+authority. One pairing must reach all of the user's projects, while each project
+runs its own daemon.
+
+**Decision.**
+
+1. Paired devices live in one per-user registry
+   (`~/.localpilot/devices/registry.json`). Each workspace daemon re-reads it
+   before every decision; writers take an exclusive lock on a stable
+   `registry.lock`, re-read, change and replace the file atomically. Directory and
+   files are owner-only (protected DACL on Windows via `localpilot-winsec`,
+   0700/0600 elsewhere). An unreadable registry disables devices and is never
+   replaced. Grants cover all workspaces unless a pairing is limited to one.
+2. Credentials are 32 random bytes (`ring` system randomness), stored as SHA-256,
+   compared in constant time, and handled as a redacted `Secret`.
+3. A connection's first record decides what it is: local (`attach`), the
+   gateway's control channel (`gateway_register`, whose capability lives exactly
+   as long as that connection), a pairing exchange, or a device
+   (`device_attach`). A device connection that fails any check is refused and
+   closed; it never becomes local.
+4. Scopes `observe` and `control` are checked through an exhaustive
+   `ClientCommand::requirement` before dispatch, against the device's standing
+   re-read for every record; open device connections re-check every second.
+   Principals thread through dispatch, retries, asks and the session log.
+5. Pairing codes are single use, expire after five minutes on a monotonic clock,
+   carry a non-secret id so failures withdraw the right code after five, and are
+   consumed together with the device's registration. Failed credentials and codes
+   get growing delays; a valid credential is never refused for others' failures;
+   device handshakes are bounded.
+6. Revocation applies everywhere, ends open connections, refuses retries and
+   drops not-yet-started follow-ups from that device (checked when they would
+   start); running work continues.
+7. An audit log records pairing, attach, refusal, revocation and gateway events
+   without secrets.
+
+**Consequences.** One pairing reaches every served workspace. The gateway that
+carries device traffic, and following the full-screen TUI's in-process session
+from a phone, come next. Not done: the TUI `/pair` command.
+
 ## ADR-0244: The Work Envelope Does Not Size Scratch Writes, And Sizes One Literal replace_in_file Like An Exact Edit
 
 **Status:** accepted · **Date:** 2026-10-30.
@@ -5302,7 +5346,7 @@ untestable without a frontier backend LocalPilot does not target.
 
 ## ADR-0139: A Pair Is Two Ordinary Agent Sessions Adopted Into A Symmetric Exact-Two Swarm Topology
 
-Status: accepted and consumed by the shipped `localpilot pair` interactive
+Status: accepted and consumed by the shipped `localpilot devices pair` interactive
 command. Builds on the convergence protocol (ADR-0136) and reuses the swarm
 membership, one-to-one messaging, and advisory-conflict substrate
 (ADR-0124..0127, ADR-0126).
@@ -5358,7 +5402,7 @@ with no protocol change.
 
 Scope and boundary: this decision covers the shipped topology, atomic admission,
 bound hosting, and adapter that wires the ADR-0136 driver to real sessions.
-`localpilot pair` is the runnable consumer: its interactive host constructs two
+`localpilot devices pair` is the runnable consumer: its interactive host constructs two
 ordinary Agent-mode sessions, adopts them, and drives the pair. The substrate and
 command add no new session mode.
 
@@ -5413,7 +5457,7 @@ back into the owning crate, not to fuse the crates.
 
 ## ADR-0137: A Pair Uses One Frame With Two Cohesive Session Projections
 
-Status: accepted and consumed by the shipped `localpilot pair` host. Extends the
+Status: accepted and consumed by the shipped `localpilot devices pair` host. Extends the
 full-screen terminal ownership boundary (ADR-0107) and presents the two ordinary
 Agent sessions adopted by ADR-0139.
 
@@ -5460,7 +5504,7 @@ hit-testing under the same authorities that single chat already uses.
 Scope and boundary: this decision owns only backend-neutral terminal state,
 geometry, rendering, and interaction. The executable host still owns Crossterm,
 runtime channels, approvals, questions, and terminal lifecycle. The shipped
-`localpilot pair` host constructs and drives those two projections through that
+`localpilot devices pair` host constructs and drives those two projections through that
 boundary.
 
 Consequences: the terminal UI gains typed single/pair timeline geometry, an
@@ -5472,7 +5516,7 @@ itself remains a closed two-value contract.
 
 ## ADR-0136: A Peer Pair Converges Through A Typed Envelope Over Direct One-To-One Messaging, Driver-Scheduled And Finitely Bounded
 
-Status: accepted and wired to the shipped `localpilot pair` command. Reuses the
+Status: accepted and wired to the shipped `localpilot devices pair` command. Reuses the
 in-app peer-messaging substrate from ADR-0124..0127 (the `SessionPeers`
 soft-interrupt transport and its coordinator-only-broadcast rule).
 

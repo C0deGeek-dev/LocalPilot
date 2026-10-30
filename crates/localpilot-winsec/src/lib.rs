@@ -1,4 +1,5 @@
-//! Owner-only Windows named pipes and contained command trees (ADR-0189).
+//! Owner-only Windows named pipes and files, and contained command trees
+//! (ADR-0189).
 //!
 //! Tokio creates a named pipe with the default security descriptor, whose
 //! DACL grants read access to Everyone and to the anonymous account. This
@@ -19,7 +20,10 @@
 mod ffi;
 
 #[cfg(windows)]
-pub use pipes::{canonical_sddl, current_user_sid, owner_only_pipe, owner_trustee, pipe_dacl};
+pub use pipes::{
+    canonical_sddl, current_user_sid, owner_only_pipe, owner_trustee, path_dacl, pipe_dacl,
+    restrict_path_to_owner,
+};
 
 #[cfg(windows)]
 pub use ffi::job::{spawn_in_job, ProcessJob};
@@ -60,6 +64,26 @@ mod pipes {
         let sid = ffi::current_user_sid()?;
         let sd = ffi::SecurityDescriptor::from_sddl(&owner_only_sddl(&sid))?;
         ffi::create_pipe(options, name, &sd)
+    }
+
+    /// Restrict the file or directory at `path` to the current user: a
+    /// protected DACL whose only entry is the owner (no inherited entries, no
+    /// Everyone, no SYSTEM, no Administrators).
+    ///
+    /// # Errors
+    /// The user's SID cannot be read or the DACL cannot be set.
+    pub fn restrict_path_to_owner(path: &std::path::Path) -> io::Result<()> {
+        let sid = ffi::current_user_sid()?;
+        let sd = ffi::SecurityDescriptor::from_sddl(&owner_only_sddl(&sid))?;
+        ffi::set_path_dacl(path, &sd)
+    }
+
+    /// The DACL of the file or directory at `path`, as SDDL.
+    ///
+    /// # Errors
+    /// The path's security information cannot be read.
+    pub fn path_dacl(path: &std::path::Path) -> io::Result<String> {
+        ffi::path_dacl_sddl(path)
     }
 
     /// A live pipe instance's DACL, as SDDL (for example
@@ -131,6 +155,21 @@ mod tests {
         for other in [";WD)", ";AN)", ";SY)", ";BA)", ";BU)"] {
             assert!(!dacl.contains(other), "{other} in {dacl}");
         }
+    }
+
+    #[test]
+    fn a_restricted_file_admits_only_its_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("registry.json");
+        std::fs::write(&file, b"{}").unwrap();
+        restrict_path_to_owner(&file).unwrap();
+        restrict_path_to_owner(dir.path()).unwrap();
+        let owner = owner_trustee().unwrap();
+        assert_owner_only(&path_dacl(&file).unwrap(), &owner);
+        assert_owner_only(&path_dacl(dir.path()).unwrap(), &owner);
+        // Still readable and writable by its owner.
+        std::fs::write(&file, b"{\"ok\":true}").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"{\"ok\":true}");
     }
 
     #[test]

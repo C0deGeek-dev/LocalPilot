@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Devices can be paired with your `localpilot serve` sessions. `localpilot devices pair
+  [--name] [--scope observe|control] [--url https://…] [--this-workspace-only]`
+  prints a single-use code (a QR code with `--url`), and one pairing reaches every
+  workspace you serve unless limited. `localpilot devices list` and
+  `localpilot devices revoke <id>` manage them; a revocation applies everywhere and
+  ends the device's open connections. Devices connect only through a registered
+  gateway, are checked against their scope before every command, and act under
+  their own identity; credentials are stored hashed in an owner-only per-user
+  registry, and an audit log records pairings, attaches and revocations without
+  secrets (ADR-0245).
 - A work step is no longer refused for a probe script it writes to its own scratch
   directory (it is not part of the repository diff), and `replace_in_file` with
   `regex: false` and `all: false` is accepted as the exact edit it is. A regex or

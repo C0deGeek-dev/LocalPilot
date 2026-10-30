@@ -135,6 +135,128 @@ pub enum ClientCommand {
         #[serde(default)]
         args: String,
     },
+    /// A paired device revokes its own pairing (everywhere); its connection
+    /// then ends. Refused for the local machine.
+    RevokeSelf,
+    /// First record of the gateway's control channel (local only). The reply
+    /// carries a capability that is valid while this connection stays open.
+    GatewayRegister,
+    /// First record of a local connection that starts pairing a device. The
+    /// reply carries a single-use pairing code; the connection then ends.
+    PairBegin {
+        name: String,
+        scope: Scope,
+        /// Limit the device to this workspace; by default it reaches every
+        /// workspace of this user.
+        #[serde(default)]
+        this_workspace_only: bool,
+    },
+    /// First record of a gateway connection exchanging a pairing code for a
+    /// device credential. The reply carries the credential once; the
+    /// connection then ends.
+    PairExchange {
+        capability: WireSecret,
+        pairing: WireSecret,
+    },
+    /// First record of a paired device's connection, sent by the gateway: the
+    /// gateway's capability, the device's credential, and what an `attach`
+    /// would carry. The connection then acts as that device, or is refused —
+    /// never as the local machine.
+    DeviceAttach {
+        capability: WireSecret,
+        credential: WireSecret,
+        target: AttachTarget,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<FeedCursor>,
+    },
+}
+
+/// A secret carried on the wire (a gateway capability, a device credential, a
+/// pairing code). It serializes as its plain text — the one place it must
+/// appear — but its `Debug` is redacted and it has no `Display`, so logging or
+/// formatting a record never shows it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WireSecret(String);
+
+impl WireSecret {
+    /// Wrap a secret for sending.
+    #[must_use]
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+
+    /// The secret's text, for the code that must check or store it.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for WireSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// What a device needs to be allowed to send a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// Watch: read state and receive events.
+    Observe,
+    /// Act: prompt, steer, cancel, answer asks, run commands.
+    Control,
+}
+
+/// Who may send a command on an attached connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Requirement {
+    /// Any principal holding at least this scope (the local machine always may).
+    AtLeast(Scope),
+    /// Only the local machine, never a device.
+    LocalOnly,
+}
+
+impl ClientCommand {
+    /// What a principal needs to send this command. Exhaustive on purpose: a
+    /// new command does not compile until it is classified.
+    #[must_use]
+    pub fn requirement(&self) -> Requirement {
+        match self {
+            Self::Hello
+            | Self::Status
+            | Self::Shutdown
+            | Self::Commands
+            | Self::Sessions
+            | Self::RevokeSelf => Requirement::AtLeast(Scope::Observe),
+            Self::Prompt { .. }
+            | Self::Cancel
+            | Self::PermissionReply { .. }
+            | Self::RunCommand { .. } => Requirement::AtLeast(Scope::Control),
+            // Connection-binding records are handled before dispatch; on an
+            // attached connection they are refused for everyone.
+            Self::Attach { .. }
+            | Self::GatewayRegister
+            | Self::DeviceAttach { .. }
+            | Self::PairBegin { .. }
+            | Self::PairExchange { .. } => Requirement::LocalOnly,
+        }
+    }
+}
+
+impl AttachTarget {
+    /// The scope a device needs to attach this way: watching an existing
+    /// session needs `observe`; opening a new one needs `control`.
+    #[must_use]
+    pub fn requirement(&self) -> Scope {
+        match self {
+            Self::OpenNew => Scope::Control,
+            Self::ResumeId { .. } | Self::ResumeName { .. } => Scope::Observe,
+        }
+    }
 }
 
 /// Where a [`ClientCommand::Attach`] binds the connection: a brand-new session,
@@ -310,6 +432,24 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dropped_follow_ups: Option<usize>,
     },
+    /// Reply to `pair_begin`: the single-use code to show the device (in a QR
+    /// code or typed), valid for `expires_in_secs`.
+    PairingCode {
+        code: WireSecret,
+        expires_in_secs: u64,
+    },
+    /// Reply to `pair_exchange`: the new device's credential, sent once.
+    DevicePaired {
+        device_id: String,
+        credential: WireSecret,
+        scope: Scope,
+    },
+    /// Reply to `gateway_register`: the capability the gateway presents on
+    /// each device connection. Valid while the registering connection stays
+    /// open.
+    GatewayRegistered {
+        capability: WireSecret,
+    },
     /// Reply to `commands`.
     Commands {
         items: Vec<CommandInfo>,
@@ -482,6 +622,8 @@ pub enum RejectCode {
     UnknownCommand,
     /// `run_command` arguments do not fit the command.
     InvalidArguments,
+    /// The device is not allowed to send this command.
+    Forbidden,
     /// This server does not understand the command.
     UnsupportedCommand,
 }
@@ -500,6 +642,55 @@ pub struct PlanStepWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn records_carrying_secrets_never_print_them() {
+        let sentinel = "SENTINEL-secret-value";
+        let commands = [
+            ClientCommand::DeviceAttach {
+                capability: WireSecret::new(sentinel),
+                credential: WireSecret::new(sentinel),
+                target: AttachTarget::OpenNew,
+                capabilities: Vec::new(),
+                since: None,
+            },
+            ClientCommand::PairExchange {
+                capability: WireSecret::new(sentinel),
+                pairing: WireSecret::new(sentinel),
+            },
+        ];
+        for command in &commands {
+            assert!(!format!("{command:?}").contains(sentinel));
+            let record = ClientRecord {
+                v: RPC_PROTOCOL_VERSION,
+                id: None,
+                request: None,
+                command: command.clone(),
+            };
+            assert!(!format!("{record:?}").contains(sentinel));
+            // On the wire it is the plain secret, and it reads back intact.
+            let line = serde_json::to_string(&record).unwrap();
+            assert!(line.contains(sentinel));
+            assert_eq!(serde_json::from_str::<ClientRecord>(&line).unwrap(), record);
+        }
+        for event in [
+            ServerEvent::GatewayRegistered {
+                capability: WireSecret::new(sentinel),
+            },
+            ServerEvent::PairingCode {
+                code: WireSecret::new(sentinel),
+                expires_in_secs: 300,
+            },
+            ServerEvent::DevicePaired {
+                device_id: "d".to_string(),
+                credential: WireSecret::new(sentinel),
+                scope: Scope::Control,
+            },
+        ] {
+            assert!(!format!("{event:?}").contains(sentinel));
+            assert!(serde_json::to_string(&event).unwrap().contains(sentinel));
+        }
+    }
 
     #[test]
     fn client_records_roundtrip() {

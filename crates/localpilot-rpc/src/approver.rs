@@ -36,22 +36,26 @@ const RECENT_CAPACITY: usize = 256;
 /// Capacity of the raised/resolved broadcast.
 const ASK_EVENT_CAPACITY: usize = 256;
 
-/// Who acted on a session. Only the local machine exists today; paired
-/// devices will add variants.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Who acted on a session.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Principal {
     /// A client on this machine (the IPC transport, the terminal UI, MCP).
     Local,
+    /// A paired device, by its registry id, reaching the session through the
+    /// gateway.
+    Device { id: String },
 }
 
 impl Principal {
-    /// A short label for audit records.
+    /// A short label for audit records and request streams: `local`, or
+    /// `device:<id>`.
     #[must_use]
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            Self::Local => "local",
+            Self::Local => "local".to_string(),
+            Self::Device { id } => format!("device:{id}"),
         }
     }
 }
