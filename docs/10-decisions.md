@@ -2,6 +2,45 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0247: The Remote Gateway Is A Loopback Relay; The Daemon Authorizes
+
+**Status:** accepted · **Date:** 2026-10-30. Builds on ADR-0245.
+
+**Context.** Paired devices need a way in from a phone browser. The daemon
+speaks NDJSON over an owner-only pipe and must stay the only authority. Users
+already run HTTPS tunnels or proxies; LocalPilot should not ship one.
+
+**Decision.**
+
+1. `localpilot remote gateway` is a separate, opt-in process (`[remote]
+   enabled`, user config only) that binds loopback only. TLS terminates in the
+   user's own same-computer proxy, reached at `[remote] advertised_url`.
+2. It registers with the workspace daemon (`gateway_register`) and holds the
+   control channel for its lifetime; ending the gateway ends the capability.
+3. Browser requests must match exactly: one `Host` from an explicit list
+   (default the advertised host) and, for pairing and sockets, one `Origin` equal
+   to the advertised origin. No forwarded-header trust.
+4. The device credential lives only in a `__Host-` `Secure` `HttpOnly`
+   `SameSite=Strict` cookie set by the pairing response; the socket presents it
+   on a fresh `device_attach` before `101`, and the daemon's answer admits it.
+5. Browser frames are parsed and re-encoded one record per line; records for
+   the gateway or the local machine are refused at the gateway.
+6. One cancellation token covers every read and write; connections, sockets,
+   header time, bodies and records are capped. The full WebSocket handshake is
+   validated before the daemon is asked anything.
+7. Every relay write is also guarded by the device's standing, re-read from the
+   per-user registry before the write and every 250 ms while it is stuck, so a
+   device revoked while its socket is stalled receives nothing more even though
+   the gateway itself keeps running.
+
+**Consequences.** A cookie-authenticated state-changing POST route (for example
+push subscriptions) must add a CSRF token bound to the device; the pairing
+route needs none because it carries a one-use code and no cookie. Sessions are
+chosen explicitly (`?session=<id>` or `?new=1`); listing workspaces and their
+sessions before attaching is follow-up work. The gateway reaches only the
+workspace it was started in until multi-workspace routing lands. Switching
+`[remote] enabled` off stops the gateway from starting; a server does not yet
+refuse a gateway registration on its own.
 ## ADR-0246: A Step That Leaves A CDN Library Without An Exact Version Is Sent Back With The Way To Fix It
 
 **Status:** accepted · **Date:** 2026-10-30. Refs LocalHub#258.

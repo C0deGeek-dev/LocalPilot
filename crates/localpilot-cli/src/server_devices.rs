@@ -87,7 +87,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Split a presented credential into its device id, without trusting it.
-fn credential_device_id(credential: &str) -> Option<&str> {
+pub(crate) fn credential_device_id(credential: &str) -> Option<&str> {
     let mut parts = credential.splitn(3, '.');
     let (prefix, id, secret) = (parts.next()?, parts.next()?, parts.next()?);
     let hex = |text: &str| {

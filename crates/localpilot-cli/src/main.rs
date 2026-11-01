@@ -62,6 +62,7 @@ mod pair_run;
 mod proposal_fixture;
 mod proposal_validation;
 mod propose_patch;
+mod remote_gateway;
 #[cfg(feature = "tui")]
 mod repl;
 mod research;
@@ -440,6 +441,11 @@ enum Command {
     Devices {
         #[command(subcommand)]
         action: DevicesAction,
+    },
+    /// Reach your served sessions from a paired phone.
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
     },
     /// Internal: run the detached server the auto-spawn (`connect --server`)
     /// path starts. Not for direct use — `localpilot serve` is the entry point.
@@ -871,6 +877,7 @@ enum DevicesAction {
         #[arg(long, default_value = "control", value_parser = ["observe", "control"])]
         scope: String,
         /// The address the device reaches the gateway at (for the QR code).
+        /// Defaults to `[remote] advertised_url`.
         #[arg(long)]
         url: Option<String>,
         /// Limit the device to this workspace.
@@ -884,6 +891,16 @@ enum DevicesAction {
         /// The device id (from `localpilot devices list`).
         id: String,
     },
+}
+
+/// `localpilot remote` actions.
+#[derive(Subcommand, Debug)]
+enum RemoteAction {
+    /// Run the gateway paired devices connect to. It listens on loopback only
+    /// (`[remote] port`); your HTTPS tunnel or reverse proxy on this computer
+    /// forwards the `[remote] advertised_url` to it. Needs `[remote] enabled =
+    /// true` in your user config and a running `localpilot serve` here.
+    Gateway,
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -2052,6 +2069,9 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             }
             DevicesAction::List => server_cmd::devices_list()?,
             DevicesAction::Revoke { id } => server_cmd::devices_revoke(&id)?,
+        },
+        Command::Remote { action } => match action {
+            RemoteAction::Gateway => remote_gateway::run().await?,
         },
 
         Command::ServerServe => {

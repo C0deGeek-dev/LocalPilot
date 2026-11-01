@@ -37,6 +37,7 @@ pub struct Config {
     pub terminal: TerminalConfig,
     pub mesh: MeshConfig,
     pub lab: LabConfig,
+    pub remote: RemoteConfig,
 }
 
 impl Default for Config {
@@ -63,6 +64,39 @@ impl Default for Config {
             terminal: TerminalConfig::default(),
             mesh: MeshConfig::default(),
             lab: LabConfig::default(),
+            remote: RemoteConfig::default(),
+        }
+    }
+}
+
+/// `[remote]`: the gateway that lets paired devices reach this user's served
+/// sessions. Only the user config or the environment may set it: a repository
+/// must not be able to point pairing at an address of its choosing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteConfig {
+    /// Allow `localpilot remote gateway` to run. Off by default; switching it
+    /// off is the kill switch.
+    pub enabled: bool,
+    /// The trusted HTTPS origin the phone uses (a tunnel or reverse proxy on
+    /// this computer that forwards to the gateway), e.g. `https://pc.example.ts.net`.
+    pub advertised_url: Option<String>,
+    /// The loopback port the gateway listens on. The gateway never binds
+    /// anything but loopback.
+    pub port: u16,
+    /// The exact `Host` values the proxy in front of the gateway sends. Empty
+    /// means the advertised URL's host, which is what a proxy that preserves
+    /// `Host` sends. Exact matches only: no wildcards.
+    pub proxy_hosts: Vec<String>,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            advertised_url: None,
+            port: 47610,
+            proxy_hosts: Vec::new(),
         }
     }
 }

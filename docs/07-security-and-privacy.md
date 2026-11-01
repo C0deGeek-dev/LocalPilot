@@ -1171,6 +1171,50 @@ opt-in step.
   refusals, revocations and gateway registrations with time, workspace and
   device id — never session content or secrets.
 
+## Remote Gateway
+
+`localpilot remote gateway` is the only network entry point for paired devices,
+and it is off unless `[remote] enabled = true` is set in the user config (a
+project file cannot set any `[remote]` key).
+
+- **Loopback only.** The gateway listens on `127.0.0.1` and speaks plain HTTP
+  and WebSocket. TLS and any exposure beyond this computer belong to the HTTPS
+  tunnel or reverse proxy the user runs on the same machine; LocalPilot bundles
+  and runs none.
+- **It carries traffic; the daemon decides.** The gateway registers with the
+  workspace's server and holds its gateway capability for as long as it runs.
+  Every device connection is a fresh `device_attach` carrying the device's
+  credential, and only the server's answer admits it. When the gateway stops,
+  its capability ends and the server closes every device connection it carried.
+- **Exact request checks.** Every request must carry exactly one `Host` from an
+  explicit list (the advertised host, or `[remote] proxy_hosts`). Pairing and
+  the device socket must also carry exactly one `Origin` equal to the advertised
+  origin. Forwarded headers are never trusted; there are no wildcard or partial
+  matches.
+- **Browser credential.** Pairing posts the code from the QR link's fragment in
+  the request body; the credential comes back only in a `__Host-` cookie
+  (`Secure`, `HttpOnly`, `SameSite=Strict`) that scripts cannot read, never in
+  the response body, and responses are not cached. The socket is authorized by
+  that cookie before the upgrade is answered; nothing the browser sends reaches
+  the server until the server has accepted the device.
+- **One frame, one record.** Each browser message is parsed as a single JSON
+  value and re-encoded on one line, so it cannot become two records. Records
+  only the gateway or this computer may send (attaching, registering, pairing)
+  are refused by the gateway as well as by the server.
+- **Revocation through the gateway.** Besides the server's own checks, the
+  gateway re-reads the device's standing in the same per-user registry before
+  every write to the browser or the server, and every 250 ms while one is stuck,
+  and drops the socket once access ends, with any record it was holding. Bytes
+  already handed to the network cannot be taken back.
+- **Limits.** At most 64 open connections and 32 device sockets; request headers
+  within 10 seconds; request bodies up to 4 KiB; browser records up to 256 KiB;
+  server records up to 16 MiB (a larger one ends the socket; records are never
+  split or truncated). The WebSocket handshake is checked in full (HTTP/1.1,
+  version 13, a key that is base64 of 16 bytes) before the server is asked
+  anything, so an invalid upgrade opens no session. Stopping the gateway closes
+  its listener and every socket and pending request at once, including sockets
+  whose client stopped reading and requests waiting on the server.
+
 ## Telemetry
 
 Default: no remote telemetry.

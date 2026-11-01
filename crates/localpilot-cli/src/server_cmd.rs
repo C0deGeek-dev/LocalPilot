@@ -1557,7 +1557,19 @@ pub async fn pair(
 ) -> anyhow::Result<()> {
     // Checked before anything is asked of the server: the QR code must point
     // only at a trusted HTTPS origin, carrying nothing but the pairing code.
-    let origin = url.map(pairing_origin).transpose()?;
+    let configured = match url {
+        Some(_) => None,
+        None => {
+            let cwd = std::env::current_dir()?;
+            localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?
+                .remote
+                .advertised_url
+        }
+    };
+    let origin = url
+        .or(configured.as_deref())
+        .map(pairing_origin)
+        .transpose()?;
     // Say what the pairing will grant before creating the code.
     let reach = if this_workspace_only {
         format!(
@@ -1649,26 +1661,26 @@ pub async fn pair(
 /// port, and nothing else (no user info, path, query or fragment that could
 /// carry other data or send the device somewhere unexpected). Nothing is
 /// requested from it.
-fn pairing_origin(url: &str) -> anyhow::Result<String> {
+pub(crate) fn pairing_origin(url: &str) -> anyhow::Result<String> {
     let parsed = reqwest::Url::parse(url.trim())
-        .map_err(|error| anyhow::anyhow!("--url is not a valid address: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("the gateway address is not valid: {error}"))?;
     if parsed.scheme() != "https" {
         anyhow::bail!(
-            "--url must be an https:// address (the gateway is reached over trusted HTTPS)"
+            "the gateway address must be https:// (the gateway is reached over trusted HTTPS)"
         );
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        anyhow::bail!("--url must not contain a user name or password");
+        anyhow::bail!("the gateway address must not contain a user name or password");
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
-        anyhow::bail!("--url must not contain a query or fragment");
+        anyhow::bail!("the gateway address must not contain a query or fragment");
     }
     if !matches!(parsed.path(), "" | "/") {
-        anyhow::bail!("--url must be the gateway's origin, without a path");
+        anyhow::bail!("the gateway address must be an origin, without a path");
     }
     let host = parsed
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("--url must name a host"))?;
+        .ok_or_else(|| anyhow::anyhow!("the gateway address must name a host"))?;
     Ok(match parsed.port() {
         Some(port) => format!("https://{host}:{port}"),
         None => format!("https://{host}"),
@@ -5655,6 +5667,448 @@ mod tests {
             "the reply was delivered after revocation: {after:?}"
         );
         drop(lease);
+    }
+
+    // --- the remote gateway, end to end --------------------------------------
+
+    const GATEWAY_ORIGIN: &str = "https://pc.example.test";
+    const GATEWAY_HOST: &str = "pc.example.test";
+
+    /// An in-process daemon the gateway dials: every call is a fresh
+    /// connection served by `serve_connection`.
+    fn daemon_dial(hosts: &HostMap, factory: &Arc<FakeFactory>) -> crate::remote_gateway::Dial {
+        let hosts = hosts.clone();
+        let factory = factory.clone();
+        let registry = SessionRegistry::new();
+        let store = factory.store();
+        Arc::new(move || {
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            let (hosts, factory, registry, store) = (
+                hosts.clone(),
+                factory.clone(),
+                registry.clone(),
+                store.clone(),
+            );
+            tokio::spawn(async move {
+                let (read, write) = tokio::io::split(server);
+                let _ = serve_connection(
+                    read,
+                    write,
+                    &registry,
+                    &hosts,
+                    factory.as_ref(),
+                    &store,
+                    Profile::Bypass,
+                )
+                .await;
+            });
+            Box::pin(
+                async move { Ok(Box::new(client) as Box<dyn crate::remote_gateway::DaemonStream>) },
+            )
+        })
+    }
+
+    /// A running gateway on an ephemeral loopback port.
+    async fn start_gateway(
+        hosts: &HostMap,
+        factory: &Arc<FakeFactory>,
+    ) -> (std::net::SocketAddr, CancellationToken) {
+        start_gateway_with(hosts, daemon_dial(hosts, factory)).await
+    }
+
+    /// The device standing the gateway monitors: the same registry.
+    fn gateway_standing(hosts: &HostMap) -> crate::remote_gateway::Standing {
+        let devices = hosts.devices.clone();
+        Arc::new(move |id| devices.standing(id).is_ok())
+    }
+
+    async fn start_gateway_with(
+        hosts: &HostMap,
+        dial: crate::remote_gateway::Dial,
+    ) -> (std::net::SocketAddr, CancellationToken) {
+        let stop = CancellationToken::new();
+        let gateway = crate::remote_gateway::Gateway::register(
+            crate::remote_gateway::Policy::new(GATEWAY_ORIGIN, &[]),
+            dial,
+            gateway_standing(hosts),
+            stop.clone(),
+        )
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(gateway.serve(listener));
+        (address, stop)
+    }
+
+    /// One HTTP/1.1 exchange over a raw socket: status, headers and body.
+    async fn http(address: std::net::SocketAddr, request: &str) -> (u16, String, String) {
+        use tokio::io::AsyncReadExt;
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        timeout(DEADLINE, socket.read_to_end(&mut raw))
+            .await
+            .expect("the gateway answered")
+            .unwrap();
+        let text = String::from_utf8_lossy(&raw).to_string();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0);
+        (status, head.to_string(), body.to_string())
+    }
+
+    fn pair_request(origin: &str, code: &str) -> String {
+        let body = format!("{{\"code\":\"{code}\"}}");
+        format!(
+            "POST /api/pair HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: close\r\nOrigin: {origin}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Open a device socket the way a browser on the advertised origin would.
+    async fn open_socket(
+        address: std::net::SocketAddr,
+        query: &str,
+        origin: &str,
+        cookie: Option<&str>,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        tokio_tungstenite::tungstenite::Error,
+    > {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{address}/api/socket?{query}")
+            .into_client_request()
+            .unwrap();
+        let headers = request.headers_mut();
+        headers.insert("host", GATEWAY_HOST.parse().unwrap());
+        headers.insert("origin", origin.parse().unwrap());
+        if let Some(credential) = cookie {
+            headers.insert(
+                "cookie",
+                format!("{}={credential}", crate::remote_gateway::DEVICE_COOKIE)
+                    .parse()
+                    .unwrap(),
+            );
+        }
+        let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+        tokio_tungstenite::client_async(request, tcp)
+            .await
+            .map(|(socket, _)| socket)
+    }
+
+    async fn next_frame(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) -> Option<ServerRecord> {
+        use futures::StreamExt;
+        loop {
+            match timeout(DEADLINE, socket.next())
+                .await
+                .expect("a frame in time")
+            {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                    return Some(serde_json::from_str(&text).unwrap());
+                }
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {}
+                _ => return None,
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pairing_through_the_gateway_puts_the_credential_only_in_a_cookie() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap::default();
+        let (address, stop) = start_gateway(&hosts, &factory).await;
+        let code = hosts
+            .pairings
+            .begin("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+
+        // The wrong origin is refused before the code is spent.
+        let (status, _, _) = http(
+            address,
+            &pair_request("https://evil.example", code.expose()),
+        )
+        .await;
+        assert_eq!(status, 403);
+
+        let (status, head, body) =
+            http(address, &pair_request(GATEWAY_ORIGIN, code.expose())).await;
+        assert_eq!(status, 200, "{head}");
+        let cookie = head
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("set-cookie:"))
+            .expect("a device cookie");
+        for attribute in [
+            "__Host-localpilot-device=",
+            "Secure",
+            "HttpOnly",
+            "SameSite=Strict",
+            "Path=/",
+        ] {
+            assert!(cookie.contains(attribute), "{cookie}");
+        }
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("cache-control: no-store"),
+            "{head}"
+        );
+        let credential = cookie
+            .split_once('=')
+            .and_then(|(_, rest)| rest.split(';').next())
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(
+            !body.contains(&credential),
+            "the body never carries the credential"
+        );
+        assert!(
+            hosts.devices.verify(&credential).is_ok(),
+            "a working device credential"
+        );
+
+        // A code works once.
+        let (status, _, _) = http(address, &pair_request(GATEWAY_ORIGIN, code.expose())).await;
+        assert_eq!(status, 403);
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_paired_phone_drives_a_session_through_the_gateway() {
+        use futures::SinkExt;
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("hello phone")));
+        let hosts = HostMap::default();
+        let (address, stop) = start_gateway(&hosts, &factory).await;
+        let (_, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+
+        let mut socket = open_socket(address, "new=1", GATEWAY_ORIGIN, Some(credential.expose()))
+            .await
+            .expect("upgraded");
+        let first = next_frame(&mut socket).await.unwrap();
+        assert!(
+            matches!(first.event, ServerEvent::Attached { .. }),
+            "{first:?}"
+        );
+        let prompt = serde_json::json!({
+            "v": RPC_PROTOCOL_VERSION,
+            "command": { "type": "prompt", "text": "hi" }
+        });
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                prompt.to_string(),
+            ))
+            .await
+            .unwrap();
+        loop {
+            let record = next_frame(&mut socket).await.expect("the turn streams");
+            if matches!(&record.event, ServerEvent::TextDelta { text } if text.contains("hello phone"))
+            {
+                break;
+            }
+        }
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_gateway_refuses_hostile_sockets_and_frames() {
+        use futures::SinkExt;
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap::default();
+        let (address, stop) = start_gateway(&hosts, &factory).await;
+        let (standing, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let credential = credential.expose().to_string();
+
+        // Another origin, no cookie, a wrong cookie, no session choice.
+        assert!(
+            open_socket(address, "new=1", "https://evil.example", Some(&credential))
+                .await
+                .is_err()
+        );
+        assert!(open_socket(address, "new=1", GATEWAY_ORIGIN, None)
+            .await
+            .is_err());
+        assert!(
+            open_socket(address, "new=1", GATEWAY_ORIGIN, Some("d.00.11"))
+                .await
+                .is_err()
+        );
+        assert!(open_socket(address, "", GATEWAY_ORIGIN, Some(&credential))
+            .await
+            .is_err());
+        // An unknown host, even with the right origin.
+        let (status, _, _) = http(
+            address,
+            "GET / HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\nOrigin: https://pc.example.test\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 421);
+
+        // A frame trying to start pairing, or smuggling a second record, ends
+        // the socket; nothing reaches the daemon as a local record.
+        for frame in [
+            serde_json::json!({"v": 1, "command": {"type": "pair_begin", "name": "x", "scope": "control"}})
+                .to_string(),
+            "{\"v\":1,\"command\":{\"type\":\"status\"}}\n{\"v\":1,\"command\":{\"type\":\"gateway_register\"}}"
+                .to_string(),
+        ] {
+            let mut socket = open_socket(address, "new=1", GATEWAY_ORIGIN, Some(&credential))
+                .await
+                .unwrap();
+            next_frame(&mut socket).await.unwrap(); // attached
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::text(frame))
+                .await
+                .unwrap();
+            // The attachment's own records may still arrive; then it closes.
+            while let Some(record) = next_frame(&mut socket).await {
+                assert!(
+                    matches!(record.event, ServerEvent::Snapshot { .. }),
+                    "nothing answers the refused frame: {record:?}"
+                );
+            }
+        }
+
+        // A revoked device is refused at the upgrade.
+        assert!(hosts.devices.revoke(&standing.id).unwrap());
+        assert!(
+            open_socket(address, "new=1", GATEWAY_ORIGIN, Some(&credential))
+                .await
+                .is_err()
+        );
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stopping_the_gateway_closes_a_stalled_socket_and_the_listener() {
+        use tokio::io::AsyncReadExt;
+        let answer = "z".repeat(512 * 1024);
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text(&answer)));
+        let hosts = HostMap::default();
+        let (address, stop) = start_gateway(&hosts, &factory).await;
+        let (_, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let mut socket = open_socket(address, "new=1", GATEWAY_ORIGIN, Some(credential.expose()))
+            .await
+            .unwrap();
+        next_frame(&mut socket).await.unwrap(); // attached
+        {
+            use futures::SinkExt;
+            let prompt = serde_json::json!({"v": 1, "command": {"type": "prompt", "text": "go"}});
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::text(
+                    prompt.to_string(),
+                ))
+                .await
+                .unwrap();
+        }
+        // The phone stops reading while the answer is written.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        stop.cancel();
+        // The connection ends: draining reaches EOF in time.
+        let raw = socket.get_mut();
+        let mut sink = vec![0_u8; 64 * 1024];
+        timeout(DEADLINE, async {
+            while matches!(raw.read(&mut sink).await, Ok(n) if n > 0) {}
+        })
+        .await
+        .expect("the stalled socket was closed");
+        // And nothing new is accepted.
+        let refused = match tokio::net::TcpStream::connect(address).await {
+            Err(_) => true,
+            Ok(mut late) => {
+                late.write_all(
+                    b"GET / HTTP/1.1\r\nHost: pc.example.test\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .ok();
+                let mut buffer = Vec::new();
+                matches!(
+                    timeout(DEADLINE, late.read_to_end(&mut buffer)).await,
+                    Ok(Ok(0)) | Ok(Err(_))
+                )
+            }
+        };
+        assert!(refused, "the listener is closed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_invalid_websocket_handshake_never_reaches_the_daemon() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap::default();
+        let (address, stop) = start_gateway(&hosts, &factory).await;
+        let (_, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        for key in [
+            "abcdefghijklmnopqrstuvwx",
+            "dGhlIHNhbXBsZSBub25jZR==",
+            "dGhlIHNhbXBsZSBub25jZWE=",
+            "%%%%%%%%%%%%%%%%%%%%%%==",
+        ] {
+            let request = format!(
+                "GET /api/socket?new=1 HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: Upgrade\r\n\
+                 Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\
+                 Origin: {GATEWAY_ORIGIN}\r\nCookie: {}={}\r\n\r\n",
+                crate::remote_gateway::DEVICE_COOKIE,
+                credential.expose()
+            );
+            let (status, head, _) = http(address, &request).await;
+            assert_eq!(status, 400, "{key}: {head}");
+        }
+        assert!(
+            hosts.inner.lock().await.is_empty(),
+            "no session was opened for an invalid handshake"
+        );
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stopping_the_gateway_ends_a_request_waiting_on_a_stalled_daemon() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap::default();
+        let working = daemon_dial(&hosts, &factory);
+        // The first connection (registration) works; later ones are never
+        // answered, and their far ends are kept open so they do not end.
+        let held = Arc::new(StdMutex::new(Vec::new()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dial: crate::remote_gateway::Dial = {
+            let held = held.clone();
+            Arc::new(move || {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return working();
+                }
+                let (client, server) = tokio::io::duplex(1024);
+                held.lock().unwrap().push(server);
+                Box::pin(async move {
+                    Ok(Box::new(client) as Box<dyn crate::remote_gateway::DaemonStream>)
+                })
+            })
+        };
+        let (address, stop) = start_gateway_with(&hosts, dial).await;
+        let pairing =
+            tokio::spawn(async move { http(address, &pair_request(GATEWAY_ORIGIN, "0.0")).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!pairing.is_finished(), "the request waits on the daemon");
+        stop.cancel();
+        timeout(Duration::from_secs(3), pairing)
+            .await
+            .expect("the request ended when the gateway stopped")
+            .unwrap();
     }
 
     // --- the plain-text client renderer --------------------------------------

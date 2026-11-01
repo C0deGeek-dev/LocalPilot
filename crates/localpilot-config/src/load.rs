@@ -89,11 +89,13 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
 /// Keys a project file must never set: they grant the agent more than the
 /// user's own settings do, and a repository must not be able to grant itself
 /// anything. Refused loudly rather than ignored, so the author sees why.
-const USER_ONLY_KEYS: [&str; 4] = [
+const USER_ONLY_KEYS: [&str; 5] = [
     "permissions.allow_commands",
     "permissions.scratch_root",
     "harness.granularity.headless_units",
     "harness.granularity.headless_rename_units",
+    // The whole table: a repository must not choose where pairing points.
+    "remote",
 ];
 
 fn refuse_user_only_keys(project: &Path) -> Result<(), ConfigError> {
@@ -587,6 +589,52 @@ profile = \"readonly\"
             ),
             "{err}"
         );
+    }
+
+    #[test]
+    fn the_remote_gateway_is_set_only_by_the_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        let paths = ConfigPaths {
+            user: Some(user.clone()),
+            project: Some(project.clone()),
+        };
+        std::fs::write(&project, "").unwrap();
+        let config = load(&paths, &CliOverrides::default()).unwrap();
+        assert!(!config.remote.enabled, "off unless the user turns it on");
+        assert_eq!(config.remote.port, 47610);
+
+        std::fs::write(
+            &user,
+            "[remote]
+enabled = true
+advertised_url = 'https://pc.example.ts.net'
+",
+        )
+        .unwrap();
+        let config = load(&paths, &CliOverrides::default()).unwrap();
+        assert!(config.remote.enabled);
+        assert_eq!(
+            config.remote.advertised_url.as_deref(),
+            Some("https://pc.example.ts.net")
+        );
+
+        // Any key of the table, from a project, is refused.
+        for entry in [
+            "[remote]
+advertised_url = 'https://attacker.example'
+",
+            "[remote]
+enabled = false
+",
+        ] {
+            std::fs::write(&project, entry).unwrap();
+            assert!(matches!(
+                load(&paths, &CliOverrides::default()),
+                Err(ConfigError::UserOnly { key: "remote", .. })
+            ));
+        }
     }
 
     #[test]

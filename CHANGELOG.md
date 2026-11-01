@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `localpilot remote gateway` lets a paired phone reach this workspace's
+  `localpilot serve` sessions. It is off unless `[remote] enabled = true` is set
+  in your user config, listens on loopback only, and is reached through your own
+  HTTPS tunnel or proxy at `[remote] advertised_url` (also the default address
+  for `localpilot devices pair` QR codes). Pairing sets an HttpOnly cookie, the
+  server accepts every device connection itself, and requests must match the
+  advertised origin and host exactly (ADR-0247).
 - A step that leaves a library on a CDN without an exact version (`@latest`, a
   range, a bare major or none, on jsDelivr, unpkg, esm.sh, Skypack or cdnjs) is
   sent back with the way to fix it: look up the version with `npm view`, list the

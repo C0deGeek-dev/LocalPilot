@@ -20,7 +20,7 @@ pub use approver::{
     AskEvent, AskOutcome, AskRegistry, PendingAsk, Principal, ReplyRefusal, RpcApprover,
 };
 pub use feed::SeqRing;
-pub use framing::{JsonRecordReader, LineFraming};
+pub use framing::{JsonRecordReader, LineFraming, DEFAULT_MAX_RECORD_LEN};
 pub use mcp::{
     serve_mcp, DriverInterventionRecord, McpServeOptions, McpServeReport, DEFAULT_MCP_IDLE_TIMEOUT,
     MCP_PROTOCOL_VERSION,

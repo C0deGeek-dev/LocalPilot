@@ -877,6 +877,26 @@ replay = true
 uplift = true
 ```
 
+### `[remote]`
+
+The gateway paired devices use to reach your served sessions
+(`localpilot remote gateway`). User config and environment only: a project's
+`.localpilot.toml` that sets any `[remote]` key is refused, because a
+repository must not choose where pairing points.
+
+| Key | Type | Default | Description |
+|---|---|---:|---|
+| `enabled` | bool | `false` | Allow the gateway to run. Switching it off is the kill switch: the gateway refuses to start. |
+| `advertised_url` | string | none | The trusted HTTPS origin the phone uses, served by a tunnel or reverse proxy on this computer that forwards to the gateway (for example `https://pc.example.ts.net`). An origin only: no path, query, fragment or user name. Also the default address for `localpilot devices pair` QR codes. |
+| `port` | integer | `47610` | The loopback port the gateway listens on. The gateway binds `127.0.0.1` only. |
+| `proxy_hosts` | array of strings | `[]` | The exact `Host` values your proxy sends to the gateway. Empty means the advertised host, which is what a proxy that preserves `Host` sends. Exact matches only; no wildcards. |
+
+```toml
+[remote]
+enabled = true
+advertised_url = "https://pc.example.ts.net"
+```
+
 ### `[terminal]`
 
 Full-screen timeline presentation preferences. An absent block preserves the

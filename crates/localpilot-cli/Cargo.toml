@@ -92,6 +92,13 @@ subtle = { workspace = true }
 sha2 = { workspace = true }
 qrcode = { workspace = true }
 fd-lock = { workspace = true }
+# The remote gateway (`localpilot remote gateway`): loopback HTTP and the
+# WebSocket relay to the workspace daemon.
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+tokio-tungstenite = { workspace = true }
 time = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
