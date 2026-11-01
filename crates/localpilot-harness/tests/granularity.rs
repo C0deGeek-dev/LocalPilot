@@ -1617,3 +1617,41 @@ keep
 "
     );
 }
+
+#[tokio::test]
+async fn without_a_diff_baseline_read_only_shell_runs_and_a_write_says_why() {
+    // No repository and no commit: the envelope has nothing to measure a
+    // command's changes against.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+    let write = if cfg!(windows) {
+        "[IO.File]::WriteAllText('b.txt', 'x')"
+    } else {
+        ": > b.txt"
+    };
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("echo", "run_shell", json!({"command":"echo test"}))
+            .tool_call(
+                "chain",
+                "run_shell",
+                json!({"command":"echo one; echo two"}),
+            )
+            .tool_call("write", "run_shell", json!({"command":write}))
+            .text("done"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Unrestricted, None);
+    let (_, events) = turn(&mut agent).await;
+    for id in ["echo", "chain"] {
+        assert!(
+            events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id: call_id, is_error:false, .. } if call_id == id)),
+            "{id} must run without a baseline"
+        );
+    }
+    assert!(
+        events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error:true, output, .. }
+            if id == "write" && output.contains("no repository diff baseline") && output.contains("git init"))),
+        "a command that could write is refused with its cause and the way out"
+    );
+    assert!(!dir.path().join("b.txt").exists());
+}

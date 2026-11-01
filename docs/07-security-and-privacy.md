@@ -360,7 +360,10 @@ deliberately. Profiles apply in both agent mode and harness mode.
   Only an entry in `[permissions] allow_commands` lifts its command gate.
 - `bypass`: auto-approves command classes and ordinary in-scope paths.
   External paths, secret-like scratch paths and opaque command targets still
-  prompt interactively or are denied headless (see the boundary rule below).
+  prompt interactively or are denied headless (see the boundary rule below). A
+  line joined with `;` or `|` is judged command by command (ADR-0248): it is
+  opaque only when one of its commands is, or when a command that receives a pipe
+  is not a plain filter.
 - `unrestricted`: a launch mode that approves everything — out-of-workspace
   paths included — with no prompts at all. The user explicitly accepts full
   responsibility. Like `bypass` it is never the default, must be set explicitly

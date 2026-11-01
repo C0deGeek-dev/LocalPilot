@@ -78,7 +78,10 @@ this turn are excluded. If a snapshot cannot be recorded, sizing falls back to
 Work-envelope refusals report the observed files, changed lines and regions
 against their limits, and are retained as system-generated notices that say to
 preserve the work. Without a repository baseline, model shell/background calls
-are refused; file tools and permission-gated verification remain available.
+are refused unless a `run_shell` call is read-only (every command read-only, no
+redirection, output option or opaque syntax), which runs; the refusal names the
+cause and the way out (`git init` and commit, ADR-0248). File tools and
+permission-gated verification remain available.
 Explicit user shell retains its authorization.
 
 A selective mode, `headless_rename_units` (on by default, 8; 0 = off), reuses that

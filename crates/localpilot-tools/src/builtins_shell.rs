@@ -340,6 +340,18 @@ pub(crate) fn execution_text(execution: &RunShellExecution) -> String {
     }
 }
 
+/// Whether a `run_shell` call, as the model wrote it, can only read files. A
+/// call that does not parse is not read-only.
+#[must_use]
+pub fn shell_call_is_read_only(input: &Value) -> bool {
+    serde_json::from_value::<RunShellInput>(input.clone())
+        .ok()
+        .and_then(|input| normalize_run_shell_input(input).ok())
+        .is_some_and(|normalized| {
+            crate::command_paths::is_read_only_execution(&normalized.execution)
+        })
+}
+
 pub(crate) fn execution_class(execution: &RunShellExecution) -> Result<CommandClass, ToolError> {
     match execution {
         RunShellExecution::Direct { program, args } => Ok(classify(program, args)),

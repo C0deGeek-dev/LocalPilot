@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0248: A Shell Chain Is Judged Command By Command, And A Read-Only Command Runs Without A Diff Baseline
+
+**Status:** accepted · **Date:** 2026-11-01. Refs LocalHub#259 and LocalHub#260.
+
+**Context.** Two rules treated a whole `run_shell` call as one unit and so refused
+more than they had to. The lexer marked any `;` or `|` as opaque, which gives
+`Effect::UnscopedCommand`, which `bypass` always asks about, so a chain of version
+checks asked the same question as a package install, in the same words (#259).
+And a work envelope with no diff baseline (no repository, no commit, an
+undeclared nested repository) refused every `run_shell` before looking at the
+command, `echo` and `ls` included, and the message named neither cause nor way
+out (#260).
+
+**Decision.** A line joined with `;` or `|` is split at its top-level separators
+(quotes respected) and each command gets the effects it would get alone, merged
+without duplicates; `||`, backticks, newlines, a backslash on Unix and an
+unterminated quote leave the line one opaque command. A command that receives a
+pipe stays opaque unless it is a plain filter (a read-only command, or one of
+`Out-Null`, `Select-Object`, `Where-Object` and similar with literal arguments),
+because piped data is also code for `sh` or `node`. `<program> --version` and
+`-V`, with the program given by name, has no file target and is no longer
+opaque; a path (`./tool --version`) still is. In a work envelope without a
+baseline, a `run_shell` whose commands are all read-only, without a redirection,
+an output option or opaque syntax, runs; everything else is refused with the
+cause and the way out (`git init` and commit). `run_background` is unchanged.
+
+**Consequences.** A chain asks for what its parts ask for: a destructive part
+keeps its class and a written path keeps its path gate, but `echo a; rm -rf x`
+no longer asks only because it is a chain, exactly as `rm -rf x` alone does not
+under `bypass`. `npx` and anything else that is opaque alone keeps the question,
+so a chain with one such part still asks. Not changed: `npm i` is not yet
+classed as a network install (only `install`, `add` and similar are), which is a
+separate classification gap.
+
 ## ADR-0247: The Remote Gateway Is A Loopback Relay; The Daemon Authorizes
 
 **Status:** accepted · **Date:** 2026-10-30. Builds on ADR-0245.
@@ -60,6 +94,7 @@ chosen explicitly (`?session=<id>` or `?new=1`); listing a workspace's
 sessions before attaching is follow-up work. Switching `[remote]
 enabled` off stops the gateway from starting and servers (when they next
 start) from accepting it; there is no live reload.
+
 ## ADR-0246: A Step That Leaves A CDN Library Without An Exact Version Is Sent Back With The Way To Fix It
 
 **Status:** accepted · **Date:** 2026-10-30. Refs LocalHub#258.

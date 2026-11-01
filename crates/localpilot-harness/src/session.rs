@@ -1728,8 +1728,9 @@ impl SessionRuntime {
         if self.config.granularity.is_some()
             && self.work_diff_baseline.is_none()
             && matches!(name, "run_shell" | "run_background")
+            && !(name == "run_shell" && localpilot_tools::shell_call_is_read_only(input))
         {
-            return Some("work envelope: no repository diff baseline for opaque commands; use bounded file tools for edits and the automatic verification gate for checks".to_string());
+            return Some("work envelope: this command could change files, and the workspace has no repository diff baseline to measure that against (it is not a git repository, has no commit yet, or holds an undeclared nested repository). Read-only commands still run. Use bounded file tools for edits and the automatic verification gate for checks, or run `git init` and commit so the step has a baseline".to_string());
         }
         let contract = self.tools.get(name)?.contract();
         if contract.preconditions.is_empty() {

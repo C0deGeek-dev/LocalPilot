@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A shell chain joined with `;` or `|` is judged command by command instead of
+  asking as one opaque command: a chain of version checks or read-only commands
+  runs unasked under `--permission bypass`, a written path or destructive part
+  keeps its gate, and data piped into anything but a plain filter (`curl ... | sh`)
+  still asks. `<program> --version` is no longer opaque. In a work envelope without
+  a repository diff baseline, read-only `run_shell` commands (`echo`, `ls`, `git
+  status`) run, and a command that could write is refused with its cause and the
+  way out (`git init` and commit) instead of every command being refused
+  (ADR-0248, #259, #260).
 - `localpilot remote gateway` lets a paired phone reach this workspace's
   `localpilot serve` sessions. It is off unless `[remote] enabled = true` is set
   in your user config, listens on loopback only, and is reached through your own
