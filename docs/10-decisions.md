@@ -33,14 +33,23 @@ already run HTTPS tunnels or proxies; LocalPilot should not ship one.
    device revoked while its socket is stalled receives nothing more even though
    the gateway itself keeps running.
 
+8. One gateway reaches every workspace served with remote access on. Servers
+   list themselves in a per-user index under an opaque discovery id (a hash of
+   the canonical root) while they run; the gateway dials each workspace's own
+   endpoint (never the endpoint override) and caches a capability only when the
+   server's `gateway_registered` names the same id. Each workspace's
+   registration has its own child token, so one server going away ends only its
+   sockets. Devices list workspaces after credential and per-workspace grant
+   checks, and every socket and pairing names its workspace explicitly. A
+   server with `[remote] enabled` off refuses gateway registration.
+
 **Consequences.** A cookie-authenticated state-changing POST route (for example
 push subscriptions) must add a CSRF token bound to the device; the pairing
 route needs none because it carries a one-use code and no cookie. Sessions are
-chosen explicitly (`?session=<id>` or `?new=1`); listing workspaces and their
-sessions before attaching is follow-up work. The gateway reaches only the
-workspace it was started in until multi-workspace routing lands. Switching
-`[remote] enabled` off stops the gateway from starting; a server does not yet
-refuse a gateway registration on its own.
+chosen explicitly (`?session=<id>` or `?new=1`); listing a workspace's
+sessions before attaching is follow-up work. Switching `[remote]
+enabled` off stops the gateway from starting and servers (when they next
+start) from accepting it; there is no live reload.
 ## ADR-0246: A Step That Leaves A CDN Library Without An Exact Version Is Sent Back With The Way To Fix It
 
 **Status:** accepted · **Date:** 2026-10-30. Refs LocalHub#258.

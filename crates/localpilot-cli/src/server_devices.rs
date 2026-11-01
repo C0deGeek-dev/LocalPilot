@@ -54,7 +54,7 @@ impl std::fmt::Debug for Secret {
 }
 
 /// `n` random bytes from the operating system, as lowercase hex.
-fn random_hex(n: usize) -> Result<String, DeviceError> {
+pub(crate) fn random_hex(n: usize) -> Result<String, DeviceError> {
     let mut bytes = vec![0u8; n];
     SystemRandom::new()
         .fill(&mut bytes)
@@ -349,6 +349,41 @@ impl DeviceRegistry {
         self.standing_of(record)
     }
 
+    /// Verify a credential whatever workspace this registry was opened for:
+    /// the device exists, is not revoked and the credential matches. Used by
+    /// the gateway to decide which workspaces to list; each workspace's grant
+    /// is then checked with [`DeviceRegistry::standing_in`].
+    pub(crate) fn verify_device(&self, credential: &str) -> Result<String, Refusal> {
+        let file = self.current().map_err(|_| Refusal::Unavailable)?;
+        let id = credential_device_id(credential).ok_or(Refusal::BadCredential)?;
+        let record = file.devices.get(id).ok_or(Refusal::BadCredential)?;
+        let presented = sha256_hex(credential);
+        if !constant_time_eq(presented.as_bytes(), record.credential_sha256.as_bytes()) {
+            return Err(Refusal::BadCredential);
+        }
+        if record.revoked_unix.is_some() {
+            return Err(Refusal::Revoked);
+        }
+        Ok(record.id.clone())
+    }
+
+    /// The device's current standing in the workspace at `root` (rather than
+    /// this registry's own workspace).
+    pub(crate) fn standing_in(&self, id: &str, root: &Path) -> Result<Standing, Refusal> {
+        let file = self.current().map_err(|_| Refusal::Unavailable)?;
+        let record = file.devices.get(id).ok_or(Refusal::BadCredential)?;
+        if record.revoked_unix.is_some() {
+            return Err(Refusal::Revoked);
+        }
+        if !record.reaches(&workspace_id(root)) {
+            return Err(Refusal::NotGranted);
+        }
+        Ok(Standing {
+            id: record.id.clone(),
+            scope: record.scope,
+        })
+    }
+
     /// The device's current standing by id, re-read before each command.
     pub(crate) fn standing(&self, id: &str) -> Result<Standing, Refusal> {
         let file = self.current().map_err(|_| Refusal::Unavailable)?;
@@ -489,7 +524,7 @@ impl DeviceRegistry {
 
 /// Create the registry directory, restricted to the owner, with a
 /// `.gitignore` that keeps it out of version control.
-fn prepare_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn prepare_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     restrict(dir)?;
     let ignore = dir.join(".gitignore");
@@ -530,7 +565,7 @@ fn persist(dir: &Path, file: &RegistryFile) -> std::io::Result<()> {
 }
 
 /// Restrict `path` to the current user.
-fn restrict(path: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         localpilot_winsec::restrict_path_to_owner(path)

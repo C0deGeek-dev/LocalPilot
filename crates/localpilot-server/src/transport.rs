@@ -85,6 +85,17 @@ impl Endpoint {
         if let Some(addr) = env_override() {
             return Self::from_addr_checked(&addr);
         }
+        Self::for_workspace(workspace_root)
+    }
+
+    /// The endpoint a workspace's server uses by default, ignoring the
+    /// [`ENDPOINT_ENV`] override: for a process (the remote gateway) that
+    /// reaches several workspaces and must never route them all to one
+    /// overridden address.
+    ///
+    /// # Errors
+    /// As for [`Endpoint::resolve`].
+    pub fn for_workspace(workspace_root: &Path) -> Result<Self, TransportError> {
         let key = workspace_key(workspace_root);
         #[cfg(unix)]
         {
@@ -281,6 +292,12 @@ pub(crate) fn bind_lost_to_owner(error: &TransportError) -> bool {
 #[cfg(unix)]
 pub(crate) fn is_addr_in_use(error: &TransportError) -> bool {
     matches!(error, TransportError::Io(inner) if inner.kind() == std::io::ErrorKind::AddrInUse)
+}
+
+/// Whether the [`ENDPOINT_ENV`] override is in effect (set and non-empty).
+#[must_use]
+pub fn endpoint_overridden() -> bool {
+    env_override().is_some()
 }
 
 fn env_override() -> Option<String> {

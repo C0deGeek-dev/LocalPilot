@@ -1181,11 +1181,22 @@ project file cannot set any `[remote]` key).
   and WebSocket. TLS and any exposure beyond this computer belong to the HTTPS
   tunnel or reverse proxy the user runs on the same machine; LocalPilot bundles
   and runs none.
-- **It carries traffic; the daemon decides.** The gateway registers with the
-  workspace's server and holds its gateway capability for as long as it runs.
-  Every device connection is a fresh `device_attach` carrying the device's
-  credential, and only the server's answer admits it. When the gateway stops,
-  its capability ends and the server closes every device connection it carried.
+- **It carries traffic; the servers decide.** A server started with remote
+  access on lists its workspace in `~/.localpilot/served` (owner-only) under an
+  opaque id (a hash of its folder, never the path) while it runs, and only it
+  removes the entry. The gateway registers with each listed server it needs,
+  over that workspace's own endpoint (never an endpoint override), and uses it
+  only if the server confirms the workspace id. A server with remote access off
+  refuses gateways. Every device connection is a fresh `device_attach` carrying
+  the device's credential, and only the server's answer admits it. When a
+  server's registration ends, that workspace's device connections close; the
+  others continue. When the gateway stops, every capability ends.
+- **Choosing a workspace.** A paired device lists the workspaces it may reach
+  (`GET /api/workspaces`: its credential is verified and each workspace's grant
+  checked first; only ids, folder names and whether each is online are
+  returned, never paths), and names one explicitly to connect. A workspace id
+  is only a key into the list. Pairing links name the workspace that issued the
+  code, and the code is presented only to that workspace's server.
 - **Exact request checks.** Every request must carry exactly one `Host` from an
   explicit list (the advertised host, or `[remote] proxy_hosts`). Pairing and
   the device socket must also carry exactly one `Origin` equal to the advertised

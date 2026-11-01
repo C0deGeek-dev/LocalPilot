@@ -57,5 +57,5 @@ pub use swarm::{
     swarm_id_for_dir, Admission, MemberRole, MemberStatus, SwarmError, SwarmId, SwarmLimits,
     SwarmMember, SwarmRegistry,
 };
-pub use transport::{connect, Conn, Endpoint, Listener, TransportError};
+pub use transport::{connect, endpoint_overridden, Conn, Endpoint, Listener, TransportError};
 pub use wire::serve_echo;

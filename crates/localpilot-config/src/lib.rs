@@ -30,9 +30,9 @@ pub use schema::{
     HistoryConfig, HistoryPersistence, IngestConfig, IngestMode, LabConfig, LookupPolicy,
     McpConfig, McpEnvEntry, McpEnvObject, McpServerConfig, MemoryConfig, MeshConfig, MeshWriter,
     Mode, PermissionProfile, PermissionsConfig, ProviderAuth, ProviderConfig, ProviderSelection,
-    QuotaAutoResume, QuotaConfig, RenderMode, RepairMode, ResearchConfig, ResearchMcpConfig,
-    ResearchMcpTool, ResearchRenderConfig, ResearchWebConfig, ResolvedRails, RuleSeverity,
-    ScratchRootConfig, SelfImprovementConfig, SensitiveLiteral, SkillsConfig, StorageConfig,
-    TerminalConfig, TimelineDensity, ToolsConfig, DEFAULT_HEADLESS_TOOL_BUDGET_MAX,
+    QuotaAutoResume, QuotaConfig, RemoteConfig, RenderMode, RepairMode, ResearchConfig,
+    ResearchMcpConfig, ResearchMcpTool, ResearchRenderConfig, ResearchWebConfig, ResolvedRails,
+    RuleSeverity, ScratchRootConfig, SelfImprovementConfig, SensitiveLiteral, SkillsConfig,
+    StorageConfig, TerminalConfig, TimelineDensity, ToolsConfig, DEFAULT_HEADLESS_TOOL_BUDGET_MAX,
     DEFAULT_HEADLESS_TURN_TIMEOUT_SECS, DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX, MAX_HEADLESS_UNITS,
 };

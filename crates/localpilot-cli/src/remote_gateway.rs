@@ -1,9 +1,10 @@
 //! `localpilot remote gateway`: the loopback HTTP and WebSocket front door
-//! that lets a paired phone reach this workspace's `localpilot serve` daemon.
+//! that lets a paired phone reach the user's `localpilot serve` workspaces.
 //!
-//! The gateway only carries traffic. It holds the daemon's gateway capability
-//! (from `gateway_register`) and presents the browser's device cookie on a
-//! fresh `device_attach`; the daemon decides every grant. The gateway listens
+//! The gateway only carries traffic. It finds workspaces in the per-user
+//! served index, registers with each server it needs (`gateway_register`, and
+//! the server must confirm the workspace), and presents the browser's device
+//! cookie on a fresh `device_attach`; the server decides every grant. The gateway listens
 //! on loopback only: the user's own HTTPS proxy or tunnel on this computer
 //! terminates TLS and forwards to it.
 //!
@@ -14,6 +15,7 @@
 //! can never become two records, and records that only the gateway or the
 //! local machine may send are refused here as well as in the daemon.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
@@ -57,6 +59,8 @@ const MAX_BODY: usize = 4 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 /// Open device sockets.
 const MAX_SOCKETS: usize = 32;
+/// Workspace registrations attempted at once.
+const MAX_REGISTRATIONS: usize = 4;
 /// How long a client may take to send its request headers.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a request body or the daemon's first answer may take.
@@ -79,26 +83,13 @@ const FORBIDDEN_RECORDS: [&str; 5] = [
 pub(crate) trait DaemonStream: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> DaemonStream for T {}
 
-/// Opens a new connection to the daemon each time it is called.
-pub(crate) type Dial = Arc<
-    dyn Fn() -> Pin<Box<dyn Future<Output = std::io::Result<Box<dyn DaemonStream>>> + Send>>
-        + Send
-        + Sync,
->;
-
-/// Whether a device (by id) still has access, read from the same per-user
-/// registry the daemon decides from. The daemon remains the authority; the
-/// gateway uses this only to stop forwarding to a device that lost access
-/// while one of its writes is stuck.
-pub(crate) type Standing = Arc<dyn Fn(&str) -> bool + Send + Sync>;
-
 /// What a browser request must carry.
 #[derive(Debug, Clone)]
 pub(crate) struct Policy {
     /// The advertised origin, e.g. `https://pc.example.ts.net`.
     origin: String,
     /// The exact `Host` values the proxy sends, lower-cased.
-    hosts: Vec<String>,
+    pub(crate) hosts: Vec<String>,
 }
 
 impl Policy {
@@ -212,96 +203,214 @@ pub(crate) fn frame_to_record(text: &str) -> Result<String, FrameRefusal> {
     Ok(line)
 }
 
-/// Where a socket attaches, from its query: `session=<id>` resumes that
-/// session, `new=1` opens one; `epoch` and `seq` resume a feed position.
-fn socket_target(query: Option<&str>) -> Option<(AttachTarget, Option<FeedCursor>)> {
+/// What a socket asks for, from its query: the workspace (`workspace=<id>`),
+/// and `session=<id>` to resume a session or `new=1` to open one; `epoch` and
+/// `seq` resume a feed position. Every key appears at most once.
+#[derive(Debug)]
+struct SocketQuery {
+    workspace: String,
+    target: AttachTarget,
+    since: Option<FeedCursor>,
+}
+
+fn socket_query(query: Option<&str>) -> Option<SocketQuery> {
+    let mut workspace = None;
     let mut session = None;
-    let mut new = false;
+    let mut new = None;
     let mut epoch = None;
     let mut seq = None;
     for pair in query.unwrap_or_default().split('&') {
-        match pair.split_once('=') {
-            Some(("session", value)) => session = Some(value.to_string()),
-            Some(("new", "1")) => new = true,
-            Some(("epoch", value)) => epoch = Some(value.to_string()),
-            Some(("seq", value)) => seq = Some(value.parse::<u64>().ok()?),
-            _ => {}
+        let (key, value) = pair.split_once('=')?;
+        let slot = match key {
+            "workspace" => &mut workspace,
+            "session" => &mut session,
+            "new" => &mut new,
+            "epoch" => &mut epoch,
+            "seq" => &mut seq,
+            _ => return None,
+        };
+        if slot.replace(value.to_string()).is_some() {
+            return None; // a key given twice is ambiguous
         }
     }
-    let target = match (session, new) {
-        (Some(id), false) => AttachTarget::ResumeId {
+    let workspace = workspace.filter(|id| crate::server_index::is_discovery_id(id))?;
+    let target = match (session, new.as_deref()) {
+        (Some(id), None) => AttachTarget::ResumeId {
             session_id: id.parse().ok()?,
         },
-        (None, true) => AttachTarget::OpenNew,
+        (None, Some("1")) => AttachTarget::OpenNew,
         _ => return None,
     };
     let since = match (epoch, seq) {
-        (Some(epoch), Some(seq)) => Some(FeedCursor { epoch, seq }),
+        (Some(epoch), Some(seq)) => Some(FeedCursor {
+            epoch,
+            seq: seq.parse().ok()?,
+        }),
         (None, None) => None,
         _ => return None,
     };
-    Some((target, since))
+    Some(SocketQuery {
+        workspace,
+        target,
+        since,
+    })
 }
 
-/// The gateway: its policy, how it reaches the daemon, the capability the
-/// daemon issued it, and the token that stops everything.
+/// A served workspace, as the gateway knows it: its discovery id, a display
+/// label, and its root (used only to derive its server's endpoint and to check
+/// a device's grant; never sent to a device).
+#[derive(Debug, Clone)]
+pub(crate) struct Workspace {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) root: std::path::PathBuf,
+}
+
+/// Opens a new connection to a workspace's server.
+pub(crate) type Dial = Arc<
+    dyn Fn(
+            &Workspace,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Box<dyn DaemonStream>>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// A credential's device id, if the credential is valid and not revoked.
+pub(crate) type Verify = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// Whether a device may currently reach the workspace at a root.
+pub(crate) type Reach = Arc<dyn Fn(&str, &std::path::Path) -> bool + Send + Sync>;
+
+/// How the gateway finds workspaces and checks devices. The servers remain
+/// the authority on every grant; the gateway uses `verify` and `standing`
+/// only to decide what to list and when to stop forwarding.
+#[derive(Clone)]
+pub(crate) struct Discovery {
+    /// The published workspaces.
+    pub(crate) list: Arc<dyn Fn() -> Vec<Workspace> + Send + Sync>,
+    pub(crate) dial: Dial,
+    /// A credential's device id, if the credential is valid and not revoked.
+    pub(crate) verify: Verify,
+    /// Whether the device may currently reach the workspace at `root`.
+    pub(crate) standing: Reach,
+}
+
+/// A workspace's registration: its capability, valid while the control
+/// channel lives, and the token that ends with it.
+#[derive(Clone)]
+struct Live {
+    capability: WireSecret,
+    token: CancellationToken,
+}
+
+/// The gateway: its policy, how it finds workspaces, one registration per
+/// workspace, and the token that stops everything.
 pub(crate) struct Gateway {
     policy: Policy,
-    dial: Dial,
-    standing: Standing,
-    capability: WireSecret,
+    discovery: Discovery,
     stop: CancellationToken,
     connections: Arc<Semaphore>,
     sockets: Arc<Semaphore>,
+    /// Registrations in progress at once.
+    registrations: Arc<Semaphore>,
+    /// Per workspace: its live registration, behind a lock so only one
+    /// registration is attempted at a time.
+    live: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<Live>>>>>,
+    /// The deadline for each step that waits on a server or a client.
+    step: Duration,
 }
 
 impl Gateway {
-    /// Register with the daemon and hold its control channel. The gateway
-    /// stops when `stop` is cancelled or the daemon ends the channel (and with
-    /// it the capability).
-    pub(crate) async fn register(
+    pub(crate) fn new(policy: Policy, discovery: Discovery, stop: CancellationToken) -> Arc<Self> {
+        Self::with_step(policy, discovery, stop, STEP_TIMEOUT)
+    }
+
+    /// As [`Gateway::new`], with `step` as the deadline for each wait.
+    pub(crate) fn with_step(
         policy: Policy,
-        dial: Dial,
-        standing: Standing,
+        discovery: Discovery,
         stop: CancellationToken,
-    ) -> anyhow::Result<Arc<Self>> {
+        step: Duration,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            policy,
+            discovery,
+            stop,
+            connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            sockets: Arc::new(Semaphore::new(MAX_SOCKETS)),
+            registrations: Arc::new(Semaphore::new(MAX_REGISTRATIONS)),
+            live: std::sync::Mutex::new(HashMap::new()),
+            step,
+        })
+    }
+
+    /// The published workspace with this id.
+    fn workspace(&self, id: &str) -> Option<Workspace> {
+        (self.discovery.list)()
+            .into_iter()
+            .find(|workspace| workspace.id == id)
+    }
+
+    /// The workspace's live registration, registering with its server first
+    /// if needed. The server must confirm it serves this workspace; a server
+    /// that names another workspace, or none, is treated as offline. One
+    /// workspace's control channel ending ends only that workspace's sockets.
+    ///
+    /// Waiting for another caller's registration, for a registration slot and
+    /// for the server all count against one deadline, so a server that does
+    /// not answer delays each request by at most one step.
+    async fn reach(&self, workspace: &Workspace) -> Option<Live> {
+        tokio::select! {
+            () = self.stop.cancelled() => None,
+            reached = tokio::time::timeout(self.step, self.reach_now(workspace)) => {
+                reached.ok().flatten()
+            }
+        }
+    }
+
+    async fn reach_now(&self, workspace: &Workspace) -> Option<Live> {
+        let slot = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(workspace.id.clone())
+            .or_default()
+            .clone();
+        let mut held = slot.lock().await;
+        if let Some(live) = held.as_ref().filter(|live| !live.token.is_cancelled()) {
+            return Some(live.clone());
+        }
+        *held = None;
         let registered = async {
-            let control = dial().await?;
+            let _permit = self.registrations.acquire().await.ok()?;
+            let control = (self.discovery.dial)(workspace).await.ok()?;
             let (read, mut write) = tokio::io::split(control);
             let mut reader = JsonRecordReader::new(read);
-            write_record(&mut write, ClientCommand::GatewayRegister).await?;
-            let capability = match next_event(&mut reader).await? {
-                Some(ServerEvent::GatewayRegistered { capability }) => capability,
-                Some(ServerEvent::Error { message }) => anyhow::bail!("{message}"),
-                other => anyhow::bail!("unexpected reply to gateway registration: {other:?}"),
-            };
-            Ok((capability, reader, write))
+            write_record(&mut write, ClientCommand::GatewayRegister)
+                .await
+                .ok()?;
+            match next_event(&mut reader).await.ok()?? {
+                ServerEvent::GatewayRegistered {
+                    capability,
+                    workspace: Some(confirmed),
+                } if confirmed == workspace.id => Some((capability, reader, write)),
+                _ => None,
+            }
         };
-        let (capability, mut reader, write) = tokio::select! {
-            () = stop.cancelled() => anyhow::bail!("the gateway is stopping"),
-            registered = tokio::time::timeout(STEP_TIMEOUT, registered) => registered??,
-        };
-        // The capability lives as long as this channel; the channel lives as
-        // long as the gateway.
+        let (capability, mut reader, write) = registered.await?;
+        let token = self.stop.child_token();
         tokio::spawn({
-            let stop = stop.clone();
+            let token = token.clone();
             async move {
                 tokio::select! {
-                    () = stop.cancelled() => {}
-                    _ = async { while let Ok(Some(_)) = reader.next().await {} } => stop.cancel(),
+                    () = token.cancelled() => {}
+                    _ = async { while let Ok(Some(_)) = reader.next().await {} } => token.cancel(),
                 }
                 drop(write);
             }
         });
-        Ok(Arc::new(Self {
-            policy,
-            dial,
-            standing,
-            capability,
-            stop,
-            connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
-            sockets: Arc::new(Semaphore::new(MAX_SOCKETS)),
-        }))
+        let live = Live { capability, token };
+        *held = Some(live.clone());
+        Some(live)
     }
 
     /// Accept connections until the gateway stops.
@@ -345,42 +454,106 @@ impl Gateway {
         }
         match (request.method(), request.uri().path()) {
             (&Method::GET, "/") => page(),
+            (&Method::GET, "/healthz") => plain(StatusCode::OK, &health_body()),
+            (&Method::GET, "/api/workspaces") => self.workspaces(&request).await,
             (&Method::POST, "/api/pair") => self.pair(request).await,
-            (&Method::GET, "/api/socket") => self.socket(request).await,
+            (&Method::GET, "/api/socket") => {
+                // A refused upgrade closes its connection rather than waiting
+                // for another request.
+                let mut response = self.socket(request).await;
+                if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+                    response
+                        .headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                }
+                response
+            }
             _ => plain(StatusCode::NOT_FOUND, "not found"),
         }
     }
 
+    /// The workspaces this device may reach, with whether each is online.
+    /// Read-only; the credential is verified and each workspace's grant
+    /// checked before anything about it is returned or probed.
+    async fn workspaces(&self, request: &Request<Incoming>) -> Response<Full<Bytes>> {
+        if !self.policy.origin_ok(request.headers()) {
+            return plain(StatusCode::FORBIDDEN, "forbidden");
+        }
+        let Some(device) = device_cookie(request.headers())
+            .and_then(|credential| (self.discovery.verify)(&credential))
+        else {
+            return plain(StatusCode::UNAUTHORIZED, "this device is not paired");
+        };
+        let allowed: Vec<Workspace> = (self.discovery.list)()
+            .into_iter()
+            .filter(|workspace| (self.discovery.standing)(&device, &workspace.root))
+            .collect();
+        let probes = allowed.iter().map(|workspace| self.reach(workspace));
+        let online = futures::future::join_all(probes).await;
+        let items: Vec<serde_json::Value> = allowed
+            .iter()
+            .zip(online)
+            .map(|(workspace, live)| {
+                serde_json::json!({
+                    "id": workspace.id,
+                    "label": workspace.label,
+                    "online": live.is_some(),
+                })
+            })
+            .collect();
+        json(&serde_json::json!({ "workspaces": items }))
+    }
+
     /// Exchange a pairing code (from the QR link's fragment, sent in the body)
-    /// for a device credential, which goes only into the device cookie.
+    /// for a device credential, which goes only into the device cookie. The
+    /// code is presented only to the workspace that issued it.
     async fn pair(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
         if !self.policy.origin_ok(request.headers()) {
             return plain(StatusCode::FORBIDDEN, "forbidden");
         }
-        let json = single(request.headers(), &header::CONTENT_TYPE)
+        let is_json = single(request.headers(), &header::CONTENT_TYPE)
             .is_some_and(|value| value.starts_with("application/json"));
-        if !json {
+        if !is_json {
             return plain(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "expected application/json",
             );
         }
         let body = Limited::new(request.into_body(), MAX_BODY).collect();
-        let Ok(Ok(body)) = tokio::time::timeout(STEP_TIMEOUT, body).await else {
+        let Ok(Ok(body)) = tokio::time::timeout(self.step, body).await else {
             return plain(StatusCode::BAD_REQUEST, "unreadable request");
         };
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Pairing {
             code: String,
+            workspace: String,
         }
-        let Ok(Pairing { code }) = serde_json::from_slice::<Pairing>(&body.to_bytes()) else {
-            return plain(StatusCode::BAD_REQUEST, "expected {\"code\": ...}");
+        let Ok(Pairing { code, workspace }) = serde_json::from_slice::<Pairing>(&body.to_bytes())
+        else {
+            return plain(
+                StatusCode::BAD_REQUEST,
+                "expected {\"code\": ..., \"workspace\": ...}",
+            );
+        };
+        if !crate::server_index::is_discovery_id(&workspace) {
+            return plain(StatusCode::BAD_REQUEST, "not a workspace id");
+        }
+        let Some(workspace) = self.workspace(&workspace) else {
+            return plain(StatusCode::NOT_FOUND, "that workspace is not being served");
+        };
+        let Some(live) = self.reach(&workspace).await else {
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "that workspace is offline");
         };
         let exchanged = self
-            .ask_daemon(ClientCommand::PairExchange {
-                capability: self.capability.clone(),
-                pairing: WireSecret::new(code),
-            })
+            .ask_daemon(
+                &workspace,
+                &live,
+                ClientCommand::PairExchange {
+                    capability: live.capability.clone(),
+                    pairing: WireSecret::new(code),
+                },
+            )
             .await;
         let Ok((
             Some(ServerEvent::DevicePaired {
@@ -400,18 +573,12 @@ impl Gateway {
         {
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "unusable credential");
         }
-        let body = serde_json::json!({ "device_id": device_id, "scope": scope }).to_string();
-        let mut response = with_headers(Response::new(Full::new(Bytes::from(body))));
-        let headers = response.headers_mut();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        let mut response = json(&serde_json::json!({ "device_id": device_id, "scope": scope }));
         if let Ok(cookie) = HeaderValue::from_str(&format!(
             "{DEVICE_COOKIE}={credential}; Path=/; Secure; HttpOnly; SameSite=Strict; \
              Max-Age={COOKIE_MAX_AGE_SECS}"
         )) {
-            headers.insert(header::SET_COOKIE, cookie);
+            response.headers_mut().insert(header::SET_COOKIE, cookie);
         }
         response
     }
@@ -451,29 +618,42 @@ impl Gateway {
         else {
             return plain(StatusCode::UNAUTHORIZED, "this device is not paired");
         };
-        let Some((target, since)) = socket_target(request.uri().query()) else {
+        let Some(query) = socket_query(request.uri().query()) else {
             return plain(
                 StatusCode::BAD_REQUEST,
-                "choose a session: ?session=<id> or ?new=1",
+                "choose a workspace and a session: ?workspace=<id>&session=<id> or &new=1",
             );
         };
+        let Some(workspace) = self.workspace(&query.workspace) else {
+            return plain(StatusCode::NOT_FOUND, "that workspace is not being served");
+        };
+        if !(self.discovery.standing)(&device, &workspace.root) {
+            return plain(
+                StatusCode::FORBIDDEN,
+                "this device may not reach that workspace",
+            );
+        }
         let Ok(permit) = self.sockets.clone().try_acquire_owned() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "too many open devices");
         };
+        let Some(live) = self.reach(&workspace).await else {
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "that workspace is offline");
+        };
         let attached = self
-            .ask_daemon(ClientCommand::DeviceAttach {
-                capability: self.capability.clone(),
-                credential: WireSecret::new(credential),
-                target,
-                capabilities: vec![CAPABILITY_ACKS.to_string(), CAPABILITY_RESUME.to_string()],
-                since,
-            })
+            .ask_daemon(
+                &workspace,
+                &live,
+                ClientCommand::DeviceAttach {
+                    capability: live.capability.clone(),
+                    credential: WireSecret::new(credential),
+                    target: query.target,
+                    capabilities: vec![CAPABILITY_ACKS.to_string(), CAPABILITY_RESUME.to_string()],
+                    since: query.since,
+                },
+            )
             .await;
         let (first, daemon) = match attached {
-            Ok((Some(event @ ServerEvent::Attached { .. }), Some((daemon, record)))) => {
-                drop(event);
-                (record, daemon)
-            }
+            Ok((Some(ServerEvent::Attached { .. }), Some((daemon, record)))) => (record, daemon),
             Ok((Some(ServerEvent::Error { message }), _)) => {
                 return plain(StatusCode::FORBIDDEN, &message);
             }
@@ -485,13 +665,17 @@ impl Gateway {
             }
         };
         let upgraded = hyper::upgrade::on(&mut request);
-        let stop = self.stop.clone();
-        let standing = self.standing.clone();
-        let access: Access = Arc::new(move || standing(&device));
+        // The socket ends with its workspace's registration (and with it the
+        // whole gateway).
+        let stop = live.token.clone();
+        let step = self.step;
+        let standing = self.discovery.standing.clone();
+        let root = workspace.root.clone();
+        let access: Access = Arc::new(move || standing(&device, &root));
         tokio::spawn(async move {
             let upgraded = tokio::select! {
                 () = stop.cancelled() => return,
-                upgraded = tokio::time::timeout(STEP_TIMEOUT, upgraded) => upgraded,
+                upgraded = tokio::time::timeout(step, upgraded) => upgraded,
             };
             let Ok(Ok(upgraded)) = upgraded else { return };
             relay(TokioIo::new(upgraded), daemon, first, stop, access, permit).await;
@@ -507,14 +691,17 @@ impl Gateway {
         response
     }
 
-    /// Send one first record on a new daemon connection and read its answer.
-    /// Returns the answer, and the open connection with the raw answer.
+    /// Send one first record on a new connection to the workspace's server and
+    /// read its answer. Returns the answer, and the open connection with the
+    /// raw answer.
     async fn ask_daemon(
         &self,
+        workspace: &Workspace,
+        live: &Live,
         command: ClientCommand,
     ) -> anyhow::Result<(Option<ServerEvent>, Option<(Daemon, serde_json::Value)>)> {
         let step = async {
-            let stream = (self.dial)().await?;
+            let stream = (self.discovery.dial)(workspace).await?;
             let (read, mut write) = tokio::io::split(stream);
             let mut reader = JsonRecordReader::new(read);
             write_record(&mut write, command).await?;
@@ -527,8 +714,8 @@ impl Gateway {
             Ok((event, Some(((reader, write), value))))
         };
         tokio::select! {
-            () = self.stop.cancelled() => anyhow::bail!("the gateway is stopping"),
-            answered = tokio::time::timeout(STEP_TIMEOUT, step) => answered?,
+            () = live.token.cancelled() => anyhow::bail!("the workspace's registration ended"),
+            answered = tokio::time::timeout(self.step, step) => answered?,
         }
     }
 }
@@ -678,6 +865,20 @@ fn with_headers(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
     response
 }
 
+/// The body `/healthz` answers with, which `localpilot remote status` checks.
+pub(crate) fn health_body() -> String {
+    format!("localpilot-gateway {}", env!("CARGO_PKG_VERSION"))
+}
+
+fn json(value: &serde_json::Value) -> Response<Full<Bytes>> {
+    let mut response = with_headers(Response::new(Full::new(Bytes::from(value.to_string()))));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
 fn plain(status: StatusCode, text: &str) -> Response<Full<Bytes>> {
     let mut response = with_headers(Response::new(Full::new(Bytes::from(text.to_string()))));
     *response.status_mut() = status;
@@ -705,8 +906,254 @@ fn page() -> Response<Full<Bytes>> {
     response
 }
 
-/// `localpilot remote gateway`: run until interrupted, the daemon goes away,
-/// or the gateway is switched off.
+/// The gateway's view of this user's served workspaces and devices.
+fn user_discovery() -> anyhow::Result<Discovery> {
+    let Some(index) = crate::server_index::ServedIndex::for_user() else {
+        anyhow::bail!("no home directory is set, so there is no per-user workspace index");
+    };
+    let list: Arc<dyn Fn() -> Vec<Workspace> + Send + Sync> = Arc::new(move || {
+        index
+            .list()
+            .into_iter()
+            .map(|entry| Workspace {
+                id: entry.id,
+                label: entry.label,
+                root: entry.root,
+            })
+            .collect()
+    });
+    // Always the workspace's own default endpoint: an endpoint override in the
+    // gateway's environment must never send every workspace to one server.
+    let dial: Dial = Arc::new(|workspace: &Workspace| {
+        let endpoint = localpilot_server::Endpoint::for_workspace(&workspace.root);
+        Box::pin(async move {
+            let endpoint = endpoint.map_err(std::io::Error::other)?;
+            localpilot_server::connect(&endpoint)
+                .await
+                .map(|conn| Box::new(conn) as Box<dyn DaemonStream>)
+                .map_err(std::io::Error::other)
+        })
+    });
+    // Only reach-free verification and per-root standing are used, so the
+    // workspace the registry is opened for does not matter.
+    let registry = Arc::new(crate::server_devices::DeviceRegistry::for_user(
+        &std::env::current_dir()?,
+    ));
+    let verify = {
+        let registry = registry.clone();
+        Arc::new(move |credential: &str| registry.verify_device(credential).ok())
+    };
+    let standing = Arc::new(move |device: &str, root: &std::path::Path| {
+        registry.standing_in(device, root).is_ok()
+    });
+    Ok(Discovery {
+        list,
+        dial,
+        verify,
+        standing,
+    })
+}
+
+/// Whether the gateway answers on its loopback port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GatewayHealth {
+    Running,
+    NotRunning,
+    /// Something answers on the port, but not this gateway.
+    Unexpected,
+}
+
+/// The `[remote]` settings as `remote status` reports them.
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteSettings {
+    pub(crate) enabled: bool,
+    /// The advertised origin; `Err` names why the configured URL is invalid.
+    pub(crate) advertised: Result<Option<String>, String>,
+    pub(crate) port: u16,
+}
+
+/// What `localpilot remote status` shows. No secrets. A part that cannot be
+/// read is reported with its reason, never as an empty or default value.
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteStatus {
+    pub(crate) settings: Result<RemoteSettings, String>,
+    /// `None` when the settings, and so the port, are unknown.
+    pub(crate) gateway: Option<GatewayHealth>,
+    /// Workspaces served with remote access on: label and discovery id.
+    pub(crate) workspaces: Vec<(String, String)>,
+    /// Paired and revoked device counts.
+    pub(crate) devices: Result<(usize, usize), String>,
+}
+
+/// Ask the loopback port for the gateway's health answer.
+async fn probe(port: u16, host: &str) -> GatewayHealth {
+    use tokio::io::AsyncReadExt as _;
+    let exchange = async {
+        let mut socket =
+            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+        socket
+            .write_all(
+                format!("GET /healthz HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await?;
+        let mut raw = Vec::new();
+        socket.read_to_end(&mut raw).await?;
+        Ok::<_, std::io::Error>(String::from_utf8_lossy(&raw).into_owned())
+    };
+    match tokio::time::timeout(Duration::from_secs(2), exchange).await {
+        Ok(Ok(text)) => {
+            let ok = text.starts_with("HTTP/1.1 200")
+                && text.split_once("\r\n\r\n").map(|(_, body)| body) == Some(&health_body());
+            if ok {
+                GatewayHealth::Running
+            } else {
+                GatewayHealth::Unexpected
+            }
+        }
+        Ok(Err(_)) => GatewayHealth::NotRunning,
+        Err(_) => GatewayHealth::Unexpected,
+    }
+}
+
+/// The settings part of the status, from a loaded (or failed) config.
+fn settings_of(
+    config: Result<localpilot_config::RemoteConfig, String>,
+) -> Result<(RemoteSettings, Vec<String>), String> {
+    let config = config?;
+    let advertised = config
+        .advertised_url
+        .as_deref()
+        .map(|url| crate::server_cmd::pairing_origin(url).map_err(|error| error.to_string()))
+        .transpose();
+    Ok((
+        RemoteSettings {
+            enabled: config.enabled,
+            advertised,
+            port: config.port,
+        },
+        config.proxy_hosts,
+    ))
+}
+
+/// The device counts, or why the registry cannot be read.
+fn device_counts(
+    registry: &crate::server_devices::DeviceRegistry,
+) -> Result<(usize, usize), String> {
+    let devices = registry.list().map_err(|error| error.to_string())?;
+    let revoked = devices
+        .iter()
+        .filter(|device| device.revoked_unix.is_some())
+        .count();
+    Ok((devices.len() - revoked, revoked))
+}
+
+/// Gather the status from its sources.
+async fn status_from(
+    config: Result<localpilot_config::RemoteConfig, String>,
+    index: Option<&crate::server_index::ServedIndex>,
+    registry: &crate::server_devices::DeviceRegistry,
+) -> RemoteStatus {
+    let settings = settings_of(config);
+    let gateway = match &settings {
+        Ok((settings, proxy_hosts)) => {
+            let host = match &settings.advertised {
+                Ok(Some(origin)) => Policy::new(origin, proxy_hosts).hosts.first().cloned(),
+                _ => None,
+            }
+            .unwrap_or_else(|| "localhost".to_string());
+            Some(probe(settings.port, &host).await)
+        }
+        Err(_) => None,
+    };
+    let workspaces = index
+        .map(crate::server_index::ServedIndex::list)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.label, entry.id))
+        .collect();
+    RemoteStatus {
+        settings: settings.map(|(settings, _)| settings),
+        gateway,
+        workspaces,
+        devices: device_counts(registry),
+    }
+}
+
+/// Gather the remote-access status for this user.
+pub(crate) async fn status() -> RemoteStatus {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let config = localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(&cwd),
+        &localpilot_config::CliOverrides::default(),
+    )
+    .map(|config| config.remote)
+    .map_err(|error| error.to_string());
+    let index = crate::server_index::ServedIndex::for_user();
+    let registry = crate::server_devices::DeviceRegistry::for_user(&cwd);
+    status_from(config, index.as_ref(), &registry).await
+}
+
+/// The status as indented text lines.
+pub(crate) fn render_status(status: &RemoteStatus) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    match &status.settings {
+        Ok(settings) => {
+            let enabled = if settings.enabled {
+                "yes"
+            } else {
+                "no ([remote] enabled = false)"
+            };
+            let _ = writeln!(s, "  enabled:        {enabled}");
+            let advertised = match &settings.advertised {
+                Ok(Some(origin)) => origin.clone(),
+                Ok(None) => "(not set)".to_string(),
+                Err(reason) => format!("invalid: {reason}"),
+            };
+            let _ = writeln!(s, "  advertised url: {advertised}");
+            let gateway = match status.gateway {
+                Some(GatewayHealth::Running) => "running",
+                Some(GatewayHealth::NotRunning) => "not running",
+                Some(GatewayHealth::Unexpected) => "port in use by something else",
+                None => "unknown",
+            };
+            let _ = writeln!(
+                s,
+                "  gateway:        {gateway} (127.0.0.1:{})",
+                settings.port
+            );
+        }
+        Err(reason) => {
+            let _ = writeln!(s, "  settings:       cannot be read: {reason}");
+            let _ = writeln!(s, "  gateway:        unknown (no port without settings)");
+        }
+    }
+    if status.workspaces.is_empty() {
+        let _ = writeln!(s, "  workspaces:     none served with remote access on");
+    } else {
+        let _ = writeln!(s, "  workspaces:");
+        for (label, id) in &status.workspaces {
+            let _ = writeln!(s, "    {label} ({id})");
+        }
+    }
+    match &status.devices {
+        Ok((active, revoked)) => {
+            let _ = writeln!(s, "  devices:        {active} paired, {revoked} revoked");
+        }
+        Err(reason) => {
+            let _ = writeln!(s, "  devices:        cannot be read: {reason}");
+        }
+    }
+    s
+}
+
+/// `localpilot remote status`.
+pub(crate) async fn print_status() {
+    print!("remote access:\n{}", render_status(&status().await));
+}
+
+/// `localpilot remote gateway`: run until interrupted or switched off.
 pub(crate) async fn run() -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(
@@ -716,41 +1163,26 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     .remote;
     if !config.enabled {
         anyhow::bail!(
-            "the remote gateway is off. Set `[remote] enabled = true` and `advertised_url`              in your user config to turn it on."
+            "the remote gateway is off. Set `[remote] enabled = true` and `advertised_url` \
+             in your user config to turn it on."
         );
     }
     let Some(url) = config.advertised_url.as_deref() else {
         anyhow::bail!(
-            "set `[remote] advertised_url` to the HTTPS address your tunnel or proxy              forwards to this gateway"
+            "set `[remote] advertised_url` to the HTTPS address your tunnel or proxy \
+             forwards to this gateway"
         );
     };
     let origin = crate::server_cmd::pairing_origin(url)?;
     let policy = Policy::new(&origin, &config.proxy_hosts);
-    let endpoint = localpilot_server::Endpoint::resolve(&cwd)?;
-    let dial: Dial = Arc::new(move || {
-        let endpoint = endpoint.clone();
-        Box::pin(async move {
-            localpilot_server::connect(&endpoint)
-                .await
-                .map(|conn| Box::new(conn) as Box<dyn DaemonStream>)
-                .map_err(std::io::Error::other)
-        })
-    });
-    let registry = Arc::new(crate::server_devices::DeviceRegistry::for_user(&cwd));
-    let standing: Standing = Arc::new(move |id| registry.standing(id).is_ok());
     let stop = CancellationToken::new();
-    let gateway = Gateway::register(policy, dial, standing, stop.clone())
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "could not register with this workspace's server ({error}). Start it with                  `localpilot serve` first."
-            )
-        })?;
+    let gateway = Gateway::new(policy, user_discovery()?, stop.clone());
     // Loopback only, always: TLS and any network exposure belong to the
     // user's proxy.
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.port)).await?;
     eprintln!(
-        "Gateway on http://127.0.0.1:{} for {origin}. Press Ctrl-C to stop.",
+        "Gateway on http://127.0.0.1:{} for {origin}. It reaches every workspace served with \
+         remote access on. Press Ctrl-C to stop.",
         config.port
     );
     tokio::spawn({
@@ -1000,6 +1432,90 @@ mod tests {
         relay.await.unwrap();
     }
 
+    fn remote_config(url: Option<&str>) -> localpilot_config::RemoteConfig {
+        localpilot_config::RemoteConfig {
+            enabled: true,
+            advertised_url: url.map(str::to_string),
+            port: 9, // discard: nothing answers there
+            proxy_hosts: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_status_shows_state_without_secrets() {
+        let home = tempfile::tempdir().unwrap();
+        let registry =
+            crate::server_devices::DeviceRegistry::open(&home.path().join("devices"), home.path());
+        registry
+            .add("a", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let (b, _) = registry
+            .add("b", localpilot_rpc::Scope::Observe, false)
+            .unwrap();
+        registry.revoke(&b.id).unwrap();
+        let index = crate::server_index::ServedIndex::open(&home.path().join("served"));
+        let root = home.path().join("alpha");
+        std::fs::create_dir_all(&root).unwrap();
+        let _published = index.publish(&root).unwrap();
+        let status = status_from(
+            Ok(remote_config(Some("https://pc.example.test"))),
+            Some(&index),
+            &registry,
+        )
+        .await;
+        let text = render_status(&status);
+        for expected in [
+            "enabled:        yes",
+            "advertised url: https://pc.example.test",
+            "(127.0.0.1:9)",
+            "alpha (",
+            "1 paired, 1 revoked",
+        ] {
+            assert!(text.contains(expected), "{text}");
+        }
+        assert!(
+            !text.contains(&root.to_string_lossy().to_string()),
+            "no paths: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_status_reports_what_it_cannot_read_instead_of_defaults() {
+        let home = tempfile::tempdir().unwrap();
+        // Unreadable settings: their reason, and no invented port or state.
+        let registry =
+            crate::server_devices::DeviceRegistry::open(&home.path().join("devices"), home.path());
+        let status = status_from(Err("bad TOML at line 3".to_string()), None, &registry).await;
+        let text = render_status(&status);
+        assert!(
+            text.contains("settings:       cannot be read: bad TOML at line 3"),
+            "{text}"
+        );
+        assert!(text.contains("gateway:        unknown"), "{text}");
+        assert!(!text.contains("enabled:"), "{text}");
+
+        // An invalid advertised URL is named as invalid, not "not set".
+        let status = status_from(
+            Ok(remote_config(Some("http://pc.example.test"))),
+            None,
+            &registry,
+        )
+        .await;
+        let text = render_status(&status);
+        assert!(text.contains("advertised url: invalid:"), "{text}");
+
+        // A corrupt registry is reported, not counted as zero devices.
+        let devices = home.path().join("corrupt");
+        std::fs::create_dir_all(&devices).unwrap();
+        std::fs::write(devices.join("registry.lock"), "").unwrap();
+        std::fs::write(devices.join("registry.json"), "{ not json").unwrap();
+        let corrupt = crate::server_devices::DeviceRegistry::open(&devices, home.path());
+        let status = status_from(Ok(remote_config(None)), None, &corrupt).await;
+        let text = render_status(&status);
+        assert!(text.contains("devices:        cannot be read:"), "{text}");
+        assert!(!text.contains("0 paired"), "{text}");
+    }
+
     #[test]
     fn a_websocket_key_must_be_sixteen_bytes_of_canonical_base64() {
         assert!(valid_websocket_key("dGhlIHNhbXBsZSBub25jZQ=="));
@@ -1016,28 +1532,41 @@ mod tests {
     }
 
     #[test]
-    fn a_socket_names_its_session_explicitly() {
+    fn a_socket_names_its_workspace_and_session_explicitly() {
+        let w = "0123456789abcdef";
         assert!(matches!(
-            socket_target(Some("new=1")),
-            Some((AttachTarget::OpenNew, None))
+            socket_query(Some(&format!("workspace={w}&new=1"))),
+            Some(SocketQuery {
+                target: AttachTarget::OpenNew,
+                since: None,
+                ..
+            })
         ));
         let id = "6f0d7d43-5d6c-4c6c-9b1e-1c2b3d4e5f60";
         assert!(matches!(
-            socket_target(Some(&format!("session={id}&epoch=e1&seq=7"))),
-            Some((
-                AttachTarget::ResumeId { .. },
-                Some(FeedCursor { seq: 7, .. })
-            ))
+            socket_query(Some(&format!("workspace={w}&session={id}&epoch=e1&seq=7"))),
+            Some(SocketQuery {
+                target: AttachTarget::ResumeId { .. },
+                since: Some(FeedCursor { seq: 7, .. }),
+                ..
+            })
         ));
         for bad in [
             None,
-            Some(""),
-            Some("session=not-an-id"),
-            Some("new=1&session=6f0d7d43-5d6c-4c6c-9b1e-1c2b3d4e5f60"),
-            Some("new=1&epoch=e1"),
-            Some("new=1&seq=x"),
+            Some(String::new()),
+            Some("new=1".to_string()),
+            Some(format!("workspace={w}")),
+            Some("workspace=../x&new=1".to_string()),
+            Some("workspace=0123456789ABCDEF&new=1".to_string()),
+            Some(format!("workspace={w}&workspace=fedcba9876543210&new=1")),
+            Some(format!("workspace={w}&new=1&new=1")),
+            Some(format!("workspace={w}&session=not-an-id")),
+            Some(format!("workspace={w}&new=1&session={id}")),
+            Some(format!("workspace={w}&new=1&epoch=e1")),
+            Some(format!("workspace={w}&new=1&seq=x&epoch=e")),
+            Some(format!("workspace={w}&new=1&other=1")),
         ] {
-            assert!(socket_target(bad).is_none(), "{bad:?}");
+            assert!(socket_query(bad.as_deref()).is_none(), "{bad:?}");
         }
     }
 }

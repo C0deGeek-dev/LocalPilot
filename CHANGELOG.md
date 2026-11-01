@@ -12,7 +12,11 @@ is SemVer-stable; the configuration schema stability policy is in
   HTTPS tunnel or proxy at `[remote] advertised_url` (also the default address
   for `localpilot devices pair` QR codes). Pairing sets an HttpOnly cookie, the
   server accepts every device connection itself, and requests must match the
-  advertised origin and host exactly (ADR-0247).
+  advertised origin and host exactly (ADR-0247). One gateway reaches every
+  workspace you serve with remote access on: a paired device lists the
+  workspaces it may reach and picks one, and pairing links name the workspace
+  that issued the code. `localpilot remote status` shows the gateway, served
+  workspaces and paired devices.
 - A step that leaves a library on a CDN without an exact version (`@latest`, a
   range, a bare major or none, on jsDelivr, unpkg, esm.sh, Skypack or cdnjs) is
   sent back with the way to fix it: look up the version with `npm view`, list the

@@ -74,6 +74,7 @@ mod selfimprove_cmd;
 mod server_cmd;
 mod server_devices;
 mod server_feed;
+mod server_index;
 mod server_requests;
 mod session_cmd;
 mod skill_discovery;
@@ -899,8 +900,12 @@ enum RemoteAction {
     /// Run the gateway paired devices connect to. It listens on loopback only
     /// (`[remote] port`); your HTTPS tunnel or reverse proxy on this computer
     /// forwards the `[remote] advertised_url` to it. Needs `[remote] enabled =
-    /// true` in your user config and a running `localpilot serve` here.
+    /// true` in your user config; it reaches every workspace served with
+    /// remote access on.
     Gateway,
+    /// Show whether remote access is on, whether the gateway runs, the
+    /// workspaces it can reach and how many devices are paired.
+    Status,
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -2072,6 +2077,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         },
         Command::Remote { action } => match action {
             RemoteAction::Gateway => remote_gateway::run().await?,
+            RemoteAction::Status => remote_gateway::print_status().await,
         },
 
         Command::ServerServe => {

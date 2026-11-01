@@ -449,6 +449,10 @@ pub enum ServerEvent {
     /// open.
     GatewayRegistered {
         capability: WireSecret,
+        /// The server's workspace discovery id, so a gateway routing to
+        /// several workspaces can confirm it reached the one it meant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
     },
     /// Reply to `commands`.
     Commands {
@@ -676,6 +680,7 @@ mod tests {
         for event in [
             ServerEvent::GatewayRegistered {
                 capability: WireSecret::new(sentinel),
+                workspace: None,
             },
             ServerEvent::PairingCode {
                 code: WireSecret::new(sentinel),

@@ -492,6 +492,20 @@ struct HostMap {
     delays: Arc<FailureDelays>,
     /// Device handshakes (attach, pairing exchange) verified at once.
     handshakes: Arc<Handshakes>,
+    /// Whether a remote gateway may register, and the workspace it would
+    /// reach.
+    remote: Arc<RemoteGate>,
+}
+
+/// The server's side of `[remote]`: a gateway may register only while remote
+/// access is on, and is told the workspace's discovery id so it can confirm
+/// it reached the workspace it meant.
+#[derive(Default)]
+struct RemoteGate {
+    /// Why gateways are refused (`[remote] enabled` is off), if they are.
+    refused: Option<String>,
+    /// This workspace's discovery id.
+    discovery: Option<String>,
 }
 
 /// Bounds the device handshakes the server verifies at once. Under a flood a
@@ -1388,6 +1402,17 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    if let Some(reason) = &hosts.remote.refused {
+        emit(
+            write,
+            reply_id,
+            ServerEvent::Error {
+                message: reason.clone(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
     let lease = match hosts.gateways.register() {
         Ok(lease) => lease,
         Err(error) => {
@@ -1408,6 +1433,7 @@ where
         reply_id,
         ServerEvent::GatewayRegistered {
             capability: localpilot_rpc::WireSecret::new(lease.capability.expose()),
+            workspace: hosts.remote.discovery.clone(),
         },
     )
     .await?;
@@ -1626,7 +1652,14 @@ pub async fn pair(
     use std::io::Write as _;
     match origin {
         Some(origin) => {
-            let link = format!("{origin}/#pair={code}");
+            let Some(workspace) = crate::server_index::discovery_id(&std::env::current_dir()?)
+            else {
+                anyhow::bail!(
+                    "this workspace's folder cannot be resolved, so it cannot be paired from"
+                );
+            };
+            // The code is presented only to the workspace that issued it.
+            let link = pairing_link(&origin, &code, &workspace);
             match qrcode::QrCode::new(link.as_bytes()) {
                 Ok(qr) => writeln!(
                     out,
@@ -1661,6 +1694,23 @@ pub async fn pair(
 /// port, and nothing else (no user info, path, query or fragment that could
 /// carry other data or send the device somewhere unexpected). Nothing is
 /// requested from it.
+/// The QR link: the gateway origin, then the code and the issuing workspace in
+/// the fragment (never sent to a server by the browser), percent-encoded.
+fn pairing_link(origin: &str, code: &str, workspace: &str) -> String {
+    fn encode(value: &str) -> String {
+        value
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                other => format!("%{other:02X}"),
+            })
+            .collect()
+    }
+    format!("{origin}/#pair={}&w={}", encode(code), encode(workspace))
+}
+
 pub(crate) fn pairing_origin(url: &str) -> anyhow::Result<String> {
     let parsed = reqwest::Url::parse(url.trim())
         .map_err(|error| anyhow::anyhow!("the gateway address is not valid: {error}"))?;
@@ -2579,10 +2629,43 @@ pub async fn serve(
     let setup = SessionSetup::resolve(model, provider_id, profile).await?;
     let store = Store::open(&cwd);
     let registry = SessionRegistry::new();
+    let remote =
+        localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?.remote;
     let hosts = HostMap {
         // One registry per user, shared by every workspace's server.
         devices: Arc::new(DeviceRegistry::for_user(&cwd)),
+        remote: Arc::new(RemoteGate {
+            refused: (!remote.enabled).then(|| {
+                "remote access is off: set `[remote] enabled = true` in your user config"
+                    .to_string()
+            }),
+            discovery: crate::server_index::discovery_id(&cwd),
+        }),
         ..HostMap::default()
+    };
+    // Listed for the remote gateway while this server runs, when remote access
+    // is on. A server on an overridden endpoint is not discoverable: the
+    // gateway only ever dials a workspace's own default endpoint.
+    let _published = match (remote.enabled, localpilot_server::endpoint_overridden()) {
+        (true, false) => {
+            match crate::server_index::ServedIndex::for_user().map(|index| index.publish(&cwd)) {
+                Some(Ok(published)) => Some(published),
+                Some(Err(error)) => {
+                    eprintln!(
+                        "localpilot: this workspace is not listed for the remote gateway: {error}"
+                    );
+                    None
+                }
+                None => None,
+            }
+        }
+        (true, true) => {
+            eprintln!(
+                "localpilot: this server uses a custom endpoint, so the remote gateway cannot reach it"
+            );
+            None
+        }
+        (false, _) => None,
     };
     if let Some(reason) = hosts.devices.unavailable() {
         eprintln!("localpilot: paired devices are disabled until this is fixed: {reason}");
@@ -4900,7 +4983,7 @@ mod tests {
     ) {
         let (reader, write, reply) = first_record(endpoint, ClientCommand::GatewayRegister).await;
         match reply {
-            ServerEvent::GatewayRegistered { capability } => {
+            ServerEvent::GatewayRegistered { capability, .. } => {
                 ((reader, write), capability.expose().to_string())
             }
             other => panic!("expected `gateway_registered`, got {other:?}"),
@@ -5673,10 +5756,40 @@ mod tests {
 
     const GATEWAY_ORIGIN: &str = "https://pc.example.test";
     const GATEWAY_HOST: &str = "pc.example.test";
+    /// The discovery id of the single test workspace.
+    const GATEWAY_WORKSPACE: &str = "0123456789abcdef";
+
+    /// Opens one connection to an in-process daemon.
+    type Connect = Arc<
+        dyn Fn() -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = std::io::Result<Box<dyn crate::remote_gateway::DaemonStream>>,
+                        > + Send,
+                >,
+            > + Send
+            + Sync,
+    >;
+
+    /// Hosts that answer a gateway as the workspace `id`.
+    fn hosts_for(id: &str, devices: Arc<DeviceRegistry>) -> HostMap {
+        HostMap {
+            devices,
+            remote: Arc::new(RemoteGate {
+                refused: None,
+                discovery: Some(id.to_string()),
+            }),
+            ..HostMap::default()
+        }
+    }
+
+    fn gateway_hosts() -> HostMap {
+        hosts_for(GATEWAY_WORKSPACE, Arc::new(DeviceRegistry::default()))
+    }
 
     /// An in-process daemon the gateway dials: every call is a fresh
     /// connection served by `serve_connection`.
-    fn daemon_dial(hosts: &HostMap, factory: &Arc<FakeFactory>) -> crate::remote_gateway::Dial {
+    fn daemon_dial(hosts: &HostMap, factory: &Arc<FakeFactory>) -> Connect {
         let hosts = hosts.clone();
         let factory = factory.clone();
         let registry = SessionRegistry::new();
@@ -5708,7 +5821,7 @@ mod tests {
         })
     }
 
-    /// A running gateway on an ephemeral loopback port.
+    /// A running gateway on an ephemeral loopback port, for one workspace.
     async fn start_gateway(
         hosts: &HostMap,
         factory: &Arc<FakeFactory>,
@@ -5716,25 +5829,61 @@ mod tests {
         start_gateway_with(hosts, daemon_dial(hosts, factory)).await
     }
 
-    /// The device standing the gateway monitors: the same registry.
-    fn gateway_standing(hosts: &HostMap) -> crate::remote_gateway::Standing {
-        let devices = hosts.devices.clone();
-        Arc::new(move |id| devices.standing(id).is_ok())
-    }
-
     async fn start_gateway_with(
         hosts: &HostMap,
-        dial: crate::remote_gateway::Dial,
+        connect: Connect,
     ) -> (std::net::SocketAddr, CancellationToken) {
+        let workspace = crate::remote_gateway::Workspace {
+            id: GATEWAY_WORKSPACE.to_string(),
+            label: "workspace".to_string(),
+            root: std::env::temp_dir(),
+        };
+        start_gateway_for(vec![(workspace, connect)], hosts.devices.clone()).await
+    }
+
+    /// A running gateway for several workspaces, checking devices against
+    /// `devices`.
+    async fn start_gateway_for(
+        spaces: Vec<(crate::remote_gateway::Workspace, Connect)>,
+        devices: Arc<DeviceRegistry>,
+    ) -> (std::net::SocketAddr, CancellationToken) {
+        start_gateway_stepped(spaces, devices, Duration::from_secs(10)).await
+    }
+
+    async fn start_gateway_stepped(
+        spaces: Vec<(crate::remote_gateway::Workspace, Connect)>,
+        devices: Arc<DeviceRegistry>,
+        step: Duration,
+    ) -> (std::net::SocketAddr, CancellationToken) {
+        let listed: Vec<crate::remote_gateway::Workspace> = spaces
+            .iter()
+            .map(|(workspace, _)| workspace.clone())
+            .collect();
+        let connects: HashMap<String, Connect> = spaces
+            .into_iter()
+            .map(|(workspace, connect)| (workspace.id, connect))
+            .collect();
+        let verify_devices = devices.clone();
+        let discovery = crate::remote_gateway::Discovery {
+            list: Arc::new(move || listed.clone()),
+            dial: Arc::new(move |workspace: &crate::remote_gateway::Workspace| {
+                match connects.get(&workspace.id) {
+                    Some(connect) => connect(),
+                    None => Box::pin(async { Err(std::io::Error::other("no such workspace")) }),
+                }
+            }),
+            verify: Arc::new(move |credential: &str| verify_devices.verify_device(credential).ok()),
+            standing: Arc::new(move |device: &str, root: &std::path::Path| {
+                devices.standing_in(device, root).is_ok()
+            }),
+        };
         let stop = CancellationToken::new();
-        let gateway = crate::remote_gateway::Gateway::register(
+        let gateway = crate::remote_gateway::Gateway::with_step(
             crate::remote_gateway::Policy::new(GATEWAY_ORIGIN, &[]),
-            dial,
-            gateway_standing(hosts),
+            discovery,
             stop.clone(),
-        )
-        .await
-        .unwrap();
+            step,
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(gateway.serve(listener));
@@ -5762,7 +5911,11 @@ mod tests {
     }
 
     fn pair_request(origin: &str, code: &str) -> String {
-        let body = format!("{{\"code\":\"{code}\"}}");
+        pair_request_in(origin, code, GATEWAY_WORKSPACE)
+    }
+
+    fn pair_request_in(origin: &str, code: &str, workspace: &str) -> String {
+        let body = format!("{{\"code\":\"{code}\",\"workspace\":\"{workspace}\"}}");
         format!(
             "POST /api/pair HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: close\r\nOrigin: {origin}\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -5781,6 +5934,11 @@ mod tests {
         tokio_tungstenite::tungstenite::Error,
     > {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let query = if query.contains("workspace=") {
+            query.to_string()
+        } else {
+            format!("workspace={GATEWAY_WORKSPACE}&{query}")
+        };
         let mut request = format!("ws://{address}/api/socket?{query}")
             .into_client_request()
             .unwrap();
@@ -5822,7 +5980,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pairing_through_the_gateway_puts_the_credential_only_in_a_cookie() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
-        let hosts = HostMap::default();
+        let hosts = gateway_hosts();
         let (address, stop) = start_gateway(&hosts, &factory).await;
         let code = hosts
             .pairings
@@ -5883,7 +6041,7 @@ mod tests {
     async fn a_paired_phone_drives_a_session_through_the_gateway() {
         use futures::SinkExt;
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("hello phone")));
-        let hosts = HostMap::default();
+        let hosts = gateway_hosts();
         let (address, stop) = start_gateway(&hosts, &factory).await;
         let (_, credential) = hosts
             .devices
@@ -5922,7 +6080,7 @@ mod tests {
     async fn the_gateway_refuses_hostile_sockets_and_frames() {
         use futures::SinkExt;
         let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
-        let hosts = HostMap::default();
+        let hosts = gateway_hosts();
         let (address, stop) = start_gateway(&hosts, &factory).await;
         let (standing, credential) = hosts
             .devices
@@ -5995,7 +6153,7 @@ mod tests {
         use tokio::io::AsyncReadExt;
         let answer = "z".repeat(512 * 1024);
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text(&answer)));
-        let hosts = HostMap::default();
+        let hosts = gateway_hosts();
         let (address, stop) = start_gateway(&hosts, &factory).await;
         let (_, credential) = hosts
             .devices
@@ -6048,7 +6206,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_invalid_websocket_handshake_never_reaches_the_daemon() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
-        let hosts = HostMap::default();
+        let hosts = gateway_hosts();
         let (address, stop) = start_gateway(&hosts, &factory).await;
         let (_, credential) = hosts
             .devices
@@ -6061,7 +6219,7 @@ mod tests {
             "%%%%%%%%%%%%%%%%%%%%%%==",
         ] {
             let request = format!(
-                "GET /api/socket?new=1 HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: Upgrade\r\n\
+                "GET /api/socket?workspace={GATEWAY_WORKSPACE}&new=1 HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: Upgrade\r\n\
                  Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\
                  Origin: {GATEWAY_ORIGIN}\r\nCookie: {}={}\r\n\r\n",
                 crate::remote_gateway::DEVICE_COOKIE,
@@ -6080,13 +6238,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn stopping_the_gateway_ends_a_request_waiting_on_a_stalled_daemon() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
-        let hosts = HostMap::default();
+        let hosts = gateway_hosts();
         let working = daemon_dial(&hosts, &factory);
         // The first connection (registration) works; later ones are never
         // answered, and their far ends are kept open so they do not end.
         let held = Arc::new(StdMutex::new(Vec::new()));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let dial: crate::remote_gateway::Dial = {
+        let dial: Connect = {
             let held = held.clone();
             Arc::new(move || {
                 if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
@@ -6109,6 +6267,500 @@ mod tests {
             .await
             .expect("the request ended when the gateway stopped")
             .unwrap();
+    }
+
+    #[test]
+    fn a_pairing_link_names_the_code_and_its_workspace_in_the_fragment() {
+        assert_eq!(
+            pairing_link("https://pc.example.test", "ab12.cd34", "0123456789abcdef"),
+            "https://pc.example.test/#pair=ab12.cd34&w=0123456789abcdef"
+        );
+        assert_eq!(
+            pairing_link("https://pc.example.test", "a&b=c d", "x/y"),
+            "https://pc.example.test/#pair=a%26b%3Dc%20d&w=x%2Fy"
+        );
+    }
+
+    // --- several workspaces behind one gateway ---------------------------------
+
+    struct Space {
+        workspace: crate::remote_gateway::Workspace,
+        hosts: HostMap,
+        factory: Arc<FakeFactory>,
+    }
+
+    /// A workspace with a real root under `home`, its server reading the
+    /// per-user registry in `registry_dir`.
+    fn space(
+        home: &std::path::Path,
+        name: &str,
+        registry_dir: &std::path::Path,
+        text: &str,
+    ) -> Space {
+        let root = home.join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let id = crate::server_index::discovery_id(&root).unwrap();
+        let devices = Arc::new(DeviceRegistry::open(registry_dir, &root));
+        Space {
+            workspace: crate::remote_gateway::Workspace {
+                id: id.clone(),
+                label: name.to_string(),
+                root,
+            },
+            hosts: hosts_for(&id, devices),
+            factory: Arc::new(FakeFactory::new(FakeProvider::new().text(text))),
+        }
+    }
+
+    /// A raw WebSocket upgrade request with a valid handshake.
+    fn upgrade_request(query: &str, credential: &str) -> String {
+        format!(
+            "GET /api/socket?{query} HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: Upgrade\r\n\
+             Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nOrigin: {GATEWAY_ORIGIN}\r\n\
+             Cookie: {}={credential}\r\n\r\n",
+            crate::remote_gateway::DEVICE_COOKIE
+        )
+    }
+
+    fn workspaces_request(credential: &str) -> String {
+        format!(
+            "GET /api/workspaces HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: close\r\n\
+             Origin: {GATEWAY_ORIGIN}\r\nCookie: {}={credential}\r\n\r\n",
+            crate::remote_gateway::DEVICE_COOKIE
+        )
+    }
+
+    /// Send a prompt on an attached socket and wait for `text` in the answer.
+    async fn prompt_and_expect(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        text: &str,
+    ) {
+        use futures::SinkExt;
+        let prompt = serde_json::json!({"v": 1, "command": {"type": "prompt", "text": "go"}});
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                prompt.to_string(),
+            ))
+            .await
+            .unwrap();
+        loop {
+            let record = next_frame(socket).await.expect("the turn streams");
+            if matches!(&record.event, ServerEvent::TextDelta { text: t } if t.contains(text)) {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_pairing_reaches_two_workspaces_through_one_gateway() {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let a = space(home.path(), "alpha", &registry_dir, "from alpha");
+        let b = space(home.path(), "my project & Ünï", &registry_dir, "from beta");
+        let (_, credential) = a
+            .hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        let (address, stop) = start_gateway_for(
+            vec![
+                (a.workspace.clone(), daemon_dial(&a.hosts, &a.factory)),
+                (b.workspace.clone(), daemon_dial(&b.hosts, &b.factory)),
+            ],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+        )
+        .await;
+
+        let (status, head, body) = http(address, &workspaces_request(&credential)).await;
+        assert_eq!(status, 200, "{head}");
+        assert!(head
+            .to_ascii_lowercase()
+            .contains("cache-control: no-store"));
+        assert!(!head.to_ascii_lowercase().contains("access-control-allow"));
+        let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let items = listed["workspaces"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "{body}");
+        assert!(items.iter().all(|item| item["online"] == true), "{body}");
+        assert!(
+            items.iter().any(|item| item["label"] == "my project & Ünï"),
+            "{body}"
+        );
+        let root = a.workspace.root.to_string_lossy().to_string();
+        assert!(
+            !body.contains(&root) && !body.contains("devices"),
+            "no paths: {body}"
+        );
+
+        for (space, answer) in [(&a, "from alpha"), (&b, "from beta")] {
+            let query = format!("workspace={}&new=1", space.workspace.id);
+            let mut socket = open_socket(address, &query, GATEWAY_ORIGIN, Some(&credential))
+                .await
+                .expect("upgraded");
+            next_frame(&mut socket).await.unwrap(); // attached
+            prompt_and_expect(&mut socket, answer).await;
+        }
+        assert_eq!(
+            a.hosts.inner.lock().await.len(),
+            1,
+            "alpha served its own session"
+        );
+        assert_eq!(
+            b.hosts.inner.lock().await.len(),
+            1,
+            "beta served its own session"
+        );
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_limited_to_one_workspace_sees_and_reaches_only_it() {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let a = space(home.path(), "alpha", &registry_dir, "a");
+        let b = space(home.path(), "beta", &registry_dir, "b");
+        let (_, credential) = a
+            .hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, true)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        let (address, stop) = start_gateway_for(
+            vec![
+                (a.workspace.clone(), daemon_dial(&a.hosts, &a.factory)),
+                (b.workspace.clone(), daemon_dial(&b.hosts, &b.factory)),
+            ],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+        )
+        .await;
+        let (_, _, body) = http(address, &workspaces_request(&credential)).await;
+        let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let items = listed["workspaces"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{body}");
+        assert_eq!(items[0]["id"], a.workspace.id.as_str());
+        let (status, _, _) = http(
+            address,
+            &upgrade_request(&format!("workspace={}&new=1", b.workspace.id), &credential),
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert!(
+            b.hosts.inner.lock().await.is_empty(),
+            "beta was never asked"
+        );
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn workspace_ids_are_only_keys_into_the_index() {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let a = space(home.path(), "alpha", &registry_dir, "a");
+        let (_, credential) = a
+            .hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        let (address, stop) = start_gateway_for(
+            vec![(a.workspace.clone(), daemon_dial(&a.hosts, &a.factory))],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+        )
+        .await;
+        for (query, expected) in [
+            ("workspace=fedcba9876543210&new=1".to_string(), 404),
+            ("workspace=..%2F..%2Fetc&new=1".to_string(), 400),
+            (
+                format!(
+                    "workspace={}&workspace={}&new=1",
+                    a.workspace.id, a.workspace.id
+                ),
+                400,
+            ),
+            ("new=1".to_string(), 400),
+        ] {
+            let (status, head, _) = http(address, &upgrade_request(&query, &credential)).await;
+            assert_eq!(status, expected, "{query}: {head}");
+        }
+        // Pairing names its workspace explicitly too.
+        for body_workspace in ["", "fedcba9876543210", "../x"] {
+            let (status, _, _) = http(
+                address,
+                &pair_request_in(GATEWAY_ORIGIN, "0.0", body_workspace),
+            )
+            .await;
+            assert!(matches!(status, 400 | 404), "{body_workspace}: {status}");
+        }
+        assert!(a.hosts.inner.lock().await.is_empty());
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_server_that_does_not_confirm_its_workspace_is_never_used() {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let a = space(home.path(), "alpha", &registry_dir, "from alpha");
+        let mut b = space(home.path(), "beta", &registry_dir, "b");
+        let (_, credential) = a
+            .hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        // Beta's index entry leads to a server that says it is alpha; a third
+        // workspace's server names none at all.
+        b.hosts = hosts_for(&a.workspace.id, b.hosts.devices.clone());
+        let mut c = space(home.path(), "gamma", &registry_dir, "c");
+        c.hosts = HostMap {
+            devices: c.hosts.devices.clone(),
+            ..HostMap::default()
+        };
+        let (address, stop) = start_gateway_for(
+            vec![
+                (a.workspace.clone(), daemon_dial(&a.hosts, &a.factory)),
+                (b.workspace.clone(), daemon_dial(&b.hosts, &b.factory)),
+                (c.workspace.clone(), daemon_dial(&c.hosts, &c.factory)),
+            ],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+        )
+        .await;
+        for wrong in [&b, &c] {
+            let (status, _, _) = http(
+                address,
+                &upgrade_request(
+                    &format!("workspace={}&new=1", wrong.workspace.id),
+                    &credential,
+                ),
+            )
+            .await;
+            assert_eq!(status, 503, "{}", wrong.workspace.label);
+            assert!(wrong.hosts.inner.lock().await.is_empty());
+        }
+        let (_, _, body) = http(address, &workspaces_request(&credential)).await;
+        let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let online: Vec<_> = listed["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["online"] == true)
+            .map(|item| item["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(online, vec![a.workspace.id.clone()], "{body}");
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_workspace_going_away_leaves_the_other_usable() {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let a = space(home.path(), "alpha", &registry_dir, "from alpha");
+        let b = space(home.path(), "beta", &registry_dir, "from beta");
+        let (_, credential) = a
+            .hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        // Beta's connections run through a relay the test can cut.
+        let cut = CancellationToken::new();
+        let beta: Connect = {
+            let inner = daemon_dial(&b.hosts, &b.factory);
+            let cut = cut.clone();
+            Arc::new(move || {
+                let inner = inner.clone();
+                let cut = cut.clone();
+                Box::pin(async move {
+                    let mut daemon = inner().await?;
+                    let (near, mut far) = tokio::io::duplex(64 * 1024);
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            () = cut.cancelled() => {}
+                            _ = tokio::io::copy_bidirectional(&mut far, &mut daemon) => {}
+                        }
+                    });
+                    Ok(Box::new(near) as Box<dyn crate::remote_gateway::DaemonStream>)
+                })
+            })
+        };
+        let (address, stop) = start_gateway_for(
+            vec![
+                (a.workspace.clone(), daemon_dial(&a.hosts, &a.factory)),
+                (b.workspace.clone(), beta),
+            ],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+        )
+        .await;
+        let mut on_a = open_socket(
+            address,
+            &format!("workspace={}&new=1", a.workspace.id),
+            GATEWAY_ORIGIN,
+            Some(&credential),
+        )
+        .await
+        .unwrap();
+        next_frame(&mut on_a).await.unwrap();
+        let mut on_b = open_socket(
+            address,
+            &format!("workspace={}&new=1", b.workspace.id),
+            GATEWAY_ORIGIN,
+            Some(&credential),
+        )
+        .await
+        .unwrap();
+        next_frame(&mut on_b).await.unwrap();
+
+        // Beta's server goes away: its socket ends, alpha's keeps working.
+        cut.cancel();
+        while next_frame(&mut on_b).await.is_some() {}
+        assert!(!stop.is_cancelled());
+        prompt_and_expect(&mut on_a, "from alpha").await;
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_server_that_never_answers_delays_each_request_by_one_step_only() {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let stalled = space(home.path(), "stalled", &registry_dir, "s");
+        let (_, credential) = stalled
+            .hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        // Every connection to this server is accepted and never answered.
+        let held = Arc::new(StdMutex::new(Vec::new()));
+        let never: Connect = {
+            let held = held.clone();
+            Arc::new(move || {
+                let (client, server) = tokio::io::duplex(1024);
+                held.lock().unwrap().push(server);
+                Box::pin(async move {
+                    Ok(Box::new(client) as Box<dyn crate::remote_gateway::DaemonStream>)
+                })
+            })
+        };
+        let step = Duration::from_millis(500);
+        let (address, stop) = start_gateway_stepped(
+            vec![(stalled.workspace.clone(), never)],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+            step,
+        )
+        .await;
+        let started = Instant::now();
+        let mut requests = Vec::new();
+        for _ in 0..4 {
+            let request = upgrade_request(
+                &format!("workspace={}&new=1", stalled.workspace.id),
+                &credential,
+            );
+            requests.push(tokio::spawn(async move {
+                let (status, _, _) = http(address, &request).await;
+                (status, started.elapsed())
+            }));
+        }
+        let listing = {
+            let request = workspaces_request(&credential);
+            tokio::spawn(async move { (http(address, &request).await, started.elapsed()) })
+        };
+        for request in requests {
+            let (status, elapsed) = request.await.unwrap();
+            assert_eq!(status, 503);
+            assert!(
+                elapsed < step * 3,
+                "one step per request, not one per predecessor: {elapsed:?}"
+            );
+        }
+        let ((status, _, body), elapsed) = listing.await.unwrap();
+        assert_eq!(status, 200);
+        assert!(body.contains("\"online\":false"), "{body}");
+        assert!(elapsed < step * 3, "discovery is bounded too: {elapsed:?}");
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pairing_code_is_presented_only_to_the_workspace_that_issued_it() {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let a = space(home.path(), "alpha", &registry_dir, "a");
+        let b = space(home.path(), "beta", &registry_dir, "b");
+        let (address, stop) = start_gateway_for(
+            vec![
+                (a.workspace.clone(), daemon_dial(&a.hosts, &a.factory)),
+                (b.workspace.clone(), daemon_dial(&b.hosts, &b.factory)),
+            ],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+        )
+        .await;
+        let code = a
+            .hosts
+            .pairings
+            .begin("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let (status, _, _) = http(
+            address,
+            &pair_request_in(GATEWAY_ORIGIN, code.expose(), &b.workspace.id),
+        )
+        .await;
+        assert_eq!(status, 403, "beta never issued the code");
+        let (status, _, _) = http(
+            address,
+            &pair_request_in(GATEWAY_ORIGIN, code.expose(), &a.workspace.id),
+        )
+        .await;
+        assert_eq!(status, 200, "the issuing workspace accepts it");
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_server_with_remote_access_off_refuses_gateways() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap {
+            remote: Arc::new(RemoteGate {
+                refused: Some("remote access is off".to_string()),
+                discovery: Some(GATEWAY_WORKSPACE.to_string()),
+            }),
+            ..HostMap::default()
+        };
+        let (_, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let (address, stop) = start_gateway(&hosts, &factory).await;
+        let (status, _, _) = http(
+            address,
+            &upgrade_request(
+                &format!("workspace={GATEWAY_WORKSPACE}&new=1"),
+                credential.expose(),
+            ),
+        )
+        .await;
+        assert_eq!(status, 503);
+        assert!(hosts.inner.lock().await.is_empty());
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_gateway_answers_a_recognizable_health_check() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = gateway_hosts();
+        let (address, stop) = start_gateway(&hosts, &factory).await;
+        let (status, _, body) = http(
+            address,
+            &format!("GET /healthz HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, crate::remote_gateway::health_body());
+        let (status, _, _) = http(
+            address,
+            "GET /healthz HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 421);
+        stop.cancel();
     }
 
     // --- the plain-text client renderer --------------------------------------
