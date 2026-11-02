@@ -1198,8 +1198,15 @@ project file cannot set any `[remote]` key).
   (`GET /api/workspaces`: its credential is verified and each workspace's grant
   checked first; only ids, folder names and whether each is online are
   returned, never paths), and names one explicitly to connect. A workspace id
-  is only a key into the list. Pairing links name the workspace that issued the
-  code, and the code is presented only to that workspace's server.
+  is only a key into the list. Before attaching, a device can list a
+  workspace's sessions (`GET /api/sessions?workspace=<id>`): the workspace's
+  server checks the credential and the device's standing itself, answers with
+  metadata only (id, name, whether live, message count, last update; at most
+  100 entries and 64 KiB) and opens nothing. The gateway checks the device's
+  standing again before answering, and from then on that connection's
+  transport writes only while the device's standing and the workspace's
+  registration hold; the connection is closed after the response. Pairing links name the workspace that issued the code, and the code
+  is presented only to that workspace's server.
 - **Exact request checks.** Every request must carry exactly one `Host` from an
   explicit list (the advertised host, or `[remote] proxy_hosts`). Pairing and
   the device socket must also carry exactly one `Origin` equal to the advertised

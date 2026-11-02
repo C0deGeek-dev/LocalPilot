@@ -29,7 +29,8 @@ is SemVer-stable; the configuration schema stability policy is in
   rate-limits pairing, unauthenticated requests and each device, bounds what a
   socket may send, and closes sockets that stop answering its pings; the
   configuration reference describes reaching it through Tailscale, Cloudflare
-  Tunnel or your own reverse proxy.
+  Tunnel or your own reverse proxy. A paired device can list a workspace's
+  sessions before attaching (`device_sessions`, `GET /api/sessions`).
 - A step that leaves a library on a CDN without an exact version (`@latest`, a
   range, a bare major or none, on jsDelivr, unpkg, esm.sh, Skypack or cdnjs) is
   sent back with the way to fix it: look up the version with `npm view`, list the

@@ -972,6 +972,20 @@ where
                 return Ok(());
             }
         },
+        ClientCommand::DeviceSessions {
+            capability,
+            credential,
+        } => {
+            return list_sessions_for_device(
+                &mut write,
+                hosts,
+                store,
+                reply_id,
+                capability.expose(),
+                credential.expose(),
+            )
+            .await;
+        }
         ClientCommand::PairBegin {
             name,
             scope,
@@ -1472,6 +1486,22 @@ async fn admit_device(
     credential: &str,
     target: &AttachTarget,
 ) -> Result<(Principal, CancellationToken), String> {
+    let (standing, lease) = verify_device(hosts, capability, credential, "attached").await?;
+    if standing.scope < target.requirement() {
+        return Err("this device may watch existing sessions but not open new ones".to_string());
+    }
+    Ok((Principal::Device { id: standing.id }, lease))
+}
+
+/// Check a device request arriving through the gateway: a live gateway
+/// capability, a handshake slot, and a credential with current standing in
+/// this workspace. `event` names the audit entry of a success.
+async fn verify_device(
+    hosts: &HostMap,
+    capability: &str,
+    credential: &str,
+    event: &str,
+) -> Result<(crate::server_devices::Standing, CancellationToken), String> {
     let lease = hosts
         .gateways
         .lease(capability)
@@ -1486,7 +1516,7 @@ async fn admit_device(
     let standing = match verified {
         Ok(standing) => {
             hosts.delays.succeeded(&key);
-            hosts.devices.audit("attached", Some(&standing.id), "");
+            hosts.devices.audit(event, Some(&standing.id), "");
             standing
         }
         Err(refusal) => {
@@ -1506,10 +1536,75 @@ async fn admit_device(
             });
         }
     };
-    if standing.scope < target.requirement() {
-        return Err("this device may watch existing sessions but not open new ones".to_string());
+    Ok((standing, lease))
+}
+
+/// At most this many sessions are listed for a device before it attaches.
+const DEVICE_SESSIONS_LISTED: usize = 100;
+/// A device's session listing is at most this large once serialized, which
+/// bounds what the gateway holds while delivering it (delivery itself is
+/// stopped by the gateway's armed transport when access ends).
+pub(crate) const DEVICE_SESSIONS_BYTES: usize = 64 * 1024;
+
+/// The sessions a device is shown: live first, then most recently updated
+/// (then by id, so the order is the same every time), at most
+/// [`DEVICE_SESSIONS_LISTED`], and dropping the oldest until the listing fits
+/// [`DEVICE_SESSIONS_BYTES`].
+fn device_listing(mut items: Vec<localpilot_rpc::SessionInfo>) -> Vec<localpilot_rpc::SessionInfo> {
+    items.sort_by(|a, b| {
+        b.live
+            .cmp(&a.live)
+            .then(b.updated_unix.cmp(&a.updated_unix))
+            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+    });
+    items.truncate(DEVICE_SESSIONS_LISTED);
+    while !items.is_empty()
+        && serde_json::to_vec(&items).map_or(0, |bytes| bytes.len()) > DEVICE_SESSIONS_BYTES
+    {
+        items.pop();
     }
-    Ok((Principal::Device { id: standing.id }, lease))
+    items
+}
+
+/// Answer a device's `device_sessions` request: the workspace's sessions
+/// (live first, then most recently updated; metadata only), delivered only
+/// while the gateway's lease and the device's standing hold. Nothing is opened.
+async fn list_sessions_for_device<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    hosts: &HostMap,
+    store: &Store,
+    reply_id: Option<String>,
+    capability: &str,
+    credential: &str,
+) -> anyhow::Result<()> {
+    let (standing, lease) =
+        match verify_device(hosts, capability, credential, "sessions_listed").await {
+            Ok(admitted) => admitted,
+            Err(message) => {
+                emit(write, reply_id, ServerEvent::Error { message }).await?;
+                return Ok(());
+            }
+        };
+    let authorized = || -> Result<(), String> {
+        if lease.is_cancelled() {
+            return Err("the gateway disconnected".to_string());
+        }
+        hosts
+            .devices
+            .standing(&standing.id)
+            .map(|_| ())
+            .map_err(|_| "this device is no longer allowed".to_string())
+    };
+    if authorized().is_err() {
+        return Ok(());
+    }
+    let items = device_listing(list_sessions(&ServerContext { hosts, store }).await);
+    let reply = emit(write, reply_id, ServerEvent::Sessions { items });
+    match while_authorized(&lease, &authorized, reply).await {
+        Some(written) => written?,
+        None => return Ok(()),
+    }
+    Ok(())
 }
 
 /// Wait for a handshake slot, giving up if the gateway's control channel
@@ -5040,6 +5135,200 @@ mod tests {
         (reader, write, id)
     }
 
+    #[test]
+    fn a_device_listing_is_ordered_and_bounded_in_count_and_size() {
+        let item = |live: bool, updated: u64, name_len: usize| localpilot_rpc::SessionInfo {
+            id: SessionId::new(),
+            name: Some("n".repeat(name_len)),
+            live,
+            message_count: 1,
+            updated_unix: updated,
+        };
+        // More than the count limit, mixed live and stored.
+        let many: Vec<_> = (0..250).map(|n| item(n % 7 == 0, n, 8)).collect();
+        let listed = device_listing(many);
+        assert_eq!(listed.len(), DEVICE_SESSIONS_LISTED);
+        assert!(listed.windows(2).all(|pair| {
+            pair[0].live && !pair[1].live
+                || (pair[0].live == pair[1].live && pair[0].updated_unix >= pair[1].updated_unix)
+        }));
+        // Large names: trimmed by size, newest kept.
+        let large: Vec<_> = (0..100).map(|n| item(false, n, 4096)).collect();
+        let listed = device_listing(large);
+        assert!(serde_json::to_vec(&listed).unwrap().len() <= DEVICE_SESSIONS_BYTES);
+        assert!(!listed.is_empty() && listed.len() < 100);
+        assert_eq!(listed[0].updated_unix, 99);
+    }
+
+    fn device_sessions(capability: &str, credential: &str) -> ClientCommand {
+        ClientCommand::DeviceSessions {
+            capability: localpilot_rpc::WireSecret::new(capability),
+            credential: localpilot_rpc::WireSecret::new(credential),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_observing_device_lists_sessions_without_opening_any() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 8, hosts.clone());
+        let (_local_reader, _local_write, session) = local_session(&endpoint).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (device, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Observe,
+        )
+        .await;
+        let before = hosts.inner.lock().await.len();
+        let (_, _, reply) =
+            first_record(&endpoint, device_sessions(&capability, &credential)).await;
+        match reply {
+            ServerEvent::Sessions { items } => {
+                assert!(
+                    items.iter().any(|item| item.id == session && item.live),
+                    "{items:?}"
+                );
+                assert!(
+                    items.windows(2).all(|pair| pair[0].live >= pair[1].live),
+                    "live first"
+                );
+            }
+            other => panic!("expected `sessions`, got {other:?}"),
+        }
+        assert_eq!(hosts.inner.lock().await.len(), before, "nothing was opened");
+        assert!(
+            hosts
+                .devices
+                .audit_lines()
+                .iter()
+                .any(|line| line.contains("sessions_listed") && line.contains(&device)),
+            "listing is audited as such, not as an attach"
+        );
+
+        // A revoked credential and a wrong capability get an error and no
+        // session metadata.
+        let (_, _, reply) =
+            first_record(&endpoint, device_sessions("not-a-capability", &credential)).await;
+        assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
+        assert!(hosts.devices.revoke(&device).unwrap());
+        let (_, _, reply) =
+            first_record(&endpoint, device_sessions(&capability, &credential)).await;
+        match reply {
+            ServerEvent::Error { message } => assert!(!message.contains(&session.to_string())),
+            other => panic!("expected `error`, got {other:?}"),
+        }
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_attached_device_cannot_send_device_sessions() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 8, hosts.clone());
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        let mut reader = JsonRecordReader::new(read);
+        send_command(
+            &mut write,
+            device_attach(&capability, &credential, AttachTarget::OpenNew),
+        )
+        .await
+        .unwrap();
+        read_until(&mut reader, |event| {
+            matches!(event, ServerEvent::Snapshot { .. })
+        })
+        .await;
+        send_with_id(&mut write, "s", device_sessions(&capability, &credential)).await;
+        let refused = read_until(&mut reader, |event| {
+            matches!(
+                event,
+                ServerEvent::Rejected { .. } | ServerEvent::Error { .. }
+            )
+        })
+        .await;
+        assert!(
+            matches!(
+                refused.last(),
+                Some(ServerEvent::Rejected {
+                    code: RejectCode::Forbidden,
+                    ..
+                })
+            ),
+            "{refused:?}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_session_listing_stuck_on_its_write_stops_when_access_ends() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap::default();
+        let registry = SessionRegistry::new();
+        let store = factory.store();
+        let lease = hosts.gateways.register().unwrap();
+        let capability = lease.capability.expose().to_string();
+        let (standing, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Observe, false)
+            .unwrap();
+        // A session with a long name makes the reply larger than the pipe.
+        let (server_read, mut client_write) = tokio::io::duplex(64 * 1024);
+        let (mut client_read, server_write) = tokio::io::duplex(32);
+        let connection = tokio::spawn({
+            let hosts = hosts.clone();
+            let factory = factory.clone();
+            async move {
+                serve_connection(
+                    server_read,
+                    server_write,
+                    &registry,
+                    &hosts,
+                    factory.as_ref(),
+                    &store,
+                    Profile::Bypass,
+                )
+                .await
+            }
+        });
+        send_command(
+            &mut client_write,
+            device_sessions(&capability, credential.expose()),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(hosts.devices.revoke(&standing.id).unwrap());
+        tokio::time::sleep(ACCESS_POLL * 3).await;
+        let mut received = Vec::new();
+        timeout(
+            DEADLINE,
+            tokio::io::AsyncReadExt::read_to_end(&mut client_read, &mut received),
+        )
+        .await
+        .expect("the connection ended")
+        .unwrap();
+        timeout(DEADLINE, connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            received.len() <= 32,
+            "only what was buffered: {}",
+            received.len()
+        );
+        drop(lease);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_observing_device_may_watch_but_not_act() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
@@ -5790,6 +6079,10 @@ mod tests {
     /// An in-process daemon the gateway dials: every call is a fresh
     /// connection served by `serve_connection`.
     fn daemon_dial(hosts: &HostMap, factory: &Arc<FakeFactory>) -> Connect {
+        daemon_dial_with(hosts, factory, Profile::Bypass)
+    }
+
+    fn daemon_dial_with(hosts: &HostMap, factory: &Arc<FakeFactory>, profile: Profile) -> Connect {
         let hosts = hosts.clone();
         let factory = factory.clone();
         let registry = SessionRegistry::new();
@@ -5811,7 +6104,7 @@ mod tests {
                     &hosts,
                     factory.as_ref(),
                     &store,
-                    Profile::Bypass,
+                    profile,
                 )
                 .await;
             });
@@ -5873,13 +6166,14 @@ mod tests {
         start_gateway_full(spaces, devices, step, limits, &[]).await
     }
 
-    async fn start_gateway_full(
+    /// A gateway for `spaces`, not yet listening.
+    fn gateway_for(
         spaces: Vec<(crate::remote_gateway::Workspace, Connect)>,
         devices: Arc<DeviceRegistry>,
         step: Duration,
         limits: crate::remote_gateway::Limits,
         proxy_hosts: &[String],
-    ) -> (std::net::SocketAddr, CancellationToken) {
+    ) -> (Arc<crate::remote_gateway::Gateway>, CancellationToken) {
         let listed: Vec<crate::remote_gateway::Workspace> = spaces
             .iter()
             .map(|(workspace, _)| workspace.clone())
@@ -5910,6 +6204,17 @@ mod tests {
             step,
             limits,
         );
+        (gateway, stop)
+    }
+
+    async fn start_gateway_full(
+        spaces: Vec<(crate::remote_gateway::Workspace, Connect)>,
+        devices: Arc<DeviceRegistry>,
+        step: Duration,
+        limits: crate::remote_gateway::Limits,
+        proxy_hosts: &[String],
+    ) -> (std::net::SocketAddr, CancellationToken) {
+        let (gateway, stop) = gateway_for(spaces, devices, step, limits, proxy_hosts);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(gateway.serve(listener));
@@ -6934,6 +7239,297 @@ mod tests {
             421,
             "the listed Host replaces the default"
         );
+        stop.cancel();
+    }
+
+    fn sessions_request(query: &str, credential: &str) -> String {
+        format!(
+            "GET /api/sessions?{query} HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: close\r\n\
+             Origin: {GATEWAY_ORIGIN}\r\nCookie: {}={credential}\r\n\r\n",
+            crate::remote_gateway::DEVICE_COOKIE
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_lists_a_workspaces_sessions_through_the_gateway() {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let a = space(home.path(), "alpha", &registry_dir, "a");
+        let b = space(home.path(), "beta", &registry_dir, "b");
+        let (_, credential) = a
+            .hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Observe, true)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        let (address, stop) = start_gateway_for(
+            vec![
+                (a.workspace.clone(), daemon_dial(&a.hosts, &a.factory)),
+                (b.workspace.clone(), daemon_dial(&b.hosts, &b.factory)),
+            ],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+        )
+        .await;
+        let (status, head, body) = http(
+            address,
+            &sessions_request(&format!("workspace={}", a.workspace.id), &credential),
+        )
+        .await;
+        assert_eq!(status, 200, "{head}");
+        assert!(head
+            .to_ascii_lowercase()
+            .contains("cache-control: no-store"));
+        let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(listed["sessions"].is_array(), "{body}");
+        assert!(
+            a.hosts.inner.lock().await.is_empty(),
+            "listing opened nothing"
+        );
+        // Not granted there, malformed queries, a forged credential.
+        let (status, _, body) = http(
+            address,
+            &sessions_request(&format!("workspace={}", b.workspace.id), &credential),
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert!(!body.contains("\"id\""), "{body}");
+        for query in [
+            String::new(),
+            format!("workspace={}&workspace={}", a.workspace.id, a.workspace.id),
+            format!("workspace={}&new=1", a.workspace.id),
+        ] {
+            assert_eq!(
+                http(address, &sessions_request(&query, &credential))
+                    .await
+                    .0,
+                400,
+                "{query}"
+            );
+        }
+        // Change the last character to a different valid one.
+        let last = if credential.ends_with('0') { '1' } else { '0' };
+        let forged = format!("{}{last}", &credential[..credential.len() - 1]);
+        assert_ne!(forged, credential);
+        assert_eq!(
+            http(
+                address,
+                &sessions_request(&format!("workspace={}", a.workspace.id), &forged)
+            )
+            .await
+            .0,
+            401
+        );
+        stop.cancel();
+    }
+
+    /// Open a session on the daemon and give it a long name; the connection
+    /// stays open, so the session stays live.
+    async fn named_session(connect: &Connect, name: &str) -> Box<dyn std::any::Any + Send> {
+        let stream = connect().await.unwrap();
+        let (read, mut write) = tokio::io::split(stream);
+        let mut reader = JsonRecordReader::new(read);
+        send_command(
+            &mut write,
+            ClientCommand::Attach {
+                target: AttachTarget::OpenNew,
+                capabilities: resume_caps(),
+                since: None,
+            },
+        )
+        .await
+        .unwrap();
+        read_until(&mut reader, |event| {
+            matches!(event, ServerEvent::Snapshot { .. })
+        })
+        .await;
+        send_with_id(
+            &mut write,
+            "n",
+            ClientCommand::RunCommand {
+                name: "name".to_string(),
+                args: name.to_string(),
+            },
+        )
+        .await;
+        read_until(&mut reader, |event| {
+            matches!(
+                event,
+                ServerEvent::CommandResult { .. } | ServerEvent::Rejected { .. }
+            )
+        })
+        .await;
+        Box::new((reader, write))
+    }
+
+    /// One `/api/sessions` request over a 4 KiB pipe; when `revoke` is set,
+    /// the device is revoked once the response has stalled. The bytes the
+    /// client finally receives.
+    async fn list_over_small_pipe(
+        gateway: Arc<crate::remote_gateway::Gateway>,
+        credential: &str,
+        revoke: Option<(&DeviceRegistry, &str)>,
+    ) -> usize {
+        let (mut client, server) = tokio::io::duplex(4 * 1024);
+        tokio::spawn(gateway.serve_io(server));
+        client
+            .write_all(
+                sessions_request(&format!("workspace={GATEWAY_WORKSPACE}"), credential).as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        if let Some((devices, id)) = revoke {
+            assert!(devices.revoke(id).unwrap());
+        }
+        let mut received = Vec::new();
+        let _ = timeout(
+            DEADLINE,
+            tokio::io::AsyncReadExt::read_to_end(&mut client, &mut received),
+        )
+        .await;
+        received.len()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stalled_listing_of_real_sessions_stops_when_the_device_is_revoked() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = gateway_hosts();
+        let connect = daemon_dial(&hosts, &factory);
+        let mut open = Vec::new();
+        for n in 0..4 {
+            open.push(named_session(&connect, &format!("session {n} {}", "n".repeat(1500))).await);
+        }
+        let workspace = crate::remote_gateway::Workspace {
+            id: GATEWAY_WORKSPACE.to_string(),
+            label: "workspace".to_string(),
+            root: std::env::temp_dir(),
+        };
+        let gateway = |connect: &Connect| {
+            gateway_for(
+                vec![(workspace.clone(), connect.clone())],
+                hosts.devices.clone(),
+                DEADLINE,
+                crate::remote_gateway::Limits::default(),
+                &[],
+            )
+            .0
+        };
+        let (device, credential) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Observe, false)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        // Authorized: the whole response arrives, names included.
+        let full = list_over_small_pipe(gateway(&connect), &credential, None).await;
+        assert!(full > 4 * 1500, "the listing carries the sessions: {full}");
+        // Revoked while the response is stuck: the rest is not sent.
+        let cut = list_over_small_pipe(
+            gateway(&connect),
+            &credential,
+            Some((hosts.devices.as_ref(), &device.id)),
+        )
+        .await;
+        assert!(
+            cut < full,
+            "only what reached the pipe before: {cut} of {full}"
+        );
+        drop(open);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_permission_ask_is_answered_through_the_gateway() {
+        use futures::SinkExt;
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let root = home.path().join("alpha");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let id = crate::server_index::discovery_id(&root).unwrap();
+        let hosts = hosts_for(&id, Arc::new(DeviceRegistry::open(&registry_dir, &root)));
+        // The model runs a shell command, which an asking session asks about.
+        let factory = Arc::new(FakeFactory::asking(asking_provider(&[])));
+        let workspace = crate::remote_gateway::Workspace {
+            id: id.clone(),
+            label: "alpha".to_string(),
+            root,
+        };
+        let connect = daemon_dial(&hosts, &factory);
+        let (address, stop) = start_gateway_for(
+            vec![(workspace, connect)],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+        )
+        .await;
+        let (_, control) = hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let (_, observer) = hosts
+            .devices
+            .add("tablet", localpilot_rpc::Scope::Observe, false)
+            .unwrap();
+        let query = format!("workspace={id}&new=1");
+        let mut phone = open_socket(address, &query, GATEWAY_ORIGIN, Some(control.expose()))
+            .await
+            .unwrap();
+        let attached = next_frame(&mut phone).await.unwrap();
+        let ServerEvent::Attached { session_id, .. } = attached.event else {
+            panic!("{attached:?}");
+        };
+        let watch = format!("workspace={id}&session={session_id}");
+        let mut tablet = open_socket(address, &watch, GATEWAY_ORIGIN, Some(observer.expose()))
+            .await
+            .unwrap();
+        next_frame(&mut tablet).await.unwrap();
+        let prompt = serde_json::json!({"v": 1, "command": {"type": "prompt", "text": "write it"}});
+        phone
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                prompt.to_string(),
+            ))
+            .await
+            .unwrap();
+        let ask_id = loop {
+            let record = next_frame(&mut phone).await.expect("the ask arrives");
+            if let ServerEvent::PermissionAsk { ask_id, .. } = record.event {
+                break ask_id;
+            }
+        };
+        // The observer sees the ask but may not answer it.
+        loop {
+            let record = next_frame(&mut tablet).await.expect("the observer sees it");
+            if matches!(record.event, ServerEvent::PermissionAsk { .. }) {
+                break;
+            }
+        }
+        let answer = |id: &str| {
+            serde_json::json!({
+                "v": 1,
+                "id": id,
+                "command": {"type": "permission_reply", "ask_id": ask_id, "allow": true}
+            })
+            .to_string()
+        };
+        tablet
+            .send(tokio_tungstenite::tungstenite::Message::text(answer("t")))
+            .await
+            .unwrap();
+        loop {
+            let record = next_frame(&mut tablet).await.expect("a refusal");
+            if let ServerEvent::Rejected { code, .. } = record.event {
+                assert_eq!(code, RejectCode::Forbidden);
+                break;
+            }
+        }
+        phone
+            .send(tokio_tungstenite::tungstenite::Message::text(answer("p")))
+            .await
+            .unwrap();
+        loop {
+            let record = next_frame(&mut phone).await.expect("the turn finishes");
+            if matches!(&record.event, ServerEvent::TextDelta { text } if text.contains("first answer"))
+            {
+                break;
+            }
+        }
         stop.cancel();
     }
 

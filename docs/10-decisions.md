@@ -87,11 +87,19 @@ already run HTTPS tunnels or proxies; LocalPilot should not ship one.
    to the server through a bounded ordered queue), so neither direction's
    backpressure stops budgets, pongs or the idle deadline.
 
+10. A device lists a workspace's sessions before attaching through a separate
+    first record, `device_sessions`, verified like `device_attach` (observe is
+    enough) and answered once with metadata only, under the same lease and
+    standing guard; nothing is opened or bound. The gateway's HTTP answer
+    (at most 64 KiB) is written through a transport armed with the device's
+    standing and the workspace's registration, and the connection is not
+    reused.
+
 **Consequences.** A cookie-authenticated state-changing POST route (for example
 push subscriptions) must add a CSRF token bound to the device; the pairing
 route needs none because it carries a one-use code and no cookie. Sessions are
-chosen explicitly (`?session=<id>` or `?new=1`); listing a workspace's
-sessions before attaching is follow-up work. Switching `[remote]
+chosen explicitly (`?session=<id>` or `?new=1`), after listing a
+workspace's sessions if needed (decision 10). Switching `[remote]
 enabled` off stops the gateway from starting and servers (when they next
 start) from accepting it; there is no live reload.
 

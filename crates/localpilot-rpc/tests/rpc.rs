@@ -397,3 +397,51 @@ async fn a_newer_protocol_version_is_a_typed_error() {
     let (served, ()) = tokio::join!(server, client);
     served.unwrap();
 }
+
+#[tokio::test]
+async fn device_records_are_refused_on_the_stdio_drive() {
+    use localpilot_rpc::WireSecret;
+    let (_dir, mut runtime, context, ask_rx, registry) = build_full(FakeProvider::new());
+    let (client_io, server_io) = tokio::io::duplex(8 * 1024);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    let (client_read, mut client_write) = tokio::io::split(client_io);
+    let mut client_reader = BufReader::new(client_read);
+
+    let server = serve(
+        &mut runtime,
+        ask_rx,
+        registry,
+        server_read,
+        server_write,
+        &context,
+    );
+
+    let client = async move {
+        client_write
+            .write_all(
+                record(
+                    None,
+                    ClientCommand::DeviceSessions {
+                        capability: WireSecret::new("c"),
+                        credential: WireSecret::new("d"),
+                    },
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let error = next_event(&mut client_reader).await.unwrap();
+        assert!(matches!(
+            error.event,
+            ServerEvent::Error { message } if message.contains("not supported on the stdio drive")
+        ));
+        client_write
+            .write_all(record(None, ClientCommand::Shutdown).as_bytes())
+            .await
+            .unwrap();
+        let _ = next_event(&mut client_reader).await;
+    };
+
+    let (served, ()) = tokio::join!(server, client);
+    served.unwrap();
+}

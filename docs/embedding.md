@@ -274,7 +274,12 @@ use a new correlation id but must repeat the same command. Commands without
   `device_paired {device_id, credential, scope}` once and ends;
 - `device_attach {capability, credential, target, capabilities, since}`
   (through the gateway) — the connection then acts as that device, or is refused
-  and closed. It never falls back to local.
+  and closed. It never falls back to local;
+- `device_sessions {capability, credential}` (through the gateway) — answers
+  `sessions {items}` once (at most 100 and 64 KiB: live sessions first, then
+  most recently updated; metadata only) or an `error`, and ends. It needs `observe`, opens
+  nothing, and is delivered only while the gateway's lease and the device's
+  standing hold.
 
 Every command carries a requirement (`ClientCommand::requirement`): `observe`
 (`hello`, `status`, `commands`, `sessions`, `shutdown`, `revoke_self`),

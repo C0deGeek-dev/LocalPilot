@@ -171,6 +171,14 @@ pub enum ClientCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         since: Option<FeedCursor>,
     },
+    /// First record of a gateway request listing the workspace's sessions for
+    /// a paired device, before it attaches: the gateway's capability and the
+    /// device's credential. The reply is one `sessions` record (or an
+    /// `error`), and the connection then ends; nothing is opened or bound.
+    DeviceSessions {
+        capability: WireSecret,
+        credential: WireSecret,
+    },
 }
 
 /// A secret carried on the wire (a gateway capability, a device credential, a
@@ -241,6 +249,7 @@ impl ClientCommand {
             Self::Attach { .. }
             | Self::GatewayRegister
             | Self::DeviceAttach { .. }
+            | Self::DeviceSessions { .. }
             | Self::PairBegin { .. }
             | Self::PairExchange { .. } => Requirement::LocalOnly,
         }
@@ -661,6 +670,10 @@ mod tests {
             ClientCommand::PairExchange {
                 capability: WireSecret::new(sentinel),
                 pairing: WireSecret::new(sentinel),
+            },
+            ClientCommand::DeviceSessions {
+                capability: WireSecret::new(sentinel),
+                credential: WireSecret::new(sentinel),
             },
         ];
         for command in &commands {

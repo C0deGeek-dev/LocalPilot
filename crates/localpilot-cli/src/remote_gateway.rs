@@ -75,10 +75,11 @@ const COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60;
 
 /// Records a browser must never send: binding a connection, or registering
 /// and pairing, belong to the gateway and the local machine.
-const FORBIDDEN_RECORDS: [&str; 5] = [
+const FORBIDDEN_RECORDS: [&str; 6] = [
     "attach",
     "gateway_register",
     "device_attach",
+    "device_sessions",
     "pair_begin",
     "pair_exchange",
 ];
@@ -215,6 +216,18 @@ struct SocketQuery {
     workspace: String,
     target: AttachTarget,
     since: Option<FeedCursor>,
+}
+
+/// A query naming exactly one workspace and nothing else.
+fn workspace_query(query: Option<&str>) -> Option<String> {
+    let mut workspace = None;
+    for pair in query.unwrap_or_default().split('&') {
+        match pair.split_once('=')? {
+            ("workspace", value) if workspace.is_none() => workspace = Some(value.to_string()),
+            _ => return None,
+        }
+    }
+    workspace.filter(|id| crate::server_index::is_discovery_id(id))
 }
 
 fn socket_query(query: Option<&str>) -> Option<SocketQuery> {
@@ -490,28 +503,66 @@ impl Gateway {
             };
             let gateway = self.clone();
             tokio::spawn(async move {
-                let service = hyper::service::service_fn({
-                    let gateway = gateway.clone();
-                    move |request| {
-                        let gateway = gateway.clone();
-                        async move { Ok::<_, Infallible>(gateway.route(request).await) }
-                    }
-                });
-                let connection = hyper::server::conn::http1::Builder::new()
-                    .timer(TokioTimer::new())
-                    .header_read_timeout(HEADER_TIMEOUT)
-                    .serve_connection(TokioIo::new(stream), service)
-                    .with_upgrades();
-                tokio::select! {
-                    () = gateway.stop.cancelled() => {}
-                    _ = connection => {}
-                }
+                gateway.serve_io(stream).await;
                 drop(permit);
             });
         }
     }
 
-    async fn route(self: Arc<Self>, request: Request<Incoming>) -> Response<Full<Bytes>> {
+    /// Serve one client connection. Its transport can be armed with a
+    /// device's access while that device's response is written, so an
+    /// authenticated HTTP response stops at the transport once access ends.
+    pub(crate) async fn serve_io<I>(self: Arc<Self>, io: I)
+    where
+        I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let armed: Arm = Arc::new(std::sync::Mutex::new(None));
+        let io = ArmedIo {
+            inner: io,
+            armed: armed.clone(),
+        };
+        let service = hyper::service::service_fn({
+            let gateway = self.clone();
+            let armed = armed.clone();
+            move |request| {
+                let gateway = gateway.clone();
+                let armed = armed.clone();
+                async move { Ok::<_, Infallible>(gateway.route(request, &armed).await) }
+            }
+        });
+        let connection = hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_TIMEOUT)
+            .serve_connection(TokioIo::new(io), service)
+            .with_upgrades();
+        // Once armed, a connection whose write is stuck is dropped as soon as
+        // its access ends, rather than waiting for the client to read again.
+        let lost = async {
+            let mut poll =
+                tokio::time::interval_at(tokio::time::Instant::now() + ACCESS_POLL, ACCESS_POLL);
+            loop {
+                poll.tick().await;
+                let access = armed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if access.is_some_and(|access| !access()) {
+                    return;
+                }
+            }
+        };
+        tokio::select! {
+            () = self.stop.cancelled() => {}
+            () = lost => {}
+            _ = connection => {}
+        }
+    }
+
+    async fn route(
+        self: Arc<Self>,
+        request: Request<Incoming>,
+        armed: &Arm,
+    ) -> Response<Full<Bytes>> {
         if !self.policy.host_ok(request.headers()) {
             return plain(StatusCode::MISDIRECTED_REQUEST, "unknown host");
         }
@@ -519,6 +570,7 @@ impl Gateway {
             (&Method::GET, "/") => page(),
             (&Method::GET, "/healthz") => plain(StatusCode::OK, &health_body()),
             (&Method::GET, "/api/workspaces") => self.workspaces(&request).await,
+            (&Method::GET, "/api/sessions") => self.sessions(&request, armed).await,
             (&Method::POST, "/api/pair") => self.pair(request).await,
             (&Method::GET, "/api/socket") => {
                 // A refused upgrade closes its connection rather than waiting
@@ -567,6 +619,94 @@ impl Gateway {
             })
             .collect();
         json(&serde_json::json!({ "workspaces": items }))
+    }
+
+    /// A workspace's sessions for this device, before it attaches: metadata
+    /// only, decided and delivered by the workspace's server.
+    async fn sessions(&self, request: &Request<Incoming>, armed: &Arm) -> Response<Full<Bytes>> {
+        if !self.policy.origin_ok(request.headers()) {
+            return plain(StatusCode::FORBIDDEN, "forbidden");
+        }
+        let (device, credential) = match self.device(request.headers()) {
+            Ok(found) => found,
+            Err(response) => return response,
+        };
+        if let Err(response) = self.spend_device(&device, true) {
+            return response;
+        }
+        let Some(id) = workspace_query(request.uri().query()) else {
+            return plain(
+                StatusCode::BAD_REQUEST,
+                "choose a workspace: ?workspace=<id>",
+            );
+        };
+        let Some(workspace) = self.workspace(&id) else {
+            return plain(StatusCode::NOT_FOUND, "that workspace is not being served");
+        };
+        if !(self.discovery.standing)(&device, &workspace.root) {
+            return plain(
+                StatusCode::FORBIDDEN,
+                "this device may not reach that workspace",
+            );
+        }
+        let Some(live) = self.reach(&workspace).await else {
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "that workspace is offline");
+        };
+        let listed = self
+            .ask_daemon(
+                &workspace,
+                &live,
+                ClientCommand::DeviceSessions {
+                    capability: live.capability.clone(),
+                    credential: WireSecret::new(credential),
+                },
+            )
+            .await;
+        match listed {
+            Ok((Some(ServerEvent::Sessions { items }), _)) => {
+                // Checked again before answering. The size cap bounds what the
+                // gateway holds; the armed transport and the connection's
+                // access monitor (serve_io) stop and release it once access
+                // ends, whether or not the client is reading.
+                if live.token.is_cancelled() || !(self.discovery.standing)(&device, &workspace.root)
+                {
+                    return plain(
+                        StatusCode::FORBIDDEN,
+                        "this device may not reach that workspace",
+                    );
+                }
+                let body = serde_json::json!({ "sessions": items });
+                if body.to_string().len() > crate::server_cmd::DEVICE_SESSIONS_BYTES + 1024 {
+                    return plain(StatusCode::BAD_GATEWAY, "the session listing was too large");
+                }
+                // From here every byte of this connection is written only
+                // while the workspace's registration and the device's
+                // standing hold; the connection is not reused afterwards.
+                let token = live.token.clone();
+                let standing = self.discovery.standing.clone();
+                let root = workspace.root.clone();
+                // The guard is only ever narrowed: a later response on the same
+                // connection (pipelining) adds its own check and cannot clear or
+                // replace this one.
+                let check: Access =
+                    Arc::new(move || !token.is_cancelled() && standing(&device, &root));
+                let mut slot = armed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *slot = Some(match slot.take() {
+                    Some(earlier) => Arc::new(move || earlier() && check()),
+                    None => check,
+                });
+                drop(slot);
+                let mut response = json(&body);
+                response
+                    .headers_mut()
+                    .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                response
+            }
+            Ok((Some(ServerEvent::Error { message }), _)) => plain(StatusCode::FORBIDDEN, &message),
+            _ => plain(StatusCode::BAD_GATEWAY, "the server did not list sessions"),
+        }
     }
 
     /// Exchange a pairing code (from the QR link's fragment, sent in the body)
@@ -996,6 +1136,73 @@ impl DeviceSockets {
             .clone()
             .try_acquire_owned()
             .ok()
+    }
+}
+
+/// The access a client connection's writes are bound to, once a device's
+/// authenticated response is being written on it.
+type Arm = Arc<std::sync::Mutex<Option<Access>>>;
+
+/// A client connection's transport: unarmed it passes everything through;
+/// armed, every write and flush checks that access still holds.
+struct ArmedIo<S> {
+    inner: S,
+    armed: Arm,
+}
+
+impl<S> ArmedIo<S> {
+    fn refused(&self) -> Option<std::io::Error> {
+        let access = self
+            .armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        (!access()).then(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the device's access ended",
+            )
+        })
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for ArmedIo<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for ArmedIo<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if let Some(error) = self.refused() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(error) = self.refused() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
@@ -1473,6 +1680,12 @@ pub(crate) async fn print_status() {
     print!("remote access:\n{}", render_status(&status().await));
 }
 
+/// The gateway's listener: loopback only, always. There is no setting that
+/// binds anything else.
+async fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await
+}
+
 /// `localpilot remote gateway`: run until interrupted or switched off.
 pub(crate) async fn run() -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
@@ -1499,7 +1712,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let gateway = Gateway::new(policy, user_discovery()?, stop.clone());
     // Loopback only, always: TLS and any network exposure belong to the
     // user's proxy.
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.port)).await?;
+    let listener = bind_loopback(config.port).await?;
     eprintln!(
         "Gateway on http://127.0.0.1:{} for {origin}. It reaches every workspace served with \
          remote access on. Press Ctrl-C to stop.",
@@ -2163,6 +2376,182 @@ mod tests {
         assert!(
             received < 64 * 1024,
             "the close did not flush the record: {received}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gateway_listens_on_loopback_only() {
+        let listener = bind_loopback(0).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        assert!(address.ip().is_loopback(), "{address}");
+        // This machine's own non-loopback address, found without sending
+        // anything (a connected UDP socket picks the outgoing interface).
+        let outward = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|socket| socket.connect("192.0.2.1:9").map(|()| socket))
+            .and_then(|socket| socket.local_addr())
+            .map(|local| local.ip())
+            .ok()
+            .filter(|ip| !ip.is_loopback() && !ip.is_unspecified());
+        let Some(ip) = outward else {
+            eprintln!("SKIPPED: this machine has no non-loopback address to test against");
+            return;
+        };
+        let attempt = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect((ip, address.port())),
+        )
+        .await;
+        assert!(
+            !matches!(attempt, Ok(Ok(_))),
+            "a connection to {ip}:{} must be refused",
+            address.port()
+        );
+    }
+
+    /// A fake server for one workspace: it registers the gateway (naming
+    /// `id`) and answers `device_sessions` with `items`.
+    fn fake_server(
+        id: &str,
+        items: Vec<localpilot_rpc::SessionInfo>,
+        control_ends: CancellationToken,
+    ) -> Dial {
+        let id = id.to_string();
+        Arc::new(move |_workspace: &Workspace| {
+            let (near, far) = tokio::io::duplex(1024 * 1024);
+            let id = id.clone();
+            let items = items.clone();
+            let control_ends = control_ends.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = tokio::io::split(far);
+                let mut reader = JsonRecordReader::new(read);
+                let Ok(Some(first)) = reader.next().await else {
+                    return;
+                };
+                let kind = first["command"]["type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let event = match kind.as_str() {
+                    "gateway_register" => ServerEvent::GatewayRegistered {
+                        capability: WireSecret::new("cap"),
+                        workspace: Some(id),
+                    },
+                    _ => ServerEvent::Sessions { items },
+                };
+                let record = ServerRecord {
+                    v: RPC_PROTOCOL_VERSION,
+                    id: None,
+                    seq: None,
+                    event,
+                };
+                let mut line = serde_json::to_vec(&record).unwrap();
+                line.push(b'\n');
+                let _ = write.write_all(&line).await;
+                if kind == "gateway_register" {
+                    // The control channel lives until the test ends it.
+                    tokio::select! {
+                        () = control_ends.cancelled() => {}
+                        _ = async { while let Ok(Some(_)) = reader.next().await {} } => {}
+                    }
+                }
+            });
+            Box::pin(async move { Ok(Box::new(near) as Box<dyn DaemonStream>) })
+        })
+    }
+
+    /// How access ends in [`listing_after`].
+    #[derive(Clone, Copy, PartialEq)]
+    enum Loss {
+        None,
+        Revoked,
+        ControlEnded,
+    }
+
+    /// Serve one `/api/sessions` request over a 4 KiB pipe; once the
+    /// response has stalled, end access as `loss` says. Returns whether the
+    /// connection ended by itself (nobody reading), then the bytes drained
+    /// and the full listing's length.
+    async fn listing_after(loss: Loss) -> (bool, usize, usize) {
+        let id = "0123456789abcdef".to_string();
+        let items: Vec<localpilot_rpc::SessionInfo> = (0..28)
+            .map(|n| localpilot_rpc::SessionInfo {
+                id: localpilot_core::SessionId::new(),
+                name: Some(format!("{n}-{}", "s".repeat(2000))),
+                live: false,
+                message_count: 1,
+                updated_unix: n,
+            })
+            .collect();
+        let full = serde_json::json!({ "sessions": items }).to_string().len();
+        let allowed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let control_ends = CancellationToken::new();
+        let discovery = Discovery {
+            list: {
+                let id = id.clone();
+                Arc::new(move || {
+                    vec![Workspace {
+                        id: id.clone(),
+                        label: "w".to_string(),
+                        root: std::env::temp_dir(),
+                    }]
+                })
+            },
+            dial: fake_server(&id, items, control_ends.clone()),
+            verify: Arc::new(|_| Some("device".to_string())),
+            standing: {
+                let allowed = allowed.clone();
+                Arc::new(move |_, _| allowed.load(std::sync::atomic::Ordering::SeqCst))
+            },
+        };
+        let gateway = Gateway::new(
+            Policy::new("https://pc.example.test", &[]),
+            discovery,
+            CancellationToken::new(),
+        );
+        let (mut client, server) = tokio::io::duplex(4 * 1024);
+        let connection = tokio::spawn(gateway.serve_io(server));
+        let request = format!(
+            "GET /api/sessions?workspace={id} HTTP/1.1\r\nHost: pc.example.test\r\n\
+             Origin: https://pc.example.test\r\nCookie: {DEVICE_COOKIE}=x.y.z\r\n\r\n"
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        // The response fills the pipe and stalls; then access changes.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        match loss {
+            Loss::None => {}
+            Loss::Revoked => allowed.store(false, std::sync::atomic::Ordering::SeqCst),
+            Loss::ControlEnded => control_ends.cancel(),
+        }
+        // Without reading anything, wait past the access poll.
+        tokio::time::sleep(ACCESS_POLL * 3).await;
+        let ended_by_itself = connection.is_finished();
+        let mut received = Vec::new();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_to_end(&mut client, &mut received),
+        )
+        .await;
+        (ended_by_itself, received.len(), full)
+    }
+
+    #[tokio::test]
+    async fn a_stalled_session_listing_stops_at_the_transport_when_access_ends() {
+        for loss in [Loss::Revoked, Loss::ControlEnded] {
+            let (ended, received, full) = listing_after(loss).await;
+            assert!(ended, "the stuck connection was released without any read");
+            assert!(
+                received < full,
+                "the rest was not sent: {received} of {full}"
+            );
+        }
+        let (ended, received, full) = listing_after(Loss::None).await;
+        assert!(
+            !ended,
+            "an authorized stalled connection waits for its reader"
+        );
+        assert!(
+            received > full,
+            "authorized: the whole response arrived: {received} of {full}"
         );
     }
 
