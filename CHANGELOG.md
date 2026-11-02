@@ -16,7 +16,11 @@ is SemVer-stable; the configuration schema stability policy is in
   workspace you serve with remote access on: a paired device lists the
   workspaces it may reach and picks one, and pairing links name the workspace
   that issued the code. `localpilot remote status` shows the gateway, served
-  workspaces and paired devices.
+  workspaces and paired devices, as does `localpilot doctor`. The gateway
+  rate-limits pairing, unauthenticated requests and each device, bounds what a
+  socket may send, and closes sockets that stop answering its pings; the
+  configuration reference describes reaching it through Tailscale, Cloudflare
+  Tunnel or your own reverse proxy.
 - A step that leaves a library on a CDN without an exact version (`@latest`, a
   range, a bare major or none, on jsDelivr, unpkg, esm.sh, Skypack or cdnjs) is
   sent back with the way to fix it: look up the version with `npm view`, list the

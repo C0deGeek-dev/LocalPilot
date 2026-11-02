@@ -63,6 +63,7 @@ mod proposal_fixture;
 mod proposal_validation;
 mod propose_patch;
 mod remote_gateway;
+mod remote_status;
 #[cfg(feature = "tui")]
 mod repl;
 mod research;
@@ -1933,8 +1934,9 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         } => {
             let is_tty = io::stdout().is_terminal();
             let resolved = output::resolve_format(format, json, is_tty);
+            let remote = remote_gateway::status().await;
             let mut stdout = io::stdout().lock();
-            doctor::run_with(&mut stdout, resolved, hygiene).await?;
+            doctor::run_with(&mut stdout, resolved, hygiene, Some(remote)).await?;
             stdout.flush()?;
         }
         Command::Models {
@@ -3130,8 +3132,9 @@ async fn run_default() -> anyhow::Result<std::process::ExitCode> {
             eprintln!("a newer version is available: {tag} — run `localpilot update`");
         }
     }
+    let remote = remote_gateway::status().await;
     let mut stdout = io::stdout().lock();
-    doctor::run(&mut stdout).await?;
+    doctor::run(&mut stdout, Some(remote)).await?;
     stdout.flush()?;
     Ok(std::process::ExitCode::SUCCESS)
 }

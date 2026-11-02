@@ -65,6 +65,11 @@ pub struct DoctorReport {
     /// default report is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hygiene: Option<localpilot_contextcheck::ContextReport>,
+    /// Remote access: `[remote]`, the gateway's health, served workspaces and
+    /// paired devices, collected by the caller (each part names its error when
+    /// it cannot be read). Absent (and omitted from JSON) when not collected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<crate::remote_status::RemoteStatus>,
     /// The configured permission profile and the user's exact command list;
     /// `None` when the configuration did not load.
     pub permissions: Option<PermissionsStatus>,
@@ -608,6 +613,7 @@ pub fn report() -> DoctorReport {
         workspace_trust,
         workspace_trust_store,
         hygiene: None,
+        remote: None,
         permissions: resolved_config().as_ref().map(permissions_status),
     }
 }
@@ -764,8 +770,11 @@ fn capabilities() -> Vec<String> {
 ///
 /// # Errors
 /// Returns any error from writing to `out`.
-pub async fn run(out: &mut dyn Write) -> io::Result<()> {
-    run_with(out, crate::output::OutputFormat::Human, false).await
+pub async fn run(
+    out: &mut dyn Write,
+    remote: Option<crate::remote_status::RemoteStatus>,
+) -> io::Result<()> {
+    run_with(out, crate::output::OutputFormat::Human, false, remote).await
 }
 
 /// Gather a report and write it in the requested format. The JSON form is the
@@ -778,8 +787,10 @@ pub async fn run_with(
     out: &mut dyn Write,
     format: crate::output::OutputFormat,
     include_context: bool,
+    remote: Option<crate::remote_status::RemoteStatus>,
 ) -> io::Result<()> {
     let mut report = report_with_mcp().await;
+    report.remote = remote;
     if include_context {
         report.hygiene = hygiene_report();
     }
@@ -1103,6 +1114,12 @@ pub fn render(report: &DoctorReport) -> String {
     let _ = writeln!(s);
 
     render_mesh(&mut s, &report.mesh);
+
+    if let Some(remote) = &report.remote {
+        let _ = writeln!(s, "remote access:");
+        s.push_str(&crate::remote_status::render_status(remote));
+        let _ = writeln!(s);
+    }
 
     if let Some(context) = &report.hygiene {
         render_hygiene(&mut s, context);
@@ -1719,6 +1736,7 @@ mod tests {
                 }),
             },
             hygiene: None,
+        remote: None,
             mesh: MeshStatus {
                 writer: "native".into(),
                 config_error: None,

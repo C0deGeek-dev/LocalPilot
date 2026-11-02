@@ -42,6 +42,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
 
+use crate::remote_status::{
+    health_body, render_status, GatewayHealth, RemoteSettings, RemoteStatus,
+};
+
 /// The device credential's cookie. `__Host-` makes the browser insist on
 /// `Secure`, `Path=/` and no `Domain`, so no sibling origin can set it.
 pub(crate) const DEVICE_COOKIE: &str = "__Host-localpilot-device";
@@ -317,6 +321,13 @@ pub(crate) struct Gateway {
     live: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<Live>>>>>,
     /// The deadline for each step that waits on a server or a client.
     step: Duration,
+    limits: Limits,
+    /// Pairing attempts, all callers together.
+    pairing: std::sync::Mutex<Bucket>,
+    /// Requests without a valid device credential, all callers together.
+    unauthenticated: std::sync::Mutex<Bucket>,
+    rates: std::sync::Mutex<DeviceRates>,
+    device_sockets: std::sync::Mutex<DeviceSockets>,
 }
 
 impl Gateway {
@@ -331,6 +342,17 @@ impl Gateway {
         stop: CancellationToken,
         step: Duration,
     ) -> Arc<Self> {
+        Self::with_settings(policy, discovery, stop, step, Limits::default())
+    }
+
+    /// As [`Gateway::with_step`], with its own budgets and timings.
+    pub(crate) fn with_settings(
+        policy: Policy,
+        discovery: Discovery,
+        stop: CancellationToken,
+        step: Duration,
+        limits: Limits,
+    ) -> Arc<Self> {
         Arc::new(Self {
             policy,
             discovery,
@@ -340,7 +362,48 @@ impl Gateway {
             registrations: Arc::new(Semaphore::new(MAX_REGISTRATIONS)),
             live: std::sync::Mutex::new(HashMap::new()),
             step,
+            limits,
+            pairing: std::sync::Mutex::new(Bucket::new(limits.pairing)),
+            unauthenticated: std::sync::Mutex::new(Bucket::new(limits.unauthenticated)),
+            rates: std::sync::Mutex::new(DeviceRates::default()),
+            device_sockets: std::sync::Mutex::new(DeviceSockets::default()),
         })
+    }
+
+    /// Spend from a global bucket, or the response to send instead.
+    fn spend(bucket: &std::sync::Mutex<Bucket>) -> Result<(), Response<Full<Bytes>>> {
+        let mut bucket = bucket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if bucket.take(1.0) {
+            Ok(())
+        } else {
+            Err(too_many(bucket.retry_after()))
+        }
+    }
+
+    /// The verified device a request's cookie names. A missing or invalid
+    /// credential spends only the shared unauthenticated budget.
+    fn device(&self, headers: &HeaderMap) -> Result<(String, String), Response<Full<Bytes>>> {
+        let verified = device_cookie(headers).and_then(|credential| {
+            (self.discovery.verify)(&credential).map(|device| (device, credential))
+        });
+        match verified {
+            Some(found) => Ok(found),
+            None => {
+                Self::spend(&self.unauthenticated)?;
+                Err(plain(StatusCode::UNAUTHORIZED, "this device is not paired"))
+            }
+        }
+    }
+
+    /// Spend from the device's listing or open budget.
+    fn spend_device(&self, device: &str, listing: bool) -> Result<(), Response<Full<Bytes>>> {
+        self.rates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take(&self.limits, device, listing)
+            .map_err(too_many)
     }
 
     /// The published workspace with this id.
@@ -479,11 +542,13 @@ impl Gateway {
         if !self.policy.origin_ok(request.headers()) {
             return plain(StatusCode::FORBIDDEN, "forbidden");
         }
-        let Some(device) = device_cookie(request.headers())
-            .and_then(|credential| (self.discovery.verify)(&credential))
-        else {
-            return plain(StatusCode::UNAUTHORIZED, "this device is not paired");
+        let device = match self.device(request.headers()) {
+            Ok((device, _)) => device,
+            Err(response) => return response,
         };
+        if let Err(response) = self.spend_device(&device, true) {
+            return response;
+        }
         let allowed: Vec<Workspace> = (self.discovery.list)()
             .into_iter()
             .filter(|workspace| (self.discovery.standing)(&device, &workspace.root))
@@ -510,6 +575,9 @@ impl Gateway {
     async fn pair(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
         if !self.policy.origin_ok(request.headers()) {
             return plain(StatusCode::FORBIDDEN, "forbidden");
+        }
+        if let Err(response) = Self::spend(&self.pairing) {
+            return response;
         }
         let is_json = single(request.headers(), &header::CONTENT_TYPE)
             .is_some_and(|value| value.starts_with("application/json"));
@@ -610,14 +678,15 @@ impl Gateway {
             return plain(StatusCode::BAD_REQUEST, "expected a WebSocket upgrade");
         };
         let accept = derive_accept_key(key.as_bytes());
-        let Some(credential) = device_cookie(headers) else {
-            return plain(StatusCode::UNAUTHORIZED, "this device is not paired");
+        // Per-device budgets apply only to a fully verified credential, so a
+        // forged secret naming a real device cannot spend that device's budget.
+        let (device, credential) = match self.device(headers) {
+            Ok(found) => found,
+            Err(response) => return response,
         };
-        let Some(device) =
-            crate::server_devices::credential_device_id(&credential).map(str::to_string)
-        else {
-            return plain(StatusCode::UNAUTHORIZED, "this device is not paired");
-        };
+        if let Err(response) = self.spend_device(&device, false) {
+            return response;
+        }
         let Some(query) = socket_query(request.uri().query()) else {
             return plain(
                 StatusCode::BAD_REQUEST,
@@ -635,6 +704,14 @@ impl Gateway {
         }
         let Ok(permit) = self.sockets.clone().try_acquire_owned() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "too many open devices");
+        };
+        let Some(device_permit) = self
+            .device_sockets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .acquire(&device, self.limits.sockets_per_device)
+        else {
+            return too_many(5);
         };
         let Some(live) = self.reach(&workspace).await else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "that workspace is offline");
@@ -669,6 +746,7 @@ impl Gateway {
         // whole gateway).
         let stop = live.token.clone();
         let step = self.step;
+        let limits = self.limits;
         let standing = self.discovery.standing.clone();
         let root = workspace.root.clone();
         let access: Access = Arc::new(move || standing(&device, &root));
@@ -678,7 +756,16 @@ impl Gateway {
                 upgraded = tokio::time::timeout(step, upgraded) => upgraded,
             };
             let Ok(Ok(upgraded)) = upgraded else { return };
-            relay(TokioIo::new(upgraded), daemon, first, stop, access, permit).await;
+            relay(
+                TokioIo::new(upgraded),
+                daemon,
+                first,
+                stop,
+                access,
+                limits,
+                (permit, device_permit),
+            )
+            .await;
         });
         let mut response = with_headers(Response::new(Full::new(Bytes::new())));
         *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
@@ -758,63 +845,371 @@ async fn guarded<T>(
     }
 }
 
+/// The gateway's budgets and timings. Constants in production; tests shorten
+/// them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    /// How often an open socket is pinged.
+    pub(crate) ping_every: Duration,
+    /// A socket with no inbound message or control frame for this long is
+    /// closed (1001).
+    pub(crate) idle_after: Duration,
+    /// Inbound messages plus control frames per socket: burst, then per second.
+    pub(crate) frames: (f64, f64),
+    /// Inbound payload bytes per socket: burst, then per second.
+    pub(crate) bytes: (f64, f64),
+    /// Browser records waiting for the server: at most this many, and this
+    /// many bytes, before the socket is closed (1008).
+    pub(crate) queue_records: usize,
+    pub(crate) queue_bytes: usize,
+    /// Pairing attempts, all callers together: burst, then per second.
+    pub(crate) pairing: (f64, f64),
+    /// Requests without a valid device credential, all callers together.
+    pub(crate) unauthenticated: (f64, f64),
+    /// Per verified device: workspace listings and socket opens.
+    pub(crate) listings: (f64, f64),
+    pub(crate) opens: (f64, f64),
+    /// Open sockets per verified device.
+    pub(crate) sockets_per_device: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            ping_every: Duration::from_secs(30),
+            idle_after: Duration::from_secs(90),
+            frames: (50.0, 20.0),
+            bytes: (1024.0 * 1024.0, 256.0 * 1024.0),
+            queue_records: 16,
+            queue_bytes: 1024 * 1024,
+            pairing: (10.0, 1.0 / 6.0),
+            unauthenticated: (30.0, 1.0),
+            listings: (30.0, 0.5),
+            opens: (20.0, 1.0 / 3.0),
+            sockets_per_device: 8,
+        }
+    }
+}
+
+/// A token bucket on the monotonic clock.
+#[derive(Debug, Clone)]
+struct Bucket {
+    capacity: f64,
+    per_second: f64,
+    tokens: f64,
+    at: std::time::Instant,
+}
+
+impl Bucket {
+    fn new((capacity, per_second): (f64, f64)) -> Self {
+        Self {
+            capacity,
+            per_second,
+            tokens: capacity,
+            at: std::time::Instant::now(),
+        }
+    }
+
+    /// Spend `cost` tokens if there are that many.
+    fn take(&mut self, cost: f64) -> bool {
+        let now = std::time::Instant::now();
+        let refill = now.duration_since(self.at).as_secs_f64() * self.per_second;
+        self.tokens = (self.tokens + refill).min(self.capacity);
+        self.at = now;
+        if self.tokens >= cost {
+            self.tokens -= cost;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Seconds until one token is available, for `Retry-After`.
+    fn retry_after(&self) -> u64 {
+        if self.per_second <= 0.0 {
+            return 60;
+        }
+        // At most a minute; never zero.
+        ((1.0 - self.tokens).max(0.0) / self.per_second)
+            .ceil()
+            .clamp(1.0, 60.0) as u64
+    }
+}
+
+/// Per-device rate buckets, bounded: the least recently used device's
+/// buckets are forgotten first (which only refills them; open-socket counts
+/// live elsewhere and are never evicted).
+#[derive(Default)]
+struct DeviceRates {
+    devices: HashMap<String, (Bucket, Bucket, std::time::Instant)>,
+}
+
+/// At most this many devices' rate buckets are kept.
+const MAX_RATE_KEYS: usize = 256;
+
+impl DeviceRates {
+    /// Spend from the device's listing (`listing = true`) or open bucket.
+    fn take(&mut self, limits: &Limits, device: &str, listing: bool) -> Result<(), u64> {
+        if !self.devices.contains_key(device) && self.devices.len() >= MAX_RATE_KEYS {
+            if let Some(oldest) = self
+                .devices
+                .iter()
+                .min_by_key(|(_, (_, _, used))| *used)
+                .map(|(id, _)| id.clone())
+            {
+                self.devices.remove(&oldest);
+            }
+        }
+        let entry = self.devices.entry(device.to_string()).or_insert_with(|| {
+            (
+                Bucket::new(limits.listings),
+                Bucket::new(limits.opens),
+                std::time::Instant::now(),
+            )
+        });
+        entry.2 = std::time::Instant::now();
+        let bucket = if listing { &mut entry.0 } else { &mut entry.1 };
+        if bucket.take(1.0) {
+            Ok(())
+        } else {
+            Err(bucket.retry_after())
+        }
+    }
+}
+
+/// Open sockets per device. An entry stays while any permit (or acquisition)
+/// holds it; unused entries are reclaimed when others are added, never while
+/// live.
+#[derive(Default)]
+struct DeviceSockets {
+    devices: HashMap<String, Arc<Semaphore>>,
+}
+
+impl DeviceSockets {
+    fn acquire(&mut self, device: &str, per_device: usize) -> Option<OwnedSemaphorePermit> {
+        self.devices.retain(|_, slots| {
+            Arc::strong_count(slots) > 1 || slots.available_permits() < per_device
+        });
+        self.devices
+            .entry(device.to_string())
+            .or_insert_with(|| Arc::new(Semaphore::new(per_device)))
+            .clone()
+            .try_acquire_owned()
+            .ok()
+    }
+}
+
+/// A browser transport whose writes and flushes check the gateway's stop
+/// token and the device's standing first, every time. Reads pass through.
+struct GuardedIo<S> {
+    inner: S,
+    stop: CancellationToken,
+    access: Access,
+}
+
+impl<S> GuardedIo<S> {
+    fn refused(&self) -> Option<std::io::Error> {
+        (self.stop.is_cancelled() || !(self.access)()).then(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the device's access ended",
+            )
+        })
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for GuardedIo<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for GuardedIo<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if let Some(error) = self.refused() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(error) = self.refused() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// How a relay ended, and the close code (if any) it is worth telling the
+/// browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// Either side ended, the gateway stopped, or access was lost.
+    Quiet,
+    /// No inbound frame for [`Limits::idle_after`]: 1001.
+    Idle,
+    /// A budget or the queue bound was exceeded, or a frame was refused: 1008.
+    Policy,
+}
+
 /// Carry records between an upgraded browser socket and its daemon
-/// connection until either ends, the gateway stops, or the device loses
-/// access. Every write is guarded, so a stalled browser or daemon never keeps
-/// a revoked device's record in flight: on loss the socket is dropped with
-/// whatever it held.
+/// connection. Three parts run side by side, so none waits on another:
+/// sending to the browser (records and pings), reading from the browser
+/// (budgets, the idle deadline, and a bounded ordered queue for the server),
+/// and writing that queue to the server. Every write is guarded by the stop
+/// token and the device's standing. When any part ends the others are
+/// dropped; at most one close frame is attempted, for a second, and the
+/// transport is dropped regardless.
 async fn relay<S: AsyncRead + AsyncWrite + Unpin>(
     socket: S,
     daemon: Daemon,
     first: serde_json::Value,
     stop: CancellationToken,
     access: Access,
-    _permit: OwnedSemaphorePermit,
+    limits: Limits,
+    _permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
 ) {
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
+
     let config = WebSocketConfig {
         max_message_size: Some(MAX_RECORD),
         max_frame_size: Some(MAX_RECORD),
         ..WebSocketConfig::default()
     };
+    // The halves share one write buffer, and reading can flush it (to answer a
+    // ping or a close), so the guard sits on the transport: no path writes to
+    // the browser once the gateway stops or the device loses access.
+    let socket = GuardedIo {
+        inner: socket,
+        stop: stop.clone(),
+        access: access.clone(),
+    };
     let ws = WebSocketStream::from_raw_socket(socket, Role::Server, Some(config)).await;
     let (mut to_browser, mut from_browser) = ws.split();
     let (mut reader, mut to_daemon) = daemon;
-    let mut outgoing = Some(first);
-    loop {
-        if let Some(value) = outgoing.take() {
-            let text = value.to_string();
-            if text.len() > MAX_OUTBOUND {
-                return;
+    let (queue, mut queued_records) = tokio::sync::mpsc::channel::<String>(limits.queue_records);
+    let queued_bytes = std::sync::atomic::AtomicUsize::new(0);
+
+    let outbound = async {
+        let mut ping = tokio::time::interval_at(
+            tokio::time::Instant::now() + limits.ping_every,
+            limits.ping_every,
+        );
+        let mut next = Some(first);
+        loop {
+            if let Some(value) = next.take() {
+                let text = value.to_string();
+                if text.len() > MAX_OUTBOUND {
+                    return Ending::Quiet;
+                }
+                match guarded(&stop, &access, to_browser.send(Message::text(text))).await {
+                    Some(Ok(())) => {}
+                    _ => return Ending::Quiet,
+                }
             }
-            match guarded(&stop, &access, to_browser.send(Message::text(text))).await {
-                Some(Ok(())) => {}
-                _ => return,
-            }
-        }
-        tokio::select! {
-            biased;
-            () = stop.cancelled() => return,
-            record = reader.next() => match record {
-                Ok(Some(value)) => outgoing = Some(value),
-                _ => return, // the daemon ended the device's connection
-            },
-            frame = from_browser.next() => match frame {
-                Some(Ok(Message::Text(text))) => {
-                    let Ok(line) = frame_to_record(&text) else { return };
-                    let write = async {
-                        to_daemon.write_all(line.as_bytes()).await?;
-                        to_daemon.flush().await
-                    };
-                    match guarded(&stop, &access, write).await {
+            // A due ping goes first: a backlog of records that is always
+            // ready must not starve the heartbeat the browser answers.
+            tokio::select! {
+                biased;
+                _ = ping.tick() => {
+                    match guarded(&stop, &access, to_browser.send(Message::Ping(Vec::new()))).await {
                         Some(Ok(())) => {}
-                        _ => return,
+                        _ => return Ending::Quiet,
                     }
                 }
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                // Binary frames, a close, or a broken socket end it.
-                _ => return,
-            },
+                record = reader.next() => match record {
+                    Ok(Some(value)) => next = Some(value),
+                    _ => return Ending::Quiet, // the daemon ended the device's connection
+                },
+            }
         }
+    };
+
+    let inbound = async {
+        let mut frames = Bucket::new(limits.frames);
+        let mut bytes = Bucket::new(limits.bytes);
+        loop {
+            let frame = match tokio::time::timeout(limits.idle_after, from_browser.next()).await {
+                Err(_) => return Ending::Idle,
+                Ok(Some(Ok(frame))) => frame,
+                Ok(_) => return Ending::Quiet,
+            };
+            // Every delivered message and control frame spends the budget.
+            if !frames.take(1.0) || !bytes.take(frame.len() as f64) {
+                return Ending::Policy;
+            }
+            match frame {
+                Message::Text(text) => {
+                    let Ok(line) = frame_to_record(&text) else {
+                        return Ending::Policy;
+                    };
+                    let size = line.len();
+                    let total =
+                        queued_bytes.fetch_add(size, std::sync::atomic::Ordering::SeqCst) + size;
+                    if total > limits.queue_bytes || queue.try_send(line).is_err() {
+                        return Ending::Policy;
+                    }
+                }
+                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                Message::Binary(_) => return Ending::Policy,
+                Message::Close(_) => return Ending::Quiet,
+            }
+        }
+    };
+
+    let writer = async {
+        while let Some(line) = queued_records.recv().await {
+            let write = async {
+                to_daemon.write_all(line.as_bytes()).await?;
+                to_daemon.flush().await
+            };
+            match guarded(&stop, &access, write).await {
+                Some(Ok(())) => {
+                    queued_bytes.fetch_sub(line.len(), std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => return Ending::Quiet,
+            }
+        }
+        Ending::Quiet
+    };
+
+    let ending = tokio::select! {
+        () = stop.cancelled() => Ending::Quiet,
+        ending = outbound => ending,
+        ending = inbound => ending,
+        ending = writer => ending,
+    };
+    let code = match ending {
+        Ending::Quiet => return,
+        Ending::Idle => CloseCode::Away,
+        Ending::Policy => CloseCode::Policy,
+    };
+    let close = Message::Close(Some(CloseFrame {
+        code,
+        reason: std::borrow::Cow::Borrowed(""),
+    }));
+    tokio::select! {
+        () = stop.cancelled() => {}
+        _ = tokio::time::timeout(Duration::from_secs(1), to_browser.send(close)) => {}
     }
 }
 
@@ -865,9 +1260,16 @@ fn with_headers(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
     response
 }
 
-/// The body `/healthz` answers with, which `localpilot remote status` checks.
-pub(crate) fn health_body() -> String {
-    format!("localpilot-gateway {}", env!("CARGO_PKG_VERSION"))
+/// `429 Too Many Requests`, with when to retry.
+fn too_many(retry_after_secs: u64) -> Response<Full<Bytes>> {
+    let mut response = plain(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too many requests; try again later",
+    );
+    if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
 }
 
 fn json(value: &serde_json::Value) -> Response<Full<Bytes>> {
@@ -954,43 +1356,17 @@ fn user_discovery() -> anyhow::Result<Discovery> {
     })
 }
 
-/// Whether the gateway answers on its loopback port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GatewayHealth {
-    Running,
-    NotRunning,
-    /// Something answers on the port, but not this gateway.
-    Unexpected,
-}
-
-/// The `[remote]` settings as `remote status` reports them.
-#[derive(Debug, Clone)]
-pub(crate) struct RemoteSettings {
-    pub(crate) enabled: bool,
-    /// The advertised origin; `Err` names why the configured URL is invalid.
-    pub(crate) advertised: Result<Option<String>, String>,
-    pub(crate) port: u16,
-}
-
-/// What `localpilot remote status` shows. No secrets. A part that cannot be
-/// read is reported with its reason, never as an empty or default value.
-#[derive(Debug, Clone)]
-pub(crate) struct RemoteStatus {
-    pub(crate) settings: Result<RemoteSettings, String>,
-    /// `None` when the settings, and so the port, are unknown.
-    pub(crate) gateway: Option<GatewayHealth>,
-    /// Workspaces served with remote access on: label and discovery id.
-    pub(crate) workspaces: Vec<(String, String)>,
-    /// Paired and revoked device counts.
-    pub(crate) devices: Result<(usize, usize), String>,
-}
-
-/// Ask the loopback port for the gateway's health answer.
+/// Ask the loopback port for the gateway's health answer. Nothing accepting
+/// the connection (refused, or no answer to the connect within the bound, as
+/// Windows does for a closed port) is "not running"; a connection that does
+/// not give the gateway's answer is something else.
 async fn probe(port: u16, host: &str) -> GatewayHealth {
     use tokio::io::AsyncReadExt as _;
+    let connect = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port));
+    let Ok(Ok(mut socket)) = tokio::time::timeout(Duration::from_secs(3), connect).await else {
+        return GatewayHealth::NotRunning;
+    };
     let exchange = async {
-        let mut socket =
-            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await?;
         socket
             .write_all(
                 format!("GET /healthz HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
@@ -1002,17 +1378,13 @@ async fn probe(port: u16, host: &str) -> GatewayHealth {
         Ok::<_, std::io::Error>(String::from_utf8_lossy(&raw).into_owned())
     };
     match tokio::time::timeout(Duration::from_secs(2), exchange).await {
-        Ok(Ok(text)) => {
-            let ok = text.starts_with("HTTP/1.1 200")
-                && text.split_once("\r\n\r\n").map(|(_, body)| body) == Some(&health_body());
-            if ok {
-                GatewayHealth::Running
-            } else {
-                GatewayHealth::Unexpected
-            }
+        Ok(Ok(text))
+            if text.starts_with("HTTP/1.1 200")
+                && text.split_once("\r\n\r\n").map(|(_, body)| body) == Some(&health_body()) =>
+        {
+            GatewayHealth::Running
         }
-        Ok(Err(_)) => GatewayHealth::NotRunning,
-        Err(_) => GatewayHealth::Unexpected,
+        _ => GatewayHealth::Unexpected,
     }
 }
 
@@ -1056,6 +1428,8 @@ async fn status_from(
 ) -> RemoteStatus {
     let settings = settings_of(config);
     let gateway = match &settings {
+        // With remote access off there is no gateway to look for.
+        Ok((settings, _)) if !settings.enabled => None,
         Ok((settings, proxy_hosts)) => {
             let host = match &settings.advertised {
                 Ok(Some(origin)) => Policy::new(origin, proxy_hosts).hosts.first().cloned(),
@@ -1092,60 +1466,6 @@ pub(crate) async fn status() -> RemoteStatus {
     let index = crate::server_index::ServedIndex::for_user();
     let registry = crate::server_devices::DeviceRegistry::for_user(&cwd);
     status_from(config, index.as_ref(), &registry).await
-}
-
-/// The status as indented text lines.
-pub(crate) fn render_status(status: &RemoteStatus) -> String {
-    use std::fmt::Write as _;
-    let mut s = String::new();
-    match &status.settings {
-        Ok(settings) => {
-            let enabled = if settings.enabled {
-                "yes"
-            } else {
-                "no ([remote] enabled = false)"
-            };
-            let _ = writeln!(s, "  enabled:        {enabled}");
-            let advertised = match &settings.advertised {
-                Ok(Some(origin)) => origin.clone(),
-                Ok(None) => "(not set)".to_string(),
-                Err(reason) => format!("invalid: {reason}"),
-            };
-            let _ = writeln!(s, "  advertised url: {advertised}");
-            let gateway = match status.gateway {
-                Some(GatewayHealth::Running) => "running",
-                Some(GatewayHealth::NotRunning) => "not running",
-                Some(GatewayHealth::Unexpected) => "port in use by something else",
-                None => "unknown",
-            };
-            let _ = writeln!(
-                s,
-                "  gateway:        {gateway} (127.0.0.1:{})",
-                settings.port
-            );
-        }
-        Err(reason) => {
-            let _ = writeln!(s, "  settings:       cannot be read: {reason}");
-            let _ = writeln!(s, "  gateway:        unknown (no port without settings)");
-        }
-    }
-    if status.workspaces.is_empty() {
-        let _ = writeln!(s, "  workspaces:     none served with remote access on");
-    } else {
-        let _ = writeln!(s, "  workspaces:");
-        for (label, id) in &status.workspaces {
-            let _ = writeln!(s, "    {label} ({id})");
-        }
-    }
-    match &status.devices {
-        Ok((active, revoked)) => {
-            let _ = writeln!(s, "  devices:        {active} paired, {revoked} revoked");
-        }
-        Err(reason) => {
-            let _ = writeln!(s, "  devices:        cannot be read: {reason}");
-        }
-    }
-    s
 }
 
 /// `localpilot remote status`.
@@ -1359,14 +1679,39 @@ mod tests {
         tokio::io::DuplexStream,
         tokio::io::DuplexStream,
     ) {
-        let (browser, gateway_side) = tokio::io::duplex(4 * 1024);
-        let (daemon_far, daemon_near) = tokio::io::duplex(1024 * 1024);
+        relay_with(access, stop, Limits::default(), 4 * 1024, 1024 * 1024).await
+    }
+
+    /// A relay between a browser pipe of `browser_room` bytes and a daemon
+    /// pipe of `daemon_room` bytes, with `limits`.
+    async fn relay_with(
+        access: Access,
+        stop: CancellationToken,
+        limits: Limits,
+        browser_room: usize,
+        daemon_room: usize,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::io::DuplexStream,
+        tokio::io::DuplexStream,
+    ) {
+        let (browser, gateway_side) = tokio::io::duplex(browser_room);
+        let (daemon_far, daemon_near) = tokio::io::duplex(daemon_room);
         let boxed: Box<dyn DaemonStream> = Box::new(daemon_near);
         let (read, write) = tokio::io::split(boxed);
         let daemon = (JsonRecordReader::new(read), write);
         let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+        let device_permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
         let first = serde_json::json!({"v": 1, "event": {"type": "closed"}});
-        let relay = tokio::spawn(relay(gateway_side, daemon, first, stop, access, permit));
+        let relay = tokio::spawn(relay(
+            gateway_side,
+            daemon,
+            first,
+            stop,
+            access,
+            limits,
+            (permit, device_permit),
+        ));
         (relay, browser, daemon_far)
     }
 
@@ -1514,6 +1859,347 @@ mod tests {
         let text = render_status(&status);
         assert!(text.contains("devices:        cannot be read:"), "{text}");
         assert!(!text.contains("0 paired"), "{text}");
+    }
+
+    fn quick() -> Limits {
+        Limits {
+            ping_every: Duration::from_millis(100),
+            idle_after: Duration::from_millis(400),
+            ..Limits::default()
+        }
+    }
+
+    /// Short deadlines, but no pings: for tests about the browser's own
+    /// frames (a ping would make the test client try to answer it).
+    fn quiet() -> Limits {
+        Limits {
+            ping_every: Duration::from_secs(3600),
+            ..quick()
+        }
+    }
+
+    async fn browser(stream: tokio::io::DuplexStream) -> WebSocketStream<tokio::io::DuplexStream> {
+        WebSocketStream::from_raw_socket(stream, Role::Client, None).await
+    }
+
+    /// Read until the socket closes; the close code, if one was sent.
+    async fn close_code(ws: &mut WebSocketStream<tokio::io::DuplexStream>) -> Option<u16> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Close(frame))) => {
+                        return frame.map(|frame| u16::from(frame.code))
+                    }
+                    Some(Ok(_)) => {}
+                    _ => return None,
+                }
+            }
+        })
+        .await
+        .expect("the socket closed in time")
+    }
+
+    #[tokio::test]
+    async fn a_flood_of_unsolicited_pongs_closes_the_socket() {
+        let (_relay, browser_end, _daemon) = relay_with(
+            Arc::new(|| true),
+            CancellationToken::new(),
+            quick(),
+            64 * 1024,
+            64 * 1024,
+        )
+        .await;
+        let mut ws = browser(browser_end).await;
+        for _ in 0..200 {
+            if ws.send(Message::Pong(Vec::new())).await.is_err() {
+                break;
+            }
+        }
+        assert_eq!(close_code(&mut ws).await, Some(1008));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_pongs_keep_a_long_streamed_turn_open() {
+        let (relay, browser_end, mut daemon) = relay_with(
+            Arc::new(|| true),
+            CancellationToken::new(),
+            quick(),
+            64 * 1024,
+            64 * 1024,
+        )
+        .await;
+        let mut ws = browser(browser_end).await;
+        // The server streams for well past the idle deadline; the browser
+        // sends nothing but its automatic answers to the gateway's pings.
+        let streaming = tokio::spawn(async move {
+            for n in 0..30 {
+                let line =
+                    format!("{{\"v\":1,\"event\":{{\"type\":\"text_delta\",\"text\":\"{n}\"}}}}\n");
+                daemon.write_all(line.as_bytes()).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            daemon
+        });
+        let mut texts = 0;
+        let mut pings = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(3000);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, ws.next()).await {
+                Ok(Some(Ok(Message::Text(_)))) => texts += 1,
+                // A browser answers a ping at once.
+                Ok(Some(Ok(Message::Ping(payload)))) => {
+                    pings += 1;
+                    ws.send(Message::Pong(payload)).await.unwrap();
+                }
+                Ok(Some(Ok(Message::Close(frame)))) => panic!("closed: {frame:?}"),
+                Ok(Some(Ok(_))) => {}
+                Ok(_) => panic!("the socket ended"),
+                Err(_) => break,
+            }
+        }
+        let _daemon = streaming.await.unwrap();
+        assert!(texts >= 30, "every record arrived: {texts}");
+        assert!(pings >= 3, "pinged throughout: {pings}");
+        assert!(
+            !relay.is_finished(),
+            "still open well past the idle deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_silent_socket_is_closed_as_idle() {
+        let (relay, browser_end, _daemon) = relay_with(
+            Arc::new(|| true),
+            CancellationToken::new(),
+            quiet(),
+            64 * 1024,
+            64 * 1024,
+        )
+        .await;
+        // The browser neither reads nor answers.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(relay.is_finished(), "closed after the idle deadline");
+        let mut ws = browser(browser_end).await;
+        assert_eq!(close_code(&mut ws).await, Some(1001));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_server_keeps_the_browser_side_working() {
+        // The server never reads: a 1 KiB pipe fills at once.
+        let limits = Limits {
+            queue_records: 4,
+            ..quiet()
+        };
+        // (a) A silent browser still expires.
+        let (relay, browser_end, _daemon) = relay_with(
+            Arc::new(|| true),
+            CancellationToken::new(),
+            limits,
+            64 * 1024,
+            1024,
+        )
+        .await;
+        let mut ws = browser(browser_end).await;
+        let big =
+            serde_json::json!({"v": 1, "command": {"type": "prompt", "text": "x".repeat(4096)}});
+        ws.send(Message::text(big.to_string())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(
+            relay.is_finished(),
+            "the idle deadline ran while the server write was stuck"
+        );
+        assert_eq!(close_code(&mut ws).await, Some(1001));
+
+        // (b) Pongs are still processed while the write is stuck.
+        let (relay, browser_end, _daemon) = relay_with(
+            Arc::new(|| true),
+            CancellationToken::new(),
+            limits,
+            64 * 1024,
+            1024,
+        )
+        .await;
+        let mut ws = browser(browser_end).await;
+        ws.send(Message::text(big.to_string())).await.unwrap();
+        for _ in 0..12 {
+            ws.send(Message::Pong(Vec::new())).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            !relay.is_finished(),
+            "answered pongs keep it open past the idle deadline"
+        );
+
+        // (c) Input beyond the queue bound closes the socket instead of
+        // growing the queue.
+        for _ in 0..8 {
+            if ws.send(Message::text(big.to_string())).await.is_err() {
+                break;
+            }
+        }
+        assert_eq!(close_code(&mut ws).await, Some(1008));
+    }
+
+    #[tokio::test]
+    async fn a_sustained_backlog_does_not_starve_the_heartbeat() {
+        // A backlog that is always ready: the server has already written far
+        // more than the gateway can forward in several idle windows.
+        let (relay, browser_end, mut daemon) = relay_with(
+            Arc::new(|| true),
+            CancellationToken::new(),
+            quick(),
+            64 * 1024,
+            16 * 1024 * 1024,
+        )
+        .await;
+        let line = "{\"v\":1,\"event\":{\"type\":\"text_delta\",\"text\":\"x\"}}
+";
+        daemon
+            .write_all(line.repeat(200_000).as_bytes())
+            .await
+            .unwrap();
+        let mut ws = browser(browser_end).await;
+        let writing = tokio::spawn(async move { daemon });
+        let mut pings = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, ws.next()).await {
+                Ok(Some(Ok(Message::Ping(payload)))) => {
+                    pings += 1;
+                    ws.send(Message::Pong(payload)).await.unwrap();
+                }
+                Ok(Some(Ok(Message::Close(frame)))) => panic!("closed: {frame:?}"),
+                Ok(Some(Ok(_))) => {}
+                Ok(_) => panic!("the socket ended"),
+                Err(_) => break,
+            }
+        }
+        let _daemon = writing.await.unwrap();
+        assert!(pings >= 3, "pinged during the backlog: {pings}");
+        assert!(
+            !relay.is_finished(),
+            "still open after several idle windows"
+        );
+    }
+
+    /// Bytes of text payload the browser receives until the socket ends.
+    async fn drain_text(ws: &mut WebSocketStream<tokio::io::DuplexStream>) -> usize {
+        let mut received = 0;
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(message)) = ws.next().await {
+                if let Message::Text(text) = message {
+                    received += text.len();
+                }
+            }
+        })
+        .await;
+        received
+    }
+
+    #[tokio::test]
+    async fn a_ping_from_the_browser_cannot_flush_a_revoked_devices_record() {
+        let allowed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let access: Access = {
+            let allowed = allowed.clone();
+            Arc::new(move || allowed.load(std::sync::atomic::Ordering::SeqCst))
+        };
+        let (_relay, browser_end, mut daemon) = relay_with(
+            access,
+            CancellationToken::new(),
+            quiet(),
+            4 * 1024,
+            1024 * 1024,
+        )
+        .await;
+        let mut ws = browser(browser_end).await;
+        let record = serde_json::json!({"v": 1, "event": {"type": "text_delta", "text": "r".repeat(64 * 1024)}});
+        daemon
+            .write_all(format!("{record}\n").as_bytes())
+            .await
+            .unwrap();
+        // The browser has not read: the record is stuck in the gateway's
+        // buffer. Revoke, then at once ask for a pong and drain.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+        ws.send(Message::Ping(Vec::new())).await.unwrap();
+        let received = drain_text(&mut ws).await;
+        assert!(
+            received < 64 * 1024,
+            "the stuck record was not flushed: {received}"
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_an_idle_revoked_socket_cannot_flush_its_record() {
+        let allowed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let access: Access = {
+            let allowed = allowed.clone();
+            Arc::new(move || allowed.load(std::sync::atomic::Ordering::SeqCst))
+        };
+        // The idle deadline (100 ms) comes before the access poll (250 ms),
+        // so the relay ends as idle and tries to send a close.
+        let limits = Limits {
+            idle_after: Duration::from_millis(100),
+            ..quiet()
+        };
+        let (relay, browser_end, mut daemon) = relay_with(
+            access,
+            CancellationToken::new(),
+            limits,
+            4 * 1024,
+            1024 * 1024,
+        )
+        .await;
+        let record = serde_json::json!({"v": 1, "event": {"type": "text_delta", "text": "r".repeat(64 * 1024)}});
+        daemon
+            .write_all(format!("{record}\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut ws = browser(browser_end).await;
+        let received = drain_text(&mut ws).await;
+        assert!(relay.is_finished());
+        assert!(
+            received < 64 * 1024,
+            "the close did not flush the record: {received}"
+        );
+    }
+
+    #[test]
+    fn a_devices_socket_count_survives_rate_eviction() {
+        let limits = Limits::default();
+        let mut sockets = DeviceSockets::default();
+        let held: Vec<_> = (0..limits.sockets_per_device)
+            .map(|_| sockets.acquire("busy", limits.sockets_per_device).unwrap())
+            .collect();
+        assert!(sockets.acquire("busy", limits.sockets_per_device).is_none());
+        // Many other devices come and go; the busy one's count is kept.
+        let mut rates = DeviceRates::default();
+        for n in 0..(MAX_RATE_KEYS * 2) {
+            let _ = rates.take(&limits, &format!("d{n}"), true);
+            let other = sockets.acquire(&format!("d{n}"), limits.sockets_per_device);
+            drop(other);
+        }
+        assert!(sockets.acquire("busy", limits.sockets_per_device).is_none());
+        assert!(
+            sockets.devices.len() <= 2,
+            "unused entries are reclaimed: {}",
+            sockets.devices.len()
+        );
+        drop(held);
+        assert!(sockets.acquire("busy", limits.sockets_per_device).is_some());
+        assert!(rates.devices.len() <= MAX_RATE_KEYS);
+    }
+
+    #[test]
+    fn a_bucket_refills_over_time_and_says_when_to_retry() {
+        let mut bucket = Bucket::new((2.0, 10.0));
+        assert!(bucket.take(1.0) && bucket.take(1.0));
+        assert!(!bucket.take(1.0));
+        assert!((1..=60).contains(&bucket.retry_after()));
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(bucket.take(1.0));
     }
 
     #[test]

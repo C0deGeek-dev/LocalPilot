@@ -43,6 +43,16 @@ already run HTTPS tunnels or proxies; LocalPilot should not ship one.
    checks, and every socket and pairing names its workspace explicitly. A
    server with `[remote] enabled` off refuses gateway registration.
 
+9. Budgets live in the gateway and are global or per verified device (never per
+   address, since everything arrives from the local proxy): pairing attempts,
+   unauthenticated requests, per-device listings, socket opens and open
+   sockets (8), with `429` and `Retry-After`. Each socket's inbound messages
+   and control frames, and their bytes, spend token buckets (1008 when
+   exceeded); 30-second pings and a 90-second inbound idle deadline (1001).
+   The relay runs three parts side by side (to the browser, from the browser,
+   to the server through a bounded ordered queue), so neither direction's
+   backpressure stops budgets, pongs or the idle deadline.
+
 **Consequences.** A cookie-authenticated state-changing POST route (for example
 push subscriptions) must add a CSRF token bound to the device; the pairing
 route needs none because it carries a one-use code and no cookie. Sessions are

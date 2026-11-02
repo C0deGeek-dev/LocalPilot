@@ -897,9 +897,36 @@ enabled = true
 advertised_url = "https://pc.example.ts.net"
 ```
 
-`localpilot remote status` shows whether remote access is on, whether the
-gateway answers on its port, the workspaces served with remote access on, and
-how many devices are paired. A server started with `LOCALPILOT_SERVER_SOCKET`
+`localpilot remote status` (and `localpilot doctor`) shows whether remote
+access is on, whether the gateway answers its health check, the workspaces
+served with remote access on, and how many devices are paired; anything it
+cannot read is shown with its reason.
+
+#### Reaching the gateway
+
+The gateway listens on `127.0.0.1:<port>` only. Something on this computer
+must terminate HTTPS at `advertised_url` and forward to it. Every request must
+reach the gateway with a `Host` it expects: by default the advertised host,
+which is what a proxy that passes the original `Host` through sends. If yours
+sets its own `Host`, list exactly that value in `proxy_hosts`; the gateway
+answers `421` to any other. Forwarded headers (`X-Forwarded-Host` and the
+like) are ignored.
+
+- **This computer only.** No proxy; useful for checking the gateway with
+  `localpilot remote status`. A phone cannot reach it.
+- **Tailscale.** `tailscale serve --bg --https=443 127.0.0.1:47610` serves
+  `https://<machine>.<tailnet>.ts.net/` to devices on your tailnet; use that
+  address as `advertised_url`.
+- **Cloudflare Tunnel.** A named tunnel whose ingress rule maps your hostname
+  to `service: http://localhost:47610`. To be explicit about the `Host` the
+  gateway sees, set `originRequest.httpHostHeader` and list the same value in
+  `proxy_hosts`; without it, check that requests are not answered with `421`. A quick tunnel (`cloudflared tunnel --url
+  http://localhost:47610`) gets a new address each run, so the
+  `advertised_url` (and existing pairings' links) would change.
+- **Your own reverse proxy.** Terminate TLS for your hostname and proxy to
+  `http://127.0.0.1:47610`, either preserving `Host` (for example nginx
+  `proxy_set_header Host $host;`) or listing the `Host` it sends in
+  `proxy_hosts`. WebSocket upgrades must be passed through (`/api/socket`). A server started with `LOCALPILOT_SERVER_SOCKET`
 set uses a custom endpoint and is not reachable through the gateway.
 
 ### `[terminal]`

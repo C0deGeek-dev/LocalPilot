@@ -1215,8 +1215,28 @@ project file cannot set any `[remote]` key).
 - **Revocation through the gateway.** Besides the server's own checks, the
   gateway re-reads the device's standing in the same per-user registry before
   every write to the browser or the server, and every 250 ms while one is stuck,
-  and drops the socket once access ends, with any record it was holding. Bytes
-  already handed to the network cannot be taken back.
+  and drops the socket once access ends, with any record it was holding. The
+  check sits on the socket's transport, so it also covers bytes written while
+  answering a browser's ping or close and the gateway's own closing frame.
+  Bytes already handed to the network cannot be taken back.
+- **Rate limits.** Everything reaches the gateway from the local proxy, so
+  budgets are shared or per verified device, never per address. Pairing
+  attempts: 10, then one per 6 seconds, for everyone together. Requests with no
+  or an invalid device credential: 30, then one per second, together. Per
+  verified device: workspace listings 30, then one per 2 seconds; socket opens
+  20, then one per 3 seconds; at most 8 open sockets. Over a budget the answer
+  is `429` with `Retry-After`, and no server is contacted. A forged credential
+  naming a real device spends only the shared budget.
+- **Open sockets.** Every message and control frame a browser sends (pongs
+  included) spends a per-socket budget of 50, then 20 per second, and its bytes
+  a budget of 1 MiB, then 256 KiB per second; over budget the socket is closed
+  with 1008. The gateway pings every 30 seconds (a due ping goes before any
+  waiting record, so a long backlog cannot starve it) and closes a socket that has
+  sent nothing for 90 seconds (1001); a long answer streaming to a connected
+  client is not idle, because the client answers the pings. Records waiting for
+  the server are bounded (16 records, 1 MiB) and never dropped or reordered: a
+  full queue closes the socket with 1008. Reading from the browser never waits
+  on a write to the server or to the browser.
 - **Limits.** At most 64 open connections and 32 device sockets; request headers
   within 10 seconds; request bodies up to 4 KiB; browser records up to 256 KiB;
   server records up to 16 MiB (a larger one ends the socket; records are never

@@ -14,6 +14,10 @@ mod mcp_env;
 #[allow(dead_code)]
 #[path = "../src/output.rs"]
 mod output;
+// `doctor` renders remote access through `crate::remote_status`.
+#[allow(dead_code)]
+#[path = "../src/remote_status.rs"]
+mod remote_status;
 // `doctor` now reads the trust store through `crate::trust`; include it too.
 #[allow(dead_code)]
 #[path = "../src/trust.rs"]
@@ -160,6 +164,48 @@ fn doctor_json_includes_mcp_servers() {
     assert_eq!(json["mcp_servers"][0]["arg_count"], 2);
 }
 
+#[test]
+fn doctor_reports_remote_access_with_explicit_unavailable_parts() {
+    let mut report = report();
+    report.remote = Some(remote_status::RemoteStatus {
+        settings: Ok(remote_status::RemoteSettings {
+            enabled: true,
+            advertised: Err("must be https".to_string()),
+            port: 47610,
+        }),
+        gateway: Some(remote_status::GatewayHealth::NotRunning),
+        workspaces: vec![("alpha".to_string(), "0123456789abcdef".to_string())],
+        devices: Err("registry.json cannot be read".to_string()),
+    });
+    let rendered = doctor::render(&report);
+    for expected in [
+        "remote access:",
+        "advertised url: invalid: must be https",
+        "gateway:        not running (127.0.0.1:47610)",
+        "alpha (0123456789abcdef)",
+        "devices:        cannot be read: registry.json cannot be read",
+    ] {
+        assert!(rendered.contains(expected), "{rendered}");
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&doctor::render_json(&report)).expect("doctor JSON parses");
+    assert_eq!(json["remote"]["gateway"], "not_running");
+    assert_eq!(
+        json["remote"]["devices"]["Err"],
+        "registry.json cannot be read"
+    );
+    assert_eq!(
+        json["remote"]["settings"]["Ok"]["advertised"]["Err"],
+        "must be https"
+    );
+
+    // Not collected: no section, no JSON key.
+    report.remote = None;
+    assert!(!doctor::render(&report).contains("remote access:"));
+    let json: serde_json::Value = serde_json::from_str(&doctor::render_json(&report)).unwrap();
+    assert!(json.get("remote").is_none());
+}
+
 fn report() -> DoctorReport {
     DoctorReport {
         version: "<version>".to_string(),
@@ -268,6 +314,7 @@ fn report() -> DoctorReport {
             }),
         },
         hygiene: None,
+        remote: None,
         permissions: None,
         skill_maintenance: doctor::SkillMaintenance::default(),
         mesh: doctor::MeshStatus {

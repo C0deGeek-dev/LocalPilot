@@ -5855,6 +5855,31 @@ mod tests {
         devices: Arc<DeviceRegistry>,
         step: Duration,
     ) -> (std::net::SocketAddr, CancellationToken) {
+        start_gateway_limited(
+            spaces,
+            devices,
+            step,
+            crate::remote_gateway::Limits::default(),
+        )
+        .await
+    }
+
+    async fn start_gateway_limited(
+        spaces: Vec<(crate::remote_gateway::Workspace, Connect)>,
+        devices: Arc<DeviceRegistry>,
+        step: Duration,
+        limits: crate::remote_gateway::Limits,
+    ) -> (std::net::SocketAddr, CancellationToken) {
+        start_gateway_full(spaces, devices, step, limits, &[]).await
+    }
+
+    async fn start_gateway_full(
+        spaces: Vec<(crate::remote_gateway::Workspace, Connect)>,
+        devices: Arc<DeviceRegistry>,
+        step: Duration,
+        limits: crate::remote_gateway::Limits,
+        proxy_hosts: &[String],
+    ) -> (std::net::SocketAddr, CancellationToken) {
         let listed: Vec<crate::remote_gateway::Workspace> = spaces
             .iter()
             .map(|(workspace, _)| workspace.clone())
@@ -5878,11 +5903,12 @@ mod tests {
             }),
         };
         let stop = CancellationToken::new();
-        let gateway = crate::remote_gateway::Gateway::with_step(
-            crate::remote_gateway::Policy::new(GATEWAY_ORIGIN, &[]),
+        let gateway = crate::remote_gateway::Gateway::with_settings(
+            crate::remote_gateway::Policy::new(GATEWAY_ORIGIN, proxy_hosts),
             discovery,
             stop.clone(),
             step,
+            limits,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -6680,6 +6706,237 @@ mod tests {
         stop.cancel();
     }
 
+    /// A gateway for one real workspace with `limits`; the device's credential.
+    async fn limited_gateway(
+        limits: crate::remote_gateway::Limits,
+    ) -> (
+        tempfile::TempDir,
+        Space,
+        String,
+        std::net::SocketAddr,
+        CancellationToken,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let a = space(home.path(), "alpha", &registry_dir, "a");
+        let (_, credential) = a
+            .hosts
+            .devices
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        let (address, stop) = start_gateway_limited(
+            vec![(a.workspace.clone(), daemon_dial(&a.hosts, &a.factory))],
+            Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
+            Duration::from_secs(10),
+            limits,
+        )
+        .await;
+        (home, a, credential, address, stop)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn forged_credentials_spend_only_the_shared_budget() {
+        let limits = crate::remote_gateway::Limits {
+            unauthenticated: (3.0, 0.0001),
+            opens: (2.0, 0.0001),
+            ..crate::remote_gateway::Limits::default()
+        };
+        let (_home, a, credential, address, stop) = limited_gateway(limits).await;
+        // The same device id with a wrong secret.
+        let (prefix, rest) = credential.split_once('.').unwrap();
+        let (id, secret) = rest.split_once('.').unwrap();
+        let forged = format!("{prefix}.{id}.{}", "0".repeat(secret.len()));
+        let query = format!("workspace={}&new=1", a.workspace.id);
+        let mut statuses = Vec::new();
+        for _ in 0..5 {
+            statuses.push(http(address, &upgrade_request(&query, &forged)).await.0);
+        }
+        assert_eq!(statuses, vec![401, 401, 401, 429, 429]);
+        // The real device's own budget is untouched: two opens, then 429.
+        for _ in 0..2 {
+            let socket = open_socket(address, &query, GATEWAY_ORIGIN, Some(&credential)).await;
+            assert!(socket.is_ok(), "the verified device still opens sockets");
+        }
+        let (status, head, _) = http(address, &upgrade_request(&query, &credential)).await;
+        assert_eq!(status, 429, "{head}");
+        assert!(head.to_ascii_lowercase().contains("retry-after:"), "{head}");
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_has_a_bounded_number_of_open_sockets() {
+        let limits = crate::remote_gateway::Limits {
+            sockets_per_device: 2,
+            ..crate::remote_gateway::Limits::default()
+        };
+        let (_home, a, credential, address, stop) = limited_gateway(limits).await;
+        let query = format!("workspace={}&new=1", a.workspace.id);
+        let mut first = open_socket(address, &query, GATEWAY_ORIGIN, Some(&credential))
+            .await
+            .unwrap();
+        next_frame(&mut first).await.unwrap();
+        let mut second = open_socket(address, &query, GATEWAY_ORIGIN, Some(&credential))
+            .await
+            .unwrap();
+        next_frame(&mut second).await.unwrap();
+        let (status, _, _) = http(address, &upgrade_request(&query, &credential)).await;
+        assert_eq!(status, 429);
+        // Closing one frees its slot.
+        drop(first);
+        let mut reopened = None;
+        for _ in 0..50 {
+            if let Ok(socket) =
+                open_socket(address, &query, GATEWAY_ORIGIN, Some(&credential)).await
+            {
+                reopened = Some(socket);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(reopened.is_some(), "a closed socket's slot is released");
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pairing_attempts_are_rate_limited_for_everyone_together() {
+        let limits = crate::remote_gateway::Limits {
+            pairing: (2.0, 0.0001),
+            ..crate::remote_gateway::Limits::default()
+        };
+        let (_home, a, _credential, address, stop) = limited_gateway(limits).await;
+        let mut statuses = Vec::new();
+        for _ in 0..3 {
+            statuses.push(
+                http(
+                    address,
+                    &pair_request_in(GATEWAY_ORIGIN, "0.0.0", &a.workspace.id),
+                )
+                .await
+                .0,
+            );
+        }
+        assert_eq!(statuses, vec![403, 403, 429]);
+        stop.cancel();
+    }
+
+    /// A same-computer reverse proxy in front of the gateway: it forwards each
+    /// connection, setting the first request's `Host` to `rewrite_to` when
+    /// given (as a proxy that does not preserve `Host` would).
+    async fn proxy(
+        upstream: std::net::SocketAddr,
+        rewrite_to: Option<String>,
+    ) -> std::net::SocketAddr {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                let rewrite_to = rewrite_to.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        if client.read(&mut byte).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
+                    let text = String::from_utf8_lossy(&head).to_string();
+                    let text = match &rewrite_to {
+                        Some(host) => {
+                            text.lines()
+                                .map(|line| {
+                                    if line.to_ascii_lowercase().starts_with("host:") {
+                                        format!("Host: {host}")
+                                    } else {
+                                        line.to_string()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\r\n")
+                                + "\r\n\r\n"
+                        }
+                        None => text,
+                    };
+                    let mut server = tokio::net::TcpStream::connect(upstream).await.unwrap();
+                    server.write_all(text.as_bytes()).await.unwrap();
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                });
+            }
+        });
+        address
+    }
+
+    fn health_request(host: &str, extra: &str) -> String {
+        format!("GET /healthz HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_proxy_must_send_a_host_the_gateway_is_told_to_expect() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = gateway_hosts();
+        let workspace = crate::remote_gateway::Workspace {
+            id: GATEWAY_WORKSPACE.to_string(),
+            label: "workspace".to_string(),
+            root: std::env::temp_dir(),
+        };
+        let spaces = || vec![(workspace.clone(), daemon_dial(&hosts, &factory))];
+        let limits = crate::remote_gateway::Limits::default();
+
+        // A proxy that preserves Host: the default policy accepts it.
+        let (gateway, stop) =
+            start_gateway_full(spaces(), hosts.devices.clone(), DEADLINE, limits, &[]).await;
+        let preserving = proxy(gateway, None).await;
+        assert_eq!(
+            http(preserving, &health_request(GATEWAY_HOST, "")).await.0,
+            200
+        );
+
+        // A proxy that rewrites Host (here to a loopback address) is refused
+        // by default, and forwarded headers do not change that.
+        let rewritten = "127.0.0.1:47610".to_string();
+        let rewriting = proxy(gateway, Some(rewritten.clone())).await;
+        assert_eq!(
+            http(rewriting, &health_request(GATEWAY_HOST, "")).await.0,
+            421
+        );
+        let forwarded = format!(
+            "X-Forwarded-Host: {GATEWAY_HOST}
+"
+        );
+        assert_eq!(
+            http(rewriting, &health_request(GATEWAY_HOST, &forwarded))
+                .await
+                .0,
+            421
+        );
+        stop.cancel();
+
+        // Told to expect the rewritten Host, the gateway accepts that proxy,
+        // and the listed value replaces the default.
+        let (gateway, stop) = start_gateway_full(
+            spaces(),
+            hosts.devices.clone(),
+            DEADLINE,
+            limits,
+            &[rewritten.clone()],
+        )
+        .await;
+        let rewriting = proxy(gateway, Some(rewritten)).await;
+        assert_eq!(
+            http(rewriting, &health_request(GATEWAY_HOST, "")).await.0,
+            200
+        );
+        let preserving = proxy(gateway, None).await;
+        assert_eq!(
+            http(preserving, &health_request(GATEWAY_HOST, "")).await.0,
+            421,
+            "the listed Host replaces the default"
+        );
+        stop.cancel();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_pairing_code_is_presented_only_to_the_workspace_that_issued_it() {
         let home = tempfile::tempdir().unwrap();
@@ -6753,7 +7010,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, 200);
-        assert_eq!(body, crate::remote_gateway::health_body());
+        assert_eq!(body, crate::remote_status::health_body());
         let (status, _, _) = http(
             address,
             "GET /healthz HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
