@@ -1215,7 +1215,7 @@ pub fn is_git_workspace(root: &Path) -> bool {
 /// What the harness and its tools keep in a project folder, and a repository the
 /// harness creates must not track: the runtime state, and the local config that
 /// is never committed.
-const HARNESS_LOCAL_PATHS: [&str; 4] = [
+pub(crate) const HARNESS_LOCAL_PATHS: [&str; 4] = [
     ".localpilot/",
     ".localpilot.toml",
     ".localmind/",
@@ -1225,13 +1225,18 @@ const HARNESS_LOCAL_PATHS: [&str; 4] = [
 /// Create a git repository at `root` when there is none, and keep the harness's
 /// own local files out of it through `.git/info/exclude`, so no `.gitignore` is
 /// added to the user's project. Returns whether a repository was created; a folder
-/// that is already inside one is left alone. No commit is made here: the plan
-/// documents are committed by the first resume.
+/// that is already inside one is left alone unless it is an effectively empty,
+/// unborn root. Empty roots receive the shared empty baseline commit; nonempty
+/// harness roots still leave plan-document commits to the first resume.
 ///
 /// # Errors
 /// [`HarnessError`] if git cannot create the repository or the exclude file
 /// cannot be written.
 pub fn init_git_workspace(root: &Path) -> Result<bool, HarnessError> {
+    let project = crate::project_start::ProjectGit::default();
+    if project.needs_baseline(root)? {
+        return project.initialize(root);
+    }
     if is_git_workspace(root) {
         return Ok(false);
     }
@@ -1735,7 +1740,7 @@ fn bounded_git(
 
 /// Run `command` to completion within `timeout`, killing it when it overruns.
 /// Output beyond 1 MiB is an error rather than a silently shortened answer.
-fn bounded_output(
+pub(crate) fn bounded_output(
     mut command: Command,
     timeout: std::time::Duration,
     label: &str,

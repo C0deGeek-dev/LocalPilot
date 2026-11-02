@@ -1,5 +1,14 @@
 # Test Plan
 
+Empty-project setup controls (`project_start::tests` and
+`session::tests::empty_project_*`) use native Git, disposable homes/configs and
+fake providers. They cover empty/runtime-only roots, unborn and existing HEADs,
+parent ownership, untouched staged indexes, identity/executable failures,
+ordinary/harness runtimes with the envelope both on and off, and terminal
+permission denial. The new baseline contains zero tracked files; the first
+write is uncommitted and the runtime captures a usable diff baseline. These
+tests exercise orchestration, not model task quality.
+
 Mesh renewal controls retain the endpoint's bytes and generation when its lease
 expires while atomic replacement is blocked by a real Windows file handle.
 Successful renewal rotates the token; expired leases and stale tokens cannot

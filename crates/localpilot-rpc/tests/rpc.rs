@@ -153,7 +153,9 @@ async fn permission_asks_flow_over_the_wire_and_denial_is_an_error_result() {
             json!({ "program": "rm", "args": ["-rf", "x"] }),
         )
         .text("could not delete");
-    let (_dir, mut runtime, context, ask_rx, registry) = build_full(provider);
+    let (dir, mut runtime, context, ask_rx, registry) = build_full(provider);
+    // Exercise command consent in an existing project, without Git setup consent.
+    std::fs::write(dir.path().join("existing.txt"), "project fixture\n").unwrap();
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (server_read, server_write) = tokio::io::split(server_io);
     let (client_read, mut client_write) = tokio::io::split(client_io);

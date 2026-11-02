@@ -35,6 +35,7 @@ mod precondition;
 mod progress;
 mod project_analysis;
 mod project_instructions;
+mod project_start;
 mod quality;
 mod resume;
 mod retrospective;

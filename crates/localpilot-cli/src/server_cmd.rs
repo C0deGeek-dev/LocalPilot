@@ -3247,8 +3247,12 @@ pub(crate) mod tests {
 
     impl FakeFactory {
         pub(crate) fn new(provider: FakeProvider) -> Self {
+            let dir = Arc::new(tempfile::tempdir().unwrap());
+            // These protocol controls use an existing project. Empty-project
+            // setup and its separate consent have runtime-specific controls.
+            std::fs::write(dir.path().join("existing.txt"), "project fixture\n").unwrap();
             Self {
-                dir: Arc::new(tempfile::tempdir().unwrap()),
+                dir,
                 provider: Arc::new(provider),
                 asking: false,
                 pending: StdMutex::new(None),

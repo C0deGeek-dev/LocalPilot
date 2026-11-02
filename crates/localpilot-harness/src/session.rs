@@ -26,7 +26,8 @@ use localpilot_recovery::{
     RepeatedObservationGuard, StreamMonitor,
 };
 use localpilot_sandbox::{
-    Approver, Interactivity, PermissionEngine, PermissionEngineHandle, Profile,
+    Approver, CommandClass, Decision, Effect, Interactivity, PermissionEngine,
+    PermissionEngineHandle, PermissionRequest, Profile,
 };
 use localpilot_store::{
     origin_for, transcript_from_events, OpenReason, SessionEventKind, Store, StoreError,
@@ -1410,6 +1411,7 @@ pub struct SessionRuntime {
     /// during a turn; each provider request snapshots it fresh.
     reasoning_effort: ReasoningEffortHandle,
     approver: Arc<dyn Approver>,
+    project_git: Arc<crate::project_start::ProjectGit>,
     store: Store,
     /// Exclusive ownership of the current session (`None` for an incognito
     /// store, or when the claim could not be taken).
@@ -1641,6 +1643,7 @@ impl SessionRuntime {
             reasoning_effort: ReasoningEffortHandle::new(config.reasoning_effort)
                 .gated(admission.clone()),
             approver: Arc::from(approver),
+            project_git: Arc::new(crate::project_start::ProjectGit::default()),
             store,
             claim: None,
             admission: admission.clone(),
@@ -1808,6 +1811,128 @@ impl SessionRuntime {
             self.config.enforce_prior_read,
         )
         .err()
+    }
+
+    /// Prepare before the first write, including turns without a work envelope.
+    /// Read-only/answer-only turns never create a repository just by starting.
+    async fn prepare_project_write(
+        &mut self,
+        name: &str,
+        input: &serde_json::Value,
+        cancel: &CancellationToken,
+    ) -> Result<bool, crate::HarnessError> {
+        if self.config.answer_only
+            || self.engine.profile() == Profile::ReadOnly
+            || self.work_diff_baseline.is_some()
+            || (name == "run_shell" && localpilot_tools::shell_call_is_read_only(input))
+        {
+            return Ok(false);
+        }
+        let Some(tool) = self.tools.get(name) else {
+            return Ok(false);
+        };
+        let ctx = ToolContext {
+            workspace: &self.workspace,
+            interactivity: self.config.interactivity,
+            trusted: self.config.trusted,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        let Ok(effects) = tool.effects(input, &ctx) else {
+            return Ok(false);
+        };
+        let engine = self.engine.snapshot().resolved();
+        let command = tool.exact_command(input);
+        if self.config.interactivity == Interactivity::NonInteractive
+            && self
+                .tools
+                .check_headless_permissions(
+                    &ToolCall::new(
+                        ToolUseId::from("project-write-preflight"),
+                        name,
+                        input.clone(),
+                    ),
+                    &ctx,
+                    &engine,
+                )
+                .is_err()
+        {
+            return Ok(false);
+        }
+        // A refused tool does not need a repository. Preserve its own denial,
+        // retry identity and readonly verification behavior without setup asks.
+        if effects.iter().any(|effect| {
+            engine.decide_command(
+                &PermissionRequest {
+                    tool: name.into(),
+                    effect: *effect,
+                    interactivity: self.config.interactivity,
+                    trusted: self.config.trusted,
+                    detail: String::new(),
+                },
+                command.as_ref(),
+            ) == Decision::Deny
+        }) {
+            return Ok(false);
+        }
+        let writes = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::WritePath {
+                    inside_workspace: true,
+                    ..
+                } | Effect::UnscopedCommand
+            ) || matches!(effect, Effect::RunCommand(class) if *class != CommandClass::ReadOnly)
+        });
+        if !writes {
+            return Ok(false);
+        }
+        let root = self.workspace.process_dir();
+        let inspect_root = root.clone();
+        let git = Arc::clone(&self.project_git);
+        let needs_baseline = tokio::task::spawn_blocking(move || git.needs_baseline(&inspect_root))
+            .await
+            .map_err(|error| crate::HarnessError::ProjectSetup(error.to_string()))??;
+        if !needs_baseline {
+            return Ok(false);
+        }
+        let request = PermissionRequest {
+            tool: "initialize_empty_project".into(),
+            effect: Effect::RunCommand(CommandClass::ProjectWrite),
+            interactivity: self.config.interactivity,
+            trusted: self.config.trusted,
+            detail: format!("Initialize Git in {} and create an empty initial commit using your Git identity and hooks; no project files will be staged", root.display()),
+        };
+        let allowed = match self.engine.snapshot().decide(&request) {
+            Decision::Allow => true,
+            Decision::Ask => tokio::select! {
+                biased;
+                () = cancel.cancelled() => false,
+                approved = self.approver.approve(&request) => approved,
+            },
+            Decision::Deny => false,
+        };
+        if !allowed || cancel.is_cancelled() {
+            return Err(crate::HarnessError::ProjectSetup("empty-project initialization was not authorized; approve Git initialization and an empty commit, or initialize and commit the baseline yourself before retrying".into()));
+        }
+        let git = Arc::clone(&self.project_git);
+        let admission = self.admission.clone();
+        let initialized = tokio::task::spawn_blocking(move || {
+            admission.mutate(|| git.initialize(&root)).unwrap_or_else(|| {
+                Err(crate::HarnessError::ProjectSetup("session ownership changed before Git setup; resume from the owning session".into()))
+            })
+        })
+            .await
+            .map_err(|error| crate::HarnessError::ProjectSetup(error.to_string()))??;
+        if initialized && self.config.granularity.is_some() {
+            self.work_diff_baseline = Some(crate::resume::work_diff_baseline(
+                &self.workspace.process_dir(),
+            )?);
+        }
+        Ok(initialized)
     }
 
     /// Whether a file-mutating call targets the project's `PROGRESS.md`.
@@ -5276,6 +5401,38 @@ impl SessionRuntime {
                         .flatten()
                 });
                 let projected_input = repaired_input.as_ref().unwrap_or(input);
+                if readable_error.is_none()
+                    && self
+                        .broker
+                        .as_ref()
+                        .map_or(true, |broker| broker.is_advertised(name))
+                {
+                    match self
+                        .prepare_project_write(name, projected_input, cancel)
+                        .await
+                    {
+                        Ok(true) => {
+                            let _ = events.send(RuntimeEvent::Warning("created an empty Git baseline for this project; no project files were committed".into()));
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            let detail = redact(&format!("project initialization stopped before `{name}`: {error}. Any completed Git initialization is preserved; correct setup or permission and retry."));
+                            for (skip_id, _, _, _) in &calls[call_index..] {
+                                self.append(tool_error_message(skip_id, &detail));
+                            }
+                            let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+                            return self.stop_with_detail(
+                                events,
+                                if cancel.is_cancelled() {
+                                    StopReason::Cancelled
+                                } else {
+                                    StopReason::NoProgress
+                                },
+                                Some(detail),
+                            );
+                        }
+                    }
+                }
                 let tool_started_at = Instant::now();
                 let detail = self
                     .tools
@@ -6602,6 +6759,165 @@ mod tests {
         }
         .into_message();
         assert_eq!(message_plain_text(&bg), "[background task] done");
+    }
+
+    #[tokio::test]
+    async fn empty_project_baseline_is_shared_by_ordinary_and_harness_turns() {
+        for harness in [false, true] {
+            for envelope in [false, true] {
+                let provider = Arc::new(
+                    FakeProvider::new()
+                        .tool_call(
+                            "create",
+                            "write_file",
+                            serde_json::json!({"path":"created.txt", "content":"new\n"}),
+                        )
+                        .text("done"),
+                );
+                let (mut runtime, dir) = runtime_with_provider(provider);
+                let home = tempfile::tempdir().unwrap();
+                runtime.project_git = Arc::new(crate::project_start::ProjectGit::isolated(
+                    home.path(),
+                    true,
+                ));
+                runtime.set_permission_profile(Profile::Bypass, Vec::new());
+                runtime.config.interactivity = Interactivity::NonInteractive;
+                runtime.harness_checkpoint_owner = harness;
+                runtime.config.granularity =
+                    envelope.then(localpilot_config::GranularityConfig::default);
+                let (events, _) = broadcast::channel(256);
+                runtime
+                    .run_turn("create created.txt", &events, &CancellationToken::new())
+                    .await;
+                assert!(
+                    dir.path().join(".git").is_dir(),
+                    "harness={harness}, envelope={envelope}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join("created.txt")).unwrap(),
+                    "new\n"
+                );
+                assert_eq!(runtime.work_diff_baseline.is_some(), envelope);
+                let tracked = std::process::Command::new("git")
+                    .args(["ls-tree", "-r", "HEAD"])
+                    .current_dir(dir.path())
+                    .output()
+                    .unwrap();
+                assert!(tracked.status.success());
+                assert!(tracked.stdout.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_project_setup_respects_permissions_and_does_not_loop() {
+        for (profile, interactive, approve, incognito) in [
+            (Profile::ReadOnly, false, true, false),
+            (Profile::Default, false, true, false),
+            (Profile::Default, true, false, false),
+            (Profile::Bypass, false, true, true),
+        ] {
+            let provider = Arc::new(
+                FakeProvider::new()
+                    .tool_call(
+                        "create",
+                        "write_file",
+                        serde_json::json!({"path":"created.txt", "content":"new\n"}),
+                    )
+                    .text("must not be requested"),
+            );
+            let (mut runtime, dir) = runtime_with_provider(provider);
+            let home = tempfile::tempdir().unwrap();
+            runtime.project_git = Arc::new(crate::project_start::ProjectGit::isolated(
+                home.path(),
+                true,
+            ));
+            runtime.set_permission_profile(profile, Vec::new());
+            runtime.config.incognito = incognito;
+            runtime
+                .engine
+                .set(runtime.engine.snapshot().with_incognito(incognito));
+            runtime.approver = Arc::new(ScriptedApprover::new(vec![approve]));
+            runtime.config.interactivity = if interactive {
+                Interactivity::Interactive
+            } else {
+                Interactivity::NonInteractive
+            };
+            let (events, _) = broadcast::channel(256);
+            assert_eq!(
+                runtime
+                    .run_turn("create created.txt", &events, &CancellationToken::new())
+                    .await,
+                if profile == Profile::ReadOnly || incognito {
+                    StopReason::Done
+                } else {
+                    StopReason::NoProgress
+                }
+            );
+            assert!(!dir.path().join(".git").exists());
+            assert!(!dir.path().join("created.txt").exists());
+            assert!(runtime.messages.iter().any(message_is_error));
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_project_read_only_turn_has_no_git_side_effect() {
+        let (mut runtime, dir) = runtime_with_provider(Arc::new(
+            FakeProvider::new()
+                .tool_call(
+                    "version",
+                    "run_shell",
+                    serde_json::json!({"command":"echo read-only"}),
+                )
+                .text("explanation"),
+        ));
+        runtime.set_permission_profile(Profile::Bypass, Vec::new());
+        let (events, _) = broadcast::channel(256);
+        assert_eq!(
+            runtime
+                .run_turn("explain", &events, &CancellationToken::new())
+                .await,
+            StopReason::Done
+        );
+        assert!(!dir.path().join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn empty_project_shell_receives_a_baseline_before_its_envelope_gate() {
+        let provider = Arc::new(
+            FakeProvider::new()
+                .tool_call(
+                    "shell",
+                    "run_shell",
+                    serde_json::json!({"command":"git config --local issue261.marker yes"}),
+                )
+                .text("done"),
+        );
+        let (mut runtime, dir) = runtime_with_provider(provider);
+        let home = tempfile::tempdir().unwrap();
+        runtime.project_git = Arc::new(crate::project_start::ProjectGit::isolated(
+            home.path(),
+            true,
+        ));
+        runtime.set_permission_profile(Profile::Unrestricted, Vec::new());
+        runtime.config.interactivity = Interactivity::NonInteractive;
+        runtime.config.granularity = Some(localpilot_config::GranularityConfig::default());
+        let (events, mut receiver) = broadcast::channel(256);
+        runtime
+            .run_turn("set the local marker", &events, &CancellationToken::new())
+            .await;
+        assert!(runtime.work_diff_baseline.is_some());
+        let mut ran = false;
+        while let Ok(event) = receiver.try_recv() {
+            if matches!(event, RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "shell")
+            {
+                ran = true;
+            }
+        }
+        assert!(ran);
+        assert!(std::fs::read_to_string(dir.path().join(".git/config"))
+            .unwrap()
+            .contains("marker = yes"));
     }
 
     fn test_runtime() -> (SessionRuntime, tempfile::TempDir) {

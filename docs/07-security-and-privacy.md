@@ -20,6 +20,16 @@ Local side effects include:
 Every local side effect must be mediated by the tool runtime and permission
 engine.
 
+Empty-project Git preparation is host-owned session-runtime work, separately
+authorized as `initialize_empty_project` with a `ProjectWrite` command effect
+before the first writing tool. Folder trust alone does not authorize it.
+Read-only, incognito, lease and non-interactive floors still apply. Refusal
+stops the turn before setup or the requested write; explicit bypass authority
+can permit setup, while the actual tool keeps its independent permission gate.
+Preparation commits no project paths (`git commit --only --allow-empty`) and
+does not stage, reset or stash existing work. Existing Git hooks and signing
+remain executable user configuration, under the command permission granted.
+
 ## Workspace Trust
 
 When opening a directory for the first time, LocalPilot should ask whether the

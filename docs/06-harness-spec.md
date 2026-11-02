@@ -15,6 +15,29 @@ decides whether those actions are allowed to advance the project.
 
 ## Automatic Work Granularity
 
+Before an ordinary or harness agent's first writing tool call in an effectively
+empty project, the shared runtime prepares Git and an empty initial commit
+(ADR-0252). This also applies without `/harness` and with the envelope disabled.
+It is a separate `initialize_empty_project` project-write permission request:
+interactive profiles may ask; headless runs require existing authority and stop
+with setup guidance if it is absent. The requested tool still passes its own
+permission and verification gates afterwards. Read-only and answer-only turns
+perform no preparation. A tool already denied by the current permission engine
+keeps its ordinary refusal/retry path and does not trigger Git preparation;
+structured command grants are considered in this read-only preflight.
+
+An effectively empty root contains only `.git/`, `.localpilot/`, `.localmind/`,
+`.localpilot.toml` and `.localmind.toml`; links and any other entry disqualify it.
+Those runtime/config paths are excluded locally, never staged. Existing HEADs
+are reused, including a parent repository; an empty subdirectory never gets a
+nested repository. An unborn root's index must be empty. Preparation never
+imports existing material, stages files, resets or stashes work. Git identity,
+hooks and signing configuration remain in force; each setup command has a
+30-second bound. A failure preserves partial initialization and stops the turn
+with the original Git error. The next turn can retry after the user repairs
+setup or changes authorization. Eval retains its separate existing-HEAD
+precondition before constructing an agent runtime.
+
 Ordinary agent and harness runtimes share `granularity::WorkProfile`. Context
 capacity/pressure controls read, patch and retained-output material; session-local
 structured reliability controls decisions and simultaneous regions. Unknown and

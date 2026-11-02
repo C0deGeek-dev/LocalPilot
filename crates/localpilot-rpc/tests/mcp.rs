@@ -230,6 +230,8 @@ async fn a_denied_ask_becomes_a_model_visible_tool_error() {
         )
         .text("could not delete");
     let (dir, mut runtime, ask_rx, registry) = build_full(provider);
+    // Exercise command consent in an existing project, without Git setup consent.
+    std::fs::write(dir.path().join("existing.txt"), "project fixture\n").unwrap();
     let session = runtime.session_id();
     let opts = options(dir.path(), true);
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);

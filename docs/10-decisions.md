@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0252: Prepare An Empty Git Baseline At The Shared Agent Write Boundary
+
+**Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#261.
+
+**Context.** Git initialization alone leaves an unborn repository without HEAD.
+Opaque writes cannot be measured against it, and ordinary chat must not need a
+harness plan merely to start an empty project.
+
+**Decision.** Ordinary, headless and harness agent turns use one empty-project
+preparation contract before the first writing tool call. Read-only and
+answer-only turns do not initialize Git. The permission engine and the host's
+approver authorize the concrete init-plus-empty-commit operation independently
+of the requested tool. Headless denial or setup failure stops that turn with
+the real reason, rather than returning the model to a refusal/retry loop.
+
+Only an effectively empty root may be adopted: the known local runtime/config
+entries documented in the harness specification are permitted, other entries
+and links are not. Git discovers ownership; existing HEADs are reused and a
+parent repository never gets shadowed. An unborn root must have an empty index.
+After approval the conditions are checked again. A normal commit with
+`--only --allow-empty` supplies a zero-path baseline without `git add`, using
+the user's identity, hooks and signing configuration (the documented
+[Git commit options](https://git-scm.com/docs/git-commit#Documentation/git-commit.txt---only)). Runtime/config exclusions
+stay in `.git/info/exclude`. No README, imported content, reset or stash.
+Preparation ignores inherited repository/index redirection variables, bounds
+each Git invocation and preserves partial initialization on failure.
+
+**Consequences.** The first actual project write is measured against the empty
+baseline, even without `/harness`. Setup authority does not authorize the tool,
+raise work limits or weaken mandatory verification. Existing nonempty projects
+still require an intentional initial commit. Harness plan-document commits
+retain their separate ownership rules. Eval still requires HEAD before runtime
+construction; this change does not redefine benchmark fixture ownership.
+
 ## ADR-0251: The Full-Screen Terminal Shares Its Own Session; Remote Work Is Decided In Its Loop
 
 **Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#255.

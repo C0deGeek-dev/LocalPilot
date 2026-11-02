@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Ordinary and harness agents can initialize an empty project with Git and an
+  empty initial commit before their first write, including without `/harness`
+  or an active work envelope. Setup follows the existing permission profile;
+  headless refusal or Git failure stops with an actionable reason. Existing
+  files, indexes and parent repositories are preserved (ADR-0252, #261).
+
 - `/remote share` in the full-screen terminal shares the running session with
   your paired devices, mid-turn and during a permission request included;
   `/remote stop` ends it and `/remote` shows where sharing stands. Sharing needs

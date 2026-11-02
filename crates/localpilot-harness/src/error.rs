@@ -4,6 +4,9 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum HarnessError {
+    /// Empty-project preparation needs an explicit user decision or repair.
+    #[error("project setup: {0}")]
+    ProjectSetup(String),
     /// A required section was missing from a project document.
     #[error("{document} is missing the required section: {section}")]
     MissingSection {
