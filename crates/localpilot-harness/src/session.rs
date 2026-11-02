@@ -272,6 +272,10 @@ pub struct SessionConfig {
     /// Production hosts enable automatic bounded units; library callers can
     /// explicitly supply the same policy. Caps only tighten automatic bounds.
     pub granularity: Option<localpilot_config::GranularityConfig>,
+    /// Require completion verification after work that may have changed the
+    /// project. Production hosts select this independently of their limits.
+    /// Legacy embedders that omit it keep their initial verification contract.
+    pub require_mutation_verification: Option<bool>,
     pub model: String,
     pub interactivity: Interactivity,
     pub trusted: bool,
@@ -400,6 +404,7 @@ impl Default for SessionConfig {
             answer_only: false,
             retrieved_beside_question: true,
             granularity: None,
+            require_mutation_verification: None,
             model: "default".to_string(),
             interactivity: Interactivity::Interactive,
             trusted: true,
@@ -1372,6 +1377,9 @@ pub struct SessionRuntime {
     /// Authorized write-capable invocation, including errors/partial writes.
     /// Separate from the conservative attempted-operation budget.
     work_mutation_may_have_run: bool,
+    /// A typed file edit or delegated edit may have run. The automatic gate's
+    /// unchanged-opaque-probe stop must not classify this as a read-only probe.
+    work_edit_may_have_run: bool,
     /// MCP effects are opaque to the local diff and touched-path evidence.
     /// An attempted call prevents the automatic read-only exemption without
     /// asserting a local mutation or changing bounded-mutation obligations.
@@ -1384,8 +1392,8 @@ pub struct SessionRuntime {
     /// Unit checkpoints the host still allows in this task (0 = none).
     unit_checkpoints_remaining: u8,
     rename_continuation: Option<unit_continuation::RenameContinuation>,
-    /// A unit checkpoint left the task's full verification failed. Survives
-    /// turn boundaries: no later turn finishes without an actual full pass.
+    /// Carried step work or a unit checkpoint still owes a full check.
+    /// The obligation survives turn boundaries until a check passes.
     outstanding_full_check: bool,
     /// A bounds-refused write ended a unit that already holds a successful
     /// mutation; the host settles it after the current tool batch.
@@ -1582,9 +1590,16 @@ impl SessionRuntime {
         store: Store,
         mut workspace: localpilot_sandbox::Workspace,
         recovery: RecoveryEngine,
-        config: SessionConfig,
+        mut config: SessionConfig,
         seed: Vec<Message>,
     ) -> Self {
+        // Resolve the legacy constructor default once. Changing the size
+        // profile later cannot create or discard a verification obligation.
+        config.require_mutation_verification = Some(
+            config
+                .require_mutation_verification
+                .unwrap_or(config.granularity.is_some()),
+        );
         let session_id = SessionId::new();
         crate::session_scratch::initialize(&mut workspace, &session_id.to_string());
         let mut messages = Vec::with_capacity(seed.len() + 1);
@@ -1621,6 +1636,7 @@ impl SessionRuntime {
             work_mutation_refusal: None,
             work_opaque_retry_blocked: false,
             work_mutation_may_have_run: false,
+            work_edit_may_have_run: false,
             work_mcp_call_attempted: false,
             work_opaque_launch_dispatched: false,
             work_write_error_may_have_run: false,
@@ -1927,7 +1943,7 @@ impl SessionRuntime {
         })
             .await
             .map_err(|error| crate::HarnessError::ProjectSetup(error.to_string()))??;
-        if initialized && self.config.granularity.is_some() {
+        if initialized && self.observes_turn_diff() {
             self.work_diff_baseline = Some(crate::resume::work_diff_baseline(
                 &self.workspace.process_dir(),
             )?);
@@ -2257,6 +2273,7 @@ impl SessionRuntime {
         self.work_opaque_retry_blocked = false;
         self.work_diff_baseline = None;
         self.work_mutation_may_have_run = false;
+        self.work_edit_may_have_run = false;
         self.work_mcp_call_attempted = false;
         self.work_opaque_launch_dispatched = false;
         self.work_write_error_may_have_run = false;
@@ -2812,6 +2829,30 @@ impl SessionRuntime {
         self.config.verify_before_done = true;
     }
 
+    fn requires_mutation_verification(&self) -> bool {
+        self.config.require_mutation_verification == Some(true)
+            || self.unit_verify_command.is_some()
+    }
+
+    fn observes_turn_diff(&self) -> bool {
+        self.requires_mutation_verification()
+            || self.config.verify_before_done
+            || self.harness_checkpoint_owner
+            || self.outstanding_full_check
+            || self.config.granularity.is_some()
+    }
+
+    /// Uncommitted work the harness already proved belongs to this step has
+    /// not been verified merely because it predates the current turn.
+    pub(crate) fn inherit_step_verification(&mut self) {
+        if !self.refuse_unless_owned("inheriting step verification")
+            && self.requires_mutation_verification()
+            && self.unit_verification_exempt.is_none()
+        {
+            self.outstanding_full_check = true;
+        }
+    }
+
     /// Under the automatic policy, a full check that fails while the observed
     /// repository material (HEAD, status paths and raw fingerprints) still
     /// equals the turn's baseline, before and after the check, ends the turn
@@ -2828,7 +2869,7 @@ impl SessionRuntime {
             && !self.outstanding_full_check
             && !self.harness_checkpoint_owner
             && !self.settling_host_unit
-            && !self.work_unit.has_mutations()
+            && !self.work_edit_may_have_run
             && self.work_mutation_refusal.is_none()
             // MCP effects are invisible to the workspace evidence.
             && !self.work_mcp_call_attempted
@@ -3547,27 +3588,25 @@ impl SessionRuntime {
         attempts: &mut usize,
         events: &broadcast::Sender<RuntimeEvent>,
     ) -> VerifyGate {
-        let mut diff_mutated = false;
-        if self.harness_checkpoint_owner {
-            if let Some(before) = &self.work_diff_baseline {
-                if crate::resume::work_diff_baseline(&self.workspace.process_dir())
-                    .is_ok_and(|after| after.head != before.head)
-                {
-                    let detail = "a command committed before harness verification; review that commit separately; completion is not recorded".to_string();
-                    let _ = events.send(RuntimeEvent::Warning(detail.clone()));
-                    return VerifyGate::GiveUp(detail);
-                }
-            }
+        let root = self.workspace.process_dir();
+        let current = self
+            .work_diff_baseline
+            .as_ref()
+            .and_then(|_| crate::resume::work_diff_baseline(&root).ok());
+        let observed = self.work_diff_baseline.as_ref().zip(current.as_ref());
+        if self.harness_checkpoint_owner
+            && observed.is_some_and(|(before, after)| before.head != after.head)
+        {
+            let detail = "a command committed before harness verification; review that commit separately; completion is not recorded".to_string();
+            let _ = events.send(RuntimeEvent::Warning(detail.clone()));
+            return VerifyGate::GiveUp(detail);
         }
+        let observed_change = observed.map(|(before, after)| before != after);
+        let diff_mutated = observed_change == Some(true);
         if let (Some(profile), Some(baseline)) =
             (self.work_profile(), self.work_diff_baseline.clone())
         {
-            match crate::resume::inspect_work_diff(
-                &self.workspace.process_dir(),
-                profile,
-                Some(&baseline),
-                false,
-            ) {
+            match crate::resume::inspect_work_diff(&root, profile, Some(&baseline), false) {
                 Ok(inspection) => {
                     inspection.record(self, events);
                     if let Some(reason) = inspection.blocked {
@@ -3582,8 +3621,6 @@ impl SessionRuntime {
                     return VerifyGate::GiveUp(format!("cannot inspect bounded unit: {error}"));
                 }
             }
-            diff_mutated = crate::resume::work_diff_baseline(&self.workspace.process_dir())
-                .is_ok_and(|after| after != baseline);
         }
         // Denied review attempts spend the attempt budget, but cannot make an
         // unchanged readonly review an implementation unit requiring tests.
@@ -3593,9 +3630,11 @@ impl SessionRuntime {
             && self.engine.snapshot().resolved().profile() == localpilot_sandbox::Profile::ReadOnly
             && !self.work_mutation_may_have_run
             && !diff_mutated;
-        let bounded_mutation = self.config.granularity.is_some()
-            && !readonly_unchanged
-            && (self.work_unit.has_mutations() || self.work_mutation_may_have_run || diff_mutated);
+        // Only execution or observed changes are verification evidence. An
+        // attempted size reservation does not prove a write ran.
+        let required_for_work = self.requires_mutation_verification()
+            && (self.work_mutation_may_have_run || diff_mutated);
+        let required = required_for_work || self.outstanding_full_check;
         if !readonly_unchanged
             && !diff_mutated
             && (self.harness_checkpoint_owner || !self.work_unit.has_mutations())
@@ -3607,11 +3646,8 @@ impl SessionRuntime {
             }
         }
         let known_unchanged_readonly = self.verify_changed_work_only
-            && self.config.granularity.is_some()
-            && self.work_diff_baseline.is_some()
+            && observed_change == Some(false)
             && !self.harness_checkpoint_owner
-            && !diff_mutated
-            && !self.work_unit.has_mutations()
             && !self.work_mutation_may_have_run
             && !self.work_mcp_call_attempted
             && self.work_mutation_refusal.is_none();
@@ -3619,7 +3655,7 @@ impl SessionRuntime {
             && (known_unchanged_readonly
                 || self.config.answer_only
                 || !self.config.verify_before_done
-                    && (!bounded_mutation || self.unit_verification_exempt.is_some()))
+                    && (!required_for_work || self.unit_verification_exempt.is_some()))
         {
             return VerifyGate::Finalize;
         }
@@ -3628,7 +3664,6 @@ impl SessionRuntime {
         // `\\?\` working directory the gate would compile in `C:\Windows`, not the
         // workspace. Detection reads marker files, which resolve the same on either
         // spelling.
-        let root = self.workspace.process_dir();
         self.turn_has_changes = diff_mutated;
         let Some(check) = crate::resolve_verify_check(
             &root,
@@ -3647,8 +3682,8 @@ impl SessionRuntime {
                 })
             })
         }) else {
-            if bounded_mutation || self.outstanding_full_check {
-                let detail = "bounded unit has no applicable verification target; set verify_command or review an explicit verify: none reason before completion".to_string();
+            if required {
+                let detail = "work has no applicable verification target; set verify_command or review an explicit verify: none reason before completion".to_string();
                 let _ = events.send(RuntimeEvent::Warning(detail.clone()));
                 return VerifyGate::GiveUp(detail);
             }
@@ -3695,55 +3730,54 @@ impl SessionRuntime {
                 }
                 self.outstanding_full_check = false;
                 if self.harness_checkpoint_owner {
-                    if let (Some(profile), Some(baseline)) =
-                        (self.work_profile(), self.work_diff_baseline.clone())
-                    {
-                        match crate::resume::inspect_work_diff(
-                            &root,
-                            profile,
-                            Some(&baseline),
-                            false,
-                        ) {
-                            Ok(inspection) => {
-                                inspection.record(self, events);
-                                if let Some(reason) = inspection.blocked {
-                                    return VerifyGate::GiveUp(reason);
+                    if let Some(baseline) = self.work_diff_baseline.clone() {
+                        if let Some(profile) = self.work_profile() {
+                            match crate::resume::inspect_work_diff(
+                                &root,
+                                profile,
+                                Some(&baseline),
+                                false,
+                            ) {
+                                Ok(inspection) => {
+                                    inspection.record(self, events);
+                                    if let Some(reason) = inspection.blocked {
+                                        return VerifyGate::GiveUp(reason);
+                                    }
+                                }
+                                Err(error) => {
+                                    return VerifyGate::GiveUp(format!(
+                                        "cannot inspect verified unit: {error}"
+                                    ))
                                 }
                             }
-                            Err(error) => {
-                                return VerifyGate::GiveUp(format!(
-                                    "cannot inspect verified unit: {error}"
-                                ))
+                        }
+                        if let Ok(after) = crate::resume::work_diff_baseline(&root) {
+                            if after.head != baseline.head {
+                                return VerifyGate::GiveUp("verification committed before the harness checkpoint; completion is not recorded".into());
                             }
+                            self.turn_has_changes = after != baseline;
                         }
-                        if crate::resume::work_diff_baseline(&root)
-                            .is_ok_and(|after| after.head != baseline.head)
-                        {
-                            return VerifyGate::GiveUp("verification committed before the harness checkpoint; completion is not recorded".into());
-                        }
-                        self.turn_has_changes = crate::resume::work_diff_baseline(&root)
-                            .is_ok_and(|after| after != baseline);
                     }
                 }
-                if bounded_mutation && diff_mutated {
+                if required_for_work && diff_mutated && self.work_profile().is_some() {
                     self.capability_evidence.observe_verification();
                 }
                 VerifyGate::Finalize
             }
-            // A changed bounded unit cannot finish without its required signal.
+            // Work cannot finish without its required verification signal.
             // Legacy read-only opt-in checks retain their visible warning.
             CheckStatus::Denied | CheckStatus::Errored => {
                 let _ = events.send(RuntimeEvent::Warning(format!(
                     "verify-before-done: could not run `{}` ({:?}); {}",
                     check.program,
                     outcome.status,
-                    if bounded_mutation || self.outstanding_full_check {
-                        "bounded unit remains unverified; stopping"
+                    if required {
+                        "work remains unverified; stopping"
                     } else {
                         "finalizing without a verify signal"
                     }
                 )));
-                if bounded_mutation || self.outstanding_full_check {
+                if required {
                     let planned = self
                         .unit_verify_command
                         .as_deref()
@@ -3759,7 +3793,7 @@ impl SessionRuntime {
                 }
             }
             CheckStatus::Failed => {
-                if bounded_mutation {
+                if required_for_work && self.work_profile().is_some() {
                     self.capability_evidence.observe_outcome(false);
                 }
                 // A unit the envelope never refused can still repair within
@@ -4407,6 +4441,7 @@ impl SessionRuntime {
         self.work_mutation_refusal = None;
         self.work_opaque_retry_blocked = false;
         self.work_mutation_may_have_run = false;
+        self.work_edit_may_have_run = false;
         self.work_mcp_call_attempted = false;
         self.work_opaque_launch_dispatched = false;
         self.work_write_error_may_have_run = false;
@@ -4421,14 +4456,16 @@ impl SessionRuntime {
         }
         self.active_work_profile = None;
         self.active_work_profile = self.work_profile();
-        self.work_diff_baseline =
-            self.config.granularity.as_ref().and_then(|_| {
-                crate::resume::work_diff_baseline(&self.workspace.process_dir()).ok()
-            });
+        self.work_diff_baseline = self
+            .observes_turn_diff()
+            .then(|| crate::resume::work_diff_baseline(&self.workspace.process_dir()).ok())
+            .flatten();
         // Size this turn from the tracked working-tree state it starts with.
         // A failed snapshot keeps the safe HEAD fallback, which can over-count
         // pre-existing edits; the refusal diagnostic identifies that fallback.
-        if let Some(baseline) = self.work_diff_baseline.as_mut() {
+        if let (Some(_), Some(baseline)) =
+            (self.active_work_profile, self.work_diff_baseline.as_mut())
+        {
             let root = self.workspace.process_dir();
             let paths: Vec<String> = baseline.files.keys().cloned().collect();
             baseline.diff_base = crate::resume::snapshot_working_tree(&root, &paths)
@@ -5625,6 +5662,7 @@ impl SessionRuntime {
                             // that a child never partially wrote.
                             if name == "delegate" && self.agents.is_some() {
                                 self.work_mutation_may_have_run = true;
+                                self.work_edit_may_have_run = true;
                             }
                             // Delegation borrows the session's own collaborators
                             // so a child is built *from* them: its tools are a
@@ -5708,6 +5746,22 @@ impl SessionRuntime {
                                 Some(dispatch) => {
                                     bounded_write_dispatched =
                                         is_file_write_tool(name) && dispatch.mutation_may_have_run;
+                                    // A scratch script is not an edit to project
+                                    // material. Keep the invocation obligation,
+                                    // but do not send an unchanged scratch-only
+                                    // turn into an unrelated edit-repair loop.
+                                    self.work_edit_may_have_run |= bounded_write_dispatched
+                                        && self
+                                            .tools
+                                            .get(name)
+                                            .and_then(|tool| {
+                                                tool.effects(&active_call.input, &ctx).ok()
+                                            })
+                                            .is_some_and(|effects| {
+                                                effects.iter().any(|effect| {
+                                                    matches!(effect, Effect::WritePath { .. })
+                                                })
+                                            });
                                     // A typed pre-invoke denial never launched
                                     // the process; invoked failures still latch.
                                     self.work_opaque_launch_dispatched |=
@@ -6797,7 +6851,7 @@ mod tests {
                     std::fs::read_to_string(dir.path().join("created.txt")).unwrap(),
                     "new\n"
                 );
-                assert_eq!(runtime.work_diff_baseline.is_some(), envelope);
+                assert_eq!(runtime.work_diff_baseline.is_some(), envelope || harness);
                 let tracked = std::process::Command::new("git")
                     .args(["ls-tree", "-r", "HEAD"])
                     .current_dir(dir.path())

@@ -166,7 +166,7 @@ struct StepTrace {
     /// The step began its attempt: the session-start rules passed, so anything
     /// dirty when it stops is the step's own work.
     started: bool,
-    /// The work-envelope baseline this attempt was measured against.
+    /// The material baseline for the whole step, including carried work.
     baseline: Option<WorkDiffBaseline>,
 }
 
@@ -208,18 +208,16 @@ async fn run_step(
     // work: the attempt continues against the baseline the blocked one started
     // from, and the work envelope keeps measuring the whole step (#251).
     let carried = step_leftover(runtime.store(), root).filter(|left| left.step == step.number);
-    let work_baseline = runtime.work_profile().and_then(|_| match &carried {
+    // Sizing, CDN review and later resumes use the same step boundary.
+    let work_baseline = match &carried {
         Some(left) => Some(left.baseline()),
         None => work_diff_baseline(root).ok(),
-    });
+    };
     trace.baseline = work_baseline.clone();
-    // The CDN check judges what the step changed whether or not a work
-    // envelope is configured, so it needs a baseline of its own then.
-    let cdn_baseline = work_baseline.clone().or_else(|| match &carried {
-        Some(left) => Some(left.baseline()),
-        None => work_diff_baseline(root).ok(),
-    });
     runtime.set_harness_checkpoint_owner(step.scope);
+    if let Some(verification) = &step.verify {
+        runtime.set_work_unit_verification(verification);
+    }
     let progress_path = root.join("PROGRESS.md");
     let mut progress = progress.clone();
 
@@ -245,6 +243,7 @@ async fn run_step(
     if let Some(left) = &carried {
         let owned = left.owned_paths(root);
         if !owned.is_empty() {
+            runtime.inherit_step_verification();
             let _ = events.send(RuntimeEvent::Warning(format!(
                 "continuing step {} with the files its blocked attempt left: {}",
                 step.number,
@@ -278,9 +277,6 @@ async fn run_step(
         prompt.push_str(CDN_HINT);
     }
     if let Some(profile) = runtime.work_profile() {
-        if let Some(verification) = &step.verify {
-            runtime.set_work_unit_verification(verification);
-        }
         if step.scope.is_some_and(|scope| !profile.accepts(scope)) {
             return Ok(ResumeOutcome {
                 step_number: step.number, committed: false, paused: false, gate: Vec::new(),
@@ -288,11 +284,11 @@ async fn run_step(
             });
         }
         prompt.push_str(&format!("\n\n{}", profile.instruction()));
-        if let Some(crate::Verification::Command(command)) = &step.verify {
-            prompt.push_str(&format!(
-                "\nSmallest planned verification: {command}. The full ratified gate still applies."
-            ));
-        }
+    }
+    if let Some(crate::Verification::Command(command)) = &step.verify {
+        prompt.push_str(&format!(
+            "\nSmallest planned verification: {command}. The full ratified gate still applies."
+        ));
     }
     // The deciding attempt's gate outcomes, surfaced on the returned outcome.
     // Assigned on every loop pass before any exit that reads it.
@@ -419,7 +415,7 @@ async fn run_step(
         // pass.
         // Only what this step changed is judged; files that were already
         // dirty or committed are not the step's to fix.
-        let unpinned_cdn = cdn_baseline
+        let unpinned_cdn = work_baseline
             .as_ref()
             .and_then(|before| work_changed_paths(root, before).ok())
             .map(|changed| crate::cdn_pin::unpinned_in_files(root, &changed))
@@ -521,7 +517,7 @@ async fn run_step(
 
     // Commit the step.
     if let Some(before) = &work_baseline {
-        if git(root, &["rev-parse", "HEAD"])? != before.head {
+        if git(root, &["rev-parse", "HEAD"])?.trim() != before.head.trim() {
             return Ok(ResumeOutcome { step_number: step.number, committed: false, paused: false,
                 blocked_reason: Some("a command committed before the harness checkpoint; review that commit before resuming; no completion was recorded".to_string()), gate: final_gate });
         }
@@ -1807,7 +1803,7 @@ pub(crate) fn bounded_output(
 }
 
 pub(crate) fn work_diff_baseline(root: &Path) -> Result<WorkDiffBaseline, HarnessError> {
-    let head = git(root, &["rev-parse", "HEAD"])?;
+    let head = git(root, &["rev-parse", "HEAD"])?.trim().to_string();
     let files = sizing_status_paths(root)?
         .0
         .into_iter()

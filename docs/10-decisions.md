@@ -2,6 +2,34 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0253: Verification Obligations Follow Work Independently Of Work Limits
+
+**Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#262.
+
+**Context.** The sizing profile controlled both diff observation and mandatory
+completion verification. Switching sizing off could omit a required check or
+lose an approved step verifier.
+
+**Decision.** Product hosts select required mutation verification at runtime
+construction. Embedders that omit the policy retain their initial contract.
+Delegates inherit the resolved policy. Authorized invocation evidence and
+observed material changes establish the obligation, including partial errors
+and opaque effects that leave an empty Git diff. Verification can observe the
+same baseline with sizing disabled. Synthetic dirty trees remain a sizing
+operation.
+
+The existing check runner applies the selected verification command and the
+turn, step and phase boundaries. Reviewed step exemptions apply to the
+automatic work check. Explicit verification and outstanding full checks retain
+their obligations. Missing, denied, unavailable and failing required checks
+stop completion with the corresponding evidence. Positively known unchanged
+read-only turns remain eligible for the automatic exemption.
+
+**Consequences.** Switching work limits preserves the work's verification
+obligation and evidence. A resumed checkpoint still needs its full check to
+pass. Failed checks on unchanged opaque probes retain the unverified stop
+that keeps unrelated repair out of the turn.
+
 ## ADR-0252: Prepare An Empty Git Baseline At The Shared Agent Write Boundary
 
 **Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#261.

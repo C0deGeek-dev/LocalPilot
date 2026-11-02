@@ -1262,6 +1262,7 @@ mod tests {
                     interactivity: Interactivity::NonInteractive,
                     context_token_limit: 262_144,
                     granularity: Some(localpilot_config::GranularityConfig::default()),
+                    require_mutation_verification: Some(true),
                     tool_call_budget_max: Some(200),
                     tool_budget_explicit: false,
                     ..SessionConfig::default()

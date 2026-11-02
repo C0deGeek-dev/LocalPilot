@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Required verification follows the work when sizing limits are switched off.
+  The same check runner preserves mutation and checkpoint evidence, planned
+  verifiers and reviewed step exemptions across sizing settings (ADR-0253,
+  #262).
+
 - Ordinary and harness agents can initialize an empty project with Git and an
   empty initial commit before their first write, including without `/harness`
   or an active work envelope. Setup follows the existing permission profile;

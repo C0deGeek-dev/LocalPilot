@@ -1,5 +1,12 @@
 # Test Plan
 
+The verification limits controls execute the existing completion check with
+different sizing caps, after disabling sizing, and with sizing absent at startup.
+They compare durable check results and turn completion for passing, failing,
+unavailable and missing checks. Related fixtures exercise unchanged read-only
+work, opaque effects, partial errors, checkpoint continuation and planned
+exemptions. Resume fixtures count the executed turn, step and phase checks.
+
 Empty-project setup controls (`project_start::tests` and
 `session::tests::empty_project_*`) use native Git, disposable homes/configs and
 fake providers. They cover empty/runtime-only roots, unborn and existing HEADs,

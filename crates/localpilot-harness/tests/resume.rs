@@ -220,6 +220,14 @@ fn sample_repo() -> tempfile::TempDir {
 /// A `Bypass`-engine runtime over `provider`, so the gate's commands run without
 /// an interactive prompt — the permission path is exercised by other tests.
 fn runtime(root: &Path, provider: Arc<FakeProvider>) -> SessionRuntime {
+    runtime_with_policy(root, provider, None)
+}
+
+fn runtime_with_policy(
+    root: &Path,
+    provider: Arc<FakeProvider>,
+    require_mutation_verification: Option<bool>,
+) -> SessionRuntime {
     SessionRuntime::new(
         provider,
         ToolRegistry::with_builtins(),
@@ -231,6 +239,7 @@ fn runtime(root: &Path, provider: Arc<FakeProvider>) -> SessionRuntime {
         SessionConfig {
             interactivity: Interactivity::NonInteractive,
             trusted: true,
+            require_mutation_verification,
             ..SessionConfig::default()
         },
         Vec::new(),
@@ -574,6 +583,78 @@ async fn a_phase_cadence_check_is_skipped_until_the_plan_completes() {
         !outcome.gate.iter().any(|o| o.name == "audit"),
         "the phase-cadence check must not run before the plan boundary"
     );
+}
+
+#[tokio::test]
+async fn planned_verification_and_exemption_preserve_check_cadence_with_limits_off() {
+    use localpilot_store::SessionEventKind;
+
+    for envelope in [true, false] {
+        for exempt in [true, false] {
+            let dir = sample_repo();
+            let root = dir.path();
+            let verify = if exempt {
+                "none - the ratified step check covers this fixture"
+            } else {
+                "git status --porcelain"
+            };
+            write_bound_project(root, &format!("{PROGRESS}  - verify: {verify}\n"));
+            git(root, &["add", "PROGRESS.md"]);
+            git(root, &["commit", "-m", "select the fixture verification"]);
+            let provider = Arc::new(
+                FakeProvider::new()
+                    .tool_call(
+                        "write",
+                        "write_file",
+                        json!({"path":"hello.txt", "content":"hello\n"}),
+                    )
+                    .text("done"),
+            );
+            let mut rt = runtime_with_policy(root, provider, Some(true));
+            rt.set_granularity(localpilot_config::GranularityConfig::default());
+            rt.set_envelope_enabled(envelope);
+            let step = check("step-fixture", "git", &["rev-parse", "HEAD"], None);
+            let mut phase = check("phase-fixture", "git", &["rev-parse", "HEAD"], None);
+            phase.cadence = Cadence::Phase;
+            let rules = RuleEngine::with_baseline(&Default::default());
+            let outcome = resume_one_step(&mut rt, root, &rules, None, &[step, phase], 3)
+                .await
+                .unwrap();
+            assert!(
+                outcome.committed && outcome.blocked_reason.is_none(),
+                "{outcome:?}"
+            );
+            let ran = rt
+                .store()
+                .read_events(rt.session_id())
+                .unwrap()
+                .into_iter()
+                .filter_map(|event| {
+                    if let SessionEventKind::CheckRan {
+                        name,
+                        cadence,
+                        status,
+                        ..
+                    } = event.kind
+                    {
+                        assert_eq!(status, "passed");
+                        Some((name, cadence))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut expected = Vec::new();
+            if !exempt {
+                expected.push((localpilot_harness::VERIFY_CHECK_NAME.into(), "phase".into()));
+            }
+            expected.extend([
+                ("step-fixture".into(), "step".into()),
+                ("phase-fixture".into(), "phase".into()),
+            ]);
+            assert_eq!(ran, expected);
+        }
+    }
 }
 
 #[tokio::test]
@@ -1224,6 +1305,53 @@ async fn a_blocked_step_resumes_over_the_files_it_left_and_commits_them() {
     assert!(git_output(root, &["status", "--porcelain"])
         .lines()
         .all(|line| line.contains(".localpilot")));
+}
+
+#[tokio::test]
+async fn carried_step_work_requires_a_passing_check_even_without_new_edits_or_sizing() {
+    let dir = sample_repo();
+    let root = dir.path();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "write",
+                "write_file",
+                json!({"path":"hello.txt", "content":"hello\n"}),
+            )
+            .text("done")
+            .text("done")
+            .text("done")
+            .text("done"),
+    );
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let mut first = runtime_with_policy(root, provider, Some(true));
+    first.set_verify_before_done(false, Some("git not-a-real-262-check".into()));
+    let blocked = resume_one_step(&mut first, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+    assert!(!blocked.committed);
+    assert_eq!(
+        first.current_turn_verification(),
+        Some(localpilot_harness::CheckStatus::Failed)
+    );
+    assert_eq!(
+        localpilot_harness::step_leftover_paths(first.store(), root),
+        ["hello.txt"]
+    );
+    drop(first);
+
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let mut resumed = runtime_with_policy(root, Arc::clone(&provider), Some(true));
+    resumed.set_verify_before_done(false, Some("git status --porcelain".into()));
+    let outcome = resume_one_step(&mut resumed, root, &rules, None, &[], 3)
+        .await
+        .unwrap();
+    assert!(outcome.committed, "{outcome:?}");
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(
+        resumed.current_turn_verification(),
+        Some(localpilot_harness::CheckStatus::Passed)
+    );
 }
 
 #[tokio::test]

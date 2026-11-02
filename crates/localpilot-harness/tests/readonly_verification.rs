@@ -177,30 +177,33 @@ impl Tool for WriteThenDowngrade {
 
 #[tokio::test]
 async fn authorized_success_and_partial_error_remain_unverified_after_readonly_downgrade() {
-    for partial in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        // No Git baseline: execution metadata must preserve the obligation even
-        // though the custom tool reports no touches and may return an error.
-        std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
-        let handle = Arc::new(Mutex::new(None));
-        let mut tools = ToolRegistry::with_builtins();
-        tools.register(Box::new(WriteThenDowngrade {
-            handle: Arc::clone(&handle),
-            partial,
-        }));
-        let provider = FakeProvider::new()
-            .tool_call("write", "write_then_downgrade", json!({}))
-            .text("done");
-        let mut runtime = runtime(dir.path(), provider, Profile::Bypass, tools, false);
-        *handle.lock().unwrap() = Some(runtime.permission_engine_handle());
-        let (stop, events) = turn(&mut runtime).await;
-        assert_eq!(stop, StopReason::NoProgress, "partial={partial}");
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-            "changed\n"
-        );
-        assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error, .. } if id == "write" && *is_error == partial)));
-        assert!(events.iter().any(|e| matches!(e, RuntimeEvent::Warning(text) if text.contains("bounded unit remains unverified"))));
-        assert!(runtime.store().read_events(runtime.session_id()).unwrap().iter().any(|e| matches!(&e.kind, SessionEventKind::CheckRan { status, .. } if status == "denied")));
+    for envelope in [true, false] {
+        for partial in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            // No Git baseline: execution metadata must preserve the obligation even
+            // though the custom tool reports no touches and may return an error.
+            std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+            let handle = Arc::new(Mutex::new(None));
+            let mut tools = ToolRegistry::with_builtins();
+            tools.register(Box::new(WriteThenDowngrade {
+                handle: Arc::clone(&handle),
+                partial,
+            }));
+            let provider = FakeProvider::new()
+                .tool_call("write", "write_then_downgrade", json!({}))
+                .text("done");
+            let mut runtime = runtime(dir.path(), provider, Profile::Bypass, tools, false);
+            runtime.set_envelope_enabled(envelope);
+            *handle.lock().unwrap() = Some(runtime.permission_engine_handle());
+            let (stop, events) = turn(&mut runtime).await;
+            assert_eq!(stop, StopReason::NoProgress, "partial={partial}");
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "changed\n"
+            );
+            assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error, .. } if id == "write" && *is_error == partial)));
+            assert!(events.iter().any(|e| matches!(e, RuntimeEvent::Warning(text) if text.contains("work remains unverified"))));
+            assert!(runtime.store().read_events(runtime.session_id()).unwrap().iter().any(|e| matches!(&e.kind, SessionEventKind::CheckRan { status, .. } if status == "denied")));
+        }
     }
 }

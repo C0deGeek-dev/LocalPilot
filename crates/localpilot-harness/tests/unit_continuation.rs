@@ -344,6 +344,7 @@ async fn the_failed_full_check_stays_outstanding_after_an_unfinished_task() {
             "{statuses:?}"
         );
         let ran = statuses.len();
+        runtime.set_envelope_enabled(false);
         let (events, _rx) = broadcast::channel(1024);
         let resumed = runtime
             .run_turn("Is anything left?", &events, &CancellationToken::new())

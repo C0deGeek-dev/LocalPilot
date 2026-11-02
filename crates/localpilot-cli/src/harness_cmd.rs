@@ -1618,6 +1618,7 @@ fn build_runtime(
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             model: model.to_string(),
+            require_mutation_verification: Some(true),
             interactivity,
             trusted,
             context_token_limit,

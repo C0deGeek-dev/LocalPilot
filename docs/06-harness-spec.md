@@ -1530,9 +1530,14 @@ tool call first runs a **verification command** — "does this workspace build /
 do its tests pass?". On a failure the captured diagnostics are fed back as the
 next turn's input and the loop continues, so the model fixes the problem instead
 of stopping; on a pass (or no detectable target, or the gate off) the turn
-finalizes as before for read-only legacy opt-in checks. Changed bounded units
-also require this gate when the optional setting is off (ADR-0199), unless their
-harness step has an explicitly reviewed `verify: none - reason` exemption.
+finalizes as before for read-only legacy opt-in checks. Authorized work that
+may have changed material also requires this gate when the optional setting is
+off, including with sizing disabled (ADR-0253). The runtime uses execution
+evidence and observed Git changes. A partial error or opaque command can owe a
+check even with an empty diff. Approved step commands and `verify: none - reason`
+exemptions apply with every sizing setting. The exemption covers the automatic
+work check, while explicit verification, outstanding full checks and ratified
+step and phase checks keep their own obligations.
 
 A file the unit creates is sized against its own allowance, `max_new_file_lines`
 (200 lines under a 32,000-token context budget, otherwise 600; a configured
