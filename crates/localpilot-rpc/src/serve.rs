@@ -196,6 +196,7 @@ where
             | ClientCommand::GatewayRegister
             | ClientCommand::DeviceAttach { .. }
             | ClientCommand::DeviceSessions { .. }
+            | ClientCommand::RelayHost { .. }
             | ClientCommand::PairBegin { .. }
             | ClientCommand::PairExchange { .. } => {
                 emit(
@@ -353,6 +354,7 @@ where
             | ClientCommand::GatewayRegister
             | ClientCommand::DeviceAttach { .. }
             | ClientCommand::DeviceSessions { .. }
+            | ClientCommand::RelayHost { .. }
             | ClientCommand::PairBegin { .. }
             | ClientCommand::PairExchange { .. } => {
                                 emit(writer, id, ServerEvent::Error {

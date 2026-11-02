@@ -398,6 +398,8 @@ fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harnes
     }
 }
 
+mod relay;
+
 // --- The server session factory ---------------------------------------------
 
 /// The serve-loop halves of one session's wire approver.
@@ -495,6 +497,11 @@ struct HostMap {
     /// Whether a remote gateway may register, and the workspace it would
     /// reach.
     remote: Arc<RemoteGate>,
+    /// Sessions other local processes run and share with devices (relays).
+    relays: Arc<StdMutex<HashMap<SessionId, Arc<relay::RelayedSession>>>>,
+    /// How long a device waits for a shared session's first decision on a
+    /// command (`None`: the default 30 s; tests shorten it).
+    relay_deadline: Option<Duration>,
 }
 
 /// The server's side of `[remote]`: a gateway may register only while remote
@@ -959,6 +966,26 @@ where
         ClientCommand::GatewayRegister => {
             return serve_gateway_control(&mut reader, &mut write, hosts, reply_id).await;
         }
+        ClientCommand::RelayHost {
+            session,
+            owner_generation,
+            holder_instance,
+            share,
+        } => {
+            // A local connection (same OS user over the owner-only pipe).
+            return relay::serve_relay(
+                &mut reader,
+                &mut write,
+                hosts,
+                store,
+                reply_id,
+                session,
+                owner_generation,
+                &holder_instance,
+                &share,
+            )
+            .await;
+        }
         ClientCommand::DeviceAttach {
             capability,
             credential,
@@ -1029,6 +1056,33 @@ where
         }
     };
     let lease = lease.unwrap_or_default();
+    // Devices reach only sessions shared with them (relayed sessions); every
+    // other session of the workspace stays local.
+    if matches!(principal, Principal::Device { .. }) {
+        let Some(relayed) = hosts.relayed(&target) else {
+            emit(
+                &mut write,
+                reply_id,
+                ServerEvent::Error {
+                    message: "this session is not shared".to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        };
+        return relay::serve_relayed_device(
+            &mut reader,
+            &mut write,
+            hosts,
+            reply_id,
+            principal,
+            lease,
+            relayed,
+            &capabilities,
+            since,
+        )
+        .await;
+    }
     if lease.is_cancelled() {
         emit(
             &mut write,
@@ -1133,11 +1187,12 @@ where
     );
     guarded!(attached);
     let server_ctx = ServerContext { hosts, store };
+    let read_stored = || read_history(store, session_id, true);
+    let read_admission = || admission_of(&host);
     let feed_ctx = FeedContext {
         feed: &served.feed,
-        store,
-        session_id,
-        host: &host,
+        history: &read_stored,
+        admission: &read_admission,
     };
     // The replay, snapshot or closure goes through the same delivery as live
     // records, so a replayed resync or closure is handled the same way, each
@@ -1598,7 +1653,9 @@ async fn list_sessions_for_device<W: AsyncWrite + Unpin>(
     if authorized().is_err() {
         return Ok(());
     }
-    let items = device_listing(list_sessions(&ServerContext { hosts, store }).await);
+    // Devices see only shared (relayed) sessions.
+    let _ = store;
+    let items = device_listing(hosts.relayed_listing());
     let reply = emit(write, reply_id, ServerEvent::Sessions { items });
     match while_authorized(&lease, &authorized, reply).await {
         Some(written) => written?,
@@ -1954,9 +2011,10 @@ enum Flow {
 /// What a connection needs to reach its session's feed state.
 struct FeedContext<'a> {
     feed: &'a SessionFeed,
-    store: &'a Store,
-    session_id: SessionId,
-    host: &'a SessionHost,
+    /// The stored history tail a fresh snapshot carries.
+    history: &'a (dyn Fn() -> (Vec<localpilot_rpc::HistoryMessage>, bool) + Sync),
+    /// The session's admission state, read when a snapshot is taken.
+    admission: &'a (dyn Fn() -> Admission + Sync),
 }
 
 /// The host's current admission state, for a snapshot.
@@ -2037,8 +2095,8 @@ async fn resync<W: AsyncWrite + Unpin>(
     ctx: &FeedContext<'_>,
 ) -> std::io::Result<Flow> {
     if view.resume {
-        let history = read_history(ctx.store, ctx.session_id, true);
-        let (snapshot, head) = ctx.feed.snapshot(&history, &|| admission_of(ctx.host));
+        let history = (ctx.history)();
+        let (snapshot, head) = ctx.feed.snapshot(&history, ctx.admission);
         if let ServerEvent::SessionClosed { reason } = snapshot {
             emit_closure(write, view, None, reason).await?;
             return Ok(Flow::Stop);
@@ -3313,7 +3371,7 @@ mod tests {
                 let store = store.clone();
                 connections.push(tokio::spawn(async move {
                     let (read, write) = tokio::io::split(conn);
-                    serve_connection(
+                    let served = serve_connection(
                         read,
                         write,
                         &registry,
@@ -3322,8 +3380,12 @@ mod tests {
                         &store,
                         Profile::Bypass,
                     )
-                    .await
-                    .unwrap();
+                    .await;
+                    // A client that hung up ends its connection normally; any
+                    // other failure fails the test that waits for the server.
+                    if let Err(error) = served {
+                        assert!(client_went_away(&error), "the connection failed: {error:?}");
+                    }
                 }));
             }
             for connection in connections {
@@ -3331,6 +3393,22 @@ mod tests {
             }
         });
         (endpoint, handle)
+    }
+
+    /// Whether a connection error only says the client went away (on Windows,
+    /// a named pipe being closed is error 232 or 109).
+    fn client_went_away(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                matches!(
+                    io.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::UnexpectedEof
+                ) || matches!(io.raw_os_error(), Some(109 | 232))
+            })
+        })
     }
 
     async fn dial(endpoint: &Endpoint) -> Conn {
@@ -4300,11 +4378,12 @@ mod tests {
         let store = factory.store();
         let (_registry, hosts, id, host, served) = served_session(&factory).await;
         hosts.close_served(id, "closed after inactivity");
+        let read_stored = || read_history(&store, id, true);
+        let read_admission = || admission_of(&host);
         let ctx = FeedContext {
             feed: &served.feed,
-            store: &store,
-            session_id: id,
-            host: &host,
+            history: &read_stored,
+            admission: &read_admission,
         };
 
         // A resume client that lagged across the close gets the closure, not a
@@ -5169,8 +5248,9 @@ mod tests {
     async fn an_observing_device_lists_sessions_without_opening_any() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
         let hosts = HostMap::default();
-        let (endpoint, server) = spawn_server_on(factory, 8, hosts.clone());
-        let (_local_reader, _local_write, session) = local_session(&endpoint).await;
+        let (endpoint, server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let shared = share(&endpoint, &factory, &hosts).await;
+        let session = shared.session();
         let (_gateway, capability) = register_gateway(&endpoint).await;
         let (device, credential) = pair_device(
             &endpoint,
@@ -5224,7 +5304,8 @@ mod tests {
     async fn an_attached_device_cannot_send_device_sessions() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
         let hosts = HostMap::default();
-        let (endpoint, server) = spawn_server_on(factory, 8, hosts.clone());
+        let (endpoint, server) = spawn_server_on(factory.clone(), 9, hosts.clone());
+        let shared = share(&endpoint, &factory, &hosts).await;
         let (_gateway, capability) = register_gateway(&endpoint).await;
         let (_, credential) = pair_device(
             &endpoint,
@@ -5237,7 +5318,7 @@ mod tests {
         let mut reader = JsonRecordReader::new(read);
         send_command(
             &mut write,
-            device_attach(&capability, &credential, AttachTarget::OpenNew),
+            device_attach(&capability, &credential, shared.target()),
         )
         .await
         .unwrap();
@@ -5331,8 +5412,8 @@ mod tests {
     async fn an_observing_device_may_watch_but_not_act() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
         let hosts = HostMap::default();
-        let (endpoint, server) = spawn_server_on(factory, 5, hosts.clone());
-        let (local_reader, local_write, session) = local_session(&endpoint).await;
+        let (endpoint, server) = spawn_server_on(factory.clone(), 5, hosts.clone());
+        let shared = host_share(&endpoint_dial(&endpoint), &hosts, &factory, false, false).await;
         let (gateway, capability) = register_gateway(&endpoint).await;
         let (_, credential) = pair_device(
             &endpoint,
@@ -5342,24 +5423,18 @@ mod tests {
         )
         .await;
 
-        // Watching an existing session: allowed.
+        // Watching the shared session: allowed, and reading its commands too.
         let (mut reader, mut write, reply) = first_record(
             &endpoint,
-            device_attach(
-                &capability,
-                &credential,
-                AttachTarget::ResumeId {
-                    session_id: session,
-                },
-            ),
+            device_attach(&capability, &credential, shared.target()),
         )
         .await;
         assert!(matches!(reply, ServerEvent::Attached { .. }), "{reply:?}");
         read_event(&mut reader).await; // snapshot
-        send_with_id(&mut write, "s1", ClientCommand::Status).await;
+        send_with_id(&mut write, "s1", ClientCommand::Commands).await;
         assert!(matches!(
             reply_to(&mut reader, "s1").await,
-            ServerEvent::Status { .. }
+            ServerEvent::Commands { .. }
         ));
         // Acting: refused, every kind.
         for (rid, command) in [
@@ -5389,7 +5464,7 @@ mod tests {
         }
         drop((reader, write));
 
-        // Opening a new session needs `control`: refused, and never local.
+        // Opening a new session: refused, and never local.
         let (_, _, reply) = first_record(
             &endpoint,
             device_attach(&capability, &credential, AttachTarget::OpenNew),
@@ -5397,15 +5472,20 @@ mod tests {
         .await;
         assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
 
-        drop((gateway, local_reader, local_write));
+        drop(gateway);
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
         let _ = timeout(DEADLINE, server).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_controlling_device_acts_under_its_own_identity() {
-        let factory = Arc::new(FakeFactory::asking(asking_provider(&[])));
+        let factory = Arc::new(FakeFactory::new(asking_provider(&[])));
         let hosts = HostMap::default();
-        let (endpoint, server) = spawn_server_on(factory, 3, hosts.clone());
+        let (endpoint, server) = spawn_server_on(factory.clone(), 4, hosts.clone());
+        let shared = host_share(&endpoint_dial(&endpoint), &hosts, &factory, true, false).await;
         let (gateway, capability) = register_gateway(&endpoint).await;
         let (device_id, credential) = pair_device(
             &endpoint,
@@ -5416,7 +5496,7 @@ mod tests {
         .await;
         let (mut reader, mut write, reply) = first_record(
             &endpoint,
-            device_attach(&capability, &credential, AttachTarget::OpenNew),
+            device_attach(&capability, &credential, shared.target()),
         )
         .await;
         assert!(matches!(reply, ServerEvent::Attached { .. }), "{reply:?}");
@@ -5451,6 +5531,10 @@ mod tests {
             .any(|line| line.contains("\"attached\"") && line.contains(&device_id)));
 
         drop((reader, write, gateway));
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
         let _ = timeout(DEADLINE, server).await;
     }
 
@@ -5458,7 +5542,8 @@ mod tests {
     async fn a_device_connection_never_falls_back_to_local() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
         let hosts = HostMap::default();
-        let (endpoint, server) = spawn_server_on(factory, 6, hosts.clone());
+        let (endpoint, server) = spawn_server_on(factory.clone(), 7, hosts.clone());
+        let shared = share(&endpoint, &factory, &hosts).await;
         let (gateway, capability) = register_gateway(&endpoint).await;
         let (device_id, credential) = pair_device(
             &endpoint,
@@ -5512,7 +5597,7 @@ mod tests {
         // Its capability dies with it, and so do the device connections on it.
         let (mut device, _device_write, reply) = first_record(
             &endpoint,
-            device_attach(&capability, &credential, AttachTarget::OpenNew),
+            device_attach(&capability, &credential, shared.target()),
         )
         .await;
         assert!(matches!(reply, ServerEvent::Attached { .. }));
@@ -5526,6 +5611,7 @@ mod tests {
             &record.event,
             ServerEvent::SessionClosed { reason } if reason.contains("gateway")
         )));
+        drop(shared);
         let _ = timeout(DEADLINE, server).await;
     }
 
@@ -5533,7 +5619,8 @@ mod tests {
     async fn a_revoked_device_stops_receiving_and_cannot_retry() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
         let hosts = HostMap::default();
-        let (endpoint, server) = spawn_server_on(factory, 4, hosts.clone());
+        let (endpoint, server) = spawn_server_on(factory.clone(), 5, hosts.clone());
+        let shared = host_share(&endpoint_dial(&endpoint), &hosts, &factory, false, false).await;
         let (gateway, capability) = register_gateway(&endpoint).await;
         let (device_id, credential) = pair_device(
             &endpoint,
@@ -5544,7 +5631,7 @@ mod tests {
         .await;
         let (mut reader, _write, reply) = first_record(
             &endpoint,
-            device_attach(&capability, &credential, AttachTarget::OpenNew),
+            device_attach(&capability, &credential, shared.target()),
         )
         .await;
         assert!(matches!(reply, ServerEvent::Attached { .. }));
@@ -5567,11 +5654,15 @@ mod tests {
         // A new attach with the same credential is refused.
         let (_, _, reply) = first_record(
             &endpoint,
-            device_attach(&capability, &credential, AttachTarget::OpenNew),
+            device_attach(&capability, &credential, shared.target()),
         )
         .await;
         assert!(matches!(reply, ServerEvent::Error { .. }));
         drop(gateway);
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
         let _ = timeout(DEADLINE, server).await;
     }
 
@@ -5779,6 +5870,7 @@ mod tests {
         let hosts = HostMap::default();
         let registry = SessionRegistry::new();
         let store = factory.store();
+        let shared = relay::relayed_for_test(&hosts);
         let lease = hosts.gateways.register().unwrap();
         let capability = lease.capability.expose().to_string();
         let (standing, credential) = hosts
@@ -5811,7 +5903,7 @@ mod tests {
             ClientCommand::DeviceAttach {
                 capability: localpilot_rpc::WireSecret::new(capability),
                 credential: localpilot_rpc::WireSecret::new(credential.expose()),
-                target: AttachTarget::OpenNew,
+                target: AttachTarget::ResumeId { session_id: shared },
                 capabilities: resume_caps(),
                 since: None,
             },
@@ -5854,6 +5946,7 @@ mod tests {
         let hosts = HostMap::default();
         let registry = SessionRegistry::new();
         let store = factory.store();
+        let shared = relay::relayed_for_test(&hosts);
         let lease = hosts.gateways.register().unwrap();
         let capability = lease.capability.expose().to_string();
         let (standing, credential) = hosts
@@ -5887,7 +5980,7 @@ mod tests {
             ClientCommand::DeviceAttach {
                 capability: localpilot_rpc::WireSecret::new(capability),
                 credential: localpilot_rpc::WireSecret::new(credential.expose()),
-                target: AttachTarget::OpenNew,
+                target: AttachTarget::ResumeId { session_id: shared },
                 capabilities: resume_caps(),
                 since: None,
             },
@@ -5901,15 +5994,13 @@ mod tests {
 
         // Attached and caught up; now a turn's answer is written while
         // nobody reads.
-        send_command(
-            &mut client_write,
-            ClientCommand::Prompt {
-                text: "go".to_string(),
-                disposition: InputDisposition::Immediate,
-            },
-        )
-        .await
-        .unwrap();
+        hosts
+            .relayed(&AttachTarget::ResumeId { session_id: shared })
+            .unwrap()
+            .feed
+            .relay(ServerEvent::TextDelta {
+                text: answer.to_string(),
+            });
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Revoked from elsewhere while the live write is blocked; wait past
@@ -5946,74 +6037,36 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_device_revoked_while_its_command_runs_never_gets_the_reply() {
-        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("ran")));
         let hosts = HostMap::default();
-        let registry = SessionRegistry::new();
-        let store = factory.store();
-        let lease = hosts.gateways.register().unwrap();
-        let capability = lease.capability.expose().to_string();
-        let (standing, credential) = hosts
-            .devices
-            .add("phone", localpilot_rpc::Scope::Control, false)
-            .unwrap();
-
-        let (server_read, mut client_write) = tokio::io::duplex(64 * 1024);
-        let (client_read, server_write) = tokio::io::duplex(64 * 1024);
-        let connection = tokio::spawn({
-            let hosts = hosts.clone();
-            let factory = factory.clone();
-            async move {
-                serve_connection(
-                    server_read,
-                    server_write,
-                    &registry,
-                    &hosts,
-                    factory.as_ref(),
-                    &store,
-                    Profile::Bypass,
-                )
-                .await
-            }
-        });
-        let mut reader = JsonRecordReader::new(client_read);
-        send_command(
-            &mut client_write,
-            ClientCommand::DeviceAttach {
-                capability: localpilot_rpc::WireSecret::new(capability),
-                credential: localpilot_rpc::WireSecret::new(credential.expose()),
-                target: AttachTarget::OpenNew,
-                capabilities: resume_caps(),
-                since: None,
-            },
-        )
-        .await
-        .unwrap();
-        let attachment = read_until(&mut reader, |event| {
-            matches!(event, ServerEvent::Snapshot { .. })
-        })
-        .await;
-        let instance = attachment
-            .iter()
-            .find_map(|event| match event {
-                ServerEvent::Attached { instance, .. } => Some(instance.clone()),
-                _ => None,
-            })
-            .unwrap();
-
-        // Hold the session list so the command is still running when the
-        // device is revoked; the transport stays writable throughout.
-        let held = hosts.inner.lock().await;
-        send_keyed(
-            &mut client_write,
-            "s1",
-            &instance,
-            1,
-            ClientCommand::Sessions,
+        let (endpoint, server) = spawn_server_on(factory.clone(), 4, hosts.clone());
+        // The session's host holds the command undecided until released.
+        let shared = host_share(&endpoint_dial(&endpoint), &hosts, &factory, false, true).await;
+        let (gateway, capability) = register_gateway(&endpoint).await;
+        let (device_id, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
         )
         .await;
+        let (mut reader, mut write, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, shared.target()),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Attached { .. }), "{reply:?}");
+        let instance = match reply {
+            ServerEvent::Attached { instance, .. } => instance,
+            _ => unreachable!(),
+        };
+        read_event(&mut reader).await; // snapshot
+
+        // The command is on its way to the source when the device is revoked.
+        send_keyed(&mut write, "p1", &instance, 1, prompt("go")).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(hosts.devices.revoke(&standing.id).unwrap());
-        drop(held);
+        assert!(hosts.devices.revoke(&device_id).unwrap());
+        shared.release();
 
         let mut after = Vec::new();
         // Until EOF, or a record cut off when the connection was dropped.
@@ -6023,20 +6076,30 @@ mod tests {
         {
             after.push(value);
         }
-        timeout(DEADLINE, connection)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
         let replied = after
             .iter()
             .filter_map(|value| serde_json::from_value::<ServerRecord>(value.clone()).ok())
-            .any(|record| matches!(record.event, ServerEvent::Sessions { .. }));
+            .any(|record| {
+                record.id.as_deref() == Some("p1")
+                    && matches!(
+                        record.event,
+                        ServerEvent::Accepted { .. } | ServerEvent::Queued { .. }
+                    )
+            });
         assert!(
             !replied,
             "the reply was delivered after revocation: {after:?}"
         );
-        drop(lease);
+        // And nothing ran: the host decides a request immediately before
+        // acting, after the revocation.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(shared_turns(&factory, shared.session), 0, "no turn started");
+        drop((write, gateway));
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
+        let _ = timeout(DEADLINE, server).await;
     }
 
     // --- the remote gateway, end to end --------------------------------------
@@ -6371,13 +6434,16 @@ mod tests {
         use futures::SinkExt;
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("hello phone")));
         let hosts = gateway_hosts();
-        let (address, stop) = start_gateway(&hosts, &factory).await;
+        let connect = daemon_dial(&hosts, &factory);
+        let (address, stop) = start_gateway_with(&hosts, connect.clone()).await;
+        let shared = host_share(&connect, &hosts, &factory, false, false).await;
         let (_, credential) = hosts
             .devices
             .add("phone", localpilot_rpc::Scope::Control, false)
             .unwrap();
 
-        let mut socket = open_socket(address, "new=1", GATEWAY_ORIGIN, Some(credential.expose()))
+        let watch = format!("session={}", shared.session);
+        let mut socket = open_socket(address, &watch, GATEWAY_ORIGIN, Some(credential.expose()))
             .await
             .expect("upgraded");
         let first = next_frame(&mut socket).await.unwrap();
@@ -6402,6 +6468,10 @@ mod tests {
                 break;
             }
         }
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
         stop.cancel();
     }
 
@@ -6410,6 +6480,7 @@ mod tests {
         use futures::SinkExt;
         let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
         let hosts = gateway_hosts();
+        let watch = format!("session={}", relay::relayed_for_test(&hosts));
         let (address, stop) = start_gateway(&hosts, &factory).await;
         let (standing, credential) = hosts
             .devices
@@ -6419,15 +6490,15 @@ mod tests {
 
         // Another origin, no cookie, a wrong cookie, no session choice.
         assert!(
-            open_socket(address, "new=1", "https://evil.example", Some(&credential))
+            open_socket(address, &watch, "https://evil.example", Some(&credential))
                 .await
                 .is_err()
         );
-        assert!(open_socket(address, "new=1", GATEWAY_ORIGIN, None)
+        assert!(open_socket(address, &watch, GATEWAY_ORIGIN, None)
             .await
             .is_err());
         assert!(
-            open_socket(address, "new=1", GATEWAY_ORIGIN, Some("d.00.11"))
+            open_socket(address, &watch, GATEWAY_ORIGIN, Some("d.00.11"))
                 .await
                 .is_err()
         );
@@ -6450,7 +6521,7 @@ mod tests {
             "{\"v\":1,\"command\":{\"type\":\"status\"}}\n{\"v\":1,\"command\":{\"type\":\"gateway_register\"}}"
                 .to_string(),
         ] {
-            let mut socket = open_socket(address, "new=1", GATEWAY_ORIGIN, Some(&credential))
+            let mut socket = open_socket(address, &watch, GATEWAY_ORIGIN, Some(&credential))
                 .await
                 .unwrap();
             next_frame(&mut socket).await.unwrap(); // attached
@@ -6470,7 +6541,7 @@ mod tests {
         // A revoked device is refused at the upgrade.
         assert!(hosts.devices.revoke(&standing.id).unwrap());
         assert!(
-            open_socket(address, "new=1", GATEWAY_ORIGIN, Some(&credential))
+            open_socket(address, &watch, GATEWAY_ORIGIN, Some(&credential))
                 .await
                 .is_err()
         );
@@ -6483,25 +6554,19 @@ mod tests {
         let answer = "z".repeat(512 * 1024);
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text(&answer)));
         let hosts = gateway_hosts();
+        let shared = relay::relayed_for_test(&hosts);
+        let watch = format!("session={shared}");
         let (address, stop) = start_gateway(&hosts, &factory).await;
         let (_, credential) = hosts
             .devices
             .add("phone", localpilot_rpc::Scope::Control, false)
             .unwrap();
-        let mut socket = open_socket(address, "new=1", GATEWAY_ORIGIN, Some(credential.expose()))
+        let mut socket = open_socket(address, &watch, GATEWAY_ORIGIN, Some(credential.expose()))
             .await
             .unwrap();
         next_frame(&mut socket).await.unwrap(); // attached
-        {
-            use futures::SinkExt;
-            let prompt = serde_json::json!({"v": 1, "command": {"type": "prompt", "text": "go"}});
-            socket
-                .send(tokio_tungstenite::tungstenite::Message::text(
-                    prompt.to_string(),
-                ))
-                .await
-                .unwrap();
-        }
+                                                // The shared session's answer is written while the phone does not read.
+        source_says(&hosts, shared, &answer);
         // The phone stops reading while the answer is written.
         tokio::time::sleep(Duration::from_millis(300)).await;
         stop.cancel();
@@ -6661,27 +6726,6 @@ mod tests {
         )
     }
 
-    /// Send a prompt on an attached socket and wait for `text` in the answer.
-    async fn prompt_and_expect(
-        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-        text: &str,
-    ) {
-        use futures::SinkExt;
-        let prompt = serde_json::json!({"v": 1, "command": {"type": "prompt", "text": "go"}});
-        socket
-            .send(tokio_tungstenite::tungstenite::Message::text(
-                prompt.to_string(),
-            ))
-            .await
-            .unwrap();
-        loop {
-            let record = next_frame(socket).await.expect("the turn streams");
-            if matches!(&record.event, ServerEvent::TextDelta { text: t } if t.contains(text)) {
-                return;
-            }
-        }
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn one_pairing_reaches_two_workspaces_through_one_gateway() {
         let home = tempfile::tempdir().unwrap();
@@ -6724,22 +6768,23 @@ mod tests {
         );
 
         for (space, answer) in [(&a, "from alpha"), (&b, "from beta")] {
-            let query = format!("workspace={}&new=1", space.workspace.id);
+            let shared = relay::relayed_for_test(&space.hosts);
+            let query = format!("workspace={}&session={shared}", space.workspace.id);
             let mut socket = open_socket(address, &query, GATEWAY_ORIGIN, Some(&credential))
                 .await
                 .expect("upgraded");
             next_frame(&mut socket).await.unwrap(); // attached
-            prompt_and_expect(&mut socket, answer).await;
+                                                    // Each workspace's server serves its own shared session.
+            source_says(&space.hosts, shared, answer);
+            expect_text(&mut socket, answer).await;
         }
-        assert_eq!(
-            a.hosts.inner.lock().await.len(),
-            1,
-            "alpha served its own session"
+        assert!(
+            a.hosts.inner.lock().await.is_empty(),
+            "nothing opened in alpha"
         );
-        assert_eq!(
-            b.hosts.inner.lock().await.len(),
-            1,
-            "beta served its own session"
+        assert!(
+            b.hosts.inner.lock().await.is_empty(),
+            "nothing opened in beta"
         );
         stop.cancel();
     }
@@ -6921,9 +6966,11 @@ mod tests {
             Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
         )
         .await;
+        let shared_a = relay::relayed_for_test(&a.hosts);
+        let shared_b = relay::relayed_for_test(&b.hosts);
         let mut on_a = open_socket(
             address,
-            &format!("workspace={}&new=1", a.workspace.id),
+            &format!("workspace={}&session={shared_a}", a.workspace.id),
             GATEWAY_ORIGIN,
             Some(&credential),
         )
@@ -6932,7 +6979,7 @@ mod tests {
         next_frame(&mut on_a).await.unwrap();
         let mut on_b = open_socket(
             address,
-            &format!("workspace={}&new=1", b.workspace.id),
+            &format!("workspace={}&session={shared_b}", b.workspace.id),
             GATEWAY_ORIGIN,
             Some(&credential),
         )
@@ -6944,7 +6991,8 @@ mod tests {
         cut.cancel();
         while next_frame(&mut on_b).await.is_some() {}
         assert!(!stop.is_cancelled());
-        prompt_and_expect(&mut on_a, "from alpha").await;
+        source_says(&a.hosts, shared_a, "from alpha");
+        expect_text(&mut on_a, "from alpha").await;
         stop.cancel();
     }
 
@@ -7050,7 +7098,11 @@ mod tests {
         let (prefix, rest) = credential.split_once('.').unwrap();
         let (id, secret) = rest.split_once('.').unwrap();
         let forged = format!("{prefix}.{id}.{}", "0".repeat(secret.len()));
-        let query = format!("workspace={}&new=1", a.workspace.id);
+        let query = format!(
+            "workspace={}&session={}",
+            a.workspace.id,
+            relay::relayed_for_test(&a.hosts)
+        );
         let mut statuses = Vec::new();
         for _ in 0..5 {
             statuses.push(http(address, &upgrade_request(&query, &forged)).await.0);
@@ -7074,7 +7126,11 @@ mod tests {
             ..crate::remote_gateway::Limits::default()
         };
         let (_home, a, credential, address, stop) = limited_gateway(limits).await;
-        let query = format!("workspace={}&new=1", a.workspace.id);
+        let query = format!(
+            "workspace={}&session={}",
+            a.workspace.id,
+            relay::relayed_for_test(&a.hosts)
+        );
         let mut first = open_socket(address, &query, GATEWAY_ORIGIN, Some(&credential))
             .await
             .unwrap();
@@ -7320,45 +7376,6 @@ mod tests {
         stop.cancel();
     }
 
-    /// Open a session on the daemon and give it a long name; the connection
-    /// stays open, so the session stays live.
-    async fn named_session(connect: &Connect, name: &str) -> Box<dyn std::any::Any + Send> {
-        let stream = connect().await.unwrap();
-        let (read, mut write) = tokio::io::split(stream);
-        let mut reader = JsonRecordReader::new(read);
-        send_command(
-            &mut write,
-            ClientCommand::Attach {
-                target: AttachTarget::OpenNew,
-                capabilities: resume_caps(),
-                since: None,
-            },
-        )
-        .await
-        .unwrap();
-        read_until(&mut reader, |event| {
-            matches!(event, ServerEvent::Snapshot { .. })
-        })
-        .await;
-        send_with_id(
-            &mut write,
-            "n",
-            ClientCommand::RunCommand {
-                name: "name".to_string(),
-                args: name.to_string(),
-            },
-        )
-        .await;
-        read_until(&mut reader, |event| {
-            matches!(
-                event,
-                ServerEvent::CommandResult { .. } | ServerEvent::Rejected { .. }
-            )
-        })
-        .await;
-        Box::new((reader, write))
-    }
-
     /// One `/api/sessions` request over a 4 KiB pipe; when `revoke` is set,
     /// the device is revoked once the response has stalled. The bytes the
     /// client finally receives.
@@ -7393,9 +7410,10 @@ mod tests {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
         let hosts = gateway_hosts();
         let connect = daemon_dial(&hosts, &factory);
-        let mut open = Vec::new();
-        for n in 0..4 {
-            open.push(named_session(&connect, &format!("session {n} {}", "n".repeat(1500))).await);
+        // Devices list shared sessions only: share enough of them that the
+        // listing is far larger than the pipe it is written into.
+        for _ in 0..80 {
+            relay::relayed_for_test(&hosts);
         }
         let workspace = crate::remote_gateway::Workspace {
             id: GATEWAY_WORKSPACE.to_string(),
@@ -7431,7 +7449,6 @@ mod tests {
             cut < full,
             "only what reached the pipe before: {cut} of {full}"
         );
-        drop(open);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7445,7 +7462,7 @@ mod tests {
         let id = crate::server_index::discovery_id(&root).unwrap();
         let hosts = hosts_for(&id, Arc::new(DeviceRegistry::open(&registry_dir, &root)));
         // The model runs a shell command, which an asking session asks about.
-        let factory = Arc::new(FakeFactory::asking(asking_provider(&[])));
+        let factory = Arc::new(FakeFactory::new(asking_provider(&[])));
         let workspace = crate::remote_gateway::Workspace {
             id: id.clone(),
             label: "alpha".to_string(),
@@ -7453,10 +7470,11 @@ mod tests {
         };
         let connect = daemon_dial(&hosts, &factory);
         let (address, stop) = start_gateway_for(
-            vec![(workspace, connect)],
+            vec![(workspace, connect.clone())],
             Arc::new(DeviceRegistry::open(&registry_dir, home.path())),
         )
         .await;
+        let shared = host_share(&connect, &hosts, &factory, true, false).await;
         let (_, control) = hosts
             .devices
             .add("phone", localpilot_rpc::Scope::Control, false)
@@ -7465,15 +7483,11 @@ mod tests {
             .devices
             .add("tablet", localpilot_rpc::Scope::Observe, false)
             .unwrap();
-        let query = format!("workspace={id}&new=1");
-        let mut phone = open_socket(address, &query, GATEWAY_ORIGIN, Some(control.expose()))
+        let watch = format!("workspace={id}&session={}", shared.session);
+        let mut phone = open_socket(address, &watch, GATEWAY_ORIGIN, Some(control.expose()))
             .await
             .unwrap();
-        let attached = next_frame(&mut phone).await.unwrap();
-        let ServerEvent::Attached { session_id, .. } = attached.event else {
-            panic!("{attached:?}");
-        };
-        let watch = format!("workspace={id}&session={session_id}");
+        next_frame(&mut phone).await.unwrap();
         let mut tablet = open_socket(address, &watch, GATEWAY_ORIGIN, Some(observer.expose()))
             .await
             .unwrap();
@@ -7528,6 +7542,10 @@ mod tests {
                 break;
             }
         }
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
         stop.cancel();
     }
 
@@ -8068,5 +8086,1219 @@ mod tests {
                 "session {id} persisted its close at shutdown: {events:?}"
             );
         }
+    }
+
+    // --- relayed sessions -------------------------------------------------------
+
+    /// A session this test "owns" the way a full-screen TUI does: claimed in
+    /// the workspace store, with its own source feed.
+    struct RelaySource {
+        _claim: localpilot_store::SessionClaim,
+        identity: crate::relay_client::RelayIdentity,
+        source: crate::relay_source::SessionSource,
+    }
+
+    fn relay_source(factory: &FakeFactory, share: &str) -> RelaySource {
+        let session = SessionId::new();
+        let claim = factory
+            .store()
+            .claim_session(
+                session,
+                localpilot_store::Holder::this_process(localpilot_store::HolderKind::Tui),
+            )
+            .unwrap()
+            .unwrap();
+        let identity = crate::relay_client::RelayIdentity {
+            session,
+            owner_generation: claim.generation(),
+            holder_instance: claim.record().holder.instance.clone(),
+            share: share.to_string(),
+        };
+        RelaySource {
+            _claim: claim,
+            identity,
+            source: crate::relay_source::SessionSource::start(AskRegistry::default()),
+        }
+    }
+
+    /// Start relaying `source` to the server at `endpoint`.
+    fn start_relay(
+        endpoint: &Endpoint,
+        source: &RelaySource,
+        stop: &CancellationToken,
+    ) -> JoinHandle<crate::relay_client::RelayEnd> {
+        let endpoint = endpoint.clone();
+        let feed = source.source.feed();
+        let identity = source.identity.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            let conn = dial(&endpoint).await;
+            let none = || (Vec::new(), false);
+            crate::relay_client::run_relay(conn, feed, &none, &identity, &stop, None)
+                .await
+                .unwrap()
+        })
+    }
+
+    /// A session shared with devices for the lifetime of the value (its relay
+    /// stops when dropped). Devices attach with [`Shared::target`].
+    struct Shared {
+        source: RelaySource,
+        stop: CancellationToken,
+    }
+
+    impl Shared {
+        fn session(&self) -> SessionId {
+            self.source.identity.session
+        }
+
+        fn target(&self) -> AttachTarget {
+            AttachTarget::ResumeId {
+                session_id: self.session(),
+            }
+        }
+    }
+
+    impl Drop for Shared {
+        fn drop(&mut self) {
+            self.stop.cancel();
+        }
+    }
+
+    /// Write `text` into a shared session's feed, as its source would.
+    fn source_says(hosts: &HostMap, session: SessionId, text: &str) {
+        hosts
+            .relayed(&AttachTarget::ResumeId {
+                session_id: session,
+            })
+            .expect("the session is shared")
+            .feed
+            .relay(ServerEvent::TextDelta {
+                text: text.to_string(),
+            });
+    }
+
+    /// Read socket frames until `text` arrives as streamed text.
+    async fn expect_text(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        text: &str,
+    ) {
+        loop {
+            let Some(record) = next_frame(socket).await else {
+                panic!("the socket ended before {text:?}");
+            };
+            if matches!(&record.event, ServerEvent::TextDelta { text: got } if got == text) {
+                return;
+            }
+        }
+    }
+
+    /// A session run the way a full-screen terminal runs it, shared through a
+    /// relay: a real runtime that owns its session, its own source (events and
+    /// the one ask registry its approver opens asks in), and a host loop that
+    /// decides the commands devices send through the relay.
+    struct HostedShare {
+        session: SessionId,
+        stop: CancellationToken,
+        /// Whether the host loop answers requests (tests hold it to keep a
+        /// command undecided).
+        hold: Arc<tokio::sync::Notify>,
+        held: Arc<std::sync::atomic::AtomicBool>,
+        relay: JoinHandle<crate::relay_client::RelayEnd>,
+        host: JoinHandle<()>,
+    }
+
+    impl HostedShare {
+        fn target(&self) -> AttachTarget {
+            AttachTarget::ResumeId {
+                session_id: self.session,
+            }
+        }
+
+        /// Let requests held by [`HostedShare::start_held`] through.
+        fn release(&self) {
+            self.held.store(false, std::sync::atomic::Ordering::SeqCst);
+            self.hold.notify_waiters();
+        }
+
+        /// Stop sharing and wait for the relay and the host to end, so their
+        /// outcome is part of the test.
+        async fn finish(self) -> crate::relay_client::RelayEnd {
+            self.stop.cancel();
+            let end = timeout(DEADLINE, self.relay)
+                .await
+                .expect("the relay ended")
+                .expect("the relay task did not panic");
+            self.host.abort();
+            end
+        }
+    }
+
+    /// An approver that opens every ask in a session's registry and waits for
+    /// whoever answers first (no keyboard here).
+    struct RegistryApprover(AskRegistry);
+
+    impl Approver for RegistryApprover {
+        fn approve<'a>(
+            &'a self,
+            request: &'a localpilot_sandbox::PermissionRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            let open = self.0.open_unbounded(localpilot_rpc::PendingAsk {
+                ask_id: format!("ask-{}", localpilot_core::EventId::new()),
+                tool: request.tool.clone(),
+                detail: request.detail.clone(),
+                risk: request.effect.risk_label().to_string(),
+                expires_at_ms: 0,
+            });
+            Box::pin(async move {
+                let localpilot_rpc::OpenAsk { outcome, guard } = open;
+                let allowed = outcome.await.is_ok_and(localpilot_rpc::AskOutcome::allows);
+                drop(guard);
+                allowed
+            })
+        }
+    }
+
+    /// Start a hosted, shared session on the server reached by `connect`.
+    /// `asking` builds a session that asks before risky tools.
+    async fn host_share(
+        connect: &Connect,
+        hosts: &HostMap,
+        factory: &FakeFactory,
+        asking: bool,
+        held: bool,
+    ) -> HostedShare {
+        let source = Arc::new(crate::relay_source::SessionSource::start(
+            AskRegistry::default(),
+        ));
+        let approver: Box<dyn Approver> = Box::new(RegistryApprover(source.asks().clone()));
+        let (profile, interactivity) = if asking {
+            (Profile::Default, Interactivity::Interactive)
+        } else {
+            (Profile::Bypass, Interactivity::NonInteractive)
+        };
+        let root = factory.dir.path();
+        let mut runtime = SessionRuntime::new(
+            factory.provider.clone(),
+            ToolRegistry::with_builtins(),
+            PermissionEngine::new(profile, Vec::new()),
+            approver,
+            Store::open(root),
+            Workspace::new(root).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                interactivity,
+                trusted: true,
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        );
+        runtime.set_owner_kind(localpilot_store::HolderKind::Tui);
+        let session = runtime.session_id();
+        let (owner_generation, holder_instance) = runtime.ownership().expect("claimed");
+        let identity = crate::relay_client::RelayIdentity {
+            session,
+            owner_generation,
+            holder_instance,
+            share: "share-1".to_string(),
+        };
+        let (requests, mut incoming) = mpsc::channel(16);
+        let devices = hosts.devices.clone();
+        let source_host = crate::relay_host::SourceHost {
+            requests,
+            standing: Arc::new(move |device: &str| devices.standing(device).ok().map(|s| s.scope)),
+            asks: source.asks().clone(),
+        };
+        let hold = Arc::new(tokio::sync::Notify::new());
+        let held_flag = Arc::new(std::sync::atomic::AtomicBool::new(held));
+        let host = tokio::spawn({
+            let source = source.clone();
+            let hold = hold.clone();
+            let held_flag = held_flag.clone();
+            async move {
+                let runtime = Arc::new(Mutex::new(runtime));
+                let mut queue: std::collections::VecDeque<(String, crate::relay_host::Ticket)> =
+                    std::collections::VecDeque::new();
+                let mut turn: Option<(JoinHandle<()>, CancellationToken)> = None;
+                loop {
+                    let finished = async {
+                        match &mut turn {
+                            Some((handle, _)) => {
+                                let _ = handle.await;
+                            }
+                            None => std::future::pending::<()>().await,
+                        }
+                    };
+                    tokio::select! {
+                        () = finished => {
+                            turn = None;
+                            while let Some((text, ticket)) = queue.pop_front() {
+                                // An accepted follow-up starts only while the
+                                // device still holds the scope.
+                                if ticket.may_start() {
+                                    turn = Some(start_turn(&runtime, &source, text, &ticket));
+                                    break;
+                                }
+                                ticket.report(localpilot_rpc::RelayRequestState::Rejected {
+                                    reason: "this device is no longer allowed".to_string(),
+                                });
+                            }
+                        }
+                        request = incoming.recv() => {
+                            let Some(request) = request else { break };
+                            while held_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                                hold.notified().await;
+                            }
+                            let crate::relay_host::SourceRequest { command, ticket } = request;
+                            // Decided immediately before acting: the share still
+                            // live and the device's current scope sufficient.
+                            if !ticket.accept_now() {
+                                ticket.report(localpilot_rpc::RelayRequestState::Rejected {
+                                    reason: "this device may no longer do that".to_string(),
+                                });
+                                continue;
+                            }
+                            match command {
+                                ClientCommand::Prompt { text, .. } => {
+                                    if turn.is_some() {
+                                        ticket.report(localpilot_rpc::RelayRequestState::Queued);
+                                        queue.push_back((text, ticket));
+                                    } else {
+                                        turn = Some(start_turn(&runtime, &source, text, &ticket));
+                                    }
+                                }
+                                ClientCommand::Cancel => match &turn {
+                                    Some((_, cancel)) => {
+                                        cancel.cancel();
+                                        ticket.report(localpilot_rpc::RelayRequestState::Done {
+                                            output: None,
+                                        });
+                                    }
+                                    None => ticket.report(localpilot_rpc::RelayRequestState::Rejected {
+                                        reason: "no turn is running".to_string(),
+                                    }),
+                                },
+                                ClientCommand::RunCommand { name, args } => {
+                                    let state = if turn.is_some() {
+                                        localpilot_rpc::RelayRequestState::Rejected {
+                                            reason: "a turn is running".to_string(),
+                                        }
+                                    } else if name == "name" {
+                                        let runtime = runtime.lock().await;
+                                        match runtime.store().set_session_name(runtime.session_id(), &args) {
+                                            Ok(()) => localpilot_rpc::RelayRequestState::Done {
+                                                output: Some(format!("named this session \"{}\"", args.trim())),
+                                            },
+                                            Err(error) => localpilot_rpc::RelayRequestState::Rejected {
+                                                reason: error.to_string(),
+                                            },
+                                        }
+                                    } else {
+                                        localpilot_rpc::RelayRequestState::Rejected {
+                                            reason: format!("`{name}` is not handled here"),
+                                        }
+                                    };
+                                    ticket.report(state);
+                                }
+                                _ => ticket.report(localpilot_rpc::RelayRequestState::Rejected {
+                                    reason: "not handled".to_string(),
+                                }),
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let stop = CancellationToken::new();
+        let relay = tokio::spawn({
+            let connect = connect.clone();
+            let feed = source.feed();
+            let stop = stop.clone();
+            let source = source.clone();
+            async move {
+                let conn = connect().await.expect("dial the server");
+                let none = || (Vec::new(), false);
+                let end = crate::relay_client::run_relay(
+                    conn,
+                    feed,
+                    &none,
+                    &identity,
+                    &stop,
+                    Some(source_host),
+                )
+                .await
+                .expect("the relay ran");
+                drop(source);
+                end
+            }
+        });
+        wait_relayed(hosts, session).await;
+        HostedShare {
+            session,
+            stop,
+            hold,
+            held: held_flag,
+            relay,
+            host,
+        }
+    }
+
+    fn start_turn(
+        runtime: &Arc<Mutex<SessionRuntime>>,
+        source: &Arc<crate::relay_source::SessionSource>,
+        text: String,
+        ticket: &crate::relay_host::Ticket,
+    ) -> (JoinHandle<()>, CancellationToken) {
+        ticket.report(localpilot_rpc::RelayRequestState::Accepted);
+        let cancel = CancellationToken::new();
+        let events = source.turn_events();
+        let runtime = runtime.clone();
+        let turn_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let mut runtime = runtime.lock().await;
+            runtime.run_turn(&text, &events, &turn_cancel).await;
+        });
+        (handle, cancel)
+    }
+
+    /// A [`Connect`] to the server at `endpoint`.
+    fn endpoint_dial(endpoint: &Endpoint) -> Connect {
+        let endpoint = endpoint.clone();
+        Arc::new(move || {
+            let endpoint = endpoint.clone();
+            Box::pin(async move {
+                Ok(Box::new(dial(&endpoint).await) as Box<dyn crate::remote_gateway::DaemonStream>)
+            })
+        })
+    }
+
+    /// Share a fresh session on the server at `endpoint` (one connection).
+    async fn share(endpoint: &Endpoint, factory: &FakeFactory, hosts: &HostMap) -> Shared {
+        let source = relay_source(factory, "share");
+        let stop = CancellationToken::new();
+        let _relay = start_relay(endpoint, &source, &stop);
+        wait_relayed(hosts, source.identity.session).await;
+        Shared { source, stop }
+    }
+
+    async fn wait_relayed(hosts: &HostMap, session: SessionId) {
+        timeout(DEADLINE, async {
+            while hosts
+                .relayed(&AttachTarget::ResumeId {
+                    session_id: session,
+                })
+                .is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the relay registered");
+    }
+
+    /// Read until a snapshot satisfies `wanted`.
+    async fn snapshot_where(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        wanted: impl Fn(&ServerEvent) -> bool,
+    ) -> ServerEvent {
+        loop {
+            let event = read_event(reader).await;
+            if matches!(event, ServerEvent::Snapshot { .. }) && wanted(&event) {
+                return event;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_follows_a_shared_turn_from_its_middle_with_the_ask_already_open() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        // A turn and an ask that began before anything was shared.
+        let events = source.source.turn_events();
+        let _ = events.send(RuntimeEvent::TurnStarted);
+        let _ = events.send(RuntimeEvent::Text("half an answer".to_string()));
+        let _ask = source
+            .source
+            .asks()
+            .open_unbounded(localpilot_rpc::PendingAsk {
+                ask_id: "ask-early".to_string(),
+                tool: "write_file".to_string(),
+                detail: "a.txt".to_string(),
+                risk: "write".to_string(),
+                expires_at_ms: 0,
+            });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let stop = CancellationToken::new();
+        let relay = start_relay(&endpoint, &source, &stop);
+        wait_relayed(&hosts, source.identity.session).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Observe,
+        )
+        .await;
+        let (mut device, _device_write, attached) = first_record(
+            &endpoint,
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                },
+            ),
+        )
+        .await;
+        assert!(
+            matches!(attached, ServerEvent::Attached { .. }),
+            "{attached:?}"
+        );
+        let snapshot = snapshot_where(&mut device, |event| {
+            matches!(
+                event,
+                ServerEvent::Snapshot {
+                    turn: localpilot_rpc::TurnState::Running,
+                    ..
+                }
+            )
+        })
+        .await;
+        let ServerEvent::Snapshot {
+            turn_text, asks, ..
+        } = snapshot
+        else {
+            unreachable!()
+        };
+        assert_eq!(turn_text.as_deref(), Some("half an answer"));
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].ask_id, "ask-early");
+
+        // A record after the snapshot arrives live, in order.
+        let _ = events.send(RuntimeEvent::Text(" and the rest".to_string()));
+        timeout(DEADLINE, async {
+            loop {
+                if let ServerEvent::TextDelta { text } = read_event(&mut device).await {
+                    assert_eq!(text, " and the rest");
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the live record arrived");
+
+        // Stopping sharing closes the device's view.
+        stop.cancel();
+        assert_eq!(
+            timeout(DEADLINE, relay).await.unwrap().unwrap(),
+            crate::relay_client::RelayEnd::Stopped
+        );
+        timeout(DEADLINE, async {
+            loop {
+                if let ServerEvent::SessionClosed { reason } = read_event(&mut device).await {
+                    assert_eq!(reason, "sharing stopped");
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the device saw sharing stop");
+        assert!(hosts
+            .relayed(&AttachTarget::ResumeId {
+                session_id: source.identity.session
+            })
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn devices_reach_only_shared_sessions() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 9, hosts.clone());
+        let (_local_reader, _local_write, hosted) = local_session(&endpoint).await;
+        let source = relay_source(&factory, "share-1");
+        let stop = CancellationToken::new();
+        let _relay = start_relay(&endpoint, &source, &stop);
+        wait_relayed(&hosts, source.identity.session).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+
+        // The listing shows the shared session only.
+        let (_, _, listed) = first_record(
+            &endpoint,
+            ClientCommand::DeviceSessions {
+                capability: localpilot_rpc::WireSecret::new(&capability),
+                credential: localpilot_rpc::WireSecret::new(&credential),
+            },
+        )
+        .await;
+        let ServerEvent::Sessions { items } = listed else {
+            panic!("a listing: {listed:?}");
+        };
+        let ids: Vec<SessionId> = items.iter().map(|item| item.id).collect();
+        assert_eq!(ids, vec![source.identity.session]);
+
+        // A hosted session, a new session, and a stored one stay local.
+        for target in [
+            AttachTarget::ResumeId { session_id: hosted },
+            AttachTarget::OpenNew,
+            AttachTarget::ResumeId {
+                session_id: SessionId::new(),
+            },
+        ] {
+            let (_, _, reply) =
+                first_record(&endpoint, device_attach(&capability, &credential, target)).await;
+            assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
+        }
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_relay_is_refused_unless_its_sender_holds_the_session_and_remote_is_on() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 4, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let run = |identity: crate::relay_client::RelayIdentity| {
+            let endpoint = endpoint.clone();
+            let feed = source.source.feed();
+            async move {
+                let conn = dial(&endpoint).await;
+                let none = || (Vec::new(), false);
+                crate::relay_client::run_relay(
+                    conn,
+                    feed,
+                    &none,
+                    &identity,
+                    &CancellationToken::new(),
+                    None,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        // A stale owner generation and a wrong holder are refused.
+        let mut stale = source.identity.clone();
+        stale.owner_generation += 1;
+        assert!(matches!(
+            run(stale).await,
+            crate::relay_client::RelayEnd::Refused(_)
+        ));
+        let mut other = source.identity.clone();
+        other.holder_instance = "someone-else".to_string();
+        assert!(matches!(
+            run(other).await,
+            crate::relay_client::RelayEnd::Refused(_)
+        ));
+        // A second relay for a session already shared is refused.
+        let stop = CancellationToken::new();
+        let _first = start_relay(&endpoint, &source, &stop);
+        wait_relayed(&hosts, source.identity.session).await;
+        assert!(matches!(
+            run(source.identity.clone()).await,
+            crate::relay_client::RelayEnd::Refused(_)
+        ));
+        stop.cancel();
+
+        // With remote access off, nothing can be shared.
+        let off = HostMap {
+            remote: Arc::new(RemoteGate {
+                refused: Some("remote access is off".to_string()),
+                discovery: None,
+            }),
+            ..HostMap::default()
+        };
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 1, off);
+        let conn = dial(&endpoint).await;
+        let none = || (Vec::new(), false);
+        let end = crate::relay_client::run_relay(
+            conn,
+            source.source.feed(),
+            &none,
+            &source.identity,
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            end,
+            crate::relay_client::RelayEnd::Refused("remote access is off".to_string())
+        );
+    }
+
+    fn mirror_snapshot(
+        turn: localpilot_rpc::TurnState,
+        busy: bool,
+        queued: usize,
+        history: &str,
+    ) -> ServerEvent {
+        ServerEvent::Snapshot {
+            epoch: "e".to_string(),
+            seq: 3,
+            turn,
+            busy,
+            queued,
+            plan: None,
+            asks: Vec::new(),
+            turn_text: Some("t".to_string()),
+            turn_text_truncated: false,
+            history: vec![localpilot_rpc::HistoryMessage {
+                role: "user".to_string(),
+                text: history.to_string(),
+            }],
+            history_truncated: false,
+        }
+    }
+
+    /// A mirror's own snapshot: whatever hosted-session history and admission
+    /// the caller offers must not leak in.
+    fn mirror_view(feed: &SessionFeed) -> ServerEvent {
+        let other = (
+            vec![localpilot_rpc::HistoryMessage {
+                role: "user".to_string(),
+                text: "not this".to_string(),
+            }],
+            false,
+        );
+        feed.snapshot(&other, &|| Admission {
+            busy: true,
+            queued: 9,
+        })
+        .0
+    }
+
+    #[tokio::test]
+    async fn a_mirror_is_one_state_installed_whole_and_forgotten_whole() {
+        use localpilot_rpc::TurnState;
+        let feed = SessionFeed::mirror();
+        let ServerEvent::Snapshot {
+            turn,
+            busy,
+            history,
+            history_truncated,
+            ..
+        } = mirror_view(&feed)
+        else {
+            panic!("a snapshot")
+        };
+        assert_eq!(turn, TurnState::Unknown, "a new mirror claims nothing");
+        assert!(!busy && history.is_empty() && history_truncated);
+
+        assert!(feed.install(&mirror_snapshot(TurnState::Running, true, 2, "first")));
+        let mut live = feed.live();
+        let ServerEvent::Snapshot {
+            turn,
+            busy,
+            queued,
+            history,
+            ..
+        } = mirror_view(&feed)
+        else {
+            panic!("a snapshot")
+        };
+        assert_eq!((turn, busy, queued), (TurnState::Running, true, 2));
+        assert_eq!(history[0].text, "first");
+
+        // The turn ends: nothing running or waiting any more.
+        feed.relay(ServerEvent::Stopped {
+            reason: "done".to_string(),
+        });
+        let ServerEvent::Snapshot {
+            turn, busy, queued, ..
+        } = mirror_view(&feed)
+        else {
+            panic!("a snapshot")
+        };
+        assert_eq!((turn, busy, queued), (TurnState::Idle, false, 0));
+
+        // A gap forgets the projection, the history and the admission together.
+        feed.forget();
+        let ServerEvent::Snapshot {
+            turn,
+            busy,
+            history,
+            history_truncated,
+            asks,
+            ..
+        } = mirror_view(&feed)
+        else {
+            panic!("a snapshot")
+        };
+        assert_eq!(turn, TurnState::Unknown);
+        assert!(!busy && history.is_empty() && history_truncated && asks.is_empty());
+
+        // A replacement installs whole; the resync it announces is seen only
+        // after the new history is in place.
+        assert!(feed.install(&mirror_snapshot(TurnState::Idle, false, 0, "second")));
+        loop {
+            let (_, event) = live.recv().await.unwrap();
+            if matches!(event, ServerEvent::ResyncRequired { .. }) {
+                let ServerEvent::Snapshot { history, .. } = mirror_view(&feed) else {
+                    panic!("a snapshot")
+                };
+                if history.first().is_some_and(|m| m.text == "second") {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_session_too_large_to_share_ends_sharing_and_never_shows_a_partial_state() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 1, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        // An open ask whose detail alone exceeds what a share may carry. The
+        // local permission request is untouched.
+        let _ask = source
+            .source
+            .asks()
+            .open_unbounded(localpilot_rpc::PendingAsk {
+                ask_id: "ask-huge".to_string(),
+                tool: "run_shell".to_string(),
+                detail: "d".repeat(localpilot_rpc::RELAY_SNAPSHOT_MAX + 1),
+                risk: "shell".to_string(),
+                expires_at_ms: 0,
+            });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stop = CancellationToken::new();
+        let end = timeout(DEADLINE, start_relay(&endpoint, &source, &stop))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(end, crate::relay_client::RelayEnd::TooLarge);
+        assert_eq!(
+            source.source.asks().outstanding().len(),
+            1,
+            "the local ask stands"
+        );
+        timeout(DEADLINE, async {
+            while hosts
+                .relayed(&AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                })
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the relay ended at the server too");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_turn_finished_after_sharing_reaches_a_later_device_idle_with_its_history() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 5, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let stored = Arc::new(StdMutex::new("before the turn".to_string()));
+        let events = source.source.turn_events();
+        let _ = events.send(RuntimeEvent::TurnStarted);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let stop = CancellationToken::new();
+        let relay = {
+            let endpoint = endpoint.clone();
+            let feed = source.source.feed();
+            let identity = source.identity.clone();
+            let stop = stop.clone();
+            let stored = stored.clone();
+            tokio::spawn(async move {
+                let conn = dial(&endpoint).await;
+                let history = move || {
+                    (
+                        vec![localpilot_rpc::HistoryMessage {
+                            role: "assistant".to_string(),
+                            text: stored.lock().unwrap().clone(),
+                        }],
+                        false,
+                    )
+                };
+                crate::relay_client::run_relay(conn, feed, &history, &identity, &stop, None)
+                    .await
+                    .unwrap()
+            })
+        };
+        wait_relayed(&hosts, source.identity.session).await;
+        // The turn ends after sharing began; its answer is now stored.
+        *stored.lock().unwrap() = "the finished answer".to_string();
+        let _ = events.send(RuntimeEvent::Stopped(localpilot_harness::StopReason::Done));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // A device that connects afterwards sees an idle, not-busy session
+        // with the finished turn's history.
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Observe,
+        )
+        .await;
+        let (mut device, _write, attached) = first_record(
+            &endpoint,
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                },
+            ),
+        )
+        .await;
+        assert!(
+            matches!(attached, ServerEvent::Attached { .. }),
+            "{attached:?}"
+        );
+        let snapshot = snapshot_where(&mut device, |event| {
+            matches!(event, ServerEvent::Snapshot { history, .. }
+                if history.first().is_some_and(|m| m.text == "the finished answer"))
+        })
+        .await;
+        let ServerEvent::Snapshot {
+            turn, busy, queued, ..
+        } = snapshot
+        else {
+            unreachable!()
+        };
+        assert_eq!(turn, localpilot_rpc::TurnState::Idle);
+        assert!(!busy, "nothing is running any more");
+        assert_eq!(queued, 0);
+        stop.cancel();
+        let _ = timeout(DEADLINE, relay).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_ask_too_large_to_share_ends_sharing_while_the_local_ask_stands() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 1, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let stop = CancellationToken::new();
+        let relay = start_relay(&endpoint, &source, &stop);
+        wait_relayed(&hosts, source.identity.session).await;
+        let _ask = source
+            .source
+            .asks()
+            .open_unbounded(localpilot_rpc::PendingAsk {
+                ask_id: "ask-big".to_string(),
+                tool: "run_shell".to_string(),
+                detail: "d".repeat(crate::server_feed::BOUNDED_RECORD_MAX + 1),
+                risk: "shell".to_string(),
+                expires_at_ms: 0,
+            });
+        let end = timeout(DEADLINE, relay).await.unwrap().unwrap();
+        assert_eq!(end, crate::relay_client::RelayEnd::TooLarge);
+        assert_eq!(source.source.asks().outstanding().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_relay_record_over_the_cap_ends_the_relay_before_it_is_parsed() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 1, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (mut reader, mut write, ready) = first_record(
+            &endpoint,
+            ClientCommand::RelayHost {
+                session: source.identity.session,
+                owner_generation: source.identity.owner_generation,
+                holder_instance: source.identity.holder_instance.clone(),
+                share: "share-1".to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(ready, ServerEvent::RelayReady { .. }), "{ready:?}");
+        // Whitespace shrinks on reserialization; the raw line is what counts.
+        let mut line = format!(
+            "{{\"type\":\"relay_stop\"{}}}",
+            " ".repeat(localpilot_rpc::RELAY_RECORD_MAX)
+        )
+        .into_bytes();
+        line.push(b'\n');
+        let _ = write.write_all(&line).await;
+        let _ = write.flush().await;
+        timeout(DEADLINE, async {
+            while hosts
+                .relayed(&AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                })
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the relay ended");
+        drop(reader.next());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_retried_phone_prompt_runs_once_and_gets_its_recorded_reply() {
+        let factory = Arc::new(FakeFactory::new(
+            FakeProvider::new().text("only once").text("never"),
+        ));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 4, hosts.clone());
+        let shared = host_share(&endpoint_dial(&endpoint), &hosts, &factory, false, false).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (mut reader, mut write, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, shared.target()),
+        )
+        .await;
+        let ServerEvent::Attached { instance, .. } = reply else {
+            panic!("{reply:?}");
+        };
+        read_event(&mut reader).await; // snapshot
+        send_keyed(&mut write, "p1", &instance, 7, prompt("go")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "p1").await,
+            ServerEvent::Accepted { .. }
+        ));
+        read_until(&mut reader, is_stop).await;
+        // The same request again (a retry after a lost reply): the recorded
+        // reply, and no second turn.
+        send_keyed(&mut write, "p2", &instance, 7, prompt("go")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "p2").await,
+            ServerEvent::Accepted { .. }
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let turns = shared_turns(&factory, shared.session);
+        assert_eq!(turns, 1, "the prompt ran once");
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
+    }
+
+    /// How many turns a session's log records.
+    fn shared_turns(factory: &FakeFactory, session: SessionId) -> usize {
+        factory
+            .store()
+            .read_events(session)
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    localpilot_store::SessionEventKind::Message { message, .. }
+                        if message.role == localpilot_core::Role::User
+                )
+            })
+            .count()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_held_remote_command_does_nothing_once_its_device_is_revoked() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 4, hosts.clone());
+        let shared = host_share(&endpoint_dial(&endpoint), &hosts, &factory, false, true).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (device_id, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (mut reader, mut write, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, shared.target()),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Attached { .. }), "{reply:?}");
+        read_event(&mut reader).await; // snapshot
+        send_with_id(&mut write, "n1", run("name", "renamed")).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(hosts.devices.revoke(&device_id).unwrap());
+        shared.release();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let named = factory
+            .store()
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == shared.session)
+            .and_then(|entry| entry.name);
+        assert_eq!(named, None, "the session was not renamed");
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_decision_after_the_device_stopped_waiting_reaches_its_retry_without_a_second_run() {
+        let factory = Arc::new(FakeFactory::new(
+            FakeProvider::new().text("once").text("twice"),
+        ));
+        let hosts = HostMap {
+            relay_deadline: Some(Duration::from_millis(300)),
+            ..HostMap::default()
+        };
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 4, hosts.clone());
+        // The host holds the decision past the device's wait.
+        let shared = host_share(&endpoint_dial(&endpoint), &hosts, &factory, false, true).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (mut reader, mut write, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, shared.target()),
+        )
+        .await;
+        let ServerEvent::Attached { instance, .. } = reply else {
+            panic!("{reply:?}");
+        };
+        read_event(&mut reader).await; // snapshot
+        send_keyed(&mut write, "p1", &instance, 1, prompt("go")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "p1").await,
+            ServerEvent::Rejected {
+                code: RejectCode::OutcomeUnknown,
+                ..
+            }
+        ));
+        // The source decides afterwards.
+        shared.release();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // A retry learns the real outcome, and nothing runs again.
+        send_keyed(&mut write, "p2", &instance, 1, prompt("go")).await;
+        assert!(matches!(
+            reply_to(&mut reader, "p2").await,
+            ServerEvent::Accepted { .. }
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(shared_turns(&factory, shared.session), 1, "one turn");
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_source_that_stops_reading_cannot_hold_the_share_open() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap {
+            relay_deadline: Some(Duration::from_millis(500)),
+            ..HostMap::default()
+        };
+        let connect = daemon_dial(&hosts, &factory);
+        let source = relay_source(&factory, "share-1");
+        // The source registers, then never reads again.
+        let conn = connect().await.unwrap();
+        let (source_read, mut source_write) = tokio::io::split(conn);
+        let mut source_reader = JsonRecordReader::new(source_read);
+        send_command(
+            &mut source_write,
+            ClientCommand::RelayHost {
+                session: source.identity.session,
+                owner_generation: source.identity.owner_generation,
+                holder_instance: source.identity.holder_instance.clone(),
+                share: "share-1".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            read_event(&mut source_reader).await,
+            ServerEvent::RelayReady { .. }
+        ));
+        let lease = hosts.gateways.register().unwrap();
+        let capability = lease.capability.expose().to_string();
+        // Many devices send large commands at once: far more than the
+        // connection to the source buffers.
+        let mut devices = Vec::new();
+        for _ in 0..30 {
+            let (_, credential) = hosts
+                .devices
+                .add("phone", localpilot_rpc::Scope::Control, false)
+                .unwrap();
+            let conn = connect().await.unwrap();
+            let (read, mut write) = tokio::io::split(conn);
+            let mut reader = JsonRecordReader::new(read);
+            send_command(
+                &mut write,
+                device_attach(
+                    &capability,
+                    credential.expose(),
+                    AttachTarget::ResumeId {
+                        session_id: source.identity.session,
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                read_event(&mut reader).await,
+                ServerEvent::Attached { .. }
+            ));
+            send_with_id(&mut write, "big", prompt(&"p".repeat(60 * 1024))).await;
+            devices.push((reader, write));
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The source stops sharing while the server's writes to it are stuck.
+        let mut stop = serde_json::to_vec(&localpilot_rpc::RelayRecord::RelayStop).unwrap();
+        stop.push(b'\n');
+        source_write.write_all(&stop).await.unwrap();
+        source_write.flush().await.unwrap();
+        timeout(DEADLINE, async {
+            while hosts
+                .relayed(&AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                })
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the share ended without the source reading");
+        for (mut reader, _write) in devices {
+            timeout(DEADLINE, async {
+                loop {
+                    match reader.next().await {
+                        Ok(Some(value)) => {
+                            if let Ok(record) = serde_json::from_value::<ServerRecord>(value) {
+                                if matches!(record.event, ServerEvent::SessionClosed { .. }) {
+                                    return;
+                                }
+                            }
+                        }
+                        _ => return,
+                    }
+                }
+            })
+            .await
+            .expect("every device's view ended");
+        }
+        drop(lease);
     }
 }

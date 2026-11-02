@@ -183,7 +183,11 @@ pub async fn run_chat_with(
         approval_tx,
         approvals: mut approval_rx,
         questions: mut question_rx,
+        asks,
     } = setup.build(&selected_provider_id, &model).await?;
+    runtime.set_owner_kind(localpilot_store::HolderKind::Tui);
+    // The session's own feed, kept from the first event (see `relay_source`).
+    let source = crate::relay_source::SessionSource::start(asks);
     timer.mark("runtime + discovery + context hooks");
     // Keep the setup alive for the whole chat: it owns the shared MCP transports
     // used by the runtime's per-session tool registry.
@@ -266,6 +270,7 @@ pub async fn run_chat_with(
             trust_required,
             deferred_selfimprove_reload: &deferred_selfimprove_reload,
             incognito_entry: &incognito_entry,
+            source: &source,
         },
     )
     .await;

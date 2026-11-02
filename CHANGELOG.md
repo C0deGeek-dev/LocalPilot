@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Paired devices now reach only sessions that are shared with them: a
+  full-screen session is shared from the process that runs it, the workspace
+  server mirrors it for the devices and passes their prompts, permission answers,
+  cancels and remote commands back to that session, which decides each one
+  itself. Devices no longer open new sessions or attach to other sessions of the
+  workspace. The terminal's `/remote share` command that starts sharing is not
+  available yet, so until it is, a paired device finds no session to follow
+  (ADR-0250).
 - A session now runs in at most one LocalPilot process at a time. Resuming a
   session that another LocalPilot process is running fails with "session busy"
   and names that process, instead of running it twice (so does `localpilot session

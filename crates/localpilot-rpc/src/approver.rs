@@ -326,6 +326,50 @@ impl AskRegistry {
     }
 }
 
+/// An ask opened with [`AskRegistry::open_unbounded`]: the receiver of its
+/// outcome, and a guard that ends it as cancelled when dropped first.
+pub struct OpenAsk {
+    pub outcome: oneshot::Receiver<AskOutcome>,
+    pub guard: AskGuard,
+}
+
+/// Ends its ask as cancelled when dropped before the ask finished (the turn was
+/// cancelled or the session closed). A no-op once the ask has an outcome.
+pub struct AskGuard {
+    registry: AskRegistry,
+    ask_id: String,
+}
+
+impl Drop for AskGuard {
+    fn drop(&mut self) {
+        self.registry.end(&self.ask_id, AskOutcome::Cancelled);
+    }
+}
+
+impl AskRegistry {
+    /// Open `ask` with no deadline: it waits until someone answers it (the
+    /// local machine or an attached device, first answer wins) or the guard is
+    /// dropped. For a host whose user answers at the keyboard, where an ask
+    /// must not expire on its own. `expires_at_ms` should be 0 (no expiry).
+    #[must_use]
+    pub fn open_unbounded(&self, ask: PendingAsk) -> OpenAsk {
+        let (sender, outcome) = oneshot::channel();
+        let ask_id = ask.ask_id.clone();
+        // Far enough that it never passes; `Instant` has no infinity.
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10 * 365 * 24 * 3600))
+            .unwrap_or_else(Instant::now);
+        self.register(ask, deadline, sender);
+        OpenAsk {
+            outcome,
+            guard: AskGuard {
+                registry: self.clone(),
+                ask_id,
+            },
+        }
+    }
+}
+
 /// Ends the ask as cancelled if the approver's future is dropped before the
 /// ask finished (the turn was cancelled or the session closed).
 struct CancelOnDrop<'a> {

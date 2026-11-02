@@ -318,6 +318,18 @@ impl Store {
         }
     }
 
+    /// Whether some owner holds `session`'s lock right now (always `false` for
+    /// an in-memory store). A point-in-time check that takes nothing it keeps.
+    ///
+    /// # Errors
+    /// An io error opening or locking the lock file.
+    pub fn session_is_held(&self, session: SessionId) -> Result<bool, StoreError> {
+        match &self.backend {
+            Backend::Memory(_) => Ok(false),
+            Backend::Disk => Ok(ownership::hold_session(&self.sessions_dir(), session)?.is_none()),
+        }
+    }
+
     /// Run a session-owned write under this handle's authority for the session:
     /// its lease when it claimed the session (checked under the lease's mutex,
     /// together with the write), otherwise the session's lock, taken for the

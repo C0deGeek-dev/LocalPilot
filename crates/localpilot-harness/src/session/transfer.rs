@@ -216,6 +216,17 @@ impl SessionRuntime {
         self.owner_kind = kind;
     }
 
+    /// This runtime's claim on its session: the ownership generation and the
+    /// holder instance its owner record names (`None` when it holds no claim,
+    /// e.g. an incognito session). A process sharing the session proves it is
+    /// the owner the record names with these.
+    #[must_use]
+    pub fn ownership(&self) -> Option<(u64, String)> {
+        self.claim
+            .as_ref()
+            .map(|claim| (claim.generation(), claim.record().holder.instance.clone()))
+    }
+
     /// Whether this runtime may execute and mutate its session.
     #[must_use]
     pub fn admission(&self) -> Admission {

@@ -4815,6 +4815,17 @@ impl AppModel {
         self.dialog_peer = None;
     }
 
+    /// Close the open dialog only when it is a permission approval (it was
+    /// answered elsewhere). Returns whether it closed one.
+    pub fn clear_approval_dialog(&mut self) -> bool {
+        if matches!(self.dialog, Some(DialogState::Approval { .. })) {
+            self.clear_dialog();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Returns the immutable peer attribution of the current dialog.
     #[must_use]
     pub const fn dialog_peer(&self) -> Option<PeerPane> {

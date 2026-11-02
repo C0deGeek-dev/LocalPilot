@@ -1255,6 +1255,18 @@ project file cannot set any `[remote]` key).
   anything, so an invalid upgrade opens no session. Stopping the gateway closes
   its listener and every socket and pending request at once, including sockets
   whose client stopped reading and requests waiting on the server.
+- **Shared sessions only (ADR-0250).** Devices discover and attach only
+  sessions their owner is sharing; every other session of the workspace, and
+  every stored one, stays local, and devices cannot open sessions. A shared
+  session stays in the process that runs it: the server registers the share only
+  from a local connection whose owner record and held lock match the session,
+  keeps a mirror installed from digest-checked snapshots (unknown after any
+  gap), and never opens, resumes or reads the session. A device's command,
+  admitted by the server as usual, is decided again by the session's own
+  process at the moment it acts: the live share and relay, the device's current
+  standing and scope, and a bounded per-device request window that never runs
+  a repeated or forgotten request twice. Relay records are capped at 256 KiB on
+  the raw bytes; a session too large to share stops sharing with a reason.
 
 ## Telemetry
 

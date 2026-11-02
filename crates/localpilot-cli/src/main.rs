@@ -62,6 +62,9 @@ mod pair_run;
 mod proposal_fixture;
 mod proposal_validation;
 mod propose_patch;
+mod relay_client;
+mod relay_host;
+mod relay_source;
 mod remote_gateway;
 mod remote_status;
 #[cfg(feature = "tui")]

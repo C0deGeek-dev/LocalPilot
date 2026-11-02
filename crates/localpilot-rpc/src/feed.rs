@@ -12,7 +12,12 @@ use std::collections::VecDeque;
 #[derive(Debug)]
 pub struct SeqRing<T> {
     entries: VecDeque<(u64, T)>,
+    /// The byte size each entry was pushed with (see [`SeqRing::push_sized`]).
+    sizes: VecDeque<usize>,
     capacity: usize,
+    /// The most bytes the entries may hold together (`usize::MAX`: no budget).
+    max_bytes: usize,
+    bytes: usize,
     next_seq: u64,
     dropped: u64,
 }
@@ -21,9 +26,22 @@ impl<T: Clone> SeqRing<T> {
     /// An empty ring keeping at most `capacity` entries (at least one).
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        Self::with_byte_budget(capacity, usize::MAX)
+    }
+
+    /// An empty ring keeping at most `capacity` entries and, counting the sizes
+    /// given to [`SeqRing::push_sized`], at most `max_bytes` bytes. An entry
+    /// larger than the whole budget still takes its sequence number but is not
+    /// kept, so a reader behind it sees an incomplete range (and takes a
+    /// snapshot) instead of the ring holding it.
+    #[must_use]
+    pub fn with_byte_budget(capacity: usize, max_bytes: usize) -> Self {
         Self {
             entries: VecDeque::new(),
+            sizes: VecDeque::new(),
             capacity: capacity.max(1),
+            max_bytes,
+            bytes: 0,
             next_seq: 1,
             dropped: 0,
         }
@@ -31,14 +49,33 @@ impl<T: Clone> SeqRing<T> {
 
     /// Append `item`, returning its sequence number.
     pub fn push(&mut self, item: T) -> u64 {
+        self.push_sized(item, 0)
+    }
+
+    /// Append `item` counting `size` bytes against the byte budget, returning
+    /// its sequence number. The oldest entries go first.
+    pub fn push_sized(&mut self, item: T, size: usize) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.entries.push_back((seq, item));
-        while self.entries.len() > self.capacity {
+        self.sizes.push_back(size);
+        self.bytes = self.bytes.saturating_add(size);
+        while self.entries.len() > self.capacity
+            || (self.bytes > self.max_bytes && !self.entries.is_empty())
+        {
             self.entries.pop_front();
+            self.bytes = self
+                .bytes
+                .saturating_sub(self.sizes.pop_front().unwrap_or(0));
             self.dropped += 1;
         }
         seq
+    }
+
+    /// Whether this ring counts bytes.
+    #[must_use]
+    pub fn has_byte_budget(&self) -> bool {
+        self.max_bytes != usize::MAX
     }
 
     /// The highest sequence number handed out so far (0 when none).
@@ -77,6 +114,8 @@ impl<T: Clone> SeqRing<T> {
     pub fn clear(&mut self) {
         self.dropped += self.entries.len() as u64;
         self.entries.clear();
+        self.sizes.clear();
+        self.bytes = 0;
     }
 }
 
@@ -119,5 +158,24 @@ mod tests {
         assert_eq!(ring.push('c'), 3);
         assert!(ring.complete_after(1).is_none());
         assert_eq!(ring.complete_after(2).unwrap(), vec![(3, 'c')]);
+    }
+
+    #[test]
+    fn a_byte_budget_drops_old_entries_and_never_keeps_one_larger_than_itself() {
+        let mut ring = SeqRing::with_byte_budget(100, 10);
+        ring.push_sized("a", 4);
+        ring.push_sized("b", 4);
+        ring.push_sized("c", 4); // 12 > 10: `a` goes
+        assert_eq!(ring.complete_after(1).map(|v| v.len()), Some(2));
+        assert_eq!(ring.complete_after(0), None, "the dropped entry is a gap");
+        let big = ring.push_sized("huge", 11);
+        assert_eq!(big, 4, "it still takes its number");
+        assert!(ring.after(0).all(|(seq, _)| *seq != big), "but is not kept");
+        assert_eq!(
+            ring.complete_after(3),
+            None,
+            "a reader behind it must resync"
+        );
+        assert_eq!(ring.complete_after(4).map(|v| v.len()), Some(0));
     }
 }

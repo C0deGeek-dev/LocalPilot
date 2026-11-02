@@ -2,6 +2,68 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0250: A Shared Session Stays In The Process That Runs It; The Server Mirrors It And Forwards Device Commands
+
+**Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#255.
+
+**Context.** A paired phone should follow the full-screen session the user is
+watching and act on it. Moving the live session into the workspace server
+(ADR-0249's hand-over) would mean rebuilding the full-screen terminal as a
+client of the server for every operation it uses. The first version keeps the
+session where it runs and shares it instead.
+
+**Decision.** The process that runs a session (the source) keeps, from the
+session's first event, its own feed: per-turn event channels forwarded in turn
+order into a bounded ingress (256 records, 4 MiB; an overflow latches a loss the
+feed rebuilds from before it applies anything later), one ask registry its
+approver opens every ask in (the keyboard answers through the same first-wins
+path as a device), and a projection bounded per record (32 KiB, text split into
+pieces; an oversized ask or plan makes the session unshareable while it lasts,
+without touching the local request). Sharing opens a local `relay_host`
+connection to the workspace server: the server requires `[remote] enabled`,
+checks that the owner record names the sender and that the session is held,
+allows one relay per session, and never opens, resumes or reads the session.
+The source sends a snapshot of its feed at one position in digest-checked parts
+(each record at most 256 KiB on the wire, checked on raw bytes before parsing;
+at most 64 parts and 2 MiB; the snapshot's own position must match its
+announcement), then every later record in order, and a fresh snapshot at each
+turn's end. The server installs a snapshot into a mirror atomically (projection,
+history and admission together) and keeps the mirror unknown after any gap until
+the next verified snapshot. Paired devices discover and attach only relayed
+sessions; hosted and stored sessions stay local, and devices cannot open new
+ones.
+
+A device command passes the server's usual admission (standing, scope, retry
+key) and is forwarded as a numbered `relay_command`. The source decides it
+finally: the relay and share it names must be the live ones, the device must
+still be allowed and hold the scope, the request must be new, and a remote
+command must be one a device may run. A bounded table per relay (64 device
+streams, 32 terminal results per device and its high-water mark, 64 open
+requests, 1 MiB including stream metadata, 64 KiB command payloads, 4 KiB
+texts) answers a repeat with its recorded state and an older, forgotten one
+with `unknown`; a request that cannot get a place is refused before anything
+runs. Permission answers go to the session's ask registry. Prompts, cancels
+and remote commands go to the session's host and stay pending until the host
+decides them immediately before acting (the share still live, the device's
+current scope sufficient); a prompt the host queues is an accepted follow-up
+that survives the share stopping and starts only if the device still holds
+the scope then. States go back as one coalesced latest state per request. The
+server waits at most 30 s for the first decision (accepted work has no
+deadline); a decision that arrives later is recorded under the device's retry
+key, so a retry learns it and nothing is re-sent or re-run. The server reads
+the source and writes to it independently, through a bounded ordered writer,
+so a source that stops reading cannot hold the share open; every source write
+races stopping and the session ending.
+
+**Consequences.** A device reaches a session only while its owner shares it, and
+everything a device does is decided by the session's own process. Stopping the
+share, closing the terminal or the session changing ends the relay; devices see
+the session closed. A session whose state is too large to share stops sharing
+with a reason rather than show less than there is. Sharing from the full-screen
+terminal (`/remote share`) is wired separately; until then a paired device finds
+no shared session. ADR-0249's hand-over stays the path for a session that should
+outlive its terminal.
+
 ## ADR-0249: A Session Is Owned By One Process, And Is Handed Over Only When Idle
 
 **Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#255.

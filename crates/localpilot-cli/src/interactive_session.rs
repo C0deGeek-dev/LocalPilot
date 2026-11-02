@@ -50,13 +50,31 @@ pub(crate) struct QuestionCall {
 }
 
 /// An approver that suspends the turn and sends the decision to its host.
+///
+/// With a session's ask registry attached ([`TuiApprover::with_asks`]), every
+/// ask is also opened there, with no deadline: the keyboard's answer is
+/// recorded through the registry's first-answer-wins path, so an ask the
+/// session shares with a paired device is decided exactly once, by whichever
+/// answer lands first. Without one it behaves as a plain channel to the host.
 pub(crate) struct TuiApprover {
     tx: mpsc::UnboundedSender<ApprovalCall>,
+    asks: Option<localpilot_rpc::AskRegistry>,
 }
 
 impl TuiApprover {
     pub(crate) fn new(tx: mpsc::UnboundedSender<ApprovalCall>) -> Self {
-        Self { tx }
+        Self { tx, asks: None }
+    }
+
+    /// An approver that also opens every ask in `asks`.
+    pub(crate) fn with_asks(
+        tx: mpsc::UnboundedSender<ApprovalCall>,
+        asks: localpilot_rpc::AskRegistry,
+    ) -> Self {
+        Self {
+            tx,
+            asks: Some(asks),
+        }
     }
 }
 
@@ -70,12 +88,49 @@ impl Approver for TuiApprover {
             request: describe(request),
             reply,
         });
+        let Some(asks) = &self.asks else {
+            return Box::pin(async move {
+                // A closed channel (UI gone) is a denial, never a silent approval.
+                if sent.is_err() {
+                    return false;
+                }
+                answer.await.unwrap_or(false)
+            });
+        };
+        let ask_id = format!("ask-{}", localpilot_core::EventId::new());
+        let open = asks.open_unbounded(localpilot_rpc::PendingAsk {
+            ask_id: ask_id.clone(),
+            tool: request.tool.clone(),
+            detail: request.detail.clone(),
+            risk: request.effect.risk_label().to_string(),
+            expires_at_ms: 0,
+        });
         Box::pin(async move {
-            // A closed channel (UI gone) is a denial, never a silent approval.
+            let localpilot_rpc::OpenAsk { mut outcome, guard } = open;
             if sent.is_err() {
-                return false;
+                let _ = asks.reply(&ask_id, false, localpilot_rpc::Principal::Local);
+            } else {
+                tokio::select! {
+                    keyboard = answer => {
+                        // A dropped reply (UI gone) is a denial. The registry
+                        // decides: an answer that lost the race changes nothing.
+                        let _ = asks.reply(
+                            &ask_id,
+                            keyboard.unwrap_or(false),
+                            localpilot_rpc::Principal::Local,
+                        );
+                    }
+                    _ = &mut outcome => {}
+                }
             }
-            answer.await.unwrap_or(false)
+            let allowed = match outcome.try_recv() {
+                Ok(outcome) => outcome.allows(),
+                Err(_) => asks
+                    .outcome_of(&ask_id)
+                    .is_some_and(|(outcome, _)| outcome.allows()),
+            };
+            drop(guard);
+            allowed
         })
     }
 }
@@ -143,6 +198,8 @@ pub(crate) struct InteractiveSessionBundle {
     pub(crate) approval_tx: mpsc::UnboundedSender<ApprovalCall>,
     pub(crate) approvals: mpsc::UnboundedReceiver<ApprovalCall>,
     pub(crate) questions: mpsc::UnboundedReceiver<QuestionCall>,
+    /// The session's ask registry: its approver opens every ask here.
+    pub(crate) asks: localpilot_rpc::AskRegistry,
 }
 
 /// Host-assigned identity of one member of an interactive pair.
@@ -346,12 +403,14 @@ impl InteractivePairHost {
             approval_tx: _,
             approvals: a_approvals,
             questions: a_questions,
+            asks: _,
         } = a_session;
         let InteractiveSessionBundle {
             runtime: b_runtime,
             approval_tx: b_approval_tx,
             approvals: b_approvals,
             questions: b_questions,
+            asks: b_asks,
         } = b_session;
 
         // Registration consumes its runtime on both outcomes, so a failure can
@@ -362,6 +421,7 @@ impl InteractivePairHost {
                 approval_tx: b_approval_tx,
                 approvals: b_approvals,
                 questions: b_questions,
+                asks: b_asks,
             };
             close_unhosted_pair_session(&cwd, b_session);
             return Err(error.into());
@@ -532,6 +592,7 @@ impl InteractiveSessionSetup {
 
         let (approval_tx, approvals) = mpsc::unbounded_channel::<ApprovalCall>();
         let (question_tx, questions) = mpsc::unbounded_channel::<QuestionCall>();
+        let asks = localpilot_rpc::AskRegistry::default();
         let mut tools = self.mcp.registry();
         let broker = crate::mcp::install_broker(&self.config.tools, &mut tools);
         let mut runtime = SessionRuntime::new(
@@ -539,7 +600,7 @@ impl InteractiveSessionSetup {
             tools,
             PermissionEngine::new(self.profile, Vec::new())
                 .with_allowed_commands(crate::session_cmd::allowed_commands(&self.config)),
-            Box::new(TuiApprover::new(approval_tx.clone())),
+            Box::new(TuiApprover::with_asks(approval_tx.clone(), asks.clone())),
             // Incognito keeps nothing on disk: the store is in-memory.
             if self.incognito {
                 Store::ephemeral()
@@ -588,6 +649,7 @@ impl InteractiveSessionSetup {
             approval_tx,
             approvals,
             questions,
+            asks,
         })
     }
 
@@ -2189,6 +2251,98 @@ mod tests {
         assert_eq!(
             PermissionEngine::new(Profile::Default, Vec::new()).decide(&request),
             Decision::Ask
+        );
+    }
+
+    // --- the approver with the session's ask registry ------------------------
+
+    fn ask_request() -> localpilot_sandbox::PermissionRequest {
+        localpilot_sandbox::PermissionRequest {
+            tool: "write_file".to_string(),
+            effect: localpilot_sandbox::Effect::WritePath {
+                inside_workspace: true,
+                secret_like: false,
+                overwrite: false,
+            },
+            interactivity: localpilot_sandbox::Interactivity::Interactive,
+            trusted: true,
+            detail: "notes.md".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_keyboard_decides_a_registry_ask_and_the_registry_records_it() {
+        for allow in [true, false] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let asks = localpilot_rpc::AskRegistry::default();
+            let approver = TuiApprover::with_asks(tx, asks.clone());
+            let request = ask_request();
+            let decision = approver.approve(&request);
+            let answer = tokio::spawn(async move {
+                let call = rx.recv().await.expect("the host sees the ask");
+                call.reply.send(allow).expect("the approver waits");
+            });
+            assert_eq!(decision.await, allow);
+            answer.await.expect("answered");
+            assert!(asks.outstanding().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ask_is_open_in_the_registry_while_the_keyboard_has_not_answered() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let asks = localpilot_rpc::AskRegistry::default();
+        let approver = TuiApprover::with_asks(tx, asks.clone());
+        let request = ask_request();
+        let decision = approver.approve(&request);
+        tokio::pin!(decision);
+        // Poll once so the ask is opened.
+        tokio::select! {
+            biased;
+            _ = &mut decision => panic!("nobody answered yet"),
+            () = tokio::task::yield_now() => {}
+        }
+        let open = asks.outstanding_detail();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].tool, "write_file");
+        assert_eq!(
+            open[0].expires_at_ms, 0,
+            "a keyboard ask never expires on its own"
+        );
+        // Another answer (a paired device, later) wins first; the keyboard
+        // answer that follows changes nothing.
+        assert!(asks
+            .reply(&open[0].ask_id, true, localpilot_rpc::Principal::Local)
+            .is_ok());
+        assert!(decision.await);
+        let call = rx.recv().await.expect("the host still saw the ask");
+        let _ = call.reply.send(false);
+    }
+
+    #[tokio::test]
+    async fn a_closed_host_denies_and_a_dropped_turn_cancels_the_registry_ask() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let asks = localpilot_rpc::AskRegistry::default();
+        let approver = TuiApprover::with_asks(tx, asks.clone());
+        let request = ask_request();
+        assert!(!approver.approve(&request).await, "no host is a denial");
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let approver = TuiApprover::with_asks(tx, asks.clone());
+        {
+            let decision = approver.approve(&request);
+            tokio::pin!(decision);
+            tokio::select! {
+                biased;
+                _ = &mut decision => panic!("nobody answered yet"),
+                () = tokio::task::yield_now() => {}
+            }
+            assert_eq!(asks.outstanding().len(), 1);
+        }
+        assert!(
+            asks.outstanding().is_empty(),
+            "dropping the turn cancels the ask"
         );
     }
 }

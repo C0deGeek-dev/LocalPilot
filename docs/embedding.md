@@ -276,10 +276,22 @@ use a new correlation id but must repeat the same command. Commands without
   (through the gateway) — the connection then acts as that device, or is refused
   and closed. It never falls back to local;
 - `device_sessions {capability, credential}` (through the gateway) — answers
-  `sessions {items}` once (at most 100 and 64 KiB: live sessions first, then
-  most recently updated; metadata only) or an `error`, and ends. It needs `observe`, opens
+  `sessions {items}` once (at most 100 and 64 KiB; the shared sessions only;
+  metadata only) or an `error`, and ends. It needs `observe`, opens
   nothing, and is delivered only while the gateway's lease and the device's
-  standing hold.
+  standing hold;
+- `relay_host {session, owner_generation, holder_instance, share}` (this
+  computer only) — shares a session this process runs (ADR-0250). It needs
+  `[remote] enabled`, an owner record naming this holder and generation, and
+  the session held; it answers `relay_ready {relay}`, after which the
+  connection carries the source's records (`relay_snapshot_begin`,
+  `relay_snapshot_part`, `relay_snapshot_commit`, `relay_event`,
+  `relay_result`, `relay_stop`, each at most 256 KiB) and receives
+  `relay_command {relay, share, device, n, command}` for each device command
+  the server admitted. The gateway refuses it from browsers.
+
+A device attaches only to a shared session (`device_attach` with a `resume_id`
+target); opening a session or attaching to any other is refused.
 
 Every command carries a requirement (`ClientCommand::requirement`): `observe`
 (`hello`, `status`, `commands`, `sessions`, `shutdown`, `revoke_self`),

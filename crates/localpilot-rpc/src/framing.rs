@@ -97,6 +97,13 @@ impl<R: tokio::io::AsyncRead + Unpin> JsonRecordReader<R> {
         }
     }
 
+    /// Lower (or raise) the record length cap from now on, for a connection
+    /// whose first record says what it carries. Records already read but not
+    /// yet returned are held to the new cap too.
+    pub fn set_max_record_len(&mut self, max_record_len: usize) {
+        self.framing.max_record_len = max_record_len;
+    }
+
     /// The next parseable JSON record, or `None` at end of input.
     ///
     /// # Errors
@@ -107,6 +114,14 @@ impl<R: tokio::io::AsyncRead + Unpin> JsonRecordReader<R> {
         use tokio::io::AsyncReadExt;
         loop {
             if let Some(record) = self.queued.pop_front() {
+                // A complete record is held to the same cap as an unfinished
+                // one, before anything parses it.
+                if record.len() > self.framing.max_record_len {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "framing: a record exceeds the maximum length",
+                    ));
+                }
                 match serde_json::from_slice(&record) {
                     Ok(value) => return Ok(Some(value)),
                     Err(_) => continue,
@@ -129,6 +144,17 @@ impl<R: tokio::io::AsyncRead + Unpin> JsonRecordReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_lowered_cap_refuses_a_complete_record_before_it_is_parsed() {
+        let big = format!("{{\"pad\":\"{}\"}}\n", " ".repeat(300));
+        let input = format!("{{\"a\":1}}\n{big}");
+        let mut reader = JsonRecordReader::new(input.as_bytes());
+        assert!(reader.next().await.unwrap().is_some());
+        reader.set_max_record_len(100);
+        let error = reader.next().await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     fn strings(records: std::io::Result<Vec<Vec<u8>>>) -> Vec<String> {
         records

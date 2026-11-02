@@ -118,6 +118,9 @@ pub(crate) struct HostContext<'a> {
     /// `/incognito off` (and session exit) can report the files it created.
     /// `Some` iff a session is currently incognito. Owned by `repl::run_chat`.
     pub(crate) incognito_entry: &'a RefCell<Option<crate::incognito::WorkspaceSnapshot>>,
+    /// The session's own event source and ask registry, kept from the start so
+    /// the session can be shared mid-turn (see `relay_source`).
+    pub(crate) source: &'a crate::relay_source::SessionSource,
 }
 
 pub(crate) struct PairHostContext<'a> {
@@ -4455,11 +4458,13 @@ async fn run_event_loop(
         config,
         deferred_selfimprove_reload,
         incognito_entry,
+        source,
         // The launch gate uses this in the startup screen; inside the loop the live
         // authority is `runtime.trusted()` (built from the same launch snapshot),
         // updated on accept — so no separate loop-local trust shadow is kept.
         trust_required: _,
     } = context;
+    let source = Some(source);
     let mut queue = VecDeque::new();
     let mut mouse_state = MouseState::default();
     let mut paste_burst = PasteBurst::default();
@@ -4617,6 +4622,7 @@ async fn run_event_loop(
                                         stages: &mut stages,
                                         guidance,
                                         execution: execution.clone(),
+                                        source,
                                     },
                                     SerialOperation::PumpedSlash(command),
                                     &mut queue,
@@ -4670,6 +4676,7 @@ async fn run_event_loop(
                                 stages: &mut stages,
                                 guidance,
                                 execution: execution.clone(),
+                                source,
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
@@ -4703,6 +4710,7 @@ async fn run_event_loop(
                                 stages: &mut stages,
                                 guidance,
                                 execution: execution.clone(),
+                                source,
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
@@ -4733,6 +4741,7 @@ async fn run_event_loop(
                                 stages: &mut stages,
                                 guidance,
                                 execution: execution.clone(),
+                                source,
                             },
                             SerialOperation::LocalMindReindex,
                             &mut queue,
@@ -4763,6 +4772,7 @@ async fn run_event_loop(
                                 stages: &mut stages,
                                 guidance,
                                 execution: execution.clone(),
+                                source,
                             },
                             SerialOperation::LocalMindReview(intent),
                             &mut queue,
@@ -4848,6 +4858,7 @@ async fn drive_operation_chain(
                         stages: &mut *ctx.stages,
                         guidance: ctx.guidance,
                         execution: ctx.execution.clone(),
+                        source: ctx.source,
                     },
                     authority.approval_tx,
                     queue,
@@ -4874,6 +4885,7 @@ async fn drive_operation_chain(
                         stages: &mut *ctx.stages,
                         guidance: ctx.guidance,
                         execution: ctx.execution.clone(),
+                        source: ctx.source,
                     },
                     authority.approval_tx,
                     intent,
@@ -5607,6 +5619,7 @@ async fn drive_localbox_models(
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         &mut io,
         &cancel,
@@ -5727,6 +5740,7 @@ async fn drive_selfimprove(
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         &mut io,
         &cancel,
@@ -5874,6 +5888,7 @@ async fn drive_localbox(
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         &mut io,
         &cancel,
@@ -5985,6 +6000,7 @@ async fn drive_compact(
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         &mut io,
         &cancel,
@@ -6142,6 +6158,7 @@ async fn drive_ingest(
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         &mut io,
         &cancel,
@@ -6268,6 +6285,7 @@ async fn drive_research(
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         &mut io,
         &cancel,
@@ -7190,6 +7208,7 @@ where
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         io,
         &cancel,
@@ -7910,6 +7929,7 @@ where
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         io,
         &cancel,
@@ -8314,6 +8334,7 @@ async fn drive_harness_resume(
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         &mut io,
         &cancel,
@@ -8569,6 +8590,9 @@ struct SlashContext<'a> {
     /// What resuming an approved plan will actually do, for the plan review to
     /// disclose before any resume becomes available.
     execution: ExecutionSnapshot,
+    /// The session's own event source and ask registry (see `relay_source`).
+    /// `None` only in tests that drive a slash path without a session source.
+    source: Option<&'a crate::relay_source::SessionSource>,
 }
 
 async fn drive_shell(
@@ -8604,6 +8628,7 @@ async fn drive_shell(
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         &mut io,
         &cancel,
@@ -8781,6 +8806,7 @@ where
         // disclosure; the conversation reads both from its own context.
         guidance: _,
         execution: _,
+        source: _,
     } = ctx;
     // A `Bare` operation still binds a receiver so the runtime-event arm and the
     // completion drain stay uniform; its sender is held open, so it simply never
@@ -8805,6 +8831,10 @@ where
     let mut pending_steer_items = VecDeque::new();
     let mut on_complete = Some(on_complete);
     let mut input_tick = tokio::time::interval(INJECTED_INPUT_INTERVAL);
+    // While a permission prompt is open, notice when its ask was decided
+    // elsewhere (another answer won), so the stale prompt closes.
+    let mut answered_elsewhere = tokio::time::interval(Duration::from_millis(100));
+    answered_elsewhere.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut frame_tick = tokio::time::interval(OPERATION_FRAME_INTERVAL);
     frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -9049,7 +9079,18 @@ where
                     let _ = (io.draw)(app)?;
                     return Ok(false);
                 }
+                _ = answered_elsewhere.tick(), if pending.as_ref().is_some_and(oneshot::Sender::is_closed) => {
+                    // The ask was decided elsewhere; close only its prompt.
+                    pending = None;
+                    if app.clear_approval_dialog() {
+                        render_needed = true;
+                    }
+                }
                 Some(call) = approval_rx.recv(), if pending.is_none() && pending_questions.is_none() => {
+                    // An ask already decided elsewhere is not shown.
+                    if call.reply.is_closed() {
+                        continue;
+                    }
                     mouse_state.reset_gesture();
                     if let Some(text) = paste_burst.flush_pending() {
                         let _ = app.handle_input(InputAction::Paste(text), 1);
@@ -9202,7 +9243,16 @@ async fn drive_turn(
     attachments: &[ContentBlock],
     queue: &mut VecDeque<QueuedOperation>,
 ) -> Result<bool> {
-    let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
+    // The turn publishes on the session's own sender, so the session's feed
+    // sees every turn from the start whether or not it is ever shared.
+    if let Some(source) = ctx.source {
+        source.follow(runtime.session_id());
+    }
+    let events = ctx.source.map_or_else(
+        || broadcast::channel::<RuntimeEvent>(1024).0,
+        |source| source.turn_events(),
+    );
+    let mut rx = events.subscribe();
     let cancel = CancellationToken::new();
     // Snapshot immediately before the turn borrows the runtime. Mid-turn image
     // paste can then use the exact active provider without racing a model switch
@@ -9237,6 +9287,7 @@ async fn drive_turn(
             stages: &mut *ctx.stages,
             guidance: ctx.guidance,
             execution: ctx.execution.clone(),
+            source: ctx.source,
         },
         &mut io,
         &cancel,
@@ -16959,6 +17010,7 @@ mod tests {
                 stages,
                 guidance: None,
                 execution: ExecutionSnapshot::default(),
+                source: None,
             },
             io,
             cancel,
@@ -17017,6 +17069,7 @@ mod tests {
                 stages,
                 guidance: None,
                 execution: ExecutionSnapshot::default(),
+                source: None,
             },
             io,
             cancel,
@@ -17073,6 +17126,7 @@ mod tests {
                 stages,
                 guidance: None,
                 execution: ExecutionSnapshot::default(),
+                source: None,
             },
             io,
             cancel,
@@ -17134,6 +17188,7 @@ mod tests {
                 stages,
                 guidance: None,
                 execution: ExecutionSnapshot::default(),
+                source: None,
             },
             io,
             cancel,
@@ -17423,6 +17478,7 @@ mod tests {
                     stages: &mut StageHost::new(),
                     guidance: None,
                     execution: ExecutionSnapshot::default(),
+                    source: None,
                     approval_rx: &mut approval_rx,
                     question_rx: &mut question_rx,
                     cwd: Path::new("."),
@@ -19157,6 +19213,95 @@ mod tests {
         .expect("turn loop completes");
         assert!(app.dialog.is_none(), "the shown approval was dismissed");
         assert_eq!(answer.try_recv(), Ok(false), "pending approval denied");
+    }
+
+    #[tokio::test]
+    async fn an_ask_answered_elsewhere_closes_its_prompt_and_the_next_ask_is_shown() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let call = |target: &str, reply| ApprovalCall {
+            request: crate::interactive_session::ApprovalRequest {
+                tool: "tool".to_string(),
+                target: target.to_string(),
+                risk_class: "test".to_string(),
+                may_create_files: false,
+            },
+            reply,
+        };
+        let (first, first_answer) = oneshot::channel();
+        approvals
+            .send(call("first", first))
+            .expect("queue approval");
+        let (second, mut second_answer) = oneshot::channel();
+        // An ask whose answer already landed elsewhere is never shown.
+        let (stale, stale_answer) = oneshot::channel();
+        drop(stale_answer);
+        tokio::spawn({
+            let approvals = approvals.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                // The first ask is decided elsewhere: its approver stops waiting.
+                drop(first_answer);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let _ = approvals.send(call("stale", stale));
+                let _ = approvals.send(call("second", second));
+            }
+        });
+        // Record every approval prompt drawn.
+        let shown = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        io.draw = Box::new({
+            let shown = shown.clone();
+            move |app: &AppModel| {
+                if let Some(localpilot_terminal_ui::DialogState::Approval { target, .. }) =
+                    &app.dialog
+                {
+                    let mut shown = shown.borrow_mut();
+                    if shown.last() != Some(target) {
+                        shown.push(target.clone());
+                    }
+                }
+                Ok(draw_hit_map(app, 80, 24))
+            }
+        });
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut StageHost::new(),
+            complete_after(600),
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+        // The first prompt closed when its ask was decided elsewhere, the stale
+        // one was never shown, and the second became the open prompt.
+        assert_eq!(
+            *shown.borrow(),
+            vec!["first".to_string(), "second".to_string()]
+        );
+        assert_eq!(second_answer.try_recv(), Ok(false));
+        assert!(app.dialog.is_none());
     }
 
     #[tokio::test]
@@ -21345,6 +21490,7 @@ last_seen = "2026-08-10"
                     stages,
                     guidance: *guidance,
                     execution: execution.clone(),
+                    source: None,
                 },
                 queue,
                 &mut io,
@@ -21400,6 +21546,7 @@ last_seen = "2026-08-10"
                     stages,
                     guidance: *guidance,
                     execution: execution.clone(),
+                    source: None,
                 },
                 queue,
                 &mut io,
@@ -21445,6 +21592,7 @@ last_seen = "2026-08-10"
                     stages,
                     guidance: *guidance,
                     execution: execution.clone(),
+                    source: None,
                 },
                 queue,
                 &mut io,
@@ -21491,6 +21639,7 @@ last_seen = "2026-08-10"
                     stages,
                     guidance: *guidance,
                     execution: execution.clone(),
+                    source: None,
                 },
                 queue,
                 &mut io,
@@ -21538,6 +21687,7 @@ last_seen = "2026-08-10"
                     stages,
                     guidance: *guidance,
                     execution: execution.clone(),
+                    source: None,
                 },
                 queue,
                 &mut io,
@@ -21596,6 +21746,7 @@ last_seen = "2026-08-10"
                     stages,
                     guidance: *guidance,
                     execution: execution.clone(),
+                    source: None,
                 },
                 queue,
                 &mut io,
@@ -21642,6 +21793,7 @@ last_seen = "2026-08-10"
                     stages,
                     guidance: *guidance,
                     execution: execution.clone(),
+                    source: None,
                 },
                 queue,
                 &mut io,

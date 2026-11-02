@@ -31,6 +31,13 @@ use tokio_util::sync::CancellationToken;
 const FEED_CAPACITY: usize = 2048;
 /// Live records buffered per connection before it lags.
 const LIVE_CAPACITY: usize = 1024;
+/// Live records a byte-bounded feed buffers (with [`BOUNDED_RECORD_MAX`],
+/// at most 8 MiB held for a lagging reader).
+const BOUNDED_LIVE_CAPACITY: usize = 256;
+/// The largest encoded record a byte-bounded feed keeps or delivers. A larger
+/// permission ask or plan makes the feed unshareable until it is gone (the
+/// local ask is untouched); any other larger record is replaced by a notice.
+pub(crate) const BOUNDED_RECORD_MAX: usize = 32 * 1024;
 /// The current turn's text kept for a snapshot (its tail).
 const TURN_TEXT_CAP: usize = 64 * 1024;
 /// Stored transcript messages and bytes a snapshot carries.
@@ -48,6 +55,11 @@ struct Projection {
     turn_text: Option<String>,
     turn_text_truncated: bool,
     asks: BTreeMap<String, AskDetail>,
+    /// Pending asks too large to keep (byte-bounded feeds): while any is
+    /// pending the feed cannot be shared.
+    oversized_asks: std::collections::BTreeSet<String>,
+    /// The current plan was too large to keep (byte-bounded feeds).
+    oversized_plan: bool,
 }
 
 impl Projection {
@@ -58,6 +70,8 @@ impl Projection {
             turn_text: Some(String::new()),
             turn_text_truncated: false,
             asks: BTreeMap::new(),
+            oversized_asks: std::collections::BTreeSet::new(),
+            oversized_plan: false,
         }
     }
 
@@ -66,6 +80,7 @@ impl Projection {
             ServerEvent::TurnStarted => {
                 self.turn = TurnState::Running;
                 self.plan = None;
+                self.oversized_plan = false;
                 self.turn_text = Some(String::new());
                 self.turn_text_truncated = false;
             }
@@ -99,6 +114,7 @@ impl Projection {
             }
             ServerEvent::PermissionResolved { ask_id, .. } => {
                 self.asks.remove(ask_id);
+                self.oversized_asks.remove(ask_id);
             }
             _ => {}
         }
@@ -126,6 +142,28 @@ struct FeedState {
     /// Set once, by [`SessionFeed::close`]: why the session closed. A closed
     /// feed takes no more records, and every attach or resync sees it.
     closed: Option<String>,
+    /// For a mirror: what its source's latest snapshot said beyond the
+    /// projection. Kept under the same lock as the projection, so a snapshot
+    /// of the mirror is always one consistent state.
+    mirror: Option<MirrorExtra>,
+}
+
+/// A mirror's history tail and admission state, as its source last reported
+/// them.
+#[derive(Debug, Clone, Default)]
+struct MirrorExtra {
+    history: (Vec<HistoryMessage>, bool),
+    admission: Admission,
+}
+
+impl MirrorExtra {
+    /// Nothing known: no history (marked incomplete), nothing running.
+    fn unknown() -> Self {
+        Self {
+            history: (Vec::new(), true),
+            admission: Admission::default(),
+        }
+    }
 }
 
 /// The session host's admission state, read under the feed lock when a
@@ -181,8 +219,33 @@ impl SessionFeed {
         runtime: broadcast::Receiver<RuntimeEvent>,
         asks: Option<AskRegistry>,
     ) -> Arc<Self> {
+        Self::start_with(runtime, asks, usize::MAX)
+    }
+
+    /// A byte-bounded feed whose records arrive through `ingress` (already
+    /// bounded per record by [`bounded_records`]) rather than a broadcast
+    /// subscription.
+    pub(crate) fn start_fed(
+        ingress: Arc<Ingress>,
+        asks: Option<AskRegistry>,
+        max_bytes: usize,
+    ) -> Arc<Self> {
         let ask_rx = asks.as_ref().map(AskRegistry::subscribe);
-        let feed = Arc::new(Self::new(FEED_CAPACITY));
+        let feed = Arc::new(Self::new(FEED_CAPACITY, max_bytes));
+        if let Some(asks) = &asks {
+            feed.rebuild_asks(asks.outstanding_detail(), false);
+        }
+        tokio::spawn(pump_ingress(feed.clone(), ingress, asks, ask_rx));
+        feed
+    }
+
+    fn start_with(
+        runtime: broadcast::Receiver<RuntimeEvent>,
+        asks: Option<AskRegistry>,
+        max_bytes: usize,
+    ) -> Arc<Self> {
+        let ask_rx = asks.as_ref().map(AskRegistry::subscribe);
+        let feed = Arc::new(Self::new(FEED_CAPACITY, max_bytes));
         if let Some(asks) = &asks {
             feed.rebuild_asks(asks.outstanding_detail(), false);
         }
@@ -190,14 +253,20 @@ impl SessionFeed {
         feed
     }
 
-    fn new(capacity: usize) -> Self {
-        let (live, _) = broadcast::channel(LIVE_CAPACITY);
+    fn new(capacity: usize, max_bytes: usize) -> Self {
+        let live_capacity = if max_bytes == usize::MAX {
+            LIVE_CAPACITY
+        } else {
+            BOUNDED_LIVE_CAPACITY
+        };
+        let (live, _) = broadcast::channel(live_capacity);
         Self {
             state: Mutex::new(FeedState {
                 epoch: new_epoch(),
-                ring: SeqRing::new(capacity),
+                ring: SeqRing::with_byte_budget(capacity, max_bytes),
                 projection: Projection::new(),
                 closed: None,
+                mirror: None,
             }),
             live,
             clients: AtomicUsize::new(0),
@@ -207,6 +276,125 @@ impl SessionFeed {
 
     fn state(&self) -> MutexGuard<'_, FeedState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A feed with no pump of its own: it mirrors another process's session
+    /// feed (a relayed session). It starts unknown (no turn state, no text, no
+    /// asks) until [`SessionFeed::install`] gives it a verified snapshot.
+    pub(crate) fn mirror() -> Arc<Self> {
+        let feed = Arc::new(Self::new(FEED_CAPACITY, usize::MAX));
+        {
+            let mut state = feed.state();
+            state.projection.turn = TurnState::Unknown;
+            state.projection.turn_text = None;
+            state.mirror = Some(MirrorExtra::unknown());
+        }
+        feed
+    }
+
+    /// Replace a mirror's whole state with a verified snapshot from its source,
+    /// atomically, under one lock: a new epoch, an empty ring, the snapshot's
+    /// projection, history tail and admission, and only then a
+    /// `resync_required` so every attached connection reconciles against the
+    /// complete new state. Returns whether it installed (anything but a
+    /// snapshot, or a closed feed, leaves the mirror unchanged).
+    pub(crate) fn install(&self, snapshot: &ServerEvent) -> bool {
+        let ServerEvent::Snapshot {
+            turn,
+            busy,
+            queued,
+            plan,
+            asks,
+            turn_text,
+            turn_text_truncated,
+            history,
+            history_truncated,
+            ..
+        } = snapshot
+        else {
+            return false;
+        };
+        let mut state = self.state();
+        if state.closed.is_some() {
+            return false;
+        }
+        state.epoch = new_epoch();
+        state.ring.clear();
+        state.projection = Projection {
+            turn: *turn,
+            plan: plan.clone(),
+            turn_text: turn_text.clone(),
+            turn_text_truncated: *turn_text_truncated,
+            asks: asks
+                .iter()
+                .map(|ask| (ask.ask_id.clone(), ask.clone()))
+                .collect(),
+            ..Projection::new()
+        };
+        state.mirror = Some(MirrorExtra {
+            history: (history.clone(), *history_truncated),
+            admission: Admission {
+                busy: *busy,
+                queued: *queued,
+            },
+        });
+        let event = ServerEvent::ResyncRequired {
+            epoch: state.epoch.clone(),
+            seq: state.ring.head() + 1,
+        };
+        let seq = state.ring.push(event.clone());
+        let _ = self.live.send((seq, event));
+        true
+    }
+
+    /// A mirror lost its source's order (a gap, or a snapshot that did not
+    /// verify): until the next install it knows nothing — no turn state, no
+    /// text, no asks — and every connection is told to reconcile.
+    pub(crate) fn forget(&self) {
+        let mut state = self.state();
+        if state.closed.is_some() {
+            return;
+        }
+        state.epoch = new_epoch();
+        state.ring.clear();
+        state.projection.turn = TurnState::Unknown;
+        state.projection.plan = None;
+        state.projection.turn_text = None;
+        state.projection.turn_text_truncated = false;
+        state.projection.asks.clear();
+        if state.mirror.is_some() {
+            state.mirror = Some(MirrorExtra::unknown());
+        }
+        let event = ServerEvent::ResyncRequired {
+            epoch: state.epoch.clone(),
+            seq: state.ring.head() + 1,
+        };
+        let seq = state.ring.push(event.clone());
+        let _ = self.live.send((seq, event));
+    }
+
+    /// Append one record relayed from the mirror's source, in the source's
+    /// order.
+    pub(crate) fn relay(&self, event: ServerEvent) {
+        self.push(event);
+    }
+
+    /// Whether everything the feed's state holds can be shared (no pending ask
+    /// or current plan was too large to keep).
+    pub(crate) fn shareable(&self) -> bool {
+        let state = self.state();
+        state.projection.oversized_asks.is_empty() && !state.projection.oversized_plan
+    }
+
+    /// Cancelled when the feed closes (the session ended or changed).
+    pub(crate) fn closed_signal(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// The feed's live records from now on (for a reader that takes its own
+    /// snapshot right after subscribing).
+    pub(crate) fn live(&self) -> broadcast::Receiver<FeedRecord> {
+        self.live.subscribe()
     }
 
     /// How many connections are attached.
@@ -221,8 +409,60 @@ impl SessionFeed {
         if state.closed.is_some() {
             return; // terminal: nothing follows `session_closed`
         }
+        // A byte-bounded feed never keeps or delivers a record larger than
+        // its per-record cap.
+        let event = if state.ring.has_byte_budget() {
+            let size = serde_json::to_vec(&event).map_or(usize::MAX, |bytes| bytes.len());
+            if size > BOUNDED_RECORD_MAX {
+                match event {
+                    ServerEvent::PermissionAsk { ask_id, .. } => {
+                        state.projection.oversized_asks.insert(ask_id);
+                        ServerEvent::Warning {
+                            message: "a permission request too large to share is open on the PC"
+                                .to_string(),
+                        }
+                    }
+                    ServerEvent::Plan { .. } => {
+                        state.projection.oversized_plan = true;
+                        state.projection.plan = None;
+                        ServerEvent::Warning {
+                            message: "the current plan is too large to share".to_string(),
+                        }
+                    }
+                    // Streamed text arrives split (see `bounded_records`); a
+                    // piece still over the cap leaves the text unknown rather
+                    // than empty.
+                    ServerEvent::TextDelta { .. } => {
+                        state.projection.turn_text = None;
+                        state.projection.turn_text_truncated = false;
+                        ServerEvent::Warning {
+                            message: "part of the answer is shown only on the PC".to_string(),
+                        }
+                    }
+                    _ => ServerEvent::Warning {
+                        message: "a large update is shown only on the PC".to_string(),
+                    },
+                }
+            } else {
+                event
+            }
+        } else {
+            event
+        };
         state.projection.apply(&event);
-        let seq = state.ring.push(event.clone());
+        if let Some(mirror) = &mut state.mirror {
+            // A finished turn leaves nothing running or waiting that the
+            // mirror knows of; the source's next snapshot says more.
+            if matches!(event, ServerEvent::Stopped { .. }) {
+                mirror.admission = Admission::default();
+            }
+        }
+        let size = if state.ring.has_byte_budget() {
+            serde_json::to_vec(&event).map_or(0, |bytes| bytes.len())
+        } else {
+            0
+        };
+        let seq = state.ring.push_sized(event.clone(), size);
         let _ = self.live.send((seq, event));
     }
 
@@ -233,10 +473,22 @@ impl SessionFeed {
         if state.closed.is_some() {
             return;
         }
-        state.projection.asks = outstanding
-            .iter()
-            .map(|ask| (ask.ask_id.clone(), ask.detail()))
-            .collect();
+        // One policy for the seed and every rebuild: in a byte-bounded feed an
+        // ask too large to keep is recorded as oversized, never kept, and the
+        // oversized set is recomputed from what is pending now.
+        let bounded = state.ring.has_byte_budget();
+        state.projection.asks.clear();
+        state.projection.oversized_asks.clear();
+        for ask in &outstanding {
+            if bounded && encoded_len(&ask.wire_event()) > BOUNDED_RECORD_MAX {
+                state.projection.oversized_asks.insert(ask.ask_id.clone());
+            } else {
+                state
+                    .projection
+                    .asks
+                    .insert(ask.ask_id.clone(), ask.detail());
+            }
+        }
         if lost_runtime {
             state.epoch = new_epoch();
             state.ring.clear();
@@ -349,6 +601,135 @@ impl SessionFeed {
     }
 }
 
+fn encoded_len(event: &ServerEvent) -> usize {
+    serde_json::to_vec(event).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// Text per streamed piece when a large text record is split for a
+/// byte-bounded feed: escaping expands a byte to at most six, so a piece stays
+/// well under [`BOUNDED_RECORD_MAX`].
+const SPLIT_TEXT: usize = 4 * 1024;
+
+fn split_text(text: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut cut = rest.len().min(SPLIT_TEXT);
+        while !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let (piece, tail) = rest.split_at(cut);
+        pieces.push(piece.to_string());
+        rest = tail;
+    }
+    pieces
+}
+
+/// The records a byte-bounded feed takes for one runtime event: large text
+/// split into pieces (so the projection keeps its whole bounded tail), and
+/// everything else as one record (sized again when pushed).
+pub(crate) fn bounded_records(event: RuntimeEvent) -> Vec<ServerEvent> {
+    let mapped = match event {
+        RuntimeEvent::TurnStarted => Some(ServerEvent::TurnStarted),
+        event => map_event(event),
+    };
+    match mapped {
+        Some(ServerEvent::TextDelta { text }) if text.len() > SPLIT_TEXT => split_text(&text)
+            .into_iter()
+            .map(|text| ServerEvent::TextDelta { text })
+            .collect(),
+        Some(ServerEvent::ReasoningDelta { text }) if text.len() > SPLIT_TEXT => split_text(&text)
+            .into_iter()
+            .map(|text| ServerEvent::ReasoningDelta { text })
+            .collect(),
+        Some(event) => vec![event],
+        None => Vec::new(),
+    }
+}
+
+/// Records waiting between a source's per-turn forwarders and its feed's pump.
+/// Bounded in count and bytes; when a record does not fit, everything queued is
+/// dropped and a loss is latched, and the pump rebuilds before it applies
+/// anything queued afterwards. A producer never waits.
+#[derive(Default)]
+pub(crate) struct Ingress {
+    state: Mutex<IngressState>,
+    wake: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct IngressState {
+    queue: std::collections::VecDeque<ServerEvent>,
+    bytes: usize,
+    lost: bool,
+}
+
+/// Records an ingress holds at most.
+const INGRESS_RECORDS: usize = 256;
+/// Bytes an ingress holds at most.
+const INGRESS_BYTES: usize = 4 * 1024 * 1024;
+
+/// What the pump takes next from an ingress.
+enum Taken {
+    Record(ServerEvent),
+    Lost,
+}
+
+impl Ingress {
+    fn lock(&self) -> MutexGuard<'_, IngressState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Queue records for the feed, or latch a loss when they do not fit.
+    pub(crate) fn offer(&self, records: Vec<ServerEvent>) {
+        {
+            let mut state = self.lock();
+            for record in records {
+                if state.lost {
+                    break; // nothing more until the pump has rebuilt
+                }
+                let size = encoded_len(&record);
+                if state.queue.len() >= INGRESS_RECORDS
+                    || state.bytes.saturating_add(size) > INGRESS_BYTES
+                {
+                    state.queue.clear();
+                    state.bytes = 0;
+                    state.lost = true;
+                } else {
+                    state.bytes += size;
+                    state.queue.push_back(record);
+                }
+            }
+        }
+        self.wake.notify_one();
+    }
+
+    /// Latch a loss (a forwarder fell behind its turn's channel).
+    pub(crate) fn lost(&self) {
+        {
+            let mut state = self.lock();
+            state.queue.clear();
+            state.bytes = 0;
+            state.lost = true;
+        }
+        self.wake.notify_one();
+    }
+
+    /// A latched loss comes first, before any record queued after it.
+    fn take(&self) -> Option<Taken> {
+        let mut state = self.lock();
+        if state.lost {
+            state.lost = false;
+            state.queue.clear();
+            state.bytes = 0;
+            return Some(Taken::Lost);
+        }
+        let record = state.queue.pop_front()?;
+        state.bytes = state.bytes.saturating_sub(encoded_len(&record));
+        Some(Taken::Record(record))
+    }
+}
+
 fn new_epoch() -> String {
     EventId::new().to_string()
 }
@@ -368,6 +749,12 @@ fn snapshot(
     history: &(Vec<HistoryMessage>, bool),
     admission: Admission,
 ) -> ServerEvent {
+    // A mirror's history and admission are its source's, held with the
+    // projection; the caller's are for hosted sessions only.
+    let (history, admission) = match &state.mirror {
+        Some(mirror) => (&mirror.history, mirror.admission),
+        None => (history, admission),
+    };
     let projection = &state.projection;
     ServerEvent::Snapshot {
         epoch: state.epoch.clone(),
@@ -429,6 +816,58 @@ fn role_label(role: Role) -> &'static str {
 
 /// The feed's only writer. Ends when the session's runtime stream closes or
 /// the feed is closed.
+/// The pump of a byte-bounded feed fed through an [`Ingress`].
+async fn pump_ingress(
+    feed: Arc<SessionFeed>,
+    ingress: Arc<Ingress>,
+    asks: Option<AskRegistry>,
+    mut ask_rx: Option<broadcast::Receiver<AskEvent>>,
+) {
+    loop {
+        // Subscribe to the wake-up before draining, so nothing offered in
+        // between is missed.
+        let woken = ingress.wake.notified();
+        while let Some(taken) = ingress.take() {
+            match taken {
+                Taken::Record(record) => feed.push(record),
+                Taken::Lost => {
+                    if let Some(rx) = &mut ask_rx {
+                        *rx = rx.resubscribe();
+                    }
+                    rebuild(&feed, asks.as_ref());
+                }
+            }
+        }
+        tokio::select! {
+            biased;
+            () = feed.cancel.cancelled() => break,
+            () = woken => {}
+            event = next_ask(&mut ask_rx) => match event {
+                Ok(AskEvent::Raised(ask)) => {
+                    let known = {
+                        let state = feed.state();
+                        state.projection.asks.contains_key(&ask.ask_id)
+                            || state.projection.oversized_asks.contains(&ask.ask_id)
+                    };
+                    if !known {
+                        feed.push(ask.wire_event());
+                    }
+                }
+                Ok(AskEvent::Resolved { ask_id, outcome, by }) => {
+                    feed.push(ServerEvent::PermissionResolved { ask_id, outcome, by });
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if let Some(rx) = &mut ask_rx {
+                        *rx = rx.resubscribe();
+                    }
+                    rebuild(&feed, asks.as_ref());
+                }
+                Err(broadcast::error::RecvError::Closed) => ask_rx = None,
+            },
+        }
+    }
+}
+
 async fn pump(
     feed: Arc<SessionFeed>,
     mut runtime: broadcast::Receiver<RuntimeEvent>,
@@ -529,7 +968,7 @@ mod tests {
 
     #[test]
     fn a_closed_feed_is_terminal_for_attach_and_snapshot() {
-        let feed = Arc::new(SessionFeed::new(16));
+        let feed = Arc::new(SessionFeed::new(16, usize::MAX));
         feed.push(ServerEvent::TurnStarted);
         let mut live = feed.live.subscribe();
         feed.close("closed after inactivity");
@@ -562,7 +1001,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_reports_accepted_work_as_busy_before_its_turn_starts() {
-        let feed = Arc::new(SessionFeed::new(16));
+        let feed = Arc::new(SessionFeed::new(16, usize::MAX));
         let accepted = || Admission {
             busy: true,
             queued: 1,
@@ -594,7 +1033,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_is_the_projection_at_the_head() {
-        let feed = Arc::new(SessionFeed::new(16));
+        let feed = Arc::new(SessionFeed::new(16, usize::MAX));
         feed.push(ServerEvent::TurnStarted);
         feed.push(text("hello "));
         feed.push(text("world"));
@@ -610,7 +1049,7 @@ mod tests {
     fn two_turns_keep_their_own_text() {
         // Both turns complete before anyone reads: each delta still belongs to
         // the turn whose start precedes it in the one ordered stream.
-        let feed = Arc::new(SessionFeed::new(16));
+        let feed = Arc::new(SessionFeed::new(16, usize::MAX));
         for event in [
             ServerEvent::TurnStarted,
             text("first"),
@@ -628,7 +1067,7 @@ mod tests {
 
     #[test]
     fn a_cursor_in_the_same_epoch_replays_and_others_get_a_snapshot() {
-        let feed = Arc::new(SessionFeed::new(4));
+        let feed = Arc::new(SessionFeed::new(4, usize::MAX));
         feed.push(ServerEvent::TurnStarted);
         feed.push(text("a"));
         let epoch = feed.state().epoch.clone();
@@ -664,7 +1103,7 @@ mod tests {
 
     #[test]
     fn a_rebuild_marks_runtime_state_unknown_and_keeps_authoritative_asks() {
-        let feed = Arc::new(SessionFeed::new(16));
+        let feed = Arc::new(SessionFeed::new(16, usize::MAX));
         feed.push(ServerEvent::TurnStarted);
         feed.push(text("partial"));
         feed.push(ServerEvent::Plan { steps: Vec::new() });
@@ -823,5 +1262,89 @@ mod tests {
         assert_eq!(history.len(), HISTORY_MESSAGES);
         assert_eq!(history.last().unwrap().text, "m29");
         assert_eq!(history.first().unwrap().text, "m10");
+    }
+
+    // --- the bounded source ingress ---------------------------------------
+
+    #[test]
+    fn an_ingress_overflow_latches_a_loss_taken_before_anything_offered_later() {
+        let ingress = Ingress::default();
+        ingress.offer((0..INGRESS_RECORDS + 1).map(|_| text("a")).collect());
+        // Offered while the loss is latched: dropped.
+        ingress.offer(vec![text("late")]);
+        assert!(matches!(ingress.take(), Some(Taken::Lost)));
+        assert!(ingress.take().is_none(), "nothing from before the rebuild");
+        ingress.offer(vec![text("after")]);
+        assert!(
+            matches!(ingress.take(), Some(Taken::Record(ServerEvent::TextDelta { text })) if text == "after")
+        );
+    }
+
+    #[test]
+    fn a_loss_latched_by_the_last_offer_is_still_taken() {
+        let ingress = Ingress::default();
+        ingress.offer((0..INGRESS_RECORDS + 1).map(|_| text("a")).collect());
+        // No more records ever arrive: the pump still sees the loss.
+        assert!(matches!(ingress.take(), Some(Taken::Lost)));
+    }
+
+    #[test]
+    fn an_ingress_holds_a_bounded_number_of_bytes() {
+        let ingress = Ingress::default();
+        let mib = "m".repeat(1024 * 1024);
+        ingress.offer((0..5).map(|_| text(&mib)).collect());
+        assert!(matches!(ingress.take(), Some(Taken::Lost)));
+        assert!(ingress.take().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_lost_ingress_makes_the_feed_claim_nothing_until_the_next_turn() {
+        let ingress = Arc::new(Ingress::default());
+        let feed = SessionFeed::start_fed(ingress.clone(), None, 8 * 1024 * 1024);
+        ingress.offer(vec![ServerEvent::TurnStarted, text("partial")]);
+        ingress.lost();
+        let history = (Vec::new(), false);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let (snapshot, _) = feed.snapshot(&history, &Admission::default);
+                if matches!(
+                    snapshot,
+                    ServerEvent::Snapshot {
+                        turn: TurnState::Unknown,
+                        turn_text: None,
+                        ..
+                    }
+                ) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the loss reached the feed");
+    }
+
+    #[test]
+    fn a_rebuild_recomputes_kept_and_oversized_asks_from_what_is_pending() {
+        let feed = SessionFeed::new(16, 8 * 1024 * 1024);
+        let ask = |id: &str, detail: usize| localpilot_rpc::PendingAsk {
+            ask_id: id.to_string(),
+            tool: "t".to_string(),
+            detail: "d".repeat(detail),
+            risk: "r".to_string(),
+            expires_at_ms: 0,
+        };
+        feed.rebuild_asks(
+            vec![ask("small", 10), ask("big", BOUNDED_RECORD_MAX + 1)],
+            true,
+        );
+        assert!(!feed.shareable());
+        let (asks, _) = feed.pending_asks();
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].ask_id, "small");
+        // The big ask was resolved while records were lost: the next rebuild
+        // forgets it.
+        feed.rebuild_asks(vec![ask("small", 10)], true);
+        assert!(feed.shareable());
     }
 }

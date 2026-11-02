@@ -179,6 +179,17 @@ pub enum ClientCommand {
         capability: WireSecret,
         credential: WireSecret,
     },
+    /// First record of a local connection publishing a session this process
+    /// runs, so paired devices can follow it (a relay). `owner_generation` and
+    /// `holder_instance` must match the session's owner record; `share` is the
+    /// source's sharing generation, new on every share. After `relay_ready`,
+    /// the connection carries [`RelayRecord`](crate::RelayRecord)s.
+    RelayHost {
+        session: SessionId,
+        owner_generation: u64,
+        holder_instance: String,
+        share: String,
+    },
 }
 
 /// A secret carried on the wire (a gateway capability, a device credential, a
@@ -251,7 +262,8 @@ impl ClientCommand {
             | Self::DeviceAttach { .. }
             | Self::DeviceSessions { .. }
             | Self::PairBegin { .. }
-            | Self::PairExchange { .. } => Requirement::LocalOnly,
+            | Self::PairExchange { .. }
+            | Self::RelayHost { .. } => Requirement::LocalOnly,
         }
     }
 }
@@ -452,6 +464,21 @@ pub enum ServerEvent {
         device_id: String,
         credential: WireSecret,
         scope: Scope,
+    },
+    /// Reply to `relay_host`: the relay is registered under `relay`; send the
+    /// snapshot next.
+    RelayReady {
+        relay: String,
+    },
+    /// To a relay's source: command `n` from paired device `device`, already
+    /// admitted by the server. The source decides it finally and answers with
+    /// a `relay_result`.
+    RelayCommand {
+        relay: String,
+        share: String,
+        device: String,
+        n: u64,
+        command: Box<ClientCommand>,
     },
     /// Reply to `gateway_register`: the capability the gateway presents on
     /// each device connection. Valid while the registering connection stays

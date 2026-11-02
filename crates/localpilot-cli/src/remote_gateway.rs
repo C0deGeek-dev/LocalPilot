@@ -75,13 +75,14 @@ const COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60;
 
 /// Records a browser must never send: binding a connection, or registering
 /// and pairing, belong to the gateway and the local machine.
-const FORBIDDEN_RECORDS: [&str; 6] = [
+const FORBIDDEN_RECORDS: [&str; 7] = [
     "attach",
     "gateway_register",
     "device_attach",
     "device_sessions",
     "pair_begin",
     "pair_exchange",
+    "relay_host",
 ];
 
 /// A connection to the daemon.

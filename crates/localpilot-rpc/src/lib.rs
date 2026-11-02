@@ -13,11 +13,13 @@ mod feed;
 mod framing;
 mod mcp;
 mod protocol;
+mod relay;
 mod serve;
 
 pub use acp::{serve_acp, ACP_PROTOCOL_VERSION};
 pub use approver::{
-    AskEvent, AskOutcome, AskRegistry, PendingAsk, Principal, ReplyRefusal, RpcApprover,
+    AskEvent, AskGuard, AskOutcome, AskRegistry, OpenAsk, PendingAsk, Principal, ReplyRefusal,
+    RpcApprover,
 };
 pub use feed::SeqRing;
 pub use framing::{JsonRecordReader, LineFraming, DEFAULT_MAX_RECORD_LEN};
@@ -30,5 +32,9 @@ pub use protocol::{
     InputDisposition, PlanStepWire, RejectCode, RequestKey, Requirement, Scope, ServerEvent,
     ServerRecord, SessionInfo, TurnState, WireSecret, CAPABILITY_ACKS, CAPABILITY_COMMANDS,
     CAPABILITY_RESUME, CAPABILITY_RETRY, RPC_PROTOCOL_VERSION, SERVER_CAPABILITIES, SERVER_VERSION,
+};
+pub use relay::{
+    relayable, snapshot_records, RelayError, RelayRecord, RelayRequestState, SnapshotAssembly,
+    SourceSnapshot, RELAY_RECORD_MAX, RELAY_SNAPSHOT_MAX,
 };
 pub use serve::{map_event, serve, RpcError, ServeContext};
