@@ -6,14 +6,27 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/remote share` in the full-screen terminal shares the running session with
+  your paired devices, mid-turn and during a permission request included;
+  `/remote stop` ends it and `/remote` shows where sharing stands. Sharing needs
+  the workspace's background server (`localpilot serve`); it is never started
+  for you. A dropped connection is retried after 1, 2, 5 and 10 seconds and then
+  every 30 seconds, and a server that is not running ends sharing with a note on
+  how to start it. Phone prompts appear in the transcript as the phone's and
+  take an ordinary turn; while a turn runs, a phone's follow-up waits for it
+  and a "now" prompt is refused (steering the running turn from a phone is not
+  available); a phone can also cancel the turn, answer a permission
+  request and run `/clear`, `/name`, `/effort` and `/compact`. While a session is
+  shared, quitting asks first ("Keep terminal open" is the default), and F6 on a
+  permission request opens remote access without answering it. Pairing and
+  device management stay on the command line for now (`localpilot devices`)
+  (ADR-0251).
 - Paired devices now reach only sessions that are shared with them: a
   full-screen session is shared from the process that runs it, the workspace
   server mirrors it for the devices and passes their prompts, permission answers,
   cancels and remote commands back to that session, which decides each one
   itself. Devices no longer open new sessions or attach to other sessions of the
-  workspace. The terminal's `/remote share` command that starts sharing is not
-  available yet, so until it is, a paired device finds no session to follow
-  (ADR-0250).
+  workspace (ADR-0250).
 - A session now runs in at most one LocalPilot process at a time. Resuming a
   session that another LocalPilot process is running fails with "session busy"
   and names that process, instead of running it twice (so does `localpilot session

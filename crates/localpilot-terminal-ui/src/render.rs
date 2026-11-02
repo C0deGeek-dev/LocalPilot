@@ -415,6 +415,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
                 let mut hit_map = render_takeover(frame, body, app, localmind);
                 hit_map.tabs = tabs;
                 hit_map.theme_rows = render_theme_picker(frame, area, app);
+                render_choice(frame, area, app);
                 return hit_map;
             }
         }
@@ -539,6 +540,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     render_footer(frame, layout.footer, app, layout.stacked);
     let theme_rows = render_theme_picker(frame, area, app);
     let dialog_hits = render_dialog(frame, area, active_timeline, app);
+    render_choice(frame, area, app);
     HitMap {
         takeover: false,
         takeover_content: Rect::default(),
@@ -3177,6 +3179,69 @@ fn timeline_search_projection(app: &AppModel, width: u16) -> Option<(String, usi
     Some((text, cursor))
 }
 
+/// The host's open choice, over everything else (a permission dialog stays
+/// open beneath it).
+fn render_choice(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
+    let Some(choice) = app.choice() else {
+        return;
+    };
+    let theme = theme(app);
+    let width = area.width.saturating_sub(4).min(76);
+    let inner_width = width.saturating_sub(4).max(1);
+    let mut lines = vec![Line::styled(
+        truncate_end(&choice.title, inner_width),
+        theme.ui(UiRole::Prompt),
+    )];
+    for text in &choice.body {
+        lines.push(Line::styled(
+            truncate_end(text, inner_width),
+            theme.ui(UiRole::Foreground),
+        ));
+    }
+    lines.push(Line::raw(""));
+    for (index, label) in choice.options.iter().enumerate() {
+        let selected = index == choice.selected;
+        let marker = if selected { "> " } else { "  " };
+        let role = if selected {
+            UiRole::Accent
+        } else {
+            UiRole::Foreground
+        };
+        lines.push(Line::styled(
+            truncate_end(&format!("{marker}{label}"), inner_width),
+            theme.ui(role),
+        ));
+    }
+    lines.push(Line::styled(
+        "Up/Down choose · Enter select · Esc back",
+        theme.ui(UiRole::Muted),
+    ));
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(area.height);
+    if width < 8 || height < 3 {
+        return;
+    }
+    let dialog = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, dialog);
+    frame.render_widget(Block::default().style(theme.ui(UiRole::Surface)), dialog);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Rect::new(
+            dialog.x.saturating_add(2),
+            dialog.y.saturating_add(1),
+            dialog.width.saturating_sub(4),
+            dialog.height.saturating_sub(2),
+        ),
+    );
+}
+
 fn render_dialog(
     frame: &mut Frame<'_>,
     frame_area: Rect,
@@ -3288,7 +3353,7 @@ fn render_dialog(
                 if app.dialog_peer().is_some() {
                     "Ctrl+C abort · Y allow once · N or Esc deny"
                 } else {
-                    "Y allow once · N deny"
+                    "Y allow once · N deny · F6 remote"
                 },
                 theme.ui(UiRole::Muted),
             ));
@@ -4185,6 +4250,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
         format!("incognito · {context}")
     } else {
         context
+    };
+    let context = match app.remote_label() {
+        Some(label) => format!("{label} · {context}"),
+        None => context,
     };
     let context = if app.has_stashed_draft() {
         format!("stashed · {context}")

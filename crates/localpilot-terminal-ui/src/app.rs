@@ -1191,6 +1191,17 @@ pub enum TakeoverNavigation {
     PageDown,
 }
 
+/// A small choice the host asks for over everything else (closing a shared
+/// session, remote access during a permission ask): a title, what the choice
+/// means, and its actions, the first selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub title: String,
+    pub body: Vec<String>,
+    pub options: Vec<String>,
+    pub selected: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
     None,
@@ -1597,6 +1608,10 @@ pub struct AppModel {
     pub focus: Focus,
     pub exit_armed: bool,
     pub exit_requested: bool,
+    /// The sharing label for the status line (`None` when not shared).
+    remote_label: Option<String>,
+    /// The host's open choice, if any (see [`Choice`]).
+    choice: Option<Choice>,
     escape_armed_at: Option<Instant>,
     print_transcript_on_exit: bool,
     copy_on_select: bool,
@@ -1720,6 +1735,8 @@ impl AppModel {
             focus: Focus::Composer,
             exit_armed: false,
             exit_requested: false,
+            remote_label: None,
+            choice: None,
             escape_armed_at: None,
             print_transcript_on_exit: false,
             copy_on_select: false,
@@ -1871,6 +1888,60 @@ impl AppModel {
     #[must_use]
     pub const fn incognito(&self) -> bool {
         self.incognito
+    }
+
+    /// Project whether this session is shared with paired devices (and how its
+    /// relay stands) into persistent UI chrome; `None` when it is not shared.
+    pub fn set_remote_label(&mut self, label: Option<String>) {
+        self.remote_label = label;
+    }
+
+    /// The sharing label shown in the status line, if the session is shared.
+    #[must_use]
+    pub fn remote_label(&self) -> Option<&str> {
+        self.remote_label.as_deref()
+    }
+
+    /// Open a choice over everything else, its first action selected. The
+    /// host routes keys to it while it is open; it never answers or dismisses
+    /// another dialog.
+    pub fn open_choice(&mut self, title: String, body: Vec<String>, options: Vec<String>) {
+        self.choice = Some(Choice {
+            title,
+            body,
+            options,
+            selected: 0,
+        });
+    }
+
+    /// The open choice, if any.
+    #[must_use]
+    pub fn choice(&self) -> Option<&Choice> {
+        self.choice.as_ref()
+    }
+
+    /// Move the choice's selection to the next (or previous) action.
+    pub fn move_choice(&mut self, forward: bool) {
+        if let Some(choice) = &mut self.choice {
+            let count = choice.options.len().max(1);
+            choice.selected = if forward {
+                (choice.selected + 1) % count
+            } else {
+                (choice.selected + count - 1) % count
+            };
+        }
+    }
+
+    /// Close the choice (whatever was chosen).
+    pub fn close_choice(&mut self) {
+        self.choice = None;
+    }
+
+    /// A queued prompt will not run: it is no longer pending, and says why.
+    pub fn mark_prompt_not_run(&mut self, id: ItemId, why: &str) -> bool {
+        let timeline = &mut self.projections.active_mut().timeline;
+        let _ = timeline.set_trailing(id, Some(format!("not run: {why}")));
+        timeline.set_pending(id, false)
     }
 
     /// Project the runtime's live incognito state into persistent UI chrome.

@@ -233,6 +233,21 @@ impl SessionRuntime {
         self.admission.state()
     }
 
+    /// The runtime's shared admission gate. A host that acts for the session
+    /// from outside the runtime's borrow (accepting remote work while a turn
+    /// runs) reads it to refuse that work the moment ownership ends.
+    #[must_use]
+    pub fn admission_gate(&self) -> localpilot_core::admission::AdmissionGate {
+        self.admission.clone()
+    }
+
+    /// The conversation the model sees now (setup messages included), as the
+    /// host shows it: cleared by `clear_conversation`, replaced by compaction.
+    #[must_use]
+    pub fn conversation(&self) -> &[localpilot_core::Message] {
+        &self.messages
+    }
+
     /// Why the runtime could not claim its session, when it is `Lost` for that
     /// reason.
     #[must_use]

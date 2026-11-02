@@ -114,11 +114,58 @@ impl SessionSource {
         events
     }
 
+    /// Publish `history` (what the host shows now, see [`history_of`]) as the
+    /// feed's history, after every record already sent (a turn's records reach
+    /// the feed before the history that follows it).
+    pub(crate) fn publish(&self, history: History) {
+        self.after_forwarders(move |ingress| ingress.history(history));
+    }
+
+    /// The host replaced what the session shows (cleared or compacted its
+    /// conversation, nothing running): after every record already sent, the
+    /// feed starts a fresh epoch in the known idle state with this history.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    pub(crate) fn refresh(&self, history: History) {
+        self.after_forwarders(move |ingress| ingress.refresh(history));
+    }
+
+    /// Run `then` on the current ingress once the latest forwarder finished,
+    /// keeping the chain's order for whatever comes next.
+    fn after_forwarders(&self, then: impl FnOnce(&Ingress) + Send + 'static) {
+        let ingress = self
+            .feed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
+            .clone();
+        let mut forwarder = self
+            .forwarder
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let previous = forwarder.take();
+        *forwarder = Some(tokio::spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            then(&ingress);
+        }));
+    }
+
     /// The session's ask registry (read by the sharing commands; see
     /// `relay_client`).
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn asks(&self) -> &AskRegistry {
         &self.asks
+    }
+
+    /// Make the feed lose records, as a forwarder falling behind would.
+    #[cfg(test)]
+    pub(crate) fn lose(&self) {
+        self.feed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
+            .lost();
     }
 
     /// The session's local feed.
@@ -139,6 +186,20 @@ impl SessionSource {
         );
         previous.0.close(reason);
     }
+}
+
+/// A snapshot's history tail, and whether older messages were left out.
+pub(crate) type History = (Vec<localpilot_rpc::HistoryMessage>, bool);
+
+/// The conversation as a snapshot's history tail: setup messages are not
+/// part of what the session shows.
+pub(crate) fn history_of(conversation: &[localpilot_core::Message]) -> History {
+    let shown: Vec<localpilot_core::Message> = conversation
+        .iter()
+        .filter(|message| message.role != localpilot_core::Role::System)
+        .cloned()
+        .collect();
+    crate::server_feed::stored_history(&shown)
 }
 
 impl Drop for SessionSource {

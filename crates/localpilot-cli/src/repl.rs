@@ -187,11 +187,16 @@ pub async fn run_chat_with(
     } = setup.build(&selected_provider_id, &model).await?;
     runtime.set_owner_kind(localpilot_store::HolderKind::Tui);
     // The session's own feed, kept from the first event (see `relay_source`).
-    let source = crate::relay_source::SessionSource::start(asks);
+    let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(asks));
     timer.mark("runtime + discovery + context hooks");
     // Keep the setup alive for the whole chat: it owns the shared MCP transports
     // used by the runtime's per-session tool registry.
     let cwd = setup.cwd().to_path_buf();
+    // Sharing with paired devices (`/remote share`), off until asked for.
+    let remote = std::sync::Arc::new(crate::remote_share::RemoteShare::for_workspace(
+        &cwd,
+        source.clone(),
+    ));
     let config = setup.config();
 
     let mut fullscreen_startup = resume
@@ -271,9 +276,16 @@ pub async fn run_chat_with(
             deferred_selfimprove_reload: &deferred_selfimprove_reload,
             incognito_entry: &incognito_entry,
             source: &source,
+            remote: &remote,
         },
     )
     .await;
+    // Closing the terminal ends phone access to its session: stop sharing and
+    // give the relay a moment to tell the server, never longer.
+    remote.stop();
+    remote
+        .wind_down(std::time::Duration::from_millis(500))
+        .await;
     // A session still incognito at exit (launched with `--incognito`, or entered
     // via `/incognito` and never turned off) reports what it created and closes
     // out nothing. `/incognito off` already reported and cleared the entry cell,

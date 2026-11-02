@@ -47,7 +47,7 @@ fn settle(
     state: RelayRequestState,
 ) {
     if let Some(late) = late {
-        let reply = reply_for(state.clone(), late.name, true);
+        let reply = reply_for(state.clone(), late.name, late.disposition, true);
         requests.complete(session, &late.stream, &late.key, reply);
     }
     let _ = decided.send(state);
@@ -58,6 +58,8 @@ struct LateReply {
     stream: String,
     key: localpilot_rpc::RequestKey,
     name: Option<String>,
+    /// A prompt's requested disposition, for its `queued` acknowledgement.
+    disposition: InputDisposition,
 }
 
 /// One relayed session, while its source's connection lives.
@@ -725,10 +727,15 @@ async fn device_command(
         ClientCommand::RunCommand { name, .. } => Some(name.clone()),
         _ => None,
     };
+    let disposition = match &record.command {
+        ClientCommand::Prompt { disposition, .. } => *disposition,
+        _ => InputDisposition::default(),
+    };
     let late = keyed.as_ref().map(|(_, key, _)| LateReply {
         stream: stream.clone(),
         key: key.clone(),
         name: name.clone(),
+        disposition,
     });
     let state = forward(relayed, device, record.command, late).await;
     if matches!(state, RelayRequestState::Unknown) {
@@ -743,7 +750,7 @@ async fn device_command(
             ),
         )];
     }
-    let reply = reply_for(state, name, acks);
+    let reply = reply_for(state, name, disposition, acks);
     if let Some((_, key, _)) = &keyed {
         hosts
             .requests
@@ -753,14 +760,17 @@ async fn device_command(
 }
 
 /// The records answering a decided command.
-fn reply_for(state: RelayRequestState, name: Option<String>, acks: bool) -> Vec<ServerEvent> {
+fn reply_for(
+    state: RelayRequestState,
+    name: Option<String>,
+    disposition: InputDisposition,
+    acks: bool,
+) -> Vec<ServerEvent> {
     let event = match state {
         RelayRequestState::Accepted => acks.then_some(ServerEvent::Accepted {
             dropped_follow_ups: None,
         }),
-        RelayRequestState::Queued => acks.then_some(ServerEvent::Queued {
-            disposition: InputDisposition::default(),
-        }),
+        RelayRequestState::Queued => acks.then_some(ServerEvent::Queued { disposition }),
         RelayRequestState::Done { output } => match name {
             Some(name) => Some(ServerEvent::CommandResult {
                 name,
@@ -849,6 +859,7 @@ mod tests {
                 stream: "device:d1".to_string(),
                 key,
                 name: None,
+                disposition: InputDisposition::default(),
             },
             payload,
         )
@@ -1026,5 +1037,19 @@ mod tests {
                     [ServerEvent::Rejected { code: RejectCode::OutcomeUnknown, .. }]
                 )
         ));
+    }
+
+    #[test]
+    fn a_queued_acknowledgement_carries_the_requested_disposition() {
+        for disposition in [
+            InputDisposition::Immediate,
+            InputDisposition::Steer,
+            InputDisposition::FollowUp,
+        ] {
+            assert_eq!(
+                reply_for(RelayRequestState::Queued, None, disposition, true),
+                vec![ServerEvent::Queued { disposition }]
+            );
+        }
     }
 }

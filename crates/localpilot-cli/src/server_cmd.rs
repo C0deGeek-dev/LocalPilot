@@ -474,7 +474,7 @@ impl ConnectionFactory for ServerFactory {
 /// [`SessionHost`] — created on first attach — so fanout is the host's own
 /// broadcast.
 #[derive(Clone, Default)]
-struct HostMap {
+pub(crate) struct HostMap {
     inner: Arc<Mutex<HashMap<SessionId, Arc<SessionHost>>>>,
     /// Each hosted session's permission asks and sequenced feed. The asks
     /// belong to the session, not to the connection that happened to create
@@ -485,7 +485,7 @@ struct HostMap {
     /// answers a retry with its original reply.
     requests: Arc<RequestStore>,
     /// This workspace's paired devices (in memory unless opened on a store).
-    devices: Arc<DeviceRegistry>,
+    pub(crate) devices: Arc<DeviceRegistry>,
     /// The gateway's live capabilities.
     gateways: Arc<GatewayLeases>,
     /// Outstanding pairing codes.
@@ -3011,7 +3011,7 @@ async fn run_client(conn: Conn, target: AttachTarget) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn send_command<W: AsyncWrite + Unpin>(
+pub(crate) async fn send_command<W: AsyncWrite + Unpin>(
     write: &mut W,
     command: ClientCommand,
 ) -> std::io::Result<()> {
@@ -3169,7 +3169,7 @@ fn render_event(event: ServerEvent, last_ask: &mut Option<String>) -> anyhow::Re
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
@@ -3186,7 +3186,7 @@ mod tests {
 
     /// A turn and its round trips must settle well within this; exceeding it is a
     /// hang the test turns into a failure.
-    const DEADLINE: Duration = Duration::from_secs(15);
+    pub(crate) const DEADLINE: Duration = Duration::from_secs(15);
 
     #[tokio::test]
     async fn context_server_and_worker_factories_use_the_pre_resolved_window() {
@@ -3236,8 +3236,8 @@ mod tests {
     /// Builds `SessionRuntime`s over one shared temp-dir store and provider —
     /// mirrors the server crate's own test factory — with no wire approver (a
     /// bypass session never asks), so `take_asks` is `None`.
-    struct FakeFactory {
-        dir: Arc<tempfile::TempDir>,
+    pub(crate) struct FakeFactory {
+        pub(crate) dir: Arc<tempfile::TempDir>,
         provider: Arc<FakeProvider>,
         /// Build sessions that ask the wire client (default profile, interactive,
         /// wire approver) instead of bypass sessions that never ask.
@@ -3246,7 +3246,7 @@ mod tests {
     }
 
     impl FakeFactory {
-        fn new(provider: FakeProvider) -> Self {
+        pub(crate) fn new(provider: FakeProvider) -> Self {
             Self {
                 dir: Arc::new(tempfile::tempdir().unwrap()),
                 provider: Arc::new(provider),
@@ -3342,7 +3342,7 @@ mod tests {
 
     /// [`spawn_server`] over a host map the test keeps, to act on hosted
     /// sessions (close them) while clients are attached.
-    fn spawn_server_on(
+    pub(crate) fn spawn_server_on(
         factory: Arc<FakeFactory>,
         count: usize,
         hosts: HostMap,
@@ -3411,7 +3411,7 @@ mod tests {
         })
     }
 
-    async fn dial(endpoint: &Endpoint) -> Conn {
+    pub(crate) async fn dial(endpoint: &Endpoint) -> Conn {
         timeout(DEADLINE, async {
             loop {
                 match localpilot_server::connect(endpoint).await {
@@ -3427,7 +3427,9 @@ mod tests {
         .expect("dial timed out")
     }
 
-    async fn read_event(reader: &mut JsonRecordReader<impl AsyncRead + Unpin>) -> ServerEvent {
+    pub(crate) async fn read_event(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+    ) -> ServerEvent {
         let value = timeout(DEADLINE, reader.next())
             .await
             .expect("read timed out")
@@ -4056,7 +4058,7 @@ mod tests {
 
     // --- sequenced feed: replay, snapshot, closure, protocol version ---------
 
-    fn resume_caps() -> Vec<String> {
+    pub(crate) fn resume_caps() -> Vec<String> {
         vec![CAPABILITY_ACKS.to_string(), CAPABILITY_RESUME.to_string()]
     }
 
@@ -5127,7 +5129,7 @@ mod tests {
     // --- paired devices ---------------------------------------------------------
 
     /// Open a connection and send `command` as its first record.
-    async fn first_record(
+    pub(crate) async fn first_record(
         endpoint: &Endpoint,
         command: ClientCommand,
     ) -> (
@@ -5144,7 +5146,7 @@ mod tests {
 
     /// Register a gateway; returns its control channel (keep it open) and the
     /// capability.
-    async fn register_gateway(
+    pub(crate) async fn register_gateway(
         endpoint: &Endpoint,
     ) -> (
         (
@@ -5163,7 +5165,7 @@ mod tests {
     }
 
     /// Pair a device through the gateway; returns its id and credential.
-    async fn pair_device(
+    pub(crate) async fn pair_device(
         endpoint: &Endpoint,
         hosts: &HostMap,
         capability: &str,
@@ -5188,7 +5190,11 @@ mod tests {
         }
     }
 
-    fn device_attach(capability: &str, credential: &str, target: AttachTarget) -> ClientCommand {
+    pub(crate) fn device_attach(
+        capability: &str,
+        credential: &str,
+        target: AttachTarget,
+    ) -> ClientCommand {
         ClientCommand::DeviceAttach {
             capability: localpilot_rpc::WireSecret::new(capability),
             credential: localpilot_rpc::WireSecret::new(credential),
@@ -8133,8 +8139,7 @@ mod tests {
         let stop = stop.clone();
         tokio::spawn(async move {
             let conn = dial(&endpoint).await;
-            let none = || (Vec::new(), false);
-            crate::relay_client::run_relay(conn, feed, &none, &identity, &stop, None)
+            crate::relay_client::run_relay(conn, feed, &identity, &stop, None, None)
                 .await
                 .unwrap()
         })
@@ -8307,6 +8312,7 @@ mod tests {
         let source_host = crate::relay_host::SourceHost {
             requests,
             standing: Arc::new(move |device: &str| devices.standing(device).ok().map(|s| s.scope)),
+            open: Arc::new(|| true),
             asks: source.asks().clone(),
         };
         let hold = Arc::new(tokio::sync::Notify::new());
@@ -8417,14 +8423,13 @@ mod tests {
             let source = source.clone();
             async move {
                 let conn = connect().await.expect("dial the server");
-                let none = || (Vec::new(), false);
                 let end = crate::relay_client::run_relay(
                     conn,
                     feed,
-                    &none,
                     &identity,
                     &stop,
                     Some(source_host),
+                    None,
                 )
                 .await
                 .expect("the relay ran");
@@ -8481,7 +8486,7 @@ mod tests {
         Shared { source, stop }
     }
 
-    async fn wait_relayed(hosts: &HostMap, session: SessionId) {
+    pub(crate) async fn wait_relayed(hosts: &HostMap, session: SessionId) {
         timeout(DEADLINE, async {
             while hosts
                 .relayed(&AttachTarget::ResumeId {
@@ -8497,7 +8502,7 @@ mod tests {
     }
 
     /// Read until a snapshot satisfies `wanted`.
-    async fn snapshot_where(
+    pub(crate) async fn snapshot_where(
         reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
         wanted: impl Fn(&ServerEvent) -> bool,
     ) -> ServerEvent {
@@ -8673,13 +8678,12 @@ mod tests {
             let feed = source.source.feed();
             async move {
                 let conn = dial(&endpoint).await;
-                let none = || (Vec::new(), false);
                 crate::relay_client::run_relay(
                     conn,
                     feed,
-                    &none,
                     &identity,
                     &CancellationToken::new(),
+                    None,
                     None,
                 )
                 .await
@@ -8719,13 +8723,12 @@ mod tests {
         };
         let (endpoint, _server) = spawn_server_on(factory.clone(), 1, off);
         let conn = dial(&endpoint).await;
-        let none = || (Vec::new(), false);
         let end = crate::relay_client::run_relay(
             conn,
             source.source.feed(),
-            &none,
             &source.identity,
             &CancellationToken::new(),
+            None,
             None,
         )
         .await
@@ -8903,7 +8906,6 @@ mod tests {
         let hosts = HostMap::default();
         let (endpoint, _server) = spawn_server_on(factory.clone(), 5, hosts.clone());
         let source = relay_source(&factory, "share-1");
-        let stored = Arc::new(StdMutex::new("before the turn".to_string()));
         let events = source.source.turn_events();
         let _ = events.send(RuntimeEvent::TurnStarted);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -8914,27 +8916,21 @@ mod tests {
             let feed = source.source.feed();
             let identity = source.identity.clone();
             let stop = stop.clone();
-            let stored = stored.clone();
             tokio::spawn(async move {
                 let conn = dial(&endpoint).await;
-                let history = move || {
-                    (
-                        vec![localpilot_rpc::HistoryMessage {
-                            role: "assistant".to_string(),
-                            text: stored.lock().unwrap().clone(),
-                        }],
-                        false,
-                    )
-                };
-                crate::relay_client::run_relay(conn, feed, &history, &identity, &stop, None)
+                crate::relay_client::run_relay(conn, feed, &identity, &stop, None, None)
                     .await
                     .unwrap()
             })
         };
         wait_relayed(&hosts, source.identity.session).await;
-        // The turn ends after sharing began; its answer is now stored.
-        *stored.lock().unwrap() = "the finished answer".to_string();
+        // The turn ends after sharing began; its host then publishes the
+        // conversation that now includes the answer.
         let _ = events.send(RuntimeEvent::Stopped(localpilot_harness::StopReason::Done));
+        drop(events);
+        source.source.publish(crate::relay_source::history_of(&[
+            localpilot_core::Message::text(localpilot_core::Role::Assistant, "the finished answer"),
+        ]));
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // A device that connects afterwards sees an idle, not-busy session
@@ -8976,6 +8972,92 @@ mod tests {
         assert_eq!(turn, localpilot_rpc::TurnState::Idle);
         assert!(!busy, "nothing is running any more");
         assert_eq!(queued, 0);
+        stop.cancel();
+        let _ = timeout(DEADLINE, relay).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cleared_conversation_reaches_attached_and_later_devices_without_a_turn() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 5, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let shown = |text: &str| {
+            crate::relay_source::history_of(&[localpilot_core::Message::text(
+                localpilot_core::Role::Assistant,
+                text,
+            )])
+        };
+        source.source.publish(shown("before the clear"));
+        // A turn was running, with text, when the session is shared.
+        let events = source.source.turn_events();
+        let _ = events.send(RuntimeEvent::TurnStarted);
+        let _ = events.send(RuntimeEvent::Text("stale text".to_string()));
+        let _ = events.send(RuntimeEvent::Stopped(localpilot_harness::StopReason::Done));
+        drop(events);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stop = CancellationToken::new();
+        let relay = start_relay(&endpoint, &source, &stop);
+        wait_relayed(&hosts, source.identity.session).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Observe,
+        )
+        .await;
+        let attach = || {
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                },
+            )
+        };
+        // A device attached before the clear reconciles to it live.
+        let (mut early, _early_write, attached) = first_record(&endpoint, attach()).await;
+        assert!(
+            matches!(attached, ServerEvent::Attached { .. }),
+            "{attached:?}"
+        );
+        let _ = snapshot_where(&mut early, |event| {
+            matches!(event, ServerEvent::Snapshot { history, .. }
+                if history.first().is_some_and(|m| m.text == "before the clear"))
+        })
+        .await;
+        // The host clears its conversation (no turn follows).
+        source.source.refresh(shown("after the clear"));
+        let live = snapshot_where(&mut early, |event| {
+            matches!(event, ServerEvent::Snapshot { history, .. }
+                if history.first().is_some_and(|m| m.text == "after the clear"))
+        })
+        .await;
+        // A device attaching afterwards sees the same.
+        let (mut later, _later_write, _) = first_record(&endpoint, attach()).await;
+        let fresh = snapshot_where(&mut later, |event| {
+            matches!(event, ServerEvent::Snapshot { history, .. }
+                if history.first().is_some_and(|m| m.text == "after the clear"))
+        })
+        .await;
+        for snapshot in [live, fresh] {
+            let ServerEvent::Snapshot {
+                turn,
+                turn_text,
+                history,
+                ..
+            } = snapshot
+            else {
+                unreachable!()
+            };
+            assert_eq!(turn, localpilot_rpc::TurnState::Idle);
+            assert!(
+                turn_text.as_deref().unwrap_or_default().is_empty(),
+                "no stale text: {turn_text:?}"
+            );
+            assert_eq!(history.len(), 1, "only the cleared view: {history:?}");
+        }
         stop.cancel();
         let _ = timeout(DEADLINE, relay).await;
     }

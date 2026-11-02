@@ -26,7 +26,7 @@ mod theme;
 mod timeline;
 
 pub use app::{
-    AppCommand, AppModel, ColorSupport, CompletionCommand, DialogState, DiffFile, DiffLine,
+    AppCommand, AppModel, Choice, ColorSupport, CompletionCommand, DialogState, DiffFile, DiffLine,
     DiffLineKind, Focus, Header, ImageAttachBlock, InputAction, KeyboardSupport, LocalMindData,
     LocalMindReviewAction, LocalMindReviewIntent, LocalMindReviewRow, LocalMindSection, PairStatus,
     PairStatusCandidate, PlanEntry, QuestionAction, QuestionOption, QuestionResponse,

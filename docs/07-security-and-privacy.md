@@ -1151,10 +1151,10 @@ opt-in step.
   channel, or a paired device. A device connection must carry a live gateway
   capability (valid only while the gateway's control channel is open) and a
   valid credential, or it is refused and closed; it is never treated as local.
-- **What a device may do.** `observe` devices can attach to existing sessions,
-  read status and receive events. `control` devices can also open sessions,
-  prompt, steer, cancel, answer permission asks and run the remote slash
-  commands. Device management, pairing and the gateway are for this computer
+- **What a device may do.** Devices reach only sessions shared with them
+  (below). `observe` devices can attach to a shared session, read status and
+  receive events. `control` devices can also prompt, cancel, answer permission
+  asks and run the remote slash commands; they cannot open sessions. Device management, pairing and the gateway are for this computer
   only. Every command is checked against the device's current standing; actions
   and answers are recorded under the device's identity, not as local.
 - **Revocation.** Revoking a device ends its open connections, refuses its next
@@ -1173,6 +1173,30 @@ opt-in step.
 - **Audit.** `~/.localpilot/devices/audit.jsonl` records pairings, attaches,
   refusals, revocations and gateway registrations with time, workspace and
   device id — never session content or secrets.
+
+## Sharing A Session
+
+`/remote share` in the full-screen terminal shares the session that terminal
+runs; `/remote stop` ends it. Nothing is shared until asked for, and the session
+never moves: it keeps running in the terminal, and the workspace's background
+server only relays it.
+
+- **The terminal decides.** Every device request is decided in the terminal's
+  own loop immediately before it acts: the share must be the current one, the
+  terminal must still own the session, and the device must still hold the
+  scope. A queued phone prompt is checked again before it starts or joins the
+  running turn. While a turn runs, only a follow-up is accepted from a phone;
+  a phone cannot steer the running turn. Pairing, devices and `/remote` itself stay on this computer.
+- **Stopping is immediate.** Stop refuses every request not yet accepted at
+  once, whatever the network is doing; the devices' disconnect is confirmed
+  later by the server. A phone prompt already accepted stays queued and runs,
+  unless the device loses its access first.
+- **Only while the terminal is open.** Starting another session, losing
+  ownership of this one or closing the terminal ends sharing. Quitting while
+  shared asks first; closing the window ends phone access without asking.
+- **What devices see.** The conversation the terminal shows (bounded as in
+  every snapshot), the running turn, its plan, open permission requests, and
+  whether work is running or queued. An incognito session cannot be shared.
 
 ## Remote Gateway
 

@@ -286,6 +286,12 @@ impl Updates {
 /// A device's current scope, or `None` when it is no longer allowed here.
 pub(crate) type Standing = Arc<dyn Fn(&str) -> Option<Scope> + Send + Sync>;
 
+/// Whether the session's host still admits new remote work at all: its share
+/// is the current one and it still owns the session. Read at every decision,
+/// so a stop or an ownership loss refuses work the instant it happens, before
+/// the relay itself has ended.
+pub(crate) type Open = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// The payload bytes a request the host holds keeps reserved in its relay's
 /// budget, given back when the host lets the request go.
 struct Reservation {
@@ -309,6 +315,7 @@ pub(crate) struct Ticket {
     updates: Arc<Updates>,
     standing: Standing,
     live: Arc<AtomicBool>,
+    open: Open,
     _reservation: Reservation,
 }
 
@@ -318,11 +325,17 @@ impl Ticket {
         self.updates.report(&self.device, self.n, state);
     }
 
+    /// The device that sent the request.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    pub(crate) fn device(&self) -> &str {
+        &self.device
+    }
+
     /// Whether the request may be accepted now, immediately before the host
     /// acts on it or queues it: the share is still live and the device's
     /// current scope still allows it.
     pub(crate) fn accept_now(&self) -> bool {
-        self.live.load(Ordering::SeqCst) && self.may_start()
+        self.live.load(Ordering::SeqCst) && (self.open)() && self.may_start()
     }
 
     /// Whether an accepted, queued follow-up may start now: the device's
@@ -345,6 +358,8 @@ pub(crate) struct SourceHost {
     /// Where requests go (the session's host services this).
     pub(crate) requests: mpsc::Sender<SourceRequest>,
     pub(crate) standing: Standing,
+    /// Whether the host still admits new remote work (see [`Open`]).
+    pub(crate) open: Open,
     /// The session's one ask registry.
     pub(crate) asks: AskRegistry,
 }
@@ -440,7 +455,7 @@ impl SourceAdmission {
         let Some(host) = &self.host else {
             return refuse("this session does not take commands");
         };
-        if !self.live.load(Ordering::SeqCst) {
+        if !self.live.load(Ordering::SeqCst) || !(host.open)() {
             return refuse("sharing stopped");
         }
         let Some(scope) = (host.standing)(device) else {
@@ -478,6 +493,7 @@ impl SourceAdmission {
                     updates: self.updates.clone(),
                     standing: host.standing.clone(),
                     live: self.live.clone(),
+                    open: host.open.clone(),
                     _reservation: Reservation {
                         bytes: payload,
                         pool: self.reserved.clone(),
@@ -594,6 +610,7 @@ mod tests {
         Fixture {
             host: SourceHost {
                 requests,
+                open: Arc::new(|| true),
                 standing: Arc::new(move |_| match reading.load(Ordering::SeqCst) {
                     1 => Some(Scope::Observe),
                     2 => Some(Scope::Control),

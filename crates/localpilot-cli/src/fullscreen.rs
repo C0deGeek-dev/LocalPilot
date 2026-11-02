@@ -2,6 +2,8 @@
 
 #[path = "fullscreen_harness.rs"]
 mod harness_router;
+#[path = "fullscreen_remote.rs"]
+mod remote_host;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -121,6 +123,8 @@ pub(crate) struct HostContext<'a> {
     /// The session's own event source and ask registry, kept from the start so
     /// the session can be shared mid-turn (see `relay_source`).
     pub(crate) source: &'a crate::relay_source::SessionSource,
+    /// Sharing this session with paired devices (`/remote`).
+    pub(crate) remote: &'a std::sync::Arc<crate::remote_share::RemoteShare>,
 }
 
 pub(crate) struct PairHostContext<'a> {
@@ -744,6 +748,9 @@ struct StageHost {
         localpilot_harness::StageOutcome,
         &'static str,
     )>,
+    /// Sharing this session with paired devices; `None` in hosts and tests
+    /// without it. Kept here because every input path already reaches it.
+    remote: Option<std::rc::Rc<remote_host::RemoteHost>>,
 }
 
 /// How many endings are remembered. Past this, a queued prompt gets the generic
@@ -761,6 +768,7 @@ impl StageHost {
             live: None,
             plan_source: None,
             recent: VecDeque::new(),
+            remote: None,
         }
     }
 
@@ -825,6 +833,9 @@ struct QueuedPrompt {
     attachments: Vec<ContentBlock>,
     item_id: ItemId,
     target: PromptTarget,
+    /// Set for a paired device's prompt: its authority, checked again when it
+    /// starts or is promoted into steering, and told what became of it.
+    origin: Option<remote_host::RemoteTag>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1079,6 +1090,7 @@ impl std::fmt::Debug for QueuedPrompt {
             )
             .field("item_id", &self.item_id)
             .field("target", &self.target)
+            .field("origin", &self.origin)
             .finish()
     }
 }
@@ -3383,6 +3395,7 @@ fn prepare_prompt_operation(
         // Captured under the state in force NOW, so nothing that happens while
         // this prompt waits in the queue can reinterpret who it belongs to.
         target: prompt_target(app.mode(), brief),
+        origin: None,
     }))
 }
 
@@ -3464,7 +3477,27 @@ async fn execute_fullscreen_slash_action(
     history: &localpilot_store::PromptHistory,
     action: SlashAction,
 ) -> bool {
+    // A command that replaces the session ends its share first.
+    if matches!(
+        action,
+        SlashAction::NewSession
+            | SlashAction::Fork
+            | SlashAction::CloneSession
+            | SlashAction::LoadSession(_)
+            | SlashAction::ContinueSession(_)
+            | SlashAction::Incognito { .. }
+    ) {
+        if let Some(host) = &stages.remote {
+            remote_host::end_for_identity(app, host);
+        }
+    }
     match action {
+        SlashAction::Remote(action) => match stages.remote.clone() {
+            Some(host) => remote_host::command(app, &host, action),
+            None => app.apply_runtime(RuntimeUpdate::Notice(
+                "remote access is not available here".to_string(),
+            )),
+        },
         SlashAction::Incognito { off } => {
             end_stage_conversation(app, stages, "incognito");
             handle_incognito_toggle(app, runtime, cwd, incognito_entry, history, off);
@@ -3505,11 +3538,10 @@ async fn execute_fullscreen_slash_action(
             }
         }
         SlashAction::Clear => {
-            runtime.clear_conversation();
-            app.clear_conversation();
-            let (used, limit) = runtime.context_usage();
-            app.apply_runtime(RuntimeUpdate::ContextUsage { used, limit });
-            app.apply_runtime(RuntimeUpdate::Notice("conversation cleared".to_string()));
+            clear_session(app, runtime);
+            if let Some(host) = &stages.remote {
+                host.publish(runtime, true);
+            }
         }
         SlashAction::Sessions => match runtime.store().list_sessions() {
             Ok(sessions) => {
@@ -3549,20 +3581,7 @@ async fn execute_fullscreen_slash_action(
             }
         }
         SlashAction::NameSession(name) => {
-            let session = runtime.session_id();
-            match runtime.store().set_session_name(session, &name) {
-                Ok(()) => {
-                    let name = name.trim();
-                    app.set_active_session_name(Some(sanitized_session_name(name)));
-                    app.apply_runtime(RuntimeUpdate::Notice(format!(
-                        "named this session \"{}\"",
-                        sanitized_session_name(name)
-                    )));
-                }
-                Err(error) => app.apply_runtime(RuntimeUpdate::Notice(format!(
-                    "could not name session: {error}"
-                ))),
-            }
+            let _ = name_session(app, runtime, &name);
         }
         SlashAction::NewSession => {
             end_stage_conversation(app, stages, "a new session");
@@ -3648,20 +3667,9 @@ async fn execute_fullscreen_slash_action(
                 profile.label()
             )));
         }
-        SlashAction::SetEffort(level) => match localpilot_llm::ReasoningEffort::parse(&level) {
-            Some(effort) => {
-                runtime.set_reasoning_effort(Some(effort));
-                app.apply_runtime(RuntimeUpdate::Notice(format!(
-                    "reasoning effort set to {}",
-                    effort.as_str()
-                )));
-            }
-            None => {
-                app.apply_runtime(RuntimeUpdate::Notice(format!(
-                    "invalid effort {level:?}; use minimal, low, medium, or high"
-                )));
-            }
-        },
+        SlashAction::SetEffort(level) => {
+            let _ = set_effort_idle(app, runtime, &level);
+        }
         SlashAction::Unknown(command) => {
             app.apply_runtime(RuntimeUpdate::Warning(format!(
                 "unknown slash command: /{command}"
@@ -4459,6 +4467,7 @@ async fn run_event_loop(
         deferred_selfimprove_reload,
         incognito_entry,
         source,
+        remote,
         // The launch gate uses this in the startup screen; inside the loop the live
         // authority is `runtime.trusted()` (built from the same launch snapshot),
         // updated on accept — so no separate loop-local trust shadow is kept.
@@ -4472,6 +4481,9 @@ async fn run_event_loop(
     // the session — an unapproved draft is not project truth, so nothing here is
     // persisted and a restart resumes from `brief.md` or from nothing.
     let mut stages = StageHost::new();
+    stages.remote = Some(std::rc::Rc::new(remote_host::RemoteHost::new(
+        remote.clone(),
+    )));
     let guidance = config
         .harness
         .guidance
@@ -4484,7 +4496,57 @@ async fn run_event_loop(
     // session is configured, and both must survive the mutable borrow the pump
     // takes of the config.
     let execution = ExecutionSnapshot::of(&config.harness);
-    while !app.exit_requested {
+    loop {
+        if app.exit_requested {
+            if exit_allowed(app, &stages, "Idle") {
+                break;
+            }
+            app.exit_requested = false;
+        }
+        // Device requests are taken here, between keystrokes, while the
+        // runtime is not borrowed.
+        let remote_work = stages
+            .remote
+            .clone()
+            .and_then(|host| remote_host::idle_tick(app, runtime, &host));
+        if let Some(work) = remote_work {
+            let first = match work {
+                remote_host::IdleWork::Prompt(operation) => SerialOperation::Queued(operation),
+                remote_host::IdleWork::Compact { force } => {
+                    SerialOperation::PumpedSlash(PumpedSlash::Compact { force })
+                }
+            };
+            if drive_operation_chain(
+                terminal,
+                app,
+                runtime,
+                SlashContext {
+                    approval_rx: &mut *approval_rx,
+                    question_rx: &mut *question_rx,
+                    cwd,
+                    history,
+                    mouse_state: &mut mouse_state,
+                    paste_burst: &mut paste_burst,
+                    workspace_index: &mut *workspace_index,
+                    stages: &mut stages,
+                    guidance,
+                    execution: execution.clone(),
+                    source,
+                },
+                first,
+                &mut queue,
+                PumpedAuthority {
+                    config,
+                    approval_tx,
+                    deferred_selfimprove_reload,
+                },
+            )
+            .await?
+            {
+                break;
+            }
+            continue;
+        }
         workspace_index.refresh(app);
         let hit_map = draw_synchronized(terminal, app)?;
         if !event::poll(EVENT_POLL_INTERVAL).context("poll full-screen terminal event")? {
@@ -4497,6 +4559,16 @@ async fn run_event_loop(
             continue;
         }
         let next = event::read().context("read full-screen terminal event")?;
+        if app.choice().is_some() {
+            if let (Event::Key(key), Some(host)) = (&next, stages.remote.clone()) {
+                if is_key_action(*key)
+                    && remote_host::choice_key(app, &host, *key) == remote_host::ChoiceKey::Close
+                {
+                    break;
+                }
+            }
+            continue;
+        }
         if matches!(next, Event::Paste(_)) {
             note_bracketed_paste(app, &mut paste_burst, false, hit_map.editor_width);
         }
@@ -4578,7 +4650,11 @@ async fn run_event_loop(
                     continue;
                 };
                 match app.handle_input(action, hit_map.editor_width) {
-                    AppCommand::Exit => break,
+                    AppCommand::Exit => {
+                        if exit_allowed(app, &stages, "Idle") {
+                            break;
+                        }
+                    }
                     AppCommand::Copy(text) => copy_to_clipboard(app, text),
                     AppCommand::OpenExternalEditor => {
                         edit_composer_externally(terminal, modes, app).await?;
@@ -4794,6 +4870,9 @@ async fn run_event_loop(
                         apply_timeline_navigation(app, navigation, &hit_map);
                     }
                     AppCommand::ActivateSession(selection) => {
+                        if let Some(host) = &stages.remote {
+                            remote_host::end_for_identity(app, host);
+                        }
                         activate_session_selection(app, runtime, &selection);
                     }
                     AppCommand::None | AppCommand::CancelWork => {}
@@ -4917,6 +4996,19 @@ async fn drive_operation_chain(
                 }
             }
             SerialOperation::Queued(QueuedOperation::Prompt(prompt)) => {
+                // A device's queued prompt starts only while the device may
+                // still have it run (its current standing; the share itself
+                // may have stopped since it was accepted).
+                if let Some(tag) = &prompt.origin {
+                    if !tag.may_start() {
+                        tag.reject("this device is no longer allowed");
+                        let _ = app
+                            .mark_prompt_not_run(prompt.item_id, "the device is no longer allowed");
+                        current = queue.pop_front().map(SerialOperation::Queued);
+                        continue;
+                    }
+                    tag.accept();
+                }
                 let _ = app.activate_prompt(prompt.item_id);
                 app.begin_work_before(next_item);
                 // Branch on the kind captured at ENQUEUE, so a mode switch made while
@@ -5961,18 +6053,44 @@ async fn drive_compact(
     force: bool,
     queue: &mut VecDeque<QueuedOperation>,
 ) -> Result<bool> {
-    let cancel = CancellationToken::new();
-    let image_capability = ImageCapabilitySnapshot {
-        provider_id: runtime.active_provider_id().to_string(),
-        vision_capable: runtime.active_accepts_images(),
-    };
-    app.begin_work_with_label("Compacting");
     let mut io = TerminalIo {
         poll: |timeout: Duration| event::poll(timeout),
         read: || event::read(),
         draw: |app: &AppModel| draw_synchronized(terminal, app),
         event_driven: true,
     };
+    drive_compact_with(app, runtime, ctx, force, queue, &mut io).await
+}
+
+/// `/compact` (from the keyboard or a device) over any terminal IO. A
+/// completed compaction replaces what the session shows, so a shared feed is
+/// refreshed from it; a cancelled one changes nothing.
+async fn drive_compact_with<P, R, D>(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    force: bool,
+    queue: &mut VecDeque<QueuedOperation>,
+    io: &mut TerminalIo<P, R, D>,
+) -> Result<bool>
+where
+    P: FnMut(Duration) -> io::Result<bool>,
+    R: FnMut() -> io::Result<Event>,
+    D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+{
+    let cancel = CancellationToken::new();
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    app.begin_work_with_label("Compacting");
+    let compacted = Cell::new(false);
+    // A device's `/compact` hears its result.
+    let device = ctx
+        .stages
+        .remote
+        .as_ref()
+        .and_then(|host| host.take_compact());
     // The two methods return distinct opaque future types, so the branch awaits
     // inside a single `async` block rather than selecting a value.
     let operation = async {
@@ -5987,7 +6105,7 @@ async fn drive_compact(
             _ = cancel.cancelled() => None,
         }
     };
-    drive_fullscreen_operation(
+    let exit = drive_fullscreen_operation(
         app,
         SlashContext {
             approval_rx: &mut *ctx.approval_rx,
@@ -6002,7 +6120,7 @@ async fn drive_compact(
             execution: ctx.execution.clone(),
             source: ctx.source,
         },
-        &mut io,
+        io,
         &cancel,
         &image_capability,
         queue,
@@ -6011,9 +6129,29 @@ async fn drive_compact(
         QuestionMode::Inert,
         ProgressLane::None,
         operation,
-        move |app: &mut AppModel, summary| apply_compact_result(app, summary, force),
+        {
+            let compacted = &compacted;
+            move |app: &mut AppModel, summary: Option<localpilot_harness::ManualCompaction>| {
+                compacted.set(summary.is_some());
+                if let Some(tag) = device {
+                    match &summary {
+                        Some(result) => {
+                            tag.done(Some(crate::repl::compact_result_notice(result, force)))
+                        }
+                        None => tag.reject("compaction was cancelled"),
+                    }
+                }
+                apply_compact_result(app, summary, force);
+            }
+        },
     )
-    .await
+    .await?;
+    if compacted.get() {
+        if let Some(host) = &ctx.stages.remote {
+            host.publish(runtime, true);
+        }
+    }
+    Ok(exit)
 }
 
 /// Project a compaction result into the full-screen host: a cancelled run posts the
@@ -8371,6 +8509,18 @@ struct TerminalIo<P, R, D> {
     event_driven: bool,
 }
 
+/// Terminal events as the reader thread delivers them (with whether more
+/// were already buffered).
+type InputEvents = mpsc::UnboundedReceiver<io::Result<(Event, bool)>>;
+
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in for the terminal reader thread: the next operation
+    /// pump on this thread reads its events from here.
+    static INJECTED_INPUT: RefCell<Option<InputEvents>> =
+        const { RefCell::new(None) };
+}
+
 /// Owns Crossterm's required poll/read affinity on one short-lived reader
 /// thread and wakes the async operation pump as soon as input is available.
 /// The 50 ms poll bound is only a shutdown bound; `poll` itself wakes on input.
@@ -8693,6 +8843,21 @@ fn handle_operation_terminal_event(
     if handle_redraw_event(app, &next) {
         return OperationInputOutcome::Geometry;
     }
+    // The host's choice takes every key while it is open; whatever is beneath
+    // it (a permission ask, a question) stays as it was.
+    if app.choice().is_some() {
+        if let (Event::Key(key), Some(host)) = (&next, stages.remote.clone()) {
+            if is_key_action(*key)
+                && remote_host::choice_key(app, &host, *key) == remote_host::ChoiceKey::Close
+            {
+                deny_pending(app, pending);
+                dismiss_pending_questions(app, pending_questions);
+                cancel.cancel();
+                return OperationInputOutcome::Exit;
+            }
+        }
+        return OperationInputOutcome::Handled;
+    }
     if matches!(next, Event::Paste(_)) {
         note_bracketed_paste(
             app,
@@ -8727,9 +8892,9 @@ fn handle_operation_terminal_event(
     }
     let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
     let exit = if pending_questions.is_some() {
-        handle_question_event(app, next, pending_questions, cancel, hit_map)
+        handle_question_event(app, next, pending_questions, cancel, hit_map, stages)
     } else if pending.is_some() {
-        handle_approval_event(app, next, pending, cancel)
+        handle_approval_event(app, next, pending, cancel, stages)
     } else {
         match route_pointer_or_navigation(app, &next, hit_map, mouse_state) {
             RoutedEvent::Handled => false,
@@ -8838,14 +9003,21 @@ where
     input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut frame_tick = tokio::time::interval(OPERATION_FRAME_INTERVAL);
     frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let (mut input_thread, mut input_rx) = if io.event_driven {
+    #[cfg(test)]
+    let injected = INJECTED_INPUT.with(|cell| cell.borrow_mut().take());
+    #[cfg(not(test))]
+    let injected: Option<InputEvents> = None;
+    let fed = injected.is_some();
+    let (mut input_thread, mut input_rx) = if let Some(rx) = injected {
+        (None, rx)
+    } else if io.event_driven {
         let (thread, rx) = CrosstermInputThread::spawn();
         (Some(thread), rx)
     } else {
         let (_tx, rx) = mpsc::unbounded_channel();
         (None, rx)
     };
-    let mut input_open = io.event_driven;
+    let mut input_open = io.event_driven || fed;
     progress.drain(app);
     let mut hit_map = (io.draw)(app)?;
     let mut render_needed = false;
@@ -8913,6 +9085,19 @@ where
                                 }
                             }
                         }
+                    }
+                    // Device requests and sharing notices are served at every
+                    // completed input batch too, so sustained typing cannot
+                    // starve them.
+                    if let Some(host) = stages.remote.clone() {
+                        remote_host::busy_tick(
+                            app,
+                            &host,
+                            queue,
+                            cancel,
+                            live,
+                            &pending_steer_items,
+                        );
                     }
                     advance_mouse_selection(app, &hit_map, mouse_state);
                     if render_needed {
@@ -8986,6 +9171,19 @@ where
                             }
                         }
                     }
+                    // Device requests and sharing notices are served at every
+                    // completed input batch too, so sustained typing cannot
+                    // starve them.
+                    if let Some(host) = stages.remote.clone() {
+                        remote_host::busy_tick(
+                            app,
+                            &host,
+                            queue,
+                            cancel,
+                            live,
+                            &pending_steer_items,
+                        );
+                    }
                     advance_mouse_selection(app, &hit_map, mouse_state);
                     if render_needed {
                         hit_map = (io.draw)(app)?;
@@ -8993,6 +9191,16 @@ where
                     }
                 }
                 _ = frame_tick.tick() => {
+                    if let Some(host) = stages.remote.clone() {
+                        remote_host::busy_tick(
+                            app,
+                            &host,
+                            queue,
+                            cancel,
+                            live,
+                            &pending_steer_items,
+                        );
+                    }
                     if kind.waits_for_durable_boundary()
                         && cancel.is_cancelled()
                         && !durable_wait_notified
@@ -9339,6 +9547,9 @@ fn handle_turn_event_impl(
             };
             match command {
                 AppCommand::Exit => {
+                    if !exit_allowed(app, stages, "Running") {
+                        return false;
+                    }
                     cancel.cancel();
                     true
                 }
@@ -9350,6 +9561,7 @@ fn handle_turn_event_impl(
                                 queue,
                                 steer,
                                 pending_items,
+                                stages.remote.as_deref(),
                             )
                         })
                     } else {
@@ -9492,9 +9704,21 @@ fn run_active_fullscreen_slash(
             false
         }
         SlashAction::Exit { print_transcript } => {
+            if !exit_allowed(app, stages, "Running") {
+                return false;
+            }
             app.request_exit(print_transcript);
             cancel.cancel();
             true
+        }
+        SlashAction::Remote(action) => {
+            match stages.remote.clone() {
+                Some(host) => remote_host::command(app, &host, action),
+                None => app.apply_runtime(RuntimeUpdate::Notice(
+                    "remote access is not available here".to_string(),
+                )),
+            }
+            false
         }
         SlashAction::Help => {
             app.open_help();
@@ -9554,20 +9778,16 @@ fn run_active_fullscreen_slash(
             false
         }
         SlashAction::SetEffort(level) => {
-            match localpilot_llm::ReasoningEffort::parse(&level) {
-                Some(effort) => match live {
-                    Some(live) => {
-                        live.reasoning_effort.set(Some(effort));
-                        app.apply_runtime(RuntimeUpdate::Notice(format!(
-                            "reasoning effort set to {} (in force from the next provider request)",
-                            effort.as_str()
-                        )));
-                    }
-                    None => unavailable_live_controls_notice(app),
+            match live {
+                Some(live) => {
+                    let _ = set_effort_live(app, live, &level);
+                }
+                None => match localpilot_llm::ReasoningEffort::parse(&level) {
+                    Some(_) => unavailable_live_controls_notice(app),
+                    None => app.apply_runtime(RuntimeUpdate::Notice(format!(
+                        "invalid effort {level:?}; use minimal, low, medium, or high"
+                    ))),
                 },
-                None => app.apply_runtime(RuntimeUpdate::Notice(format!(
-                    "invalid effort {level:?}; use minimal, low, medium, or high"
-                ))),
             }
             false
         }
@@ -9653,6 +9873,7 @@ fn promote_queued_prompts_to_urgent_steering(
     queue: &mut VecDeque<QueuedOperation>,
     steer: &SteerQueue,
     pending_steer_items: &mut VecDeque<ItemId>,
+    remote: Option<&remote_host::RemoteHost>,
 ) -> usize {
     let mut promoted = 0;
     while queue.front().is_some_and(|operation| {
@@ -9661,6 +9882,19 @@ fn promote_queued_prompts_to_urgent_steering(
         let Some(QueuedOperation::Prompt(prompt)) = queue.pop_front() else {
             break;
         };
+        // A device's prompt enters the turn only while the device may still
+        // have it run; its authority is kept until the steer is consumed.
+        if let Some(tag) = &prompt.origin {
+            if !tag.may_start() {
+                tag.reject("this device is no longer allowed");
+                let _ = app.mark_prompt_not_run(prompt.item_id, "the device is no longer allowed");
+                continue;
+            }
+            tag.accept();
+            if let Some(remote) = remote {
+                remote.keep_steering(prompt.item_id, tag.clone());
+            }
+        }
         pending_steer_items.push_back(prompt.item_id);
         steer.push_interrupt(SoftInterrupt {
             content: prompt.text,
@@ -10320,11 +10554,19 @@ fn handle_approval_event(
     event: Event,
     pending: &mut Option<oneshot::Sender<bool>>,
     cancel: &CancellationToken,
+    stages: &StageHost,
 ) -> bool {
     let Event::Key(key) = event else {
         return false;
     };
     if !is_key_action(key) {
+        return false;
+    }
+    // Remote access without answering or dismissing the ask.
+    if key.code == KeyCode::F(6) {
+        if let Some(host) = &stages.remote {
+            remote_host::open_remote_menu(app, host);
+        }
         return false;
     }
     if is_cancel(key) {
@@ -10335,6 +10577,10 @@ fn handle_approval_event(
                 false
             }
             AppCommand::Exit => {
+                // While shared, closing is confirmed first; the ask stays open.
+                if !exit_allowed(app, stages, "Waiting for permission") {
+                    return false;
+                }
                 deny_pending(app, pending);
                 cancel.cancel();
                 true
@@ -10368,6 +10614,7 @@ fn handle_question_event(
     pending: &mut Option<PendingQuestions>,
     cancel: &CancellationToken,
     hit_map: &HitMap,
+    stages: &StageHost,
 ) -> bool {
     match event {
         Event::Mouse(mouse) => {
@@ -10409,10 +10656,20 @@ fn handle_question_event(
             let resolution = app.handle_question_input(InputAction::Paste(text));
             resolve_question_action(app, resolution, pending)
         }
+        Event::Key(key) if is_key_action(key) && key.code == KeyCode::F(6) => {
+            // Remote access without answering or dismissing the question.
+            if let Some(host) = &stages.remote {
+                remote_host::open_remote_menu(app, host);
+            }
+            false
+        }
         Event::Key(key) if is_key_action(key) => {
             if is_cancel(key) {
                 return match app.handle_input(InputAction::CancelOrExit, hit_map.editor_width) {
                     AppCommand::Exit => {
+                        if !exit_allowed(app, stages, "Waiting for an answer") {
+                            return false;
+                        }
                         dismiss_pending_questions(app, pending);
                         cancel.cancel();
                         true
@@ -10499,6 +10756,93 @@ fn dismiss_buffered_questions(question_rx: &mut mpsc::UnboundedReceiver<Question
         let _ = call
             .reply
             .send(vec![UserAnswer::Dismissed; call.questions.len()]);
+    }
+}
+
+/// Whether an exit request may close the terminal now: always when nothing
+/// is shared; otherwise it opens the close confirmation and the close happens
+/// only when the user chooses it there.
+fn exit_allowed(app: &mut AppModel, stages: &StageHost, turn: &str) -> bool {
+    stages
+        .remote
+        .as_ref()
+        .is_none_or(|host| remote_host::request_exit(app, host, turn))
+}
+
+/// `/clear`: the model starts on an empty context; the stored transcript is kept.
+fn clear_session(app: &mut AppModel, runtime: &mut SessionRuntime) {
+    runtime.clear_conversation();
+    app.clear_conversation();
+    let (used, limit) = runtime.context_usage();
+    app.apply_runtime(RuntimeUpdate::ContextUsage { used, limit });
+    app.apply_runtime(RuntimeUpdate::Notice("conversation cleared".to_string()));
+}
+
+/// `/name <text>`: name this session. The result as shown, or why it failed.
+fn name_session(
+    app: &mut AppModel,
+    runtime: &SessionRuntime,
+    name: &str,
+) -> std::result::Result<String, String> {
+    let session = runtime.session_id();
+    match runtime.store().set_session_name(session, name) {
+        Ok(()) => {
+            let name = name.trim();
+            app.set_active_session_name(Some(sanitized_session_name(name)));
+            let output = format!("named this session \"{}\"", sanitized_session_name(name));
+            app.apply_runtime(RuntimeUpdate::Notice(output.clone()));
+            Ok(output)
+        }
+        Err(error) => {
+            let reason = format!("could not name session: {error}");
+            app.apply_runtime(RuntimeUpdate::Notice(reason.clone()));
+            Err(reason)
+        }
+    }
+}
+
+/// `/effort <level>` while idle.
+fn set_effort_idle(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    level: &str,
+) -> std::result::Result<String, String> {
+    match localpilot_llm::ReasoningEffort::parse(level) {
+        Some(effort) => {
+            runtime.set_reasoning_effort(Some(effort));
+            let output = format!("reasoning effort set to {}", effort.as_str());
+            app.apply_runtime(RuntimeUpdate::Notice(output.clone()));
+            Ok(output)
+        }
+        None => {
+            let reason = format!("invalid effort {level:?}; use minimal, low, medium, or high");
+            app.apply_runtime(RuntimeUpdate::Notice(reason.clone()));
+            Err(reason)
+        }
+    }
+}
+
+/// `/effort <level>` during an operation, through its live handle.
+fn set_effort_live(
+    app: &mut AppModel,
+    live: &LiveControls,
+    level: &str,
+) -> std::result::Result<String, String> {
+    match localpilot_llm::ReasoningEffort::parse(level) {
+        Some(effort) => {
+            live.reasoning_effort.set(Some(effort));
+            let output = format!(
+                "reasoning effort set to {} (in force from the next provider request)",
+                effort.as_str()
+            );
+            app.apply_runtime(RuntimeUpdate::Notice(output.clone()));
+            Ok(output)
+        }
+        None => {
+            let reason = format!("invalid effort {level:?}; use minimal, low, medium, or high");
+            app.apply_runtime(RuntimeUpdate::Notice(reason.clone()));
+            Err(reason)
+        }
     }
 }
 
@@ -14490,8 +14834,12 @@ mod tests {
                 "incognito",
                 "Incognito: save nothing; new files need approval (`/incognito off` to end)",
             ),
+            (
+                "remote",
+                "Remote access: status, or share | stop this session with paired devices",
+            ),
         ];
-        assert_eq!(full_screen.len(), 50);
+        assert_eq!(full_screen.len(), 51);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
@@ -16731,6 +17079,7 @@ mod tests {
             Event::Key(press(KeyCode::Char('n'), KeyModifiers::NONE)),
             &mut pending,
             &cancel,
+            &StageHost::new(),
         ));
         assert_eq!(answer.try_recv(), Ok(false));
         assert!(app.dialog.is_none());
@@ -16752,6 +17101,7 @@ mod tests {
             Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
             &mut pending,
             &cancel,
+            &StageHost::new(),
         ));
         assert!(matches!(
             answer.try_recv(),
@@ -16764,6 +17114,7 @@ mod tests {
             Event::Key(press(KeyCode::Char('n'), KeyModifiers::NONE)),
             &mut pending,
             &cancel,
+            &StageHost::new(),
         ));
         assert_eq!(answer.try_recv(), Ok(false));
         assert!(app.dialog.is_none());
@@ -16796,6 +17147,7 @@ mod tests {
             Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             &mut pending,
             &cancel,
+            &StageHost::new(),
         ));
         assert!(matches!(
             answer.try_recv(),
@@ -16849,6 +17201,7 @@ mod tests {
             &mut pending,
             &cancel,
             &hit_map,
+            &StageHost::new(),
         ));
         assert!(!handle_question_event(
             &mut app,
@@ -16856,6 +17209,7 @@ mod tests {
             &mut pending,
             &cancel,
             &hit_map,
+            &StageHost::new(),
         ));
         assert_eq!(
             answer.try_recv(),
@@ -23563,6 +23917,1112 @@ last_seen = "2026-08-10"
             !cwd.join("brief.md").exists(),
             "a torn-down pump writes nothing"
         );
+        bundle.runtime.close();
+    }
+
+    // ---- sharing through the real operation pump ---------------------------
+
+    fn sharing_host(
+        dials: &crate::remote_share::test_support::Dials,
+        level: &std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) -> std::rc::Rc<remote_host::RemoteHost> {
+        let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+            localpilot_rpc::AskRegistry::default(),
+        ));
+        let share = crate::remote_share::RemoteShare::new(
+            dials.dial(),
+            crate::remote_share::test_support::standing(level),
+            std::sync::Arc::new(|_| Some("Pixel".to_string())),
+            source,
+        )
+        // Retries a thousand times sooner than the real schedule.
+        .with_nap(std::sync::Arc::new(|delay| {
+            Box::pin(tokio::time::sleep(delay / 1000))
+        }));
+        share.track(crate::remote_share::Tracked {
+            session: localpilot_core::SessionId::new(),
+            claim: Some((1, "me".to_string())),
+            gate: localpilot_core::admission::AdmissionGate::default(),
+        });
+        std::rc::Rc::new(remote_host::RemoteHost::new(std::sync::Arc::new(share)))
+    }
+
+    async fn until_state(host: &remote_host::RemoteHost, want: crate::remote_share::ShareState) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.share.state() != want {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the share reached the state in time");
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(press(code, KeyModifiers::NONE))
+    }
+
+    fn approval(reply: oneshot::Sender<bool>) -> ApprovalCall {
+        ApprovalCall {
+            request: crate::interactive_session::ApprovalRequest {
+                tool: "tool".to_string(),
+                target: "fixture".to_string(),
+                risk_class: "test".to_string(),
+                may_create_files: false,
+            },
+            reply,
+        }
+    }
+
+    #[tokio::test]
+    async fn f6_during_a_permission_ask_shares_the_session_and_leaves_the_ask_open() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        let (reply, mut answer) = oneshot::channel();
+        approvals.send(approval(reply)).expect("queue approval");
+        let events = queued(vec![]);
+        let mut io = characterization_io(events.clone(), cell(0), cell(0), None);
+        let peer = dials.push_link();
+        let script = {
+            let events = events.clone();
+            let host = host.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                // F6, then Esc: back to the ask, nothing answered.
+                events
+                    .borrow_mut()
+                    .extend([key(KeyCode::F(6)), key(KeyCode::Esc)]);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let untouched_after_back = answer.try_recv().is_err();
+                // F6, then Enter on "Share this session".
+                events
+                    .borrow_mut()
+                    .extend([key(KeyCode::F(6)), key(KeyCode::Enter)]);
+                let mut server = crate::remote_share::test_support::Server::accept(peer).await;
+                server.ready().await;
+                until_state(&host, crate::remote_share::ShareState::Shared).await;
+                let untouched_after_share = answer.try_recv().is_err();
+                // The ask is still answerable on the PC.
+                events.borrow_mut().push_back(key(KeyCode::Char('y')));
+                let answered = tokio::time::timeout(Duration::from_secs(5), answer)
+                    .await
+                    .expect("answered in time");
+                (untouched_after_back, untouched_after_share, answered)
+            }
+        };
+        let outcome = std::cell::Cell::new(None);
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut stages,
+            script,
+            |_app: &mut AppModel, result| outcome.set(Some(result)),
+        )
+        .await
+        .expect("turn loop completes");
+        let (back, shared, answered) = outcome.take().expect("the script finished");
+        assert!(back, "Esc from the remote menu left the ask unanswered");
+        assert!(shared, "sharing from the menu left the ask unanswered");
+        assert_eq!(
+            answered,
+            Ok(true),
+            "the ask was answered by the PC's own key"
+        );
+        assert!(app.choice().is_none());
+        assert!(!cancel.is_cancelled());
+    }
+
+    /// Run a turn whose script shares the session, has a device send a prompt
+    /// while the turn runs, then stops sharing, optionally revokes the device,
+    /// and presses Esc to promote queued prompts into steering.
+    async fn phone_prompt_then_stop(revoke: bool) -> (Vec<String>, usize) {
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        let events = queued(vec![]);
+        let mut io = characterization_io(events.clone(), cell(0), cell(0), None);
+        let peer = dials.push_link();
+        let script = {
+            let events = events.clone();
+            let host = host.clone();
+            let level = level.clone();
+            async move {
+                assert_eq!(
+                    host.share.share(),
+                    crate::remote_share::ShareOutcome::Connecting
+                );
+                let mut server = crate::remote_share::test_support::Server::accept(peer).await;
+                server.ready().await;
+                until_state(&host, crate::remote_share::ShareState::Shared).await;
+                // Keyboard traffic (that leaves the draft empty) while the
+                // device's request is due.
+                events
+                    .borrow_mut()
+                    .extend((0..200).map(|_| key(KeyCode::Left)));
+                server
+                    .command(
+                        "d1",
+                        1,
+                        crate::remote_share::test_support::follow_up("follow up"),
+                    )
+                    .await;
+                let result = server.next_of("relay_result").await.expect("a result");
+                assert!(result.to_string().contains("queued"), "{result}");
+                // Sharing stops; the accepted follow-up stays queued.
+                host.share.stop();
+                if revoke {
+                    level.store(0, std::sync::atomic::Ordering::SeqCst);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                events.borrow_mut().push_back(key(KeyCode::Esc));
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        };
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut stages,
+            script,
+            |_app: &mut AppModel, ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+        let steered = steer
+            .snapshot()
+            .into_iter()
+            .map(|interrupt| interrupt.content)
+            .collect();
+        (steered, queue.len())
+    }
+
+    #[tokio::test]
+    async fn a_phone_prompt_accepted_during_a_turn_survives_stop_and_steers() {
+        let (steered, queued) = phone_prompt_then_stop(false).await;
+        assert_eq!(steered, vec!["follow up".to_string()]);
+        assert_eq!(queued, 0, "promoted out of the queue");
+    }
+
+    #[tokio::test]
+    async fn a_revoked_devices_queued_prompt_is_never_injected() {
+        let (steered, queued) = phone_prompt_then_stop(true).await;
+        assert!(steered.is_empty(), "nothing injected: {steered:?}");
+        assert_eq!(queued, 0, "dropped from the queue, not left pending");
+    }
+
+    #[tokio::test]
+    async fn quitting_a_shared_session_closes_only_when_close_is_chosen() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        // Sharing stays connecting: the server never answers.
+        let _peer = dials.push_link();
+        assert_eq!(
+            host.share.share(),
+            crate::remote_share::ShareOutcome::Connecting
+        );
+        let ctrl_c = || Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let events = queued(vec![]);
+        let mut io = characterization_io(events.clone(), cell(0), cell(0), None);
+        let still_open = std::rc::Rc::new(std::cell::Cell::new(false));
+        let script = {
+            let events = events.clone();
+            let still_open = still_open.clone();
+            let host = host.clone();
+            async move {
+                // Repeated quit keys: the confirmation opens and stays open.
+                for _ in 0..6 {
+                    events.borrow_mut().push_back(ctrl_c());
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+                // Enter on the default keeps the terminal open.
+                events.borrow_mut().push_back(key(KeyCode::Enter));
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                still_open.set(host.share.active());
+                // Quit again, then choose "Close session and exit".
+                events.borrow_mut().push_back(ctrl_c());
+                events.borrow_mut().push_back(ctrl_c());
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                events
+                    .borrow_mut()
+                    .extend([key(KeyCode::Down), key(KeyCode::Enter)]);
+                std::future::pending::<()>().await;
+            }
+        };
+        let out = drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut stages,
+            script,
+            |_app: &mut AppModel, ()| {},
+        )
+        .await
+        .expect("turn loop returns");
+        assert!(
+            still_open.get(),
+            "quit keys and Keep never closed the terminal"
+        );
+        assert!(out, "Close session and exit closes");
+        assert_eq!(host.share.state(), crate::remote_share::ShareState::Off);
+        assert!(app.choice().is_none());
+    }
+
+    fn host_for(
+        dials: &crate::remote_share::test_support::Dials,
+        runtime: &SessionRuntime,
+    ) -> std::rc::Rc<remote_host::RemoteHost> {
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(dials, &level);
+        host.share.track(crate::remote_share::Tracked {
+            session: runtime.session_id(),
+            claim: runtime.ownership(),
+            gate: runtime.admission_gate(),
+        });
+        host
+    }
+
+    #[tokio::test]
+    async fn a_session_switch_that_fails_still_leaves_sharing_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let mut bundle = brief_session(cwd, scripted(&[])).await;
+        let dials = crate::remote_share::test_support::Dials::default();
+        let host = host_for(&dials, &bundle.runtime);
+        let peer = dials.push_link();
+        assert_eq!(
+            host.share.share(),
+            crate::remote_share::ShareOutcome::Connecting
+        );
+        let mut server = crate::remote_share::test_support::Server::accept(peer).await;
+        server.ready().await;
+        until_state(&host, crate::remote_share::ShareState::Shared).await;
+        let mut app = app();
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        let before = bundle.runtime.session_id();
+        execute_fullscreen_slash_action(
+            &mut app,
+            &mut bundle.runtime,
+            &localpilot_config::Config::default(),
+            cwd,
+            &mut stages,
+            &RefCell::new(None),
+            &localpilot_store::PromptHistory::with_store(None),
+            SlashAction::LoadSession("no-such-session".to_string()),
+        )
+        .await;
+        assert_eq!(bundle.runtime.session_id(), before, "the switch failed");
+        assert_eq!(host.share.state(), crate::remote_share::ShareState::Off);
+        assert!(timeline_has_notice(
+            &app,
+            "Use /remote share for this session"
+        ));
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn closing_the_runtime_ends_its_share_through_the_ownership_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let mut bundle = brief_session(cwd, scripted(&[])).await;
+        assert!(
+            bundle.runtime.ownership().is_some(),
+            "the runtime holds a claim"
+        );
+        let dials = crate::remote_share::test_support::Dials::default();
+        let host = host_for(&dials, &bundle.runtime);
+        let peer = dials.push_link();
+        assert_eq!(
+            host.share.share(),
+            crate::remote_share::ShareOutcome::Connecting
+        );
+        let mut server = crate::remote_share::test_support::Server::accept(peer).await;
+        server.ready().await;
+        until_state(&host, crate::remote_share::ShareState::Shared).await;
+        server
+            .command(
+                "d1",
+                1,
+                crate::remote_share::test_support::prompt("after the close"),
+            )
+            .await;
+        let pending = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = host.share.next_request() {
+                    return request;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the request arrived");
+        // The runtime's own close: its admission gate is no longer owned.
+        bundle.runtime.close();
+        assert!(
+            !pending.ticket.accept_now(),
+            "refused once the runtime closed"
+        );
+        until_state(&host, crate::remote_share::ShareState::Off).await;
+        assert!(host
+            .share
+            .take_notices()
+            .iter()
+            .any(|notice| matches!(notice, crate::remote_share::ShareNotice::Ended(why) if why.contains("no longer owns"))));
+    }
+
+    // ---- sharing: menus, dispositions, fairness, real server ------------------
+
+    /// Share over the fake relay until shared; returns the far end.
+    async fn shared_over_fake(
+        dials: &crate::remote_share::test_support::Dials,
+        host: &remote_host::RemoteHost,
+    ) -> crate::remote_share::test_support::Server {
+        let peer = dials.push_link();
+        assert_eq!(
+            host.share.share(),
+            crate::remote_share::ShareOutcome::Connecting
+        );
+        let mut server = crate::remote_share::test_support::Server::accept(peer).await;
+        server.ready().await;
+        until_state(host, crate::remote_share::ShareState::Shared).await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_stop_menu_left_open_after_sharing_ended_never_shares_again() {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let server = shared_over_fake(&dials, &host).await;
+        let mut app = app();
+        remote_host::open_remote_menu(&mut app, &host);
+        assert_eq!(
+            app.choice().unwrap().options[0],
+            "Stop sharing",
+            "the menu shows stop"
+        );
+        // Sharing ends on its own while the menu is open (the server goes away
+        // and is not running any more).
+        drop(server);
+        until_state(&host, crate::remote_share::ShareState::Off).await;
+        let dialed = dials.count();
+        assert_eq!(
+            remote_host::choice_key(&mut app, &host, press(KeyCode::Enter, KeyModifiers::NONE)),
+            remote_host::ChoiceKey::Back
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(dials.count(), dialed, "no new dial");
+        assert_eq!(host.share.state(), crate::remote_share::ShareState::Off);
+        assert!(timeline_has_notice(&app, "This session is not shared."));
+    }
+
+    #[tokio::test]
+    async fn a_share_menu_left_open_after_sharing_started_never_shares_twice() {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let mut app = app();
+        remote_host::open_remote_menu(&mut app, &host);
+        assert_eq!(app.choice().unwrap().options[0], "Share this session");
+        let _server = shared_over_fake(&dials, &host).await;
+        assert_eq!(
+            remote_host::choice_key(&mut app, &host, press(KeyCode::Enter, KeyModifiers::NONE)),
+            remote_host::ChoiceKey::Back
+        );
+        assert_eq!(dials.count(), 1, "the open share is kept, not doubled");
+        assert_eq!(host.share.state(), crate::remote_share::ShareState::Shared);
+        assert!(timeline_has_notice(&app, "already shared"));
+    }
+
+    /// The state a device was told for request `n`.
+    async fn told(server: &mut crate::remote_share::test_support::Server, n: u64) -> String {
+        loop {
+            let result = server.next_of("relay_result").await.expect("a result");
+            if result["n"] == n {
+                return result.to_string();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_prompt_is_run_queued_or_refused_by_its_disposition() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bundle = brief_session(dir.path(), scripted(&[])).await;
+        let dials = crate::remote_share::test_support::Dials::default();
+        let host = host_for(&dials, &bundle.runtime);
+        let mut server = shared_over_fake(&dials, &host).await;
+        let mut app = app();
+        use crate::remote_share::test_support::{follow_up, prompt, steer};
+        // Idle: "now" and "follow-up" run now; steering is refused.
+        for (n, command) in [(1, prompt("now")), (2, follow_up("later"))] {
+            server.command("d1", n, command).await;
+            let work = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(work) = remote_host::idle_tick(&mut app, &mut bundle.runtime, &host)
+                    {
+                        return work;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("taken");
+            assert!(matches!(
+                work,
+                remote_host::IdleWork::Prompt(QueuedOperation::Prompt(QueuedPrompt {
+                    origin: Some(_),
+                    ..
+                }))
+            ));
+        }
+        server.command("d1", 3, steer("steer")).await;
+        let mut idle_state = String::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert!(remote_host::idle_tick(&mut app, &mut bundle.runtime, &host).is_none());
+                if let Ok(Some(line)) =
+                    tokio::time::timeout(Duration::from_millis(5), server.lines.recv()).await
+                {
+                    if line["type"] == "relay_result" && line["n"] == 3 {
+                        idle_state = line.to_string();
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("refused");
+        assert!(
+            idle_state.contains("rejected") && idle_state.contains("steering"),
+            "{idle_state}"
+        );
+        // Busy: "now" is refused with nothing queued, a follow-up queues,
+        // steering is refused.
+        let mut queue = VecDeque::new();
+        let cancel = CancellationToken::new();
+        let pending = VecDeque::new();
+        server.command("d1", 4, prompt("now while busy")).await;
+        server.command("d1", 5, follow_up("after this turn")).await;
+        server.command("d1", 6, steer("into this turn")).await;
+        let mut states = std::collections::HashMap::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while states.len() < 3 {
+                remote_host::busy_tick(&mut app, &host, &mut queue, &cancel, None, &pending);
+                if let Ok(Some(line)) =
+                    tokio::time::timeout(Duration::from_millis(5), server.lines.recv()).await
+                {
+                    if line["type"] == "relay_result" {
+                        // The first answer each request got.
+                        states
+                            .entry(line["n"].as_u64().unwrap())
+                            .or_insert_with(|| line.to_string());
+                    }
+                }
+            }
+        })
+        .await
+        .expect("all three answered");
+        assert!(states[&4].contains("rejected"), "{}", states[&4]);
+        assert!(states[&5].contains("queued"), "{}", states[&5]);
+        assert!(states[&6].contains("rejected"), "{}", states[&6]);
+        assert_eq!(queue.len(), 1, "only the follow-up was queued");
+        assert!(!cancel.is_cancelled());
+        let _ = told; // shared helper for other cases
+        bundle.runtime.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn sustained_typing_never_starves_a_waiting_device_request() {
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let mut server = shared_over_fake(&dials, &host).await;
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        // The production input path, fed faster than one batch per pass.
+        let (keys, injected) = mpsc::unbounded_channel();
+        INJECTED_INPUT.with(|cell| *cell.borrow_mut() = Some(injected));
+        let flooding = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flood = tokio::spawn({
+            let flooding = flooding.clone();
+            async move {
+                while flooding.load(std::sync::atomic::Ordering::SeqCst) {
+                    for _ in 0..200 {
+                        if keys.send(Ok((key(KeyCode::Left), true))).is_err() {
+                            return;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        // While the flood runs, a device sends a follow-up and a refused "now".
+        let device = tokio::spawn({
+            let flooding = flooding.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                server
+                    .command(
+                        "d1",
+                        1,
+                        crate::remote_share::test_support::follow_up("queued"),
+                    )
+                    .await;
+                server
+                    .command(
+                        "d1",
+                        2,
+                        crate::remote_share::test_support::prompt("refused"),
+                    )
+                    .await;
+                let mut answered = Vec::new();
+                while answered.len() < 2 {
+                    let result = server.next_of("relay_result").await.expect("a result");
+                    answered.push((
+                        result["n"].as_u64().unwrap(),
+                        result.to_string(),
+                        flooding.load(std::sync::atomic::Ordering::SeqCst),
+                    ));
+                }
+                flooding.store(false, std::sync::atomic::Ordering::SeqCst);
+                answered
+            }
+        });
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        io.event_driven = true;
+        let out = drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut stages,
+            async {
+                // Ends once the flood has stopped.
+                while flooding.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            },
+            |_app: &mut AppModel, ()| {},
+        )
+        .await;
+        let answered = tokio::time::timeout(Duration::from_secs(10), device)
+            .await
+            .expect("the device was answered")
+            .unwrap();
+        let _ = flood.await;
+        out.expect("turn loop completes");
+        for (n, state, during_flood) in &answered {
+            assert!(
+                during_flood,
+                "request {n} was answered only after typing stopped"
+            );
+            match n {
+                1 => assert!(state.contains("queued"), "{state}"),
+                _ => assert!(state.contains("rejected"), "{state}"),
+            }
+        }
+        assert_eq!(queue.len(), 1);
+    }
+
+    // ---- through the real server -------------------------------------------
+
+    /// Sharing the runtime's session with a real workspace server.
+    fn served_host(
+        endpoint: &localpilot_server::Endpoint,
+        hosts: &crate::server_cmd::HostMap,
+        source: std::sync::Arc<crate::relay_source::SessionSource>,
+    ) -> std::rc::Rc<remote_host::RemoteHost> {
+        let endpoint = endpoint.clone();
+        let dial: crate::remote_share::Dial = std::sync::Arc::new(move || {
+            let endpoint = endpoint.clone();
+            Box::pin(async move {
+                let conn = localpilot_server::connect(&endpoint).await?;
+                Ok(Box::new(conn) as Box<dyn crate::remote_share::Link>)
+            })
+        });
+        let devices = hosts.devices.clone();
+        let share = crate::remote_share::RemoteShare::new(
+            dial,
+            std::sync::Arc::new(move |device: &str| devices.standing(device).ok().map(|s| s.scope)),
+            std::sync::Arc::new(|_| Some("Pixel".to_string())),
+            source,
+        );
+        std::rc::Rc::new(remote_host::RemoteHost::new(std::sync::Arc::new(share)))
+    }
+
+    /// Idle ticks (the terminal's own loop) until `done`.
+    async fn ticking(
+        app: &mut AppModel,
+        runtime: &mut SessionRuntime,
+        host: &remote_host::RemoteHost,
+        mut done: impl FnMut(&remote_host::RemoteHost) -> bool,
+    ) -> Option<remote_host::IdleWork> {
+        tokio::time::timeout(crate::server_cmd::tests::DEADLINE, async {
+            loop {
+                if let Some(work) = remote_host::idle_tick(app, runtime, host) {
+                    return Some(work);
+                }
+                if done(host) {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("in time")
+    }
+
+    async fn run_a_turn(
+        runtime: &mut SessionRuntime,
+        source: &crate::relay_source::SessionSource,
+        prompt: &str,
+    ) {
+        source.follow(runtime.session_id());
+        let events = source.turn_events();
+        runtime
+            .run_turn(prompt, &events, &CancellationToken::new())
+            .await;
+    }
+
+    fn texts_of(snapshot: &localpilot_rpc::ServerEvent) -> (Vec<String>, Option<String>, String) {
+        let localpilot_rpc::ServerEvent::Snapshot {
+            history,
+            turn_text,
+            epoch,
+            ..
+        } = snapshot
+        else {
+            panic!("not a snapshot")
+        };
+        (
+            history.iter().map(|m| m.text.clone()).collect(),
+            turn_text.clone(),
+            epoch.clone(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn clearing_from_the_keyboard_or_a_phone_reaches_every_device_through_the_server() {
+        use crate::server_cmd::send_command;
+        use crate::server_cmd::tests::*;
+        use localpilot_rpc::{AttachTarget, ClientCommand, ServerEvent};
+        let factory = std::sync::Arc::new(FakeFactory::new(
+            localpilot_llm::FakeProvider::new().text("x"),
+        ));
+        let hosts = crate::server_cmd::HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let mut bundle = brief_session(
+            factory.dir.path(),
+            scripted(&["the first answer", "the second answer"]),
+        )
+        .await;
+        let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+            localpilot_rpc::AskRegistry::default(),
+        ));
+        run_a_turn(&mut bundle.runtime, &source, "hello").await;
+        let host = served_host(&endpoint, &hosts, source.clone());
+        let mut app = app();
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        assert!(ticking(&mut app, &mut bundle.runtime, &host, |_| true)
+            .await
+            .is_none());
+        assert_eq!(
+            host.share.share(),
+            crate::remote_share::ShareOutcome::Connecting
+        );
+        ticking(&mut app, &mut bundle.runtime, &host, |h| {
+            h.share.state() == crate::remote_share::ShareState::Shared
+        })
+        .await;
+        let session = bundle.runtime.session_id();
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let attach = |since| ClientCommand::DeviceAttach {
+            capability: localpilot_rpc::WireSecret::new(&capability),
+            credential: localpilot_rpc::WireSecret::new(&credential),
+            target: AttachTarget::ResumeId {
+                session_id: session,
+            },
+            capabilities: resume_caps(),
+            since,
+        };
+        let (mut early, mut early_write, _) = first_record(&endpoint, attach(None)).await;
+        let before = snapshot_where(&mut early, |s| {
+            texts_of(s).0.iter().any(|t| t == "the first answer")
+        })
+        .await;
+        let (_, old_text, old_epoch) = texts_of(&before);
+        assert!(
+            old_text.unwrap_or_default().contains("the first answer"),
+            "text of the turn"
+        );
+        // The keyboard's /clear, through its real handler.
+        execute_fullscreen_slash_action(
+            &mut app,
+            &mut bundle.runtime,
+            &localpilot_config::Config::default(),
+            factory.dir.path(),
+            &mut stages,
+            &RefCell::new(None),
+            &localpilot_store::PromptHistory::with_store(None),
+            SlashAction::Clear,
+        )
+        .await;
+        let cleared = |s: &ServerEvent| {
+            let (history, text, _) = texts_of(s);
+            history.is_empty() && text.unwrap_or_default().is_empty()
+        };
+        let live = snapshot_where(&mut early, cleared).await;
+        assert_ne!(texts_of(&live).2, old_epoch, "a new epoch");
+        // A fresh attach, and one resuming from before the clear.
+        let (mut fresh, _fresh_write, _) = first_record(&endpoint, attach(None)).await;
+        let _ = snapshot_where(&mut fresh, cleared).await;
+        let (mut resumed, _resumed_write, _) = first_record(
+            &endpoint,
+            attach(Some(localpilot_rpc::FeedCursor {
+                epoch: old_epoch,
+                seq: 1,
+            })),
+        )
+        .await;
+        let _ = snapshot_where(&mut resumed, cleared).await;
+        // A new turn, then the phone's /clear, through the terminal's loop.
+        run_a_turn(&mut bundle.runtime, &source, "again").await;
+        ticking(&mut app, &mut bundle.runtime, &host, |_| true).await;
+        let _ = snapshot_where(&mut early, |s| {
+            texts_of(s).0.iter().any(|t| t == "the second answer")
+        })
+        .await;
+        send_command(
+            &mut early_write,
+            ClientCommand::RunCommand {
+                name: "clear".to_string(),
+                args: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut seen_clear = false;
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        while !seen_clear {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the phone's clear arrived"
+            );
+            assert!(remote_host::idle_tick(&mut app, &mut bundle.runtime, &host).is_none());
+            seen_clear = bundle
+                .runtime
+                .conversation()
+                .iter()
+                .all(|m| m.role == localpilot_core::Role::System);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let _ = snapshot_where(&mut early, cleared).await;
+        // A phone prompt reaches the terminal's own queue with its authority.
+        send_command(
+            &mut early_write,
+            ClientCommand::Prompt {
+                text: "from the phone".to_string(),
+                disposition: localpilot_rpc::InputDisposition::Immediate,
+            },
+        )
+        .await
+        .unwrap();
+        let work = ticking(&mut app, &mut bundle.runtime, &host, |_| false).await;
+        assert!(matches!(
+            work,
+            Some(remote_host::IdleWork::Prompt(QueuedOperation::Prompt(QueuedPrompt { ref text, origin: Some(_), .. }))) if text == "from the phone"
+        ));
+        // The terminal decides it (here: not run), which answers the phone.
+        drop(work);
+        // A permission ask opened by the session is answered by the phone.
+        let ask = source.asks().open_unbounded(localpilot_rpc::PendingAsk {
+            ask_id: "ask-1".to_string(),
+            tool: "write_file".to_string(),
+            detail: "a.txt".to_string(),
+            risk: "write".to_string(),
+            expires_at_ms: 0,
+        });
+        // The phone is told of the ask as it opens.
+        loop {
+            if let ServerEvent::PermissionAsk { ask_id, .. } = read_event(&mut early).await {
+                if ask_id == "ask-1" {
+                    break;
+                }
+            }
+        }
+        send_command(
+            &mut early_write,
+            ClientCommand::PermissionReply {
+                ask_id: "ask-1".to_string(),
+                allow: true,
+            },
+        )
+        .await
+        .unwrap();
+        let decided = tokio::time::timeout(DEADLINE, ask.outcome)
+            .await
+            .expect("answered")
+            .expect("an outcome");
+        assert!(
+            format!("{decided:?}").to_lowercase().contains("allow"),
+            "{decided:?}"
+        );
+        host.share.stop();
+        bundle.runtime.close();
+    }
+
+    /// `/compact` through the handler the operation pump runs for it.
+    async fn compact_through_the_handler(
+        app: &mut AppModel,
+        runtime: &mut SessionRuntime,
+        stages: &mut StageHost,
+        force: bool,
+    ) {
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let mut queue = VecDeque::new();
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        let dir = std::path::PathBuf::from(".");
+        let mut ctx = SlashContext {
+            approval_rx: &mut approval_rx,
+            question_rx: &mut question_rx,
+            cwd: &dir,
+            history: &history,
+            mouse_state: &mut mouse_state,
+            paste_burst: &mut paste_burst,
+            workspace_index: &mut workspace_index,
+            stages,
+            guidance: None,
+            execution: ExecutionSnapshot::default(),
+            source: None,
+        };
+        drive_compact_with(app, runtime, &mut ctx, force, &mut queue, &mut io)
+            .await
+            .expect("compacted");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn compacting_from_the_keyboard_or_a_phone_refreshes_every_device() {
+        use crate::server_cmd::send_command;
+        use crate::server_cmd::tests::*;
+        use localpilot_rpc::{AttachTarget, ClientCommand, ServerEvent};
+        let factory = std::sync::Arc::new(FakeFactory::new(
+            localpilot_llm::FakeProvider::new().text("x"),
+        ));
+        let hosts = crate::server_cmd::HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let mut bundle = brief_session(
+            factory.dir.path(),
+            scripted(&[
+                "the first answer",
+                "a summary",
+                "the second answer",
+                "another summary",
+            ]),
+        )
+        .await;
+        let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+            localpilot_rpc::AskRegistry::default(),
+        ));
+        run_a_turn(&mut bundle.runtime, &source, "hello").await;
+        let host = served_host(&endpoint, &hosts, source.clone());
+        let mut app = app();
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        ticking(&mut app, &mut bundle.runtime, &host, |_| true).await;
+        assert_eq!(
+            host.share.share(),
+            crate::remote_share::ShareOutcome::Connecting
+        );
+        ticking(&mut app, &mut bundle.runtime, &host, |h| {
+            h.share.state() == crate::remote_share::ShareState::Shared
+        })
+        .await;
+        let session = bundle.runtime.session_id();
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let attach = |since| ClientCommand::DeviceAttach {
+            capability: localpilot_rpc::WireSecret::new(&capability),
+            credential: localpilot_rpc::WireSecret::new(&credential),
+            target: AttachTarget::ResumeId {
+                session_id: session,
+            },
+            capabilities: resume_caps(),
+            since,
+        };
+        let (mut early, mut early_write, _) = first_record(&endpoint, attach(None)).await;
+        let before = snapshot_where(&mut early, |s| {
+            texts_of(s)
+                .1
+                .unwrap_or_default()
+                .contains("the first answer")
+        })
+        .await;
+        let old_epoch = texts_of(&before).2;
+        let refreshed = |old: String| {
+            move |s: &ServerEvent| {
+                let (_, text, epoch) = texts_of(s);
+                epoch != old && text.unwrap_or_default().is_empty()
+            }
+        };
+        // The keyboard's /compact, through the same handler the pump runs.
+        compact_through_the_handler(&mut app, &mut bundle.runtime, &mut stages, true).await;
+        let live = snapshot_where(&mut early, refreshed(old_epoch.clone())).await;
+        let (_, _, epoch) = texts_of(&live);
+        let (mut resumed, _w, _) = first_record(
+            &endpoint,
+            attach(Some(localpilot_rpc::FeedCursor {
+                epoch: old_epoch,
+                seq: 1,
+            })),
+        )
+        .await;
+        let _ = snapshot_where(&mut resumed, refreshed(String::new())).await;
+        // A new turn, then the phone's /compact through the terminal's loop.
+        run_a_turn(&mut bundle.runtime, &source, "again").await;
+        ticking(&mut app, &mut bundle.runtime, &host, |_| true).await;
+        // The turn's text (whichever scripted answer it got) is shown again.
+        let after_turn = snapshot_where(&mut early, |s| {
+            !texts_of(s).1.unwrap_or_default().is_empty()
+        })
+        .await;
+        // (A device sees the server's mirror epoch, renewed at every snapshot;
+        // what a refresh must change is the content: no turn text.)
+        let turn_epoch = texts_of(&after_turn).2;
+        let _ = epoch;
+        send_command(
+            &mut early_write,
+            ClientCommand::RunCommand {
+                name: "compact".to_string(),
+                args: "force".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let work = ticking(&mut app, &mut bundle.runtime, &host, |_| false).await;
+        let Some(remote_host::IdleWork::Compact { force }) = work else {
+            panic!("expected the phone's compact");
+        };
+        compact_through_the_handler(&mut app, &mut bundle.runtime, &mut stages, force).await;
+        let _ = snapshot_where(&mut early, refreshed(turn_epoch)).await;
+        let (mut fresh, _fresh_write, _) = first_record(&endpoint, attach(None)).await;
+        let _ = snapshot_where(&mut fresh, |s| texts_of(s).1.unwrap_or_default().is_empty()).await;
+        host.share.stop();
         bundle.runtime.close();
     }
 }

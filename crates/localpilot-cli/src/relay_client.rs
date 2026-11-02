@@ -8,17 +8,16 @@
 //! sharing rather than flooding the server. Nothing here borrows the runtime:
 //! the feed is the session's own, kept from its first event.
 //!
-//! Not yet called outside tests: the full-screen `/remote share` command wires it
-//! in the change that adds the terminal's sharing commands.
-#![cfg_attr(not(test), allow(dead_code))]
+//! The full-screen `/remote share` command runs it (see `remote_share`).
+#![cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use localpilot_core::SessionId;
 use localpilot_rpc::{
-    relayable, snapshot_records, ClientCommand, ClientRecord, HistoryMessage, JsonRecordReader,
-    RelayError, RelayRecord, RelayRequestState, ServerEvent, ServerRecord, RELAY_RECORD_MAX,
+    relayable, snapshot_records, ClientCommand, ClientRecord, JsonRecordReader, RelayError,
+    RelayRecord, RelayRequestState, ServerEvent, ServerRecord, RELAY_RECORD_MAX,
     RPC_PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -26,7 +25,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::relay_host::{SourceAdmission, SourceHost};
-use crate::server_feed::{Admission, SessionFeed};
+use crate::server_feed::SessionFeed;
 
 /// More fresh snapshots than this within [`RESNAPSHOT_WINDOW`] ends sharing.
 const RESNAPSHOT_LIMIT: usize = 3;
@@ -73,30 +72,40 @@ async fn send<W: AsyncWrite + Unpin>(
 /// dropped (a server that stopped reading never holds sharing open).
 const STOP_FLUSH: Duration = Duration::from_millis(200);
 
-/// A snapshot of the local feed as the records that carry it, with the epoch
-/// it was taken in and the feed position it covers.
-fn snapshot_now(
-    feed: &SessionFeed,
-    history: &(dyn Fn() -> (Vec<HistoryMessage>, bool) + Sync),
-) -> Result<((String, u64), Vec<RelayRecord>), RelayEnd> {
+/// A snapshot of the local feed: its position, how many losses the feed had
+/// when it was taken, and the records that carry it.
+struct Taken {
+    position: (String, u64),
+    losses: u64,
+    records: Vec<RelayRecord>,
+}
+
+/// A snapshot of the local feed as the records that carry it. History and
+/// admission are the host's, read with the projection under the feed's lock.
+fn snapshot_now(feed: &SessionFeed) -> Result<Taken, RelayEnd> {
     if !feed.shareable() {
         return Err(RelayEnd::TooLarge);
     }
-    let (snapshot, _) = feed.snapshot(&history(), &Admission::default);
+    let (snapshot, losses) = feed.source_snapshot();
     let ServerEvent::Snapshot { epoch, seq, .. } = &snapshot else {
         return Err(RelayEnd::SessionEnded);
     };
     let position = (epoch.clone(), *seq);
     match snapshot_records(&snapshot) {
-        Ok(records) => Ok((position, records)),
+        Ok(records) => Ok(Taken {
+            position,
+            losses,
+            records,
+        }),
         Err(RelayError::SnapshotTooLarge) => Err(RelayEnd::TooLarge),
         Err(_) => Err(RelayEnd::SessionEnded),
     }
 }
 
 /// Publish the session behind `feed` over `conn` until `stop` fires, the server
-/// goes away, or the session ends. `history` reads the session's stored
-/// history tail for a snapshot (the source owns the session, so it may).
+/// goes away, or the session ends. `ready` fires once the server accepted the
+/// registration and the first snapshot was sent: only then is the session
+/// shared.
 ///
 /// Every write races `stop` and the session ending, so a server that stops
 /// reading never holds the source: stopping drops the connection after at
@@ -104,10 +113,10 @@ fn snapshot_now(
 pub(crate) async fn run_relay<S>(
     conn: S,
     feed: Arc<SessionFeed>,
-    history: &(dyn Fn() -> (Vec<HistoryMessage>, bool) + Sync),
     identity: &RelayIdentity,
     stop: &CancellationToken,
     host: Option<SourceHost>,
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> std::io::Result<RelayEnd>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -174,23 +183,39 @@ where
     // Subscribe before the snapshot so nothing between them is missed; live
     // records at or below the snapshot's position are already in it.
     let mut live = feed.live();
-    let ((mut epoch, mut floor), records) = match snapshot_now(&feed, history) {
+    let mut changes = feed.source_changes();
+    changes.mark_unchanged();
+    let Taken {
+        position: (mut epoch, mut floor),
+        losses: mut seen_losses,
+        records,
+    } = match snapshot_now(&feed) {
         Ok(taken) => taken,
         Err(end) => finish!(end),
     };
     for record in &records {
         write_or_end!(record);
     }
+    if let Some(ready) = ready {
+        let _ = ready.send(());
+    }
     let mut resnapshots: Vec<Instant> = Vec::new();
     loop {
-        // Why the next snapshot is sent: `Some(true)` after a loss (rate
-        // limited), `Some(false)` at a turn boundary (the history and
-        // admission it carries changed).
+        // Why the next snapshot is sent: `Some(true)` after a loss seen here
+        // (rate limited), `Some(false)` when the feed moved to a new epoch or
+        // the host published new history or admission (a loss there is
+        // recognised from the feed's own loss count).
         let mut resnapshot: Option<bool> = None;
         tokio::select! {
             biased;
             () = stop.cancelled() => finish!(RelayEnd::Stopped),
             () = ended.cancelled() => finish!(RelayEnd::SessionEnded),
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    finish!(RelayEnd::SessionEnded);
+                }
+                resnapshot = Some(false);
+            },
             reply = reader.next() => match reply {
                 Ok(Some(value)) => {
                     if let Ok(ServerEvent::RelayCommand {
@@ -232,13 +257,12 @@ where
                     }
                     match event {
                         ServerEvent::SessionClosed { .. } => finish!(RelayEnd::SessionEnded),
-                        // The local feed lost records: its state was rebuilt
-                        // in a new epoch.
-                        ServerEvent::ResyncRequired { .. } => resnapshot = Some(true),
+                        // The local feed moved to a new epoch: rebuilt after
+                        // a loss, or refreshed by its host.
+                        ServerEvent::ResyncRequired { .. } => resnapshot = Some(false),
                         event => {
                             floor = seq;
                             if relayable(&event) {
-                                let boundary = matches!(event, ServerEvent::Stopped { .. });
                                 let record = RelayRecord::RelayEvent {
                                     epoch: epoch.clone(),
                                     seq,
@@ -251,9 +275,6 @@ where
                                     .is_ok_and(|bytes| bytes.len() < RELAY_RECORD_MAX);
                                 if fits {
                                     write_or_end!(&record);
-                                    if boundary {
-                                        resnapshot = Some(false);
-                                    }
                                 } else {
                                     resnapshot = Some(true);
                                 }
@@ -270,9 +291,19 @@ where
         if !feed.shareable() {
             finish!(RelayEnd::TooLarge);
         }
-        let Some(lost) = resnapshot else {
+        let Some(lost_here) = resnapshot else {
             continue;
         };
+        live = feed.live();
+        changes.mark_unchanged();
+        let taken = match snapshot_now(&feed) {
+            Ok(taken) => taken,
+            Err(end) => finish!(end),
+        };
+        // A loss counts whether this reader saw it or the feed rebuilt after
+        // one; a refresh by the host alone never does.
+        let lost = lost_here || taken.losses > seen_losses;
+        seen_losses = taken.losses;
         if lost {
             let now = Instant::now();
             resnapshots.retain(|at| now.duration_since(*at) < RESNAPSHOT_WINDOW);
@@ -281,15 +312,8 @@ where
                 finish!(RelayEnd::Unstable);
             }
         }
-        live = feed.live();
-        let records = match snapshot_now(&feed, history) {
-            Ok((position, records)) => {
-                (epoch, floor) = position;
-                records
-            }
-            Err(end) => finish!(end),
-        };
-        for record in &records {
+        (epoch, floor) = taken.position;
+        for record in &taken.records {
             write_or_end!(record);
         }
     }
@@ -351,10 +375,7 @@ mod tests {
         let _server = server(peer);
         let feed = source.feed();
         let stop = stop.clone();
-        tokio::spawn(async move {
-            let none = || (Vec::new(), false);
-            run_relay(client, feed, &none, &identity(), &stop, None).await
-        })
+        tokio::spawn(async move { run_relay(client, feed, &identity(), &stop, None, None).await })
     }
 
     #[tokio::test]
@@ -452,8 +473,7 @@ mod tests {
             while read.read_line(&mut rest).await.is_ok_and(|n| n > 0) {}
             rest
         });
-        let none = || (Vec::new(), false);
-        let end = run_relay(client, source.feed(), &none, &identity(), &stop, None)
+        let end = run_relay(client, source.feed(), &identity(), &stop, None, None)
             .await
             .unwrap();
         assert_eq!(end, RelayEnd::Stopped);
@@ -473,15 +493,13 @@ mod tests {
         let host = SourceHost {
             requests,
             standing: Arc::new(|_| Some(localpilot_rpc::Scope::Control)),
+            open: Arc::new(|| true),
             asks: AskRegistry::default(),
         };
         let relay = tokio::spawn({
             let feed = source.feed();
             let stop = stop.clone();
-            async move {
-                let none = || (Vec::new(), false);
-                run_relay(client, feed, &none, &identity(), &stop, Some(host)).await
-            }
+            async move { run_relay(client, feed, &identity(), &stop, Some(host), None).await }
         });
         let (read, mut write) = tokio::io::split(peer);
         let mut read = BufReader::new(read);
@@ -532,5 +550,51 @@ mod tests {
         assert!(incoming.try_recv().is_err(), "nothing reached the host");
         stop.cancel();
         let _ = tokio::time::timeout(QUICK, relay).await;
+    }
+
+    fn shown(text: &str) -> crate::relay_source::History {
+        crate::relay_source::history_of(&[localpilot_core::Message::text(
+            localpilot_core::Role::Assistant,
+            text,
+        )])
+    }
+
+    #[tokio::test]
+    async fn refreshes_by_the_host_never_end_sharing() {
+        let source = SessionSource::start(AskRegistry::default());
+        let stop = CancellationToken::new();
+        let relay = relay_over(1 << 20, &source, &stop, |peer| {
+            tokio::spawn(stalling_server(peer, usize::MAX))
+        })
+        .await;
+        for n in 0..6 {
+            source.refresh(shown(&format!("cleared {n}")));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        assert!(
+            !relay.is_finished(),
+            "six refreshes in a minute keep sharing"
+        );
+        stop.cancel();
+        let end = tokio::time::timeout(QUICK, relay).await.unwrap().unwrap();
+        assert_eq!(end.unwrap(), RelayEnd::Stopped);
+    }
+
+    #[tokio::test]
+    async fn losses_end_sharing_even_when_each_races_a_refresh() {
+        let source = SessionSource::start(AskRegistry::default());
+        let stop = CancellationToken::new();
+        let relay = relay_over(1 << 20, &source, &stop, |peer| {
+            tokio::spawn(stalling_server(peer, usize::MAX))
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        for n in 0..4 {
+            source.refresh(shown(&format!("cleared {n}")));
+            source.lose();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        let end = tokio::time::timeout(QUICK, relay).await.unwrap().unwrap();
+        assert_eq!(end.unwrap(), RelayEnd::Unstable);
     }
 }

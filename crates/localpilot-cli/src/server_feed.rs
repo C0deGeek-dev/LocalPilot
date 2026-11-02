@@ -146,6 +146,13 @@ struct FeedState {
     /// projection. Kept under the same lock as the projection, so a snapshot
     /// of the mirror is always one consistent state.
     mirror: Option<MirrorExtra>,
+    /// For a source feed (a session this process runs): the history tail and
+    /// admission its host last published, kept under the same lock so a
+    /// snapshot pairs them with the projection and position they belong to.
+    source: Option<MirrorExtra>,
+    /// How many times this feed lost records and rebuilt. Read with each
+    /// snapshot, so a reader can tell a loss from an intentional refresh.
+    losses: u64,
 }
 
 /// A mirror's history tail and admission state, as its source last reported
@@ -169,7 +176,7 @@ impl MirrorExtra {
 /// The session host's admission state, read under the feed lock when a
 /// snapshot is taken: whether accepted work is running or about to start, and
 /// how many follow-ups wait. It is current, not bound to the feed position.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Admission {
     pub(crate) busy: bool,
     pub(crate) queued: usize,
@@ -209,6 +216,9 @@ pub(crate) struct SessionFeed {
     live: broadcast::Sender<FeedRecord>,
     clients: AtomicUsize,
     cancel: CancellationToken,
+    /// Counts each change to a source feed's published history or admission
+    /// (see [`SessionFeed::source_changes`]).
+    history: tokio::sync::watch::Sender<u64>,
 }
 
 impl SessionFeed {
@@ -267,10 +277,13 @@ impl SessionFeed {
                 projection: Projection::new(),
                 closed: None,
                 mirror: None,
+                source: None,
+                losses: 0,
             }),
             live,
             clients: AtomicUsize::new(0),
             cancel: CancellationToken::new(),
+            history: tokio::sync::watch::channel(0).0,
         }
     }
 
@@ -490,6 +503,7 @@ impl SessionFeed {
             }
         }
         if lost_runtime {
+            state.losses += 1;
             state.epoch = new_epoch();
             state.ring.clear();
             state.projection.turn = TurnState::Unknown;
@@ -568,6 +582,108 @@ impl SessionFeed {
             None => snapshot(&state, history, admission()),
         };
         (event, state.ring.head())
+    }
+
+    /// A source feed's snapshot at its head (history and admission are the
+    /// host's, published to the feed), with how many losses the feed had when
+    /// it was taken; or the closure, when the feed has closed.
+    pub(crate) fn source_snapshot(&self) -> (ServerEvent, u64) {
+        let state = self.state();
+        let event = match &state.closed {
+            Some(reason) => ServerEvent::SessionClosed {
+                reason: reason.clone(),
+            },
+            None => snapshot(&state, &(Vec::new(), true), Admission::default()),
+        };
+        (event, state.losses)
+    }
+
+    /// Changes to a source feed's published history or admission: a reader
+    /// that shares the feed sends a fresh snapshot when this moves.
+    pub(crate) fn source_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.history.subscribe()
+    }
+
+    /// Publish the host's history tail (a source feed), in place: the
+    /// projection and position are unchanged.
+    fn set_history(&self, history: (Vec<HistoryMessage>, bool)) {
+        {
+            let mut state = self.state();
+            if state.closed.is_some() {
+                return;
+            }
+            let admission = state
+                .source
+                .as_ref()
+                .map(|s| s.admission)
+                .unwrap_or_default();
+            state.source = Some(MirrorExtra { history, admission });
+        }
+        self.history.send_modify(|n| *n += 1);
+    }
+
+    /// Publish the host's admission state (a source feed): whether accepted
+    /// work is running or about to start and how many follow-ups wait.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    pub(crate) fn set_admission(&self, admission: Admission) {
+        {
+            let mut state = self.state();
+            if state.closed.is_some() {
+                return;
+            }
+            let history = state
+                .source
+                .take()
+                .map_or_else(|| (Vec::new(), true), |s| s.history);
+            state.source = Some(MirrorExtra { history, admission });
+        }
+        self.history.send_modify(|n| *n += 1);
+    }
+
+    /// The host replaced what the session shows (its conversation was cleared
+    /// or compacted) while nothing runs: a new epoch whose projection is the
+    /// known idle state (the outstanding asks rebuilt from the registry) and
+    /// whose history is `history`, all under one lock, and only then a
+    /// `resync_required`. Not a loss: [`SessionFeed::source_snapshot`]'s loss
+    /// count is unchanged.
+    fn refresh(
+        &self,
+        history: (Vec<HistoryMessage>, bool),
+        outstanding: Vec<localpilot_rpc::PendingAsk>,
+    ) {
+        {
+            let mut state = self.state();
+            if state.closed.is_some() {
+                return;
+            }
+            let bounded = state.ring.has_byte_budget();
+            state.epoch = new_epoch();
+            state.ring.clear();
+            state.projection = Projection::new();
+            for ask in &outstanding {
+                if bounded && encoded_len(&ask.wire_event()) > BOUNDED_RECORD_MAX {
+                    state.projection.oversized_asks.insert(ask.ask_id.clone());
+                } else {
+                    state
+                        .projection
+                        .asks
+                        .insert(ask.ask_id.clone(), ask.detail());
+                }
+            }
+            let admission = state
+                .source
+                .as_ref()
+                .map(|s| s.admission)
+                .unwrap_or_default();
+            state.source = Some(MirrorExtra { history, admission });
+            let event = ServerEvent::ResyncRequired {
+                epoch: state.epoch.clone(),
+                seq: state.ring.head() + 1,
+            };
+            let seq = state.ring.push(event.clone());
+            let _ = self.live.send((seq, event));
+        }
+        self.history.send_modify(|n| *n += 1);
     }
 
     /// The pending asks as the projection knows them, with the feed's position.
@@ -659,9 +775,55 @@ pub(crate) struct Ingress {
 
 #[derive(Default)]
 struct IngressState {
-    queue: std::collections::VecDeque<ServerEvent>,
+    queue: std::collections::VecDeque<Item>,
     bytes: usize,
     lost: bool,
+    /// The newest history dropped with a loss: applied after the rebuild (the
+    /// projection stays unknown; only the history is current). One tail at
+    /// most, as bounded as any snapshot's.
+    carried: Option<(Vec<HistoryMessage>, bool)>,
+}
+
+/// The bytes a history tail holds, as an ingress charges it.
+fn history_size(history: &(Vec<HistoryMessage>, bool)) -> usize {
+    history
+        .0
+        .iter()
+        .map(|message| message.text.len() + message.role.len() + 32)
+        .sum::<usize>()
+        + 32
+}
+
+impl Item {
+    fn size(&self) -> usize {
+        match self {
+            Self::Record(record) => encoded_len(record),
+            Self::History(history) | Self::Refresh(history) => history_size(history),
+        }
+    }
+}
+
+/// One entry in an ingress, in the order the host produced it.
+enum Item {
+    Record(ServerEvent),
+    /// The host's history tail after an operation.
+    History((Vec<HistoryMessage>, bool)),
+    /// The host replaced what the session shows; see [`SessionFeed::refresh`].
+    Refresh((Vec<HistoryMessage>, bool)),
+}
+
+impl IngressState {
+    /// Drop everything queued and latch a loss, keeping only the newest
+    /// history among what was dropped.
+    fn latch_loss(&mut self) {
+        for item in self.queue.drain(..) {
+            if let Item::History(history) | Item::Refresh(history) = item {
+                self.carried = Some(history);
+            }
+        }
+        self.bytes = 0;
+        self.lost = true;
+    }
 }
 
 /// Records an ingress holds at most.
@@ -672,7 +834,9 @@ const INGRESS_BYTES: usize = 4 * 1024 * 1024;
 /// What the pump takes next from an ingress.
 enum Taken {
     Record(ServerEvent),
-    Lost,
+    History((Vec<HistoryMessage>, bool)),
+    Refresh((Vec<HistoryMessage>, bool)),
+    Lost(Option<(Vec<HistoryMessage>, bool)>),
 }
 
 impl Ingress {
@@ -692,12 +856,10 @@ impl Ingress {
                 if state.queue.len() >= INGRESS_RECORDS
                     || state.bytes.saturating_add(size) > INGRESS_BYTES
                 {
-                    state.queue.clear();
-                    state.bytes = 0;
-                    state.lost = true;
+                    state.latch_loss();
                 } else {
                     state.bytes += size;
-                    state.queue.push_back(record);
+                    state.queue.push_back(Item::Record(record));
                 }
             }
         }
@@ -706,27 +868,83 @@ impl Ingress {
 
     /// Latch a loss (a forwarder fell behind its turn's channel).
     pub(crate) fn lost(&self) {
+        self.lock().latch_loss();
+        self.wake.notify_one();
+    }
+
+    /// Queue the host's history tail (after the records already queued). A
+    /// history waiting directly before it is superseded.
+    pub(crate) fn history(&self, history: (Vec<HistoryMessage>, bool)) {
+        self.control(Item::History(history));
+    }
+
+    /// Queue a refresh: the host replaced what the session shows (after the
+    /// records already queued).
+    pub(crate) fn refresh(&self, history: (Vec<HistoryMessage>, bool)) {
+        self.control(Item::Refresh(history));
+    }
+
+    /// Queue a history or refresh after everything queued, under the same
+    /// count and byte bounds as records. Consecutive ones merge into one (the
+    /// newest history; a refresh if either was). One that does not fit latches
+    /// a loss, keeping only it as the newest history.
+    fn control(&self, item: Item) {
         {
             let mut state = self.lock();
-            state.queue.clear();
-            state.bytes = 0;
-            state.lost = true;
+            let mut item = item;
+            if matches!(
+                state.queue.back(),
+                Some(Item::History(_) | Item::Refresh(_))
+            ) {
+                if let Some(previous) = state.queue.pop_back() {
+                    state.bytes = state.bytes.saturating_sub(previous.size());
+                    let refresh =
+                        matches!(previous, Item::Refresh(_)) || matches!(item, Item::Refresh(_));
+                    if let Item::History(history) | Item::Refresh(history) = item {
+                        item = if refresh {
+                            Item::Refresh(history)
+                        } else {
+                            Item::History(history)
+                        };
+                    }
+                }
+            }
+            let size = item.size();
+            if !state.lost
+                && (state.queue.len() >= INGRESS_RECORDS
+                    || state.bytes.saturating_add(size) > INGRESS_BYTES)
+            {
+                state.latch_loss();
+            }
+            if state.lost {
+                // Nothing queued survives the rebuild; the newest history does.
+                if let Item::History(history) | Item::Refresh(history) = item {
+                    state.carried = Some(history);
+                }
+            } else {
+                state.bytes += size;
+                state.queue.push_back(item);
+            }
         }
         self.wake.notify_one();
     }
 
-    /// A latched loss comes first, before any record queued after it.
+    /// A latched loss comes first, before anything queued after it.
     fn take(&self) -> Option<Taken> {
         let mut state = self.lock();
         if state.lost {
             state.lost = false;
             state.queue.clear();
             state.bytes = 0;
-            return Some(Taken::Lost);
+            return Some(Taken::Lost(state.carried.take()));
         }
-        let record = state.queue.pop_front()?;
-        state.bytes = state.bytes.saturating_sub(encoded_len(&record));
-        Some(Taken::Record(record))
+        let item = state.queue.pop_front()?;
+        state.bytes = state.bytes.saturating_sub(item.size());
+        Some(match item {
+            Item::Record(record) => Taken::Record(record),
+            Item::History(history) => Taken::History(history),
+            Item::Refresh(history) => Taken::Refresh(history),
+        })
     }
 }
 
@@ -749,10 +967,11 @@ fn snapshot(
     history: &(Vec<HistoryMessage>, bool),
     admission: Admission,
 ) -> ServerEvent {
-    // A mirror's history and admission are its source's, held with the
-    // projection; the caller's are for hosted sessions only.
-    let (history, admission) = match &state.mirror {
-        Some(mirror) => (&mirror.history, mirror.admission),
+    // A mirror's history and admission are its source's, and a source feed's
+    // are its host's, each held with the projection; the caller's are for
+    // hosted sessions only.
+    let (history, admission) = match state.mirror.as_ref().or(state.source.as_ref()) {
+        Some(extra) => (&extra.history, extra.admission),
         None => (history, admission),
     };
     let projection = &state.projection;
@@ -830,11 +1049,27 @@ async fn pump_ingress(
         while let Some(taken) = ingress.take() {
             match taken {
                 Taken::Record(record) => feed.push(record),
-                Taken::Lost => {
+                Taken::History(history) => feed.set_history(history),
+                Taken::Refresh(history) => {
+                    // The registry is the authority for what is outstanding
+                    // now; drop ask events received before it was read.
+                    if let Some(rx) = &mut ask_rx {
+                        *rx = rx.resubscribe();
+                    }
+                    let outstanding = asks
+                        .as_ref()
+                        .map(AskRegistry::outstanding_detail)
+                        .unwrap_or_default();
+                    feed.refresh(history, outstanding);
+                }
+                Taken::Lost(carried) => {
                     if let Some(rx) = &mut ask_rx {
                         *rx = rx.resubscribe();
                     }
                     rebuild(&feed, asks.as_ref());
+                    if let Some(history) = carried {
+                        feed.set_history(history);
+                    }
                 }
             }
         }
@@ -1272,7 +1507,7 @@ mod tests {
         ingress.offer((0..INGRESS_RECORDS + 1).map(|_| text("a")).collect());
         // Offered while the loss is latched: dropped.
         ingress.offer(vec![text("late")]);
-        assert!(matches!(ingress.take(), Some(Taken::Lost)));
+        assert!(matches!(ingress.take(), Some(Taken::Lost(_))));
         assert!(ingress.take().is_none(), "nothing from before the rebuild");
         ingress.offer(vec![text("after")]);
         assert!(
@@ -1285,7 +1520,7 @@ mod tests {
         let ingress = Ingress::default();
         ingress.offer((0..INGRESS_RECORDS + 1).map(|_| text("a")).collect());
         // No more records ever arrive: the pump still sees the loss.
-        assert!(matches!(ingress.take(), Some(Taken::Lost)));
+        assert!(matches!(ingress.take(), Some(Taken::Lost(_))));
     }
 
     #[test]
@@ -1293,7 +1528,7 @@ mod tests {
         let ingress = Ingress::default();
         let mib = "m".repeat(1024 * 1024);
         ingress.offer((0..5).map(|_| text(&mib)).collect());
-        assert!(matches!(ingress.take(), Some(Taken::Lost)));
+        assert!(matches!(ingress.take(), Some(Taken::Lost(_))));
         assert!(ingress.take().is_none());
     }
 
@@ -1346,5 +1581,173 @@ mod tests {
         // forgets it.
         feed.rebuild_asks(vec![ask("small", 10)], true);
         assert!(feed.shareable());
+    }
+
+    fn shown(text: &str) -> (Vec<HistoryMessage>, bool) {
+        (
+            vec![HistoryMessage {
+                role: "assistant".to_string(),
+                text: text.to_string(),
+            }],
+            false,
+        )
+    }
+
+    async fn settled(
+        feed: &SessionFeed,
+        mut done: impl FnMut(&ServerEvent, u64) -> bool,
+    ) -> (ServerEvent, u64) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let (snapshot, losses) = feed.source_snapshot();
+                if done(&snapshot, losses) {
+                    return (snapshot, losses);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the feed settled")
+    }
+
+    #[tokio::test]
+    async fn a_refresh_starts_a_known_idle_epoch_and_is_not_a_loss() {
+        let ingress = Arc::new(Ingress::default());
+        let feed = SessionFeed::start_fed(ingress.clone(), None, 8 * 1024 * 1024);
+        ingress.offer(vec![ServerEvent::TurnStarted, text("old answer")]);
+        let (before, _) = settled(&feed, |s, _| {
+            matches!(
+                s,
+                ServerEvent::Snapshot {
+                    turn: TurnState::Running,
+                    ..
+                }
+            )
+        })
+        .await;
+        let ServerEvent::Snapshot {
+            epoch: old_epoch, ..
+        } = before
+        else {
+            unreachable!()
+        };
+        ingress.refresh(shown("after clear"));
+        let (after, losses) = settled(&feed, |s, _| {
+            matches!(s, ServerEvent::Snapshot { history, .. } if history.first().is_some_and(|m| m.text == "after clear"))
+        })
+        .await;
+        let ServerEvent::Snapshot {
+            epoch,
+            turn,
+            turn_text,
+            plan,
+            ..
+        } = after
+        else {
+            unreachable!()
+        };
+        assert_ne!(epoch, old_epoch, "a new epoch");
+        assert_eq!(turn, TurnState::Idle, "known idle, not unknown");
+        assert_eq!(turn_text.as_deref(), Some(""), "no stale text");
+        assert!(plan.is_none());
+        assert_eq!(losses, 0, "a refresh is not a loss");
+    }
+
+    #[tokio::test]
+    async fn a_loss_racing_a_refresh_still_counts_and_keeps_the_newest_history() {
+        let ingress = Arc::new(Ingress::default());
+        let feed = SessionFeed::start_fed(ingress.clone(), None, 8 * 1024 * 1024);
+        // Both before the pump runs: the refresh is dropped with the loss.
+        ingress.refresh(shown("newest"));
+        ingress.lost();
+        let (after, losses) = settled(&feed, |_, losses| losses > 0).await;
+        assert_eq!(losses, 1);
+        let ServerEvent::Snapshot { turn, history, .. } = after else {
+            unreachable!()
+        };
+        assert_eq!(
+            turn,
+            TurnState::Unknown,
+            "a dropped refresh never claims idle"
+        );
+        let (newest, _) = settled(&feed, |s, _| {
+            matches!(s, ServerEvent::Snapshot { history, .. } if history.first().is_some_and(|m| m.text == "newest"))
+        })
+        .await;
+        drop((history, newest));
+    }
+
+    #[tokio::test]
+    async fn published_history_keeps_the_position_and_signals_a_change() {
+        let ingress = Arc::new(Ingress::default());
+        let feed = SessionFeed::start_fed(ingress.clone(), None, 8 * 1024 * 1024);
+        let mut changes = feed.source_changes();
+        let (before, _) = feed.source_snapshot();
+        ingress.history(shown("one"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), changes.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let (after, losses) = feed.source_snapshot();
+        let (
+            ServerEvent::Snapshot {
+                epoch: a, seq: x, ..
+            },
+            ServerEvent::Snapshot {
+                epoch: b,
+                seq: y,
+                history,
+                ..
+            },
+        ) = (before, after)
+        else {
+            unreachable!()
+        };
+        assert_eq!((a, x), (b, y), "same epoch and position");
+        assert_eq!(history[0].text, "one");
+        assert_eq!(losses, 0);
+    }
+
+    #[test]
+    fn histories_and_records_share_the_ingress_bounds() {
+        let ingress = Ingress::default();
+        // Consecutive histories merge into one entry.
+        for n in 0..1000 {
+            ingress.history(shown(&format!("tail {n}")));
+        }
+        assert_eq!(ingress.lock().queue.len(), 1);
+        // Records and histories in turn, with no pump draining them.
+        let mut lost_at = None;
+        for n in 0..400 {
+            ingress.offer(vec![text("piece")]);
+            ingress.history(shown(&format!("tail {n}")));
+            let state = ingress.lock();
+            assert!(state.queue.len() <= INGRESS_RECORDS, "count bound");
+            assert!(state.bytes <= INGRESS_BYTES, "byte bound");
+            if state.lost && lost_at.is_none() {
+                lost_at = Some(n);
+            }
+        }
+        assert!(lost_at.is_some(), "overflow latched a loss");
+        // The loss comes first, carrying only the newest history.
+        match ingress.take() {
+            Some(Taken::Lost(Some((history, _)))) => assert_eq!(history[0].text, "tail 399"),
+            _ => panic!("expected the loss with the newest history"),
+        }
+        assert!(ingress.take().is_none(), "nothing else retained");
+        assert_eq!(ingress.lock().bytes, 0);
+    }
+
+    #[test]
+    fn a_refresh_merged_with_a_later_history_stays_a_refresh() {
+        let ingress = Ingress::default();
+        ingress.refresh(shown("cleared"));
+        ingress.history(shown("newer"));
+        match ingress.take() {
+            Some(Taken::Refresh((history, _))) => assert_eq!(history[0].text, "newer"),
+            _ => panic!("expected one refresh"),
+        }
+        assert!(ingress.take().is_none());
+        assert_eq!(ingress.lock().bytes, 0, "its bytes were released");
     }
 }

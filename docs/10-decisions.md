@@ -2,6 +2,73 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0251: The Full-Screen Terminal Shares Its Own Session; Remote Work Is Decided In Its Loop
+
+**Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#255.
+
+**Context.** ADR-0250 made a shared session stay in the process that runs it,
+but nothing in the full-screen terminal started sharing. The terminal is the
+session's only owner: its loop runs turns, owns the queue of follow-ups and
+shows the permission requests. Device requests must not get a second path
+around that loop, and stopping must take effect at once whatever the network
+is doing.
+
+**Decision.** `/remote share`, `/remote stop` and `/remote` are local commands
+of the full-screen terminal, available while idle and during any running work;
+a device can never run them. Sharing connects to the workspace's own server
+(the endpoint the gateway discovers, never an override) and needs it running:
+it is never started for the user. One controller per terminal holds the share:
+
+- **Fences.** Each share has a fence the terminal clears synchronously on stop,
+  on a command that replaces the session (new, resume, fork, clone, incognito,
+  choosing another session; also caught on the next idle tick), and on a
+  confirmed exit. Each connection has its own fence, cleared when it ends. A
+  request not yet accepted needs both fences, the runtime's admission gate
+  still owned, and the device's current standing (read from the per-user
+  registry; a read error refuses). A session with no claim (incognito) or not
+  owned is never shared.
+- **One queue, one loop.** Device requests wait on a queue that lives as long
+  as the terminal and are taken between keystrokes (at most 8 per tick) in the
+  idle loop, in every running operation's frame tick, and after every
+  completed batch of keyboard input (so typing cannot starve them). A phone
+  prompt takes an ordinary model turn; while one runs, a follow-up queues
+  behind it as an accepted request carrying its authority, a "now" prompt is
+  refused with nothing queued, and steering is refused (the terminal never
+  injects a device's text into its running turn); it starts, or is promoted into
+  steering, only while the device still holds the scope, and whatever happens
+  to it the device is told. A cancel stops the running work; `/clear`, `/name`,
+  `/effort` and `/compact` run through the same handlers as the keyboard's and
+  report their real result; anything else while busy is refused.
+- **What devices see.** The terminal publishes the history it shows and its
+  admission (busy, queued) into the feed's own state, in order after the
+  records already sent, so a snapshot pairs history, projection and position.
+  `/clear` and a completed `/compact` (from the keyboard or a device, through
+  the same handlers) refresh the feed: a new epoch in the known idle state,
+  not counted as a loss; a loss is recognised from the feed's own loss count,
+  so a refresh racing one still counts toward ending an unstable share.
+  History and refreshes share the feed intake's count and byte bounds with
+  records; consecutive ones merge, and a loss keeps only the newest history.
+- **Lifecycle.** Shared is shown only after the server accepted the
+  registration. A dropped connection is retried after 1, 2, 5 and 10 s, then
+  every 30 s (±20%) while the server answers; a server confirmed not running
+  ends sharing at once if this share never connected, otherwise after that
+  short ladder, with how to start one. A report from an earlier share or
+  connection never changes the current one. Losing ownership (checked every
+  250 ms, while connecting and waiting to retry too, and at every decision)
+  refuses new remote work and ends sharing.
+- **Leaving.** While sharing is on, every graceful quit opens a confirmation
+  with "Keep terminal open" selected; only choosing "Close session and exit"
+  closes, after which sharing stops and the relay gets at most 500 ms to tell
+  the server. F6 on a permission request or question opens remote access
+  without answering or dismissing it; its action is the one it showed (a
+  "Stop sharing" left open never shares).
+
+**Consequences.** Remote work cannot run beside the terminal's own work or
+outlive its authority, and stopping never waits for the network. Phone access
+lasts while the terminal is open; closing the window ends it. Device counts and
+attach notices, pairing and device management in the terminal, and the full
+status screens are not part of this decision's first version.
+
 ## ADR-0250: A Shared Session Stays In The Process That Runs It; The Server Mirrors It And Forwards Device Commands
 
 **Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#255.
@@ -26,8 +93,8 @@ allows one relay per session, and never opens, resumes or reads the session.
 The source sends a snapshot of its feed at one position in digest-checked parts
 (each record at most 256 KiB on the wire, checked on raw bytes before parsing;
 at most 64 parts and 2 MiB; the snapshot's own position must match its
-announcement), then every later record in order, and a fresh snapshot at each
-turn's end. The server installs a snapshot into a mirror atomically (projection,
+announcement), then every later record in order, and a fresh snapshot whenever the feed
+starts a new epoch or its host publishes new history or admission (ADR-0251). The server installs a snapshot into a mirror atomically (projection,
 history and admission together) and keeps the mirror unknown after any gap until
 the next verified snapshot. Paired devices discover and attach only relayed
 sessions; hosted and stored sessions stay local, and devices cannot open new
@@ -60,8 +127,7 @@ everything a device does is decided by the session's own process. Stopping the
 share, closing the terminal or the session changing ends the relay; devices see
 the session closed. A session whose state is too large to share stops sharing
 with a reason rather than show less than there is. Sharing from the full-screen
-terminal (`/remote share`) is wired separately; until then a paired device finds
-no shared session. ADR-0249's hand-over stays the path for a session that should
+terminal is ADR-0251. ADR-0249's hand-over stays the path for a session that should
 outlive its terminal.
 
 ## ADR-0249: A Session Is Owned By One Process, And Is Handed Over Only When Idle

@@ -231,6 +231,9 @@ pub enum SlashAction {
     Incognito {
         off: bool,
     },
+    /// Remote access for this terminal's session: status, sharing, pairing and
+    /// devices. Full-screen only and never available to a device.
+    Remote(RemoteAction),
     Invalid {
         command: String,
         reason: String,
@@ -435,6 +438,7 @@ impl SlashAction {
             | Self::Search(_)
             | Self::LocalMind
             | Self::Incognito { .. }
+            | Self::Remote(_)
             | Self::Model { .. }
             | Self::Invalid { .. }
             | Self::Unknown(_) => Persistence::ReadOnly,
@@ -523,6 +527,7 @@ impl SlashAction {
                 (
                     Host::Fullscreen,
                     Self::Exit { .. }
+                        | Self::Remote(_)
                         | Self::Help
                         | Self::Theme(_)
                         | Self::Search(_)
@@ -735,7 +740,7 @@ slash_commands! {
         // routes them to real actions; their catalog scope stays full-screen/pair-only.
         Help, Theme, Settings, Diff, Search,
         // Full-screen-only takeover; the pair host keeps it Unknown.
-        LocalMind, Incognito,
+        LocalMind, Incognito, Remote,
         // Permanent pair-only identity: `/abort` is owned by the pair event
         // loop, never parsed by `parse_slash_for`, present only in the pair picker.
         Abort,
@@ -906,6 +911,12 @@ slash_commands! {
             Fall,
             "Incognito: save nothing; new files need approval (`/incognito off` to end)"
         ),
+        Remote => fullscreen_only(
+            "remote",
+            Optional,
+            Fall,
+            "Remote access: status, or share | stop this session with paired devices"
+        ),
         // --- permanent pair-only, pair-loop-owned: no-arg, rejects a stray ----
         Abort => pair_only("abort", NoArg, Reject, "Stop the collaboration and both peers"),
         // --- parse-only aliases (hidden; present for lookup + stray policy) ---
@@ -999,6 +1010,7 @@ impl SlashAction {
             SlashAction::Search(_) => C::Search,
             SlashAction::LocalMind => C::LocalMind,
             SlashAction::Incognito { .. } => C::Incognito,
+            SlashAction::Remote(_) => C::Remote,
             SlashAction::Invalid { .. } | SlashAction::Unknown(_) => return None,
         })
     }
@@ -1374,6 +1386,46 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
         C::Incognito => routed_fullscreen(host, command, || SlashAction::Incognito {
             off: args.trim().eq_ignore_ascii_case("off"),
         }),
+        C::Remote => routed_fullscreen(host, command, || {
+            SlashAction::Remote(RemoteAction::parse(args))
+        }),
+    }
+}
+
+/// What `/remote` was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteAction {
+    /// `/remote`: remote access and sharing status.
+    Status,
+    /// `/remote share`: share this session with paired devices.
+    Share,
+    /// `/remote stop`: stop sharing this session.
+    Stop,
+    /// `/remote pair [observe|control]`: pair a device (control by default).
+    Pair { observe: bool },
+    /// `/remote devices`: list and revoke devices.
+    Devices,
+    /// Anything else: show how to use the command (never sent to the model).
+    Usage,
+}
+
+impl RemoteAction {
+    fn parse(args: &str) -> Self {
+        let mut words = args.split_whitespace();
+        let first = words.next().map(str::to_ascii_lowercase);
+        let second = words.next().map(str::to_ascii_lowercase);
+        if words.next().is_some() {
+            return Self::Usage;
+        }
+        match (first.as_deref(), second.as_deref()) {
+            (None, None) => Self::Status,
+            (Some("share"), None) => Self::Share,
+            (Some("stop"), None) => Self::Stop,
+            (Some("devices"), None) => Self::Devices,
+            (Some("pair"), None | Some("control")) => Self::Pair { observe: false },
+            (Some("pair"), Some("observe")) => Self::Pair { observe: true },
+            _ => Self::Usage,
+        }
     }
 }
 
@@ -1668,7 +1720,7 @@ mod tests {
             from_table, from_enum,
             "SLASH_SPELLINGS identities must equal SlashCommand::ALL"
         );
-        assert_eq!(from_enum.len(), 48, "expected 48 command identities");
+        assert_eq!(from_enum.len(), 49, "expected 49 command identities");
     }
 
     #[test]
@@ -1700,7 +1752,7 @@ mod tests {
         // 41→43 adds `harness-intake` and `harness-brief`, the reviewable brief
         // conversation; 43→45 adds `harness-plan` and `harness-replan`, the same
         // review conversation for `PROGRESS.md`.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 50);
+        assert_eq!(specs_for(Host::Fullscreen).len(), 51);
         assert_eq!(specs_for(Host::Pair).len(), 8);
         let remote: Vec<&str> = specs_for(Host::Remote).iter().map(|s| s.0).collect();
         assert_eq!(remote, ["effort", "name", "rename", "clear", "compact"]);
