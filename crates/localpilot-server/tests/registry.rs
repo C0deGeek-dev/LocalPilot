@@ -161,13 +161,13 @@ async fn resume_by_name_round_trips_from_the_event_log() {
     drive_turn(&handle, "say something").await;
     drop(handle);
 
-    // Give it a name (this also registers it in the store index).
-    store.set_session_name(id, "greeting").unwrap();
-
     // Drop it from the registry entirely.
     assert!(registry.remove(id).await.is_some());
     assert!(registry.get(id).await.is_none());
     assert!(registry.is_empty().await);
+    // Named once the runtime that owned it is gone: a store handle that never
+    // claimed the session may write to it only while nobody holds it.
+    store.set_session_name(id, "greeting").unwrap();
 
     // Resume by name: rebuilt from the log, same id, back in the registry.
     let resumed = registry

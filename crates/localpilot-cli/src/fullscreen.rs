@@ -10806,6 +10806,8 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
             StopReason::NoProgress | StopReason::UnitCheckpoint => StopState::NoProgress,
             StopReason::TimedOut => StopState::TimedOut,
             StopReason::Quiesced => StopState::Quiesced,
+            // The turn did not run: this window no longer owns the session.
+            StopReason::NotOwner => StopState::Cancelled,
         }),
     }
 }

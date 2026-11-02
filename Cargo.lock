@@ -2019,6 +2019,7 @@ version = "6.0.0"
 dependencies = [
  "dunce",
  "futures",
+ "localpilot-core",
  "proptest",
  "tempfile",
  "thiserror 2.0.9",
@@ -2133,6 +2134,7 @@ dependencies = [
 name = "localpilot-store"
 version = "6.0.0"
 dependencies = [
+ "fd-lock",
  "localpilot-config",
  "localpilot-core",
  "serde",

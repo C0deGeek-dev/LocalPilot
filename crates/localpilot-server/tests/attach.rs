@@ -121,9 +121,11 @@ async fn attach_resume_name_rebinds_the_same_id() {
     let handle = registry.get(id).await.unwrap();
     drive_turn(&handle, "say something").await;
     drop(handle);
-    store.set_session_name(id, "greeting").unwrap();
     assert!(registry.remove(id).await.is_some());
     assert!(registry.is_empty().await);
+    // Named once the runtime that owned it is gone: a store handle that never
+    // claimed the session may write to it only while nobody holds it.
+    store.set_session_name(id, "greeting").unwrap();
 
     // Attach by name: same id, back in the registry, transcript replayed.
     let resumed = attach(

@@ -40,6 +40,18 @@ pub enum StoreError {
     /// be resolved (no `APPDATA`/`XDG_CONFIG_HOME`/`HOME` set).
     #[error("could not resolve a per-user directory for the prompt-history store")]
     NoUserDir,
+
+    /// Another process owns the session (it holds the session's owner lock).
+    #[error("session {session} is open in another LocalPilot process{}", holder.as_ref().map(|h| format!(" (process {})", h.pid)).unwrap_or_default())]
+    SessionBusy {
+        session: SessionId,
+        holder: Option<crate::Holder>,
+    },
+
+    /// This process no longer owns the session: it was handed over to another
+    /// process, so nothing here may write to it.
+    #[error("session {session} was handed over to another process")]
+    OwnershipLost { session: SessionId },
 }
 
 impl StoreError {

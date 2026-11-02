@@ -491,7 +491,8 @@ async fn run_arm(
         StopReason::Degraded
         | StopReason::ProviderError
         | StopReason::NoProgress
-        | StopReason::UnitCheckpoint => return Err(ArmStop::Infrastructure),
+        | StopReason::UnitCheckpoint
+        | StopReason::NotOwner => return Err(ArmStop::Infrastructure),
     }
     let log = runtime
         .store()

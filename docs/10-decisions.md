@@ -2,6 +2,73 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0249: A Session Is Owned By One Process, And Is Handed Over Only When Idle
+
+**Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#255.
+
+**Context.** A phone should follow the session the user is watching in the
+full-screen terminal, and the session should keep running in the workspace's
+background server (`localpilot serve`) when the terminal goes away. That means
+moving a live session from one process to another. Until now nothing stopped two
+processes from running one session: the store had no cross-process coordination,
+two processes could resume the same session id, and the shared session index was
+read, changed and rewritten without a lock, so two processes updating different
+sessions could lose each other's update. A failed event write was logged and the
+turn went on, so a refused write could not stop a process that should no longer
+run the session.
+
+**Decision.** Each session has a permanent `sessions/<id>.owner.lock`. The
+runtime that runs a session holds an exclusive operating-system lock on it for as
+long as it runs it; another process gets a "session busy" error naming the
+holder. The operating system releases the lock when the process ends, so a free
+lock proves that nothing runs the session: recovery never waits for a timeout.
+Next to it, `sessions/<id>.owner.json` records an ownership generation (one more
+per claim), the holder and the state of a hand-over; it is published atomically,
+only under the lock, and a record of an unknown version refuses the claim. The
+claim arms a lease in the lease table of the store handle that took it (shared by
+its clones): every session-owned write through that handle (event, transcript
+message, name) checks the lease under the same mutex as the write, and a released
+lease stays dead. A handle without a lease for the session writes only while it
+can take the session's lock itself, so nothing can write to a session another
+owner holds, whatever path spelling it used. A runtime that cannot claim its
+session fails closed: it runs and writes nothing. The runtime keeps one admission
+gate (owned, preparing, released, lost) for its whole life, shared with the
+handles it gives out (reasoning effort, permission engine, steering queue); every
+turn, tool launch, user shell command, session switch, history change and setter
+consults it at the moment it acts, and a write refused because the session is
+owned elsewhere cancels the running turn instead of continuing.
+
+A hand-over is idle-only: no turn, no queued steering, no background process,
+not incognito. Preparing, holding the gate, checks idleness and freezes the log
+tail and a manifest of the settings that move (provider, model, reasoning effort,
+permission profile and allowlist, trust, envelope, image-support override, name),
+and from then refuses everything that executes or mutates.
+Release revalidates the tail and the manifest digest, kills the lease and
+publishes the released record while still holding the lock, and only then lets
+the lock go; if the publish fails, the source still holds the lock and owns the
+session. Release never closes the session (no `SessionClosed`, no scratch
+cleanup), and closing a runtime that no longer owns its session does nothing. The
+destination takes the lock, checks the released record against the log and
+publishes the commit before it drives the session. A source that cannot confirm
+the commit decides from the owner record and the lock, never from a timeout: a
+free lock with a released or committed record is an ordinary cold session that
+either side may resume. Lock files are never deleted, not even by prune, so two
+openers can never lock different files under one name; prune skips sessions
+another process holds and takes its locks without publishing, so a dry run
+changes nothing. The session index has a permanent `sessions/index.lock`
+held for each read-change-publish, always the innermost lock.
+
+**Consequences.** Resuming a session that is running in another LocalPilot
+process now fails with "session busy" instead of running it twice. Prune leaves
+an empty lock file per removed session. A stale handle in a process that handed
+its session over cannot write to it. Incognito sessions have no owner files and
+cannot be handed over. Older builds ignore these files: ownership is enforced
+only between builds that have this change, which the coordinated release ships
+together. The manifest carries no secrets; the destination recomputes tool,
+MCP and hook registries, structured command grants and the work profile from the
+workspace configuration and the session's history. The server side of
+the hand-over and the terminal's attached mode build on this.
+
 ## ADR-0248: A Shell Chain Is Judged Command By Command, And A Read-Only Command Runs Without A Diff Baseline
 
 **Status:** accepted · **Date:** 2026-11-01. Refs LocalHub#259 and LocalHub#260.

@@ -484,6 +484,10 @@ pub(crate) async fn switch_model_target(
             notices.push("/model: a turn is in progress; switch once it finishes".to_string());
             return model_switch_report(runtime, notices);
         }
+        Err(error @ SwitchError::NotOwner) => {
+            notices.push(format!("/model: {error}"));
+            return model_switch_report(runtime, notices);
+        }
     };
     // The provider's no-default-model warning surfaces before any model override.
     if let Some(warning) = &outcome.warning {

@@ -2377,10 +2377,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             emit(write, id, ServerEvent::Sessions { items }).await?;
         }
         ClientCommand::RunCommand { name, args } => {
-            run_command(
-                write, id, host, session_id, server, principal, acks, &name, &args,
-            )
-            .await?;
+            run_command(write, id, host, session_id, principal, acks, &name, &args).await?;
         }
         ClientCommand::Attach { .. } => {
             reject(
@@ -2493,7 +2490,6 @@ async fn run_command<W: AsyncWrite + Unpin>(
     id: Option<String>,
     host: &Arc<SessionHost>,
     session_id: &SessionId,
-    server: &ServerContext<'_>,
     principal: &Principal,
     acks: bool,
     name: &str,
@@ -2576,8 +2572,10 @@ async fn run_command<W: AsyncWrite + Unpin>(
                         .to_string(),
                 )
             }
-            localpilot_slash::SlashAction::NameSession(new_name) => server
-                .store
+            // Through the hosted runtime's own store: it owns the session, so
+            // the write carries its lease.
+            localpilot_slash::SlashAction::NameSession(new_name) => runtime
+                .store()
                 .set_session_name(*session_id, new_name)
                 .map(|()| format!("named this session \"{}\"", new_name.trim()))
                 .map_err(|error| (RejectCode::InvalidArguments, error.to_string())),

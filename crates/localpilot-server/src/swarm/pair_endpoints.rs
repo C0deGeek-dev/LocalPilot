@@ -162,6 +162,11 @@ fn map_capture(
                 "peer {peer} quiesced before producing an envelope"
             )))
         }
+        StopReason::NotOwner => {
+            return Err(EndpointError::PeerFailed(format!(
+                "peer {peer} does not own its session"
+            )))
+        }
     })
 }
 

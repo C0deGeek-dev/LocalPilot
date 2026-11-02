@@ -359,6 +359,12 @@ impl PermissionEngine {
         self.profile
     }
 
+    /// The user allowlist this engine was built with.
+    #[must_use]
+    pub fn allowlist(&self) -> &[String] {
+        &self.allowlist
+    }
+
     /// Whether the incognito floor is on.
     #[must_use]
     pub fn incognito(&self) -> bool {
@@ -599,6 +605,7 @@ fn untrusted_floor(decision: Decision, trusted: bool, interactivity: Interactivi
 #[derive(Debug, Clone)]
 pub struct PermissionEngineHandle {
     engine: std::sync::Arc<std::sync::RwLock<PermissionEngine>>,
+    gate: Option<localpilot_core::admission::AdmissionGate>,
 }
 
 impl PermissionEngineHandle {
@@ -607,7 +614,15 @@ impl PermissionEngineHandle {
     pub fn new(engine: PermissionEngine) -> Self {
         Self {
             engine: std::sync::Arc::new(std::sync::RwLock::new(engine)),
+            gate: None,
         }
+    }
+
+    /// The same handle, refusing swaps whenever `gate` does not admit them.
+    #[must_use]
+    pub fn gated(mut self, gate: localpilot_core::admission::AdmissionGate) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// The current engine, cloned. Callers evaluate a whole tool call against
@@ -620,12 +635,22 @@ impl PermissionEngineHandle {
         }
     }
 
-    /// Replace the engine; every subsequent snapshot sees the new one.
-    pub fn set(&self, engine: PermissionEngine) {
+    /// Replace the engine; every subsequent snapshot sees the new one. Returns
+    /// `false` when the handle's gate refused the swap (the session is being
+    /// handed over or runs elsewhere).
+    pub fn set(&self, engine: PermissionEngine) -> bool {
+        let _admitted = match &self.gate {
+            Some(gate) => match gate.admit() {
+                Some(guard) => Some(guard),
+                None => return false,
+            },
+            None => None,
+        };
         match self.engine.write() {
             Ok(mut current) => *current = engine,
             Err(poisoned) => *poisoned.into_inner() = engine,
         }
+        true
     }
 
     /// The active profile (a convenience over [`Self::snapshot`]).

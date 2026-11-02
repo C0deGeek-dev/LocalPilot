@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A session now runs in at most one LocalPilot process at a time. Resuming a
+  session that another LocalPilot process is running fails with "session busy"
+  and names that process, instead of running it twice (so does `localpilot session
+  name` for a session that is running elsewhere; name it from that session with
+  `/name`); the session is free again
+  as soon as that process ends, even if it crashed. Updates to the session index
+  from several processes no longer overwrite each other, and prune skips
+  sessions that are open elsewhere (it leaves a small empty lock file behind for
+  each session it removes). Older LocalPilot builds do not take part in this
+  (ADR-0249).
 - A shell chain joined with `;` or `|` is judged command by command instead of
   asking as one opaque command: a chain of version checks or read-only commands
   runs unasked under `--permission bypass`, a written path or destructive part

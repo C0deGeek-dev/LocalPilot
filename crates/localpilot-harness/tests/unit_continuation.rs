@@ -932,13 +932,15 @@ async fn signals_at_a_host_unit_boundary_are_handled_before_any_settlement() {
                 match signal {
                     Signal::Cancel => hook_cancel.cancel(),
                     Signal::Quiesce => quiesce.request(),
-                    Signal::Steer => steer.push("steering: stop and report"),
+                    Signal::Steer => {
+                        steer.push("steering: stop and report");
+                    }
                     Signal::UrgentSteer => {
                         steer.push_interrupt(localpilot_harness::SoftInterrupt {
                             content: "urgent: stop and report".into(),
                             source: localpilot_harness::SoftInterruptSource::User,
                             urgent: true,
-                        })
+                        });
                     }
                 }
             }),

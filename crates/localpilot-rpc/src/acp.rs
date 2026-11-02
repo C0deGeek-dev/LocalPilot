@@ -318,7 +318,9 @@ fn stop_reason(reason: StopReason) -> &'static str {
         | StopReason::TimedOut
         // Only headless evaluation opens further units; an unfinished task is
         // never reported as a normal end of turn.
-        | StopReason::UnitCheckpoint => "error",
+        | StopReason::UnitCheckpoint
+        // The session runs elsewhere; this turn did not run.
+        | StopReason::NotOwner => "error",
     }
 }
 

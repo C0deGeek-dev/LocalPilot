@@ -81,8 +81,8 @@ fn a_started_process_is_remembered_then_killed_on_close() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
 
-    // Turn 1: start a long-running process, then list it. Turn 2 (after close):
-    // list again — the registry must be empty.
+    // Start a long-running process and list it; closing the session must
+    // terminate and forget it.
     let provider = FakeProvider::new()
         .tool_call(
             "c1",
@@ -90,9 +90,7 @@ fn a_started_process_is_remembered_then_killed_on_close() {
             json!({ "command": stays_up_command(), "grace_secs": 0 }),
         )
         .tool_call("c2", "run_background", json!({ "action": "list" }))
-        .text("running")
-        .tool_call("c3", "run_background", json!({ "action": "list" }))
-        .text("done");
+        .text("running");
 
     let mut runtime = runtime(root, provider);
     let (events, mut rx) = broadcast::channel(256);
@@ -116,12 +114,11 @@ fn a_started_process_is_remembered_then_killed_on_close() {
 
     // Closing the session terminates and forgets every background process.
     runtime.close();
-
-    let reason = rt.block_on(runtime.run_turn("list again", &events, &cancel));
-    assert_eq!(reason, StopReason::Done);
-    let after_close = tool_output(&drain(&mut rx), "c3");
     assert!(
-        after_close.contains("no background processes"),
-        "close() must terminate and forget the process: {after_close}"
+        runtime.background_registry().list().is_empty(),
+        "close() must terminate and forget the process"
     );
+    // A closed runtime runs nothing until it claims a session again.
+    let reason = rt.block_on(runtime.run_turn("list again", &events, &cancel));
+    assert_eq!(reason, StopReason::NotOwner);
 }

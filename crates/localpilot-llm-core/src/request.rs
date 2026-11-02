@@ -53,6 +53,7 @@ impl ReasoningEffort {
 #[derive(Debug, Clone)]
 pub struct ReasoningEffortHandle {
     effort: std::sync::Arc<std::sync::RwLock<Option<ReasoningEffort>>>,
+    gate: Option<localpilot_core::admission::AdmissionGate>,
 }
 
 impl ReasoningEffortHandle {
@@ -61,7 +62,15 @@ impl ReasoningEffortHandle {
     pub fn new(effort: Option<ReasoningEffort>) -> Self {
         Self {
             effort: std::sync::Arc::new(std::sync::RwLock::new(effort)),
+            gate: None,
         }
+    }
+
+    /// The same handle, refusing changes whenever `gate` does not admit them.
+    #[must_use]
+    pub fn gated(mut self, gate: localpilot_core::admission::AdmissionGate) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// Snapshot the effort used by the next provider request.
@@ -73,12 +82,22 @@ impl ReasoningEffortHandle {
         }
     }
 
-    /// Replace the effort observed by subsequent provider requests.
-    pub fn set(&self, effort: Option<ReasoningEffort>) {
+    /// Replace the effort observed by subsequent provider requests. Returns
+    /// `false` when the handle's gate refused the change (the session is being
+    /// handed over or runs elsewhere).
+    pub fn set(&self, effort: Option<ReasoningEffort>) -> bool {
+        let _admitted = match &self.gate {
+            Some(gate) => match gate.admit() {
+                Some(guard) => Some(guard),
+                None => return false,
+            },
+            None => None,
+        };
         match self.effort.write() {
             Ok(mut current) => *current = effort,
             Err(poisoned) => *poisoned.into_inner() = effort,
         }
+        true
     }
 }
 

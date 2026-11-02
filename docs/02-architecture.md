@@ -411,6 +411,10 @@ Owns:
   authoritative
 - retention: prunes sessions and orphaned tool-output under a `RetentionPolicy`
   (ADR-0024)
+- session ownership: one process runs a session at a time (an OS-held
+  `sessions/<id>.owner.lock` plus an owner record and an in-process write lease),
+  the idle hand-over of a session to another process, and the session index's
+  lock (ADR-0249)
 
 Storage must be inspectable plain files where possible.
 

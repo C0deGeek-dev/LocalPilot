@@ -7,6 +7,7 @@
 //! provider-specific names beyond generic enum variants.
 #![forbid(unsafe_code)]
 
+pub mod admission;
 mod error;
 mod id;
 mod message;

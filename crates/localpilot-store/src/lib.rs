@@ -14,6 +14,7 @@ mod atomic;
 mod error;
 mod events;
 mod history;
+mod ownership;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -35,6 +36,10 @@ pub use history::{
     all_texts, project_entries, project_texts, HistoryEntry, HistoryPaste, PromptHistory,
     HISTORY_FORMAT_VERSION,
 };
+pub use ownership::{
+    Holder, HolderKind, OwnerRecord, SessionClaim, TransferRecord, TransferState,
+    OWNER_RECORD_VERSION,
+};
 
 const SESSIONS_DIR: &str = "sessions";
 const CACHE_DIR: &str = "cache";
@@ -49,6 +54,8 @@ const INDEX_FILE: &str = "index.json";
 pub struct Store {
     root: PathBuf,
     backend: Backend,
+    /// The session leases this handle and its clones armed (see `ownership`).
+    leases: ownership::LeaseTable,
 }
 
 /// Where the store's records live. Every filesystem primitive the store uses
@@ -134,6 +141,7 @@ impl Store {
         Self {
             root: workspace_root.join(".localpilot"),
             backend: Backend::Disk,
+            leases: ownership::LeaseTable::default(),
         }
     }
 
@@ -143,6 +151,7 @@ impl Store {
         Self {
             root: localpilot_dir,
             backend: Backend::Disk,
+            leases: ownership::LeaseTable::default(),
         }
     }
 
@@ -158,6 +167,7 @@ impl Store {
         Self {
             root: std::env::temp_dir().join(format!("localpilot-incognito-{nonce:x}")),
             backend: Backend::Memory(Arc::new(Mutex::new(BTreeMap::new()))),
+            leases: ownership::LeaseTable::default(),
         }
     }
 
@@ -252,6 +262,92 @@ impl Store {
         }
     }
 
+    // --- ownership -----------------------------------------------------------
+
+    fn sessions_dir(&self) -> PathBuf {
+        self.root.join(SESSIONS_DIR)
+    }
+
+    /// Take exclusive ownership of `session` for this process, failing at once
+    /// with [`StoreError::SessionBusy`] when another process holds it. Returns
+    /// `None` for an in-memory (incognito) store, which no other process can
+    /// reach.
+    ///
+    /// # Errors
+    /// [`StoreError::SessionBusy`], an unreadable or newer owner record, or an
+    /// io error.
+    pub fn claim_session(
+        &self,
+        session: SessionId,
+        holder: Holder,
+    ) -> Result<Option<SessionClaim>, StoreError> {
+        self.claim_session_within(session, holder, std::time::Duration::ZERO)
+    }
+
+    /// [`Store::claim_session`], retrying while the session is busy until `wait`
+    /// has passed.
+    ///
+    /// # Errors
+    /// As [`Store::claim_session`].
+    pub fn claim_session_within(
+        &self,
+        session: SessionId,
+        holder: Holder,
+        wait: std::time::Duration,
+    ) -> Result<Option<SessionClaim>, StoreError> {
+        match &self.backend {
+            Backend::Memory(_) => Ok(None),
+            Backend::Disk => {
+                SessionClaim::take(&self.leases, &self.sessions_dir(), session, holder, wait)
+                    .map(Some)
+            }
+        }
+    }
+
+    /// The published owner record of `session`, read without taking its lock
+    /// (`None` when it was never claimed, or for an in-memory store).
+    ///
+    /// # Errors
+    /// An unreadable record, or one of an unsupported version.
+    pub fn owner_record(&self, session: SessionId) -> Result<Option<OwnerRecord>, StoreError> {
+        match &self.backend {
+            Backend::Memory(_) => Ok(None),
+            Backend::Disk => {
+                ownership::read_record(&ownership::record_path(&self.sessions_dir(), session))
+            }
+        }
+    }
+
+    /// Run a session-owned write under this handle's authority for the session:
+    /// its lease when it claimed the session (checked under the lease's mutex,
+    /// together with the write), otherwise the session's lock, taken for the
+    /// write and refused when another owner holds it.
+    fn session_write<T>(
+        &self,
+        session: SessionId,
+        write: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        if matches!(self.backend, Backend::Memory(_)) {
+            return write();
+        }
+        match ownership::lease_in(&self.leases, session) {
+            Some(lease) => lease.guarded(session, write),
+            None => ownership::with_session_lock(&self.sessions_dir(), session, write),
+        }
+    }
+
+    /// Run one read-modify-publish transaction of the session index under its
+    /// stable lock (in-memory stores serialize through their map instead).
+    fn with_index_lock<T>(
+        &self,
+        work: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        match &self.backend {
+            Backend::Memory(_) => work(),
+            Backend::Disk => ownership::with_index_lock(&self.sessions_dir(), work),
+        }
+    }
+
     // --- transcripts -------------------------------------------------------
 
     fn session_path(&self, session: SessionId) -> PathBuf {
@@ -268,14 +364,14 @@ impl Store {
     pub fn append_message(&self, session: SessionId, message: &Message) -> Result<(), StoreError> {
         let path = self.session_path(session);
         let line = redact(&serde_json::to_string(message)?);
-        self.append_record(&path, &line)?;
-
-        let count = self
-            .read_string(&path)?
-            .map(|content| content.lines().filter(|l| !l.trim().is_empty()).count())
-            .unwrap_or(0);
-        self.touch_index(session, count)?;
-        Ok(())
+        self.session_write(session, || {
+            self.append_record(&path, &line)?;
+            let count = self
+                .read_string(&path)?
+                .map(|content| content.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(0);
+            self.touch_index(session, count)
+        })
     }
 
     /// Read a session transcript back into messages. A line damaged on disk
@@ -326,7 +422,7 @@ impl Store {
         };
         let path = self.events_path(session);
         let line = redact(&serde_json::to_string(&event)?);
-        self.append_record(&path, &line)?;
+        self.session_write(session, || self.append_record(&path, &line))?;
         Ok(event.id)
     }
 
@@ -409,6 +505,14 @@ impl Store {
     }
 
     fn touch_index(&self, session: SessionId, message_count: usize) -> Result<(), StoreError> {
+        self.with_index_lock(|| self.touch_index_locked(session, message_count))
+    }
+
+    fn touch_index_locked(
+        &self,
+        session: SessionId,
+        message_count: usize,
+    ) -> Result<(), StoreError> {
         let mut index = self.load_index()?;
         let now = now_unix();
         if let Some(entry) = index.sessions.iter_mut().find(|e| e.id == session) {
@@ -449,6 +553,12 @@ impl Store {
         if name.is_empty() || name.parse::<SessionId>().is_ok() {
             return Err(StoreError::InvalidName(name.to_string()));
         }
+        self.session_write(session, || {
+            self.with_index_lock(|| self.set_session_name_locked(session, name))
+        })
+    }
+
+    fn set_session_name_locked(&self, session: SessionId, name: &str) -> Result<(), StoreError> {
         let mut index = self.load_index()?;
         // Uniqueness is case-insensitive so `Abc` and `abc` cannot both resolve.
         if let Some(clash) = index
@@ -623,7 +733,22 @@ impl Store {
         dry_run: bool,
     ) -> Result<PruneReport, StoreError> {
         let index = self.load_index()?;
-        let doomed = sessions_to_remove(&index.sessions, policy, now_unix);
+        let mut doomed = sessions_to_remove(&index.sessions, policy, now_unix);
+        // A session another process is running is never pruned. The claims are
+        // held until its files are gone, so nobody can open it meanwhile; its
+        // lock file stays (see `ownership`).
+        // Locks are taken without publishing, so a dry run changes nothing.
+        let mut claims = Vec::new();
+        if matches!(self.backend, Backend::Disk) {
+            for id in doomed.clone() {
+                match ownership::hold_session(&self.sessions_dir(), id)? {
+                    Some(lock) => claims.push(lock),
+                    None => {
+                        doomed.remove(&id);
+                    }
+                }
+            }
+        }
 
         // The keys (file stems under `tool-output/`) still owned by survivors:
         // a `recovery-<id>` snapshot per session, plus every tool-use id that
@@ -654,18 +779,23 @@ impl Store {
                 self.remove(&self.session_path(*id))?;
                 self.remove(&self.events_path(*id))?;
             }
-            let kept = SessionIndex {
-                sessions: index
-                    .sessions
-                    .into_iter()
-                    .filter(|e| !doomed.contains(&e.id))
-                    .collect(),
-            };
-            self.write_bytes(
-                &self.index_path(),
-                serde_json::to_string_pretty(&kept)?.as_bytes(),
-            )?;
+            self.with_index_lock(|| {
+                // Re-read under the lock: other processes may have changed the
+                // index since the policy was evaluated.
+                let mut kept = self.load_index()?;
+                kept.sessions.retain(|e| !doomed.contains(&e.id));
+                self.write_bytes(
+                    &self.index_path(),
+                    serde_json::to_string_pretty(&kept)?.as_bytes(),
+                )
+            })?;
+            for id in &doomed {
+                if matches!(self.backend, Backend::Disk) {
+                    self.remove(&ownership::record_path(&self.sessions_dir(), *id))?;
+                }
+            }
         }
+        drop(claims);
 
         Ok(PruneReport {
             sessions_removed: doomed.len(),

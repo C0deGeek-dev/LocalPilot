@@ -520,5 +520,6 @@ fn stop_reason_label(reason: StopReason) -> &'static str {
         StopReason::TimedOut => "timed_out",
         StopReason::Quiesced => "quiesced",
         StopReason::UnitCheckpoint => "unit_checkpoint",
+        StopReason::NotOwner => "not_owner",
     }
 }

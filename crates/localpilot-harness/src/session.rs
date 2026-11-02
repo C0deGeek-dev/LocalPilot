@@ -49,7 +49,12 @@ use crate::rules::{trigger_for_cadence, RuleContext, RuleEngine, RuleVerdict, Tr
 use crate::summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 
 mod rename;
+mod transfer;
 mod unit_continuation;
+pub use transfer::{
+    profile_name, Admission, FrozenTransfer, TransferManifest, TransferRefusal,
+    TRANSFER_MANIFEST_MAX_BYTES, TRANSFER_MANIFEST_VERSION,
+};
 pub use unit_continuation::python_syntax_check;
 
 /// Why a turn loop stopped.
@@ -88,6 +93,9 @@ pub enum StopReason {
     /// host may open the next unit, and only a passing full check ends as
     /// `Done`.
     UnitCheckpoint,
+    /// This runtime no longer owns its session (it was handed over to another
+    /// process, or another process holds it), so the turn did not run.
+    NotOwner,
 }
 
 /// A bounded, parseable summary of what a turn accomplished, surfaced at the
@@ -629,19 +637,38 @@ impl SoftInterrupt {
 struct SteerQueueInner {
     queue: std::sync::Mutex<std::collections::VecDeque<SoftInterrupt>>,
     urgent: tokio::sync::Notify,
+    /// The owning runtime's admission gate: nothing is queued while the session
+    /// is being handed over or runs elsewhere.
+    gate: localpilot_core::admission::AdmissionGate,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct SteerQueue(Arc<SteerQueueInner>);
 
 impl SteerQueue {
-    /// Queue user steering text for the running turn (a non-urgent user message).
-    pub fn push(&self, text: impl Into<String>) {
-        self.push_interrupt(SoftInterrupt::user(text.into()));
+    /// A queue that refuses input whenever `gate` does not admit it.
+    #[must_use]
+    pub fn gated(gate: localpilot_core::admission::AdmissionGate) -> Self {
+        Self(Arc::new(SteerQueueInner {
+            queue: std::sync::Mutex::default(),
+            urgent: tokio::sync::Notify::new(),
+            gate,
+        }))
+    }
+
+    /// Queue user steering text for the running turn (a non-urgent user
+    /// message). Returns `false` when it was refused (the session is being
+    /// handed over or runs elsewhere); the caller keeps the text.
+    pub fn push(&self, text: impl Into<String>) -> bool {
+        self.push_interrupt(SoftInterrupt::user(text.into()))
     }
 
     /// Queue an arbitrary soft interrupt (user, system, or background task).
-    pub fn push_interrupt(&self, interrupt: SoftInterrupt) {
+    /// Returns `false` when it was refused.
+    pub fn push_interrupt(&self, interrupt: SoftInterrupt) -> bool {
+        let Some(_admitted) = self.0.gate.admit() else {
+            return false;
+        };
         let urgent = interrupt.urgent;
         if let Ok(mut queue) = self.0.queue.lock() {
             queue.push_back(interrupt);
@@ -649,6 +676,7 @@ impl SteerQueue {
         if urgent {
             self.0.urgent.notify_one();
         }
+        true
     }
 
     /// Whether anything is queued.
@@ -1313,6 +1341,9 @@ pub enum SwitchError {
     /// No provider with this id is configured (or no registry was attached).
     #[error("provider '{0}' is not configured")]
     UnknownProvider(String),
+    /// The session is being handed over, or was, so nothing may change it here.
+    #[error("this session is being shared or runs elsewhere; it cannot be changed here")]
+    NotOwner,
 }
 
 /// Host-owned resolution of a missing completion check, with current-turn paths.
@@ -1380,6 +1411,17 @@ pub struct SessionRuntime {
     reasoning_effort: ReasoningEffortHandle,
     approver: Arc<dyn Approver>,
     store: Store,
+    /// Exclusive ownership of the current session (`None` for an incognito
+    /// store, or when the claim could not be taken).
+    claim: Option<localpilot_store::SessionClaim>,
+    /// Whether this runtime may execute and mutate its session.
+    admission: localpilot_core::admission::AdmissionGate,
+    /// Why the runtime could not claim its session, while it is `Lost` for that.
+    ownership_error: Option<String>,
+    /// The running turn's cancellation, so losing the session stops it.
+    turn_cancel: Option<CancellationToken>,
+    /// What kind of host runs this runtime, recorded with each claim.
+    owner_kind: localpilot_store::HolderKind,
     workspace: localpilot_sandbox::Workspace,
     recovery: RecoveryEngine,
     /// Subagent definitions this session may delegate to. `None` means the host
@@ -1559,6 +1601,9 @@ impl SessionRuntime {
 
         let rule_engine = RuleEngine::with_baseline(&config.rules);
 
+        // One admission gate for the runtime's whole life, shared with every
+        // handle it gives out.
+        let admission = localpilot_core::admission::AdmissionGate::default();
         let mut runtime = Self {
             capability_evidence: crate::granularity::CapabilityEvidence::default(),
             active_work_profile: None,
@@ -1591,10 +1636,17 @@ impl SessionRuntime {
             // The incognito floor is a session property, not a profile, so it is
             // applied to the engine once here and carried across every later
             // profile swap (`/bypass` must not lift it).
-            engine: PermissionEngineHandle::new(engine.with_incognito(config.incognito)),
-            reasoning_effort: ReasoningEffortHandle::new(config.reasoning_effort),
+            engine: PermissionEngineHandle::new(engine.with_incognito(config.incognito))
+                .gated(admission.clone()),
+            reasoning_effort: ReasoningEffortHandle::new(config.reasoning_effort)
+                .gated(admission.clone()),
             approver: Arc::from(approver),
             store,
+            claim: None,
+            admission: admission.clone(),
+            ownership_error: None,
+            turn_cancel: None,
+            owner_kind: localpilot_store::HolderKind::Other,
             workspace,
             recovery,
             config,
@@ -1607,7 +1659,7 @@ impl SessionRuntime {
             prompt_token_calibration: PromptTokenCalibration::default(),
             turn_instructions: Vec::new(),
             verify_changed_work_only: false,
-            steer: SteerQueue::default(),
+            steer: SteerQueue::gated(admission.clone()),
             quiesce: QuiesceSignal::default(),
             hooks: HookFabric::default(),
             tool_failure_guard: ToolFailureGuard::default(),
@@ -1643,6 +1695,7 @@ impl SessionRuntime {
             incognito_ledger: crate::IncognitoLedger::default(),
         };
         runtime.sync_active_provider_metadata();
+        runtime.claim_fresh();
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
         });
@@ -1652,12 +1705,21 @@ impl SessionRuntime {
     /// Append one entry to the durable session event log, chaining it to the
     /// previous entry. A write failure is logged but never crashes the loop —
     /// the event log is an audit record, not a gate.
+    /// A write refused because the session is owned elsewhere is terminal for
+    /// this runtime (see [`Admission::Lost`]), never logged-and-continued.
     pub fn record_event(&mut self, kind: SessionEventKind) {
+        if !self.admission.is_owned() {
+            return;
+        }
         match self
             .store
             .append_event(self.session_id, self.last_event, kind)
         {
             Ok(id) => self.last_event = Some(id),
+            Err(
+                localpilot_store::StoreError::OwnershipLost { .. }
+                | localpilot_store::StoreError::SessionBusy { .. },
+            ) => self.lose_ownership(),
             Err(err) => tracing::warn!(error = %err, "failed to persist session event"),
         }
     }
@@ -2033,11 +2095,30 @@ impl SessionRuntime {
 
     /// Record that this session is closing.
     pub fn close(&mut self) {
+        // A session handed over (or found owned elsewhere) belongs to its new
+        // owner: closing here must not clear its scratch, stop its processes or
+        // write `SessionClosed`.
+        match self.admission.state() {
+            Admission::Owned => {}
+            // A frozen session stays frozen and claimed: the hand-over decides
+            // (release or abort), never a close.
+            Admission::Preparing { .. } => {
+                tracing::warn!("close refused: the session is being handed over");
+                return;
+            }
+            _ => {
+                self.claim = None;
+                return;
+            }
+        }
         self.background.kill_all();
         self.workspace.clear_scratch();
         self.replace_system_prompt(self.system_prompt_text());
         self.persist_graduation();
         self.record_event(SessionEventKind::SessionClosed);
+        // Nothing runs until a session is claimed again.
+        self.admission.set(Admission::Closed);
+        self.claim = None;
     }
 
     /// Clear harness ownership when a runtime enters another session.
@@ -2063,19 +2144,40 @@ impl SessionRuntime {
     }
 
     /// Start a fresh session with no previous harness unit's scope or exemption.
-    pub fn start_new_session(&mut self) {
+    ///
+    /// Returns `false`, leaving the runtime as it was, when this runtime does
+    /// not own its current session or the new session cannot be claimed.
+    pub fn start_new_session(&mut self) -> bool {
+        // A closed runtime may start again: it claims the new session first.
+        if !matches!(self.admission.state(), Admission::Closed)
+            && self.refuse_unless_owned("starting a new session")
+        {
+            return false;
+        }
+        let next = SessionId::new();
+        let claim = match self.claim_for(next) {
+            Ok(claim) => claim,
+            Err(error) => {
+                tracing::warn!(%error, "could not take ownership of a new session");
+                return false;
+            }
+        };
+        // Owned again before the reset below, which is itself gated.
+        self.admission.set(Admission::Owned);
         // A fresh session must not inherit the previous one's running servers.
         self.background.kill_all();
         self.clear_conversation();
         self.capability_evidence = crate::granularity::CapabilityEvidence::default();
         self.active_work_profile = None;
         self.reset_work_unit_ownership();
-        self.session_id = SessionId::new();
+        self.session_id = next;
+        self.claim = claim;
         self.renew_scratch();
         self.last_event = None;
         self.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
         });
+        true
     }
 
     /// Begin an incognito session in place: swap to an in-memory store, turn on
@@ -2084,15 +2186,16 @@ impl SessionRuntime {
     /// exactly as they were on disk — this does not touch them. A no-op that
     /// returns `false` when already incognito.
     pub fn enter_incognito(&mut self) -> bool {
-        if self.config.incognito {
+        if self.refuse_unless_owned("entering incognito") || self.config.incognito {
             return false;
         }
         self.config.incognito = true;
+        // The previous session is left as it was; this runtime stops owning it.
+        self.claim = None;
         self.store = Store::ephemeral();
         self.engine.set(self.engine.snapshot().with_incognito(true));
         self.incognito_ledger = crate::IncognitoLedger::default();
-        self.start_new_session();
-        true
+        self.start_new_session()
     }
 
     /// End an incognito session in place: swap back to the on-disk store, clear
@@ -2100,15 +2203,14 @@ impl SessionRuntime {
     /// `false` when not incognito. The incognito session's in-memory records are
     /// dropped with the ephemeral store.
     pub fn exit_incognito(&mut self) -> bool {
-        if !self.config.incognito {
+        if self.refuse_unless_owned("leaving incognito") || !self.config.incognito {
             return false;
         }
         self.config.incognito = false;
         self.store = Store::open(self.workspace.root());
         self.engine
             .set(self.engine.snapshot().with_incognito(false));
-        self.start_new_session();
-        true
+        self.start_new_session()
     }
 
     /// Resume `session` from its durable event log: the conversation is
@@ -2127,7 +2229,29 @@ impl SessionRuntime {
         &mut self,
         session: SessionId,
     ) -> Result<SessionRecovery, localpilot_store::StoreError> {
+        if matches!(self.admission.state(), Admission::Preparing { .. }) {
+            return Err(localpilot_store::StoreError::OwnershipLost {
+                session: self.session_id,
+            });
+        }
+        // Take the session before touching anything; a busy session leaves this
+        // runtime exactly as it was.
+        let owned_already = self.admission.is_owned()
+            && self
+                .claim
+                .as_ref()
+                .is_some_and(|claim| claim.session() == session);
+        let claim = if owned_already {
+            None
+        } else {
+            self.claim_for(session)?
+        };
         let recovered = self.store.read_events_recovering(session)?;
+        if !owned_already {
+            self.claim = claim;
+            self.admission.set(Admission::Owned);
+            self.ownership_error = None;
+        }
         let events = recovered.events;
         let transcript = transcript_from_events(&events);
         // Keep the current setup prompt; the transcript never contains it.
@@ -2167,12 +2291,20 @@ impl SessionRuntime {
         &mut self,
         mark_fork: bool,
     ) -> Result<SessionId, localpilot_store::StoreError> {
+        if !self.admission.is_owned() {
+            return Err(localpilot_store::StoreError::OwnershipLost {
+                session: self.session_id,
+            });
+        }
+        let next = SessionId::new();
+        let claim = self.claim_for(next)?;
         let fork_point = self.last_event;
         self.reset_work_unit_ownership();
         let history: Vec<Message> = self.messages.iter().skip(1).cloned().collect();
         self.capability_evidence = crate::granularity::CapabilityEvidence::default();
         self.active_work_profile = None;
-        self.session_id = SessionId::new();
+        self.session_id = next;
+        self.claim = claim;
         self.background.kill_all();
         self.renew_scratch();
         self.last_event = None;
@@ -2228,6 +2360,20 @@ impl SessionRuntime {
     ) -> ToolDispatchResult {
         let call_id = format!("user-shell-{}", EventId::new());
         let call = ToolCall::new(ToolUseId::from(call_id.as_str()), "run_shell", input);
+        if !self.admission.is_owned() {
+            return ToolDispatchResult {
+                result: localpilot_core::ToolResult::error(
+                    call.id.clone(),
+                    "this session is being shared or runs elsewhere; the command did not run",
+                ),
+                presentation: None,
+                touches: Vec::new(),
+                mutation_may_have_run: false,
+                unavailable_backend: None,
+                permission_denial: None,
+                work_envelope_refusal: false,
+            };
+        }
         self.record_event(SessionEventKind::ToolStarted {
             id: call_id.clone(),
             name: "run_shell".to_string(),
@@ -2310,6 +2456,9 @@ impl SessionRuntime {
     /// when either side is blank; a host must project only a completed bounded
     /// result and call this once at its completion boundary.
     pub fn record_research_exchange(&mut self, topic: &str, result: &str) -> bool {
+        if self.refuse_unless_owned("recording research") {
+            return false;
+        }
         if self.turn_in_flight || topic.trim().is_empty() || result.trim().is_empty() {
             return false;
         }
@@ -2356,6 +2505,12 @@ impl SessionRuntime {
     /// same shared handle [`Self::permission_engine_handle`] exposes, so both
     /// paths stay consistent.
     pub fn set_permission_profile(&mut self, profile: Profile, allowlist: Vec<String>) {
+        if !self.admission.is_owned() {
+            tracing::warn!(
+                "permission profile change refused: this runtime does not own its session"
+            );
+            return;
+        }
         // Rebuild from the current engine so every session-level floor
         // (incognito) carries across the swap — `/bypass` must never lift the
         // incognito file-creation gate.
@@ -2402,10 +2557,16 @@ impl SessionRuntime {
     /// `ask_user`. An interactive front-end wires this; a headless caller leaves
     /// it unset, and the tool reports itself unavailable instead of stalling.
     pub fn set_prompter(&mut self, prompter: std::sync::Arc<dyn localpilot_tools::UserPrompter>) {
+        if self.refuse_unless_owned("prompter change") {
+            return;
+        }
         self.prompter = Some(prompter);
     }
 
     pub fn set_agents(&mut self, agents: std::sync::Arc<localpilot_agents::AgentSet>) {
+        if self.refuse_unless_owned("agent change") {
+            return;
+        }
         self.agents = Some(agents);
     }
 
@@ -2413,10 +2574,16 @@ impl SessionRuntime {
     /// `swarm` tool. A server hosting a swarm wires this per session; every
     /// other caller leaves it unset.
     pub fn set_peers(&mut self, peers: std::sync::Arc<dyn localpilot_tools::SwarmPeers>) {
+        if self.refuse_unless_owned("peer change") {
+            return;
+        }
         self.peers = Some(peers);
     }
 
     pub fn set_broker(&mut self, broker: Option<Broker>) {
+        if self.refuse_unless_owned("broker change") {
+            return;
+        }
         if let Some(broker) = &broker {
             self.seed_persisted_graduation(broker);
         }
@@ -2459,22 +2626,37 @@ impl SessionRuntime {
     /// REPL, and overridable per harness step (high for planning, low for
     /// mechanical edits).
     pub fn set_reasoning_effort(&self, effort: Option<localpilot_llm::ReasoningEffort>) {
+        if !self.admission.is_owned() {
+            tracing::warn!(
+                "reasoning effort change refused: this runtime does not own its session"
+            );
+            return;
+        }
         self.reasoning_effort.set(effort);
     }
 
     /// Set, or with `None` remove, the turn's wall-clock bound.
     pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        if self.refuse_unless_owned("turn timeout change") {
+            return;
+        }
         self.config.turn_timeout = timeout;
     }
 
     /// Restrict a print turn to answering from supplied context.
     pub fn set_answer_only(&mut self, enabled: bool) {
+        if self.refuse_unless_owned("answer-only change") {
+            return;
+        }
         self.config.answer_only = enabled;
     }
 
     /// Place retrieved context beside the question (`true`, the default) or in
     /// the system prompt with everything else (`false`).
     pub fn set_retrieved_beside_question(&mut self, enabled: bool) {
+        if self.refuse_unless_owned("context placement change") {
+            return;
+        }
         self.config.retrieved_beside_question = enabled;
     }
 
@@ -2482,6 +2664,9 @@ impl SessionRuntime {
     /// overriding the verification command. Answer-only turns skip this gate.
     /// An explicit command overrides stack detection; `None` retains it.
     pub fn set_verify_before_done(&mut self, enabled: bool, command: Option<String>) {
+        if self.refuse_unless_owned("verification change") {
+            return;
+        }
         self.verify_changed_work_only = false;
         self.config.verify_before_done = enabled;
         if command.is_some() {
@@ -2493,6 +2678,9 @@ impl SessionRuntime {
     /// read-only work to finish. An existing configured opt-in or command retains
     /// its explicit verification contract; opaque effects still require checks.
     pub fn set_automatic_verify_before_done(&mut self) {
+        if self.refuse_unless_owned("verification change") {
+            return;
+        }
         if !self.config.verify_before_done && self.config.verify_command.is_none() {
             self.verify_changed_work_only = true;
         }
@@ -2558,6 +2746,9 @@ impl SessionRuntime {
     }
 
     pub fn set_granularity(&mut self, caps: localpilot_config::GranularityConfig) {
+        if self.refuse_unless_owned("granularity change") {
+            return;
+        }
         if self.envelope_off {
             self.suspended_granularity = Some(caps);
         } else {
@@ -2570,6 +2761,10 @@ impl SessionRuntime {
     /// and verification are separate and unaffected. Off, no profile resolves, so
     /// no write is sized and no step's diff is inspected against one.
     pub fn set_envelope_enabled(&mut self, enabled: bool) {
+        if !self.admission.is_owned() {
+            tracing::warn!("envelope change refused: this runtime does not own its session");
+            return;
+        }
         if enabled != self.envelope_off {
             return;
         }
@@ -2593,6 +2788,9 @@ impl SessionRuntime {
     /// The reviewed step selects timely verification; a stated exemption does
     /// not waive the caller's ratified quality gate or explicit session gate.
     pub fn set_harness_checkpoint_owner(&mut self, scope: Option<crate::granularity::WorkScope>) {
+        if self.refuse_unless_owned("checkpoint owner change") {
+            return;
+        }
         self.harness_checkpoint_owner = true;
         self.unit_scope = scope;
         self.unit_verification_exempt = None;
@@ -2604,10 +2802,16 @@ impl SessionRuntime {
     /// The host receives the final text and root, not authority to skip the
     /// permission gate. Configured, planned and detected checks take precedence.
     pub fn set_completion_check_fallback(&mut self, resolver: CompletionCheckResolver) {
+        if self.refuse_unless_owned("completion check change") {
+            return;
+        }
         self.completion_check_fallback = Some(resolver);
     }
 
     pub fn set_work_unit_verification(&mut self, verification: &crate::Verification) {
+        if self.refuse_unless_owned("unit verification change") {
+            return;
+        }
         match verification {
             crate::Verification::Command(command) => {
                 self.unit_verify_command = Some(command.clone());
@@ -2640,6 +2844,9 @@ impl SessionRuntime {
     /// the switch then selects an already-built provider rather than rebuilding or
     /// re-authenticating one. Without a registry attached, a switch is refused.
     pub fn set_registry(&mut self, registry: Arc<ProviderRegistry>) {
+        if self.refuse_unless_owned("provider registry change") {
+            return;
+        }
         self.registry = Some(registry);
     }
 
@@ -2654,6 +2861,9 @@ impl SessionRuntime {
     /// replacement is restricted to the same idle boundary as provider/model
     /// switching.
     pub fn replace_registry(&mut self, registry: Arc<ProviderRegistry>) -> Result<(), SwitchError> {
+        if !self.admission.is_owned() {
+            return Err(SwitchError::NotOwner);
+        }
         if self.turn_in_flight {
             return Err(SwitchError::TurnInFlight);
         }
@@ -2688,6 +2898,10 @@ impl SessionRuntime {
     /// preflight for an undeclared-but-probed-vision provider); `Some(false)`/`None`
     /// leaves the provider's own declaration as the sole gate.
     pub fn set_image_support_override(&mut self, resolved: Option<bool>) {
+        if !self.admission.is_owned() {
+            tracing::warn!("image support change refused: this runtime does not own its session");
+            return;
+        }
         self.image_support_override = resolved;
     }
 
@@ -2720,6 +2934,9 @@ impl SessionRuntime {
     /// [`SwitchError::TurnInFlight`] mid-turn; [`SwitchError::UnknownProvider`]
     /// when no registry is attached or `id` is not configured.
     pub fn set_active_provider(&mut self, id: &str) -> Result<SwitchOutcome, SwitchError> {
+        if !self.admission.is_owned() {
+            return Err(SwitchError::NotOwner);
+        }
         if self.turn_in_flight {
             return Err(SwitchError::TurnInFlight);
         }
@@ -2765,6 +2982,9 @@ impl SessionRuntime {
     /// # Errors
     /// [`SwitchError::TurnInFlight`] when a turn is in flight.
     pub fn set_active_model(&mut self, model: impl Into<String>) -> Result<(), SwitchError> {
+        if !self.admission.is_owned() {
+            return Err(SwitchError::NotOwner);
+        }
         if self.turn_in_flight {
             return Err(SwitchError::TurnInFlight);
         }
@@ -2810,6 +3030,11 @@ impl SessionRuntime {
 
     /// The hook fabric, for registering context hooks and tool gates. Gates are
     /// tighten-only and run after the permission engine.
+    ///
+    /// Setup wiring only: it is not gated by the admission state, so a host
+    /// registers hooks before the first turn and never while the session is
+    /// frozen for a hand-over. Hooks are local to this runtime; a destination
+    /// rebuilds its own from configuration.
     pub fn hooks_mut(&mut self) -> &mut HookFabric {
         &mut self.hooks
     }
@@ -2817,6 +3042,9 @@ impl SessionRuntime {
     /// Clear user/assistant/tool history while preserving the leading setup
     /// messages required for future turns.
     pub fn clear_conversation(&mut self) {
+        if self.refuse_unless_owned("clearing the conversation") {
+            return;
+        }
         let leading_system = self
             .messages
             .iter()
@@ -2833,6 +3061,9 @@ impl SessionRuntime {
     /// is preferred over the provider-backed summarizer built on demand. Mainly
     /// for tests and hosts that want a dedicated summarization model.
     pub fn set_summarizer(&mut self, summarizer: Arc<dyn Summarizer>) {
+        if self.refuse_unless_owned("summarizer change") {
+            return;
+        }
         self.summarizer = Some(summarizer);
     }
 
@@ -2855,6 +3086,9 @@ impl SessionRuntime {
     /// Compact the stored runtime message history using the same rules applied
     /// before automatic provider requests.
     pub async fn compact_conversation(&mut self) -> ManualCompaction {
+        if self.refuse_unless_owned("compaction") {
+            return self.refused_compaction();
+        }
         let cancel = CancellationToken::new();
         // Manual compaction shapes stored history only; no per-turn request
         // context is injected here, so only the advertised tool specs — which
@@ -2880,12 +3114,28 @@ impl SessionRuntime {
         }
     }
 
+    /// The answer to a compaction refused because this runtime does not own its
+    /// session: nothing changed.
+    fn refused_compaction(&self) -> ManualCompaction {
+        ManualCompaction {
+            compacted: false,
+            context_used: self.context_usage().0,
+            context_limit: self.config.context_token_limit,
+            requested_mode: self.config.compaction_mode,
+            used_mode: self.config.compaction_mode,
+            fallback_reason: Some("this session is being shared or runs elsewhere".to_string()),
+        }
+    }
+
     /// Force-compact the runtime history even when it is already within the
     /// configured limit, by targeting roughly half the budget. The token
     /// estimate undercounts some payloads (large tool outputs in particular), so
     /// a model's real tokenizer can reject a request the budget believes fits;
     /// this lets the user shrink the conversation on demand and keep going.
     pub async fn compact_conversation_force(&mut self) -> ManualCompaction {
+        if self.refuse_unless_owned("compaction") {
+            return self.refused_compaction();
+        }
         let tools_reserve = self.advertised_tool_estimate();
         let target = (self
             .prompt_token_calibration
@@ -3044,6 +3294,9 @@ impl SessionRuntime {
         trigger: Trigger,
         root: &Path,
     ) -> Vec<CheckOutcome> {
+        if self.refuse_unless_owned("running gate checks") {
+            return Vec::new();
+        }
         let mut outcomes = Vec::new();
         for check in checks {
             if trigger_for_cadence(check.cadence) == trigger {
@@ -3432,6 +3685,9 @@ impl SessionRuntime {
     /// here; context hooks contribute it and it is injected into the request at
     /// build time (see `run_turn`), so it never accumulates in history.
     pub fn seed_system(&mut self, text: impl Into<String>) {
+        if self.refuse_unless_owned("system prompt change") {
+            return;
+        }
         self.append(Message::new(Role::System, vec![ContentBlock::text(text)]));
     }
 
@@ -3691,6 +3947,9 @@ impl SessionRuntime {
     /// need a moment earlier, and rebuilding the whole prompt to add a paragraph
     /// would discard whatever else the host had put there.
     pub fn append_system_prompt(&mut self, addition: impl AsRef<str>) {
+        if self.refuse_unless_owned("system prompt change") {
+            return;
+        }
         let addition = addition.as_ref().trim();
         if addition.is_empty() {
             return;
@@ -3705,6 +3964,9 @@ impl SessionRuntime {
     }
 
     pub fn replace_system_prompt(&mut self, prompt: impl Into<String>) {
+        if self.refuse_unless_owned("system prompt change") {
+            return;
+        }
         let message = Message::text(
             Role::System,
             crate::session_scratch::prompt(prompt.into(), &self.workspace),
@@ -3738,6 +4000,10 @@ impl SessionRuntime {
     /// explicit step (`trust::remember`). A permission-profile switch never routes
     /// through here — profile and trust are independent.
     pub fn set_trusted(&mut self, trusted: bool) {
+        if !self.admission.is_owned() {
+            tracing::warn!("trust change refused: this runtime does not own its session");
+            return;
+        }
         self.config.trusted = trusted;
     }
 
@@ -3752,6 +4018,9 @@ impl SessionRuntime {
     /// config marker is set at construction, so this is only for a marker that
     /// becomes true partway through a session's life.
     pub fn note_package_discovery_disabled_but_present(&mut self) {
+        if self.refuse_unless_owned("system prompt change") {
+            return;
+        }
         if self.config.package_discovery_disabled_but_present {
             return;
         }
@@ -3797,6 +4066,9 @@ impl SessionRuntime {
     }
 
     fn append(&mut self, message: Message) {
+        if !self.admission.is_owned() {
+            return;
+        }
         // Capture this turn's latest assistant text before the message is moved
         // into history. A pair-convergence drive reads it back as the exact
         // envelope the turn emitted: scoping it to the turn (guarded by
@@ -3809,8 +4081,16 @@ impl SessionRuntime {
         }
         // Persist (redacting) before keeping it in memory; a write failure is
         // logged but does not crash the loop.
-        if let Err(err) = self.store.append_message(self.session_id, &message) {
-            tracing::warn!(error = %err, "failed to persist transcript message");
+        match self.store.append_message(self.session_id, &message) {
+            Ok(()) => {}
+            Err(
+                localpilot_store::StoreError::OwnershipLost { .. }
+                | localpilot_store::StoreError::SessionBusy { .. },
+            ) => {
+                self.lose_ownership();
+                return;
+            }
+            Err(err) => tracing::warn!(error = %err, "failed to persist transcript message"),
         }
         self.record_event(SessionEventKind::Message {
             origin: origin_for(&message),
@@ -3950,6 +4230,32 @@ impl SessionRuntime {
         events: &broadcast::Sender<RuntimeEvent>,
         cancel: &CancellationToken,
     ) -> StopReason {
+        if !self.admission.is_owned() {
+            return StopReason::NotOwner;
+        }
+        // The turn runs on a child token that losing the session cancels, so a
+        // turn that finds its session owned elsewhere stops at its next await.
+        let turn_cancel = cancel.child_token();
+        self.turn_cancel = Some(turn_cancel.clone());
+        let reason = self
+            .run_turn_body(user_input, attachments, followup, events, &turn_cancel)
+            .await;
+        self.turn_cancel = None;
+        if matches!(self.admission.state(), Admission::Lost) {
+            StopReason::NotOwner
+        } else {
+            reason
+        }
+    }
+
+    async fn run_turn_body(
+        &mut self,
+        user_input: &str,
+        attachments: &[ContentBlock],
+        followup: Option<Message>,
+        events: &broadcast::Sender<RuntimeEvent>,
+        cancel: &CancellationToken,
+    ) -> StopReason {
         // Context hooks contribute system context for this turn. It is computed
         // once from the prompt and injected into the outgoing request adjacent to
         // the leading system prompt — never appended to history or persisted — so
@@ -3964,6 +4270,9 @@ impl SessionRuntime {
         // A turn is now in flight: a mid-session provider/model switch is refused
         // until it ends (cleared in `stop`, the single exit), so the transcript is
         // only ever re-pointed at a turn boundary.
+        if !self.admission.is_owned() {
+            return StopReason::NotOwner;
+        }
         self.turn_in_flight = true;
         self.turn_tool_calls = 0;
         self.turn_verification = None;
@@ -5200,19 +5509,24 @@ impl SessionRuntime {
                             // they cannot attest that a server did no external
                             // or partial writes, even when a call returns Err.
                             self.work_mcp_call_attempted |= self.tools.is_mcp(&active_call.name);
-                            let dispatched = tokio::select! {
-                                () = cancel.cancelled() => None,
-                                // A graceful wind-down requested while this tool is
-                                // running: abort the wait and fall through to the
-                                // quiesce path below, which leaves a resumable
-                                // result for a wait-like tool rather than an abort.
-                                () = quiesce.token().cancelled() => None,
-                                result = self.tools.dispatch_detailed(
-                                    &active_call,
-                                    &ctx,
-                                    &engine,
-                                    self.approver.as_ref(),
-                                ) => Some(result),
+                            // A session found owned elsewhere launches nothing.
+                            let dispatched = if !self.admission.is_owned() {
+                                None
+                            } else {
+                                tokio::select! {
+                                    () = cancel.cancelled() => None,
+                                    // A graceful wind-down requested while this tool is
+                                    // running: abort the wait and fall through to the
+                                    // quiesce path below, which leaves a resumable
+                                    // result for a wait-like tool rather than an abort.
+                                    () = quiesce.token().cancelled() => None,
+                                    result = self.tools.dispatch_detailed(
+                                        &active_call,
+                                        &ctx,
+                                        &engine,
+                                        self.approver.as_ref(),
+                                    ) => Some(result),
+                                }
                             };
                             // A delegating call is one call to this session, but
                             // the child made its own. Charge them to this turn or
