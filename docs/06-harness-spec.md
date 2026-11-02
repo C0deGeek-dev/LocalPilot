@@ -15,6 +15,13 @@ decides whether those actions are allowed to advance the project.
 
 ## Automatic Work Granularity
 
+The configured work-limit mode selects adaptive sizing, fixed Wide or Very wide
+ceilings, or Off. Fixed edit ceilings are independent of reliability and context
+pressure. Review scopes and explicitly configured caps can tighten them.
+The configuration reference lists the material, binary, read and output bounds.
+Off skips size admission and diff sizing. Permission and verification retain
+their own evidence and policies (ADR-0254).
+
 Before an ordinary or harness agent's first writing tool call in an effectively
 empty project, the shared runtime prepares Git and an empty initial commit
 (ADR-0252). This also applies without `/harness` and with the envelope disabled.

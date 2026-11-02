@@ -2,6 +2,30 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0254: Configure Adaptive, Fixed Or Disabled Work Sizing
+
+**Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#263.
+
+**Context.** Adaptive ceilings can be tightened through configuration. Larger
+coherent edits need a user-selected ceiling independent of model reliability.
+
+**Decision.** `[harness.granularity].mode` defaults to `automatic`. Wide allows
+10 files, 40 regions and 2,000 equivalents in each material allowance. Very wide
+allows 50 files, 200 regions and 10,000 equivalents in each allowance. These
+ceilings are policy choices. The existing separate new-file allowance, explicit
+caps, reviewed step scopes, context-based read/output bounds and 64 KiB binary
+budget apply. Exact-edit preview uses indexed matching and admits up to the
+effective edit allowance, with a 400-line preview floor and a 10,000-line ceiling.
+
+Admission measures cumulative submitted material. Inspection measures the net
+diff and accumulates changed bytes across files. A legitimate mode change clears
+size refusals and their opaque retry latch. Execution and partial-write evidence
+stay available to the verification gate.
+
+**Consequences.** Off skips the sizing-only baseline requirement and sizing
+checks. The runtime uses standard tool limits, permission, verification,
+cancellation and session cost controls.
+
 ## ADR-0253: Verification Obligations Follow Work Independently Of Work Limits
 
 **Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#262.

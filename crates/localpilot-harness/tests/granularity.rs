@@ -752,7 +752,7 @@ async fn failed_bounded_repair_does_not_restore_opaque_dispatch() {
 #[tokio::test]
 async fn long_line_output_is_retained_and_projection_is_bounded() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("large.txt"), "α".repeat(10_000)).unwrap();
+    std::fs::write(dir.path().join("large.txt"), "ÃŽÂ±".repeat(10_000)).unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
@@ -1177,7 +1177,7 @@ async fn contract_refusal_does_not_spend_a_mutation_that_never_dispatched() {
 #[tokio::test]
 async fn unicode_and_space_paths_share_the_same_checkpoint_limits() {
     let dir = tempfile::tempdir().unwrap();
-    let name = "résumé file.txt";
+    let name = "rÃƒÂ©sumÃƒÂ© file.txt";
     project_with_plan(dir.path(), &PLAN.replace("first.txt", name));
     let provider = Arc::new(
         FakeProvider::new()
@@ -1654,4 +1654,132 @@ async fn without_a_diff_baseline_read_only_shell_runs_and_a_write_says_why() {
         "a command that could write is refused with its cause and the way out"
     );
     assert!(!dir.path().join("b.txt").exists());
+}
+
+#[tokio::test]
+async fn configured_modes_enforce_their_actual_file_boundaries() {
+    use localpilot_config::WorkLimitMode;
+
+    for (mode, count, allowed) in [
+        (WorkLimitMode::Automatic, 1, true),
+        (WorkLimitMode::Automatic, 2, false),
+        (WorkLimitMode::Wide, 9, true),
+        (WorkLimitMode::Wide, 10, true),
+        (WorkLimitMode::Wide, 11, false),
+        (WorkLimitMode::VeryWide, 49, true),
+        (WorkLimitMode::VeryWide, 50, true),
+        (WorkLimitMode::VeryWide, 51, false),
+        (WorkLimitMode::Off, 51, true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        let operations = (0..count)
+            .map(|i| json!({"action":"create","path":format!("new-{i}.txt"),"content":"new\n"}))
+            .collect::<Vec<_>>();
+        let provider = Arc::new(
+            FakeProvider::new()
+                .tool_call("create", "apply_patch", json!({"operations":operations}))
+                .text("done"),
+        );
+        let mut agent = runtime(
+            dir.path(),
+            provider,
+            Profile::Unrestricted,
+            Some("git status --short".into()),
+        );
+        agent.set_granularity(GranularityConfig {
+            mode,
+            ..GranularityConfig::default()
+        });
+        let (stop, events) = turn(&mut agent).await;
+        assert_eq!(
+            dir.path().join("new-0.txt").exists(),
+            allowed,
+            "{mode:?} {count}: {events:?}"
+        );
+        assert_eq!(
+            dir.path().join(format!("new-{}.txt", count - 1)).exists(),
+            allowed
+        );
+        if allowed {
+            assert_eq!(stop, StopReason::Done);
+            assert_eq!(agent.current_turn_verification(), Some(CheckStatus::Passed));
+        }
+    }
+}
+
+#[tokio::test]
+async fn off_admits_no_baseline_commands_only_with_independent_permission() {
+    use localpilot_config::WorkLimitMode;
+
+    for (profile, allowed) in [(Profile::Unrestricted, true), (Profile::Default, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("existing.txt"), "existing\n").unwrap();
+        let write = if cfg!(windows) {
+            "[IO.File]::WriteAllText('b.txt', 'x')"
+        } else {
+            ": > b.txt"
+        };
+        let provider = Arc::new(
+            FakeProvider::new()
+                .tool_call("write", "run_shell", json!({"command":write}))
+                .text("done"),
+        );
+        let mut agent = runtime(dir.path(), provider, profile, None);
+        agent.set_granularity(GranularityConfig {
+            mode: WorkLimitMode::Off,
+            ..GranularityConfig::default()
+        });
+        let (stop, events) = turn(&mut agent).await;
+        assert_eq!(dir.path().join("b.txt").exists(), allowed, "{events:?}");
+        assert!(!dir.path().join(".git").exists());
+        if allowed {
+            assert_eq!(
+                stop,
+                StopReason::NoProgress,
+                "missing verification still blocks completion"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn fixed_profile_counts_long_diff_payload_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path());
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(dir.path().join(name), "old\n").unwrap();
+    }
+    git(dir.path(), &["add", "a.txt", "b.txt"]);
+    git(dir.path(), &["commit", "-m", "tracked fixture files"]);
+    let command = if cfg!(windows) {
+        "[IO.File]::WriteAllText('a.txt', ('+' * 390)); [IO.File]::WriteAllText('b.txt', ('+' * 390))"
+    } else {
+        "printf '++%0390d' 0 > a.txt; printf '++%0390d' 0 > b.txt"
+    };
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("write", "run_shell", json!({"command":command}))
+            .text("done"),
+    );
+    let mut agent = runtime(
+        dir.path(),
+        provider,
+        Profile::Unrestricted,
+        Some("git status --short".into()),
+    );
+    agent.set_granularity(GranularityConfig {
+        mode: localpilot_config::WorkLimitMode::Wide,
+        max_changed_lines: Some(8),
+        ..GranularityConfig::default()
+    });
+    let (stop, events) = turn(&mut agent).await;
+    assert_eq!(stop, StopReason::NoProgress);
+    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::Warning(message) if message.contains("changed byte material"))), "{events:?}");
+    assert!(std::fs::read_to_string(dir.path().join("a.txt"))
+        .unwrap()
+        .starts_with("++"));
+    assert!(std::fs::read_to_string(dir.path().join("b.txt"))
+        .unwrap()
+        .starts_with("++"));
 }

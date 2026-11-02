@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Configure work sizing with `[harness.granularity].mode`. Choose the existing
+  `automatic` policy, fixed `wide` or `very_wide` ceilings, or `off`
+  (ADR-0254, #263).
+
 - Required verification follows the work when sizing limits are switched off.
   The same check runner preserves mutation and checkpoint evidence, planned
   verifiers and reviewed step exemptions across sizing settings (ADR-0253,

@@ -949,15 +949,23 @@ pub(crate) fn inspect_work_diff(
                         path,
                     ],
                 )?;
-                let material = diff
-                    .lines()
-                    .filter(|line| {
-                        (line.starts_with('+') && !line.starts_with("+++"))
-                            || (line.starts_with('-') && !line.starts_with("---"))
-                    })
-                    .map(|line| line.len().saturating_sub(1).div_ceil(80))
-                    .sum::<usize>();
-                if material > profile.max_changed_lines {
+                let mut in_hunk = false;
+                let mut added_bytes = 0usize;
+                let mut removed_bytes = 0usize;
+                for line in diff.lines() {
+                    if line.starts_with("@@ ") {
+                        in_hunk = true;
+                    } else if in_hunk && line.starts_with('+') {
+                        added_bytes = added_bytes.saturating_add(line.len());
+                    } else if in_hunk && line.starts_with('-') {
+                        removed_bytes = removed_bytes.saturating_add(line.len());
+                    }
+                }
+                let material = added_bytes
+                    .div_ceil(80)
+                    .saturating_add(removed_bytes.div_ceil(80));
+                lines = lines.saturating_add(material.saturating_sub(file_lines));
+                if lines > profile.max_changed_lines {
                     return Ok(inspection.refuse("work envelope: changed byte material exceeds the profile (including giant single lines); preserve and split the work"));
                 }
                 file_regions = diff.lines().filter(|line| line.starts_with("@@ ")).count();

@@ -1064,16 +1064,27 @@ Notable rule key:
 
 ### `[harness.granularity]`
 
-Automatic work sizing is enabled by production hosts. These optional positive
-integer ceilings only tighten the derived profile: `max_files`, `max_regions`,
-`max_read_lines`, `max_changed_lines`, and `max_decisions`. Zero is floored at one;
-a larger configured number cannot broaden an automatic bound. There is no broad
-override. For example:
+The `mode` key is available from LocalPilot 6.0.0 (currently Unreleased).
+Omitting it selects `automatic`. Other supported values are `wide`,
+`very_wide`, and `off`.
+
+| Mode | Files | Regions | Edited material | New-file material |
+|---|---:|---:|---:|---:|
+| `automatic` | Adaptive | Adaptive | Adaptive | Adaptive |
+| `wide` | 10 | 40 | 2,000 equivalents | 2,000 equivalents |
+| `very_wide` | 50 | 200 | 10,000 equivalents | 10,000 equivalents |
+| `off` | No sizing ceiling | No sizing ceiling | No sizing ceiling | No sizing ceiling |
+
+Fixed edit budgets apply from the first turn. The numbers are policy choices,
+not measured safety thresholds. Optional `max_files`, `max_regions`,
+`max_read_lines`, `max_changed_lines`, and `max_decisions` tighten an enabled
+profile. Zero is floored at one. A configured changed-line cap tightens both
+material allowances. For example:
 
 ```toml
 [harness.granularity]
+mode = "wide"
 max_read_lines = 40
-max_changed_lines = 30
 ```
 
 Context below 32,000 usable prompt tokens or at 70% pressure gets 80-line reads,
@@ -1082,11 +1093,24 @@ Context below 32,000 usable prompt tokens or at 70% pressure gets 80-line reads,
 region and one decision. Repeated valid tool successes plus verified changed
 units permit at most three files, four regions and two decisions with sufficient
 context (two regions with small context). Small context or conservative reliability
-stops harness execution after a durable checkpoint. Caps apply cumulatively to
-attempted edits, including old/new text and giant-line byte equivalents.
-All normalized write targets count, including owned scratch and external paths;
-an unresolvable target refuses the whole request rather than skipping later patch
-operations. These bounds do not authorize paths: permission checks still apply.
+stops harness execution after a durable checkpoint. The read, output, decision
+and continuation rules also apply to fixed profiles. Reviewed step scopes
+cap files, regions, existing edits and decisions. New-file material has its
+separate allowance. Enabled profiles retain a 64 KiB aggregate binary budget
+and require explicit review of links or special files that cannot be sized.
+
+Admission charges cumulative normalized write targets, excluding owned scratch.
+It charges each submitted old/new text chunk by the greater of its line count
+or one equivalent per 80 bytes, rounded up. Whole-file overwrites and deletions
+of existing material conservatively charge old bytes as lines before permission
+permits reading. A new file uses one region and subsequent writes use its
+separate material allowance. Whole rewrites of a unit-created file replace its
+prior material cost. Final inspection measures the net Git diff and sums
+material across files, including giant lines.
+
+`off` uses the standard tool read and output limits, permission checks, session
+budgets, cancellation and required verification. The sizing-only baseline
+requirement and opaque retry block apply only with sizing enabled.
 
 After a bounded write exceeds these limits, the runtime refuses model-requested
 shell commands and background starts for that unit. Use bounded reads and a

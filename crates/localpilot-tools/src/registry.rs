@@ -38,6 +38,7 @@ pub struct ToolRegistry {
     sources: Vec<ToolSource>,
     context_output_bytes: usize,
     file_read_limits: Option<FileReadLimits>,
+    work_read_limits: Option<FileReadLimits>,
 }
 
 /// One authorized tool dispatch with both its model-facing result and an
@@ -96,6 +97,7 @@ impl ToolRegistry {
             sources: Vec::new(),
             context_output_bytes: CONTEXT_OUTPUT_BYTES,
             file_read_limits: None,
+            work_read_limits: None,
         }
     }
 
@@ -110,6 +112,36 @@ impl ToolRegistry {
             max_lines,
             max_bytes,
         });
+    }
+
+    /// Apply the current work profile's tool limits alongside registry limits.
+    pub fn set_work_limits(&mut self, max_lines: usize, max_bytes: usize) {
+        self.work_read_limits = Some(FileReadLimits {
+            max_lines,
+            max_bytes,
+        });
+    }
+
+    /// Remove the work profile's limits.
+    pub fn clear_work_limits(&mut self) {
+        self.work_read_limits = None;
+    }
+
+    fn effective_output_bytes(&self) -> usize {
+        self.work_read_limits
+            .map_or(self.context_output_bytes, |work| {
+                self.context_output_bytes.min(work.max_bytes.max(1024))
+            })
+    }
+
+    fn effective_read_limits(&self) -> Option<FileReadLimits> {
+        match (self.file_read_limits, self.work_read_limits) {
+            (Some(base), Some(work)) => Some(FileReadLimits {
+                max_lines: base.max_lines.min(work.max_lines),
+                max_bytes: base.max_bytes.min(work.max_bytes),
+            }),
+            (base, work) => base.or(work),
+        }
     }
 
     /// A registry with all builtin tools.
@@ -229,6 +261,7 @@ impl ToolRegistry {
             sources,
             context_output_bytes: self.context_output_bytes,
             file_read_limits: self.file_read_limits,
+            work_read_limits: self.work_read_limits,
         }
     }
 
@@ -371,7 +404,7 @@ impl ToolRegistry {
                 &call.id,
                 "the explicit user-shell dispatch accepts only run_shell",
                 ctx,
-                self.context_output_bytes,
+                self.effective_output_bytes(),
             ));
         }
         self.dispatch_detailed_with_intent(call, ctx, engine, approver, DispatchIntent::UserShell)
@@ -410,7 +443,7 @@ impl ToolRegistry {
                 &call.id,
                 &format!("unknown tool: {}", call.name),
                 ctx,
-                self.context_output_bytes,
+                self.effective_output_bytes(),
             ));
         };
 
@@ -426,7 +459,7 @@ impl ToolRegistry {
                     &call.id,
                     &err.to_string(),
                     ctx,
-                    self.context_output_bytes,
+                    self.effective_output_bytes(),
                 ))
             }
         };
@@ -491,7 +524,7 @@ impl ToolRegistry {
                         &model_message
                     },
                     ctx,
-                    self.context_output_bytes,
+                    self.effective_output_bytes(),
                 ));
                 dispatch.permission_denial = Some(PermissionDenial {
                     reason: permission_denial_kind(&request, engine, command.as_ref()),
@@ -521,7 +554,7 @@ impl ToolRegistry {
             ) || effect.may_create_files()
         });
         match tool
-            .invoke_with_file_read_limits(call.input.clone(), ctx, self.file_read_limits)
+            .invoke_with_file_read_limits(call.input.clone(), ctx, self.effective_read_limits())
             .await
         {
             // Redaction happens here, for every profile including bypass.
@@ -532,7 +565,7 @@ impl ToolRegistry {
                     &call.id,
                     &redacted,
                     ctx,
-                    self.context_output_bytes,
+                    self.effective_output_bytes(),
                 );
                 ToolDispatchResult {
                     result: ToolResult {
@@ -557,7 +590,7 @@ impl ToolRegistry {
                     &call.id,
                     &err.to_string(),
                     ctx,
-                    self.context_output_bytes,
+                    self.effective_output_bytes(),
                 ))
             },
         }

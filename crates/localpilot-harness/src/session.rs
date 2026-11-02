@@ -1781,9 +1781,8 @@ impl SessionRuntime {
         if let Some(profile) = self.work_profile() {
             let active = self.active_work_profile.get_or_insert(profile);
             active.tighten(profile);
-            self.tools.set_context_output_limit(active.max_output_bytes);
             self.tools
-                .set_file_read_limits(active.max_read_lines, active.max_output_bytes);
+                .set_work_limits(active.max_read_lines, active.max_output_bytes);
             let active = *active;
             if let Some(guidance) = self.rename_admission_guidance(name, input) {
                 self.work_opaque_retry_blocked = true;
@@ -1806,7 +1805,7 @@ impl SessionRuntime {
         if self.work_opaque_retry_blocked && is_opaque_launch(name, input) {
             return Some("work envelope: a bounded write was refused; opaque shell/background retries cannot preserve its limits. Use bounded reads and a smaller exact edit, or checkpoint the unit; automatic verification remains available".to_string());
         }
-        if self.config.granularity.is_some()
+        if self.sizing_caps().is_some()
             && self.work_diff_baseline.is_none()
             && matches!(name, "run_shell" | "run_background")
             && !(name == "run_shell" && localpilot_tools::shell_call_is_read_only(input))
@@ -2918,7 +2917,35 @@ impl SessionRuntime {
         if self.envelope_off {
             self.suspended_granularity = Some(caps);
         } else {
+            let changed_mode = self
+                .config
+                .granularity
+                .as_ref()
+                .is_some_and(|old| old.mode != caps.mode);
             self.config.granularity = Some(caps);
+            if changed_mode {
+                self.active_work_profile = None;
+                self.clear_sizing_refusals();
+            }
+        }
+    }
+
+    fn sizing_caps(&self) -> Option<&localpilot_config::GranularityConfig> {
+        self.config
+            .granularity
+            .as_ref()
+            .filter(|caps| caps.mode != localpilot_config::WorkLimitMode::Off)
+    }
+
+    fn clear_sizing_refusals(&mut self) {
+        self.work_opaque_retry_blocked = false;
+        self.work_mutation_refusal = None;
+        self.unit_end_requested = false;
+        self.unit_refused_request = None;
+        self.unit_write_refused = false;
+        self.host_unit_declined = false;
+        if self.sizing_caps().is_none() {
+            self.tools.clear_work_limits();
         }
     }
 
@@ -2944,11 +2971,15 @@ impl SessionRuntime {
         }
         self.active_work_profile = None;
         self.work_unit = crate::granularity::WorkUnit::default();
+        self.clear_sizing_refusals();
     }
 
     #[must_use]
     pub fn envelope_enabled(&self) -> bool {
         !self.envelope_off
+            && self.config.granularity.as_ref().map_or(true, |caps| {
+                caps.mode != localpilot_config::WorkLimitMode::Off
+            })
     }
 
     /// The reviewed step selects timely verification; a stated exemption does
@@ -3399,7 +3430,7 @@ impl SessionRuntime {
     /// calibrated pressure and session-local reliability observations.
     #[must_use]
     pub fn work_profile(&self) -> Option<crate::granularity::WorkProfile> {
-        let caps = self.config.granularity.as_ref()?;
+        let caps = self.sizing_caps()?;
         let (used, limit) = self.context_usage();
         let limit =
             if self.work_context_provenance == crate::granularity::ContextProvenance::Unknown {
@@ -3446,7 +3477,7 @@ impl SessionRuntime {
                 provenance: self.work_context_provenance,
             },
             crate::granularity::Reliability::Unknown,
-            self.config.granularity.as_ref()?,
+            self.sizing_caps()?,
         ))
     }
 
@@ -4474,7 +4505,9 @@ impl SessionRuntime {
         }
         if let Some(profile) = self.active_work_profile {
             self.tools
-                .set_context_output_limit(profile.max_output_bytes);
+                .set_work_limits(profile.max_read_lines, profile.max_output_bytes);
+        } else {
+            self.tools.clear_work_limits();
         }
         self.turn_assistant_text = None;
         self.turn_usage = TokenUsage::default();
@@ -6972,6 +7005,30 @@ mod tests {
         assert!(std::fs::read_to_string(dir.path().join(".git/config"))
             .unwrap()
             .contains("marker = yes"));
+    }
+
+    #[test]
+    fn switching_off_clears_sizing_refusal_but_keeps_execution_evidence() {
+        let (mut runtime, _dir) = test_runtime();
+        runtime.set_granularity(localpilot_config::GranularityConfig::default());
+        runtime.work_opaque_retry_blocked = true;
+        runtime.work_mutation_refusal = Some("work envelope: fixture refusal".into());
+        runtime.work_mutation_may_have_run = true;
+        runtime.work_write_error_may_have_run = true;
+        runtime.outstanding_full_check = true;
+        let input = serde_json::json!({"command":"echo fixture > marker.txt"});
+        assert!(runtime
+            .precondition_block("run_shell", &input)
+            .unwrap()
+            .contains("opaque"));
+        runtime.set_granularity(localpilot_config::GranularityConfig {
+            mode: localpilot_config::WorkLimitMode::Off,
+            ..localpilot_config::GranularityConfig::default()
+        });
+        assert!(runtime.precondition_block("run_shell", &input).is_none());
+        assert!(runtime.work_mutation_refusal.is_none());
+        assert!(runtime.work_mutation_may_have_run && runtime.work_write_error_may_have_run);
+        assert!(runtime.outstanding_full_check);
     }
 
     fn test_runtime() -> (SessionRuntime, tempfile::TempDir) {

@@ -738,7 +738,8 @@ pub async fn plan(root: &Path, model: &str, provider_id: Option<&str>) -> anyhow
         &brief,
         localpilot_harness::BriefRevision::of(&brief).as_str(),
         &summary,
-        Some(profile),
+        (config.harness.granularity.mode != localpilot_config::WorkLimitMode::Off)
+            .then_some(profile),
     )
     .await?;
     localpilot_harness::persist_approved_plan(root, &draft, &brief, expected.as_ref())?;

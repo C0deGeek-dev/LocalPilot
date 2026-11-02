@@ -579,7 +579,7 @@ impl SessionRuntime {
         events: &broadcast::Sender<RuntimeEvent>,
         cancel: &CancellationToken,
     ) -> StopReason {
-        let (units, rename_only) = self.config.granularity.as_ref().map_or((0, false), |caps| {
+        let (units, rename_only) = self.sizing_caps().map_or((0, false), |caps| {
             if caps.headless_units > 0 {
                 (
                     caps.headless_units

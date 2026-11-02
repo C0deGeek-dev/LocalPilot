@@ -1265,11 +1265,33 @@ impl Default for HarnessConfig {
     }
 }
 
-/// Optional stricter ceilings for automatic work sizing. Zero is clamped to one.
-/// There is no switch or broad override that waives permission or verification.
+/// Select how the runtime bounds a work unit.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkLimitMode {
+    /// Adapt size to context and demonstrated reliability.
+    #[default]
+    Automatic,
+    /// Fixed ceilings for a larger coherent edit.
+    Wide,
+    /// Fixed ceilings for a substantially larger coherent edit.
+    VeryWide,
+    /// Disable work-size admission and inspection.
+    Off,
+}
+
+impl WorkLimitMode {
+    fn is_automatic(&self) -> bool {
+        *self == Self::Automatic
+    }
+}
+
+/// Work sizing and optional stricter ceilings. Zero is clamped to one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GranularityConfig {
+    #[serde(skip_serializing_if = "WorkLimitMode::is_automatic")]
+    pub mode: WorkLimitMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_files: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1296,6 +1318,7 @@ pub struct GranularityConfig {
 impl Default for GranularityConfig {
     fn default() -> Self {
         Self {
+            mode: WorkLimitMode::Automatic,
             max_files: None,
             max_regions: None,
             max_read_lines: None,

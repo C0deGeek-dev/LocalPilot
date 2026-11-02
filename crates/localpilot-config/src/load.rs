@@ -486,6 +486,26 @@ mod tests {
     }
 
     #[test]
+    fn work_limit_mode_defaults_and_rejects_unknown_values() {
+        use crate::{GranularityConfig, WorkLimitMode};
+
+        assert_eq!(
+            toml::from_str::<GranularityConfig>("").unwrap().mode,
+            WorkLimitMode::Automatic
+        );
+        for (value, mode) in [
+            ("automatic", WorkLimitMode::Automatic),
+            ("wide", WorkLimitMode::Wide),
+            ("very_wide", WorkLimitMode::VeryWide),
+            ("off", WorkLimitMode::Off),
+        ] {
+            let parsed = toml::from_str::<GranularityConfig>(&format!("mode = '{value}'")).unwrap();
+            assert_eq!(parsed.mode, mode);
+        }
+        assert!(toml::from_str::<GranularityConfig>("mode = 'custom'").is_err());
+    }
+
+    #[test]
     fn selective_rename_units_default_on_and_an_explicit_zero_survives() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("user.toml");

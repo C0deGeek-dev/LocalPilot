@@ -174,6 +174,18 @@ impl WorkProfile {
             reliability,
             constrained_context: small,
         };
+        use localpilot_config::WorkLimitMode;
+        let fixed = match caps.mode {
+            WorkLimitMode::Wide => Some((10, 40, 2_000)),
+            WorkLimitMode::VeryWide => Some((50, 200, 10_000)),
+            WorkLimitMode::Automatic | WorkLimitMode::Off => None,
+        };
+        if let Some((files, regions, lines)) = fixed {
+            profile.max_files = files;
+            profile.max_regions = regions;
+            profile.max_changed_lines = lines;
+            profile.max_new_file_lines = lines;
+        }
         profile.tighten_caps(caps);
         profile
     }
@@ -461,7 +473,11 @@ impl WorkUnit {
                     hunk.get("old_text").and_then(Value::as_str),
                     hunk.get("new_text").and_then(Value::as_str),
                 ) {
-                    (Some(old), Some(new)) => match argument_change_regions(old, new) {
+                    (Some(old), Some(new)) => match argument_change_regions_bounded(
+                        old,
+                        new,
+                        profile.max_changed_lines.max(400),
+                    ) {
                         Some(regions) => regions.max(1), // No-op attempts still spend a hunk.
                         None => return reject("exact edit preview exceeds its computation bound"),
                     },
@@ -490,26 +506,29 @@ impl WorkUnit {
 
 /// Preview separated changes using only supplied text, never workspace content.
 /// This tightens admission; the actual repository diff remains authoritative.
-fn argument_change_regions(old: &str, new: &str) -> Option<usize> {
+fn argument_change_regions_bounded(old: &str, new: &str, limit: usize) -> Option<usize> {
     let old: Vec<_> = old.lines().collect();
     let new: Vec<_> = new.lines().collect();
-    // Live profiles permit at most 200 aggregate lines. Independently bound
-    // argument scanning even for an externally constructed profile.
-    if old.len().checked_add(new.len())? > 400 {
+    // Bound the preview independently of externally constructed profiles.
+    if old.len().checked_add(new.len())? > limit.min(10_000) {
         return None;
+    }
+    let mut positions = std::collections::BTreeMap::new();
+    for (index, line) in new.iter().enumerate() {
+        positions
+            .entry(*line)
+            .and_modify(|position| *position = None)
+            .or_insert(Some(index));
     }
     let mut anchors = Vec::new();
     let mut seen = BTreeSet::new();
     for (i, line) in old.iter().enumerate() {
-        let mut positions = new.iter().enumerate().filter(|(_, other)| *other == line);
-        if let Some((j, _)) = positions.next() {
+        if let Some(position) = positions.get(line) {
+            let Some(j) = *position else { return Some(1) };
             // Repeated or reordered shared lines permit competing alignments.
             // Retain the previous one-hunk admission in those cases; the actual
             // post-write diff still enforces the effective region budget.
-            if positions.next().is_some()
-                || !seen.insert(line)
-                || anchors.last().is_some_and(|&(_, previous)| j <= previous)
-            {
+            if !seen.insert(line) || anchors.last().is_some_and(|&(_, previous)| j <= previous) {
                 return Some(1);
             }
             anchors.push((i, j));
@@ -527,6 +546,11 @@ fn argument_change_regions(old: &str, new: &str) -> Option<usize> {
         regions += 1;
     }
     Some(regions)
+}
+
+#[cfg(test)]
+fn argument_change_regions(old: &str, new: &str) -> Option<usize> {
+    argument_change_regions_bounded(old, new, 400)
 }
 
 #[cfg(test)]
