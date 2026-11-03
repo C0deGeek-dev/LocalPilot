@@ -53,6 +53,9 @@ The following inputs are acceptable:
 - published protocol specifications
 - behavior observed by using a product normally, documented at a high level
 - open-source crates used according to their licenses
+- the local API of an open-source daemon the user runs on their own computer,
+  implemented from its published client and handlers (for example the
+  Tailscale daemon; ADR-0259)
 - user-authored requirements
 - conventional CLI and TUI patterns
 

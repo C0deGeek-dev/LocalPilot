@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `localpilot remote setup --check` reads Tailscale on this computer and says
+  whether it can give your phone an HTTPS address for the gateway
+  (`https://<machine>.<tailnet>.ts.net/`) without touching your other Serve
+  settings, or exactly what stands in the way and how to fix it. It changes
+  nothing (ADR-0259).
 - `/remote` in the full-screen terminal now opens a status canvas: relay,
   config, gateway, phone address, whether a phone could pair, this session and
   what it is doing, who is attached here, and the device counts, with actions

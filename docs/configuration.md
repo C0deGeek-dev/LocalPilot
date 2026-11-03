@@ -916,7 +916,18 @@ like) are ignored.
   `localpilot remote status`. A phone cannot reach it.
 - **Tailscale.** `tailscale serve --bg --https=443 127.0.0.1:47610` serves
   `https://<machine>.<tailnet>.ts.net/` to devices on your tailnet; use that
-  address as `advertised_url`.
+  address as `advertised_url`. `localpilot remote setup --check` reads
+  Tailscale on this computer and says whether that address can be added
+  without touching your other Serve settings, or what stands in the way
+  (Tailscale not connected, MagicDNS or HTTPS certificates off in the admin
+  console, something already on port 443, a release it cannot change). It
+  changes nothing. It needs a stable Tailscale release from 1.102.0 on with
+  the open-source daemon; the macOS app builds are not supported yet. On
+  Linux, a user who is not root needs `sudo tailscale set --operator=$USER`
+  to manage Tailscale. Note that the HTTPS certificate publishes
+  `<machine>.<tailnet>.ts.net` in public Certificate Transparency logs; rename
+  the computer in Tailscale to something neutral first if its name is
+  personal.
 - **Cloudflare Tunnel.** A named tunnel whose ingress rule maps your hostname
   to `service: http://localhost:47610`. To be explicit about the `Host` the
   gateway sees, set `originRequest.httpHostHeader` and list the same value in

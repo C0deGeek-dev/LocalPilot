@@ -71,6 +71,7 @@ mod remote_pairing;
 mod remote_share;
 mod remote_status;
 mod remote_status_model;
+mod remote_tailscale;
 #[cfg(feature = "tui")]
 mod repl;
 mod research;
@@ -914,6 +915,13 @@ enum RemoteAction {
     /// Show whether remote access is on, whether the gateway runs, the
     /// workspaces it can reach and how many devices are paired.
     Status,
+    /// Check whether Tailscale on this computer can give your phone an HTTPS
+    /// address for the gateway, and say what setup would change. Read-only.
+    Setup {
+        /// Only check and report; change nothing.
+        #[arg(long, required = true)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -2087,6 +2095,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         Command::Remote { action } => match action {
             RemoteAction::Gateway => remote_gateway::run().await?,
             RemoteAction::Status => remote_gateway::print_status().await,
+            RemoteAction::Setup { check: _ } => remote_tailscale::print_check().await?,
         },
 
         Command::ServerServe => {

@@ -2,6 +2,64 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0259: Phone Setup Reads Tailscale Through Its Local API and Changes Only What It Adds
+
+**Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.
+
+**Context.** A regular user should get a phone address for the gateway
+without setting up a tunnel or proxy, and without any LocalPilot-operated
+server. Tailscale on the user's computer can serve
+`https://<machine>.<tailnet>.ts.net/` to the user's own devices, but its Serve
+settings may already hold the user's other services, and the `tailscale serve`
+command cannot make a change conditional on what was read: a concurrent edit
+between reading and writing would be overwritten. Tailscale's daemon exposes a
+local HTTP API (a server the user runs, open source, with a published client)
+that can: a Serve write carries the version tag of the settings it was based
+on and is refused if they changed. The API is marked unstable upstream, and an
+empty tag overwrites unconditionally.
+
+**Decision.**
+1. The daemon's local API counts as a local server under the clean-room
+   rules. The wire format is implemented from its published client and
+   handlers; no code is copied.
+2. `localpilot remote setup --check` reads the daemon's status and Serve
+   settings and says what setup would do, changing nothing. Transport is the
+   daemon's own endpoint only: the administrators-only named pipe on Windows,
+   `/var/run/tailscale/tailscaled.sock` on Linux and other Unix systems,
+   `/var/run/tailscaled.socket` on macOS with the open-source daemon (the
+   macOS app builds are refused for now). Each request is bounded in time and
+   size, and the status of a reply is kept even when its body is cut, so a
+   definite refusal never turns into an unknown outcome.
+3. The phone origin is exclusive: port 443 of this computer's name with one
+   root handler forwarding to the gateway, nothing else on that origin.
+   Setup refuses, before any change, when the origin already has a handler, a
+   port entry, a Funnel setting, a terminal-run Serve session or a service on
+   it; when the settings hold anything it does not understand; when the node
+   is not connected, MagicDNS or HTTPS certificates are off, or the name is
+   not exactly one label inside the tailnet; and when the settings came
+   without a version tag. Exactly the same entry made by someone else is
+   reused and never removed. The planned write is the settings as read plus
+   the two entries of the phone origin, so everything else is kept byte for
+   byte in meaning.
+4. Setup may change only stable Tailscale releases from 1.102.0 on (the
+   release version form with its commit, an even minor, no change count or
+   development stamp). Newer releases are not refused for being new: the
+   strict settings check and, before the first change on each run, a test
+   save with a deliberately stale tag that must be refused are what show the
+   install behaves as setup expects. Other versions are diagnosed only.
+5. Because the HTTPS certificate makes the machine name permanently public in
+   Certificate Transparency logs, setup shows that name before any step that
+   can issue a certificate and offers a random replacement name for the
+   computer first.
+
+**Consequences.** The read-only check ships first; changes to Tailscale land
+separately, behind the same checks. A Serve setting the user owns is never
+edited, removed or overwritten by setup. If a future Tailscale stopped
+enforcing the version tag, the test save would write back the settings just
+read, which could undo an edit made in that instant; setup then refuses and
+says so. Phone reachability across networks is still confirmed on a real
+phone; a check from this computer does not prove it.
+
 ## ADR-0258: The Remote Status Canvas Says Only What It Knows
 
 **Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.
