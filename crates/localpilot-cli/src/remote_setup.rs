@@ -2,8 +2,11 @@
 //! Tailscale on this computer, changing only what setup adds and recording
 //! only what it can confirm.
 //!
-//! A run reads first and refuses before any change when anything is unclear.
-//! Then, in order:
+//! A run reads first and refuses before any change when anything is unclear,
+//! then asks. After consent every write is preceded by a fresh, fully
+//! validated read (same node and tailnet, a stable release setup may change,
+//! settings it understands, a version tag), so nothing is written on the
+//! strength of what was seen before the prompt. In order:
 //! 1. a test save Tailscale must refuse (a deliberately stale version tag),
 //!    which shows its conditional write works on this install;
 //! 2. optionally, a random name for this computer, offered because the
@@ -12,9 +15,10 @@
 //! 4. the gateway address in the user config;
 //! 5. checks of the gateway and of the address from this computer.
 //!
-//! The journal keeps what LocalPilot has confirmed it owns apart from the
-//! newest operation's result; an attempt whose outcome is unknown confers
-//! nothing, and no later refusal erases an earlier confirmed record.
+//! The journal keeps what LocalPilot has confirmed it owns, every operation
+//! whose outcome is not confirmed, and the newest result, each on its own:
+//! an unconfirmed operation blocks further changes until the user resolves
+//! it, and no later result erases an earlier record.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -24,8 +28,8 @@ use serde_json::Value;
 
 use crate::remote_gateway::{Listener, OriginAnswer};
 use crate::remote_tailscale::{
-    eligible, name_in_use, one_label, origin_plan, read_node, version_tag, without_ours,
-    ApiFailure, Node, OriginPlan, Refusal, Reply,
+    eligible, name_in_use, one_label, origin_plan, read_node, schema_ok, supported, version_tag,
+    without_ours, ApiFailure, Node, OriginPlan, Refusal, Reply,
 };
 
 const STATUS: &str = "/localapi/v0/status?peers=false";
@@ -34,7 +38,7 @@ const PREFS: &str = "/localapi/v0/prefs";
 /// How long a new name may take to reach this computer's status.
 pub(crate) const SETTLE_WITHIN: Duration = Duration::from_secs(30);
 const SETTLE_EVERY: Duration = Duration::from_secs(1);
-const JOURNAL_VERSION: u32 = 1;
+const JOURNAL_VERSION: u32 = 2;
 
 /// The daemon's local API, as setup uses it.
 #[async_trait::async_trait]
@@ -104,6 +108,9 @@ pub(crate) enum NameFlag {
     Keep,
 }
 
+/// Fills a buffer from the operating system's random source.
+pub(crate) type Random = dyn Fn(&mut [u8]) -> Result<(), String> + Sync;
+
 /// Everything a run touches, so every path can be exercised with fakes.
 pub(crate) struct Setup<'a> {
     pub daemon: &'a dyn Daemon,
@@ -120,11 +127,10 @@ pub(crate) struct Setup<'a> {
     pub settle_within: Duration,
     /// Writes the journal; replaced in tests to fail on purpose.
     pub persist: &'a (dyn Fn(&Path, &Journal) -> std::io::Result<()> + Sync),
-    /// Random bytes for the name and the test tag.
-    pub random: &'a (dyn Fn(&mut [u8]) + Sync),
+    pub random: &'a Random,
 }
 
-/// Why a run stopped. The message says what was and was not changed.
+/// Why a command stopped, as the person running it reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Stop(pub String);
 
@@ -134,12 +140,45 @@ impl std::fmt::Display for Stop {
     }
 }
 
-fn stop<T>(message: impl Into<String>) -> Result<T, Stop> {
-    Err(Stop(message.into()))
+/// Why a step stopped, before the run adds what was already done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Halt {
+    /// This step changed nothing.
+    Clean(String),
+    /// Whether this step changed something is not known; the message says
+    /// what to check.
+    Unknown(String),
 }
 
-fn refused<T>(refusal: &Refusal) -> Result<T, Stop> {
-    stop(format!("{}. {}", refusal.message(), refusal.remedy()))
+type Step<T> = Result<T, Halt>;
+
+fn halt<T>(message: impl Into<String>) -> Step<T> {
+    Err(Halt::Clean(message.into()))
+}
+
+fn unknown<T>(message: impl Into<String>) -> Step<T> {
+    Err(Halt::Unknown(message.into()))
+}
+
+fn refused<T>(refusal: &Refusal) -> Step<T> {
+    let remedy = refusal.remedy();
+    let remedy = remedy
+        .strip_prefix("Nothing was changed. ")
+        .unwrap_or(remedy);
+    halt(format!("{}. {remedy}", refusal.message()))
+}
+
+/// The final message: the reason, then what was done before it.
+fn finish(halted: Halt, done: &[String]) -> Stop {
+    let before = done.join("; ");
+    Stop(match halted {
+        Halt::Clean(message) if done.is_empty() => format!("{message} Nothing was changed."),
+        Halt::Clean(message) => {
+            format!("{message} Done before this: {before}. Nothing else was changed.")
+        }
+        Halt::Unknown(message) if done.is_empty() => message,
+        Halt::Unknown(message) => format!("{message} Done before this: {before}."),
+    })
 }
 
 // ---------------------------------------------------------------- journal
@@ -149,12 +188,17 @@ fn refused<T>(refusal: &Refusal) -> Result<T, Stop> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Journal {
     pub version: u32,
-    /// The phone origin LocalPilot added and confirmed.
+    /// Every phone origin LocalPilot added and confirmed.
     #[serde(default)]
-    pub serve: Option<ServeOwned>,
+    pub serve: Vec<ServeOwned>,
     /// The name LocalPilot gave this computer and confirmed.
     #[serde(default)]
     pub rename: Option<RenameOwned>,
+    /// Operations whose outcome is not confirmed (planned and cut off,
+    /// unknown, or a test save that was accepted). Each stays until the user
+    /// resolves it; none confers ownership.
+    #[serde(default)]
+    pub pending: Vec<Attempt>,
     /// The newest operation's result, whatever it was.
     #[serde(default)]
     pub last: Option<Attempt>,
@@ -164,8 +208,9 @@ impl Default for Journal {
     fn default() -> Self {
         Self {
             version: JOURNAL_VERSION,
-            serve: None,
+            serve: Vec::new(),
             rename: None,
+            pending: Vec::new(),
             last: None,
         }
     }
@@ -197,7 +242,7 @@ pub(crate) struct RenameOwned {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Attempt {
-    pub step: Step,
+    pub step: Op,
     pub state: State,
     pub node_id: String,
     #[serde(default)]
@@ -208,9 +253,49 @@ pub(crate) struct Attempt {
     pub new_hostname: Option<String>,
 }
 
+impl Attempt {
+    fn new(step: Op, node: &Node) -> Self {
+        Self {
+            step,
+            state: State::Planned,
+            node_id: node.node_id.clone(),
+            detail: String::new(),
+            old_hostname: None,
+            new_hostname: None,
+        }
+    }
+
+    fn describe(&self) -> String {
+        let what = match self.step {
+            Op::Probe => "a test save",
+            Op::Rename => "renaming this computer",
+            Op::Serve => "adding the phone address",
+            Op::UndoServe => "removing the phone address",
+            Op::UndoRename => "restoring the name setting",
+        };
+        let names = match (&self.old_hostname, &self.new_hostname) {
+            (Some(old), Some(new)) => {
+                let old = if old.is_empty() {
+                    "the computer's own host name"
+                } else {
+                    old
+                };
+                format!(" (from {old} to {new})")
+            }
+            _ => String::new(),
+        };
+        let detail = if self.detail.is_empty() {
+            "it was cut off before its result was known".to_string()
+        } else {
+            self.detail.clone()
+        };
+        format!("{what}{names}: {detail}")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Step {
+pub(crate) enum Op {
     Probe,
     Rename,
     Serve,
@@ -239,33 +324,36 @@ fn journal_path(dir: &Path) -> PathBuf {
     dir.join("setup.json")
 }
 
-fn load_journal(dir: &Path) -> Result<Journal, Stop> {
+fn load_journal(dir: &Path) -> Step<Journal> {
     let path = journal_path(dir);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Journal::default()),
-        Err(error) => return stop(format!("could not read {}: {error}", path.display())),
+        Err(error) => return halt(format!("Could not read {}: {error}.", path.display())),
     };
     let journal: Journal = serde_json::from_str(&text).map_err(|error| {
-        Stop(format!(
-            "{} is not a record this version understands ({error}); nothing was changed. \
-             Move it aside only after checking your Tailscale settings.",
+        Halt::Clean(format!(
+            "{} is not a record this version understands ({error}). Move it aside only after \
+             checking your Tailscale settings.",
             path.display()
         ))
     })?;
     if journal.version != JOURNAL_VERSION {
-        return stop(format!(
-            "{} was written by another version of LocalPilot; nothing was changed",
+        return halt(format!(
+            "{} was written by another version of LocalPilot.",
             path.display()
         ));
     }
     Ok(journal)
 }
 
-/// Write the journal atomically, readable only by this user.
+/// Write the journal atomically, readable only by this user: the folder and
+/// the temporary file are restricted before anything is written, whatever
+/// permissions an earlier file had.
 pub(crate) fn write_journal(dir: &Path, journal: &Journal) -> std::io::Result<()> {
     use std::io::Write as _;
     std::fs::create_dir_all(dir)?;
+    crate::server_devices::restrict(dir)?;
     let text = serde_json::to_vec_pretty(journal).map_err(std::io::Error::other)?;
     let temporary = dir.join("setup.json.tmp");
     {
@@ -277,6 +365,7 @@ pub(crate) fn write_journal(dir: &Path, journal: &Journal) -> std::io::Result<()
             options.mode(0o600);
         }
         let mut file = options.open(&temporary)?;
+        crate::server_devices::restrict(&temporary)?;
         file.write_all(&text)?;
         file.sync_all()?;
     }
@@ -288,85 +377,105 @@ struct Held {
     _lock: Box<fd_lock::RwLock<std::fs::File>>,
 }
 
-fn hold(dir: &Path) -> Result<Held, Stop> {
+fn hold(dir: &Path) -> Step<Held> {
     std::fs::create_dir_all(dir)
-        .map_err(|error| Stop(format!("could not create {}: {error}", dir.display())))?;
+        .and_then(|()| crate::server_devices::restrict(dir))
+        .map_err(|error| Halt::Clean(format!("Could not prepare {}: {error}.", dir.display())))?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(dir.join("setup.lock"))
-        .map_err(|error| Stop(format!("could not open the setup lock: {error}")))?;
+        .map_err(|error| Halt::Clean(format!("Could not open the setup lock: {error}.")))?;
     let mut lock = Box::new(fd_lock::RwLock::new(file));
     // The guard is forgotten so the lock stays taken until `Held` closes the
     // file at the end of the run.
     match lock.try_write() {
         Ok(guard) => std::mem::forget(guard),
-        Err(_) => return stop("another `localpilot remote setup` is running"),
+        Err(_) => return halt("Another `localpilot remote setup` is running."),
     }
     Ok(Held { _lock: lock })
 }
 
-impl Setup<'_> {
-    fn save(&self, journal: &Journal) -> Result<(), String> {
-        (self.persist)(&self.state_dir, journal).map_err(|error| error.to_string())
+/// One run's journal and progress.
+struct Run<'a, 's> {
+    s: &'a Setup<'s>,
+    journal: Journal,
+    /// What this run confirmed it changed, in order.
+    done: Vec<String>,
+}
+
+impl Run<'_, '_> {
+    fn save(&self) -> Result<(), String> {
+        (self.s.persist)(&self.s.state_dir, &self.journal).map_err(|error| error.to_string())
     }
 
-    /// Record `attempt` as the newest result before acting on it. Failing to
-    /// record means not acting.
-    fn plan(&self, journal: &mut Journal, attempt: Attempt) -> Result<(), Stop> {
-        journal.last = Some(attempt);
-        self.save(journal).map_err(|error| {
-            Stop(format!(
-                "LocalPilot could not record what it was about to do ({error}); nothing more was changed"
-            ))
-        })
+    /// Record `attempt` as pending before acting on it. Failing to record
+    /// means not acting.
+    fn plan(&mut self, attempt: Attempt) -> Step<()> {
+        self.journal.pending.push(attempt.clone());
+        self.journal.last = Some(attempt);
+        if let Err(error) = self.save() {
+            self.journal.pending.pop();
+            return halt(format!(
+                "LocalPilot could not record what it was about to do ({error})."
+            ));
+        }
+        Ok(())
     }
 
-    /// Record the newest result after the fact; failure is reported but the
-    /// caller decides whether to go on.
-    fn settle_attempt(
-        &self,
-        journal: &mut Journal,
-        state: State,
-        detail: &str,
-    ) -> Result<(), String> {
-        if let Some(last) = journal.last.as_mut() {
+    /// Settle the newest attempt: a definite result leaves the pending list,
+    /// an unknown one stays on it.
+    fn settle(&mut self, state: State, detail: &str) -> Result<(), String> {
+        if let Some(last) = self.journal.last.as_mut() {
             last.state = state;
             last.detail = detail.to_string();
         }
-        self.save(journal)
+        if let Some(pending) = self.journal.pending.last_mut() {
+            pending.state = state;
+            pending.detail = detail.to_string();
+        }
+        if matches!(state, State::Passed | State::Done | State::Refused) {
+            self.journal.pending.pop();
+        }
+        self.save()
     }
 
-    fn random_hex(&self, bytes: usize) -> String {
+    fn random_bytes(&self, buffer: &mut [u8]) -> Step<()> {
+        (self.s.random)(buffer).map_err(|error| {
+            Halt::Clean(format!("This computer's random source failed ({error})."))
+        })
+    }
+
+    fn random_hex(&self, bytes: usize) -> Step<String> {
         let mut buffer = vec![0u8; bytes];
-        (self.random)(&mut buffer);
-        buffer.iter().fold(String::new(), |mut text, byte| {
+        self.random_bytes(&mut buffer)?;
+        Ok(buffer.iter().fold(String::new(), |mut text, byte| {
             use std::fmt::Write as _;
             let _ = write!(text, "{byte:02x}");
             text
-        })
+        }))
     }
 
     /// A name with nothing of LocalPilot in it: the shape Windows gives a new
     /// computer (`DESKTOP-` and seven letters or digits, lower-cased as
-    /// MagicDNS shows it), so in public certificate logs it is one of very
-    /// many and says nothing about what runs there.
-    fn random_name(&self) -> String {
+    /// MagicDNS shows it), so in public certificate logs the machine part is
+    /// one of very many and says nothing about what runs there.
+    fn random_name(&self) -> Step<String> {
         const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
         // Bytes at or above this would favour some characters.
         const FAIR: u8 = 252;
         let mut label = String::new();
         while label.len() < 7 {
             let mut buffer = [0u8; 16];
-            (self.random)(&mut buffer);
+            self.random_bytes(&mut buffer)?;
             for byte in buffer {
                 if byte < FAIR && label.len() < 7 {
                     label.push(ALPHABET[usize::from(byte) % ALPHABET.len()] as char);
                 }
             }
         }
-        format!("desktop-{label}")
+        Ok(format!("desktop-{label}"))
     }
 }
 
@@ -380,21 +489,17 @@ struct Reading {
     etag: Option<String>,
 }
 
-async fn document(
-    daemon: &dyn Daemon,
-    path: &str,
-    what: &str,
-) -> Result<(Value, Option<String>), Stop> {
+async fn document(daemon: &dyn Daemon, path: &str, what: &str) -> Step<(Value, Option<String>)> {
     let reply = daemon
         .get(path)
         .await
-        .map_err(|failure| Stop(format!("{failure}; nothing was changed")))?;
+        .map_err(|failure| Halt::Clean(format!("{failure}.")))?;
     match reply.status {
         200 => {}
         403 => {
-            return stop(format!(
-                "this user may not read Tailscale's {what}; nothing was changed. On Linux, \
-                 `sudo tailscale set --operator=$USER` lets your user manage Tailscale."
+            return halt(format!(
+                "This user may not read Tailscale's {what}. On Linux, `sudo tailscale set \
+                 --operator=$USER` lets your user manage Tailscale."
             ))
         }
         status => {
@@ -403,25 +508,20 @@ async fn document(
                 .chars()
                 .take(200)
                 .collect();
-            return stop(format!(
-                "Tailscale answered {status} when asked for its {what}: {detail}; nothing was changed"
+            return halt(format!(
+                "Tailscale answered {status} when asked for its {what}: {detail}."
             ));
         }
     }
     if reply.truncated {
-        return stop(format!(
-            "Tailscale's {what} was larger than setup reads; nothing was changed"
-        ));
+        return halt(format!("Tailscale's {what} was larger than setup reads."));
     }
-    let value = serde_json::from_slice(&reply.body).map_err(|error| {
-        Stop(format!(
-            "Tailscale's {what} was not JSON ({error}); nothing was changed"
-        ))
-    })?;
+    let value = serde_json::from_slice(&reply.body)
+        .map_err(|error| Halt::Clean(format!("Tailscale's {what} was not JSON ({error}).")))?;
     Ok((value, reply.etag))
 }
 
-async fn read(daemon: &dyn Daemon) -> Result<Reading, Stop> {
+async fn read(daemon: &dyn Daemon) -> Step<Reading> {
     let (status, _) = document(daemon, STATUS, "status").await?;
     let node = read_node(&status).or_else(|refusal| refused(&refusal))?;
     let (config, etag) = document(daemon, SERVE, "Serve settings").await?;
@@ -433,37 +533,78 @@ async fn read(daemon: &dyn Daemon) -> Result<Reading, Stop> {
     })
 }
 
-async fn hostname(daemon: &dyn Daemon) -> Result<String, Stop> {
+async fn hostname(daemon: &dyn Daemon) -> Step<String> {
     let (prefs, _) = document(daemon, PREFS, "preferences").await?;
     prefs
         .get("Hostname")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| {
-            Stop("Tailscale's preferences have no name setting; nothing was changed".to_string())
-        })
+        .ok_or_else(|| Halt::Clean("Tailscale's preferences have no name setting.".to_string()))
 }
 
 fn same_node(a: &Node, node_id: &str, tailnet: &str) -> bool {
     a.node_id == node_id && a.tailnet == tailnet
 }
 
-/// The status, with the node identity and name checked against what the run
-/// started on.
-fn expect_node(reading: &Reading, start: &Node, name: &str) -> Result<(), Stop> {
-    if !same_node(&reading.node, &start.node_id, &start.tailnet) {
-        return stop(
-            "Tailscale is now signed in as another node or tailnet than when setup started; \
-             nothing more was changed",
+/// A fresh reading that is safe to write on: the same node and tailnet as
+/// `who`, a stable release setup may change, connected, settings it
+/// understands and a version tag. Taken immediately before every write.
+async fn fresh(daemon: &dyn Daemon, who: &Node) -> Step<Reading> {
+    let reading = read(daemon).await?;
+    if !same_node(&reading.node, &who.node_id, &who.tailnet) {
+        return halt(
+            "Tailscale is now signed in as another node or tailnet than when setup started.",
         );
     }
-    if !reading.node.name.eq_ignore_ascii_case(name) {
-        return stop(format!(
-            "this computer's Tailscale name is now {} instead of {name}; nothing more was changed",
-            reading.node.name
-        ));
+    if !supported(&reading.node.version) {
+        return refused(&Refusal::Unsupported(reading.node.version));
     }
-    Ok(())
+    if reading.node.state != "Running" {
+        return refused(&Refusal::NotRunning(reading.node.state));
+    }
+    schema_ok(&reading.config).or_else(|refusal| refused(&refusal))?;
+    version_tag(reading.etag.as_deref()).or_else(|refusal| refused(&refusal))?;
+    Ok(reading)
+}
+
+fn expect_name(reading: &Reading, name: &str) -> Step<()> {
+    if reading.node.name.eq_ignore_ascii_case(name) {
+        Ok(())
+    } else {
+        halt(format!(
+            "This computer's Tailscale name is now {} instead of {name}.",
+            reading.node.name
+        ))
+    }
+}
+
+/// Refuse while an earlier operation's outcome is unconfirmed.
+fn no_pending(journal: &Journal) -> Step<()> {
+    if journal.pending.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<String> = journal.pending.iter().map(Attempt::describe).collect();
+    halt(format!(
+        "An earlier run did not confirm what happened: {}. Check `tailscale status` and \
+         `tailscale serve status`, then run `localpilot remote setup --resolve` to confirm you \
+         have looked; LocalPilot will not treat any of it as its own.",
+        list.join("; ")
+    ))
+}
+
+/// The node and tailnet every confirmed record was made on.
+fn owners(journal: &Journal) -> Vec<(String, String)> {
+    journal
+        .serve
+        .iter()
+        .map(|o| (o.node_id.clone(), o.tailnet.clone()))
+        .chain(
+            journal
+                .rename
+                .iter()
+                .map(|o| (o.node_id.clone(), o.tailnet.clone())),
+        )
+        .collect()
 }
 
 // ------------------------------------------------------------- check
@@ -474,50 +615,60 @@ pub(crate) async fn check(
     console: &dyn Console,
     port: u16,
 ) -> Result<(), Stop> {
-    let (status, _) = document(daemon, STATUS, "status").await?;
-    let (config, etag) = document(daemon, SERVE, "Serve settings").await?;
-    if let Ok(node) = read_node(&status) {
-        console.say(&format!(
-            "Tailscale {} on {} (tailnet {}), {}.",
-            node.version,
-            if node.name.is_empty() {
-                "this computer"
-            } else {
-                &node.name
-            },
-            node.tailnet,
-            node.state
-        ));
-    }
-    match crate::remote_tailscale::assess(&status, &config, etag.as_deref(), port) {
-        crate::remote_tailscale::Readiness::Ready(change) => {
+    let inner = async {
+        let (status, _) = document(daemon, STATUS, "status").await?;
+        let (config, etag) = document(daemon, SERVE, "Serve settings").await?;
+        if let Ok(node) = read_node(&status) {
             console.say(&format!(
-                "Setup would serve {}/ from the gateway on 127.0.0.1:{port}, changing nothing \
-                 else in your Serve settings.",
-                change.origin
+                "Tailscale {} on {} (tailnet {}), {}.",
+                node.version,
+                if node.name.is_empty() {
+                    "this computer"
+                } else {
+                    &node.name
+                },
+                node.tailnet,
+                node.state
             ));
-            if let Some(note) = &change.admin_note {
-                console.say(&format!("Note: {note}."));
+        }
+        match crate::remote_tailscale::assess(&status, &config, etag.as_deref(), port) {
+            crate::remote_tailscale::Readiness::Ready(change) => {
+                console.say(&format!(
+                    "Setup would serve {}/ from the gateway on 127.0.0.1:{port}, changing \
+                     nothing else in your Serve settings.",
+                    change.origin
+                ));
+                if let Some(note) = &change.admin_note {
+                    console.say(&format!("Note: {note}."));
+                }
+                console.say(&format!(
+                    "Serving it publishes the name {} in public certificate logs; setup offers a \
+                     random name for this computer first.",
+                    change.origin.trim_start_matches("https://")
+                ));
+                console
+                    .say("This check changed nothing. Run `localpilot remote setup` to set it up.");
+                Ok(())
             }
-            console.say(&format!(
-                "Serving it publishes the name {} in public certificate logs; setup offers a \
-                 random name for this computer first.",
-                change.origin.trim_start_matches("https://")
-            ));
-            console.say("This check changed nothing. Run `localpilot remote setup` to set it up.");
-            Ok(())
+            crate::remote_tailscale::Readiness::AlreadyServed { origin } => {
+                console.say(&format!(
+                    "{origin}/ already forwards to the gateway on 127.0.0.1:{port}."
+                ));
+                Ok(())
+            }
+            crate::remote_tailscale::Readiness::Refused(refusal) => refused(&refusal),
         }
-        crate::remote_tailscale::Readiness::AlreadyServed { origin } => {
-            console.say(&format!(
-                "{origin}/ already forwards to the gateway on 127.0.0.1:{port}."
-            ));
-            Ok(())
-        }
-        crate::remote_tailscale::Readiness::Refused(refusal) => refused(&refusal),
-    }
+    };
+    inner.await.map_err(|halted| finish(halted, &[]))
 }
 
 // ------------------------------------------------------------- setup
+
+/// The limit of the test save, stated before it is sent.
+const PROBE_LIMIT: &str = "First, setup sends a test save that Tailscale must refuse, to \
+     confirm it never saves over settings that changed in between. If this install ignored \
+     that check, the test save would write back your settings as they were just read, which \
+     could undo a change made elsewhere at that same moment.";
 
 /// The disclosure shown before any change, the same whether it is answered
 /// at a prompt or given by flags.
@@ -536,12 +687,10 @@ fn disclosure(
         ),
         format!(
             "Its HTTPS certificate puts the name {published} permanently in public \
-             Certificate Transparency logs, including the tailnet part {suffix}. Names in \
-             earlier certificates cannot be removed."
+             Certificate Transparency logs, including the tailnet part {suffix}, which stays \
+             as it is. Names in earlier certificates cannot be removed."
         ),
-        "First, setup sends a test save that Tailscale must refuse, to confirm it never \
-         saves over settings that changed in between."
-            .to_string(),
+        PROBE_LIMIT.to_string(),
     ];
     if let Some(proposed) = proposed {
         lines.push(format!(
@@ -560,8 +709,8 @@ fn disclosure(
                 .to_string(),
         );
         lines.push(
-            "A neutral name reduces what future certificates reveal about this computer; \
-             it does not make it anonymous."
+            "The new machine name says nothing about you or LocalPilot; the tailnet part of \
+             the address is unchanged, and nothing makes the address anonymous."
                 .to_string(),
         );
     }
@@ -569,7 +718,7 @@ fn disclosure(
 }
 
 /// Show `lines`, then go ahead only with `--yes` or a yes at the prompt.
-fn consent(s: &Setup<'_>, lines: &[String], yes: bool) -> Result<(), Stop> {
+fn consent(s: &Setup<'_>, lines: &[String], yes: bool) -> Step<()> {
     for line in lines {
         s.console.say(line);
     }
@@ -577,7 +726,7 @@ fn consent(s: &Setup<'_>, lines: &[String], yes: bool) -> Result<(), Stop> {
         return Ok(());
     }
     if !s.interactive {
-        return stop("Nothing was changed. Without a terminal to ask in, add --yes to confirm.");
+        return halt("Without a terminal to ask in, add --yes to confirm.");
     }
     if s.console
         .choose("Go ahead?", &[Choice::Proceed, Choice::Cancel])
@@ -585,7 +734,7 @@ fn consent(s: &Setup<'_>, lines: &[String], yes: bool) -> Result<(), Stop> {
     {
         Ok(())
     } else {
-        stop("Cancelled; nothing was changed.")
+        halt("Cancelled.")
     }
 }
 
@@ -595,68 +744,74 @@ enum Rename {
     No(String),
 }
 
+/// Take the lock and the journal, run `body`, and turn its stop into the
+/// final message with what was done before it.
+async fn with_journal<F>(s: &Setup<'_>, body: F) -> Result<(), Stop>
+where
+    F: for<'r, 'a, 'b> FnOnce(
+        &'r mut Run<'a, 'b>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Step<()>> + 'r>,
+    >,
+{
+    let held = hold(&s.state_dir).map_err(|halted| finish(halted, &[]))?;
+    let journal = load_journal(&s.state_dir).map_err(|halted| finish(halted, &[]))?;
+    let mut run = Run {
+        s,
+        journal,
+        done: Vec::new(),
+    };
+    let result = body(&mut run).await;
+    drop(held);
+    result.map_err(|halted| finish(halted, &run.done))
+}
+
 /// `localpilot remote setup`.
 pub(crate) async fn run(s: &Setup<'_>, flag: NameFlag, yes: bool) -> Result<(), Stop> {
-    let _held = hold(&s.state_dir)?;
-    let mut journal = load_journal(&s.state_dir)?;
-    let pending_rename = journal.last.as_ref().is_some_and(|last| {
-        last.step == Step::Rename && matches!(last.state, State::Planned | State::Unresolved)
-    });
-    if let Some(last) = &journal.last {
-        if matches!(
-            last.state,
-            State::Planned | State::Unresolved | State::Unexpected
-        ) {
-            s.console.say(&format!(
-                "Note: an earlier run ended without a confirmed result ({:?}, {:?}: {}). \
-                 LocalPilot does not treat that as its own.",
-                last.step, last.state, last.detail
-            ));
-        }
-    }
+    with_journal(s, |run| Box::pin(setup(run, flag, yes))).await
+}
 
-    // Read, and refuse before any change.
+async fn setup(run: &mut Run<'_, '_>, flag: NameFlag, yes: bool) -> Step<()> {
+    let s = run.s;
+    no_pending(&run.journal)?;
+
+    // Read, and refuse before asking when anything is in the way.
     let start = read(s.daemon).await?;
     let node = eligible(&start.status).or_else(|refusal| refused(&refusal))?;
     version_tag(start.etag.as_deref()).or_else(|refusal| refused(&refusal))?;
-    let plan_now =
-        origin_plan(&start.config, &node.name, s.port).or_else(|refusal| refused(&refusal))?;
+    origin_plan(&start.config, &node.name, s.port).or_else(|refusal| refused(&refusal))?;
     let start_hostname = hostname(s.daemon).await?;
-    for owner in [
-        journal.serve.as_ref().map(|o| (&o.node_id, &o.tailnet)),
-        journal.rename.as_ref().map(|o| (&o.node_id, &o.tailnet)),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if !same_node(&node, owner.0, owner.1) {
-            return stop(
-                "LocalPilot's earlier setup was made on another Tailscale node or tailnet; \
-                 nothing was changed. Run `localpilot remote setup --undo` while signed in as \
-                 that one first.",
+    for (node_id, tailnet) in owners(&run.journal) {
+        if !same_node(&node, &node_id, &tailnet) {
+            return halt(
+                "LocalPilot's earlier setup was made on another Tailscale node or tailnet. Run \
+                 `localpilot remote setup --undo` while signed in as that one first.",
             );
         }
     }
 
-    let rename = if journal.rename.is_some() {
+    let rename = if run.journal.rename.is_some() {
         Rename::No("this computer already has the name LocalPilot gave it".to_string())
-    } else if pending_rename {
-        Rename::No("an earlier rename has no confirmed result".to_string())
     } else if let Some(use_) = name_in_use(&start.config, &node.name) {
         Rename::No(format!("{use_}, and a new name would move it"))
     } else {
-        let proposed = format!("{}.{}", s.random_name(), node.suffix);
-        let free = one_label(&proposed, &node.suffix)
-            && matches!(
-                origin_plan(&start.config, &proposed, s.port),
-                Ok(OriginPlan::Free(_))
-            );
         match (s.devices)() {
             Err(error) => Rename::No(format!(
                 "the list of paired devices could not be read ({error})"
             )),
-            Ok(_) if !free => Rename::No(format!("{proposed} is not free")),
-            Ok(devices) => Rename::Offer { proposed, devices },
+            Ok(devices) => {
+                let proposed = format!("{}.{}", run.random_name()?, node.suffix);
+                let free = one_label(&proposed, &node.suffix)
+                    && matches!(
+                        origin_plan(&start.config, &proposed, s.port),
+                        Ok(OriginPlan::Free(_))
+                    );
+                if free {
+                    Rename::Offer { proposed, devices }
+                } else {
+                    Rename::No(format!("{proposed} is not free"))
+                }
+            }
         }
     };
 
@@ -670,11 +825,9 @@ pub(crate) async fn run(s: &Setup<'_>, flag: NameFlag, yes: bool) -> Result<(), 
             let (proposed, devices) = match (&offer, &rename) {
                 (Some(offer), _) => offer.clone(),
                 (None, Rename::No(why)) => {
-                    return stop(format!(
-                        "A new name cannot be given: {why}. Nothing was changed."
-                    ))
+                    return halt(format!("A new name cannot be given: {why}."))
                 }
-                (None, Rename::Offer { .. }) => return stop("Nothing was changed."),
+                (None, Rename::Offer { .. }) => return halt("A new name cannot be given."),
             };
             let lines = disclosure(&node.name, Some(&proposed), &node.suffix, devices, s.port);
             consent(s, &lines, yes)?;
@@ -692,9 +845,9 @@ pub(crate) async fn run(s: &Setup<'_>, flag: NameFlag, yes: bool) -> Result<(), 
                 s.console.say(&line);
             }
             if !s.interactive {
-                return stop(
-                    "Nothing was changed. Without a terminal to ask in, run again with --yes \
-                     and either --random-name or --keep-name.",
+                return halt(
+                    "Without a terminal to ask in, run again with --yes and either \
+                     --random-name or --keep-name.",
                 );
             }
             if let Rename::No(why) = &rename {
@@ -708,60 +861,79 @@ pub(crate) async fn run(s: &Setup<'_>, flag: NameFlag, yes: bool) -> Result<(), 
             match s.console.choose("Set up the phone address?", choices) {
                 Choice::RandomName if offer.is_some() => true,
                 Choice::KeepName => false,
-                _ => return stop("Cancelled; nothing was changed."),
+                _ => return halt("Cancelled."),
             }
         }
     };
-    let target_name = match (&offer, renaming) {
+    let target = match (&offer, renaming) {
         (Some((proposed, _)), true) => proposed.clone(),
         _ => node.name.clone(),
     };
-    let writes = renaming || matches!(plan_now, OriginPlan::Free(_));
-    if writes {
-        probe(s, &mut journal, &start, &node).await?;
-    }
 
+    // From here on, every write follows a fresh, validated reading.
+    let mut probed = false;
     if renaming {
-        rename_node(s, &mut journal, &node, &start_hostname, &target_name).await?;
+        let now = fresh(s.daemon, &node).await?;
+        check_rename(s, &now, &node, &target, &start_hostname).await?;
+        probe(run, &now).await?;
+        probed = true;
+        let now = fresh(s.daemon, &node).await?;
+        check_rename(s, &now, &node, &target, &start_hostname).await?;
+        rename_node(run, &node, &start_hostname, &target).await?;
     }
 
-    // The phone origin, on a fresh reading.
-    let fresh = read(s.daemon).await?;
-    expect_node(&fresh, &node, &target_name)?;
-    let fresh_node = eligible(&fresh.status).or_else(|refusal| refused(&refusal))?;
-    let origin = format!("https://{}", fresh_node.name);
-    let owned_here = journal.serve.as_ref().is_some_and(|owned| {
-        owned.name.eq_ignore_ascii_case(&fresh_node.name) && owned.port == s.port
-    });
-    match origin_plan(&fresh.config, &fresh_node.name, s.port)
-        .or_else(|refusal| refused(&refusal))?
-    {
-        OriginPlan::AlreadyServed if owned_here => {
+    let origin = format!("https://{target}");
+    let mut wrote = false;
+    let served = loop {
+        let now = fresh(s.daemon, &node).await?;
+        expect_name(&now, &target)?;
+        let current = eligible(&now.status).or_else(|refusal| refused(&refusal))?;
+        let plan =
+            origin_plan(&now.config, &target, s.port).or_else(|refusal| refused(&refusal))?;
+        match plan {
+            OriginPlan::AlreadyServed => break current,
+            OriginPlan::Free(_) if !probed => {
+                probe(run, &now).await?;
+                probed = true;
+            }
+            OriginPlan::Free(planned) => {
+                let tag = version_tag(now.etag.as_deref()).or_else(|refusal| refused(&refusal))?;
+                serve(run, &current, &planned, &tag).await?;
+                wrote = true;
+                break current;
+            }
+        }
+    };
+    if !wrote {
+        let owned_here = run
+            .journal
+            .serve
+            .iter()
+            .any(|owned| owned.name.eq_ignore_ascii_case(&served.name) && owned.port == s.port);
+        if owned_here {
             s.console
                 .say(&format!("{origin}/ is set up by LocalPilot already."));
-        }
-        OriginPlan::AlreadyServed => {
+        } else {
             s.console.say(&format!(
-                "{origin}/ already forwards to the gateway, but LocalPilot has no \
-                 confirmed record of setting it up; it uses it and will never remove it."
+                "{origin}/ already forwards to the gateway, but LocalPilot has no confirmed \
+                 record of setting it up; it uses it and will never remove it."
             ));
-        }
-        OriginPlan::Free(planned) => {
-            let tag = version_tag(fresh.etag.as_deref()).or_else(|refusal| refused(&refusal))?;
-            serve(s, &mut journal, &fresh_node, &planned, &tag).await?;
         }
     }
 
     // The user config.
     match edit_config(s.config_path.as_deref(), &origin) {
-        Ok(true) => s.console.say(&format!(
-            "Your config now has [remote] enabled = true and advertised_url = \"{origin}\"."
-        )),
+        Ok(true) => {
+            s.console.say(&format!(
+                "Your config now has [remote] enabled = true and advertised_url = \"{origin}\"."
+            ));
+            run.done.push("updated your config".to_string());
+        }
         Ok(false) => {}
         Err(error) => {
-            return stop(format!(
-                "Tailscale is set up, but your config was not updated: {error}. Set [remote] \
-                 enabled = true and advertised_url = \"{origin}\" yourself."
+            return halt(format!(
+                "Your config was not updated: {error}. Set [remote] enabled = true and \
+                 advertised_url = \"{origin}\" yourself."
             ))
         }
     }
@@ -785,7 +957,7 @@ pub(crate) async fn run(s: &Setup<'_>, flag: NameFlag, yes: bool) -> Result<(), 
         }
         Listener::Gateway => {}
     }
-    match s.probes.origin(s.port, &fresh_node.name).await {
+    match s.probes.origin(s.port, &target).await {
         OriginAnswer::Current => {}
         OriginAnswer::OtherPolicy(why) => {
             s.console.say(&format!(
@@ -802,28 +974,32 @@ pub(crate) async fn run(s: &Setup<'_>, flag: NameFlag, yes: bool) -> Result<(), 
             return Ok(());
         }
     }
-    let before_tls = read(s.daemon).await?;
-    expect_node(&before_tls, &node, &fresh_node.name)?;
-    eligible(&before_tls.status).or_else(|refusal| refused(&refusal))?;
-    if origin_plan(&before_tls.config, &fresh_node.name, s.port)
-        .or_else(|refusal| refused(&refusal))?
+    let now = fresh(s.daemon, &node).await?;
+    expect_name(&now, &target)?;
+    eligible(&now.status).or_else(|refusal| refused(&refusal))?;
+    if origin_plan(&now.config, &target, s.port).or_else(|refusal| refused(&refusal))?
         != OriginPlan::AlreadyServed
     {
-        return stop("Tailscale's Serve settings changed before the check; it was not run.");
+        return halt("Tailscale's Serve settings changed before the check; it was not run.");
     }
-    s.probes.tls(&origin).await.map_err(|why| {
-        Stop(format!(
+    if let Err(why) = s.probes.tls(&origin).await {
+        return halt(format!(
             "The check of {origin} from this computer failed: {why}."
-        ))
-    })?;
-    if let Some(owned) = journal.serve.as_mut() {
-        if !owned.verified {
+        ));
+    }
+    let mut marked = false;
+    for owned in &mut run.journal.serve {
+        if owned.name.eq_ignore_ascii_case(&target) && owned.port == s.port && !owned.verified {
             owned.verified = true;
-            if let Err(error) = s.save(&journal) {
-                return stop(format!(
-                    "{origin} works from this computer, but LocalPilot could not record that ({error})."
-                ));
-            }
+            marked = true;
+        }
+    }
+    if marked {
+        if let Err(error) = run.save() {
+            return halt(format!(
+                "{origin} works from this computer, but LocalPilot could not record that \
+                 ({error})."
+            ));
         }
     }
     s.console.say(&format!(
@@ -833,107 +1009,106 @@ pub(crate) async fn run(s: &Setup<'_>, flag: NameFlag, yes: bool) -> Result<(), 
     Ok(())
 }
 
-/// The test save: the settings exactly as read, with a version tag that is
-/// deliberately not theirs. Only a refusal passes.
-async fn probe(
+/// The rename's preconditions on a fresh reading: the same name as at the
+/// start, nothing using it, the proposed name free, and the name setting
+/// unchanged.
+async fn check_rename(
     s: &Setup<'_>,
-    journal: &mut Journal,
-    start: &Reading,
-    node: &Node,
-) -> Result<(), Stop> {
-    let observed = start.etag.clone().unwrap_or_default();
-    let mut tag = format!("lp-probe-{}", s.random_hex(8));
-    while tag == observed {
-        tag = format!("lp-probe-{}", s.random_hex(8));
+    now: &Reading,
+    start: &Node,
+    proposed: &str,
+    hostname_was: &str,
+) -> Step<()> {
+    expect_name(now, &start.name)?;
+    eligible(&now.status).or_else(|refusal| refused(&refusal))?;
+    if let Some(use_) = name_in_use(&now.config, &start.name) {
+        return halt(format!("{use_}, and a new name would move it."));
     }
-    let body = if start.config.is_null() {
+    if !matches!(
+        origin_plan(&now.config, proposed, s.port),
+        Ok(OriginPlan::Free(_))
+    ) {
+        return halt(format!("{proposed} is no longer free."));
+    }
+    if hostname(s.daemon).await? != hostname_was {
+        return halt("Tailscale's name setting changed while setting up.");
+    }
+    Ok(())
+}
+
+/// The test save: the settings exactly as just read, with a version tag that
+/// is deliberately not theirs. Only a refusal passes.
+async fn probe(run: &mut Run<'_, '_>, now: &Reading) -> Step<()> {
+    let observed = now.etag.clone().unwrap_or_default();
+    let mut tag = format!("lp-probe-{}", run.random_hex(8)?);
+    while tag == observed {
+        tag = format!("lp-probe-{}", run.random_hex(8)?);
+    }
+    let body = if now.config.is_null() {
         Value::Object(serde_json::Map::new())
     } else {
-        start.config.clone()
+        now.config.clone()
     };
-    s.plan(
-        journal,
-        Attempt {
-            step: Step::Probe,
-            state: State::Planned,
-            node_id: node.node_id.clone(),
-            detail: String::new(),
-            old_hostname: None,
-            new_hostname: None,
-        },
-    )?;
-    let (state, message) = match s.daemon.post(SERVE, &body, &tag).await {
+    run.plan(Attempt::new(Op::Probe, &now.node))?;
+    let (state, halted) = match run.s.daemon.post(SERVE, &body, &tag).await {
         Ok(reply) if reply.status == 412 => (State::Passed, None),
         Ok(reply) if reply.status == 200 => (
             State::Unexpected,
-            Some(
+            Some(Halt::Unknown(
                 "Tailscale accepted a save it should have refused, so on this install it does \
-                 not protect settings that changed in between. It saved your settings exactly \
-                 as they were just read; nothing else was changed."
+                 not protect settings that changed in between. That save wrote back your Serve \
+                 settings as they were just read; a change made elsewhere at that moment may \
+                 have been undone. Check `tailscale serve status`. Nothing else was done."
                     .to_string(),
-            ),
+            )),
         ),
         Ok(reply) if matches!(reply.status, 401 | 403) => (
             State::Refused,
-            Some(format!(
-                "Tailscale refused to let this user change its settings ({}); nothing was \
-                 changed. On Linux, `sudo tailscale set --operator=$USER` lets your user manage \
-                 Tailscale.",
+            Some(Halt::Clean(format!(
+                "Tailscale refused to let this user change its settings ({}). On Linux, `sudo \
+                 tailscale set --operator=$USER` lets your user manage Tailscale.",
                 reply.status
-            )),
+            ))),
         ),
         Ok(reply) => (
             State::Unresolved,
-            Some(format!(
-                "Tailscale answered the test save with {}, which setup does not expect; nothing \
-                 more was changed. Check `tailscale serve status`.",
+            Some(Halt::Unknown(format!(
+                "Tailscale answered the test save with {}, which setup does not expect, so \
+                 whether it saved is not known. Check `tailscale serve status`. Nothing else \
+                 was done.",
                 reply.status
-            )),
+            ))),
         ),
         Err(failure) => (
             State::Unresolved,
-            Some(format!(
-                "{failure} during the test save; nothing more was changed. Check `tailscale \
-                 serve status`."
-            )),
+            Some(Halt::Unknown(format!(
+                "{failure} during the test save, so whether it saved is not known. Check \
+                 `tailscale serve status`. Nothing else was done."
+            ))),
         ),
     };
-    let detail = message.clone().unwrap_or_default();
-    let recorded = s.settle_attempt(journal, state, &detail);
-    if let Some(message) = message {
-        return stop(message);
+    let detail = match &halted {
+        Some(Halt::Clean(message) | Halt::Unknown(message)) => message.clone(),
+        None => String::new(),
+    };
+    let recorded = run.settle(state, &detail);
+    if let Some(halted) = halted {
+        return Err(halted);
     }
     recorded.map_err(|error| {
-        Stop(format!(
-            "LocalPilot could not record the test save ({error}); nothing was changed"
+        Halt::Clean(format!(
+            "LocalPilot could not record the test save ({error})."
         ))
     })
 }
 
-async fn rename_node(
-    s: &Setup<'_>,
-    journal: &mut Journal,
-    node: &Node,
-    old: &str,
-    target: &str,
-) -> Result<(), Stop> {
+async fn rename_node(run: &mut Run<'_, '_>, node: &Node, old: &str, target: &str) -> Step<()> {
+    let s = run.s;
     let label = target.split('.').next().unwrap_or_default().to_string();
-    if hostname(s.daemon).await? != old {
-        return stop(
-            "Tailscale's name setting changed while setting up; nothing more was changed.",
-        );
-    }
-    s.plan(
-        journal,
-        Attempt {
-            step: Step::Rename,
-            state: State::Planned,
-            node_id: node.node_id.clone(),
-            detail: String::new(),
-            old_hostname: Some(old.to_string()),
-            new_hostname: Some(label.clone()),
-        },
-    )?;
+    let mut attempt = Attempt::new(Op::Rename, node);
+    attempt.old_hostname = Some(old.to_string());
+    attempt.new_hostname = Some(label.clone());
+    run.plan(attempt)?;
     let body = serde_json::json!({ "Hostname": label, "HostnameSet": true });
     let answered = s.daemon.patch(PREFS, &body).await;
     let confirmed = match &answered {
@@ -960,44 +1135,40 @@ async fn rename_node(
         _ => false,
     };
     if !confirmed {
-        let (state, message) = match &answered {
-            Ok(reply) if reply.status == 403 => (
-                State::Refused,
-                "Tailscale refused to let this user rename the computer; nothing was changed."
-                    .to_string(),
-            ),
-            Ok(reply) => (
-                State::Unresolved,
-                format!(
-                    "Tailscale's answer to the rename ({}) could not be confirmed, so whether \
-                     this computer was renamed to {label} is not known. Nothing more was \
-                     changed; check the name with `tailscale status`.",
-                    reply.status
-                ),
-            ),
-            Err(failure) => (
-                State::Unresolved,
-                format!(
-                    "{failure} during the rename, so whether this computer was renamed to \
-                     {label} is not known. Nothing more was changed; check the name with \
-                     `tailscale status`."
-                ),
-            ),
+        let halted = match &answered {
+            Ok(reply) if reply.status == 403 => {
+                Halt::Clean("Tailscale refused to let this user rename the computer.".to_string())
+            }
+            Ok(reply) => Halt::Unknown(format!(
+                "Tailscale's answer to the rename ({}) could not be confirmed, so whether this \
+                 computer was renamed to {label} is not known. Check the name with `tailscale \
+                 status`. Nothing else was done.",
+                reply.status
+            )),
+            Err(failure) => Halt::Unknown(format!(
+                "{failure} during the rename, so whether this computer was renamed to {label} \
+                 is not known. Check the name with `tailscale status`. Nothing else was done."
+            )),
         };
-        let _ = s.settle_attempt(journal, state, &message);
-        return stop(message);
+        let (state, detail) = match &halted {
+            Halt::Clean(message) => (State::Refused, message.clone()),
+            Halt::Unknown(message) => (State::Unresolved, message.clone()),
+        };
+        let _ = run.settle(state, &detail);
+        return Err(halted);
     }
-    journal.rename = Some(RenameOwned {
+    run.journal.rename = Some(RenameOwned {
         node_id: node.node_id.clone(),
         tailnet: node.tailnet.clone(),
         old_hostname: old.to_string(),
         new_hostname: label.clone(),
     });
-    if let Err(error) = s.settle_attempt(journal, State::Done, "") {
-        return stop(format!(
-            "Tailscale renamed this computer to {label}, but LocalPilot could not record it \
-             ({error}); nothing else was done. Restore the old name in Tailscale yourself if \
-             you want it back."
+    run.done
+        .push(format!("renamed this computer in Tailscale to {label}"));
+    if let Err(error) = run.settle(State::Done, "") {
+        return halt(format!(
+            "LocalPilot could not record the rename ({error}); restore the old name in \
+             Tailscale yourself if you want it back."
         ));
     }
     s.console
@@ -1011,10 +1182,7 @@ async fn rename_node(
         if let Ok((status, _)) = document(s.daemon, STATUS, "status").await {
             if let Ok(now) = read_node(&status) {
                 if !same_node(&now, &node.node_id, &node.tailnet) {
-                    return stop(
-                        "Tailscale is now signed in as another node or tailnet; nothing more \
-                         was changed.",
-                    );
+                    return halt("Tailscale is now signed in as another node or tailnet.");
                 }
                 observed.clone_from(&now.name);
                 if now.name.eq_ignore_ascii_case(target) && eligible(&status).is_ok() {
@@ -1023,35 +1191,19 @@ async fn rename_node(
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            return stop(format!(
+            return halt(format!(
                 "Tailscale now reports this computer as {observed}, not yet {target} with a \
                  certificate. It may still be updating, may have added a suffix to avoid a \
-                 clash, or the name may be set in the admin console. Nothing more was changed; \
-                 run `localpilot remote setup` again in a minute, or check the name in the \
-                 Tailscale admin console."
+                 clash, or the name may be set in the admin console. Run `localpilot remote \
+                 setup` again in a minute, or check the name in the Tailscale admin console."
             ));
         }
     }
 }
 
-async fn serve(
-    s: &Setup<'_>,
-    journal: &mut Journal,
-    node: &Node,
-    planned: &Value,
-    tag: &str,
-) -> Result<(), Stop> {
-    s.plan(
-        journal,
-        Attempt {
-            step: Step::Serve,
-            state: State::Planned,
-            node_id: node.node_id.clone(),
-            detail: String::new(),
-            old_hostname: None,
-            new_hostname: None,
-        },
-    )?;
+async fn serve(run: &mut Run<'_, '_>, node: &Node, planned: &Value, tag: &str) -> Step<()> {
+    let s = run.s;
+    run.plan(Attempt::new(Op::Serve, node))?;
     let answered = s.daemon.post(SERVE, planned, tag).await;
     let origin = format!("https://{}", node.name);
     match &answered {
@@ -1067,65 +1219,66 @@ async fn serve(
             if !confirmed {
                 let message = format!(
                     "Tailscale accepted the change, but a fresh read did not show {origin} set \
-                     up as planned, so LocalPilot does not claim it. Nothing more was changed; \
-                     check `tailscale serve status`."
+                     up as planned, so LocalPilot does not claim it. Check `tailscale serve \
+                     status`. Nothing else was done."
                 );
-                let _ = s.settle_attempt(journal, State::Unresolved, &message);
-                return stop(message);
+                let _ = run.settle(State::Unresolved, &message);
+                return unknown(message);
             }
-            journal.serve = Some(ServeOwned {
+            let record = ServeOwned {
                 node_id: node.node_id.clone(),
                 tailnet: node.tailnet.clone(),
                 name: node.name.clone(),
                 port: s.port,
                 verified: false,
-            });
-            if let Err(error) = s.settle_attempt(journal, State::Done, "") {
-                return stop(format!(
-                    "Tailscale now serves {origin}, but LocalPilot could not record it ({error}); \
-                     nothing else was done."
-                ));
+            };
+            let known =
+                run.journal.serve.iter().any(|owned| {
+                    owned.name.eq_ignore_ascii_case(&record.name) && owned.port == s.port
+                });
+            if !known {
+                run.journal.serve.push(record);
+            }
+            run.done.push(format!("Tailscale now serves {origin}/"));
+            if let Err(error) = run.settle(State::Done, "") {
+                return halt(format!("LocalPilot could not record that ({error})."));
             }
             s.console
                 .say(&format!("Tailscale now serves {origin}/ from the gateway."));
             Ok(())
         }
         Ok(reply) => {
-            let (state, message) = match reply.status {
-                412 => (
-                    State::Refused,
-                    "Tailscale's Serve settings changed while setting up; nothing was changed. \
-                     Run setup again."
+            let halted = match reply.status {
+                412 => Halt::Clean(
+                    "Tailscale's Serve settings changed while setting up. Run setup again."
                         .to_string(),
                 ),
-                401 | 403 => (
-                    State::Refused,
-                    format!(
-                        "Tailscale refused the change ({}); nothing was changed.{}",
-                        reply.status,
-                        crate::remote_tailscale::admin_note(planned)
-                            .map(|note| format!(" Note: {note}."))
-                            .unwrap_or_default()
-                    ),
-                ),
-                status => (
-                    State::Unresolved,
-                    format!(
-                        "Tailscale answered {status}, so whether {origin} was set up is not \
-                         known. Nothing more was changed; check `tailscale serve status`."
-                    ),
-                ),
+                401 | 403 => Halt::Clean(format!(
+                    "Tailscale refused the change ({}).{}",
+                    reply.status,
+                    crate::remote_tailscale::admin_note(planned)
+                        .map(|note| format!(" Note: {note}."))
+                        .unwrap_or_default()
+                )),
+                status => Halt::Unknown(format!(
+                    "Tailscale answered {status}, so whether {origin} was set up is not known. \
+                     Check `tailscale serve status`. Nothing else was done."
+                )),
             };
-            let _ = s.settle_attempt(journal, state, &message);
-            stop(message)
+            let (state, detail) = match &halted {
+                Halt::Clean(message) => (State::Refused, message.clone()),
+                Halt::Unknown(message) => (State::Unresolved, message.clone()),
+            };
+            let _ = run.settle(state, &detail);
+            Err(halted)
         }
         Err(failure) => {
             let message = format!(
                 "{failure} while setting up {origin}, so whether it was set up is not known. \
-                 Nothing more was changed; check `tailscale serve status`."
+                 Check `tailscale serve status`. Nothing else was done."
             );
-            let _ = s.settle_attempt(journal, State::Unresolved, &message);
-            stop(message)
+            let _ = run.settle(State::Unresolved, &message);
+            unknown(message)
         }
     }
 }
@@ -1195,36 +1348,34 @@ pub(crate) fn edit_config(path: Option<&Path>, origin: &str) -> Result<bool, Str
 /// `localpilot remote setup --undo`: remove what LocalPilot confirmed it set
 /// up, each part only while it is still exactly as recorded.
 pub(crate) async fn undo(s: &Setup<'_>, yes: bool) -> Result<(), Stop> {
-    let _held = hold(&s.state_dir)?;
-    let mut journal = load_journal(&s.state_dir)?;
-    if journal.serve.is_none() && journal.rename.is_none() {
+    with_journal(s, |run| Box::pin(undo_inner(run, yes))).await
+}
+
+async fn undo_inner(run: &mut Run<'_, '_>, yes: bool) -> Step<()> {
+    let s = run.s;
+    no_pending(&run.journal)?;
+    if run.journal.serve.is_empty() && run.journal.rename.is_none() {
         s.console
             .say("LocalPilot has not set anything up in Tailscale on this computer.");
         return Ok(());
     }
     let start = read(s.daemon).await?;
-    for owner in [
-        journal.serve.as_ref().map(|o| (&o.node_id, &o.tailnet)),
-        journal.rename.as_ref().map(|o| (&o.node_id, &o.tailnet)),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if !same_node(&start.node, owner.0, owner.1) {
-            return stop(
-                "Tailscale is signed in as another node or tailnet than the one LocalPilot set \
-                 up; nothing was changed.",
+    for (node_id, tailnet) in owners(&run.journal) {
+        if !same_node(&start.node, &node_id, &tailnet) {
+            return halt(
+                "Tailscale is signed in as another node or tailnet than the one LocalPilot set up.",
             );
         }
     }
+    let node = start.node.clone();
     let mut lines = Vec::new();
-    if let Some(owned) = &journal.serve {
+    for owned in &run.journal.serve {
         lines.push(format!(
             "Undo removes https://{}/ from Tailscale Serve.",
             owned.name
         ));
     }
-    if let Some(owned) = &journal.rename {
+    if let Some(owned) = &run.journal.rename {
         let old = if owned.old_hostname.is_empty() {
             "this computer's own host name".to_string()
         } else {
@@ -1236,50 +1387,38 @@ pub(crate) async fn undo(s: &Setup<'_>, yes: bool) -> Result<(), Stop> {
              the same moment could be overwritten."
         ));
     }
-    lines.push("First, setup sends a test save that Tailscale must refuse.".to_string());
+    lines.push(PROBE_LIMIT.to_string());
     for line in &lines {
         s.console.say(line);
     }
     if !yes {
         if !s.interactive {
-            return stop(
-                "Nothing was changed. Without a terminal to ask in, add --yes to confirm.",
-            );
+            return halt("Without a terminal to ask in, add --yes to confirm.");
         }
         if s.console
             .choose("Undo?", &[Choice::Proceed, Choice::Cancel])
             != Choice::Proceed
         {
-            return stop("Cancelled; nothing was changed.");
+            return halt("Cancelled.");
         }
     }
-    probe(s, &mut journal, &start, &start.node).await?;
+    let now = fresh(s.daemon, &node).await?;
+    probe(run, &now).await?;
 
-    if let Some(owned) = journal.serve.clone() {
-        let fresh = read(s.daemon).await?;
-        match origin_plan(&fresh.config, &owned.name, owned.port) {
+    for owned in run.journal.serve.clone() {
+        let now = fresh(s.daemon, &node).await?;
+        match origin_plan(&now.config, &owned.name, owned.port) {
             Ok(OriginPlan::Free(_)) => {
                 s.console
                     .say(&format!("https://{}/ was already removed.", owned.name));
-                journal.serve = None;
-                s.save(&journal)
-                    .map_err(|error| Stop(format!("could not record the removal ({error})")))?;
+                run.journal.serve.retain(|item| item != &owned);
+                run.save()
+                    .map_err(|error| Halt::Clean(format!("Could not record that ({error}).")))?;
             }
             Ok(OriginPlan::AlreadyServed) => {
-                let tag =
-                    version_tag(fresh.etag.as_deref()).or_else(|refusal| refused(&refusal))?;
-                let without = without_ours(&fresh.config, &owned.name);
-                s.plan(
-                    &mut journal,
-                    Attempt {
-                        step: Step::UndoServe,
-                        state: State::Planned,
-                        node_id: owned.node_id.clone(),
-                        detail: String::new(),
-                        old_hostname: None,
-                        new_hostname: None,
-                    },
-                )?;
+                let tag = version_tag(now.etag.as_deref()).or_else(|refusal| refused(&refusal))?;
+                let without = without_ours(&now.config, &owned.name);
+                run.plan(Attempt::new(Op::UndoServe, &node))?;
                 let answered = s.daemon.post(SERVE, &without, &tag).await;
                 let gone = match &answered {
                     Ok(reply) if reply.status == 200 => match read(s.daemon).await {
@@ -1295,32 +1434,34 @@ pub(crate) async fn undo(s: &Setup<'_>, yes: bool) -> Result<(), Stop> {
                     _ => false,
                 };
                 if !gone {
-                    let (state, message) = match &answered {
-                        Ok(reply) if matches!(reply.status, 401 | 403 | 412) => (
-                            State::Refused,
-                            format!(
-                                "Tailscale did not remove https://{}/ ({}); nothing was changed. \
-                                 Run undo again.",
+                    let halted = match &answered {
+                        Ok(reply) if matches!(reply.status, 401 | 403 | 412) => {
+                            Halt::Clean(format!(
+                                "Tailscale did not remove https://{}/ ({}). Run undo again.",
                                 owned.name, reply.status
-                            ),
-                        ),
-                        _ => (
-                            State::Unresolved,
-                            format!(
-                                "whether https://{}/ was removed is not known; LocalPilot keeps \
-                                 its record. Check `tailscale serve status`.",
-                                owned.name
-                            ),
-                        ),
+                            ))
+                        }
+                        _ => Halt::Unknown(format!(
+                            "Whether https://{}/ was removed is not known; LocalPilot keeps its \
+                             record. Check `tailscale serve status`.",
+                            owned.name
+                        )),
                     };
-                    let _ = s.settle_attempt(&mut journal, state, &message);
-                    return stop(message);
+                    let (state, detail) = match &halted {
+                        Halt::Clean(message) => (State::Refused, message.clone()),
+                        Halt::Unknown(message) => (State::Unresolved, message.clone()),
+                    };
+                    let _ = run.settle(state, &detail);
+                    return Err(halted);
                 }
-                journal.serve = None;
-                if let Err(error) = s.settle_attempt(&mut journal, State::Done, "") {
-                    return stop(format!(
-                        "https://{}/ was removed, but LocalPilot could not record it ({error}).",
-                        owned.name
+                run.journal.serve.retain(|item| item != &owned);
+                run.done.push(format!(
+                    "removed https://{}/ from Tailscale Serve",
+                    owned.name
+                ));
+                if let Err(error) = run.settle(State::Done, "") {
+                    return halt(format!(
+                        "LocalPilot could not record the removal ({error})."
                     ));
                 }
                 s.console.say(&format!(
@@ -1329,7 +1470,7 @@ pub(crate) async fn undo(s: &Setup<'_>, yes: bool) -> Result<(), Stop> {
                 ));
             }
             Err(refusal) => {
-                return stop(format!(
+                return halt(format!(
                     "https://{}/ is no longer exactly as LocalPilot set it up ({}); it was not \
                      removed.",
                     owned.name,
@@ -1339,29 +1480,22 @@ pub(crate) async fn undo(s: &Setup<'_>, yes: bool) -> Result<(), Stop> {
         }
     }
 
-    if let Some(owned) = journal.rename.clone() {
-        let fresh = read(s.daemon).await?;
-        if let Some(use_) = name_in_use(&fresh.config, &fresh.node.name) {
-            return stop(format!(
+    if let Some(owned) = run.journal.rename.clone() {
+        let now = fresh(s.daemon, &node).await?;
+        if let Some(use_) = name_in_use(&now.config, &now.node.name) {
+            return halt(format!(
                 "{use_}, and restoring the old name would move it; the name was not changed."
             ));
         }
         if hostname(s.daemon).await? != owned.new_hostname {
-            return stop(
+            return halt(
                 "Tailscale's name setting was changed after setup; LocalPilot leaves it as it is.",
             );
         }
-        s.plan(
-            &mut journal,
-            Attempt {
-                step: Step::UndoRename,
-                state: State::Planned,
-                node_id: owned.node_id.clone(),
-                detail: String::new(),
-                old_hostname: Some(owned.old_hostname.clone()),
-                new_hostname: Some(owned.new_hostname.clone()),
-            },
-        )?;
+        let mut attempt = Attempt::new(Op::UndoRename, &node);
+        attempt.old_hostname = Some(owned.new_hostname.clone());
+        attempt.new_hostname = Some(owned.old_hostname.clone());
+        run.plan(attempt)?;
         let body = serde_json::json!({ "Hostname": owned.old_hostname, "HostnameSet": true });
         let answered = s.daemon.patch(PREFS, &body).await;
         let restored = match &answered {
@@ -1374,25 +1508,29 @@ pub(crate) async fn undo(s: &Setup<'_>, yes: bool) -> Result<(), Stop> {
             _ => false,
         };
         if !restored {
-            let (state, message) = match &answered {
-                Ok(reply) if reply.status == 403 => (
-                    State::Refused,
-                    "Tailscale refused to restore the name; nothing was changed.".to_string(),
-                ),
-                _ => (
-                    State::Unresolved,
-                    "whether the old name was restored is not known; LocalPilot keeps its \
+            let halted = match &answered {
+                Ok(reply) if reply.status == 403 => {
+                    Halt::Clean("Tailscale refused to restore the name.".to_string())
+                }
+                _ => Halt::Unknown(
+                    "Whether the old name was restored is not known; LocalPilot keeps its \
                      record. Check the name with `tailscale status`."
                         .to_string(),
                 ),
             };
-            let _ = s.settle_attempt(&mut journal, state, &message);
-            return stop(message);
+            let (state, detail) = match &halted {
+                Halt::Clean(message) => (State::Refused, message.clone()),
+                Halt::Unknown(message) => (State::Unresolved, message.clone()),
+            };
+            let _ = run.settle(state, &detail);
+            return Err(halted);
         }
-        journal.rename = None;
-        if let Err(error) = s.settle_attempt(&mut journal, State::Done, "") {
-            return stop(format!(
-                "The old name setting was restored, but LocalPilot could not record it ({error})."
+        run.journal.rename = None;
+        run.done
+            .push("restored Tailscale's earlier name setting".to_string());
+        if let Err(error) = run.settle(State::Done, "") {
+            return halt(format!(
+                "LocalPilot could not record the restore ({error})."
             ));
         }
         s.console
@@ -1402,6 +1540,47 @@ pub(crate) async fn undo(s: &Setup<'_>, yes: bool) -> Result<(), Stop> {
         "Your config's [remote] advertised_url still names the old address; change or remove \
          it yourself.",
     );
+    Ok(())
+}
+
+// ------------------------------------------------------------- resolve
+
+/// `localpilot remote setup --resolve`: after the user has checked
+/// Tailscale, forget operations whose outcome was never confirmed. Nothing
+/// is adopted as LocalPilot's; confirmed records stay.
+pub(crate) async fn resolve(s: &Setup<'_>, yes: bool) -> Result<(), Stop> {
+    with_journal(s, |run| Box::pin(resolve_inner(run, yes))).await
+}
+
+async fn resolve_inner(run: &mut Run<'_, '_>, yes: bool) -> Step<()> {
+    let s = run.s;
+    if run.journal.pending.is_empty() {
+        s.console.say("There is nothing unconfirmed to resolve.");
+        return Ok(());
+    }
+    for attempt in &run.journal.pending {
+        s.console
+            .say(&format!("Unconfirmed: {}.", attempt.describe()));
+    }
+    s.console.say(
+        "Resolving forgets these after you have checked Tailscale yourself. LocalPilot will not \
+         treat any of them as its own, so undo will not touch what they may have changed.",
+    );
+    if !yes {
+        if !s.interactive {
+            return halt("Without a terminal to ask in, add --yes to confirm.");
+        }
+        if s.console
+            .choose("Forget them?", &[Choice::Proceed, Choice::Cancel])
+            != Choice::Proceed
+        {
+            return halt("Cancelled.");
+        }
+    }
+    run.journal.pending.clear();
+    run.save()
+        .map_err(|error| Halt::Clean(format!("Could not record that ({error}).")))?;
+    s.console.say("Forgotten.");
     Ok(())
 }
 
@@ -1456,12 +1635,6 @@ impl Probes for LocalProbes {
 /// missing-credential refusal (a pre-upgrade check, not a working socket).
 async fn tls_check(origin: &str) -> Result<(), String> {
     const CAP: usize = 64 * 1024;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .http1_only()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|error| error.to_string())?;
     async fn body(mut response: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
         let mut collected = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
@@ -1472,6 +1645,12 @@ async fn tls_check(origin: &str) -> Result<(), String> {
         }
         Ok(collected)
     }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .http1_only()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())?;
     let health = client
         .get(format!("{origin}/healthz"))
         .send()
@@ -1516,30 +1695,31 @@ fn paired_devices() -> Result<usize, String> {
         .count())
 }
 
-fn system_random(buffer: &mut [u8]) {
+fn system_random(buffer: &mut [u8]) -> Result<(), String> {
     use ring::rand::SecureRandom as _;
-    if ring::rand::SystemRandom::new().fill(buffer).is_err() {
-        // Without randomness there is no safe name or tag: an all-zero buffer
-        // still differs from any real tag by its prefix, and the name is then
-        // predictable but harmless.
-        buffer.fill(0);
-    }
+    ring::rand::SystemRandom::new()
+        .fill(buffer)
+        .map_err(|_| "no random bytes available".to_string())
 }
 
 /// `~/.localpilot/remote`, beside the device registry.
 fn state_dir() -> Result<PathBuf, Stop> {
     crate::server_devices::user_devices_dir()
         .and_then(|devices| devices.parent().map(|home| home.join("remote")))
-        .ok_or_else(|| Stop("no home folder to keep setup's record in".to_string()))
+        .ok_or_else(|| Stop("No home folder to keep setup's record in.".to_string()))
+}
+
+/// What `localpilot remote setup` was asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Check,
+    Setup(NameFlag),
+    Undo,
+    Resolve,
 }
 
 /// `localpilot remote setup [...]` from the command line.
-pub(crate) async fn command(
-    check_only: bool,
-    undo_run: bool,
-    flag: NameFlag,
-    yes: bool,
-) -> anyhow::Result<()> {
+pub(crate) async fn command(mode: Mode, yes: bool) -> anyhow::Result<()> {
     use std::io::IsTerminal as _;
     let cwd = std::env::current_dir()?;
     let port = localpilot_config::load(
@@ -1549,7 +1729,7 @@ pub(crate) async fn command(
     .remote
     .port;
     let console = Terminal;
-    if check_only {
+    if mode == Mode::Check {
         return check(&LocalDaemon, &console, port)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"));
@@ -1568,10 +1748,11 @@ pub(crate) async fn command(
         persist: &write_journal,
         random: &system_random,
     };
-    let result = if undo_run {
-        undo(&setup, yes).await
-    } else {
-        run(&setup, flag, yes).await
+    let result = match mode {
+        Mode::Check => Ok(()),
+        Mode::Setup(flag) => run(&setup, flag, yes).await,
+        Mode::Undo => undo(&setup, yes).await,
+        Mode::Resolve => resolve(&setup, yes).await,
     };
     result.map_err(|error| anyhow::anyhow!("{error}"))
 }
@@ -1608,7 +1789,12 @@ mod tests {
         /// Run just before the daemon handles the next POST that is not the
         /// test save (another writer racing setup).
         race: Option<Race>,
+        /// Run just before the daemon handles the test save.
+        on_probe: Option<Race>,
         requests: Vec<String>,
+        /// The body of every POST, in order.
+        bodies: Vec<Value>,
+        version: String,
     }
 
     impl Sim {
@@ -1627,7 +1813,10 @@ mod tests {
                 post_answers: Default::default(),
                 patch_answer: None,
                 race: None,
+                on_probe: None,
                 requests: Vec::new(),
+                bodies: Vec::new(),
+                version: "1.104.5-t73a48057a".into(),
             }
         }
 
@@ -1647,7 +1836,7 @@ mod tests {
                 }
             }
             json!({
-                "Version": "1.104.5-t73a48057a",
+                "Version": self.version,
                 "BackendState": "Running",
                 "Self": {
                     "ID": self.node_id,
@@ -1726,10 +1915,13 @@ mod tests {
         ) -> Result<Reply, ApiFailure> {
             let mut sim = self.sim();
             sim.requests.push(format!("POST {path} {if_match}"));
-            if !if_match.starts_with("lp-probe-") {
-                if let Some(race) = sim.race.take() {
-                    race(&mut sim);
+            sim.bodies.push(body.clone());
+            if if_match.starts_with("lp-probe-") {
+                if let Some(hook) = sim.on_probe.take() {
+                    hook(&mut sim);
                 }
+            } else if let Some(race) = sim.race.take() {
+                race(&mut sim);
             }
             if let Some(answer) = sim.post_answers.pop_front() {
                 return answer.map(|status| reply(status, Vec::new(), None));
@@ -1838,7 +2030,8 @@ mod tests {
         home: tempfile::TempDir,
         interactive: bool,
         /// Fail to record the journal once it reaches this step and state.
-        fail_persist: Option<(Step, State)>,
+        fail_persist: Option<(Op, State)>,
+        random_fails: bool,
     }
 
     impl World {
@@ -1851,6 +2044,7 @@ mod tests {
                 home: tempfile::tempdir().unwrap(),
                 interactive: false,
                 fail_persist: None,
+                random_fails: false,
             }
         }
 
@@ -1872,6 +2066,10 @@ mod tests {
 
         async fn undo(&self, yes: bool) -> Result<(), Stop> {
             self.with(|setup| Box::pin(undo(setup, yes))).await
+        }
+
+        async fn resolve(&self, yes: bool) -> Result<(), Stop> {
+            self.with(|setup| Box::pin(resolve(setup, yes))).await
         }
 
         async fn with<F>(&self, f: F) -> Result<(), Stop>
@@ -1898,11 +2096,16 @@ mod tests {
                 write_journal(dir, journal)
             };
             let counter = std::sync::atomic::AtomicU8::new(0);
+            let fails = self.random_fails;
             let random = move |buffer: &mut [u8]| {
+                if fails {
+                    return Err("no entropy".to_string());
+                }
                 let base = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 for (index, byte) in buffer.iter_mut().enumerate() {
                     *byte = base.wrapping_mul(31).wrapping_add(index as u8 * 7);
                 }
+                Ok(())
             };
             let setup = Setup {
                 daemon: &self.daemon,
@@ -1944,13 +2147,13 @@ mod tests {
         let journal = world.journal();
         assert_eq!(
             journal.serve,
-            Some(ServeOwned {
+            vec![ServeOwned {
                 node_id: "nNODE1CNTRL".into(),
                 tailnet: "user@example.com".into(),
                 name: "davids-desktop.tail1234.ts.net".into(),
                 port: PORT,
                 verified: true,
-            })
+            }]
         );
         assert_eq!(journal.rename, None);
         let config = std::fs::read_to_string(world.config_path()).unwrap();
@@ -2013,7 +2216,7 @@ mod tests {
         assert_eq!(*world.probes.tls_calls.lock().unwrap(), 0);
         // The rename is ours and survives the stop; nothing is served.
         assert!(world.journal().rename.is_some());
-        assert!(world.journal().serve.is_none());
+        assert!(world.journal().serve.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -2055,7 +2258,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_test_save_must_be_refused() {
         for (answer, word) in [
-            (Ok(200), "accepted a save it should have refused"),
+            (Ok(200), "may have been undone"),
             (Ok(403), "refused to let this user"),
             (Ok(500), "does not expect"),
             (
@@ -2069,8 +2272,8 @@ mod tests {
             assert!(error.0.contains(word), "{answer:?}: {error}");
             assert_eq!(world.daemon.sim().writes().len(), 1, "{answer:?}");
             let journal = world.journal();
-            assert!(journal.serve.is_none());
-            assert_eq!(journal.last.unwrap().step, Step::Probe);
+            assert!(journal.serve.is_empty());
+            assert_eq!(journal.last.unwrap().step, Op::Probe);
         }
     }
 
@@ -2088,7 +2291,7 @@ mod tests {
             json!({ "TCP": { "8080": { "HTTP": true } } })
         );
         let journal = world.journal();
-        assert!(journal.serve.is_none());
+        assert!(journal.serve.is_empty());
         assert_eq!(journal.last.unwrap().state, State::Refused);
         assert!(!world.config_path().exists(), "the config is not touched");
     }
@@ -2105,7 +2308,7 @@ mod tests {
             let error = world.go(NameFlag::Keep, true).await.unwrap_err();
             assert!(error.0.contains("not known"), "{error}");
             let journal = world.journal();
-            assert!(journal.serve.is_none(), "nothing is claimed");
+            assert!(journal.serve.is_empty(), "nothing is claimed");
             assert_eq!(journal.last.unwrap().state, State::Unresolved);
             assert!(!world.config_path().exists());
             assert_eq!(*world.probes.tls_calls.lock().unwrap(), 0);
@@ -2123,15 +2326,15 @@ mod tests {
         }
         let error = world.go(NameFlag::Keep, true).await.unwrap_err();
         assert!(error.0.contains("does not claim it"), "{error}");
-        assert!(world.journal().serve.is_none());
+        assert!(world.journal().serve.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
     async fn failing_to_record_an_applied_change_stops_and_says_so() {
         let mut world = World::new();
-        world.fail_persist = Some((Step::Serve, State::Done));
+        world.fail_persist = Some((Op::Serve, State::Done));
         let error = world.go(NameFlag::Keep, true).await.unwrap_err();
-        assert!(error.0.contains("could not record it"), "{error}");
+        assert!(error.0.contains("could not record"), "{error}");
         assert!(!world.config_path().exists(), "nothing else was done");
     }
 
@@ -2149,18 +2352,27 @@ mod tests {
             let journal = world.journal();
             assert!(journal.rename.is_none());
             let last = journal.last.unwrap();
-            assert_eq!((last.step, last.state), (Step::Rename, State::Unresolved));
+            assert_eq!((last.step, last.state), (Op::Rename, State::Unresolved));
             assert_eq!(last.old_hostname.as_deref(), Some(""));
             // Nothing is served after it.
             assert_eq!(world.daemon.sim().writes().len(), 2);
-            // A later run will not rename over it.
-            let again = world.go(NameFlag::Random, true).await.unwrap_err();
-            assert!(again.0.contains("no confirmed result"), "{again}");
+            // Nothing more happens, of any kind, until the user resolves it.
+            for flag in [NameFlag::Random, NameFlag::Keep] {
+                let again = world.go(flag, true).await.unwrap_err();
+                assert!(again.0.contains("--resolve"), "{again}");
+            }
+            let again = world.undo(true).await.unwrap_err();
+            assert!(again.0.contains("did not confirm"), "{again}");
+            assert_eq!(world.daemon.sim().writes().len(), 2);
+            // The record keeps the names.
+            let pending = world.journal().pending;
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].old_hostname.as_deref(), Some(""));
         }
         let world = World::new();
         world.daemon.sim().patch_answer = Some(Ok(403));
         let error = world.go(NameFlag::Random, true).await.unwrap_err();
-        assert!(error.0.contains("nothing was changed"), "{error}");
+        assert!(error.0.contains("Nothing was changed"), "{error}");
         assert_eq!(world.journal().last.unwrap().state, State::Refused);
     }
 
@@ -2223,7 +2435,7 @@ mod tests {
                 "{listener:?} {origin:?}"
             );
             assert_eq!(*world.probes.tls_calls.lock().unwrap(), 0);
-            assert!(!world.journal().serve.unwrap().verified);
+            assert!(!world.journal().serve[0].verified);
         }
     }
 
@@ -2239,7 +2451,7 @@ mod tests {
             world.daemon.sim().config,
             json!({ "TCP": { "8080": { "HTTP": true } } })
         );
-        assert!(world.journal().serve.is_none());
+        assert!(world.journal().serve.is_empty());
 
         let world = World::new();
         world.go(NameFlag::Random, true).await.expect("setup");
@@ -2276,7 +2488,7 @@ mod tests {
         );
         // Only the test save was sent; the record is kept.
         assert_eq!(world.daemon.sim().writes().len(), before + 1);
-        assert!(world.journal().serve.is_some());
+        assert!(!world.journal().serve.is_empty());
 
         // A name changed after setup is not restored.
         let world = World::new();
@@ -2292,8 +2504,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_journal_it_does_not_understand_refuses_before_any_request() {
         for text in [
-            r#"{"version":2}"#,
-            r#"{"version":1,"mystery":true}"#,
+            r#"{"version":1}"#,
+            r#"{"version":3}"#,
+            r#"{"version":2,"mystery":true}"#,
             "not json",
         ] {
             let world = World::new();
@@ -2313,6 +2526,240 @@ mod tests {
         let sim = world.daemon.sim();
         assert!(!sim.requests.is_empty());
         assert!(sim.writes().is_empty(), "{:?}", sim.requests);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_switch_of_node_after_consent_stops_before_any_write() {
+        // The same name and settings, signed in as another node.
+        let mut world = World::new();
+        world.interactive = true;
+        world.console = FakeConsole::answering(&[Choice::RandomName]);
+        let daemon = &world.daemon;
+        let switch = || daemon.sim().node_id = "nOTHER2CNTRL".into();
+        // Switch while the prompt is open: the console answers, then the
+        // node changes before setup reads again.
+        struct Switching<'a, F: Fn() + Sync + Send> {
+            inner: &'a FakeConsole,
+            then: F,
+        }
+        impl<F: Fn() + Sync + Send> Console for Switching<'_, F> {
+            fn say(&self, line: &str) {
+                self.inner.say(line);
+            }
+            fn choose(&self, prompt: &str, choices: &[Choice]) -> Choice {
+                let answer = self.inner.choose(prompt, choices);
+                (self.then)();
+                answer
+            }
+        }
+        let console = Switching {
+            inner: &world.console,
+            then: switch,
+        };
+        let devices = || Ok(0);
+        let random = |buffer: &mut [u8]| {
+            buffer
+                .iter_mut()
+                .enumerate()
+                .for_each(|(i, b)| *b = i as u8);
+            Ok(())
+        };
+        let setup = Setup {
+            daemon: &world.daemon,
+            probes: &world.probes,
+            console: &console,
+            devices: &devices,
+            state_dir: world.state_dir(),
+            config_path: Some(world.config_path()),
+            port: PORT,
+            interactive: true,
+            settle_within: SETTLE_WITHIN,
+            persist: &write_journal,
+            random: &random,
+        };
+        let error = run(&setup, NameFlag::Ask, false).await.unwrap_err();
+        assert!(error.0.contains("another node"), "{error}");
+        assert!(world.daemon.sim().writes().is_empty());
+
+        // Switch after the test save, before the rename: no PATCH.
+        let world = World::new();
+        world.daemon.sim().on_probe = Some(Box::new(|sim: &mut Sim| {
+            sim.node_id = "nOTHER2CNTRL".into();
+        }));
+        let error = world.go(NameFlag::Random, true).await.unwrap_err();
+        assert!(error.0.contains("another node"), "{error}");
+        let writes = world.daemon.sim().writes();
+        assert_eq!(writes.len(), 1, "only the test save: {writes:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn undo_writes_only_on_a_supported_understood_tagged_install() {
+        for spoil in [
+            |sim: &mut Sim| sim.version = "1.104.5-dev20261103-t73a48057a".into(),
+            |sim: &mut Sim| {
+                sim.config["Mystery"] = json!(1);
+            },
+            |sim: &mut Sim| sim.node_id = "nOTHER2CNTRL".into(),
+        ] {
+            let world = World::new();
+            world.go(NameFlag::Keep, true).await.expect("setup");
+            let before = world.daemon.sim().writes().len();
+            spoil(&mut world.daemon.sim());
+            assert!(world.undo(true).await.is_err());
+            assert_eq!(world.daemon.sim().writes().len(), before, "no POST at all");
+            assert!(!world.journal().serve.is_empty(), "the record is kept");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_origin_that_becomes_free_is_written_only_after_a_test_save() {
+        let world = World::new();
+        // At the start the origin is someone else's identical entry...
+        world.daemon.sim().config = ours("davids-desktop.tail1234.ts.net");
+        // ...which is gone by the time setup reads again.
+        let mut world = world;
+        world.interactive = true;
+        world.console = FakeConsole::answering(&[Choice::Proceed]);
+        let console = Removing {
+            inner: &world.console,
+            daemon: &world.daemon,
+        };
+        struct Removing<'a> {
+            inner: &'a FakeConsole,
+            daemon: &'a Fake,
+        }
+        impl Console for Removing<'_> {
+            fn say(&self, line: &str) {
+                self.inner.say(line);
+            }
+            fn choose(&self, prompt: &str, choices: &[Choice]) -> Choice {
+                let mut sim = self.daemon.sim();
+                sim.config = json!({ "TCP": { "8080": { "HTTP": true } } });
+                sim.generation += 1;
+                drop(sim);
+                self.inner.choose(prompt, choices)
+            }
+        }
+        let devices = || Ok(0);
+        let random = |buffer: &mut [u8]| {
+            buffer
+                .iter_mut()
+                .enumerate()
+                .for_each(|(i, b)| *b = i as u8);
+            Ok(())
+        };
+        let setup = Setup {
+            daemon: &world.daemon,
+            probes: &world.probes,
+            console: &console,
+            devices: &devices,
+            state_dir: world.state_dir(),
+            config_path: Some(world.config_path()),
+            port: PORT,
+            interactive: true,
+            settle_within: SETTLE_WITHIN,
+            persist: &write_journal,
+            random: &random,
+        };
+        run(&setup, NameFlag::Keep, false).await.expect("setup");
+        let sim = world.daemon.sim();
+        let writes = sim.writes();
+        assert!(
+            writes[0].starts_with("POST /localapi/v0/serve-config lp-probe-"),
+            "{writes:?}"
+        );
+        // The test save carried the settings as they were after the prompt,
+        // not the ones seen before it.
+        assert_eq!(
+            sim.bodies[0],
+            json!({ "TCP": { "8080": { "HTTP": true } } })
+        );
+        assert!(
+            writes[1].starts_with("POST /localapi/v0/serve-config e"),
+            "{writes:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resolving_forgets_without_adopting() {
+        let world = World::new();
+        world.daemon.sim().patch_answer = Some(Err(ApiFailure::Interrupted("timed out".into())));
+        assert!(world.go(NameFlag::Random, true).await.is_err());
+        world.resolve(true).await.expect("resolve");
+        let journal = world.journal();
+        assert!(journal.pending.is_empty());
+        assert!(journal.rename.is_none(), "nothing is adopted");
+        // Setup can run again afterwards.
+        world.go(NameFlag::Keep, true).await.expect("setup");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_earlier_route_stays_recorded_when_the_name_moves() {
+        let world = World::new();
+        world.go(NameFlag::Keep, true).await.expect("setup");
+        // The computer is renamed outside LocalPilot; its old route stays,
+        // and port 443 is shared by every name, so no second one is added.
+        {
+            let mut sim = world.daemon.sim();
+            sim.name = "renamed-pc".into();
+            sim.certs.push("renamed-pc".into());
+        }
+        let error = world.go(NameFlag::Keep, true).await.unwrap_err();
+        assert!(
+            error.0.contains("port 443 already has a Serve setting"),
+            "{error}"
+        );
+        let names: Vec<String> = world
+            .journal()
+            .serve
+            .iter()
+            .map(|o| o.name.clone())
+            .collect();
+        assert_eq!(names, vec!["davids-desktop.tail1234.ts.net".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_after_a_change_says_what_was_done() {
+        let world = World::new();
+        std::fs::create_dir_all(world.config_path().parent().unwrap()).unwrap();
+        std::fs::write(world.config_path(), "model = [unclosed\n").unwrap();
+        let error = world.go(NameFlag::Keep, true).await.unwrap_err();
+        assert!(
+            error.0.contains("Done before this: Tailscale now serves"),
+            "{error}"
+        );
+        assert!(!error.0.contains("Nothing was changed"), "{error}");
+        // And the consent stated the test save's limit.
+        assert!(world
+            .console
+            .text()
+            .contains("could undo a change made elsewhere"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_random_bytes_nothing_is_named_or_sent() {
+        let mut world = World::new();
+        world.random_fails = true;
+        let error = world.go(NameFlag::Random, true).await.unwrap_err();
+        assert!(error.0.contains("random source failed"), "{error}");
+        assert!(world.daemon.sim().writes().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_journal_is_private_even_over_a_broad_leftover() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("remote");
+        std::fs::create_dir_all(&dir).unwrap();
+        let leftover = dir.join("setup.json.tmp");
+        std::fs::write(&leftover, "x").unwrap();
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o666)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        write_journal(&dir, &Journal::default()).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&journal_path(&dir)), 0o600);
+        assert_eq!(mode(&dir), 0o700);
     }
 
     #[test]

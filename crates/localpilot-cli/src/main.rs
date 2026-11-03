@@ -923,7 +923,7 @@ enum RemoteAction {
     /// certificate publishes the name.
     Setup {
         /// Only check and report; change nothing.
-        #[arg(long, conflicts_with_all = ["undo", "random_name", "keep_name", "yes"])]
+        #[arg(long, conflicts_with_all = ["undo", "resolve", "random_name", "keep_name", "yes"])]
         check: bool,
         /// Give this computer a random Tailscale name first.
         #[arg(long, conflicts_with = "keep_name")]
@@ -935,8 +935,12 @@ enum RemoteAction {
         #[arg(long)]
         yes: bool,
         /// Remove what setup added, each part only while it is unchanged.
-        #[arg(long, conflicts_with_all = ["random_name", "keep_name"])]
+        #[arg(long, conflicts_with_all = ["random_name", "keep_name", "resolve"])]
         undo: bool,
+        /// After checking Tailscale yourself, forget operations an earlier run
+        /// could not confirm (nothing is adopted as LocalPilot's).
+        #[arg(long, conflicts_with_all = ["random_name", "keep_name"])]
+        resolve: bool,
     },
 }
 
@@ -2117,15 +2121,23 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 keep_name,
                 yes,
                 undo,
+                resolve,
             } => {
-                let flag = if random_name {
-                    remote_setup::NameFlag::Random
+                use remote_setup::{Mode, NameFlag};
+                let mode = if check {
+                    Mode::Check
+                } else if undo {
+                    Mode::Undo
+                } else if resolve {
+                    Mode::Resolve
+                } else if random_name {
+                    Mode::Setup(NameFlag::Random)
                 } else if keep_name {
-                    remote_setup::NameFlag::Keep
+                    Mode::Setup(NameFlag::Keep)
                 } else {
-                    remote_setup::NameFlag::Ask
+                    Mode::Setup(NameFlag::Ask)
                 };
-                remote_setup::command(check, undo, flag, yes).await?;
+                remote_setup::command(mode, yes).await?;
             }
         },
 

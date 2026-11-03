@@ -1700,20 +1700,44 @@ where
     }
 }
 
-/// The status code and body of a raw reply, when it is a well-formed
-/// HTTP/1.1 response whose body is exactly its declared length.
+/// The status code and body of a raw reply, when it is unambiguously framed:
+/// an `HTTP/1.1 <3 digits> <reason>` status line, header lines that are each
+/// a token, a colon and a value, exactly one decimal `Content-Length` equal to
+/// the body's length, and no `Transfer-Encoding`. Anything else is not an
+/// answer the gateway gives.
 fn status_and_body(raw: &[u8]) -> Option<(u16, &[u8])> {
     let split = raw.windows(4).position(|window| window == b"\r\n\r\n")?;
     let head = std::str::from_utf8(&raw[..split]).ok()?;
     let body = &raw[split + 4..];
     let mut lines = head.split("\r\n");
     let status = lines.next()?.strip_prefix("HTTP/1.1 ")?;
-    let code: u16 = status.split(' ').next()?.parse().ok()?;
-    let length = lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())?;
-    (length == body.len()).then_some((code, body))
+    let (code, reason) = status.split_once(' ')?;
+    if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) || reason.contains('\n') {
+        return None;
+    }
+    let code: u16 = code.parse().ok()?;
+    let mut length = None;
+    for line in lines {
+        let (name, value) = line.split_once(':')?;
+        let token = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+        if !token {
+            return None;
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return None;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let value = value.trim();
+            if length.is_some() || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            length = Some(value.parse::<usize>().ok()?);
+        }
+    }
+    (length? == body.len()).then_some((code, body))
 }
 
 /// What setup found listening on the gateway port.
@@ -3036,6 +3060,16 @@ mod tests {
             classify_health(&reply(200, "hello")),
             Listener::Unidentified(_)
         ));
+        let health = crate::remote_status::health_body();
+        let doubled = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {0}\r\nContent-Length: 1\r\n\r\n{1}",
+            health.len(),
+            health
+        );
+        assert!(matches!(
+            classify_health(doubled.as_bytes()),
+            Listener::Unidentified(_)
+        ));
         assert!(matches!(
             classify_health(&reply(421, "unknown host")),
             Listener::Unidentified(_)
@@ -3049,6 +3083,12 @@ mod tests {
             // No length at all, or not HTTP/1.1.
             b"HTTP/1.1 401 X\r\n\r\nthis device is not paired".to_vec(),
             b"HTTP/1.0 401 X\r\nContent-Length: 25\r\n\r\nthis device is not paired".to_vec(),
+            // Ambiguous framing.
+            b"HTTP/1.1 401 X\r\nContent-Length: 25\r\nContent-Length: 25\r\n\r\nthis device is not paired".to_vec(),
+            b"HTTP/1.1 401 X\r\nTransfer-Encoding: chunked\r\nContent-Length: 25\r\n\r\nthis device is not paired".to_vec(),
+            b"HTTP/1.1 401 X\r\nContent-Length: +25\r\n\r\nthis device is not paired".to_vec(),
+            b"HTTP/1.1 401 X\r\nbroken header\r\nContent-Length: 25\r\n\r\nthis device is not paired".to_vec(),
+            b"HTTP/1.1 4011 X\r\nContent-Length: 25\r\n\r\nthis device is not paired".to_vec(),
             Vec::new(),
         ] {
             assert!(

@@ -60,8 +60,13 @@ empty tag overwrites unconditionally.
      the proposed name. It is refused when anything uses the current name at
      any port, and when the paired-device list cannot be read. It settles only
      when this same node shows the new name with its certificate.
-   - **Ownership.** The journal (`~/.localpilot/remote/setup.json`) keeps
-     confirmed ownership apart from the newest attempt. A change counts as
+   - **Fresh reads.** After consent, every write follows a fresh reading
+     that must show the same node and tailnet, a supported release, settings
+     setup understands and a version tag.
+   - **Ownership.** The journal (`~/.localpilot/remote/setup.json`, owner-only)
+     keeps confirmed ownership, every unconfirmed operation and the newest
+     result apart. An unconfirmed operation blocks further changes until the
+     user runs `--resolve` after checking Tailscale. A change counts as
      LocalPilot's only after the daemon accepted it and a fresh read shows it
      on the same node. Unknown outcomes are reported, never adopted, and never
      undone automatically.

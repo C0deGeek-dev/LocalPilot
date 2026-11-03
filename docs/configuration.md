@@ -947,6 +947,7 @@ localpilot remote setup                # asks, then sets up
 localpilot remote setup --random-name --yes   # without a prompt
 localpilot remote setup --keep-name --yes
 localpilot remote setup --undo [--yes]
+localpilot remote setup --resolve [--yes]   # after checking an unconfirmed result yourself
 ```
 
 What a run does, re-reading Tailscale before each step and stopping at the
@@ -962,17 +963,21 @@ first thing it cannot confirm:
    name permanently in public Certificate Transparency logs. Because that name
    usually is your computer's host name, setup offers a random one instead,
    shaped like a default Windows computer name (for example
-   `desktop-k7f3q2m`), so the logs show nothing about you or about LocalPilot.
+   `desktop-k7f3q2m`), so the machine part of the name says nothing about you
+   or about LocalPilot. The tailnet part stays as it is.
    Renaming changes the name
    for every device and app in your tailnet that uses it. Already paired
    phones must pair again. Names in earlier certificates cannot be removed.
    Cancel is the default. Without a terminal, setup needs `--yes` and either
    `--random-name` or `--keep-name`.
-3. **A test save.** Setup sends Tailscale your settings exactly as read with a
-   deliberately wrong version tag. Tailscale must refuse it, which shows it
-   will not save over settings that changed in between. If it accepts it,
-   setup stops: the save changed nothing, because it was your settings as
-   they were, but this install cannot be changed safely.
+3. **A test save.** Right after re-reading, setup sends Tailscale your settings
+   exactly as just read with a deliberately wrong version tag. Tailscale must
+   refuse it, which shows it will not save over settings that changed in
+   between. If it accepts it, setup stops: this install cannot be changed
+   safely, and that save wrote back your settings as they were just read,
+   which could have undone a change made elsewhere at that same moment. Setup
+   says this before sending the test save, and again if it happens. Undo
+   sends the same test save first.
 4. **The rename**, if you chose it. Setup waits up to 30 seconds for Tailscale
    to show the new name with its certificate. Tailscale cannot make a name
    change conditional, so a change made to the name elsewhere at the same
@@ -997,10 +1002,17 @@ first thing it cannot confirm:
    WebSocket request without a credential, which must be refused as unpaired.
    Success reads "Verified from this computer; the phone is not checked yet."
 
-Setup records what it confirmed in `~/.localpilot/remote/setup.json`. A
+Setup records what it confirmed in `~/.localpilot/remote/setup.json`,
+readable only by you. Every write follows a fresh reading that must show the
+same Tailscale node and tailnet, a supported release, settings setup
+understands and a version tag; anything else stops it before the write. A
 change it could not confirm (an answer lost on the way, for example) is
-reported and never treated as LocalPilot's, so undo never touches it. Run
-setup again any time: it keeps what it already set up.
+reported, kept in the record as unconfirmed and never treated as
+LocalPilot's, so undo never touches it. While such a result is open, setup
+and undo refuse to change anything. Check Tailscale yourself, then run
+`localpilot remote setup --resolve` to clear it. When a run stops after it
+has changed something, the message says what was done. Run setup again any
+time: it keeps what it already set up.
 
 `--undo` first removes the phone address, only while it is still exactly as
 setup made it. It then restores the earlier name setting, only while nothing

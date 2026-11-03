@@ -15,7 +15,8 @@ is SemVer-stable; the configuration schema stability policy is in
   - It sends a test save that Tailscale must refuse before any change, and
     only accepts changes on settings that have not changed since it read them.
   - It records only what it confirmed. `--undo` removes it, each part only
-    while unchanged.
+    while unchanged. A result it could not confirm blocks further changes
+    until you check Tailscale and run `--resolve`.
   - `--check` reports what it would do and changes nothing. `--random-name`,
     `--keep-name` and `--yes` work without a prompt.
   - The gateway answers `GET /identify` with its version, only for requests

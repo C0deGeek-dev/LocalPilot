@@ -720,6 +720,16 @@ pub(crate) fn origin_plan(config: &Value, name: &str, port: u16) -> Result<Origi
     Ok(OriginPlan::Free(Value::Object(top)))
 }
 
+/// Whether every setting in `config` is one setup understands. Only the
+/// shape is judged: an empty name matches no origin, and any "in use" answer
+/// for it is not a schema failure.
+pub(crate) fn schema_ok(config: &Value) -> Result<(), Refusal> {
+    match origin_plan(config, "", 0) {
+        Err(refusal @ Refusal::Malformed(_)) => Err(refusal),
+        _ => Ok(()),
+    }
+}
+
 /// The phone origin's two entries: port 443 as HTTPS, and the root of the
 /// origin forwarded to the gateway.
 fn our_entries(port: u16) -> (Value, Value) {
