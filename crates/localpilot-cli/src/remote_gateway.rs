@@ -1569,10 +1569,30 @@ fn user_discovery() -> anyhow::Result<Discovery> {
 /// Windows does for a closed port) is "not running"; a connection that does
 /// not give the gateway's answer is something else.
 async fn probe(port: u16, host: &str) -> GatewayHealth {
+    probe_within(port, host, PROBE_CONNECT, PROBE_EXCHANGE).await
+}
+
+/// How long the gateway check may wait to connect, then for its answer. A
+/// refused loopback connection can take about two seconds to be reported on
+/// Windows, so connecting gets three before the answer is called unknown.
+const PROBE_CONNECT: Duration = Duration::from_secs(3);
+const PROBE_EXCHANGE: Duration = Duration::from_secs(2);
+
+async fn probe_within(
+    port: u16,
+    host: &str,
+    connect_within: Duration,
+    exchange_within: Duration,
+) -> GatewayHealth {
     use tokio::io::AsyncReadExt as _;
     let connect = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port));
-    let Ok(Ok(mut socket)) = tokio::time::timeout(Duration::from_secs(3), connect).await else {
-        return GatewayHealth::NotRunning;
+    let mut socket = match tokio::time::timeout(connect_within, connect).await {
+        Ok(Ok(socket)) => socket,
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            return GatewayHealth::NotRunning;
+        }
+        Ok(Err(error)) => return GatewayHealth::CheckFailed(error.to_string()),
+        Err(_) => return GatewayHealth::TimedOut,
     };
     let exchange = async {
         socket
@@ -1585,14 +1605,20 @@ async fn probe(port: u16, host: &str) -> GatewayHealth {
         socket.read_to_end(&mut raw).await?;
         Ok::<_, std::io::Error>(String::from_utf8_lossy(&raw).into_owned())
     };
-    match tokio::time::timeout(Duration::from_secs(2), exchange).await {
+    match tokio::time::timeout(exchange_within, exchange).await {
         Ok(Ok(text))
             if text.starts_with("HTTP/1.1 200")
                 && text.split_once("\r\n\r\n").map(|(_, body)| body) == Some(&health_body()) =>
         {
             GatewayHealth::Running
         }
-        _ => GatewayHealth::Unexpected,
+        Ok(Ok(text)) if text.is_empty() => GatewayHealth::CheckFailed(
+            "the port closed the connection without answering".to_string(),
+        ),
+        // An answer, but not the gateway's.
+        Ok(Ok(_)) => GatewayHealth::Unexpected,
+        Ok(Err(error)) => GatewayHealth::CheckFailed(error.to_string()),
+        Err(_) => GatewayHealth::TimedOut,
     }
 }
 
@@ -2644,5 +2670,72 @@ mod tests {
         ] {
             assert!(socket_query(bad.as_deref()).is_none(), "{bad:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_gateway_check_says_only_what_it_found() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Nothing listens: refused.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        assert_eq!(
+            probe_within(port, "h", PROBE_CONNECT, Duration::from_secs(1)).await,
+            GatewayHealth::NotRunning
+        );
+        let serve = |reply: Option<&'static str>, stall: bool| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 256];
+                let _ = socket.read(&mut request).await;
+                if stall {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                if let Some(reply) = reply {
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                }
+            });
+            port
+        };
+        // Accepts and never answers: unknown (timed out), not "something else".
+        let port = serve(None, true).await;
+        assert_eq!(
+            probe_within(
+                port,
+                "h",
+                Duration::from_secs(1),
+                Duration::from_millis(300)
+            )
+            .await,
+            GatewayHealth::TimedOut
+        );
+        // Closes without a word: the check failed, not proof of anything.
+        let port = serve(None, false).await;
+        assert!(matches!(
+            probe_within(port, "h", Duration::from_secs(1), Duration::from_secs(1)).await,
+            GatewayHealth::CheckFailed(_)
+        ));
+        // A valid HTTP answer that is not the gateway's: something else.
+        let port = serve(
+            Some("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            probe_within(port, "h", Duration::from_secs(1), Duration::from_secs(1)).await,
+            GatewayHealth::Unexpected
+        );
+        // The gateway's own answer.
+        let body = format!(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}",
+            health_body()
+        );
+        let port = serve(Some(Box::leak(body.into_boxed_str())), false).await;
+        assert_eq!(
+            probe_within(port, "h", Duration::from_secs(1), Duration::from_secs(1)).await,
+            GatewayHealth::Running
+        );
     }
 }

@@ -25025,4 +25025,333 @@ last_seen = "2026-08-10"
         host.share.stop();
         bundle.runtime.close();
     }
+
+    // ---- attendance and the /remote snapshot --------------------------------
+
+    fn typed(text: &str) -> Vec<Event> {
+        let mut events: Vec<Event> = text.chars().map(|c| key(KeyCode::Char(c))).collect();
+        events.push(key(KeyCode::Enter));
+        events
+    }
+
+    #[tokio::test]
+    async fn a_stalled_remote_status_never_holds_up_the_terminal_and_a_late_one_is_dropped() {
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        // The first probe never finishes on its own; the second answers.
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe: remote_host::StatusProbe = {
+            let calls = calls.clone();
+            std::sync::Arc::new(move || {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    if call == 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    "  second probe".to_string()
+                })
+            })
+        };
+        let host = {
+            let inner = std::rc::Rc::try_unwrap(host).ok().expect("one owner");
+            std::rc::Rc::new(inner.with_probe(probe))
+        };
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        let events = queued(vec![]);
+        let mut io = characterization_io(events.clone(), cell(0), cell(0), None);
+        let script = {
+            let events = events.clone();
+            async move {
+                // `/remote` while a turn runs: its probe stalls.
+                events.borrow_mut().extend(typed("/remote"));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                // A permission ask arrives and is answered from the keyboard
+                // while that probe is still stalled.
+                let (reply, answer) = oneshot::channel();
+                approvals.send(approval(reply)).expect("queue approval");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                events.borrow_mut().push_back(key(KeyCode::Char('y')));
+                let answered = tokio::time::timeout(Duration::from_secs(1), answer)
+                    .await
+                    .expect("answered while the probe stalls");
+                // A second `/remote` replaces the first; the first one's late
+                // timeout must not replace the second's report.
+                events.borrow_mut().extend(typed("/remote"));
+                tokio::time::sleep(Duration::from_millis(2600)).await;
+                answered
+            }
+        };
+        let outcome = std::cell::Cell::new(None);
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut stages,
+            script,
+            |_app: &mut AppModel, result| outcome.set(Some(result)),
+        )
+        .await
+        .expect("turn loop completes");
+        assert_eq!(outcome.take().expect("the script ran"), Ok(true));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let (title, lines) = app.report().expect("the second snapshot is shown");
+        assert!(title.contains("snapshot at"), "{title}");
+        assert!(
+            lines.iter().any(|line| line.contains("second probe")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("Could not check")),
+            "the first, late result was dropped: {lines:?}"
+        );
+        assert!(timeline_has_notice(&app, "Checking remote status..."));
+    }
+
+    #[tokio::test]
+    async fn the_status_line_and_the_exit_question_say_how_many_devices_are_attached() {
+        use localpilot_rpc::DeviceStanding;
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let mut server = shared_over_fake(&dials, &host).await;
+        let mut app = app();
+        remote_host::show_notices(&mut app, &host);
+        assert_eq!(app.remote_label(), Some("shared · devices unknown"));
+        server
+            .devices(
+                1,
+                true,
+                (2, 0),
+                Some(vec![
+                    crate::remote_share::test_support::device("a", DeviceStanding::Active),
+                    crate::remote_share::test_support::device("b", DeviceStanding::Active),
+                ]),
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.share.devices().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("attendance arrived");
+        remote_host::show_notices(&mut app, &host);
+        assert_eq!(app.remote_label(), Some("shared · 2 devices"));
+        assert!(!remote_host::request_exit(&mut app, &host, "Idle"));
+        let body = &app.choice().expect("asked").body;
+        assert!(
+            body.iter()
+                .any(|line| line == "Devices attached: 2 devices."),
+            "{body:?}"
+        );
+    }
+
+    /// A status probe that never finishes and says when it was stopped.
+    fn held_probe(
+        stopped: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> remote_host::StatusProbe {
+        struct Stopped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Stopped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let stopped = stopped.clone();
+        std::sync::Arc::new(move || {
+            let guard = Stopped(stopped.clone());
+            Box::pin(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+                String::new()
+            })
+        })
+    }
+
+    /// Run a turn whose script types `/remote` (its check never finishes),
+    /// then `then`, and reports whether the check was stopped.
+    async fn status_view_then(then: Vec<Event>) -> (AppModel, bool) {
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = {
+            let inner = std::rc::Rc::try_unwrap(sharing_host(&dials, &level))
+                .ok()
+                .expect("one owner");
+            std::rc::Rc::new(inner.with_probe(held_probe(&stopped)))
+        };
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        let events = queued(vec![]);
+        let mut io = characterization_io(events.clone(), cell(0), cell(0), None);
+        let script = {
+            let events = events.clone();
+            let stopped = stopped.clone();
+            async move {
+                events.borrow_mut().extend(typed("/remote"));
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                assert!(
+                    !stopped.load(std::sync::atomic::Ordering::SeqCst),
+                    "checking"
+                );
+                events.borrow_mut().extend(then);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        };
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut stages,
+            script,
+            |_app: &mut AppModel, ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+        let stopped = stopped.load(std::sync::atomic::Ordering::SeqCst);
+        (app, stopped)
+    }
+
+    #[tokio::test]
+    async fn closing_the_remote_view_before_its_check_finishes_stops_the_check() {
+        let (app, stopped) = status_view_then(vec![key(KeyCode::Esc)]).await;
+        assert!(app.report().is_none(), "the view stays closed");
+        assert!(stopped, "its check was stopped");
+    }
+
+    #[tokio::test]
+    async fn a_session_change_stops_the_remote_views_check() {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = std::rc::Rc::try_unwrap(sharing_host(&dials, &level))
+            .ok()
+            .expect("one owner")
+            .with_probe(held_probe(&stopped));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+        let generation = app.report_generation();
+        assert!(generation.is_some(), "the checking view is open");
+        tokio::time::sleep(Duration::from_millis(30)).await; // the check is running
+        host.share.track(crate::remote_share::Tracked {
+            session: localpilot_core::SessionId::new(),
+            claim: Some((1, "me".to_string())),
+            gate: localpilot_core::admission::AdmissionGate::default(),
+        });
+        let mut queue = VecDeque::new();
+        remote_host::busy_tick(
+            &mut app,
+            &host,
+            &mut queue,
+            &CancellationToken::new(),
+            None,
+            &VecDeque::new(),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            stopped.load(std::sync::atomic::Ordering::SeqCst),
+            "its check was stopped"
+        );
+        assert_eq!(
+            app.report_generation(),
+            generation,
+            "the view was not refilled"
+        );
+        assert!(app.report().unwrap().0.contains("checking"));
+    }
+
+    #[tokio::test]
+    async fn another_view_over_the_remote_view_stops_its_check_and_is_never_replaced() {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = std::rc::Rc::try_unwrap(sharing_host(&dials, &level))
+            .ok()
+            .expect("one owner")
+            .with_probe(held_probe(&stopped));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+        assert!(
+            app.report_generation().is_some(),
+            "the checking view is open"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await; // the check is running
+                                                             // Help takes the screen; then another report does.
+        app.open_help();
+        let mut queue = VecDeque::new();
+        remote_host::busy_tick(
+            &mut app,
+            &host,
+            &mut queue,
+            &CancellationToken::new(),
+            None,
+            &VecDeque::new(),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            stopped.load(std::sync::atomic::Ordering::SeqCst),
+            "its check was stopped"
+        );
+        app.open_report("Other".to_string(), vec!["other".to_string()]);
+        remote_host::busy_tick(
+            &mut app,
+            &host,
+            &mut queue,
+            &CancellationToken::new(),
+            None,
+            &VecDeque::new(),
+        );
+        assert_eq!(
+            app.report().map(|(title, _)| title),
+            Some("Other"),
+            "never replaced"
+        );
+    }
 }

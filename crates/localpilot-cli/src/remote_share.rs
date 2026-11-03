@@ -86,6 +86,61 @@ pub(crate) enum ShareNotice {
     },
     /// Sharing ended on its own; the text says why.
     Ended(String),
+    /// The share's first attendance: nobody attached yet.
+    NoDevicesYet,
+    Attached {
+        name: String,
+        scope: Option<localpilot_rpc::Scope>,
+    },
+    Detached {
+        name: String,
+    },
+    /// An attached device is no longer allowed (it is being disconnected).
+    NotAllowed {
+        name: String,
+        standing: localpilot_rpc::DeviceStanding,
+    },
+    /// More arrivals and departures than one update shows one by one.
+    Summary {
+        attached: usize,
+        detached: usize,
+    },
+    /// Devices that attached and left again between two updates (both shown
+    /// by the counts and absent from both lists).
+    CameAndWent(u64),
+    /// Arrivals and departures counted while the list could not say which
+    /// devices (one of the two lists is unknown).
+    Activity {
+        arrived: u64,
+        left: u64,
+    },
+    /// Notices dropped because too many were waiting to be shown.
+    Overflow(usize),
+}
+
+/// Per-device notices one attendance update shows; beyond that, a summary.
+const DEVICE_NOTICES: usize = 3;
+/// Notices kept until shown; beyond that they are counted, not kept.
+const NOTICES_KEPT: usize = 16;
+
+/// Keep `notice` for the terminal, or count it once too many are waiting.
+fn push_notice(notices: &mut Vec<ShareNotice>, notice: ShareNotice) {
+    if notices.len() + 1 < NOTICES_KEPT {
+        notices.push(notice);
+        return;
+    }
+    match notices.last_mut() {
+        Some(ShareNotice::Overflow(dropped)) => *dropped += 1,
+        _ => notices.push(ShareNotice::Overflow(1)),
+    }
+}
+
+/// A device's name for a notice.
+fn label(device: &localpilot_rpc::AttendedDevice) -> String {
+    device
+        .name
+        .clone()
+        .unwrap_or_else(|| "a paired device".to_string())
 }
 
 /// A connection to the server, of whatever transport.
@@ -134,6 +189,9 @@ struct Inner {
     current: Option<Current>,
     tracked: Option<Tracked>,
     notices: Vec<ShareNotice>,
+    /// Who is attached, as the current connection's last accepted update
+    /// says; `None` while unknown (not connected, or no update yet).
+    attendance: Option<crate::relay_host::Telemetry>,
     /// The task of the share that ended last, for a bounded wait at exit.
     ending: Option<tokio::task::JoinHandle<()>>,
 }
@@ -213,6 +271,7 @@ impl RemoteShare {
                 current: None,
                 tracked: None,
                 notices: Vec::new(),
+                attendance: None,
                 ending: None,
             })),
             requests,
@@ -268,6 +327,19 @@ impl RemoteShare {
     /// Whether sharing is on (connecting, shared or reconnecting).
     pub(crate) fn active(&self) -> bool {
         self.inner().current.is_some()
+    }
+
+    /// The session the terminal runs now, as last tracked.
+    pub(crate) fn tracked_session(&self) -> Option<SessionId> {
+        self.inner().tracked.as_ref().map(|tracked| tracked.session)
+    }
+
+    /// The devices attached now, or `None` when that is not known.
+    pub(crate) fn devices(&self) -> Option<Vec<localpilot_rpc::AttendedDevice>> {
+        self.inner()
+            .attendance
+            .as_ref()
+            .and_then(|telemetry| telemetry.devices.clone())
     }
 
     /// Notices the relay tasks reported since the last call.
@@ -385,6 +457,7 @@ impl RemoteShare {
 
 /// Clear the share's fence first, then end its task, and forget it.
 fn end_current(inner: &mut Inner) {
+    inner.attendance = None;
     if let Some(current) = inner.current.take() {
         current.fence.store(false, Ordering::SeqCst);
         current.stop.cancel();
@@ -393,6 +466,93 @@ fn end_current(inner: &mut Inner) {
         }
     }
     inner.state = ShareState::Off;
+}
+
+/// Take one accepted attendance update for the current connection: keep it,
+/// and say what changed (bounded). A baseline starts the connection's view;
+/// a share's first baseline says when nobody is attached yet, a reconnect's
+/// says nothing (its devices are not new arrivals).
+fn apply_attendance(inner: &mut Inner, telemetry: crate::relay_host::Telemetry, reconnect: bool) {
+    use localpilot_rpc::DeviceStanding;
+    let previous = inner.attendance.take();
+    let mut notices = Vec::new();
+    match (&previous, telemetry.baseline) {
+        (_, true) | (None, _) => {
+            if telemetry.baseline
+                && !reconnect
+                && telemetry.devices.as_ref().is_some_and(Vec::is_empty)
+            {
+                notices.push(ShareNotice::NoDevicesYet);
+            }
+        }
+        (Some(previous), false) => {
+            let arrivals = telemetry.attaches.saturating_sub(previous.attaches);
+            let departures = telemetry.detaches.saturating_sub(previous.detaches);
+            if let (Some(before), Some(now)) = (&previous.devices, &telemetry.devices) {
+                let attached: Vec<_> = now
+                    .iter()
+                    .filter(|device| !before.iter().any(|old| old.id == device.id))
+                    .collect();
+                let detached: Vec<_> = before
+                    .iter()
+                    .filter(|device| !now.iter().any(|new| new.id == device.id))
+                    .collect();
+                let refused: Vec<_> = now
+                    .iter()
+                    .filter(|device| device.standing != DeviceStanding::Active)
+                    .filter(|device| {
+                        before
+                            .iter()
+                            .find(|old| old.id == device.id)
+                            .is_none_or(|old| old.standing != device.standing)
+                    })
+                    .collect();
+                if attached.len() + detached.len() > DEVICE_NOTICES {
+                    notices.push(ShareNotice::Summary {
+                        attached: attached.len(),
+                        detached: detached.len(),
+                    });
+                } else {
+                    for device in &attached {
+                        notices.push(ShareNotice::Attached {
+                            name: label(device),
+                            scope: device.scope,
+                        });
+                    }
+                    for device in &detached {
+                        notices.push(ShareNotice::Detached {
+                            name: label(device),
+                        });
+                    }
+                }
+                for device in refused.iter().take(DEVICE_NOTICES) {
+                    notices.push(ShareNotice::NotAllowed {
+                        name: label(device),
+                        standing: device.standing,
+                    });
+                }
+                // Arrivals and departures the lists do not show: devices that
+                // came and went in between (as many as both counts confirm).
+                let unseen_arrivals = arrivals.saturating_sub(attached.len() as u64);
+                let unseen_departures = departures.saturating_sub(detached.len() as u64);
+                let came_and_went = unseen_arrivals.min(unseen_departures);
+                if came_and_went > 0 {
+                    notices.push(ShareNotice::CameAndWent(came_and_went));
+                }
+            } else if arrivals > 0 || departures > 0 {
+                // One list is unknown: the counts are all there is, and they
+                // say nothing about which devices.
+                notices.push(ShareNotice::Activity {
+                    arrived: arrivals,
+                    left: departures,
+                });
+            }
+        }
+    }
+    for notice in notices {
+        push_notice(&mut inner.notices, notice);
+    }
+    inner.attendance = Some(telemetry);
 }
 
 /// A fresh share generation for the server (never reused).
@@ -451,7 +611,7 @@ impl ShareTask {
             inner.state = state;
         }
         if let Some(notice) = notice {
-            inner.notices.push(notice);
+            push_notice(&mut inner.notices, notice);
         }
         true
     }
@@ -461,7 +621,7 @@ impl ShareTask {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         if inner.current.as_ref().map(|c| c.share) == Some(self.share) {
             end_current(&mut inner);
-            inner.notices.push(ShareNotice::Ended(why));
+            push_notice(&mut inner.notices, ShareNotice::Ended(why));
         }
     }
 
@@ -537,10 +697,28 @@ impl ShareTask {
                 fence.load(Ordering::SeqCst) && attempt.load(Ordering::SeqCst) && gate.is_owned()
             })
         };
+        // Attendance from this connection only, while it and its share are
+        // current.
+        let on_attendance: crate::relay_host::OnAttendance = {
+            let inner = self.inner.clone();
+            let share = self.share;
+            let attempt = attempt.clone();
+            Arc::new(move |telemetry| {
+                if !attempt.load(Ordering::SeqCst) {
+                    return;
+                }
+                let mut inner = inner.lock().unwrap_or_else(PoisonError::into_inner);
+                if inner.current.as_ref().map(|c| c.share) != Some(share) {
+                    return;
+                }
+                apply_attendance(&mut inner, telemetry, reconnect);
+            })
+        };
         let host = SourceHost {
             requests: self.requests.clone(),
             standing: self.standing.clone(),
             open,
+            attendance: Some(on_attendance),
             asks: self.asks.clone(),
         };
         let relay_stop = self.stop.child_token();
@@ -587,6 +765,13 @@ impl ShareTask {
             }
         };
         attempt.store(false, Ordering::SeqCst);
+        // Who was attached over this connection is not known any more.
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            if inner.current.as_ref().map(|c| c.share) == Some(self.share) {
+                inner.attendance = None;
+            }
+        }
         if owner_lost {
             return (Attempt::Over(OWNER_LOST.to_string()), shared);
         }
@@ -687,6 +872,40 @@ pub(crate) mod test_support {
             self.write.write_all(&bytes).await.unwrap();
         }
 
+        /// Tell the source who is attached.
+        pub(crate) async fn devices(
+            &mut self,
+            version: u64,
+            baseline: bool,
+            counts: (u64, u64),
+            devices: Option<Vec<localpilot_rpc::AttendedDevice>>,
+        ) {
+            let share = self.share.clone();
+            self.send_for(share, version, baseline, counts, devices)
+                .await;
+        }
+
+        /// The same, naming any share.
+        pub(crate) async fn send_for(
+            &mut self,
+            share: String,
+            version: u64,
+            baseline: bool,
+            (attaches, detaches): (u64, u64),
+            devices: Option<Vec<localpilot_rpc::AttendedDevice>>,
+        ) {
+            self.send(ServerEvent::RelayDevices {
+                relay: "r".to_string(),
+                share,
+                version,
+                baseline,
+                attaches,
+                detaches,
+                devices,
+            })
+            .await;
+        }
+
         pub(crate) async fn ready(&mut self) {
             self.send(ServerEvent::RelayReady {
                 relay: "r".to_string(),
@@ -726,6 +945,19 @@ pub(crate) mod test_support {
         ClientCommand::Prompt {
             text: text.to_string(),
             disposition: InputDisposition::default(),
+        }
+    }
+
+    /// An attached device for a test's attendance record.
+    pub(crate) fn device(
+        id: &str,
+        standing: localpilot_rpc::DeviceStanding,
+    ) -> localpilot_rpc::AttendedDevice {
+        localpilot_rpc::AttendedDevice {
+            id: id.to_string(),
+            name: Some(format!("{id}-phone")),
+            scope: Some(Scope::Control),
+            standing,
         }
     }
 
@@ -1051,7 +1283,7 @@ mod tests {
                         delays.push(retry_in);
                     }
                     ShareNotice::Ended(why) => ended = Some(why),
-                    ShareNotice::Shared | ShareNotice::Restored => {}
+                    _ => {}
                 }
             }
             if let Some(why) = ended {
@@ -1202,5 +1434,271 @@ mod tests {
         let result = server.next_of("relay_result").await.expect("a result");
         assert_eq!(result["n"], 1, "{result}");
         assert!(result.to_string().contains("rejected"), "{result}");
+    }
+
+    // ---- attendance ---------------------------------------------------------
+
+    use super::test_support::device;
+    use localpilot_rpc::DeviceStanding;
+
+    async fn notices_after(
+        f: &Fixture,
+        wanted: impl Fn(&[ShareNotice]) -> bool,
+    ) -> Vec<ShareNotice> {
+        let mut seen = Vec::new();
+        tokio::time::timeout(QUICK, async {
+            loop {
+                seen.extend(f.share.take_notices());
+                if wanted(&seen) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("notices in time: {seen:?}"));
+        seen
+    }
+
+    #[tokio::test]
+    async fn attendance_is_taken_in_order_for_the_current_share_only() {
+        let f = fixture();
+        let mut server = shared(&f).await;
+        let _ = f.share.take_notices();
+        // Before the baseline nothing is taken.
+        server
+            .devices(
+                2,
+                false,
+                (1, 0),
+                Some(vec![device("a", DeviceStanding::Active)]),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(f.share.devices(), None, "unknown until the baseline");
+        server.devices(1, true, (0, 0), Some(Vec::new())).await;
+        let seen = notices_after(&f, |n| n.contains(&ShareNotice::NoDevicesYet)).await;
+        assert_eq!(seen, vec![ShareNotice::NoDevicesYet]);
+        assert_eq!(
+            f.share.devices(),
+            Some(Vec::new()),
+            "an authoritative empty list"
+        );
+        server
+            .devices(
+                3,
+                false,
+                (1, 0),
+                Some(vec![device("a", DeviceStanding::Active)]),
+            )
+            .await;
+        let seen = notices_after(&f, |n| !n.is_empty()).await;
+        assert!(
+            matches!(seen.as_slice(), [ShareNotice::Attached { name, .. }] if name == "a-phone"),
+            "{seen:?}"
+        );
+        // An older version and another share's record change nothing.
+        server.devices(2, false, (0, 0), Some(Vec::new())).await;
+        server
+            .send_for(
+                "another-share".to_string(),
+                9,
+                false,
+                (0, 0),
+                Some(Vec::new()),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(f.share.devices().map(|d| d.len()), Some(1));
+        assert!(f.share.take_notices().is_empty());
+    }
+
+    #[tokio::test]
+    async fn activity_a_list_cannot_show_is_counted_and_notices_stay_bounded() {
+        let f = fixture();
+        let mut server = shared(&f).await;
+        server.devices(1, true, (0, 0), Some(Vec::new())).await;
+        let _ = notices_after(&f, |n| n.contains(&ShareNotice::NoDevicesYet)).await;
+        // Two came and went between updates: the list is still empty.
+        server.devices(2, false, (2, 2), Some(Vec::new())).await;
+        let seen = notices_after(&f, |n| !n.is_empty()).await;
+        assert_eq!(seen, vec![ShareNotice::CameAndWent(2)]);
+        // Five at once: one summary, not five notices.
+        let five: Vec<_> = (0..5)
+            .map(|n| device(&format!("d{n}"), DeviceStanding::Active))
+            .collect();
+        server.devices(3, false, (7, 2), Some(five)).await;
+        let seen = notices_after(&f, |n| !n.is_empty()).await;
+        assert_eq!(
+            seen,
+            vec![ShareNotice::Summary {
+                attached: 5,
+                detached: 0
+            }]
+        );
+        // Many updates nobody looked at: at most the kept number, then a count.
+        for v in 0..40u64 {
+            let list = if v % 2 == 0 {
+                Vec::new()
+            } else {
+                vec![device("x", DeviceStanding::Active)]
+            };
+            server
+                .devices(4 + v, false, (8 + v, 8 + v), Some(list))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let kept = f.share.take_notices();
+        assert!(kept.len() <= NOTICES_KEPT, "{}", kept.len());
+        assert!(
+            matches!(kept.last(), Some(ShareNotice::Overflow(_))),
+            "{kept:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_no_longer_allowed_is_said_so_and_never_reads_as_active() {
+        let f = fixture();
+        let mut server = shared(&f).await;
+        server
+            .devices(
+                1,
+                true,
+                (1, 0),
+                Some(vec![device("a", DeviceStanding::Active)]),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = f.share.take_notices();
+        server
+            .devices(
+                2,
+                false,
+                (1, 0),
+                Some(vec![device("a", DeviceStanding::Revoked)]),
+            )
+            .await;
+        let seen = notices_after(&f, |n| !n.is_empty()).await;
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ShareNotice::NotAllowed {
+                    standing: DeviceStanding::Revoked,
+                    ..
+                }]
+            ),
+            "{seen:?}"
+        );
+        assert_eq!(
+            f.share.devices().unwrap()[0].standing,
+            DeviceStanding::Revoked
+        );
+    }
+
+    #[tokio::test]
+    async fn attendance_is_unknown_while_interrupted_and_a_reconnect_baseline_is_quiet() {
+        let f = fixture();
+        let mut server = shared(&f).await;
+        server
+            .devices(
+                1,
+                true,
+                (1, 0),
+                Some(vec![device("a", DeviceStanding::Active)]),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(f.share.devices().map(|d| d.len()), Some(1));
+        let _ = f.share.take_notices();
+        let next = f.dials.push_link();
+        drop(server);
+        until(|| f.share.devices().is_none()).await;
+        let mut again = Server::accept(next).await;
+        again.ready().await;
+        until(|| f.share.state() == ShareState::Shared).await;
+        again
+            .devices(
+                1,
+                true,
+                (1, 0),
+                Some(vec![device("a", DeviceStanding::Active)]),
+            )
+            .await;
+        until(|| f.share.devices().is_some()).await;
+        let seen = f.share.take_notices();
+        assert!(
+            !seen
+                .iter()
+                .any(|n| matches!(n, ShareNotice::Attached { .. } | ShareNotice::NoDevicesYet)),
+            "nobody is new after a reconnect: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn counts_seen_while_the_list_is_unknown_are_reported_as_they_are() {
+        let f = fixture();
+        let mut server = shared(&f).await;
+        server.devices(1, true, (0, 0), Some(Vec::new())).await;
+        let _ = notices_after(&f, |n| n.contains(&ShareNotice::NoDevicesYet)).await;
+        // One arrival while the list is unknown: an arrival, never "left".
+        server.devices(2, false, (1, 0), None).await;
+        let seen = notices_after(&f, |n| !n.is_empty()).await;
+        assert_eq!(
+            seen,
+            vec![ShareNotice::Activity {
+                arrived: 1,
+                left: 0
+            }]
+        );
+        assert_eq!(f.share.devices(), None, "unknown, not empty");
+        // The list comes back with that device still there: nothing new.
+        server
+            .devices(
+                3,
+                false,
+                (1, 0),
+                Some(vec![device("a", DeviceStanding::Active)]),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(f.share.take_notices().is_empty());
+        assert_eq!(f.share.devices().map(|d| d.len()), Some(1));
+        // A departure while unknown is still a departure.
+        server.devices(4, false, (1, 1), None).await;
+        let seen = notices_after(&f, |n| !n.is_empty()).await;
+        assert_eq!(
+            seen,
+            vec![ShareNotice::Activity {
+                arrived: 0,
+                left: 1
+            }]
+        );
+        // Activity across recovery is counted, not lost.
+        server.devices(5, false, (3, 3), Some(Vec::new())).await;
+        let seen = notices_after(&f, |n| !n.is_empty()).await;
+        assert_eq!(
+            seen,
+            vec![ShareNotice::Activity {
+                arrived: 2,
+                left: 2
+            }]
+        );
+        // Between two known lists, only arrivals that also left are "came and
+        // went": here two arrived, one is attached, one left.
+        server
+            .devices(
+                6,
+                false,
+                (5, 4),
+                Some(vec![device("b", DeviceStanding::Active)]),
+            )
+            .await;
+        let seen = notices_after(&f, |n| n.len() >= 2).await;
+        assert!(seen.contains(&ShareNotice::CameAndWent(1)), "{seen:?}");
+        assert!(
+            seen.iter()
+                .any(|n| matches!(n, ShareNotice::Attached { name, .. } if name == "b-phone")),
+            "{seen:?}"
+        );
     }
 }

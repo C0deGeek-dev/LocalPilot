@@ -230,6 +230,35 @@ pub enum Scope {
     Control,
 }
 
+/// One device attached to a shared session, as its source is told. An open
+/// connection is membership, not authorization: `standing` says whether the
+/// device is still allowed, and `name`/`scope` are `None` when the registry
+/// could not say.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttendedDevice {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Scope>,
+    pub standing: DeviceStanding,
+}
+
+/// Whether an attached device is still allowed here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceStanding {
+    Active,
+    /// Its grant no longer covers this workspace.
+    NotGranted,
+    /// Revoked everywhere.
+    Revoked,
+    /// Its pairing no longer exists.
+    Removed,
+    /// The registry could not be read.
+    Unknown,
+}
+
 /// Who may send a command on an attached connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Requirement {
@@ -469,6 +498,23 @@ pub enum ServerEvent {
     /// snapshot next.
     RelayReady {
         relay: String,
+    },
+    /// To a relay's source only: which paired devices are attached to its
+    /// shared session now. Never part of a session's feed and never sent to a
+    /// device. `version` increases strictly per relay; the first record is the
+    /// `baseline` (version 1). `attaches` and `detaches` count devices whose
+    /// first connection opened or whose last one closed, so activity a later
+    /// list no longer shows is still counted. `devices` is `None` when the
+    /// list could not be sent (unknown, not empty).
+    RelayDevices {
+        relay: String,
+        share: String,
+        version: u64,
+        #[serde(default)]
+        baseline: bool,
+        attaches: u64,
+        detaches: u64,
+        devices: Option<Vec<AttendedDevice>>,
     },
     /// To a relay's source: command `n` from paired device `device`, already
     /// admitted by the server. The source decides it finally and answers with

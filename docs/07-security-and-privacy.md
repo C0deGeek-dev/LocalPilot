@@ -1207,6 +1207,10 @@ server only relays it.
 - **What devices see.** The conversation the terminal shows (bounded as in
   every snapshot), the running turn, its plan, open permission requests, and
   whether work is running or queued. An incognito session cannot be shared.
+- **Who is attached.** The PC's terminal is told which paired devices are
+  attached (id, name, scope and whether each is still allowed); devices are
+  never told about each other. At most 64 devices, 8 connections each, can be
+  attached to one shared session.
 
 ## Remote Gateway
 

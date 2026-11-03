@@ -149,11 +149,36 @@ it is never started for the user. One controller per terminal holds the share:
   without answering or dismissing it; its action is the one it showed (a
   "Stop sharing" left open never shares).
 
+- **Who is attached.** The server tells the source, and only the source,
+  which devices are attached to the shared session (`relay_devices`, never
+  part of the session's feed and never sent to a device). Attendance is bounded
+  (64 distinct devices, 8 connections each; a device over the bounds is refused
+  before it sees anything of the session), counts a device once however many
+  connections it has, and carries arrival and departure counts so activity a
+  later list no longer shows is still reported. Each device's standing (active,
+  no longer granted here, revoked, no longer paired, unknown) is read from one
+  read of the registry and re-read every second while anyone is attached, so a
+  device is never shown as attached and allowed only because its connection is
+  still open. The first record is an immutable baseline, later ones coalesce
+  with strictly increasing versions; the terminal takes them only for the
+  current share and connection and treats the count as unknown while
+  disconnected. A record too large to send says the list is unknown; a failed
+  write ends the relay. Attendance shares the source connection with commands
+  by whole records, neither starving the other.
+- **Status.** `/remote` opens its view at once and fills it from a background
+  check (at most 6 s: the gateway check's own bounds plus a margin, since a
+  refused loopback connection can take about two seconds to be reported on
+  Windows). Only that view, still shown and for the same session, is filled
+  in; closing or replacing it, a session change or a newer `/remote` stops the
+  check. The gateway check says running, not running (connection refused),
+  something else answering, timed out, or failed with its reason, and never
+  infers one from another. The status line stays the live indicator.
+
 **Consequences.** Remote work cannot run beside the terminal's own work or
 outlive its authority, and stopping never waits for the network. Phone access
-lasts while the terminal is open; closing the window ends it. Device counts and
-attach notices, pairing and device management in the terminal, and the full
-status screens are not part of this decision's first version.
+lasts while the terminal is open; closing the window ends it. Pairing and
+device management in the terminal and the full status screens are not part of
+this decision's first version.
 
 ## ADR-0250: A Shared Session Stays In The Process That Runs It; The Server Mirrors It And Forwards Device Commands
 

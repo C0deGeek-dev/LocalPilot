@@ -22,6 +22,191 @@ const FORWARD_QUEUE: usize = 64;
 /// the source accepted has no deadline.
 const DECIDE_DEADLINE: Duration = Duration::from_secs(30);
 
+/// Distinct devices a relayed session may have attached at once.
+const ATTENDANCE_DEVICES: usize = 64;
+/// Connections one device may have open to one relayed session.
+const ATTENDANCE_SOCKETS: usize = 8;
+/// How often an attended relay re-reads its devices' standing.
+const ATTENDANCE_POLL: Duration = Duration::from_secs(1);
+/// The latest attendance is written at least once per this many queued
+/// command records.
+const TELEMETRY_EVERY: usize = 8;
+/// Bounds on what a source is told about a device.
+const DEVICE_NAME_CHARS: usize = 64;
+const DEVICE_NAME_BYTES: usize = 256;
+const DEVICE_ID_BYTES: usize = 64;
+
+/// Which devices are attached to one relayed session: open connections per
+/// device, and how many devices arrived and left. Membership only; whether a
+/// device is still allowed is read from the registry when it is reported.
+pub(super) struct Attendance {
+    state: StdMutex<AttendanceState>,
+    changes: tokio::sync::watch::Sender<u64>,
+}
+
+#[derive(Default)]
+struct AttendanceState {
+    sockets: std::collections::BTreeMap<String, usize>,
+    attaches: u64,
+    detaches: u64,
+}
+
+impl Attendance {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: StdMutex::new(AttendanceState::default()),
+            changes: tokio::sync::watch::channel(0).0,
+        })
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, AttendanceState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Admit one connection of `device`, or say why not. The guard releases it.
+    pub(super) fn admit(self: &Arc<Self>, device: &str) -> Result<AttendanceGuard, &'static str> {
+        {
+            let mut state = self.state();
+            let distinct = state.sockets.len();
+            match state.sockets.get_mut(device) {
+                Some(open) if *open >= ATTENDANCE_SOCKETS => {
+                    return Err("this device has too many connections to this shared session");
+                }
+                Some(open) => *open += 1,
+                None if distinct >= ATTENDANCE_DEVICES => {
+                    return Err("this shared session has too many devices attached");
+                }
+                None => {
+                    state.sockets.insert(device.to_string(), 1);
+                    state.attaches += 1;
+                }
+            }
+        }
+        self.changes.send_modify(|n| *n += 1);
+        Ok(AttendanceGuard {
+            attendance: self.clone(),
+            device: device.to_string(),
+        })
+    }
+
+    /// The attached device ids and the arrival and departure counts.
+    fn snapshot(&self) -> (Vec<String>, u64, u64) {
+        let state = self.state();
+        (
+            state.sockets.keys().cloned().collect(),
+            state.attaches,
+            state.detaches,
+        )
+    }
+}
+
+/// One admitted device connection; dropping it ends that membership.
+pub(super) struct AttendanceGuard {
+    attendance: Arc<Attendance>,
+    device: String,
+}
+
+impl Drop for AttendanceGuard {
+    fn drop(&mut self) {
+        {
+            let mut state = self.attendance.state();
+            if let Some(open) = state.sockets.get_mut(&self.device) {
+                *open -= 1;
+                if *open == 0 {
+                    state.sockets.remove(&self.device);
+                    state.detaches += 1;
+                }
+            }
+        }
+        self.attendance.changes.send_modify(|n| *n += 1);
+    }
+}
+
+/// Text cut to at most `chars` characters and `bytes` bytes, with control
+/// characters dropped.
+fn bounded_label(text: &str, chars: usize, bytes: usize) -> String {
+    let mut out = String::new();
+    for c in text.chars().filter(|c| !c.is_control()).take(chars) {
+        if out.len() + c.len_utf8() > bytes {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// What the source is told about the attached devices `ids`, from one read
+/// of the registry: each one's standing and, while it is known, its name and
+/// scope. When the registry cannot be read, every device is still listed
+/// (membership is known) with an unknown standing and no metadata.
+fn attended(registry: &DeviceRegistry, ids: &[String]) -> Vec<localpilot_rpc::AttendedDevice> {
+    use localpilot_rpc::DeviceStanding;
+    let id_of = |id: &String| bounded_label(id, DEVICE_ID_BYTES, DEVICE_ID_BYTES);
+    let Some(standings) = registry.standings(ids) else {
+        return ids
+            .iter()
+            .map(|id| localpilot_rpc::AttendedDevice {
+                id: id_of(id),
+                name: None,
+                scope: None,
+                standing: DeviceStanding::Unknown,
+            })
+            .collect();
+    };
+    ids.iter()
+        .zip(standings)
+        .map(|(id, (record, standing))| localpilot_rpc::AttendedDevice {
+            id: id_of(id),
+            name: record
+                .as_ref()
+                .map(|record| bounded_label(&record.name, DEVICE_NAME_CHARS, DEVICE_NAME_BYTES)),
+            scope: record.as_ref().map(|record| record.scope),
+            standing: match standing {
+                Ok(_) => DeviceStanding::Active,
+                Err(Refusal::NotGranted) => DeviceStanding::NotGranted,
+                Err(Refusal::Revoked) => DeviceStanding::Revoked,
+                Err(Refusal::BadCredential) => DeviceStanding::Removed,
+                Err(Refusal::Unavailable) => DeviceStanding::Unknown,
+            },
+        })
+        .collect()
+}
+
+/// One `relay_devices` record as bytes on a line. A record over the relay
+/// cap is replaced, before anything is written, by one that says the list is
+/// unknown (same binding, version and counts).
+fn telemetry_line(
+    relayed: &RelayedSession,
+    version: u64,
+    baseline: bool,
+    (devices, attaches, detaches): &(Option<Vec<localpilot_rpc::AttendedDevice>>, u64, u64),
+) -> Vec<u8> {
+    let line = |devices: Option<Vec<localpilot_rpc::AttendedDevice>>| {
+        let record = ServerRecord {
+            v: RPC_PROTOCOL_VERSION,
+            id: None,
+            seq: None,
+            event: ServerEvent::RelayDevices {
+                relay: relayed.relay.clone(),
+                share: relayed.share.clone(),
+                version,
+                baseline,
+                attaches: *attaches,
+                detaches: *detaches,
+                devices,
+            },
+        };
+        serde_json::to_vec(&record).ok().map(|mut bytes| {
+            bytes.push(b'\n');
+            bytes
+        })
+    };
+    match line(devices.clone()) {
+        Some(bytes) if bytes.len() < RELAY_RECORD_MAX => bytes,
+        _ => line(None).unwrap_or_default(),
+    }
+}
+
 /// A device command on its way to the source.
 pub(super) struct Forward {
     device: String,
@@ -75,6 +260,11 @@ pub(super) struct RelayedSession {
     forward: tokio::sync::mpsc::Sender<Forward>,
     /// How long a device waits for the source's first decision.
     deadline: Duration,
+    /// The devices attached to this relay (never another relay's).
+    pub(super) attendance: Arc<Attendance>,
+    /// Tests: the writer waits for a permit before it starts.
+    #[cfg(test)]
+    hold: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl HostMap {
@@ -175,6 +365,9 @@ where
                     share: share.to_string(),
                     forward,
                     deadline: hosts.relay_deadline.unwrap_or(DECIDE_DEADLINE),
+                    attendance: Attendance::new(),
+                    #[cfg(test)]
+                    hold: hosts.telemetry_hold.clone(),
                 });
                 slot.insert(relayed.clone());
                 Some(relayed)
@@ -199,6 +392,7 @@ where
         reply_id,
         forwarded,
         &hosts.requests,
+        &hosts.devices,
     )
     .await;
     {
@@ -220,6 +414,7 @@ where
 
 /// Read the source's records into the mirror. Returns the closure reason when
 /// the source ended sharing itself, `None` when its connection ended.
+#[allow(clippy::too_many_arguments)] // one relay's whole context
 async fn mirror<R, W>(
     reader: &mut JsonRecordReader<R>,
     write: &mut W,
@@ -227,6 +422,7 @@ async fn mirror<R, W>(
     reply_id: Option<String>,
     mut forwarded: tokio::sync::mpsc::Receiver<Forward>,
     requests: &RequestStore,
+    registry: &DeviceRegistry,
 ) -> anyhow::Result<Option<String>>
 where
     R: AsyncRead + Unpin,
@@ -252,6 +448,7 @@ where
                 &mut forwarded,
                 requests,
                 &mut waiting,
+                registry,
             )
             .await
         }
@@ -263,6 +460,7 @@ where
 
 /// The mirror's life after `relay_ready`: the source's records in, the
 /// devices' commands out.
+#[allow(clippy::too_many_arguments)] // one relay's whole context
 async fn serve_mirror<R, W>(
     reader: &mut JsonRecordReader<R>,
     write: &mut W,
@@ -270,6 +468,7 @@ async fn serve_mirror<R, W>(
     forwarded: &mut tokio::sync::mpsc::Receiver<Forward>,
     requests: &RequestStore,
     waiting: &mut Waiting,
+    registry: &DeviceRegistry,
 ) -> anyhow::Result<Option<String>>
 where
     R: AsyncRead + Unpin,
@@ -282,10 +481,89 @@ where
     // so a source that stops reading never stops this side from reading its
     // records (its stop, its end, its snapshots and results).
     let (outgoing, mut to_write) = tokio::sync::mpsc::channel::<Vec<u8>>(FORWARD_QUEUE);
+    // The writer also tells the source which devices are attached: first an
+    // immutable baseline (version 1, nobody attached yet: the relay was just
+    // created), then the latest state in one coalescing slot, never holding
+    // back command records and written at least once per few of them. Every
+    // record is written whole; a failed write ends the relay.
+    let attendance = relayed.attendance.clone();
     let writer = async {
-        while let Some(bytes) = to_write.recv().await {
-            write.write_all(&bytes).await?;
-            write.flush().await?;
+        #[cfg(test)]
+        if let Some(hold) = &relayed.hold {
+            let _ = hold.acquire().await;
+        }
+        let mut changes = attendance.changes.subscribe();
+        let mut published: (Option<Vec<localpilot_rpc::AttendedDevice>>, u64, u64) =
+            (Some(Vec::new()), 0, 0);
+        let mut version = 1;
+        let baseline = telemetry_line(relayed, version, true, &published);
+        write.write_all(&baseline).await?;
+        write.flush().await?;
+        let mut pending: Option<Vec<u8>> = None;
+        let mut since = 0usize;
+        let mut next_poll = tokio::time::Instant::now() + ATTENDANCE_POLL;
+        let mut refresh = |pending: &mut Option<Vec<u8>>| {
+            let (ids, attaches, detaches) = attendance.snapshot();
+            let current = (Some(attended(registry, &ids)), attaches, detaches);
+            if current != published {
+                version += 1;
+                *pending = Some(telemetry_line(relayed, version, false, &current));
+                published = current;
+            }
+        };
+        // Whatever happened before this writer started (a device may have
+        // attached, read and left already) is sampled once after the
+        // baseline, so it is reported as the first update.
+        refresh(&mut pending);
+        // Each round does, in this order: at most one coalesced attendance
+        // refresh (a change seen, or the standing poll due while anyone is
+        // attached), the pending update when due, then one command record or
+        // a wait. Neither attendance churn nor command traffic can starve the
+        // other, and the poll runs at its time under sustained traffic.
+        loop {
+            let now = tokio::time::Instant::now();
+            let poll_due = now >= next_poll;
+            if poll_due {
+                next_poll = now + ATTENDANCE_POLL;
+            }
+            if changes.has_changed().unwrap_or(false) {
+                changes.mark_unchanged();
+                refresh(&mut pending);
+            } else if poll_due && !attendance.snapshot().0.is_empty() {
+                refresh(&mut pending);
+            }
+            if pending.is_some() && (since >= TELEMETRY_EVERY || to_write.is_empty()) {
+                if let Some(bytes) = pending.take() {
+                    write.write_all(&bytes).await?;
+                    write.flush().await?;
+                }
+                since = 0;
+            }
+            match to_write.try_recv() {
+                Ok(bytes) => {
+                    write.write_all(&bytes).await?;
+                    write.flush().await?;
+                    since += 1;
+                    continue;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            }
+            tokio::select! {
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    refresh(&mut pending);
+                }
+                bytes = to_write.recv() => {
+                    let Some(bytes) = bytes else { break };
+                    write.write_all(&bytes).await?;
+                    write.flush().await?;
+                    since += 1;
+                }
+                () = tokio::time::sleep_until(next_poll) => {}
+            }
         }
         Ok::<(), std::io::Error>(())
     };
@@ -507,6 +785,22 @@ where
             }
         };
     }
+    // Attendance is bounded: a device over the bounds gets nothing of the
+    // session. The guard ends this connection's membership however it ends.
+    let _attending = match relayed.attendance.admit(device) {
+        Ok(guard) => guard,
+        Err(message) => {
+            emit(
+                write,
+                reply_id,
+                ServerEvent::Error {
+                    message: message.to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
     // A mirror's snapshots carry its source's history and admission; these
     // are never consulted for it.
     let read_history = || (Vec::new(), true);
@@ -626,6 +920,8 @@ pub(super) fn relayed_for_test(hosts: &HostMap) -> SessionId {
         share: "test".to_string(),
         forward,
         deadline: DECIDE_DEADLINE,
+        attendance: Attendance::new(),
+        hold: None,
     });
     relayed.feed.install(&ServerEvent::Snapshot {
         epoch: "source".to_string(),
@@ -1014,6 +1310,8 @@ mod tests {
             share: "s".to_string(),
             forward: forward.clone(),
             deadline: DECIDE_DEADLINE,
+            attendance: Attendance::new(),
+            hold: None,
         };
         // A device queued its command during the handshake.
         let (decided, mut waiter) = oneshot::channel();
@@ -1026,7 +1324,16 @@ mod tests {
             })
             .unwrap();
         let mut reader = JsonRecordReader::new(tokio::io::empty());
-        let outcome = mirror(&mut reader, &mut Broken, &relayed, None, forwarded, &store).await;
+        let outcome = mirror(
+            &mut reader,
+            &mut Broken,
+            &relayed,
+            None,
+            forwarded,
+            &store,
+            &DeviceRegistry::default(),
+        )
+        .await;
         assert!(outcome.is_err(), "the ready write failed");
         assert_eq!(waiter.try_recv(), Ok(RelayRequestState::Unknown));
         assert!(matches!(
@@ -1051,5 +1358,165 @@ mod tests {
                 vec![ServerEvent::Queued { disposition }]
             );
         }
+    }
+
+    /// A writer that takes `budget` bytes, then fails: a record can be cut
+    /// off part-way.
+    struct Cutoff {
+        budget: usize,
+    }
+
+    impl tokio::io::AsyncWrite for Cutoff {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if self.budget == 0 {
+                return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+            }
+            let taken = buf.len().min(self.budget);
+            self.budget -= taken;
+            std::task::Poll::Ready(Ok(taken))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_telemetry_record_cut_off_part_way_ends_the_relay_with_its_cleanup() {
+        let store = RequestStore::new();
+        let session = SessionId::new();
+        let (late, _payload) = keyed(&store, session, 1);
+        let (forward, forwarded) = tokio::sync::mpsc::channel(FORWARD_QUEUE);
+        let relayed = RelayedSession {
+            session,
+            relay: "r".to_string(),
+            feed: SessionFeed::mirror(),
+            share: "s".to_string(),
+            forward: forward.clone(),
+            deadline: DECIDE_DEADLINE,
+            attendance: Attendance::new(),
+            hold: None,
+        };
+        let (decided, mut waiter) = oneshot::channel();
+        forward
+            .try_send(Forward {
+                device: "d1".to_string(),
+                command: ClientCommand::Cancel,
+                decided,
+                late: Some(late),
+            })
+            .unwrap();
+        // `relay_ready` goes through whole; the baseline after it is cut off.
+        let ready = {
+            let record = ServerRecord {
+                v: RPC_PROTOCOL_VERSION,
+                id: None,
+                seq: None,
+                event: ServerEvent::RelayReady {
+                    relay: "r".to_string(),
+                },
+            };
+            serde_json::to_vec(&record).unwrap().len() + 1
+        };
+        let (_peer, quiet) = tokio::io::duplex(64);
+        let mut reader = JsonRecordReader::new(quiet);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            mirror(
+                &mut reader,
+                &mut Cutoff { budget: ready + 10 },
+                &relayed,
+                None,
+                forwarded,
+                &store,
+                &DeviceRegistry::default(),
+            ),
+        )
+        .await
+        .expect("the relay ended");
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(
+            waiter.try_recv(),
+            Ok(RelayRequestState::Unknown),
+            "cleaned up"
+        );
+    }
+
+    #[test]
+    fn an_attendance_record_over_the_cap_is_sent_as_unknown_with_its_binding() {
+        let (forward, _forwarded) = tokio::sync::mpsc::channel(1);
+        let relayed = RelayedSession {
+            session: SessionId::new(),
+            relay: "r".to_string(),
+            feed: SessionFeed::mirror(),
+            share: "s".to_string(),
+            forward,
+            deadline: DECIDE_DEADLINE,
+            attendance: Attendance::new(),
+            hold: None,
+        };
+        let many: Vec<_> = (0..5000)
+            .map(|n| localpilot_rpc::AttendedDevice {
+                id: format!("{n:064}"),
+                name: Some("n".repeat(DEVICE_NAME_CHARS)),
+                scope: Some(localpilot_rpc::Scope::Control),
+                standing: localpilot_rpc::DeviceStanding::Active,
+            })
+            .collect();
+        let line = telemetry_line(&relayed, 7, false, &(Some(many), 9, 4));
+        assert!(line.len() < RELAY_RECORD_MAX);
+        let record: ServerRecord = serde_json::from_slice(&line).unwrap();
+        assert_eq!(
+            record.event,
+            ServerEvent::RelayDevices {
+                relay: "r".to_string(),
+                share: "s".to_string(),
+                version: 7,
+                baseline: false,
+                attaches: 9,
+                detaches: 4,
+                devices: None,
+            }
+        );
+    }
+
+    #[test]
+    fn attendance_is_bounded_per_device_and_per_relay_and_frees_with_the_last() {
+        let attendance = Attendance::new();
+        let one: Vec<_> = (0..ATTENDANCE_SOCKETS)
+            .map(|_| attendance.admit("d").unwrap())
+            .collect();
+        assert!(attendance.admit("d").is_err(), "a ninth connection");
+        let others: Vec<_> = (1..ATTENDANCE_DEVICES)
+            .map(|n| attendance.admit(&format!("o{n}")).unwrap())
+            .collect();
+        assert!(attendance.admit("new").is_err(), "a 65th device");
+        assert_eq!(attendance.snapshot().1, ATTENDANCE_DEVICES as u64);
+        drop(one);
+        assert_eq!(attendance.snapshot().2, 1, "left with its last connection");
+        let admitted = attendance.admit("new");
+        assert!(admitted.is_ok(), "room again");
+        drop((others, admitted));
+        assert!(attendance.snapshot().0.is_empty());
+    }
+
+    #[test]
+    fn device_labels_are_bounded_and_carry_no_control_characters() {
+        let name = format!("a\u{1b}[2Jb{}", "é".repeat(400));
+        let label = bounded_label(&name, DEVICE_NAME_CHARS, DEVICE_NAME_BYTES);
+        assert!(!label.chars().any(char::is_control));
+        assert!(label.chars().count() <= DEVICE_NAME_CHARS && label.len() <= DEVICE_NAME_BYTES);
     }
 }

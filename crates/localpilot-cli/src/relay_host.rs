@@ -352,6 +352,21 @@ pub(crate) struct SourceRequest {
     pub(crate) ticket: Ticket,
 }
 
+/// Which devices are attached to the shared session, as one accepted
+/// `relay_devices` record says (see `localpilot_rpc::ServerEvent`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Telemetry {
+    pub(crate) version: u64,
+    pub(crate) baseline: bool,
+    pub(crate) attaches: u64,
+    pub(crate) detaches: u64,
+    /// `None` when the server could not send the list (unknown, not empty).
+    pub(crate) devices: Option<Vec<localpilot_rpc::AttendedDevice>>,
+}
+
+/// Where a relay hands each accepted attendance record.
+pub(crate) type OnAttendance = Arc<dyn Fn(Telemetry) + Send + Sync>;
+
 /// What a relay needs to take commands for a session.
 #[derive(Clone)]
 pub(crate) struct SourceHost {
@@ -360,6 +375,8 @@ pub(crate) struct SourceHost {
     pub(crate) standing: Standing,
     /// Whether the host still admits new remote work (see [`Open`]).
     pub(crate) open: Open,
+    /// Who is attached, as the server reports it (`None`: not wanted).
+    pub(crate) attendance: Option<OnAttendance>,
     /// The session's one ask registry.
     pub(crate) asks: AskRegistry,
 }
@@ -611,6 +628,7 @@ mod tests {
             host: SourceHost {
                 requests,
                 open: Arc::new(|| true),
+                attendance: None,
                 standing: Arc::new(move |_| match reading.load(Ordering::SeqCst) {
                     1 => Some(Scope::Observe),
                     2 => Some(Scope::Control),

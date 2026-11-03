@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A shared session now shows who is attached: the status line says how many
+  devices (or "devices unknown" while that is not known), the terminal notes
+  each device that attaches or leaves (and arrivals and departures it could not
+  attribute to a device), and a device that is attached but no longer allowed
+  is never presented as authorized (one whose access cannot be confirmed says
+  so). `/remote` opens a status view at once and fills in remote settings,
+  gateway health and paired devices from a background check; closing or
+  replacing the view stops the check, and it never holds up the terminal.
+  `localpilot remote status` now says when the gateway check timed out or
+  failed instead of reporting the gateway as not running or the port as used
+  by something else. At most 64 devices (8 connections each) can be attached
+  to one shared session (ADR-0251).
+
 - Configure work sizing with `[harness.granularity].mode`. Choose the existing
   `automatic` policy, fixed `wide` or `very_wide` ceilings, or `off`
   (ADR-0254, #263).

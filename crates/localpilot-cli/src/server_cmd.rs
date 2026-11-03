@@ -503,6 +503,10 @@ pub(crate) struct HostMap {
     /// How long a device waits for a shared session's first decision on a
     /// command (`None`: the default 30 s; tests shorten it).
     relay_deadline: Option<Duration>,
+    /// Tests: a relay's writer waits for this before it starts (so devices can
+    /// come and go before its first attendance record).
+    #[cfg(test)]
+    telemetry_hold: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// The server's side of `[remote]`: a gateway may register only while remote
@@ -8318,6 +8322,7 @@ pub(crate) mod tests {
             requests,
             standing: Arc::new(move |device: &str| devices.standing(device).ok().map(|s| s.scope)),
             open: Arc::new(|| true),
+            attendance: None,
             asks: source.asks().clone(),
         };
         let hold = Arc::new(tokio::sync::Notify::new());
@@ -9089,6 +9094,599 @@ pub(crate) mod tests {
         let end = timeout(DEADLINE, relay).await.unwrap().unwrap();
         assert_eq!(end, crate::relay_client::RelayEnd::TooLarge);
         assert_eq!(source.source.asks().outstanding().len(), 1);
+    }
+
+    // ---- attendance: who is attached to a shared session --------------------
+
+    /// A relay registered by hand: the test reads what the server tells its
+    /// source.
+    async fn hand_relay(
+        endpoint: &Endpoint,
+        source: &RelaySource,
+    ) -> (
+        JsonRecordReader<tokio::io::ReadHalf<Conn>>,
+        tokio::io::WriteHalf<Conn>,
+    ) {
+        let (reader, write, ready) = first_record(
+            endpoint,
+            ClientCommand::RelayHost {
+                session: source.identity.session,
+                owner_generation: source.identity.owner_generation,
+                holder_instance: source.identity.holder_instance.clone(),
+                share: source.identity.share.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(ready, ServerEvent::RelayReady { .. }), "{ready:?}");
+        (reader, write)
+    }
+
+    type Devices = (
+        u64,
+        bool,
+        u64,
+        u64,
+        Option<Vec<localpilot_rpc::AttendedDevice>>,
+    );
+
+    /// The next attendance record the source is told.
+    async fn next_devices(reader: &mut JsonRecordReader<impl AsyncRead + Unpin>) -> Devices {
+        loop {
+            if let ServerEvent::RelayDevices {
+                version,
+                baseline,
+                attaches,
+                detaches,
+                devices,
+                ..
+            } = read_event(reader).await
+            {
+                return (version, baseline, attaches, detaches, devices);
+            }
+        }
+    }
+
+    /// Attendance records until one satisfies `wanted`.
+    async fn devices_where(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        wanted: impl Fn(&Devices) -> bool,
+    ) -> Devices {
+        loop {
+            let devices = next_devices(reader).await;
+            if wanted(&devices) {
+                return devices;
+            }
+        }
+    }
+
+    fn relayed_attendance(hosts: &HostMap, session: SessionId) -> Arc<relay::Attendance> {
+        hosts
+            .relayed(&AttachTarget::ResumeId {
+                session_id: session,
+            })
+            .expect("relayed")
+            .attendance
+            .clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_counts_once_however_many_connections_and_leaves_with_its_last() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (mut relay, _relay_write) = hand_relay(&endpoint, &source).await;
+        let (version, baseline, attaches, detaches, devices) = next_devices(&mut relay).await;
+        assert_eq!((version, baseline, attaches, detaches), (1, true, 0, 0));
+        assert_eq!(devices, Some(Vec::new()), "an authoritative empty baseline");
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (id, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let attach = || {
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                },
+            )
+        };
+        let (first, first_write, attached) = first_record(&endpoint, attach()).await;
+        assert!(
+            matches!(attached, ServerEvent::Attached { .. }),
+            "{attached:?}"
+        );
+        let (second, second_write, attached) = first_record(&endpoint, attach()).await;
+        assert!(
+            matches!(attached, ServerEvent::Attached { .. }),
+            "{attached:?}"
+        );
+        let one = devices_where(&mut relay, |d| d.4.as_ref().is_some_and(|d| d.len() == 1)).await;
+        let listed = one.4.unwrap();
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].standing, localpilot_rpc::DeviceStanding::Active);
+        assert_eq!(listed[0].scope, Some(localpilot_rpc::Scope::Control));
+        assert_eq!(one.2, 1, "one arrival for two connections");
+        drop((first, first_write));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop((second, second_write));
+        let gone = devices_where(&mut relay, |d| d.4.as_ref().is_some_and(Vec::is_empty)).await;
+        assert_eq!((gone.2, gone.3), (1, 1), "it left with its last connection");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_over_the_attendance_bounds_gets_nothing_of_the_session() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (_relay, _relay_write) = hand_relay(&endpoint, &source).await;
+        let attendance = relayed_attendance(&hosts, source.identity.session);
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (id, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let attach = || {
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                },
+            )
+        };
+        // Eight connections of this device are held: a ninth is refused.
+        let held: Vec<_> = (0..8).map(|_| attendance.admit(&id).unwrap()).collect();
+        let (_r, _w, refused) = first_record(&endpoint, attach()).await;
+        assert!(
+            matches!(&refused, ServerEvent::Error { message } if message.contains("too many connections")),
+            "{refused:?}"
+        );
+        drop(held);
+        // Sixty-four other devices are attached: this one is refused.
+        let others: Vec<_> = (0..64)
+            .map(|n| attendance.admit(&format!("other-{n}")).unwrap())
+            .collect();
+        assert!(attendance.admit("one-more").is_err());
+        let (_r, _w, refused) = first_record(&endpoint, attach()).await;
+        assert!(
+            matches!(&refused, ServerEvent::Error { message } if message.contains("too many devices")),
+            "{refused:?}"
+        );
+        // One leaves: there is room again.
+        drop(others);
+        let (_r, _w, attached) = first_record(&endpoint, attach()).await;
+        assert!(
+            matches!(attached, ServerEvent::Attached { .. }),
+            "{attached:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devices_standing_reaches_the_source_without_a_new_connection() {
+        use localpilot_rpc::DeviceStanding;
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (mut relay, _relay_write) = hand_relay(&endpoint, &source).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (id, _credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        // Membership held directly: only the registry changes from here on.
+        let _member = relayed_attendance(&hosts, source.identity.session)
+            .admit(&id)
+            .unwrap();
+        let row = |d: &Devices| d.4.as_ref().and_then(|d| d.first().cloned());
+        let _ = devices_where(&mut relay, |d| {
+            row(d).is_some_and(|r| r.standing == DeviceStanding::Active)
+        })
+        .await;
+        hosts
+            .devices
+            .edit_for_test(&id, |r| r.name = "renamed".to_string());
+        let _ = devices_where(&mut relay, |d| {
+            row(d).is_some_and(|r| r.name.as_deref() == Some("renamed"))
+        })
+        .await;
+        hosts
+            .devices
+            .edit_for_test(&id, |r| r.scope = localpilot_rpc::Scope::Observe);
+        let _ = devices_where(&mut relay, |d| {
+            row(d).is_some_and(|r| {
+                r.scope == Some(localpilot_rpc::Scope::Observe)
+                    && r.standing == DeviceStanding::Active
+            })
+        })
+        .await;
+        hosts
+            .devices
+            .edit_for_test(&id, |r| r.workspaces = Some(vec!["elsewhere".to_string()]));
+        let _ = devices_where(&mut relay, |d| {
+            row(d).is_some_and(|r| r.standing == DeviceStanding::NotGranted)
+        })
+        .await;
+        hosts.devices.edit_for_test(&id, |r| {
+            r.workspaces = None;
+            r.revoked_unix = Some(1);
+        });
+        let _ = devices_where(&mut relay, |d| {
+            row(d).is_some_and(|r| r.standing == DeviceStanding::Revoked)
+        })
+        .await;
+        // An unreadable registry: still listed (membership), standing unknown,
+        // no metadata, never an empty list.
+        hosts.devices.fail_for_test(true);
+        let unknown = devices_where(&mut relay, |d| {
+            row(d).is_some_and(|r| r.standing == DeviceStanding::Unknown)
+        })
+        .await;
+        let r = row(&unknown).unwrap();
+        assert!(r.name.is_none() && r.scope.is_none(), "{r:?}");
+        assert_eq!(unknown.4.as_ref().map(Vec::len), Some(1));
+        hosts.devices.fail_for_test(false);
+        let _ = devices_where(&mut relay, |d| {
+            row(d).is_some_and(|r| r.standing == DeviceStanding::Revoked)
+        })
+        .await;
+        hosts.devices.forget_for_test(&id);
+        let removed = devices_where(&mut relay, |d| {
+            row(d).is_some_and(|r| r.standing == DeviceStanding::Removed)
+        })
+        .await;
+        assert!(row(&removed).unwrap().name.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn devices_that_came_and_went_before_the_first_record_are_counted() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        let hosts = HostMap {
+            telemetry_hold: Some(hold.clone()),
+            ..HostMap::default()
+        };
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (mut relay, _relay_write) = hand_relay(&endpoint, &source).await;
+        let attendance = relayed_attendance(&hosts, source.identity.session);
+        // Before the writer has started: three arrive and all leave again, so
+        // nothing is attached once it starts (and no standing poll runs).
+        for n in 0..3 {
+            drop(attendance.admit(&format!("brief-{n}")).unwrap());
+        }
+        hold.add_permits(1);
+        let (version, baseline, attaches, detaches, devices) = next_devices(&mut relay).await;
+        assert_eq!((version, baseline, attaches, detaches), (1, true, 0, 0));
+        assert_eq!(devices, Some(Vec::new()));
+        let (version, baseline, attaches, detaches, devices) = next_devices(&mut relay).await;
+        assert_eq!((version, baseline), (2, false));
+        assert_eq!((attaches, detaches), (3, 3), "the brief ones are counted");
+        assert_eq!(devices, Some(Vec::new()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_ended_relays_devices_never_touch_its_replacement() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (_old, mut old_write) = hand_relay(&endpoint, &source).await;
+        let old_member = relayed_attendance(&hosts, source.identity.session)
+            .admit("old-device")
+            .unwrap();
+        // The first share stops; a new one starts.
+        let mut stop = serde_json::to_vec(&localpilot_rpc::RelayRecord::RelayStop).unwrap();
+        stop.push(b'\n');
+        old_write.write_all(&stop).await.unwrap();
+        timeout(DEADLINE, async {
+            while hosts
+                .relayed(&AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                })
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first relay ended");
+        let mut renewed = relay_source(&factory, "share-2");
+        renewed.identity.session = source.identity.session;
+        let (mut relay, _relay_write) = hand_relay(&endpoint, &source).await;
+        let first = next_devices(&mut relay).await;
+        assert_eq!((first.0, first.1, first.4), (1, true, Some(Vec::new())));
+        drop(old_member);
+        let quiet = timeout(Duration::from_millis(1500), next_devices(&mut relay)).await;
+        assert!(
+            quiet.is_err(),
+            "the old relay's device left only the old relay: {quiet:?}"
+        );
+        drop(renewed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn commands_and_attendance_churn_both_reach_the_source() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (mut relay, mut relay_write) = hand_relay(&endpoint, &source).await;
+        let attendance = relayed_attendance(&hosts, source.identity.session);
+        let churning = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let churn = tokio::spawn({
+            let churning = churning.clone();
+            async move {
+                let mut n = 0u64;
+                while churning.load(Ordering::SeqCst) {
+                    n += 1;
+                    drop(attendance.admit(&format!("churn-{}", n % 10)));
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_id, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (mut device, mut device_write, _) = first_record(
+            &endpoint,
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                },
+            ),
+        )
+        .await;
+        // The device's commands reach the source and its answers reach the
+        // device, while attendance keeps changing.
+        let mut answered = 0;
+        let mut telemetry = 0;
+        while answered < 5 {
+            send_command(&mut device_write, ClientCommand::Cancel)
+                .await
+                .unwrap();
+            loop {
+                match read_event(&mut relay).await {
+                    ServerEvent::RelayDevices { .. } => telemetry += 1,
+                    ServerEvent::RelayCommand { device, n, .. } => {
+                        let mut result =
+                            serde_json::to_vec(&localpilot_rpc::RelayRecord::RelayResult {
+                                device,
+                                n,
+                                state: localpilot_rpc::RelayRequestState::Rejected {
+                                    reason: "no turn".to_string(),
+                                },
+                            })
+                            .unwrap();
+                        result.push(b'\n');
+                        relay_write.write_all(&result).await.unwrap();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            loop {
+                if matches!(
+                    read_event(&mut device).await,
+                    ServerEvent::Rejected { .. } | ServerEvent::Error { .. }
+                ) {
+                    break;
+                }
+            }
+            answered += 1;
+        }
+        assert!(
+            churning.load(Ordering::SeqCst),
+            "answered while the churn ran"
+        );
+        assert!(telemetry > 0, "attendance flowed too");
+        churning.store(false, Ordering::SeqCst);
+        let _ = churn.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_scope_change_reaches_the_source_during_sustained_commands() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (mut relay, mut relay_write) = hand_relay(&endpoint, &source).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (sender, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (watched, _c) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let _member = relayed_attendance(&hosts, source.identity.session)
+            .admit(&watched)
+            .unwrap();
+        let (_device, mut device_write, _) = first_record(
+            &endpoint,
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                },
+            ),
+        )
+        .await;
+        let sending = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let spam = tokio::spawn({
+            let sending = sending.clone();
+            async move {
+                while sending.load(Ordering::SeqCst) {
+                    if send_command(&mut device_write, ClientCommand::Cancel)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        tokio::spawn({
+            let devices = hosts.devices.clone();
+            let changed = changed.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                devices.edit_for_test(&watched, |r| r.scope = localpilot_rpc::Scope::Observe);
+                changed.store(true, Ordering::SeqCst);
+            }
+        });
+        // The source answers every command and watches for the change.
+        let seen_during_traffic = timeout(DEADLINE, async {
+            loop {
+                match read_event(&mut relay).await {
+                    ServerEvent::RelayCommand { device, n, .. } => {
+                        let mut result =
+                            serde_json::to_vec(&localpilot_rpc::RelayRecord::RelayResult {
+                                device,
+                                n,
+                                state: localpilot_rpc::RelayRequestState::Rejected {
+                                    reason: "no turn".to_string(),
+                                },
+                            })
+                            .unwrap();
+                        result.push(b'\n');
+                        relay_write.write_all(&result).await.unwrap();
+                    }
+                    ServerEvent::RelayDevices {
+                        devices: Some(devices),
+                        ..
+                    } if changed.load(Ordering::SeqCst)
+                        && devices
+                            .iter()
+                            .any(|d| d.scope == Some(localpilot_rpc::Scope::Observe)) =>
+                    {
+                        return sending.load(Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the change arrived");
+        assert!(seen_during_traffic, "while commands kept coming");
+        sending.store(false, Ordering::SeqCst);
+        // Its last command may wait for an answer nobody sends any more.
+        spam.abort();
+        drop(sender);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_source_that_stops_reading_can_still_stop_sharing_under_churn() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        // The source never reads again.
+        let (_unread, mut relay_write) = hand_relay(&endpoint, &source).await;
+        let attendance = relayed_attendance(&hosts, source.identity.session);
+        for n in 0..2000 {
+            drop(attendance.admit(&format!("churn-{}", n % 50)));
+            if n % 100 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        let mut stop = serde_json::to_vec(&localpilot_rpc::RelayRecord::RelayStop).unwrap();
+        stop.push(b'\n');
+        relay_write.write_all(&stop).await.unwrap();
+        timeout(DEADLINE, async {
+            while hosts
+                .relayed(&AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                })
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("sharing stopped");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_phone_neither_receives_nor_makes_attendance() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (mut relay, _relay_write) = hand_relay(&endpoint, &source).await;
+        let _ = next_devices(&mut relay).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_id, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (mut device, mut device_write, _) = first_record(
+            &endpoint,
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                },
+            ),
+        )
+        .await;
+        let attached =
+            devices_where(&mut relay, |d| d.4.as_ref().is_some_and(|d| d.len() == 1)).await;
+        // The phone tries to send one.
+        let forged = format!(
+            "{{\"v\":{RPC_PROTOCOL_VERSION},\"command\":{{\"type\":\"relay_devices\",\"relay\":\"x\",\"share\":\"share-1\",\"version\":99,\"attaches\":9,\"detaches\":9,\"devices\":[]}}}}\n"
+        );
+        device_write.write_all(forged.as_bytes()).await.unwrap();
+        // It never sees attendance, and the source is told nothing it made.
+        let watched = timeout(Duration::from_millis(1200), async {
+            loop {
+                let event = read_event(&mut device).await;
+                assert!(
+                    !matches!(event, ServerEvent::RelayDevices { .. }),
+                    "{event:?}"
+                );
+            }
+        })
+        .await;
+        assert!(watched.is_err(), "watched until the deadline");
+        let next = timeout(Duration::from_millis(500), next_devices(&mut relay)).await;
+        if let Ok(next) = next {
+            assert!(next.0 > attached.0 && next.2 <= 1, "{next:?}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

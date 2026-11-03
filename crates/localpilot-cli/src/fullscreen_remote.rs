@@ -134,7 +134,39 @@ pub(super) struct RemoteHost {
     published: RefCell<Option<(SessionId, crate::relay_source::History)>>,
     /// The admission state last published to the feed.
     admission: Cell<Option<crate::server_feed::Admission>>,
+    /// How `/remote` reads the gateway and configuration (off the terminal's
+    /// loop; tests replace it).
+    probe: StatusProbe,
+    /// The `/remote` view being filled in, if one is: only it may be updated,
+    /// and only while it is the report shown, for the same session.
+    status: RefCell<Option<PendingStatus>>,
 }
+
+/// A `/remote` view waiting for its probe.
+struct PendingStatus {
+    /// The report the view opened as (see `AppModel::report_generation`).
+    report: u64,
+    session: Option<SessionId>,
+    sharing: Vec<String>,
+    task: tokio::task::JoinHandle<()>,
+    result: tokio::sync::oneshot::Receiver<Vec<String>>,
+}
+
+impl Drop for PendingStatus {
+    fn drop(&mut self) {
+        // A view closed, replaced or superseded stops its probe.
+        self.task.abort();
+    }
+}
+
+/// Reads remote access settings, gateway health and the device count.
+pub(super) type StatusProbe = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>> + Send + Sync,
+>;
+
+/// How long a `/remote` snapshot may take before it reports a timeout: the
+/// gateway check's own bounds (connect, then answer) plus a margin.
+const STATUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(6);
 
 impl RemoteHost {
     pub(super) fn new(share: Arc<RemoteShare>) -> Self {
@@ -145,7 +177,91 @@ impl RemoteHost {
             choice: Cell::new(None),
             published: RefCell::new(None),
             admission: Cell::new(None),
+            probe: Arc::new(|| {
+                Box::pin(async {
+                    crate::remote_status::render_status(&crate::remote_gateway::status().await)
+                })
+            }),
+            status: RefCell::new(None),
         }
+    }
+
+    /// The same host, reading remote status with `probe`.
+    #[cfg(test)]
+    pub(super) fn with_probe(mut self, probe: StatusProbe) -> Self {
+        self.probe = probe;
+        self
+    }
+
+    /// Open the `/remote` view: the sharing part now, remote access checked
+    /// off the terminal's loop within [`STATUS_DEADLINE`] and filled into this
+    /// same view. An earlier view's check is stopped.
+    fn request_status(&self, app: &mut AppModel) {
+        let session = self.share.tracked_session();
+        let sharing = sharing_lines(&self.share);
+        let mut lines = sharing.clone();
+        lines.push(String::new());
+        lines.push("Remote access: checking...".to_string());
+        app.open_report("Remote status (checking...)".to_string(), lines);
+        let Some(report) = app.report_generation() else {
+            return;
+        };
+        let probe = self.probe.clone();
+        let (tx, result) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let probed = match tokio::time::timeout(STATUS_DEADLINE, probe()).await {
+                Ok(text) => text.lines().map(str::to_string).collect::<Vec<_>>(),
+                Err(_) => vec![format!(
+                    "  Could not check remote access within {} s; reopen /remote to try again.",
+                    STATUS_DEADLINE.as_secs()
+                )],
+            };
+            let _ = tx.send(probed);
+        });
+        // Replacing the pending view drops (and so stops) the earlier check.
+        *self.status.borrow_mut() = Some(PendingStatus {
+            report,
+            session,
+            sharing,
+            task,
+            result,
+        });
+    }
+
+    /// Fill in the `/remote` view once its check finished, if it is still the
+    /// report shown for the same session; otherwise stop the check.
+    fn show_status(&self, app: &mut AppModel) {
+        let mut slot = self.status.borrow_mut();
+        let Some(pending) = slot.as_mut() else {
+            return;
+        };
+        if app.report_generation() != Some(pending.report)
+            || pending.session != self.share.tracked_session()
+        {
+            *slot = None;
+            return;
+        }
+        let probed = match pending.result.try_recv() {
+            Ok(probed) => probed,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                vec!["  Could not check remote access; reopen /remote to try again.".to_string()]
+            }
+        };
+        let mut lines = std::mem::take(&mut pending.sharing);
+        lines.push(String::new());
+        lines.push("Remote access:".to_string());
+        lines.extend(probed);
+        let report = pending.report;
+        *slot = None;
+        let _ = app.update_report(
+            report,
+            format!(
+                "Remote status (snapshot at {}; reopen /remote to refresh)",
+                super::local_prompt_time()
+            ),
+            lines,
+        );
     }
 
     /// Publish whether work is running and how many follow-ups wait, when it
@@ -200,11 +316,11 @@ impl RemoteHost {
 }
 
 /// The short status-line label for a sharing state (`None` when not shared).
-fn label(state: &ShareState) -> Option<String> {
+fn label(state: &ShareState, devices: Option<&[localpilot_rpc::AttendedDevice]>) -> Option<String> {
     match state {
         ShareState::Off => None,
         ShareState::Connecting => Some("sharing: connecting".to_string()),
-        ShareState::Shared => Some("shared".to_string()),
+        ShareState::Shared => Some(format!("shared · {}", devices_text(devices))),
         ShareState::Interrupted { retry_in } => Some(format!(
             "sharing interrupted · retry in {}s",
             retry_in.as_secs().max(1)
@@ -230,9 +346,120 @@ pub(super) fn show_notices(app: &mut AppModel, host: &RemoteHost) {
                 )))
             }
             ShareNotice::Ended(why) => app.apply_runtime(RuntimeUpdate::Warning(why)),
+            ShareNotice::NoDevicesYet => app.apply_runtime(RuntimeUpdate::Notice(
+                "No devices attached yet.".to_string(),
+            )),
+            ShareNotice::Attached { name, scope } => {
+                let scope = match scope {
+                    Some(localpilot_rpc::Scope::Control) => " (control)",
+                    Some(localpilot_rpc::Scope::Observe) => " (observe)",
+                    None => "",
+                };
+                app.apply_runtime(RuntimeUpdate::Notice(format!(
+                    "Device attached: {name}{scope}."
+                )));
+            }
+            ShareNotice::Detached { name } => {
+                app.apply_runtime(RuntimeUpdate::Notice(format!("Device detached: {name}.")));
+            }
+            ShareNotice::NotAllowed { name, standing } => {
+                let text = match standing {
+                    // A failed read is not a known refusal: nothing is being
+                    // disconnected because of it.
+                    localpilot_rpc::DeviceStanding::Unknown => format!(
+                        "{name}: its access cannot be confirmed right now (the device registry cannot be read)."
+                    ),
+                    other => format!(
+                        "{name} is {}; it is being disconnected.",
+                        standing_text(other)
+                    ),
+                };
+                app.apply_runtime(RuntimeUpdate::Warning(text));
+            }
+            ShareNotice::Summary { attached, detached } => {
+                app.apply_runtime(RuntimeUpdate::Notice(format!(
+                    "{attached} device(s) attached, {detached} detached."
+                )));
+            }
+            ShareNotice::CameAndWent(count) => app.apply_runtime(RuntimeUpdate::Notice(format!(
+                "{count} device(s) attached and left again since the last update."
+            ))),
+            ShareNotice::Activity { arrived, left } => app.apply_runtime(RuntimeUpdate::Notice(
+                format!(
+                    "Since the last update: {arrived} device arrival(s), {left} departure(s) (which devices is not known)."
+                ),
+            )),
+            ShareNotice::Overflow(count) => app.apply_runtime(RuntimeUpdate::Notice(format!(
+                "{count} more sharing update(s) not shown."
+            ))),
         }
     }
-    app.set_remote_label(label(&host.share.state()));
+    app.set_remote_label(label(&host.share.state(), host.share.devices().as_deref()));
+}
+
+/// A device standing, as a notice says it.
+fn standing_text(standing: localpilot_rpc::DeviceStanding) -> &'static str {
+    use localpilot_rpc::DeviceStanding;
+    match standing {
+        DeviceStanding::Active => "allowed",
+        DeviceStanding::NotGranted => "no longer allowed in this workspace",
+        DeviceStanding::Revoked => "revoked",
+        DeviceStanding::Removed => "no longer paired",
+        DeviceStanding::Unknown => "of unknown standing (the device registry cannot be read)",
+    }
+}
+
+/// This session's sharing, as the `/remote` snapshot starts.
+fn sharing_lines(share: &RemoteShare) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Sharing: {}",
+        match share.state() {
+            ShareState::Off => "off".to_string(),
+            ShareState::Connecting => "connecting".to_string(),
+            ShareState::Shared =>
+                "shared (phone access lasts while this terminal is open)".to_string(),
+            ShareState::Interrupted { retry_in } => format!(
+                "interrupted; reconnecting in {}s (phone actions are unavailable)",
+                retry_in.as_secs().max(1)
+            ),
+        }
+    )];
+    let devices = share.devices();
+    lines.push(format!("Attached: {}", devices_text(devices.as_deref())));
+    for device in devices.unwrap_or_default() {
+        let scope = match device.scope {
+            Some(localpilot_rpc::Scope::Control) => "control",
+            Some(localpilot_rpc::Scope::Observe) => "observe",
+            None => "scope unknown",
+        };
+        let standing = match device.standing {
+            localpilot_rpc::DeviceStanding::Active => String::new(),
+            localpilot_rpc::DeviceStanding::Unknown => {
+                ", access unconfirmed (registry unreadable)".to_string()
+            }
+            other => format!(", {}, being disconnected", standing_text(other)),
+        };
+        lines.push(format!(
+            "  {} [{}], {scope}{standing}",
+            device.name.as_deref().unwrap_or("(name unknown)"),
+            device.id
+        ));
+    }
+    lines.push(
+        "Commands: /remote share | /remote stop. Pair a phone with `localpilot devices pair`."
+            .to_string(),
+    );
+    lines
+}
+
+/// How many devices are attached, for the status line and the exit question.
+fn devices_text(devices: Option<&[localpilot_rpc::AttendedDevice]>) -> String {
+    match devices {
+        None => "devices unknown".to_string(),
+        Some([]) => "no devices".to_string(),
+        Some([_]) => "1 device".to_string(),
+        Some(devices) => format!("{} devices", devices.len()),
+    }
 }
 
 /// What a device asked the idle host to run.
@@ -265,6 +492,7 @@ pub(super) fn idle_tick(
     host.publish(runtime, false);
     host.publish_admission(false, 0);
     show_notices(app, host);
+    host.show_status(app);
     for _ in 0..REQUESTS_PER_TICK {
         let request = host.share.next_request()?;
         if let Some(work) = idle_request(app, runtime, host, request) {
@@ -387,6 +615,7 @@ pub(super) fn busy_tick(
 ) {
     host.release_steering(pending_steers);
     show_notices(app, host);
+    host.show_status(app);
     host.publish_admission(true, queue.len());
     for _ in 0..REQUESTS_PER_TICK {
         let Some(SourceRequest { command, ticket }) = host.share.next_request() else {
@@ -458,23 +687,8 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
     };
     match action {
         RemoteAction::Status => {
-            let sharing = match host.share.state() {
-                ShareState::Off => "This session is not shared.".to_string(),
-                ShareState::Connecting => "Sharing is connecting.".to_string(),
-                ShareState::Shared => {
-                    "This session is shared. Devices attached: unknown. Closing this terminal ends phone access."
-                        .to_string()
-                }
-                ShareState::Interrupted { retry_in } => format!(
-                    "Sharing interrupted; reconnecting in {}s. Phone actions are unavailable.",
-                    retry_in.as_secs().max(1)
-                ),
-            };
-            notice(app, &sharing);
-            notice(
-                app,
-                "Use /remote share | stop. Pair a phone with `localpilot devices pair`; `localpilot remote status` shows the gateway.",
-            );
+            notice(app, "Checking remote status...");
+            host.request_status(app);
         }
         RemoteAction::Share => match host.share.share() {
             ShareOutcome::Connecting => {
@@ -505,7 +719,7 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
             "Use /remote [pair [observe|control] | devices | share | stop].",
         ),
     }
-    app.set_remote_label(label(&host.share.state()));
+    app.set_remote_label(label(&host.share.state(), host.share.devices().as_deref()));
 }
 
 /// End sharing before a command replaces the session.
@@ -554,7 +768,10 @@ pub(super) fn request_exit(app: &mut AppModel, host: &RemoteHost, turn: &str) ->
             "Close this shared session?".to_string(),
             vec![
                 sharing.to_string(),
-                "Devices attached: unknown.".to_string(),
+                format!(
+                    "Devices attached: {}.",
+                    devices_text(host.share.devices().as_deref())
+                ),
                 format!("Current turn: {turn}"),
             ],
             vec![

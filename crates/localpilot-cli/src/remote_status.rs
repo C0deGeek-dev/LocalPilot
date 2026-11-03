@@ -5,14 +5,22 @@
 
 use serde::Serialize;
 
-/// Whether the gateway answers on its loopback port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Whether the gateway answers on its loopback port. Only a refused
+/// connection means it is not running, and only a reply that is not the
+/// gateway's means something else is there; anything else is reported as
+/// what it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayHealth {
     Running,
+    /// The connection was refused: nothing listens on the port.
     NotRunning,
-    /// Something answers on the port, but not this gateway.
+    /// Something answered on the port, but not this gateway.
     Unexpected,
+    /// No answer in time (connecting or exchanging).
+    TimedOut,
+    /// The check itself failed; the reason says how.
+    CheckFailed(String),
 }
 
 /// The `[remote]` settings as `remote status` reports them.
@@ -61,12 +69,14 @@ pub fn render_status(status: &RemoteStatus) -> String {
                 Err(reason) => format!("invalid: {reason}"),
             };
             let _ = writeln!(s, "  advertised url: {advertised}");
-            let gateway = match status.gateway {
-                Some(GatewayHealth::Running) => "running",
-                Some(GatewayHealth::NotRunning) => "not running",
-                Some(GatewayHealth::Unexpected) => "port in use by something else",
-                None if !settings.enabled => "not checked (remote access is off)",
-                None => "unknown",
+            let gateway = match &status.gateway {
+                Some(GatewayHealth::Running) => "running".to_string(),
+                Some(GatewayHealth::NotRunning) => "not running".to_string(),
+                Some(GatewayHealth::Unexpected) => "port in use by something else".to_string(),
+                Some(GatewayHealth::TimedOut) => "no answer in time (unknown)".to_string(),
+                Some(GatewayHealth::CheckFailed(reason)) => format!("could not check: {reason}"),
+                None if !settings.enabled => "not checked (remote access is off)".to_string(),
+                None => "unknown".to_string(),
             };
             let _ = writeln!(
                 s,

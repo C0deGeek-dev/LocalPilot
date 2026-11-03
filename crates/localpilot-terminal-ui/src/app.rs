@@ -1202,6 +1202,17 @@ pub struct Choice {
     pub selected: usize,
 }
 
+/// A report title: one line (newlines and tabs flattened) of at most 256
+/// bytes, cut on a character boundary.
+fn report_title(title: &str) -> String {
+    let sanitized = sanitize_inline(title);
+    let mut end = sanitized.len().min(256);
+    while end > 0 && !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    sanitized[..end].to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
     None,
@@ -1610,6 +1621,9 @@ pub struct AppModel {
     pub exit_requested: bool,
     /// The sharing label for the status line (`None` when not shared).
     remote_label: Option<String>,
+    /// Counts reports opened, so a host can tell whether the report it opened
+    /// is still the one shown.
+    reports_opened: u64,
     /// The host's open choice, if any (see [`Choice`]).
     choice: Option<Choice>,
     escape_armed_at: Option<Instant>,
@@ -1736,6 +1750,7 @@ impl AppModel {
             exit_armed: false,
             exit_requested: false,
             remote_label: None,
+            reports_opened: 0,
             choice: None,
             escape_armed_at: None,
             print_transcript_on_exit: false,
@@ -2958,6 +2973,36 @@ impl AppModel {
         std::mem::take(&mut self.quick_help)
     }
 
+    /// Which report is shown (a number that changes with every report
+    /// opened), or `None` when no report is open.
+    #[must_use]
+    pub fn report_generation(&self) -> Option<u64> {
+        self.report().map(|_| self.reports_opened)
+    }
+
+    /// Replace the shown report's title and lines, only if it is still report
+    /// `generation`; its scroll position is kept. Returns whether it was.
+    pub fn update_report(&mut self, generation: u64, title: String, lines: Vec<String>) -> bool {
+        if self.report_generation() != Some(generation) {
+            return false;
+        }
+        let Some(state) = self.takeover.as_mut() else {
+            return false;
+        };
+        state.report_title = report_title(&title);
+        state.report_lines = lines.iter().map(|line| sanitize_text(line)).collect();
+        true
+    }
+
+    /// The open report takeover's title and lines, if a report is open.
+    #[must_use]
+    pub fn report(&self) -> Option<(&str, &[String])> {
+        self.takeover
+            .as_ref()
+            .filter(|state| state.kind == TakeoverKind::Report)
+            .map(|state| (state.report_title.as_str(), state.report_lines.as_slice()))
+    }
+
     #[must_use]
     pub(crate) fn takeover(&self) -> Option<TakeoverView<'_>> {
         self.takeover
@@ -3110,17 +3155,9 @@ impl AppModel {
         self.quick_help = false;
         self.close_theme_picker(true);
         self.input_overlay = None;
-        let title = {
-            // Inline sanitize flattens newlines/tabs so the title bar can never
-            // become multi-line; then clamp to the byte budget on a char boundary.
-            let sanitized = sanitize_inline(&title);
-            let mut end = sanitized.len().min(256);
-            while end > 0 && !sanitized.is_char_boundary(end) {
-                end -= 1;
-            }
-            sanitized[..end].to_string()
-        };
+        let title = report_title(&title);
         let report_lines: Vec<String> = lines.iter().map(|line| sanitize_text(line)).collect();
+        self.reports_opened += 1;
         self.takeover = Some(TakeoverState {
             kind: TakeoverKind::Report,
             scroll: 0,

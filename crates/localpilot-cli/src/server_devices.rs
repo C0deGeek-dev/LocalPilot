@@ -172,6 +172,10 @@ pub(crate) struct Standing {
     pub(crate) scope: Scope,
 }
 
+/// One device's record (if it still exists) and whether it may act here
+/// now, from one read of the registry.
+pub(crate) type DeviceStandingRead = (Option<DeviceRecord>, Result<Scope, Refusal>);
+
 /// The paired devices of this user. See the module docs.
 pub(crate) struct DeviceRegistry {
     /// The registry directory, or `None` for an in-memory registry (tests).
@@ -185,6 +189,9 @@ pub(crate) struct DeviceRegistry {
     workspace: String,
     /// Why devices are unavailable regardless of the file (no home directory).
     disabled: Option<String>,
+    /// Tests: reading the registry fails while set.
+    #[cfg(test)]
+    failing: std::sync::atomic::AtomicBool,
 }
 
 impl Default for DeviceRegistry {
@@ -195,6 +202,8 @@ impl Default for DeviceRegistry {
             audit_memory: Mutex::new(Vec::new()),
             workspace: String::new(),
             disabled: None,
+            #[cfg(test)]
+            failing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -282,6 +291,8 @@ impl DeviceRegistry {
             audit_memory: Mutex::new(Vec::new()),
             workspace: workspace_id(workspace_root),
             disabled: None,
+            #[cfg(test)]
+            failing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -306,6 +317,10 @@ impl DeviceRegistry {
     fn current(&self) -> Result<RegistryFile, String> {
         if let Some(reason) = &self.disabled {
             return Err(reason.clone());
+        }
+        #[cfg(test)]
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("the registry cannot be read (test)".to_string());
         }
         match &self.dir {
             Some(dir) => read_registry(dir),
@@ -392,6 +407,51 @@ impl DeviceRegistry {
     }
 
     /// Every device, revoked ones included, newest first.
+    /// The standing of each of `ids` from one read of the registry: its
+    /// record (when it still exists) and whether it may act here now (`Err`
+    /// says why not). The whole answer is `None` when the registry cannot be
+    /// read, so it is never mixed from different versions of the file.
+    pub(crate) fn standings(&self, ids: &[String]) -> Option<Vec<DeviceStandingRead>> {
+        let file = self.current().ok()?;
+        Some(
+            ids.iter()
+                .map(|id| match file.devices.get(id) {
+                    Some(record) => (
+                        Some(record.clone()),
+                        self.standing_of(record).map(|standing| standing.scope),
+                    ),
+                    None => (None, Err(Refusal::BadCredential)),
+                })
+                .collect(),
+        )
+    }
+
+    /// Tests: change an in-memory record in place.
+    #[cfg(test)]
+    pub(crate) fn edit_for_test(&self, id: &str, edit: impl FnOnce(&mut DeviceRecord)) {
+        let mut memory = self.memory.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(record) = memory.devices.get_mut(id) {
+            edit(record);
+        }
+    }
+
+    /// Tests: remove an in-memory record.
+    #[cfg(test)]
+    pub(crate) fn forget_for_test(&self, id: &str) {
+        self.memory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .devices
+            .remove(id);
+    }
+
+    /// Tests: make reading the registry fail (or work again).
+    #[cfg(test)]
+    pub(crate) fn fail_for_test(&self, failing: bool) {
+        self.failing
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub(crate) fn list(&self) -> Result<Vec<DeviceRecord>, DeviceError> {
         let file = self.current().map_err(DeviceError::Unavailable)?;
         let mut devices: Vec<DeviceRecord> = file.devices.values().cloned().collect();

@@ -28,10 +28,11 @@ pub use mcp::{
     MCP_PROTOCOL_VERSION,
 };
 pub use protocol::{
-    AskDetail, AttachTarget, ClientCommand, ClientRecord, CommandInfo, FeedCursor, HistoryMessage,
-    InputDisposition, PlanStepWire, RejectCode, RequestKey, Requirement, Scope, ServerEvent,
-    ServerRecord, SessionInfo, TurnState, WireSecret, CAPABILITY_ACKS, CAPABILITY_COMMANDS,
-    CAPABILITY_RESUME, CAPABILITY_RETRY, RPC_PROTOCOL_VERSION, SERVER_CAPABILITIES, SERVER_VERSION,
+    AskDetail, AttachTarget, AttendedDevice, ClientCommand, ClientRecord, CommandInfo,
+    DeviceStanding, FeedCursor, HistoryMessage, InputDisposition, PlanStepWire, RejectCode,
+    RequestKey, Requirement, Scope, ServerEvent, ServerRecord, SessionInfo, TurnState, WireSecret,
+    CAPABILITY_ACKS, CAPABILITY_COMMANDS, CAPABILITY_RESUME, CAPABILITY_RETRY,
+    RPC_PROTOCOL_VERSION, SERVER_CAPABILITIES, SERVER_VERSION,
 };
 pub use relay::{
     relayable, snapshot_records, RelayError, RelayRecord, RelayRequestState, SnapshotAssembly,

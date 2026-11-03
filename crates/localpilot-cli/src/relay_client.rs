@@ -124,6 +124,7 @@ where
     // Commands from devices are decided here, finally; every state the host
     // reports later arrives on `updates`. Dropping the admission (any return)
     // ends sharing for requests still queued.
+    let attendance = host.as_ref().and_then(|host| host.attendance.clone());
     let mut admission = SourceAdmission::new(host);
     let updates = admission.updates();
     let (read, mut write) = tokio::io::split(conn);
@@ -200,6 +201,8 @@ where
         let _ = ready.send(());
     }
     let mut resnapshots: Vec<Instant> = Vec::new();
+    // The attendance version accepted last: none until the baseline.
+    let mut attendance_version: Option<u64> = None;
     loop {
         // Why the next snapshot is sent: `Some(true)` after a loss seen here
         // (rate limited), `Some(false)` when the feed moved to a new epoch or
@@ -218,13 +221,45 @@ where
             },
             reply = reader.next() => match reply {
                 Ok(Some(value)) => {
+                    let event = serde_json::from_value::<ServerRecord>(value).map(|record| record.event);
+                    // Who is attached: only for this relay and share, the
+                    // baseline first, then strictly newer versions.
+                    if let Ok(ServerEvent::RelayDevices {
+                        relay: to,
+                        share,
+                        version,
+                        baseline,
+                        attaches,
+                        detaches,
+                        devices,
+                    }) = &event
+                    {
+                        let current = *to == relay && *share == identity.share;
+                        let next = match attendance_version {
+                            None => *baseline && *version == 1,
+                            Some(seen) => !*baseline && *version > seen,
+                        };
+                        if current && next {
+                            attendance_version = Some(*version);
+                            if let Some(report) = &attendance {
+                                report(crate::relay_host::Telemetry {
+                                    version: *version,
+                                    baseline: *baseline,
+                                    attaches: *attaches,
+                                    detaches: *detaches,
+                                    devices: devices.clone(),
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     if let Ok(ServerEvent::RelayCommand {
                         relay: to,
                         share,
                         device,
                         n,
                         command,
-                    }) = serde_json::from_value::<ServerRecord>(value).map(|record| record.event)
+                    }) = event
                     {
                         // A command for another relay or an earlier share never
                         // runs here.
@@ -494,6 +529,7 @@ mod tests {
             requests,
             standing: Arc::new(|_| Some(localpilot_rpc::Scope::Control)),
             open: Arc::new(|| true),
+            attendance: None,
             asks: AskRegistry::default(),
         };
         let relay = tokio::spawn({

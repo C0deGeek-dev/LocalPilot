@@ -288,7 +288,10 @@ use a new correlation id but must repeat the same command. Commands without
   `relay_snapshot_part`, `relay_snapshot_commit`, `relay_event`,
   `relay_result`, `relay_stop`, each at most 256 KiB) and receives
   `relay_command {relay, share, device, n, command}` for each device command
-  the server admitted. The gateway refuses it from browsers.
+  the server admitted, and `relay_devices {relay, share, version, baseline,
+  attaches, detaches, devices}` saying who is attached (a baseline first, then
+  strictly newer versions; `devices` is `null` when unknown; ADR-0251). The
+  gateway refuses it from browsers.
 
 A device attaches only to a shared session (`device_attach` with a `resume_id`
 target); opening a session or attaching to any other is refused.
