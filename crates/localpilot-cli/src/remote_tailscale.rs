@@ -625,6 +625,9 @@ pub(crate) enum OriginPlan {
 /// 443 forwarding to `127.0.0.1:<port>`, independent of what the node's
 /// status says about certificates.
 pub(crate) fn origin_plan(config: &Value, name: &str, port: u16) -> Result<OriginPlan, Refusal> {
+    // The whole config is judged before any conflict is: an unknown setting
+    // anywhere refuses, whatever else is found first.
+    schema_ok(config)?;
     let host_port = format!("{name}:{HTTPS_PORT}");
     let (ours_tcp, ours_web) = our_entries(port);
     let mut top = match config {
@@ -724,10 +727,57 @@ pub(crate) fn origin_plan(config: &Value, name: &str, port: u16) -> Result<Origi
 /// shape is judged: an empty name matches no origin, and any "in use" answer
 /// for it is not a schema failure.
 pub(crate) fn schema_ok(config: &Value) -> Result<(), Refusal> {
-    match origin_plan(config, "", 0) {
-        Err(refusal @ Refusal::Malformed(_)) => Err(refusal),
-        _ => Ok(()),
+    let top = match config {
+        Value::Null => return Ok(()),
+        Value::Object(map) => map,
+        _ => {
+            return Err(Refusal::Malformed(
+                "the Serve config is not an object".into(),
+            ))
+        }
+    };
+    // `inspect` with a name no valid key can match judges shape only.
+    inspect(top, "", "")?;
+    for (key, value) in top {
+        match key.as_str() {
+            "Foreground" => {
+                for (session, inner) in entries(value, "Foreground")? {
+                    let inner = object(inner, &format!("Foreground.{session}"))?;
+                    if inner.contains_key("Foreground") || inner.contains_key("Services") {
+                        return Err(Refusal::Malformed(format!(
+                            "Foreground.{session} nests a section it should not"
+                        )));
+                    }
+                    inspect(inner, "", &format!("Foreground.{session}."))?;
+                }
+            }
+            "Services" => {
+                for (service, inner) in entries(value, "Services")? {
+                    let inner = object(inner, &format!("Services.{service}"))?;
+                    for (field, part) in inner {
+                        match field.as_str() {
+                            "TCP" => check_tcp(part, &format!("Services.{service}.TCP"))?,
+                            "Web" => {
+                                let at = format!("Services.{service}.Web");
+                                for (key, web) in entries(part, &at)? {
+                                    origin_key(key, "", &at)?;
+                                    check_web(web, &format!("{at}.{key}"))?;
+                                }
+                            }
+                            "Tun" if part.is_boolean() => {}
+                            other => {
+                                return Err(Refusal::Malformed(format!(
+                                    "Services.{service}.{other} is not understood"
+                                )))
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
+    Ok(())
 }
 
 /// The phone origin's two entries: port 443 as HTTPS, and the root of the
@@ -1358,6 +1408,28 @@ mod tests {
             })))
         );
         assert_ne!(change.config, json!({}));
+    }
+
+    #[test]
+    fn an_unknown_setting_after_a_conflict_is_still_refused() {
+        let config = json!({
+            "Foreground": { "first": { "TCP": { "443": { "HTTPS": true } } } },
+            "Services": { "svc:later": { "UnknownExposure": true } }
+        });
+        assert!(matches!(schema_ok(&config), Err(Refusal::Malformed(_))));
+        assert!(matches!(
+            origin_plan(&config, NAME, PORT),
+            Err(Refusal::Malformed(_))
+        ));
+        // Without the unknown part it is a conflict, not a shape problem.
+        let config = json!({
+            "Foreground": { "first": { "TCP": { "443": { "HTTPS": true } } } }
+        });
+        assert_eq!(schema_ok(&config), Ok(()));
+        assert!(matches!(
+            origin_plan(&config, NAME, PORT),
+            Err(Refusal::InUse(_))
+        ));
     }
 
     #[test]

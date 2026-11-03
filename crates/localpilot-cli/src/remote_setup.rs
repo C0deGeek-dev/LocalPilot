@@ -111,6 +111,9 @@ pub(crate) enum NameFlag {
 /// Fills a buffer from the operating system's random source.
 pub(crate) type Random = dyn Fn(&mut [u8]) -> Result<(), String> + Sync;
 
+/// Sets the phone address in the user config.
+pub(crate) type EditConfig = dyn Fn(Option<&Path>, &str) -> Result<ConfigEdit, ConfigError> + Sync;
+
 /// Everything a run touches, so every path can be exercised with fakes.
 pub(crate) struct Setup<'a> {
     pub daemon: &'a dyn Daemon,
@@ -127,6 +130,8 @@ pub(crate) struct Setup<'a> {
     pub settle_within: Duration,
     /// Writes the journal; replaced in tests to fail on purpose.
     pub persist: &'a (dyn Fn(&Path, &Journal) -> std::io::Result<()> + Sync),
+    /// Edits the user config; replaced in tests.
+    pub edit_config: &'a EditConfig,
     pub random: &'a Random,
 }
 
@@ -922,18 +927,24 @@ async fn setup(run: &mut Run<'_, '_>, flag: NameFlag, yes: bool) -> Step<()> {
     }
 
     // The user config.
-    match edit_config(s.config_path.as_deref(), &origin) {
-        Ok(true) => {
+    match (s.edit_config)(s.config_path.as_deref(), &origin) {
+        Ok(ConfigEdit::Written) => {
             s.console.say(&format!(
                 "Your config now has [remote] enabled = true and advertised_url = \"{origin}\"."
             ));
             run.done.push("updated your config".to_string());
         }
-        Ok(false) => {}
-        Err(error) => {
+        Ok(ConfigEdit::Unchanged) => {}
+        Err(ConfigError::Before(error)) => {
             return halt(format!(
                 "Your config was not updated: {error}. Set [remote] enabled = true and \
                  advertised_url = \"{origin}\" yourself."
+            ))
+        }
+        Err(ConfigError::After(error)) => {
+            return unknown(format!(
+                "Setup replaced your config to set [remote] enabled = true and advertised_url \
+                 = \"{origin}\", but {error}. Check the file. Nothing else was done."
             ))
         }
     }
@@ -1285,62 +1296,105 @@ async fn serve(run: &mut Run<'_, '_>, node: &Node, planned: &Value, tag: &str) -
 
 // ------------------------------------------------------------- config
 
+/// What happened to the user config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfigEdit {
+    /// It already said this; nothing was written.
+    Unchanged,
+    /// It was replaced and reads back exactly as written.
+    Written,
+}
+
+/// Why the config edit did not complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfigError {
+    /// Nothing was replaced.
+    Before(String),
+    /// The file was replaced, but reading it back failed or showed something
+    /// else; its current content is not confirmed.
+    After(String),
+}
+
 /// Set `[remote] enabled = true` and `advertised_url` in the user config,
 /// keeping everything else byte for byte. Every LocalPilot writer of this
 /// file takes the same exclusive lock; an editor outside LocalPilot that
-/// writes between the last check and the replace is not detected. Returns
-/// whether the file changed.
-pub(crate) fn edit_config(path: Option<&Path>, origin: &str) -> Result<bool, String> {
-    let path = path.ok_or("there is no user config location on this system")?;
-    let directory = path.parent().ok_or("the config path has no folder")?;
-    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+/// writes between the last check and the replace is not detected.
+pub(crate) fn edit_config(path: Option<&Path>, origin: &str) -> Result<ConfigEdit, ConfigError> {
+    edit_config_with(path, origin, &|_| {})
+}
+
+/// [`edit_config`], with a hook that runs right after the replace (tests use
+/// it to stand in for another writer).
+pub(crate) fn edit_config_with(
+    path: Option<&Path>,
+    origin: &str,
+    after_replace: &dyn Fn(&Path),
+) -> Result<ConfigEdit, ConfigError> {
+    let before_ = |message: String| ConfigError::Before(message);
+    let path =
+        path.ok_or_else(|| before_("there is no user config location on this system".into()))?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| before_("the config path has no folder".into()))?;
+    std::fs::create_dir_all(directory).map_err(|error| before_(error.to_string()))?;
     let lock_path = path.with_extension("toml.lock");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&lock_path)
-        .map_err(|error| format!("could not open {}: {error}", lock_path.display()))?;
+        .map_err(|error| before_(format!("could not open {}: {error}", lock_path.display())))?;
     let mut lock = fd_lock::RwLock::new(lock_file);
     let _guard = lock
         .try_write()
-        .map_err(|_| "another LocalPilot command is writing the config".to_string())?;
+        .map_err(|_| before_("another LocalPilot command is writing the config".into()))?;
 
     let before = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(format!("could not read {}: {error}", path.display())),
+        Err(error) => {
+            return Err(before_(format!(
+                "could not read {}: {error}",
+                path.display()
+            )))
+        }
     };
     let text =
-        String::from_utf8(before.clone()).map_err(|_| "the config is not UTF-8".to_string())?;
+        String::from_utf8(before.clone()).map_err(|_| before_("the config is not UTF-8".into()))?;
     let mut document: toml_edit::DocumentMut = text
         .parse()
-        .map_err(|error| format!("the config is not valid TOML ({error})"))?;
+        .map_err(|error| before_(format!("the config is not valid TOML ({error})")))?;
     let remote = document
         .entry("remote")
         .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
     let table = remote
         .as_table_mut()
-        .ok_or("[remote] in the config is not a table")?;
+        .ok_or_else(|| before_("[remote] in the config is not a table".into()))?;
     table["enabled"] = toml_edit::value(true);
     table["advertised_url"] = toml_edit::value(origin);
     let after = document.to_string();
     if after.as_bytes() == before.as_slice() {
-        return Ok(false);
+        return Ok(ConfigEdit::Unchanged);
     }
     // Replace only what was read.
     let now = std::fs::read(path).unwrap_or_default();
     if now != before {
-        return Err("the config changed while setup was editing it".to_string());
+        return Err(before_(
+            "the config changed while setup was editing it".into(),
+        ));
     }
     let temporary = path.with_extension("toml.tmp");
-    std::fs::write(&temporary, after.as_bytes()).map_err(|error| error.to_string())?;
-    std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
-    let written = std::fs::read(path).map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, after.as_bytes()).map_err(|error| before_(error.to_string()))?;
+    std::fs::rename(&temporary, path).map_err(|error| before_(error.to_string()))?;
+    after_replace(path);
+    let written = std::fs::read(path)
+        .map_err(|error| ConfigError::After(format!("reading it back failed ({error})")))?;
     if written != after.as_bytes() {
-        return Err("the config changed right after setup wrote it".to_string());
+        return Err(ConfigError::After(
+            "it reads back differently, so something else changed it right after".into(),
+        ));
     }
-    Ok(true)
+    Ok(ConfigEdit::Written)
 }
 
 // ------------------------------------------------------------- undo
@@ -1746,6 +1800,7 @@ pub(crate) async fn command(mode: Mode, yes: bool) -> anyhow::Result<()> {
         interactive: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         settle_within: SETTLE_WITHIN,
         persist: &write_journal,
+        edit_config: &edit_config,
         random: &system_random,
     };
     let result = match mode {
@@ -2032,6 +2087,7 @@ mod tests {
         /// Fail to record the journal once it reaches this step and state.
         fail_persist: Option<(Op, State)>,
         random_fails: bool,
+        edit_config: Box<EditConfig>,
     }
 
     impl World {
@@ -2045,6 +2101,7 @@ mod tests {
                 interactive: false,
                 fail_persist: None,
                 random_fails: false,
+                edit_config: Box::new(edit_config),
             }
         }
 
@@ -2118,6 +2175,7 @@ mod tests {
                 interactive: self.interactive,
                 settle_within: SETTLE_WITHIN,
                 persist: &persist,
+                edit_config: &self.edit_config,
                 random: &random,
             };
             f(&setup).await
@@ -2575,6 +2633,7 @@ mod tests {
             interactive: true,
             settle_within: SETTLE_WITHIN,
             persist: &write_journal,
+            edit_config: &edit_config,
             random: &random,
         };
         let error = run(&setup, NameFlag::Ask, false).await.unwrap_err();
@@ -2659,6 +2718,7 @@ mod tests {
             interactive: true,
             settle_within: SETTLE_WITHIN,
             persist: &write_journal,
+            edit_config: &edit_config,
             random: &random,
         };
         run(&setup, NameFlag::Keep, false).await.expect("setup");
@@ -2737,6 +2797,60 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_config_changed_right_after_its_replace_is_reported_as_changed() {
+        let mut world = World::new();
+        world.edit_config = Box::new(|path, origin| {
+            edit_config_with(path, origin, &|written| {
+                std::fs::write(written, "someone = \"else\"\n").unwrap();
+            })
+        });
+        let error = world.go(NameFlag::Keep, true).await.unwrap_err();
+        assert!(error.0.contains("Setup replaced your config"), "{error}");
+        assert!(
+            error.0.contains("Done before this: Tailscale now serves"),
+            "{error}"
+        );
+        assert!(!error.0.contains("not updated"), "{error}");
+        assert!(!error.0.contains("Nothing was changed"), "{error}");
+
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config.toml");
+        // A read-back failure after the replace is "changed, not confirmed".
+        assert!(matches!(
+            edit_config_with(Some(&path), "https://x", &|written| {
+                std::fs::remove_file(written).unwrap();
+            }),
+            Err(ConfigError::After(_))
+        ));
+        // A refusal before it is "nothing replaced".
+        std::fs::write(
+            &path,
+            "model = [unclosed
+",
+        )
+        .unwrap();
+        assert!(matches!(
+            edit_config_with(Some(&path), "https://x", &|_| {}),
+            Err(ConfigError::Before(_))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn undo_sends_nothing_on_an_unknown_setting_after_a_conflict() {
+        let world = World::new();
+        world.go(NameFlag::Keep, true).await.expect("setup");
+        let before = world.daemon.sim().writes().len();
+        {
+            let mut sim = world.daemon.sim();
+            sim.config["Foreground"] = json!({ "first": { "TCP": { "443": { "HTTPS": true } } } });
+            sim.config["Services"] = json!({ "svc:later": { "UnknownExposure": true } });
+            sim.generation += 1;
+        }
+        assert!(world.undo(true).await.is_err());
+        assert_eq!(world.daemon.sim().writes().len(), before, "no POST at all");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn without_random_bytes_nothing_is_named_or_sent() {
         let mut world = World::new();
         world.random_fails = true;
@@ -2770,7 +2884,7 @@ mod tests {
         std::fs::write(&path, original).unwrap();
         assert_eq!(
             edit_config(Some(&path), "https://pc.tail1234.ts.net"),
-            Ok(true)
+            Ok(ConfigEdit::Written)
         );
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -2782,7 +2896,7 @@ mod tests {
         assert!(text.contains("advertised_url = \"https://pc.tail1234.ts.net\""));
         assert_eq!(
             edit_config(Some(&path), "https://pc.tail1234.ts.net"),
-            Ok(false)
+            Ok(ConfigEdit::Unchanged)
         );
 
         std::fs::write(&path, "model = [unclosed\n").unwrap();
