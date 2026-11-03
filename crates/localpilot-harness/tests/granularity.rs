@@ -1783,3 +1783,27 @@ async fn fixed_profile_counts_long_diff_payload_across_files() {
         .unwrap()
         .starts_with("++"));
 }
+
+#[tokio::test]
+async fn full_action_authority_still_meets_the_sizing_limit_and_names_it() {
+    // `Unrestricted` is what Accept all selects. It authorizes the action; it is
+    // not a work-size decision, so an oversized write is refused for its size.
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "giant",
+                "write_file",
+                json!({"path":"new.txt", "content":"x".repeat(20_000)}),
+            )
+            .text("needs a smaller edit"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Unrestricted, None);
+    let (_, events) = turn(&mut agent).await;
+    assert!(!dir.path().join("new.txt").exists());
+    assert!(
+        events.iter().any(|e| matches!(e, RuntimeEvent::ToolFinished { id, is_error: true, output, .. }
+            if id == "giant" && output.contains("work envelope") && !output.contains("permission denied"))),
+        "the refusal names the work limit, not a permission"
+    );
+}

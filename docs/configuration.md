@@ -1326,9 +1326,35 @@ engine.
 
 ### `[permissions]`
 
+Starting in 6.0.0 (Unreleased), set `action_mode = "normal"` or
+`action_mode = "accept_all"` in your user config for bare interactive startup,
+`chat`, `print` and `eval`. The environment key is
+`LOCALPILOT_PERMISSIONS__ACTION_MODE`. A project file that sets this key is
+rejected. Omit it to keep the legacy profile and flag behavior.
+
+- `normal` uses the Default profile and its existing grants. The usual
+  workspace trust and headless write rules apply.
+- `accept_all` uses Unrestricted, including opaque shell and background
+  commands and ordinary file operations outside the workspace. A subprocess can
+  access files and the network with your OS account's permissions. The launcher
+  displays the effective action policy on stderr.
+
+An explicit `--permission` or `--bypass` selection takes precedence over
+`action_mode`. With an action mode configured, an explicit `--permission
+readonly` wins over combined bypass flags. Otherwise the separate full-auto
+launch flag retains its launch authority. A configured legacy `profile =
+"readonly"` is respected in the absence of explicit launch permission flags.
+Other legacy profiles take effect when the action setting is omitted. For
+`print`, `--allow-writes` still grants turn-local trust and respects the
+selected profile. Unrestricted already admits ordinary writes without it.
+Work sizing, required verification, incognito, session ownership, OS access
+controls and product-owned remote switches apply independently.
+
+
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `profile` | `default` \| `relaxed` \| `readonly` \| `bypass` \| `unrestricted` | `default` | Permission profile. `bypass` and `unrestricted` are never the default and are always surfaced. `unrestricted` approves everything — out-of-workspace paths included — with no prompts; the user accepts full responsibility. `readonly` denies every write and every command above read-only, with no prompt |
+| `action_mode` | `normal` \| `accept_all` | unset | User-owned action authorization for bare interactive startup, `chat`, `print` and `eval`. `normal` uses the Default profile; `accept_all` uses Unrestricted, including opaque commands and external paths. A project file cannot set it. Unset keeps the legacy profile and flag behavior; an explicit launch flag or a read-only restriction wins. Environment: `LOCALPILOT_PERMISSIONS__ACTION_MODE` |
 | `extra_read_roots` | array of string | `[]` | Absolute directories granted standing **read** scope in addition to the workspace, in every profile including non-interactive runs. Writes keep the workspace boundary; secret-like reads keep their gate. A missing directory is reported and skipped at startup |
 | `scratch_root` | bool or string | `true` | **User config and environment only.** `true` creates a unique per-session child under OS temp; `false` disables it; an absolute existing directory selects a custom parent. Only the owned child gets scratch scope and cleanup; the parent is never granted or removed. Failed creation warns and grants nothing. Ordinary scratch file reads/writes pass in trusted default/bypass headless sessions; secret-like names and session restrictions keep their gates |
 | `allow_commands` | array of `{ program, args_prefix }` | `[]` | **User config and environment only**; a project file that sets it is refused. A structured `run_shell` call (`program` + `args`, never a free-text `command`) whose program equals `program` and whose arguments start with `args_prefix` passes the command gate in `default`, `relaxed` and `readonly`, and runs headless. Exact string match. An entry admits every call that starts with it, so name a script's absolute path in `args_prefix`. The untrusted-workspace and incognito floors still apply. `localpilot doctor` lists the entries |

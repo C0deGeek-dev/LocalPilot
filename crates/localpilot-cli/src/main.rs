@@ -2731,7 +2731,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             resume,
             incognito,
         } => {
-            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            let profile = session_cmd::launch_profile(permission.as_deref(), bypass)?;
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
             let outcome = repl::run_chat_with(
                 model.as_deref(),
@@ -2760,7 +2760,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             resume,
             turn_timeout,
         } => {
-            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            let profile = session_cmd::launch_profile(permission.as_deref(), bypass)?;
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
             let outcome = session_cmd::print_mode(
                 &prompt,
@@ -2793,7 +2793,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             verify_command,
             learn,
         } => {
-            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            let profile = session_cmd::launch_profile(permission.as_deref(), bypass)?;
             eval_cmd::run_eval(eval_cmd::EvalOptions {
                 problem: &problem,
                 model: &model,
@@ -3173,7 +3173,12 @@ async fn run_default() -> anyhow::Result<std::process::ExitCode> {
             localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())
         {
             if config.resolve_model(None).is_some() {
-                let profile = session_cmd::resolve_profile_from_config(&config);
+                let profile = session_cmd::action_profile(
+                    &config,
+                    None,
+                    false,
+                    session_cmd::resolve_profile_from_config(&config),
+                );
                 // A configured bare invocation is the same long-lived chat
                 // session as `localpilot chat`; keep its owner lease alive for
                 // the complete REPL lifetime as well.

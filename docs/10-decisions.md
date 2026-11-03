@@ -2,6 +2,23 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0260: Configure User-Owned Action Authorization
+
+**Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#264.
+
+**Decision.** An optional user-owned `permissions.action_mode` selects Normal
+(Default) or Accept all (Unrestricted) in the primary interactive and
+single-turn CLI. Omission preserves the launcher's legacy profile selection.
+Explicit launch flags win, with an explicit readonly launch restriction
+taking priority when an action mode is configured. The configured legacy
+readonly profile also constrains the setting absent explicit launch flags.
+Project action requests and broader host adoption have separate follow-ups.
+
+**Consequences.** Accept all admits opaque execution and external paths through
+the existing permission engine. Launch disclosure covers external file and
+subprocess network access. Session constraints, sizing, required verification
+and product remote switches remain independently enforced.
+
 ## ADR-0259: Phone Setup Reads Tailscale Through Its Local API and Changes Only What It Adds
 
 **Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.

@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Choose Normal or Accept all action authorization through the user-owned
+  `[permissions].action_mode` setting for chat, print and eval. Accept all
+  uses the existing Unrestricted profile (ADR-0260, #264).
+
 - `localpilot remote setup` gives your phone an HTTPS address for the gateway
   through Tailscale on this computer (`https://<machine>.<tailnet>.ts.net/`).
   It changes nothing else in your Serve settings and sets `[remote]

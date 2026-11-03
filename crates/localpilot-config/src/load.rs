@@ -89,7 +89,8 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
 /// Keys a project file must never set: they grant the agent more than the
 /// user's own settings do, and a repository must not be able to grant itself
 /// anything. Refused loudly rather than ignored, so the author sees why.
-const USER_ONLY_KEYS: [&str; 5] = [
+const USER_ONLY_KEYS: [&str; 6] = [
+    "permissions.action_mode",
     "permissions.allow_commands",
     "permissions.scratch_root",
     "harness.granularity.headless_units",
@@ -482,6 +483,37 @@ mod tests {
             cadence: Cadence::Step,
             auto_fix: AutoFix::No,
             severity: None,
+        }
+    }
+
+    #[test]
+    fn action_mode_is_user_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join(".localpilot.toml");
+        let paths = ConfigPaths {
+            user: Some(user.clone()),
+            project: Some(project.clone()),
+        };
+        let load_mode =
+            || load(&paths, &CliOverrides::default()).map(|config| config.permissions.action_mode);
+        assert_eq!(load_mode().unwrap(), None);
+        for (value, mode) in [
+            ("normal", crate::ActionMode::Normal),
+            ("accept_all", crate::ActionMode::AcceptAll),
+        ] {
+            let toml = format!("[permissions]\naction_mode = {value:?}\n");
+            std::fs::write(&user, &toml).unwrap();
+            assert_eq!(load_mode().unwrap(), Some(mode));
+            std::fs::write(&project, &toml).unwrap();
+            assert!(matches!(
+                load_mode(),
+                Err(ConfigError::UserOnly {
+                    key: "permissions.action_mode",
+                    ..
+                })
+            ));
+            std::fs::remove_file(&project).unwrap();
         }
     }
 

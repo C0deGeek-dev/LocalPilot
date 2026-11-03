@@ -1612,6 +1612,9 @@ impl HarnessConfig {
 #[serde(default)]
 pub struct PermissionsConfig {
     pub profile: PermissionProfile,
+    /// Optional user-owned action policy. Omission preserves legacy launch behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_mode: Option<ActionMode>,
     /// Private session scratch: true/default selects OS temp, false disables
     /// it, a string selects an absolute existing parent. User/environment only;
     /// a project cannot choose where the agent gains write authority.
@@ -1654,6 +1657,14 @@ pub struct AllowCommand {
     pub program: String,
     #[serde(default)]
     pub args_prefix: Vec<String>,
+}
+
+/// User-facing action authorization policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionMode {
+    Normal,
+    AcceptAll,
 }
 
 /// Permission profile. `Bypass` and `Unrestricted` are never the default.

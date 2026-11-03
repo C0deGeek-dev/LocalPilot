@@ -49,6 +49,54 @@ pub fn resolve_profile(permission: Option<&str>, bypass: bool) -> Profile {
     }
 }
 
+/// Resolve the action setting for the primary chat and single-turn CLI launches.
+pub fn launch_profile(permission: Option<&str>, bypass: bool) -> anyhow::Result<Profile> {
+    let cwd = std::env::current_dir()?;
+    let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    Ok(action_profile(
+        &config,
+        permission,
+        bypass,
+        resolve_profile(permission, bypass),
+    ))
+}
+
+pub fn action_profile(
+    config: &localpilot_config::Config,
+    permission: Option<&str>,
+    bypass: bool,
+    fallback: Profile,
+) -> Profile {
+    let Some(mode) = config.permissions.action_mode else {
+        return fallback;
+    };
+    let (profile, source) = if permission == Some("readonly") {
+        (Profile::ReadOnly, "explicit launch restriction")
+    } else if crate::bypass::engaged() {
+        (Profile::Unrestricted, "explicit full-auto launch")
+    } else if permission.is_some() || bypass {
+        (
+            resolve_profile(permission, bypass),
+            "explicit launch profile",
+        )
+    } else if config.permissions.profile == localpilot_config::PermissionProfile::Readonly {
+        (Profile::ReadOnly, "configured read-only restriction")
+    } else {
+        match mode {
+            localpilot_config::ActionMode::Normal => (Profile::Default, "Normal"),
+            localpilot_config::ActionMode::AcceptAll => (Profile::Unrestricted, "Accept all"),
+        }
+    };
+    if profile == Profile::Unrestricted {
+        eprintln!(
+            "Actions: {source} (unrestricted). Tools can modify or delete files outside the workspace. Subprocesses can access the network with your OS account's permissions."
+        );
+    } else {
+        eprintln!("Actions: {source} ({profile:?}).");
+    }
+    profile
+}
+
 /// The access one `print` turn runs with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrintAccess {
@@ -958,6 +1006,179 @@ mod tests {
             overwrite: true,
             secret_like: false,
         }
+    }
+
+    #[tokio::test]
+    async fn accept_all_dispatches_opaque_and_external_actions_without_approval() {
+        use localpilot_core::{ToolCall, ToolUseId};
+        use localpilot_tools::{BackgroundProcesses, ToolContext, ToolRegistry};
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let registry = ToolRegistry::with_builtins();
+        let approver = ScriptedApprover::new(Vec::new());
+        let mut config = localpilot_config::Config::default();
+        config.permissions.action_mode = Some(localpilot_config::ActionMode::AcceptAll);
+        let profile = action_profile(&config, None, false, Profile::Default);
+        let engine = PermissionEngine::new(profile, Vec::new());
+        let shell = if cfg!(windows) {
+            "[Console]::WriteLine('opaque')"
+        } else {
+            "value=opaque; printf '%s' \"$value\""
+        };
+        let background = if cfg!(windows) {
+            "Start-Sleep -Seconds 10"
+        } else {
+            "delay=10; sleep \"$delay\""
+        };
+        for interactivity in [Interactivity::Interactive, Interactivity::NonInteractive] {
+            let processes = BackgroundProcesses::new();
+            let ctx = ToolContext {
+                workspace: &workspace,
+                interactivity,
+                trusted: true,
+                retention: None,
+                processes: Some(&processes),
+                agents: None,
+                prompter: None,
+                peers: None,
+            };
+            let target = outside.path().join("external.txt");
+            let calls = [
+                ToolCall::new(
+                    ToolUseId::from("shell"),
+                    "run_shell",
+                    json!({"command": shell}),
+                ),
+                ToolCall::new(
+                    ToolUseId::from("background"),
+                    "run_background",
+                    json!({"action": "start", "command": background, "grace_secs": 1}),
+                ),
+                ToolCall::new(
+                    ToolUseId::from("write"),
+                    "write_file",
+                    json!({"path": target, "content": "external"}),
+                ),
+            ];
+            let bypass_engine = PermissionEngine::new(Profile::Bypass, Vec::new());
+            for call in &calls {
+                assert!(registry
+                    .dispatch(call, &ctx, &bypass_engine, &approver)
+                    .await
+                    .is_error());
+                let result = registry.dispatch(call, &ctx, &engine, &approver).await;
+                assert!(!result.is_error(), "{}", result.output);
+            }
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "external");
+            std::fs::remove_file(&target).unwrap();
+            let incognito = engine.clone().with_incognito(true);
+            assert!(registry
+                .dispatch(&calls[2], &ctx, &incognito, &approver)
+                .await
+                .is_error());
+            assert!(!target.exists());
+            processes.kill_all();
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_all_does_not_override_a_denied_write_lease() {
+        use localpilot_core::{ToolCall, ToolUseId};
+        use localpilot_sandbox::{Lease, LeaseState};
+        use localpilot_tools::{BackgroundProcesses, ToolContext, ToolRegistry};
+        use serde_json::json;
+
+        #[derive(Debug)]
+        struct Denied;
+        impl Lease for Denied {
+            fn current(&self) -> LeaseState {
+                LeaseState::Denied("owner=other".to_string())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let registry = ToolRegistry::with_builtins();
+        let approver = ScriptedApprover::new(Vec::new());
+        let mut config = localpilot_config::Config::default();
+        config.permissions.action_mode = Some(localpilot_config::ActionMode::AcceptAll);
+        let profile = action_profile(&config, None, false, Profile::Default);
+        assert_eq!(profile, Profile::Unrestricted);
+        let engine =
+            PermissionEngine::new(profile, Vec::new()).with_lease(std::sync::Arc::new(Denied));
+        let processes = BackgroundProcesses::new();
+        let ctx = ToolContext {
+            workspace: &workspace,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: Some(&processes),
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        let inside = dir.path().join("inside.txt");
+        let external = outside.path().join("external.txt");
+        let calls = [
+            ToolCall::new(
+                ToolUseId::from("inside"),
+                "write_file",
+                json!({"path": inside, "content": "x"}),
+            ),
+            ToolCall::new(
+                ToolUseId::from("external"),
+                "write_file",
+                json!({"path": external, "content": "x"}),
+            ),
+        ];
+        for call in &calls {
+            let result = registry.dispatch(call, &ctx, &engine, &approver).await;
+            assert!(result.is_error(), "{}", result.output);
+        }
+        assert!(!inside.exists() && !external.exists());
+    }
+
+    #[test]
+    fn action_modes_keep_explicit_restrictions_and_legacy_launches() {
+        use localpilot_config::{ActionMode, PermissionProfile};
+
+        let mut config = localpilot_config::Config::default();
+        assert_eq!(
+            action_profile(&config, None, false, Profile::Relaxed),
+            Profile::Relaxed
+        );
+        config.permissions.action_mode = Some(ActionMode::AcceptAll);
+        let profile = action_profile(&config, None, false, Profile::Default);
+        assert_eq!(profile, Profile::Unrestricted);
+        assert_eq!(
+            print_access(profile, false, false).profile,
+            Profile::Unrestricted
+        );
+        assert_eq!(
+            action_profile(&config, Some("readonly"), true, Profile::Default),
+            Profile::ReadOnly
+        );
+        for name in PERMISSION_PROFILES {
+            assert_eq!(
+                action_profile(&config, Some(name), false, Profile::Default),
+                resolve_profile(Some(name), false)
+            );
+        }
+        config.permissions.profile = PermissionProfile::Readonly;
+        assert_eq!(
+            action_profile(&config, None, false, Profile::Default),
+            Profile::ReadOnly
+        );
+        config.permissions.profile = PermissionProfile::Unrestricted;
+        config.permissions.action_mode = Some(ActionMode::Normal);
+        assert_eq!(
+            action_profile(&config, None, false, Profile::Unrestricted),
+            Profile::Default
+        );
     }
 
     #[test]
