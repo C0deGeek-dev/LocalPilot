@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/remote share` without a background server for the workspace no longer
+  just ends: `/remote` offers "Start server and share", and starts it only
+  when chosen. When the server stops under a shared session, sharing waits
+  instead of giving up, with phone access closed, and `/remote` offers
+  "Start server and reconnect". While a connection is down, `/remote` offers
+  "Reconnect now". A start only acts for the share it was chosen for, never
+  starts a second server while one may still be starting, and never stops a
+  server. The start choice steps aside for a permission request or question
+  (ADR-0261).
 - Choose Normal or Accept all action authorization through the user-owned
   `[permissions].action_mode` setting for chat, print and eval. Accept all
   uses the existing Unrestricted profile (ADR-0260, #264).

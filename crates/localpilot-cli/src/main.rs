@@ -68,6 +68,7 @@ mod relay_source;
 mod remote_devices;
 mod remote_gateway;
 mod remote_pairing;
+mod remote_server_start;
 mod remote_setup;
 mod remote_share;
 mod remote_status;

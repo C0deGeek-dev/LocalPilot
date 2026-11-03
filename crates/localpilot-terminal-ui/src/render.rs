@@ -3813,6 +3813,9 @@ fn render_pairing_view(
 /// The host's open choice, over everything else (a permission dialog stays
 /// open beneath it).
 fn render_choice(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
+    if !app.choice_shown() {
+        return;
+    }
     let Some(choice) = app.choice() else {
         return;
     };

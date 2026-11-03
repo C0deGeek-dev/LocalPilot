@@ -485,7 +485,7 @@ impl Drop for Wiped {
     }
 }
 
-async fn send_record<W: AsyncWrite + Unpin>(
+pub(crate) async fn send_record<W: AsyncWrite + Unpin>(
     write: &mut W,
     command: ClientCommand,
 ) -> std::io::Result<()> {
@@ -503,7 +503,9 @@ async fn send_record<W: AsyncWrite + Unpin>(
     write.flush().await
 }
 
-async fn next_event<R: AsyncRead + Unpin>(reader: &mut JsonRecordReader<R>) -> Option<ServerEvent> {
+pub(crate) async fn next_event<R: AsyncRead + Unpin>(
+    reader: &mut JsonRecordReader<R>,
+) -> Option<ServerEvent> {
     let value = reader.next().await.ok()??;
     serde_json::from_value::<ServerRecord>(value)
         .ok()

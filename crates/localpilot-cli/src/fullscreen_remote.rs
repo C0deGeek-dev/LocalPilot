@@ -140,6 +140,8 @@ pub(super) struct RemoteHost {
     pub(super) pairing: super::pairing_host::PairingHost,
     /// The paired devices (`/remote devices`).
     pub(super) devices: super::devices_host::DevicesHost,
+    /// Starting the background server from `/remote`.
+    pub(super) start: super::start_host::StartHost,
 }
 
 impl RemoteHost {
@@ -151,6 +153,13 @@ impl RemoteHost {
         let devices = super::devices_host::DevicesHost::new(std::sync::Arc::new(
             crate::server_devices::DeviceRegistry::for_user(cwd),
         ));
+        let start =
+            super::start_host::StartHost::new(crate::remote_server_start::ServerStart::new(
+                std::sync::Arc::new(crate::remote_server_start::Workspace {
+                    root: cwd.to_path_buf(),
+                    dial: share.dial(),
+                }),
+            ));
         Self {
             share,
             pairing,
@@ -161,7 +170,18 @@ impl RemoteHost {
             published: RefCell::new(None),
             admission: Cell::new(None),
             status: super::status_host::StatusHost::new(cwd.to_path_buf()),
+            start,
         }
+    }
+
+    /// The same host, starting servers with `server`.
+    #[cfg(test)]
+    pub(super) fn with_server_start(
+        mut self,
+        server: crate::remote_server_start::ServerStart,
+    ) -> Self {
+        self.start = super::start_host::StartHost::new(server);
+        self
     }
 
     /// The same host, listing devices with `devices`.
@@ -273,6 +293,10 @@ fn status_labels(host: &RemoteHost, app: &AppModel) -> (Option<String>, Option<S
             };
             (Some(full), Some(short))
         }
+        ShareState::ServerStopped => (
+            Some("Sharing interrupted | Devices: unknown | Relay: server not running".to_string()),
+            Some("Interrupted · ?dev · no server".to_string()),
+        ),
     };
     match host.pairing.status(app) {
         Some(pairing) => (
@@ -307,6 +331,16 @@ pub(super) fn show_notices(app: &mut AppModel, host: &RemoteHost) {
                 )))
             }
             ShareNotice::Ended(why) => app.apply_runtime(RuntimeUpdate::Warning(why)),
+            ShareNotice::NeedsServer => app.apply_runtime(RuntimeUpdate::Warning(
+                "Sharing needs the background server for this workspace. Open /remote and \
+                 choose Start server and share."
+                    .to_string(),
+            )),
+            ShareNotice::ServerStopped => app.apply_runtime(RuntimeUpdate::Warning(
+                "Sharing interrupted: the background server is not running. Local work \
+                 continues. Open /remote to start it and reconnect."
+                    .to_string(),
+            )),
             ShareNotice::NoDevicesYet => app.apply_runtime(RuntimeUpdate::Notice(
                 "No devices attached yet.".to_string(),
             )),
@@ -616,6 +650,11 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
             }
             ShareOutcome::AlreadyShared => notice(app, "This session is already shared."),
             ShareOutcome::AlreadyConnecting => notice(app, "Sharing is connecting."),
+            ShareOutcome::ServerStopped => notice(
+                app,
+                "Sharing is waiting for the background server. Open /remote and choose Start \
+                 server and reconnect.",
+            ),
             ShareOutcome::Refused(reason) => app.apply_runtime(RuntimeUpdate::Warning(format!(
                 "Could not share this session. {reason}"
             ))),
@@ -646,8 +685,34 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
     refresh_labels(app, host);
 }
 
+/// Keep the start choice current, and share or reconnect once its server is
+/// ready for an intent that is still current.
+fn tick_start(app: &mut AppModel, host: &RemoteHost) {
+    if !host.start.is_open() && host.choice.get() == Some(ChoiceKind::StartServer) {
+        host.choice.set(None);
+    }
+    let ours = host.choice.get() == Some(ChoiceKind::StartServer) && app.choice().is_some();
+    let then = host.start.tick(app, &host.share, ours);
+    if !host.start.is_open() && host.choice.get() == Some(ChoiceKind::StartServer) {
+        host.choice.set(None);
+    }
+    match then {
+        Some(super::start_host::Then::Share) => command(app, host, RemoteAction::Share),
+        Some(super::start_host::Then::Reconnect) => {
+            let text = if host.share.reconnect_now() {
+                "Reconnecting now..."
+            } else {
+                "Sharing is no longer waiting to reconnect."
+            };
+            app.apply_runtime(RuntimeUpdate::Notice(text.to_string()));
+        }
+        None => {}
+    }
+}
+
 /// Keep the pairing overlay current (and closed if the session changed).
 fn tick_pairing(app: &mut AppModel, host: &RemoteHost, busy: bool) {
+    tick_start(app, host);
     let shared = !matches!(host.share.state(), ShareState::Off);
     host.pairing.tick(app, host.share.tracked_session(), shared);
     // Attendance here: only this session's confirmed list (when shared).
@@ -697,6 +762,7 @@ fn tick_pairing(app: &mut AppModel, host: &RemoteHost, busy: bool) {
         retry_at,
         attended: attended.as_deref(),
         work,
+        server_needed: host.share.server_needed(),
     };
     host.status
         .tick(app, &mut host.devices.controller(), &inputs);
@@ -734,6 +800,28 @@ pub(super) fn pairing_key(app: &mut AppModel, host: &RemoteHost, key: crossterm:
                 command(app, host, RemoteAction::Share)
             }
             Some(super::status_host::StatusAction::Stop) => command(app, host, RemoteAction::Stop),
+            Some(super::status_host::StatusAction::Reconnect) => {
+                let text = if host.share.reconnect_now() {
+                    "Reconnecting now..."
+                } else {
+                    "Sharing is not waiting to reconnect."
+                };
+                app.apply_runtime(RuntimeUpdate::Notice(text.to_string()));
+            }
+            Some(
+                action @ (super::status_host::StatusAction::StartAndShare
+                | super::status_host::StatusAction::StartAndReconnect),
+            ) => {
+                let then = if action == super::status_host::StatusAction::StartAndShare {
+                    super::start_host::Then::Share
+                } else {
+                    super::start_host::Then::Reconnect
+                };
+                match host.start.open(app, &host.share, then) {
+                    Ok(()) => host.choice.set(Some(ChoiceKind::StartServer)),
+                    Err(why) => app.apply_runtime(RuntimeUpdate::Notice(why.to_string())),
+                }
+            }
             _ => {}
         }
         return;
@@ -773,6 +861,8 @@ enum ChoiceKind {
     /// Remote access during a permission ask or question (F6). `stop` is the
     /// action the menu showed: Enter does exactly that, whatever changed since.
     Remote { stop: bool },
+    /// Starting the background server (see `start_host`).
+    StartServer,
 }
 
 /// Whether an exit request may close the terminal now. While sharing is on
@@ -786,7 +876,7 @@ pub(super) fn request_exit(app: &mut AppModel, host: &RemoteHost, turn: &str) ->
     }
     if app.choice().is_none() {
         let sharing = match host.share.state() {
-            ShareState::Interrupted { .. } => {
+            ShareState::Interrupted { .. } | ShareState::ServerStopped => {
                 "Phone access is interrupted. Closing ends this session and stops reconnecting."
             }
             ShareState::Connecting => {
@@ -830,6 +920,10 @@ pub(super) fn open_remote_menu(app: &mut AppModel, host: &RemoteHost) {
         ShareState::Connecting => ("Sharing is connecting.", true),
         ShareState::Shared => ("This session is shared.", true),
         ShareState::Interrupted { .. } => ("Sharing is interrupted; reconnecting.", true),
+        ShareState::ServerStopped => (
+            "Sharing is interrupted: the background server is not running.",
+            true,
+        ),
     };
     let action = if stop {
         "Stop sharing"
@@ -869,6 +963,21 @@ pub(super) fn choice_key(
     let Some(selected) = app.choice().map(|choice| choice.selected) else {
         return ChoiceKey::Back;
     };
+    if host.choice.get() == Some(ChoiceKind::StartServer) {
+        match key.code {
+            KeyCode::Down | KeyCode::Tab => app.move_choice(true),
+            KeyCode::Up | KeyCode::BackTab => app.move_choice(false),
+            KeyCode::Enter | KeyCode::Esc => {
+                let enter = key.code == KeyCode::Enter;
+                if host.start.key(app, &host.share, enter) == super::start_host::StartKey::Closed {
+                    host.choice.set(None);
+                }
+                refresh_labels(app, host);
+            }
+            _ => {}
+        }
+        return ChoiceKey::Open;
+    }
     match key.code {
         KeyCode::Down | KeyCode::Tab => {
             app.move_choice(true);

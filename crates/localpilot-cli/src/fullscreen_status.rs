@@ -31,6 +31,13 @@ pub(super) enum StatusAction {
     Stop,
     Refresh,
     Close,
+    /// One immediate reconnect attempt, for an interrupted share.
+    Reconnect,
+    /// No server ran when sharing was asked for: start it, then share.
+    StartAndShare,
+    /// The server stopped under an interrupted share: start it, then
+    /// reconnect.
+    StartAndReconnect,
 }
 
 impl StatusAction {
@@ -42,6 +49,9 @@ impl StatusAction {
             Self::Stop => "Stop sharing",
             Self::Refresh => "Refresh status",
             Self::Close => "Close",
+            Self::Reconnect => "Reconnect now",
+            Self::StartAndShare => "Start server and share",
+            Self::StartAndReconnect => "Start server and reconnect",
         }
     }
 }
@@ -63,6 +73,8 @@ pub(super) struct StatusInputs<'a> {
     /// This session's confirmed attendance (only while shared).
     pub(super) attended: Option<&'a [localpilot_rpc::AttendedDevice]>,
     pub(super) work: Work,
+    /// The current sharing intent found no background server.
+    pub(super) server_needed: bool,
 }
 
 /// The host's status-canvas state.
@@ -79,6 +91,20 @@ pub(super) struct StatusHost {
     late_marked: Cell<bool>,
     /// The actions as last drawn, in order (Enter acts on these).
     drawn: RefCell<Vec<StatusAction>>,
+    /// The states whose own first action was already selected for this
+    /// opening: each is selected once (on opening, or on first entering that
+    /// state), never again, so a selection the user made survives the state
+    /// changing back and forth while reconnecting.
+    offered: RefCell<Vec<Primary>>,
+}
+
+/// Which state's own first action the canvas offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Primary {
+    None,
+    Reconnect,
+    StartAndShare,
+    StartAndReconnect,
 }
 
 impl StatusHost {
@@ -92,6 +118,7 @@ impl StatusHost {
             seen_epoch: Cell::new(0),
             late_marked: Cell::new(false),
             drawn: RefCell::new(Vec::new()),
+            offered: RefCell::new(Vec::new()),
         }
     }
 
@@ -110,6 +137,7 @@ impl StatusHost {
         self.late_marked.set(false);
         let asked = devices.check_status(generation, &self.cwd);
         self.not_started(asked);
+        self.offered.borrow_mut().clear();
         app.open_status_view(StatusView::new("Remote".to_string()));
     }
 
@@ -185,7 +213,11 @@ impl StatusHost {
                         app.close_status_view();
                         self.retire(devices);
                     }
-                    StatusAction::Share | StatusAction::Stop => {}
+                    StatusAction::Share
+                    | StatusAction::Stop
+                    | StatusAction::Reconnect
+                    | StatusAction::StartAndShare
+                    | StatusAction::StartAndReconnect => {}
                 }
                 Some(action)
             }
@@ -266,6 +298,26 @@ impl StatusHost {
             format!("{}; running in this terminal", session_text(&inputs.share)),
         ));
         rows.push(row("Work", work_text(inputs.work).to_string()));
+        match inputs.share {
+            ShareState::Interrupted { .. } => rows.push(row(
+                "Phone actions",
+                "Unavailable until sharing reconnects. Local work continues in this terminal."
+                    .to_string(),
+            )),
+            ShareState::ServerStopped => rows.push(row(
+                "Phone actions",
+                "Unavailable: the background server is not running. Local work continues in \
+                 this terminal."
+                    .to_string(),
+            )),
+            _ if inputs.server_needed => rows.push(row(
+                "Background server",
+                "Not running for this workspace; sharing needs it. Starting it does not start \
+                 the gateway."
+                    .to_string(),
+            )),
+            _ => {}
+        }
         match inputs.attended {
             None => rows.push(row(
                 "Attached here",
@@ -310,17 +362,7 @@ impl StatusHost {
         }
         rows.push(row("Devices", model.counts_line()));
         drop(model);
-        let actions = vec![
-            StatusAction::Pair,
-            StatusAction::Devices,
-            if matches!(inputs.share, ShareState::Off) {
-                StatusAction::Share
-            } else {
-                StatusAction::Stop
-            },
-            StatusAction::Refresh,
-            StatusAction::Close,
-        ];
+        let (primary, actions) = actions_for(&inputs.share, inputs.server_needed);
         let Some(view) = app.status_view_mut() else {
             return;
         };
@@ -331,7 +373,40 @@ impl StatusHost {
                 .map(|action| action.label().to_string())
                 .collect(),
         );
+        // The state's own first action is selected the first time this
+        // opening shows that state; otherwise the user's selection (kept by
+        // label) stays.
+        let mut offered = self.offered.borrow_mut();
+        if primary != Primary::None && !offered.contains(&primary) {
+            offered.push(primary);
+            view.action = 0;
+        }
         *self.drawn.borrow_mut() = actions;
+    }
+}
+
+/// The actions for a sharing state, its own first.
+fn actions_for(share: &ShareState, server_needed: bool) -> (Primary, Vec<StatusAction>) {
+    use StatusAction::{
+        Close, Devices, Pair, Reconnect, Refresh, Share, StartAndReconnect, StartAndShare, Stop,
+    };
+    match share {
+        ShareState::Interrupted { .. } => (
+            Primary::Reconnect,
+            vec![Reconnect, Stop, Pair, Devices, Refresh, Close],
+        ),
+        ShareState::ServerStopped => (
+            Primary::StartAndReconnect,
+            vec![StartAndReconnect, Stop, Pair, Devices, Refresh, Close],
+        ),
+        ShareState::Off if server_needed => (
+            Primary::StartAndShare,
+            vec![StartAndShare, Pair, Devices, Refresh, Close],
+        ),
+        ShareState::Off => (Primary::None, vec![Pair, Devices, Share, Refresh, Close]),
+        ShareState::Connecting | ShareState::Shared => {
+            (Primary::None, vec![Pair, Devices, Stop, Refresh, Close])
+        }
     }
 }
 
@@ -366,6 +441,9 @@ fn relay_text(share: &ShareState, retry_at: Option<Instant>) -> String {
             ),
             None => "Interrupted; reconnecting".to_string(),
         },
+        ShareState::ServerStopped => {
+            "Interrupted; the background server is not running".to_string()
+        }
     }
 }
 
@@ -374,7 +452,7 @@ fn session_text(share: &ShareState) -> &'static str {
         ShareState::Off => "Not shared",
         ShareState::Connecting => "Sharing: connecting",
         ShareState::Shared => "Shared",
-        ShareState::Interrupted { .. } => "Sharing interrupted",
+        ShareState::Interrupted { .. } | ShareState::ServerStopped => "Sharing interrupted",
     }
 }
 

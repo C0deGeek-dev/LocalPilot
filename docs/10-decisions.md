@@ -2,6 +2,49 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0261: Sharing Starts the Background Server Only When Asked, and Reconnects Only for the Wait It Was Asked In
+
+**Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.
+
+**Context.** `/remote share` needs the workspace's background server. Without
+one, sharing ended with advice to run `localpilot serve`. A dropped
+connection retried a few times and then ended too. Starting a server from the
+terminal and reconnecting both act later than the click that asked for them,
+so a late result could act for a share that was stopped or replaced
+meanwhile, or start a second server while the first was still booting.
+
+**Decision.**
+1. No server at the first try ends that share and records that the current
+   sharing intent needs one. `/remote` then offers "Start server and share";
+   nothing opens on its own.
+2. A server that goes away under a share that had connected gets the short
+   retry ladder. After that the share waits in a "server not running" state,
+   with phone access closed and attendance unknown, until `/remote` offers
+   "Start server and reconnect". Nothing retries or starts on its own.
+3. Every share, stop (also with nothing shared), session or claim
+   replacement and share end moves the sharing intent on. A start choice
+   acts only for the intent it was opened for, and that is checked again
+   immediately before a server is started and before sharing or
+   reconnecting. A result for an intent that moved on is only reported.
+   Cancelling a start for a reconnect stops that share.
+4. A start is owned past its choice. The process is kept and never stopped
+   by the terminal. A second one is never started while ours may still be
+   starting, or when its status cannot be read. It counts as ready only once
+   it answers a session-free pairing hello, within one 15 s deadline for
+   every probe. It runs as the detached `__server-serve` in the workspace
+   folder, bound to the endpoint sharing dials.
+5. The start choice steps aside, neither drawn nor given keys, while a
+   permission request or question is open.
+6. "Reconnect now" wakes the share only for the wait it is in. Each wait
+   publishes its epoch with its state, a wake counts only for that epoch,
+   and stop or lost ownership win over a wake or timer ready at the same
+   time.
+
+**Consequences.** A server is started only by an explicit choice, for the
+share it was chosen for, and at most once at a time. A share whose server is
+gone no longer ends by itself; it says so in `/remote` and the status line
+until the user starts the server or stops sharing.
+
 ## ADR-0260: Configure User-Owned Action Authorization
 
 **Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#264.

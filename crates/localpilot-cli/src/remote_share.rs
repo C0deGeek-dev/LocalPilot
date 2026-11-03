@@ -74,6 +74,29 @@ pub(crate) enum ShareState {
     Interrupted {
         retry_in: Duration,
     },
+    /// The connection dropped and the background server is verifiably not
+    /// running: sharing waits, with admission closed and attendance unknown,
+    /// until the user starts it and asks to reconnect. Nothing retries on
+    /// its own.
+    ServerStopped,
+}
+
+/// The sharing intent a deliberate start or reconnect acts for: valid only
+/// while it is still the current intent, for the same session and claim, and
+/// the terminal still owns the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntentTicket {
+    intent: u64,
+    session: SessionId,
+    claim: Option<(u64, String)>,
+}
+
+/// A share that ended because no background server was running, for the
+/// intent that tried (so `/remote` can offer to start it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerNeeded {
+    intent: u64,
+    session: SessionId,
 }
 
 /// A change a relay task reports, for the terminal to show.
@@ -86,6 +109,11 @@ pub(crate) enum ShareNotice {
     },
     /// Sharing ended on its own; the text says why.
     Ended(String),
+    /// Sharing could not start: no background server runs for this
+    /// workspace. `/remote` offers to start it.
+    NeedsServer,
+    /// Reconnecting stopped: the background server is not running.
+    ServerStopped,
     /// The share's first attendance: nobody attached yet.
     NoDevicesYet,
     Attached {
@@ -197,6 +225,18 @@ struct Inner {
     /// When the interrupted share's next attempt is due: set exactly when
     /// the wait is scheduled, cleared on any other state, under this lock.
     retry_at: Option<std::time::Instant>,
+    /// The sharing intent: bumped by every share, stop, replacement and end,
+    /// so a ticket taken earlier stops being current.
+    intent: u64,
+    /// Set when the current intent's share found no server.
+    server_needed: Option<ServerNeeded>,
+    /// The wait a share task is in now (share, epoch), published with its
+    /// state after the task listens for a wake.
+    wait: Option<(u64, u64)>,
+    /// The last epoch handed out.
+    epochs: u64,
+    /// A reconnect-now aimed at exactly that wait.
+    wake: Option<(u64, u64)>,
 }
 
 /// One terminal's sharing. See the module docs.
@@ -209,6 +249,9 @@ pub(crate) struct RemoteShare {
     names: Names,
     source: Arc<crate::relay_source::SessionSource>,
     nap: Nap,
+    /// Wakes a waiting share task for a reconnect-now (it checks the wake is
+    /// meant for its wait).
+    waker: Arc<tokio::sync::Notify>,
 }
 
 /// What `/remote share` did.
@@ -217,6 +260,8 @@ pub(crate) enum ShareOutcome {
     Connecting,
     AlreadyShared,
     AlreadyConnecting,
+    /// Sharing waits for the background server to be started again.
+    ServerStopped,
     Refused(String),
 }
 
@@ -277,6 +322,11 @@ impl RemoteShare {
                 attendance: None,
                 retry_at: None,
                 ending: None,
+                intent: 0,
+                server_needed: None,
+                wait: None,
+                epochs: 0,
+                wake: None,
             })),
             requests,
             incoming: Mutex::new(incoming),
@@ -285,6 +335,7 @@ impl RemoteShare {
             names,
             source,
             nap: Arc::new(|delay| Box::pin(tokio::time::sleep(delay))),
+            waker: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -304,12 +355,20 @@ impl RemoteShare {
     /// Returns whether a share was ended.
     pub(crate) fn track(&self, tracked: Tracked) -> bool {
         let mut inner = self.inner();
+        // Another session, or the same one under another claim: the share
+        // was made for the old one and ends with it.
+        let replaced = inner
+            .tracked
+            .as_ref()
+            .is_some_and(|old| old.session != tracked.session || old.claim != tracked.claim);
         let ended = inner
             .current
             .as_ref()
-            .is_some_and(|current| current.session != tracked.session);
+            .is_some_and(|current| current.session != tracked.session || replaced);
         if ended {
             end_current(&mut inner);
+        } else if replaced {
+            retire_intent(&mut inner);
         }
         inner.tracked = Some(tracked);
         ended
@@ -321,6 +380,7 @@ impl RemoteShare {
         let mut inner = self.inner();
         let ended = inner.current.is_some();
         end_current(&mut inner);
+        retire_intent(&mut inner);
         ended
     }
 
@@ -382,6 +442,69 @@ impl RemoteShare {
         (self.names)(device)
     }
 
+    /// The current sharing intent, for a deliberate start or reconnect to act
+    /// for (`None` before a session runs).
+    pub(crate) fn ticket(&self) -> Option<IntentTicket> {
+        let inner = self.inner();
+        let tracked = inner.tracked.as_ref()?;
+        Some(IntentTicket {
+            intent: inner.intent,
+            session: tracked.session,
+            claim: tracked.claim.clone(),
+        })
+    }
+
+    /// Whether `ticket` is still the intent to act for: nothing shared,
+    /// stopped or replaced since, the same session and claim, still owned.
+    pub(crate) fn intent_current(&self, ticket: &IntentTicket) -> bool {
+        let inner = self.inner();
+        inner.intent == ticket.intent
+            && inner.tracked.as_ref().is_some_and(|tracked| {
+                tracked.session == ticket.session
+                    && tracked.claim == ticket.claim
+                    && tracked.gate.is_owned()
+            })
+    }
+
+    /// Whether the current intent's share found no background server (so
+    /// `/remote` offers to start one).
+    pub(crate) fn server_needed(&self) -> bool {
+        let inner = self.inner();
+        inner.server_needed.as_ref().is_some_and(|needed| {
+            needed.intent == inner.intent
+                && inner
+                    .tracked
+                    .as_ref()
+                    .is_some_and(|tracked| tracked.session == needed.session)
+        })
+    }
+
+    /// Give up the current intent without sharing (a cancelled start).
+    pub(crate) fn cancel_intent(&self) {
+        retire_intent(&mut self.inner());
+    }
+
+    /// Ask the waiting share to try once now. Only a share waiting to
+    /// reconnect (interrupted, or with the server stopped) is woken, and only
+    /// for the wait it is in; otherwise nothing happens.
+    pub(crate) fn reconnect_now(&self) -> bool {
+        let mut inner = self.inner();
+        let waiting = matches!(
+            inner.state,
+            ShareState::Interrupted { .. } | ShareState::ServerStopped
+        );
+        let current = inner.current.as_ref().map(|current| current.share);
+        match inner.wait {
+            Some((share, epoch)) if waiting && current == Some(share) => {
+                inner.wake = Some((share, epoch));
+                drop(inner);
+                self.waker.notify_waiters();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The session's source (its feed and ask registry).
     pub(crate) fn source(&self) -> &crate::relay_source::SessionSource {
         &self.source
@@ -404,8 +527,10 @@ impl RemoteShare {
             ShareState::Shared => return ShareOutcome::AlreadyShared,
             ShareState::Connecting => return ShareOutcome::AlreadyConnecting,
             ShareState::Interrupted { .. } => return ShareOutcome::AlreadyShared,
+            ShareState::ServerStopped => return ShareOutcome::ServerStopped,
             ShareState::Off => {}
         }
+        retire_intent(&mut inner);
         let Some(tracked) = inner.tracked.clone() else {
             return ShareOutcome::Refused("the session has not started yet".to_string());
         };
@@ -453,6 +578,8 @@ impl RemoteShare {
             asks,
             feed,
             identity,
+            waker: self.waker.clone(),
+            session: tracked.session,
         };
         let handle = tokio::spawn(task.run());
         if let Some(current) = &mut self.inner().current {
@@ -468,17 +595,38 @@ impl RemoteShare {
     pub(crate) fn stop(&self) -> StopOutcome {
         let mut inner = self.inner();
         let outcome = match inner.state {
-            ShareState::Off => return StopOutcome::NotShared,
+            ShareState::Off => {
+                // A share that is waiting for its server to be started is
+                // still an intent: stopping cancels it.
+                let pending = inner.server_needed.is_some();
+                retire_intent(&mut inner);
+                return if pending {
+                    StopOutcome::Cancelled
+                } else {
+                    StopOutcome::NotShared
+                };
+            }
             ShareState::Connecting => StopOutcome::Cancelled,
-            ShareState::Shared | ShareState::Interrupted { .. } => StopOutcome::Stopped,
+            ShareState::Shared | ShareState::Interrupted { .. } | ShareState::ServerStopped => {
+                StopOutcome::Stopped
+            }
         };
         end_current(&mut inner);
         outcome
     }
 }
 
+/// Make every ticket taken so far stale, and forget a missing-server fact.
+fn retire_intent(inner: &mut Inner) {
+    inner.intent += 1;
+    inner.server_needed = None;
+}
+
 /// Clear the share's fence first, then end its task, and forget it.
 fn end_current(inner: &mut Inner) {
+    retire_intent(inner);
+    inner.wait = None;
+    inner.wake = None;
     inner.attendance = None;
     if let Some(current) = inner.current.take() {
         current.fence.store(false, Ordering::SeqCst);
@@ -609,6 +757,18 @@ struct ShareTask {
     asks: AskRegistry,
     feed: Arc<SessionFeed>,
     identity: RelayIdentity,
+    waker: Arc<tokio::sync::Notify>,
+    session: SessionId,
+}
+
+/// How a wait between attempts ended.
+enum Waited {
+    Stopped,
+    OwnerLost,
+    /// The retry delay passed.
+    Timer,
+    /// A reconnect-now for exactly this wait.
+    Woken,
 }
 
 /// How one connection attempt ended.
@@ -635,6 +795,12 @@ impl ShareTask {
                 ShareState::Interrupted { retry_in } => Some(std::time::Instant::now() + *retry_in),
                 _ => None,
             };
+            if !matches!(
+                state,
+                ShareState::Interrupted { .. } | ShareState::ServerStopped
+            ) {
+                inner.wait = None;
+            }
             inner.state = state;
         }
         if let Some(notice) = notice {
@@ -656,8 +822,11 @@ impl ShareTask {
         let mut failures = 0usize;
         let mut ever_shared = false;
         loop {
-            if self.stop.is_cancelled() {
+            if self.stop.is_cancelled() || !self.fence.load(Ordering::SeqCst) {
                 return;
+            }
+            if !self.gate.is_owned() {
+                return self.over(OWNER_LOST.to_string());
             }
             match self.attempt(ever_shared).await {
                 (Attempt::Stopped, _) => return,
@@ -668,28 +837,48 @@ impl ShareTask {
                         failures = 0;
                     }
                     let absent = matches!(outcome, Attempt::Absent);
-                    // A server that is not running gets the short ladder
-                    // only (enough to ride a restart), and none at all when
-                    // this share never connected.
-                    if absent && (!ever_shared || failures >= LADDER.len()) {
-                        return self.over(
-                            "Sharing needs a background server for this workspace. Start it with `localpilot serve`, then /remote share."
-                                .to_string(),
-                        );
+                    // No server at the first try: this share ends, and
+                    // `/remote` offers to start one.
+                    if absent && !ever_shared {
+                        return self.needs_server();
+                    }
+                    // A server gone for longer than the short ladder (enough
+                    // to ride a restart): wait for the user, never retry.
+                    if absent && failures >= LADDER.len() {
+                        loop {
+                            match self.wait(ShareState::ServerStopped, None).await {
+                                Waited::Woken => {}
+                                Waited::OwnerLost => return self.over(OWNER_LOST.to_string()),
+                                Waited::Stopped | Waited::Timer => return,
+                            }
+                            if !self.fence.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            if !self.report(Some(ShareState::Connecting), None) {
+                                return;
+                            }
+                            // One attempt: no server again waits for the user
+                            // again; anything else goes back to the ladder.
+                            match self.attempt(ever_shared).await {
+                                (Attempt::Stopped, _) => return,
+                                (Attempt::Over(why), _) => return self.over(why),
+                                (Attempt::Absent, _) => {}
+                                (_, _) => {
+                                    failures = 0;
+                                    break;
+                                }
+                            }
+                        }
                     }
                     let delay = retry_delay(failures);
                     failures += 1;
-                    if !self.report(
-                        Some(ShareState::Interrupted { retry_in: delay }),
-                        Some(ShareNotice::Interrupted { retry_in: delay }),
-                    ) {
-                        return;
-                    }
-                    tokio::select! {
-                        () = self.stop.cancelled() => return,
-                        // Ownership can end while waiting to retry.
-                        () = owner_lost(&self.gate) => return self.over(OWNER_LOST.to_string()),
-                        () = (self.nap)(delay) => {}
+                    match self
+                        .wait(ShareState::Interrupted { retry_in: delay }, Some(delay))
+                        .await
+                    {
+                        Waited::Stopped => return,
+                        Waited::OwnerLost => return self.over(OWNER_LOST.to_string()),
+                        Waited::Timer | Waited::Woken => {}
                     }
                     if !self.report(Some(ShareState::Connecting), None) {
                         return;
@@ -697,6 +886,95 @@ impl ShareTask {
                 }
             }
         }
+    }
+
+    /// No server for a share that never connected: end it, and record that
+    /// the current intent needs one.
+    fn needs_server(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if inner.current.as_ref().map(|c| c.share) == Some(self.share) {
+            end_current(&mut inner);
+            inner.server_needed = Some(ServerNeeded {
+                intent: inner.intent,
+                session: self.session,
+            });
+            push_notice(&mut inner.notices, ShareNotice::NeedsServer);
+        }
+    }
+
+    /// Wait in `state` (for `nap`, or until woken when `None`). The task
+    /// listens for a wake before the wait is published, and the wait's epoch,
+    /// state and retry time are published together; a wake counts only for
+    /// this wait, and stop or owner loss win over a wake or timer ready at
+    /// the same time.
+    async fn wait(&self, state: ShareState, nap: Option<Duration>) -> Waited {
+        let notified = self.waker.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let epoch = {
+            let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            if inner.current.as_ref().map(|c| c.share) != Some(self.share) {
+                return Waited::Stopped;
+            }
+            inner.epochs += 1;
+            let epoch = inner.epochs;
+            inner.wait = Some((self.share, epoch));
+            inner.retry_at = nap.map(|delay| std::time::Instant::now() + delay);
+            let notice = match &state {
+                ShareState::Interrupted { retry_in } => Some(ShareNotice::Interrupted {
+                    retry_in: *retry_in,
+                }),
+                ShareState::ServerStopped => Some(ShareNotice::ServerStopped),
+                _ => None,
+            };
+            inner.state = state;
+            if let Some(notice) = notice {
+                push_notice(&mut inner.notices, notice);
+            }
+            epoch
+        };
+        let sleep = async {
+            match nap {
+                Some(delay) => (self.nap)(delay).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(sleep);
+        let waited = loop {
+            tokio::select! {
+                biased;
+                () = self.stop.cancelled() => break Waited::Stopped,
+                () = owner_lost(&self.gate) => break Waited::OwnerLost,
+                () = &mut notified => {
+                    let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+                    if inner.wake == Some((self.share, epoch)) {
+                        inner.wake = None;
+                        break Waited::Woken;
+                    }
+                    drop(inner);
+                    // Not for this wait: listen again.
+                    notified.set(self.waker.notified());
+                    notified.as_mut().enable();
+                }
+                () = &mut sleep => break Waited::Timer,
+            }
+        };
+        // Ownership is polled; a wake or timer ready first must still lose to
+        // an ownership already gone.
+        let waited = match waited {
+            Waited::Woken | Waited::Timer if !self.gate.is_owned() => Waited::OwnerLost,
+            other => other,
+        };
+        // This wait is over: retire it so no later wake can count for it.
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if inner.wait == Some((self.share, epoch)) {
+            inner.wait = None;
+            inner.retry_at = None;
+        }
+        if inner.wake == Some((self.share, epoch)) {
+            inner.wake = None;
+        }
+        waited
     }
 
     /// One connection: register, publish until it ends. Returns how it ended
@@ -1249,17 +1527,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_server_before_sharing_ever_connected_ends_with_how_to_start_one() {
+    async fn no_server_before_sharing_ever_connected_records_that_one_is_needed() {
         let f = fixture();
         f.dials.push_error(TransportError::NotRunning);
+        let before = f.share.ticket().expect("a session");
         assert_eq!(f.share.share(), ShareOutcome::Connecting);
         until(|| f.share.state() == ShareState::Off).await;
-        let notices = f.share.take_notices();
-        assert!(
-            matches!(notices.as_slice(), [ShareNotice::Ended(why)] if why.contains("localpilot serve")),
-            "{notices:?}"
-        );
+        assert_eq!(f.share.take_notices(), vec![ShareNotice::NeedsServer]);
         assert_eq!(f.dials.count(), 1, "no retries against an absent server");
+        assert!(f.share.server_needed());
+        assert!(
+            !f.share.intent_current(&before),
+            "sharing moved the intent on"
+        );
+        let now = f.share.ticket().expect("a session");
+        assert!(f.share.intent_current(&now));
+        // Stopping cancels the waiting intent, even though nothing runs.
+        assert_eq!(f.share.stop(), StopOutcome::Cancelled);
+        assert!(!f.share.server_needed());
+        assert!(!f.share.intent_current(&now));
+        assert_eq!(f.share.stop(), StopOutcome::NotShared);
+    }
+
+    #[tokio::test]
+    async fn a_needed_server_is_forgotten_by_a_new_share_or_session() {
+        let f = fixture();
+        f.dials.push_error(TransportError::NotRunning);
+        f.share.share();
+        until(|| f.share.server_needed()).await;
+        f.dials.push_error(TransportError::NotRunning);
+        let ticket = f.share.ticket().unwrap();
+        f.share.share();
+        assert!(!f.share.intent_current(&ticket));
+        until(|| f.share.server_needed()).await;
+        // Another session: the fact was for the old one.
+        let ticket = f.share.ticket().unwrap();
+        f.share.track(Tracked {
+            session: SessionId::new(),
+            claim: Some((1, "holder".to_string())),
+            gate: f.gate.clone(),
+        });
+        assert!(!f.share.server_needed());
+        assert!(!f.share.intent_current(&ticket));
+        // A cancelled start retires the intent too.
+        let ticket = f.share.ticket().unwrap();
+        f.share.cancel_intent();
+        assert!(!f.share.intent_current(&ticket));
+        // And losing ownership makes a ticket stale.
+        let ticket = f.share.ticket().unwrap();
+        f.gate.set(Admission::Lost);
+        assert!(!f.share.intent_current(&ticket));
     }
 
     #[tokio::test]
@@ -1295,29 +1612,33 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_server_that_went_away_gets_the_short_ladder_then_the_start_notice() {
-        let f = fixture();
-        let server = shared(&f).await;
+    /// Share, then lose the server for good: the short ladder, then the
+    /// stopped wait.
+    async fn server_stopped(f: &Fixture) -> Vec<Duration> {
+        let server = shared(f).await;
         drop(server); // the server stops; every later dial finds nothing
         let mut delays = Vec::new();
-        let ended = loop {
+        loop {
             tokio::time::sleep(Duration::from_millis(1)).await;
-            let mut ended = None;
+            let mut stopped = false;
             for notice in f.share.take_notices() {
                 match notice {
-                    ShareNotice::Interrupted { retry_in } => {
-                        delays.push(retry_in);
-                    }
-                    ShareNotice::Ended(why) => ended = Some(why),
-                    _ => {}
+                    ShareNotice::Interrupted { retry_in } => delays.push(retry_in),
+                    ShareNotice::ServerStopped => stopped = true,
+                    other => assert!(!matches!(other, ShareNotice::Ended(_)), "{other:?}"),
                 }
             }
-            if let Some(why) = ended {
-                break why;
+            if stopped {
+                break;
             }
-        };
-        assert!(ended.contains("localpilot serve"), "{ended}");
+        }
+        delays
+    }
+
+    #[tokio::test]
+    async fn a_server_that_went_away_gets_the_short_ladder_then_waits_for_the_user() {
+        let f = fixture();
+        let delays = server_stopped(&f).await;
         assert_eq!(
             delays,
             vec![
@@ -1328,7 +1649,103 @@ mod tests {
             ]
         );
         assert_eq!(f.dials.count(), 5);
+        assert_eq!(f.share.state(), ShareState::ServerStopped);
+        assert_eq!(f.share.retry_at(), None, "no countdown");
+        assert_eq!(f.share.devices(), None, "attendance unknown");
+        assert!(f.share.active(), "the intent is kept");
+        // Nothing retries on its own.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(f.dials.count(), 5);
+        assert_eq!(f.share.share(), ShareOutcome::ServerStopped);
+    }
+
+    #[tokio::test]
+    async fn reconnect_now_from_a_stopped_server_tries_once_then_waits_again_or_reconnects() {
+        let f = fixture();
+        server_stopped(&f).await;
+        // Still no server: exactly one more dial, then the same wait.
+        assert!(f.share.reconnect_now());
+        until(|| f.dials.count() == 6).await;
+        until(|| f.share.state() == ShareState::ServerStopped).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(f.dials.count(), 6, "no spin");
+        // Repeated clicks on one wait count once.
+        f.dials.push_error(TransportError::NotRunning);
+        assert!(f.share.reconnect_now());
+        assert!(f.share.reconnect_now());
+        until(|| f.dials.count() == 7).await;
+        until(|| f.share.state() == ShareState::ServerStopped).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(f.dials.count(), 7);
+        // The server is back: the next attempt reconnects.
+        let peer = f.dials.push_link();
+        assert!(f.share.reconnect_now());
+        let mut server = Server::accept(peer).await;
+        server.ready().await;
+        until(|| f.share.state() == ShareState::Shared).await;
+        assert!(f.share.take_notices().contains(&ShareNotice::Restored));
+    }
+
+    #[tokio::test]
+    async fn reconnect_now_outside_a_wait_does_nothing_and_leaves_no_permit() {
+        let f = fixture();
+        assert!(!f.share.reconnect_now(), "off");
+        let server = shared(&f).await;
+        assert!(!f.share.reconnect_now(), "shared");
+        // A click while shared must not count for the interruption after it:
+        // that wait still takes its full (held) delay.
+        let f2 = fixture_napping(None, held_nap());
+        let server2 = shared(&f2).await;
+        assert!(!f2.share.reconnect_now());
+        drop(server2);
+        until(|| matches!(f2.share.state(), ShareState::Interrupted { .. })).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(f2.dials.count(), 1, "no wake was stored for this wait");
+        // A click now is for this wait: one immediate attempt.
+        f2.dials.push_error(TransportError::Busy);
+        assert!(f2.share.reconnect_now());
+        until(|| f2.dials.count() == 2).await;
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn a_new_claim_on_the_same_session_ends_the_share_made_for_the_old_one() {
+        let f = fixture();
+        let _server = shared(&f).await;
+        let ticket = f.share.ticket().unwrap();
+        // Same session, another claim; the old gate still says owned.
+        assert!(f.gate.is_owned());
+        assert!(f.share.track(Tracked {
+            session: f.session,
+            claim: Some((99, "another".to_string())),
+            gate: f.gate.clone(),
+        }));
         assert_eq!(f.share.state(), ShareState::Off);
+        assert!(!f.share.active());
+        assert!(!f.share.intent_current(&ticket));
+    }
+
+    #[tokio::test]
+    async fn stop_and_owner_loss_win_over_a_wake() {
+        let f = fixture();
+        server_stopped(&f).await;
+        assert_eq!(f.share.stop(), StopOutcome::Stopped);
+        assert!(!f.share.reconnect_now());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(f.dials.count(), 5);
+        assert_eq!(f.share.state(), ShareState::Off);
+
+        let f = fixture();
+        server_stopped(&f).await;
+        f.gate.set(Admission::Lost);
+        let _ = f.share.reconnect_now();
+        until(|| f.share.state() == ShareState::Off).await;
+        assert!(f
+            .share
+            .take_notices()
+            .iter()
+            .any(|n| matches!(n, ShareNotice::Ended(why) if why.contains("no longer owns"))));
+        assert_eq!(f.dials.count(), 5, "no dial after ownership ended");
     }
 
     #[tokio::test]

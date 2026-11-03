@@ -1212,6 +1212,9 @@ pub struct Choice {
     pub body: Vec<String>,
     pub options: Vec<String>,
     pub selected: usize,
+    /// It steps aside while a permission request or question is open:
+    /// neither drawn nor given keys until that closes.
+    pub yields: bool,
 }
 
 /// A report title: one line (newlines and tabs flattened) of at most 256
@@ -1973,7 +1976,48 @@ impl AppModel {
             body,
             options,
             selected: 0,
+            yields: false,
         });
+    }
+
+    /// Open a choice that steps aside for a permission request or question
+    /// (see [`Choice::yields`]), its first action selected.
+    pub fn open_yielding_choice(&mut self, title: String, body: Vec<String>, options: Vec<String>) {
+        self.open_choice(title, body, options);
+        if let Some(choice) = &mut self.choice {
+            choice.yields = true;
+        }
+    }
+
+    /// Change the open choice's text and actions in place: the selection
+    /// stays on the same action, or falls to the last (the safe way out).
+    pub fn update_choice(&mut self, body: Vec<String>, options: Vec<String>) {
+        if let Some(choice) = &mut self.choice {
+            let current = choice.options.get(choice.selected).cloned();
+            choice.selected = current
+                .and_then(|label| options.iter().position(|option| *option == label))
+                .unwrap_or_else(|| options.len().saturating_sub(1));
+            choice.body = body;
+            choice.options = options;
+        }
+    }
+
+    /// Select the open choice's action named `label`, if it has one.
+    pub fn select_choice(&mut self, label: &str) {
+        if let Some(choice) = &mut self.choice {
+            if let Some(index) = choice.options.iter().position(|option| option == label) {
+                choice.selected = index;
+            }
+        }
+    }
+
+    /// Whether the open choice is shown and takes keys now (a yielding one
+    /// does not while a permission request or question is open).
+    #[must_use]
+    pub fn choice_shown(&self) -> bool {
+        self.choice
+            .as_ref()
+            .is_some_and(|choice| !(choice.yields && self.dialog.is_some()))
     }
 
     /// The open choice, if any.

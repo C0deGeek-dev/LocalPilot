@@ -8,6 +8,8 @@ mod harness_router;
 mod pairing_host;
 #[path = "fullscreen_remote.rs"]
 mod remote_host;
+#[path = "fullscreen_start.rs"]
+mod start_host;
 #[path = "fullscreen_status.rs"]
 mod status_host;
 
@@ -4566,7 +4568,7 @@ async fn run_event_loop(
             continue;
         }
         let next = event::read().context("read full-screen terminal event")?;
-        if app.choice().is_some() {
+        if app.choice_shown() {
             if let (Event::Key(key), Some(host)) = (&next, stages.remote.clone()) {
                 if is_key_action(*key)
                     && remote_host::choice_key(app, &host, *key) == remote_host::ChoiceKey::Close
@@ -8862,7 +8864,7 @@ fn handle_operation_terminal_event(
     }
     // The host's choice takes every key while it is open; whatever is beneath
     // it (a permission ask, a question) stays as it was.
-    if app.choice().is_some() {
+    if app.choice_shown() {
         if let (Event::Key(key), Some(host)) = (&next, stages.remote.clone()) {
             if is_key_action(*key)
                 && remote_host::choice_key(app, &host, *key) == remote_host::ChoiceKey::Close
@@ -26242,8 +26244,9 @@ last_seen = "2026-08-10"
             "Stop sharing",
             "the menu shows stop"
         );
-        // Sharing ends on its own while the menu is open (the server goes away
-        // and is not running any more).
+        // Sharing ends on its own while the menu is open (the session is
+        // replaced under it).
+        host.share.end_for_identity();
         drop(server);
         until_state(&host, crate::remote_share::ShareState::Off).await;
         let dialed = dials.count();
@@ -26255,6 +26258,306 @@ last_seen = "2026-08-10"
         assert_eq!(dials.count(), dialed, "no new dial");
         assert_eq!(host.share.state(), crate::remote_share::ShareState::Off);
         assert!(timeline_has_notice(&app, "This session is not shared."));
+    }
+
+    /// A server start the test controls: absent until spawned, then ready.
+    struct StartSeams {
+        spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// While set, the spawned server never answers.
+        hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct StartChild;
+
+    impl crate::remote_server_start::Child for StartChild {
+        fn status(&mut self) -> crate::remote_server_start::Status {
+            crate::remote_server_start::Status::Running
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::remote_server_start::Seams for StartSeams {
+        async fn probe(&self, _within: Duration) -> crate::remote_server_start::Probe {
+            use std::sync::atomic::Ordering;
+            if self.spawned.load(Ordering::SeqCst) == 0 {
+                crate::remote_server_start::Probe::NotRunning
+            } else if self.hold.load(Ordering::SeqCst) {
+                crate::remote_server_start::Probe::NotYet
+            } else {
+                crate::remote_server_start::Probe::Ready
+            }
+        }
+        fn spawn(&self) -> std::io::Result<Box<dyn crate::remote_server_start::Child>> {
+            self.spawned
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(StartChild))
+        }
+    }
+
+    struct StartFixture {
+        host: std::rc::Rc<remote_host::RemoteHost>,
+        dials: crate::remote_share::test_support::Dials,
+        spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        gate: localpilot_core::admission::AdmissionGate,
+    }
+
+    fn start_fixture() -> StartFixture {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+            localpilot_rpc::AskRegistry::default(),
+        ));
+        let share = crate::remote_share::RemoteShare::new(
+            dials.dial(),
+            crate::remote_share::test_support::standing(&level),
+            std::sync::Arc::new(|_| Some("Pixel".to_string())),
+            source,
+        )
+        .with_nap(std::sync::Arc::new(|delay| {
+            Box::pin(tokio::time::sleep(delay / 1000))
+        }));
+        let gate = localpilot_core::admission::AdmissionGate::default();
+        share.track(crate::remote_share::Tracked {
+            session: localpilot_core::SessionId::new(),
+            claim: Some((1, "me".to_string())),
+            gate: gate.clone(),
+        });
+        let spawned = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seams = StartSeams {
+            spawned: spawned.clone(),
+            hold: hold.clone(),
+        };
+        let host = std::rc::Rc::new(
+            remote_host::RemoteHost::new(std::sync::Arc::new(share), &std::env::temp_dir())
+                .with_server_start(crate::remote_server_start::ServerStart::new(
+                    std::sync::Arc::new(seams),
+                )),
+        );
+        StartFixture {
+            host,
+            dials,
+            spawned,
+            hold,
+            gate,
+        }
+    }
+
+    /// `/remote share` with no server: sharing records that one is needed.
+    async fn needs_server(f: &StartFixture, app: &mut AppModel) {
+        f.dials
+            .push_error(localpilot_server::TransportError::NotRunning);
+        remote_host::command(app, &f.host, localpilot_slash::RemoteAction::Share);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !f.host.share.server_needed() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("in time");
+        remote_host::show_notices(app, &f.host);
+    }
+
+    /// Tick the host until `done`.
+    async fn pump_until(
+        app: &mut AppModel,
+        host: &remote_host::RemoteHost,
+        mut done: impl FnMut(&AppModel) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                remote_host::idle_status_for_test(app, host);
+                remote_host::show_notices(app, host);
+                if done(app) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("in time");
+    }
+
+    fn enter() -> crossterm::event::KeyEvent {
+        press(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    #[tokio::test]
+    async fn a_missing_server_is_offered_on_the_canvas_and_started_only_on_request() {
+        let f = start_fixture();
+        let mut app = app();
+        needs_server(&f, &mut app).await;
+        assert!(timeline_has_notice(&app, "choose Start server and share"));
+        assert!(app.choice().is_none(), "nothing opens by itself");
+        remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+        remote_host::idle_status_for_test(&mut app, &f.host);
+        let view = app.status_view().unwrap();
+        assert_eq!(view.selected_action(), Some("Start server and share"));
+        // The deliberate action opens the start choice; nothing starts yet.
+        remote_host::pairing_key(&mut app, &f.host, enter());
+        assert_eq!(app.choice().unwrap().title, "Start background server?");
+        assert_eq!(
+            f.spawned.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "opening the choice starts nothing"
+        );
+        // Start: the server is started once, then this session is shared.
+        let peer = f.dials.push_link();
+        remote_host::choice_key(&mut app, &f.host, enter());
+        pump_until(&mut app, &f.host, |app| app.choice().is_none()).await;
+        assert_eq!(f.spawned.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let mut server = crate::remote_share::test_support::Server::accept(peer).await;
+        server.ready().await;
+        until_state(&f.host, crate::remote_share::ShareState::Shared).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_start_choice_gives_up_the_intent() {
+        let f = start_fixture();
+        let mut app = app();
+        needs_server(&f, &mut app).await;
+        remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+        remote_host::idle_status_for_test(&mut app, &f.host);
+        remote_host::pairing_key(&mut app, &f.host, enter());
+        remote_host::choice_key(&mut app, &f.host, press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.choice().is_none());
+        assert!(!f.host.share.server_needed(), "the intent is given up");
+        assert!(timeline_has_notice(&app, "Sharing cancelled"));
+        assert_eq!(f.spawned.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Esc on the canvas keeps a reconnect intent; here the canvas simply
+        // offers sharing again.
+        remote_host::idle_status_for_test(&mut app, &f.host);
+        assert_eq!(
+            app.status_view().unwrap().actions,
+            vec![
+                "Pair device",
+                "Devices",
+                "Share session",
+                "Refresh status",
+                "Close"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_start_that_ends_after_its_intent_moved_on_only_reports_the_server() {
+        let f = start_fixture();
+        let mut app = app();
+        needs_server(&f, &mut app).await;
+        remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+        remote_host::idle_status_for_test(&mut app, &f.host);
+        remote_host::pairing_key(&mut app, &f.host, enter());
+        // The server takes its time.
+        f.hold.store(true, std::sync::atomic::Ordering::SeqCst);
+        remote_host::choice_key(&mut app, &f.host, enter());
+        pump_until(&mut app, &f.host, |_| {
+            f.spawned.load(std::sync::atomic::Ordering::SeqCst) == 1
+        })
+        .await;
+        // Meanwhile the terminal loses its session.
+        f.gate.set(localpilot_core::admission::Admission::Lost);
+        pump_until(&mut app, &f.host, |app| app.choice().is_none()).await;
+        f.hold.store(false, std::sync::atomic::Ordering::SeqCst);
+        // When the start ends, it is reported, and nothing is shared.
+        let dialed = f.dials.count();
+        pump_until(&mut app, &f.host, |app| {
+            timeline_has_notice(app, "The background server")
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(f.dials.count(), dialed, "never shared");
+        assert_eq!(f.spawned.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_start_choice_steps_aside_for_a_permission_request() {
+        let f = start_fixture();
+        let mut app = app();
+        needs_server(&f, &mut app).await;
+        remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+        remote_host::idle_status_for_test(&mut app, &f.host);
+        remote_host::pairing_key(&mut app, &f.host, enter());
+        assert!(app.choice_shown());
+        app.dialog = Some(localpilot_terminal_ui::DialogState::Approval {
+            tool: "tool".to_string(),
+            target: "target".to_string(),
+            risk_class: "test".to_string(),
+            incognito_creation: false,
+        });
+        assert!(!app.choice_shown(), "the ask wins");
+        // The ask's own keys are not the choice's: the remote menu choice of
+        // F6 still sits over an ask.
+        app.dialog = None;
+        assert!(app.choice_shown(), "back when the ask closes");
+        assert_eq!(app.choice().unwrap().title, "Start background server?");
+    }
+
+    #[tokio::test]
+    async fn a_start_choice_replaced_on_screen_is_cancelled_before_it_starts_anything() {
+        let f = start_fixture();
+        let mut app = app();
+        needs_server(&f, &mut app).await;
+        remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+        remote_host::idle_status_for_test(&mut app, &f.host);
+        remote_host::pairing_key(&mut app, &f.host, enter());
+        // Start is chosen: the start begins but has not probed yet.
+        remote_host::choice_key(&mut app, &f.host, enter());
+        // Something replaces the choice on screen before the probe answers.
+        app.close_choice();
+        remote_host::idle_status_for_test(&mut app, &f.host);
+        assert!(!f.host.share.server_needed(), "the intent is cancelled");
+        // The probe then finds no server: nothing is started for it.
+        pump_until(&mut app, &f.host, |app| {
+            timeline_has_notice(app, "did not start")
+        })
+        .await;
+        assert_eq!(f.spawned.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_start_for_a_reconnect_stops_that_share() {
+        let f = start_fixture();
+        let mut app = app();
+        let server = shared_over_fake(&f.dials, &f.host).await;
+        remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+        drop(server);
+        until_state(&f.host, crate::remote_share::ShareState::ServerStopped).await;
+        remote_host::idle_status_for_test(&mut app, &f.host);
+        remote_host::pairing_key(&mut app, &f.host, enter());
+        let dialed = f.dials.count();
+        remote_host::choice_key(&mut app, &f.host, press(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(f.host.share.state(), crate::remote_share::ShareState::Off);
+        assert!(!f.host.share.reconnect_now(), "nothing waits any more");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(f.dials.count(), dialed, "no later dial");
+        assert!(timeline_has_notice(&app, "Sharing stopped"));
+        assert_eq!(f.spawned.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_canvas_reconnects_now_and_offers_a_start_once_the_server_is_gone() {
+        let f = start_fixture();
+        let mut app = app();
+        let server = shared_over_fake(&f.dials, &f.host).await;
+        remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+        drop(server);
+        // The ladder runs out: the server is gone.
+        until_state(&f.host, crate::remote_share::ShareState::ServerStopped).await;
+        remote_host::idle_status_for_test(&mut app, &f.host);
+        let view = app.status_view().unwrap();
+        assert_eq!(view.selected_action(), Some("Start server and reconnect"));
+        assert!(view.actions.contains(&"Stop sharing".to_string()));
+        // Start, then reconnect to the started server.
+        remote_host::pairing_key(&mut app, &f.host, enter());
+        let peer = f.dials.push_link();
+        remote_host::choice_key(&mut app, &f.host, enter());
+        pump_until(&mut app, &f.host, |app| app.choice().is_none()).await;
+        let mut server = crate::remote_share::test_support::Server::accept(peer).await;
+        server.ready().await;
+        until_state(&f.host, crate::remote_share::ShareState::Shared).await;
+        remote_host::show_notices(&mut app, &f.host);
+        assert!(timeline_has_notice(&app, "Sharing restored"));
     }
 
     #[tokio::test]

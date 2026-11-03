@@ -1226,6 +1226,20 @@ server only relays it.
   once, whatever the network is doing; the devices' disconnect is confirmed
   later by the server. A phone prompt already accepted stays queued and runs,
   unless the device loses its access first.
+- **Starting the server only when asked.** When no background server runs
+  for the workspace, sharing does not start one. `/remote` offers "Start
+  server and share" (or "Start server and reconnect" when the server stopped
+  under a share), and only that choice starts it. A start acts only for the
+  sharing intent it was chosen for: stopping, sharing again, another session
+  or lost ownership turns its result into a report. The started server is
+  never stopped by the terminal, a second one is never started while the
+  first may still be starting, and it counts as ready only once it answers a
+  session-free hello. The choice steps aside while a permission request or
+  question is open.
+- **Reconnecting.** A dropped connection retries on a short schedule. When
+  the server is gone for good, sharing waits, with phone access closed, until
+  it is started from `/remote`; nothing restarts on its own. "Reconnect now"
+  makes one attempt, and only for the wait it was chosen in.
 - **Only while the terminal is open.** Starting another session, losing
   ownership of this one or closing the terminal ends sharing. Quitting while
   shared asks first; closing the window ends phone access without asking.
