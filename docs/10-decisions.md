@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0258: The Remote Status Canvas Says Only What It Knows
+
+**Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.
+
+**Context.** `/remote` showed a one-off text report. The terminal needs a
+status view that stays truthful while parts of the picture fail or go stale:
+a gateway check can time out, settings can be unreadable, the registry can
+change under a revoke, and sharing can be reconnecting.
+
+**Decision.** `/remote` opens a status canvas with rows for the relay, the
+config file's remote settings, the gateway, the phone address, whether a phone
+could pair, this session and what it is doing, who is attached here, and the
+paired and revoked device counts, plus actions to pair, list devices, share or
+stop sharing, and refresh. The probed rows come from one bounded check on the
+same single worker as the device list, merged row by row: a row whose check
+failed keeps its last value, labelled last known with the time its own source
+was observed and the port or address it was checked against, beside the
+current error. A disabled config means the gateway was not checked, never that
+it is off. Counts read before a change to the registry this terminal made (a
+revoke it accepted, a device it paired) are never shown as current. A check
+that does not finish in time makes every probed row uncertain. The live rows
+come from the terminal's own state at every tick: the relay and its retry
+deadline (set by the share itself when it schedules the wait), this session's
+confirmed attendance (the only source of an attached-device number, also in
+the status line and the exit question; the paired and revoked totals come from
+the probed registry), and its work
+(waiting for permission, waiting for your answer, working, idle). Share or
+Stop does exactly what the canvas showed. The status line uses the same
+vocabulary, with a short form for narrow windows that keeps an unknown device
+count and an unconfirmed pairing visible.
+
+**Consequences.** The canvas never invents a zero, a healthy gateway or a
+reachable phone; it says what it checked, when, and what it could not check.
+
 ## ADR-0257: Listing And Revoking Devices From The Full-Screen Terminal
 
 **Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.

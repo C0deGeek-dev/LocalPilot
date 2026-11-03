@@ -1232,6 +1232,11 @@ server only relays it.
 - **What devices see.** The conversation the terminal shows (bounded as in
   every snapshot), the running turn, its plan, open permission requests, and
   whether work is running or queued. An incognito session cannot be shared.
+- **The status canvas.** `/remote` shows what the terminal checked; a failed
+  check keeps its last known value, labelled with when it was observed. The
+  number of devices attached here (in the canvas, the status line and the exit
+  question) comes only from this session's confirmed attendance; the paired
+  and revoked totals come from the registry.
 - **Who is attached.** The PC's terminal is told which paired devices are
   attached (id, name, scope and whether each is still allowed); devices are
   never told about each other. At most 64 devices, 8 connections each, can be

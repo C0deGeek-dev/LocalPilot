@@ -458,6 +458,9 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         if let Some(view) = app.devices_view() {
             view.set_controls_visible(false);
         }
+        if let Some(view) = app.status_view() {
+            view.set_controls_visible(false);
+        }
         frame.render_widget(
             Paragraph::new(format!(
                 "{APP_NAME}\nresize to at least {MINIMUM_WIDTH} × {MINIMUM_HEIGHT}"
@@ -3203,6 +3206,8 @@ fn render_pairing(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
         render_pairing_view(frame, area, app, view);
     } else if let Some(view) = app.devices_view() {
         render_devices_view(frame, area, app, view);
+    } else if let Some(view) = app.status_view() {
+        render_status_view(frame, area, app, view);
     }
 }
 
@@ -3618,6 +3623,75 @@ fn device_row_lines(marker: &str, row: &crate::devices::DevicesRow, inner: u16) 
         lines.push(format!("    {line}"));
     }
     lines
+}
+
+fn render_status_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppModel,
+    view: &crate::status::StatusView,
+) {
+    let theme = theme(app);
+    let width = area.width.saturating_sub(4).min(100);
+    let inner = width.saturating_sub(4).max(1);
+    let label_width = view
+        .rows
+        .iter()
+        .map(|row| UnicodeWidthStr::width(row.label.as_str()))
+        .max()
+        .unwrap_or(0)
+        .min(usize::from(inner) / 3);
+    let mut body: Vec<Line<'static>> = Vec::new();
+    for row in &view.rows {
+        let label = truncate_end(&row.label, u16::try_from(label_width).unwrap_or(u16::MAX));
+        let pad = label_width.saturating_sub(UnicodeWidthStr::width(label.as_str()));
+        let text = format!("{label}{}  {}", " ".repeat(pad), row.value);
+        let indent = u16::try_from(label_width + 2).unwrap_or(0).min(inner / 2);
+        for line in wrap_indented(&text, inner, indent) {
+            body.push(Line::styled(line, theme.ui(UiRole::Foreground)));
+        }
+    }
+    let mut controls: Vec<Line<'static>> = view
+        .actions
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let selected = index == view.action;
+            let marker = if selected { "> " } else { "  " };
+            let role = if selected {
+                UiRole::Accent
+            } else {
+                UiRole::Foreground
+            };
+            Line::styled(
+                truncate_end(&format!("{marker}{label}"), inner),
+                theme.ui(role),
+            )
+        })
+        .collect();
+    controls.push(Line::styled(
+        truncate_end(
+            "Esc back · Up/Down choose · Enter select · PgUp/PgDn scroll",
+            inner,
+        ),
+        theme.ui(UiRole::Muted),
+    ));
+    let title = view.title.clone();
+    let shown = pairing_layout(
+        frame,
+        area,
+        app,
+        width,
+        &title,
+        body,
+        controls,
+        Some(view.scroll()),
+        None,
+    );
+    if let Some((_, start, room)) = shown {
+        view.set_shown(start, room);
+    }
+    view.set_controls_visible(shown.is_some());
 }
 
 /// The colors a QR code is drawn in, whatever the theme: dark modules black
@@ -4808,14 +4882,27 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
     } else {
         context
     };
-    let context = match app.remote_label() {
-        Some(label) => format!("{label} · {context}"),
-        None => context,
-    };
     let context = if app.has_stashed_draft() {
         format!("stashed · {context}")
     } else {
         context
+    };
+    // The sharing label never disappears behind truncation: it leads the
+    // context (which keeps its start when cut), and its short form stands in
+    // when the full one leaves too little room.
+    let context = match (app.remote_label(), app.remote_label_short()) {
+        (Some(label), short) => {
+            let full = format!("{label} · {context}");
+            match short {
+                Some(short)
+                    if UnicodeWidthStr::width(full.as_str()) + 24 > usize::from(area.width) =>
+                {
+                    format!("{short} · {context}")
+                }
+                _ => full,
+            }
+        }
+        (None, _) => context,
     };
     let busy = matches!(app.active_work(), crate::WorkState::Busy { .. });
     let theme = theme(app);
@@ -5797,6 +5884,104 @@ mod tests {
                 seen.contains(&flat[start..start + 30]),
                 "missing from {start}"
             );
+        }
+    }
+
+    fn status_model(rows: usize) -> AppModel {
+        let mut app = model();
+        let mut view = crate::status::StatusView::new("Remote".to_string());
+        view.rows = (0..rows)
+            .map(|n| crate::status::StatusRow {
+                label: format!("Row {n:02}"),
+                value: format!(
+                    "value {n:02} with a fairly long explanation of what is known about it"
+                ),
+            })
+            .collect();
+        view.set_actions(vec![
+            "Pair device".to_string(),
+            "Devices".to_string(),
+            "Share session".to_string(),
+            "Refresh status".to_string(),
+            "Close".to_string(),
+        ]);
+        app.open_status_view(view);
+        app
+    }
+
+    #[test]
+    fn the_status_canvas_keeps_its_actions_and_pages_through_every_row() {
+        for (width, height) in [(80, 24), (120, 40), (80, 14)] {
+            let mut app = status_model(12);
+            let mut seen = std::collections::BTreeSet::new();
+            for _ in 0..30 {
+                let text = screen_text(&app, width, height);
+                for label in [
+                    "Pair device",
+                    "Devices",
+                    "Share session",
+                    "Refresh status",
+                    "Close",
+                ] {
+                    assert!(text.contains(label), "{width}x{height}: {label}");
+                }
+                let flat = rows_without_spaces(&text);
+                for n in 0..12 {
+                    if flat.contains(&format!("value{n:02}with")) {
+                        seen.insert(n);
+                    }
+                }
+                app.status_view_mut().unwrap().page_down();
+            }
+            assert_eq!(seen.len(), 12, "{width}x{height}: every row reachable");
+            assert!(app.status_view().unwrap().controls_visible());
+        }
+    }
+
+    #[test]
+    fn the_status_canvas_is_a_remote_overlay_like_the_others() {
+        let mut app = status_model(3);
+        assert!(app.pairing_shown());
+        app.open_theme_picker();
+        assert!(app.pairing_replaced());
+        assert!(!screen_text(&app, 100, 40).contains("Refresh status"));
+    }
+
+    #[test]
+    fn a_narrow_status_line_keeps_the_unknown_count_and_the_unconfirmed_pairing() {
+        let cases = [
+            (
+                "Shared: yes | Devices: unknown | Relay: connected · pairing code unconfirmed · /remote pair",
+                "Shared · ?dev · pair?",
+                "Shared·?dev·pair?",
+            ),
+            (
+                "Sharing interrupted | Devices: unknown | Relay: reconnecting in 30s · pairing code unconfirmed · /remote pair",
+                "Interrupted · ?dev · 30s · pair?",
+                "Interrupted·?dev·30s·pair?",
+            ),
+        ];
+        for (full, short, flat) in cases {
+            for width in [40, 60] {
+                let mut app = model();
+                app.set_remote_labels(Some(full.to_string()), Some(short.to_string()));
+                // A stashed draft and the usual model/profile context too.
+                let _ = app.handle_input(crate::InputAction::Paste("a draft".to_string()), 40);
+                let _ = app.handle_input(crate::InputAction::StashOrPop, 40);
+                assert!(app.has_stashed_draft());
+                let text = rows_without_spaces(&screen_text(&app, width, 24));
+                assert!(text.contains(flat), "{width}: {flat} missing from {text}");
+            }
+            let wide = rows_without_spaces(&screen_text(
+                &{
+                    let mut app = model();
+                    app.set_remote_labels(Some(full.to_string()), Some(short.to_string()));
+                    app
+                },
+                220,
+                24,
+            ));
+            assert!(wide.contains("Devices:unknown"), "{wide}");
         }
     }
 

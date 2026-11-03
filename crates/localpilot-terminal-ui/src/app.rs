@@ -1643,6 +1643,10 @@ pub struct AppModel {
     pairing_view: Option<crate::pairing::PairingView>,
     /// The paired-devices view (the third remote overlay).
     devices_view: Option<crate::devices::DevicesView>,
+    /// The remote status canvas (the fourth).
+    status_view: Option<crate::status::StatusView>,
+    /// The sharing label's short form, for a status line too narrow for it.
+    remote_label_short: Option<String>,
     /// Counts explicit navigation (takeovers, product tabs, the theme
     /// picker), and where the app stood when the pairing overlay opened:
     /// anything shown since replaces the overlay.
@@ -1777,6 +1781,8 @@ impl AppModel {
             pairing_setup: None,
             pairing_view: None,
             devices_view: None,
+            status_view: None,
+            remote_label_short: None,
             takeovers: 0,
             pairing_opened_at: None,
             escape_armed_at: None,
@@ -1936,6 +1942,20 @@ impl AppModel {
     /// relay stands) into persistent UI chrome; `None` when it is not shared.
     pub fn set_remote_label(&mut self, label: Option<String>) {
         self.remote_label = label;
+        self.remote_label_short = None;
+    }
+
+    /// The sharing label and a short form of it, used when the status line
+    /// is too narrow for the full one.
+    pub fn set_remote_labels(&mut self, label: Option<String>, short: Option<String>) {
+        self.remote_label = label;
+        self.remote_label_short = short;
+    }
+
+    /// The short form of the sharing label, if there is one.
+    #[must_use]
+    pub fn remote_label_short(&self) -> Option<&str> {
+        self.remote_label_short.as_deref()
     }
 
     /// The sharing label shown in the status line, if the session is shared.
@@ -1983,6 +2003,7 @@ impl AppModel {
     pub fn open_pairing_setup(&mut self, setup: crate::pairing::PairingSetup) {
         self.pairing_view = None;
         self.devices_view = None;
+        self.status_view = None;
         self.pairing_setup = Some(setup);
         self.pairing_opened_at = Some(self.navigation_mark());
     }
@@ -2005,6 +2026,7 @@ impl AppModel {
     pub fn open_pairing_view(&mut self, view: crate::pairing::PairingView) {
         self.pairing_setup = None;
         self.devices_view = None;
+        self.status_view = None;
         self.pairing_view = Some(view);
         self.pairing_opened_at = Some(self.navigation_mark());
     }
@@ -2028,6 +2050,7 @@ impl AppModel {
     pub fn open_devices_view(&mut self, view: crate::devices::DevicesView) {
         self.pairing_setup = None;
         self.pairing_view = None;
+        self.status_view = None;
         self.devices_view = Some(view);
         self.pairing_opened_at = Some(self.navigation_mark());
     }
@@ -2045,10 +2068,36 @@ impl AppModel {
         self.devices_view = None;
     }
 
+    /// Open the remote status canvas (replacing the other remote overlays,
+    /// whose hosts must already have let them go).
+    pub fn open_status_view(&mut self, view: crate::status::StatusView) {
+        self.pairing_setup = None;
+        self.pairing_view = None;
+        self.devices_view = None;
+        self.status_view = Some(view);
+        self.pairing_opened_at = Some(self.navigation_mark());
+    }
+
+    #[must_use]
+    pub fn status_view(&self) -> Option<&crate::status::StatusView> {
+        self.status_view.as_ref()
+    }
+
+    pub fn status_view_mut(&mut self) -> Option<&mut crate::status::StatusView> {
+        self.status_view.as_mut()
+    }
+
+    pub fn close_status_view(&mut self) {
+        self.status_view = None;
+    }
+
     /// Whether one of the remote overlays (pairing setup, pairing view,
     /// devices) is open, shown or not.
     fn remote_overlay_open(&self) -> bool {
-        self.pairing_setup.is_some() || self.pairing_view.is_some() || self.devices_view.is_some()
+        self.pairing_setup.is_some()
+            || self.pairing_view.is_some()
+            || self.devices_view.is_some()
+            || self.status_view.is_some()
     }
 
     /// Whether a pairing overlay is open and shown: a permission request or

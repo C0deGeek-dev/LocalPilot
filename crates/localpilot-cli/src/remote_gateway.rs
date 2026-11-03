@@ -1666,19 +1666,7 @@ async fn status_from(
     registry: &crate::server_devices::DeviceRegistry,
 ) -> RemoteStatus {
     let settings = settings_of(config);
-    let gateway = match &settings {
-        // With remote access off there is no gateway to look for.
-        Ok((settings, _)) if !settings.enabled => None,
-        Ok((settings, proxy_hosts)) => {
-            let host = match &settings.advertised {
-                Ok(Some(origin)) => Policy::new(origin, proxy_hosts).hosts.first().cloned(),
-                _ => None,
-            }
-            .unwrap_or_else(|| "localhost".to_string());
-            Some(probe(settings.port, &host).await)
-        }
-        Err(_) => None,
-    };
+    let gateway = gateway_of(&settings).await;
     let workspaces = index
         .map(crate::server_index::ServedIndex::list)
         .unwrap_or_default()
@@ -1693,17 +1681,96 @@ async fn status_from(
     }
 }
 
+type Settings = Result<(crate::remote_status::RemoteSettings, Vec<String>), String>;
+
+/// The gateway's health for these settings (`None` when not checked).
+async fn gateway_of(settings: &Settings) -> Option<GatewayHealth> {
+    match settings {
+        // With remote access off there is no gateway to look for.
+        Ok((settings, _)) if !settings.enabled => None,
+        Ok((settings, proxy_hosts)) => {
+            let host = match &settings.advertised {
+                Ok(Some(origin)) => Policy::new(origin, proxy_hosts).hosts.first().cloned(),
+                _ => None,
+            }
+            .unwrap_or_else(|| "localhost".to_string());
+            Some(probe(settings.port, &host).await)
+        }
+        Err(_) => None,
+    }
+}
+
+/// The status for the workspace at `cwd`, with when each part was observed.
+pub(crate) async fn observe_at(cwd: &std::path::Path) -> crate::remote_status::ObservedStatus {
+    let config = localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(cwd),
+        &localpilot_config::CliOverrides::default(),
+    )
+    .map(|config| config.remote)
+    .map_err(|error| error.to_string());
+    let settings = settings_of(config);
+    // Observed now, before the slower reads that follow.
+    let settings_at = std::time::SystemTime::now();
+    let index = crate::server_index::ServedIndex::for_user();
+    let workspaces = index
+        .as_ref()
+        .map(crate::server_index::ServedIndex::list)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.label, entry.id))
+        .collect();
+    let registry = crate::server_devices::DeviceRegistry::for_user(cwd);
+    let checked = settings.clone();
+    let gateway = async move { gateway_of(&checked).await };
+    observe(settings, settings_at, gateway, workspaces, || {
+        device_counts(&registry)
+    })
+    .await
+}
+
+/// Stamp each part with when it was observed: the settings at
+/// `settings_at` (when they were read), the gateway when `gateway`
+/// resolves, the counts when `counts` is read.
+async fn observe(
+    settings: Settings,
+    settings_at: std::time::SystemTime,
+    gateway: impl std::future::Future<Output = Option<GatewayHealth>>,
+    workspaces: Vec<(String, String)>,
+    counts: impl FnOnce() -> Result<(usize, usize), String>,
+) -> crate::remote_status::ObservedStatus {
+    let gateway = gateway.await;
+    let gateway_at = std::time::SystemTime::now();
+    let devices = counts();
+    let devices_at = std::time::SystemTime::now();
+    crate::remote_status::ObservedStatus {
+        status: RemoteStatus {
+            settings: settings.map(|(settings, _)| settings),
+            gateway,
+            workspaces,
+            devices,
+        },
+        settings_at,
+        gateway_at,
+        devices_at,
+    }
+}
+
 /// Gather the remote-access status for this user.
 pub(crate) async fn status() -> RemoteStatus {
     let cwd = std::env::current_dir().unwrap_or_default();
+    status_at(&cwd).await
+}
+
+/// [`status`] for the workspace at `cwd`.
+pub(crate) async fn status_at(cwd: &std::path::Path) -> RemoteStatus {
     let config = localpilot_config::load(
-        &localpilot_config::ConfigPaths::standard(&cwd),
+        &localpilot_config::ConfigPaths::standard(cwd),
         &localpilot_config::CliOverrides::default(),
     )
     .map(|config| config.remote)
     .map_err(|error| error.to_string());
     let index = crate::server_index::ServedIndex::for_user();
-    let registry = crate::server_devices::DeviceRegistry::for_user(&cwd);
+    let registry = crate::server_devices::DeviceRegistry::for_user(cwd);
     status_from(config, index.as_ref(), &registry).await
 }
 
@@ -2742,5 +2809,41 @@ mod tests {
             probe_within(port, "h", Duration::from_secs(1), Duration::from_secs(1)).await,
             GatewayHealth::Running
         );
+    }
+    #[tokio::test]
+    async fn each_part_of_a_status_is_stamped_when_it_was_observed() {
+        let settings: Settings = Ok((
+            crate::remote_status::RemoteSettings {
+                enabled: true,
+                advertised: Ok(None),
+                port: 1,
+            },
+            Vec::new(),
+        ));
+        let slow_gateway = async {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            Some(GatewayHealth::Running)
+        };
+        let observed = observe(
+            settings,
+            std::time::SystemTime::now(),
+            slow_gateway,
+            Vec::new(),
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                Ok((1, 0))
+            },
+        )
+        .await;
+        let gap = |a: std::time::SystemTime, b: std::time::SystemTime| {
+            b.duration_since(a).unwrap_or_default()
+        };
+        assert!(
+            gap(observed.settings_at, observed.gateway_at) >= std::time::Duration::from_millis(50)
+        );
+        assert!(
+            gap(observed.gateway_at, observed.devices_at) >= std::time::Duration::from_millis(20)
+        );
+        assert_eq!(observed.status.gateway, Some(GatewayHealth::Running));
     }
 }

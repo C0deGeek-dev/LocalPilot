@@ -77,6 +77,11 @@ pub(super) struct PairingHost {
     told: RefCell<Option<Phase>>,
     /// A short note in the view (a copy that worked or failed).
     note: RefCell<Option<String>>,
+    /// The kept attempt's Used outcome was reported to the registry's
+    /// followers (once per attempt).
+    used_told: Cell<bool>,
+    /// A paired device not yet reported to the registry's followers.
+    used_pending: Cell<bool>,
 }
 
 impl PairingHost {
@@ -90,6 +95,8 @@ impl PairingHost {
             session: Cell::new(None),
             told: RefCell::new(None),
             note: RefCell::new(None),
+            used_told: Cell::new(false),
+            used_pending: Cell::new(false),
         }
     }
 
@@ -126,7 +133,7 @@ impl PairingHost {
             self.open_view(app);
             return;
         }
-        self.attempt.borrow_mut().take();
+        drop(self.release());
         app.open_pairing_setup(PairingSetup::new(!observe));
     }
 
@@ -177,8 +184,11 @@ impl PairingHost {
             }
             return;
         };
-        // Any earlier attempt is replaced, and ends with its drop.
+        // Any earlier attempt is replaced, and ends with its drop (its
+        // outcome noted first).
+        drop(self.release());
         *self.attempt.borrow_mut() = Some(attempt);
+        self.used_told.set(false);
         self.told.borrow_mut().take();
         self.open_view(app);
     }
@@ -323,7 +333,7 @@ impl PairingHost {
             }
             Some(AGAIN) => {
                 let grant = self.attempt.borrow().as_ref().map(|a| a.grant().clone());
-                self.attempt.borrow_mut().take();
+                drop(self.release());
                 let mut setup = PairingSetup::new(true);
                 if let Some(grant) = grant {
                     setup = setup.named(&grant.name);
@@ -376,6 +386,7 @@ impl PairingHost {
         // One reading decides what is told and what is kept: anything not
         // yet told is told now, and nothing is told twice.
         let phase = attempt.phase();
+        self.note(&phase);
         match &phase {
             Phase::Finished(_) | Phase::Unconfirmed { restarted: true } => {
                 self.tell(app, &phase);
@@ -419,6 +430,38 @@ impl PairingHost {
                 view.wipe_secret();
             }
             self.hide(app);
+        }
+    }
+
+    /// Whether the kept attempt ended with a device paired, once per attempt
+    /// (the registry changed).
+    pub(super) fn take_used(&self) -> bool {
+        // Read wherever the outcome was first seen, even if the attempt
+        // itself was since told and let go.
+        if let Some(attempt) = self.attempt.borrow().as_ref() {
+            self.note(&attempt.phase());
+        }
+        self.used_pending.replace(false)
+    }
+
+    /// Let the kept attempt go, noting its outcome first: every way an
+    /// attempt is dropped goes through here (or notes its phase just before),
+    /// so a device paired is never lost with it.
+    fn release(&self) -> Option<Attempt> {
+        let attempt = self.attempt.borrow_mut().take()?;
+        self.note(&attempt.phase());
+        Some(attempt)
+    }
+
+    /// A device was paired by the kept attempt: noted once per attempt,
+    /// before the attempt can be let go.
+    fn note(&self, phase: &Phase) {
+        if matches!(
+            phase,
+            Phase::Finished(Ended::Outcome(PairingOutcome::Used { .. }))
+        ) && !self.used_told.replace(true)
+        {
+            self.used_pending.set(true);
         }
     }
 
@@ -480,6 +523,7 @@ impl PairingHost {
             return;
         };
         let phase = attempt.phase();
+        self.note(&phase);
         match &phase {
             Phase::Finished(_) | Phase::Unconfirmed { restarted: true } => {
                 self.tell(app, &phase);
@@ -506,6 +550,7 @@ impl PairingHost {
             return;
         };
         let phase = attempt.phase();
+        self.note(&phase);
         let settling = attempt.settling();
         let grant = attempt.grant().clone();
         let code = if replaced { None } else { attempt.take_code() };

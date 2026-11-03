@@ -70,6 +70,7 @@ mod remote_gateway;
 mod remote_pairing;
 mod remote_share;
 mod remote_status;
+mod remote_status_model;
 #[cfg(feature = "tui")]
 mod repl;
 mod research;

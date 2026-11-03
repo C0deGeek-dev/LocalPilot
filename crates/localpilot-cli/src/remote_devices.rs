@@ -17,6 +17,8 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::server_devices::{
     DeviceError, DeviceGrant, DeviceRegistry, DeviceRow, DeviceRows, RevokeOutcome,
 };
@@ -28,9 +30,41 @@ pub(crate) const ADMISSION: Duration = Duration::from_secs(5);
 pub(crate) const ANSWER: Duration = Duration::from_secs(6);
 /// How long a read may take before the terminal says it is still reading.
 pub(crate) const READ_ANSWER: Duration = Duration::from_secs(3);
-/// Requests and answers waiting at once (the terminal keeps at most one read
-/// and one revoke outstanding).
+/// How long a status check may take before the terminal says it did not
+/// finish (it stays the one outstanding check).
+pub(crate) const STATUS_ANSWER: Duration = Duration::from_secs(6);
+/// Requests and answers waiting at once (the terminal keeps at most one read,
+/// one revoke and one status check outstanding).
 const QUEUE: usize = 4;
+
+/// How the worker checks remote status for a workspace: `None` when the
+/// check was cancelled. Tests replace it.
+pub(crate) type StatusCheck = Arc<
+    dyn Fn(&std::path::Path, &CancellationToken) -> Option<crate::remote_status::ObservedStatus>
+        + Send
+        + Sync,
+>;
+
+/// The real check: the config, index and registry reads, then the gateway's
+/// health check, whose network part a cancel stops.
+pub(crate) fn real_status_check() -> StatusCheck {
+    Arc::new(|cwd: &std::path::Path, cancel: &CancellationToken| {
+        if cancel.is_cancelled() {
+            return None;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        runtime.block_on(async {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => None,
+                status = crate::remote_gateway::observe_at(cwd) => Some(status),
+            }
+        })
+    })
+}
 
 enum Request {
     List {
@@ -40,6 +74,11 @@ enum Request {
         op: u64,
         id: String,
         deadline: Instant,
+    },
+    Status {
+        seq: u64,
+        cwd: std::path::PathBuf,
+        cancel: CancellationToken,
     },
 }
 
@@ -52,6 +91,10 @@ enum Reply {
         op: u64,
         result: Result<RevokeOutcome, DeviceError>,
     },
+    Status {
+        seq: u64,
+        status: Option<crate::remote_status::ObservedStatus>,
+    },
 }
 
 /// The one thread that does registry work, in order.
@@ -61,7 +104,7 @@ struct Worker {
 }
 
 impl Worker {
-    fn start(registry: Arc<DeviceRegistry>) -> std::io::Result<Self> {
+    fn start(registry: Arc<DeviceRegistry>, check: StatusCheck) -> std::io::Result<Self> {
         let (requests, incoming) = std::sync::mpsc::sync_channel::<Request>(QUEUE);
         let (outgoing, replies) = std::sync::mpsc::sync_channel::<Reply>(QUEUE);
         // Not joined: a revoke admitted to the lock completes even after the
@@ -75,6 +118,15 @@ impl Worker {
                             seq,
                             rows: registry.rows().map_err(|error| error.to_string()),
                         },
+                        Request::Status { seq, cwd, cancel } => {
+                            // A cancelled request skips the check entirely.
+                            let status = if cancel.is_cancelled() {
+                                None
+                            } else {
+                                check(&cwd, &cancel)
+                            };
+                            Reply::Status { seq, status }
+                        }
                         Request::Revoke { op, id, deadline } => {
                             let result = registry.revoke_device_within(&id, deadline);
                             if matches!(result, Ok(RevokeOutcome::Revoked(_))) {
@@ -175,6 +227,40 @@ pub(crate) struct Devices {
     revoke: Option<RevokeOp>,
     admission: Duration,
     answer: Duration,
+    check: StatusCheck,
+    status_answer: Duration,
+    /// How many times the registry changed (or may have) from here: a
+    /// revoke accepted, a device paired.
+    epoch: u64,
+    status_seq: u64,
+    /// The one status check outstanding.
+    status: Option<StatusAsk>,
+    /// A canvas that asked while an older check (for another canvas) was
+    /// outstanding: it gets exactly one check once that one answers.
+    status_wanted: Option<(u64, std::path::PathBuf)>,
+    /// The answer for a canvas, until it takes it.
+    status_ready: Option<(u64, Option<crate::remote_status_model::Probe>)>,
+}
+
+/// An outstanding status check.
+struct StatusAsk {
+    seq: u64,
+    /// The canvas it is for.
+    generation: u64,
+    epoch: u64,
+    cancel: CancellationToken,
+    asked: Instant,
+}
+
+/// What asking for a status check did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusAsked {
+    Sent,
+    /// One for this canvas is already outstanding.
+    Coalesced,
+    /// One for another canvas is outstanding; this one follows it.
+    Queued,
+    Unavailable,
 }
 
 impl Devices {
@@ -193,6 +279,157 @@ impl Devices {
             revoke: None,
             admission: ADMISSION,
             answer: ANSWER,
+            check: real_status_check(),
+            status_answer: STATUS_ANSWER,
+            epoch: 0,
+            status_seq: 0,
+            status: None,
+            status_wanted: None,
+            status_ready: None,
+        }
+    }
+
+    /// The same, checking status with `check` (tests).
+    #[cfg(test)]
+    pub(crate) fn with_check(mut self, check: StatusCheck) -> Self {
+        self.check = check;
+        self
+    }
+
+    /// The same, saying a check is late after `answer` (tests).
+    #[cfg(test)]
+    pub(crate) fn with_status_answer(mut self, answer: Duration) -> Self {
+        self.status_answer = answer;
+        self
+    }
+
+    /// Tests: the worker takes no more requests (a submit fails).
+    #[cfg(test)]
+    pub(crate) fn stop_worker_for_test(&mut self) {
+        let (requests, _) = std::sync::mpsc::sync_channel(0);
+        let (_, replies) = std::sync::mpsc::sync_channel(0);
+        self.worker = Some(Worker { requests, replies });
+    }
+
+    /// How many times the registry changed (or may have) from here.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The registry changed (or may have) for a reason this controller does
+    /// not see itself (a device paired).
+    pub(crate) fn registry_changed(&mut self) {
+        self.epoch += 1;
+    }
+
+    /// Check remote status for the canvas `generation` (workspace `cwd`).
+    pub(crate) fn check_status(&mut self, generation: u64, cwd: &std::path::Path) -> StatusAsked {
+        if let Some(pending) = &self.status {
+            if pending.generation == generation {
+                return StatusAsked::Coalesced;
+            }
+            self.status_wanted = Some((generation, cwd.to_path_buf()));
+            return StatusAsked::Queued;
+        }
+        let seq = self.status_seq + 1;
+        let epoch = self.epoch;
+        let cancel = CancellationToken::new();
+        let Some(worker) = self.worker() else {
+            return StatusAsked::Unavailable;
+        };
+        let request = Request::Status {
+            seq,
+            cwd: cwd.to_path_buf(),
+            cancel: cancel.clone(),
+        };
+        if worker.requests.try_send(request).is_err() {
+            return StatusAsked::Unavailable;
+        }
+        self.status_seq = seq;
+        self.status = Some(StatusAsk {
+            seq,
+            generation,
+            epoch,
+            cancel,
+            asked: Instant::now(),
+        });
+        StatusAsked::Sent
+    }
+
+    /// The canvas `generation` went: its check's network part is cancelled
+    /// (the check stays owned until the worker answers), and nothing waits
+    /// for it any more.
+    pub(crate) fn retire_status(&mut self, generation: u64) {
+        if let Some(pending) = self.status.as_ref().filter(|p| p.generation == generation) {
+            pending.cancel.cancel();
+        }
+        if self
+            .status_wanted
+            .as_ref()
+            .is_some_and(|(wanted, _)| *wanted == generation)
+        {
+            self.status_wanted = None;
+        }
+        if self
+            .status_ready
+            .as_ref()
+            .is_some_and(|(ready, _)| *ready == generation)
+        {
+            self.status_ready = None;
+        }
+    }
+
+    /// Whether a check for this canvas is outstanding.
+    pub(crate) fn checking_status(&self, generation: u64) -> bool {
+        self.status
+            .as_ref()
+            .is_some_and(|p| p.generation == generation)
+            || self
+                .status_wanted
+                .as_ref()
+                .is_some_and(|(wanted, _)| *wanted == generation)
+    }
+
+    /// Whether the outstanding check is taking longer than [`STATUS_ANSWER`].
+    pub(crate) fn status_late(&self, now: Instant) -> bool {
+        self.status
+            .as_ref()
+            .is_some_and(|pending| now.duration_since(pending.asked) >= self.status_answer)
+    }
+
+    /// The answer for canvas `generation`, once (`Some(None)`: it was
+    /// cancelled or the worker went away). An answer for any other canvas is
+    /// dropped.
+    pub(crate) fn take_status(
+        &mut self,
+        generation: u64,
+    ) -> Option<Option<crate::remote_status_model::Probe>> {
+        match self.status_ready.take() {
+            Some((ready, probe)) if ready == generation => Some(probe),
+            _ => None,
+        }
+    }
+
+    fn status_answered(&mut self, seq: u64, status: Option<crate::remote_status::ObservedStatus>) {
+        let Some(pending) = self.status.take_if(|pending| pending.seq == seq) else {
+            return;
+        };
+        let probe = status
+            .filter(|_| !pending.cancel.is_cancelled())
+            .map(|observed| crate::remote_status_model::Probe {
+                observed,
+                epoch: pending.epoch,
+            });
+        // A retired canvas's answer is drained here and dropped.
+        if !pending.cancel.is_cancelled() {
+            self.status_ready = Some((pending.generation, probe));
+        }
+        // The canvas that waited behind it gets exactly one check now (or
+        // answers unknown when it cannot be started).
+        if let Some((generation, cwd)) = self.status_wanted.take() {
+            if self.check_status(generation, &cwd) != StatusAsked::Sent {
+                self.status_ready = Some((generation, None));
+            }
         }
     }
 
@@ -206,7 +443,7 @@ impl Devices {
 
     fn worker(&mut self) -> Option<&Worker> {
         if self.worker.is_none() {
-            self.worker = Worker::start(self.registry.clone()).ok();
+            self.worker = Worker::start(self.registry.clone(), self.check.clone()).ok();
         }
         self.worker.as_ref()
     }
@@ -293,6 +530,8 @@ impl Devices {
             .try_send(Request::Revoke { op, id, deadline })
             .map_err(|_| Refused::Unavailable)?;
         self.next_op = op;
+        // From here it may commit: counts read before are not current.
+        self.epoch += 1;
         self.revoke = Some(RevokeOp {
             op,
             row: row.clone(),
@@ -325,6 +564,20 @@ impl Devices {
                     // The worker is gone: a revoke it had may or may not have
                     // been written; nothing more will be read.
                     self.worker = None;
+                    // Every check it owed is settled: a retired one is
+                    // dropped, a live one answers unknown, and a canvas that
+                    // waited behind it gets its one check on a new worker
+                    // (or answers unknown when none can start).
+                    if let Some(pending) = self.status.take() {
+                        if !pending.cancel.is_cancelled() {
+                            self.status_ready = Some((pending.generation, None));
+                        }
+                    }
+                    if let Some((generation, cwd)) = self.status_wanted.take() {
+                        if self.check_status(generation, &cwd) != StatusAsked::Sent {
+                            self.status_ready = Some((generation, None));
+                        }
+                    }
                     if let Some(revoke) = self.revoke.as_mut().filter(|revoke| !revoke.answered) {
                         // It may have been written before the worker died:
                         // no later change can come from it, but only a new
@@ -345,6 +598,7 @@ impl Devices {
             };
             changed = true;
             match reply {
+                Reply::Status { seq, status } => self.status_answered(seq, status),
                 Reply::Listed { seq, rows } => {
                     if seq == self.asked_seq {
                         self.read_pending = false;
@@ -505,6 +759,7 @@ pub(crate) mod tests {
         registry.edit_for_test(&here.id, |record| record.name = "x".repeat(1000));
         let listed = registry.rows().unwrap();
         assert_eq!(listed.total, 2);
+        assert_eq!((listed.active, listed.revoked), (2, 0));
         let row = listed.rows.iter().find(|row| row.id == here.id).unwrap();
         assert!(row.name.len() <= 256 && row.name.ends_with('…'));
         assert_eq!(row.reach, crate::server_devices::DeviceReach::All);
@@ -781,6 +1036,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn totals_count_the_whole_registry_not_the_rows_shown() {
+        let registry = DeviceRegistry::default();
+        for n in 0..300 {
+            let (standing, _) = registry
+                .add(&format!("d{n}"), Scope::Observe, false)
+                .unwrap();
+            if n % 3 == 0 {
+                registry.revoke(&standing.id).unwrap();
+            }
+        }
+        let listed = registry.rows().unwrap();
+        assert_eq!(listed.rows.len(), crate::server_devices::ROWS_SHOWN);
+        assert_eq!(listed.total, 300);
+        assert_eq!((listed.active, listed.revoked), (200, 100));
+    }
+
+    #[test]
     fn a_row_whose_record_names_another_device_cannot_be_revoked() {
         let registry = Arc::new(DeviceRegistry::default());
         let (first, _) = registry.add("first", Scope::Control, false).unwrap();
@@ -919,5 +1191,252 @@ pub(crate) mod tests {
         assert!(!devices.reading_late(Instant::now()));
         assert!(devices.reading_late(Instant::now() + READ_ANSWER));
         until(&mut devices, "listed", Devices::current);
+    }
+    /// A status check the test controls: it waits for a release, then
+    /// answers (or sees its cancel).
+    fn gated_check() -> (
+        StatusCheck,
+        std::sync::mpsc::Sender<()>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(gate);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let check: StatusCheck = {
+            let calls = calls.clone();
+            Arc::new(move |_cwd: &std::path::Path, cancel: &CancellationToken| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = gate.lock().unwrap().recv();
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                let now = std::time::SystemTime::now();
+                Some(crate::remote_status::ObservedStatus {
+                    status: crate::remote_status::RemoteStatus {
+                        settings: Err("test".into()),
+                        gateway: None,
+                        workspaces: Vec::new(),
+                        devices: Ok((1, 0)),
+                    },
+                    settings_at: now,
+                    gateway_at: now,
+                    devices_at: now,
+                })
+            })
+        };
+        (check, release, calls)
+    }
+
+    #[test]
+    fn one_status_check_at_a_time_and_a_stale_answer_never_reaches_a_new_canvas() {
+        let (check, release, calls) = gated_check();
+        let mut devices = Devices::new(Arc::new(DeviceRegistry::default())).with_check(check);
+        let cwd = std::path::Path::new(".");
+        assert_eq!(devices.check_status(1, cwd), StatusAsked::Sent);
+        assert_eq!(
+            devices.check_status(1, cwd),
+            StatusAsked::Coalesced,
+            "Refresh coalesces"
+        );
+        // Canvas 1 closes while its check is blocked; canvas 2 opens.
+        while calls.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        devices.retire_status(1);
+        assert_eq!(devices.check_status(2, cwd), StatusAsked::Queued);
+        assert_eq!(devices.check_status(2, cwd), StatusAsked::Queued);
+        assert!(devices.checking_status(2));
+        // The old check answers: dropped for canvas 2, which gets exactly one.
+        release.send(()).unwrap();
+        let started = Instant::now();
+        while calls.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            devices.poll(Instant::now());
+            assert!(
+                devices.take_status(2).is_none(),
+                "the stale answer never reaches it"
+            );
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        release.send(()).unwrap();
+        let probe = loop {
+            devices.poll(Instant::now());
+            if let Some(probe) = devices.take_status(2) {
+                break probe;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(probe.is_some(), "its own check answered");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "no accumulation"
+        );
+        assert!(!devices.checking_status(2));
+    }
+
+    /// A check cancelled before the worker starts it skips the network part.
+    #[test]
+    fn a_check_cancelled_while_queued_never_runs() {
+        let (check, release, calls) = gated_check();
+        let mut devices = Devices::new(Arc::new(DeviceRegistry::default())).with_check(check);
+        devices.check_status(1, std::path::Path::new("."));
+        devices.retire_status(1);
+        drop(release);
+        let started = Instant::now();
+        while devices.status.is_some() {
+            devices.poll(Instant::now());
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) <= 1);
+        assert!(devices.take_status(1).is_none());
+    }
+
+    #[test]
+    fn a_cancelled_check_answers_cancelled_and_frees_the_slot() {
+        let (check, release, calls) = gated_check();
+        let mut devices = Devices::new(Arc::new(DeviceRegistry::default())).with_check(check);
+        let cwd = std::path::Path::new(".");
+        devices.check_status(1, cwd);
+        while calls.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Cancelled during the exchange (the check sees its token).
+        devices.retire_status(1);
+        release.send(()).unwrap();
+        let started = Instant::now();
+        while devices.status.is_some() {
+            devices.poll(Instant::now());
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            devices.take_status(1).is_none(),
+            "a retired canvas gets nothing"
+        );
+        // A new canvas can check right away.
+        assert_eq!(devices.check_status(3, cwd), StatusAsked::Sent);
+        assert!(devices.status_late(Instant::now() + STATUS_ANSWER));
+        drop(release);
+    }
+
+    #[test]
+    fn a_revoke_accepted_during_a_check_keeps_its_counts_from_being_current() {
+        let (check, release, _) = gated_check();
+        let registry = Arc::new(DeviceRegistry::default());
+        registry.add("phone", Scope::Control, false).unwrap();
+        let mut devices = Devices::new(registry).with_check(check);
+        devices.refresh();
+        until(&mut devices, "listed", Devices::current);
+        let cwd = std::path::Path::new(".");
+        devices.check_status(1, cwd);
+        let row = rows(&devices).remove(0);
+        // Accepted while the check runs: it may commit.
+        devices.revoke(&row).unwrap();
+        assert_eq!(devices.epoch(), 1);
+        release.send(()).unwrap();
+        let started = Instant::now();
+        let probe = loop {
+            devices.poll(Instant::now());
+            if let Some(probe) = devices.take_status(1) {
+                break probe.unwrap();
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(probe.epoch, 0, "asked before the change");
+        let mut model = crate::remote_status_model::StatusModel::default();
+        model.merge(probe, devices.epoch());
+        assert!(
+            model.counts_line().starts_with("Last known"),
+            "{}",
+            model.counts_line()
+        );
+    }
+
+    #[test]
+    fn a_worker_lost_during_a_check_answers_it_as_unknown() {
+        let registry = Arc::new(DeviceRegistry::default());
+        let check: StatusCheck =
+            Arc::new(|_: &std::path::Path, _: &CancellationToken| panic!("the worker dies"));
+        let mut devices = Devices::new(registry).with_check(check);
+        devices.check_status(1, std::path::Path::new("."));
+        let started = Instant::now();
+        let answer = loop {
+            devices.poll(Instant::now());
+            if let Some(answer) = devices.take_status(1) {
+                break answer;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(answer.is_none());
+        assert!(!devices.checking_status(1));
+    }
+    /// A retired canvas's check is blocked, a new canvas waits behind it,
+    /// and the worker dies: the new canvas gets its one check on a new
+    /// worker, never perpetual checking, and never the old answer.
+    #[test]
+    fn a_canvas_waiting_behind_a_dying_check_still_gets_its_answer() {
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(gate);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let check: StatusCheck = {
+            let calls = calls.clone();
+            Arc::new(move |_: &std::path::Path, _: &CancellationToken| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = gate.lock().unwrap().recv();
+                assert!(call > 0, "the first check dies");
+                let now = std::time::SystemTime::now();
+                Some(crate::remote_status::ObservedStatus {
+                    status: crate::remote_status::RemoteStatus {
+                        settings: Err("test".into()),
+                        gateway: None,
+                        workspaces: Vec::new(),
+                        devices: Ok((7, 0)),
+                    },
+                    settings_at: now,
+                    gateway_at: now,
+                    devices_at: now,
+                })
+            })
+        };
+        let mut devices = Devices::new(Arc::new(DeviceRegistry::default())).with_check(check);
+        let cwd = std::path::Path::new(".");
+        devices.check_status(1, cwd);
+        while calls.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        devices.retire_status(1);
+        assert_eq!(devices.check_status(2, cwd), StatusAsked::Queued);
+        release.send(()).unwrap(); // the first check panics: the worker dies
+        let started = Instant::now();
+        while calls.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            devices.poll(Instant::now());
+            assert!(devices.take_status(1).is_none());
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "never perpetual checking"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        release.send(()).unwrap();
+        let answer = loop {
+            devices.poll(Instant::now());
+            if let Some(answer) = devices.take_status(2) {
+                break answer;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(
+            answer.map(|probe| probe.observed.status.devices),
+            Some(Ok((7, 0))),
+            "its own check, on a new worker"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(!devices.checking_status(2));
     }
 }

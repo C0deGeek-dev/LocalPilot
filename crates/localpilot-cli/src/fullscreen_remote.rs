@@ -134,43 +134,13 @@ pub(super) struct RemoteHost {
     published: RefCell<Option<(SessionId, crate::relay_source::History)>>,
     /// The admission state last published to the feed.
     admission: Cell<Option<crate::server_feed::Admission>>,
-    /// How `/remote` reads the gateway and configuration (off the terminal's
-    /// loop; tests replace it).
-    probe: StatusProbe,
-    /// The `/remote` view being filled in, if one is: only it may be updated,
-    /// and only while it is the report shown, for the same session.
-    status: RefCell<Option<PendingStatus>>,
+    /// The `/remote` status canvas.
+    pub(super) status: super::status_host::StatusHost,
     /// Pairing a device (`/remote pair`).
     pub(super) pairing: super::pairing_host::PairingHost,
     /// The paired devices (`/remote devices`).
     pub(super) devices: super::devices_host::DevicesHost,
 }
-
-/// A `/remote` view waiting for its probe.
-struct PendingStatus {
-    /// The report the view opened as (see `AppModel::report_generation`).
-    report: u64,
-    session: Option<SessionId>,
-    sharing: Vec<String>,
-    task: tokio::task::JoinHandle<()>,
-    result: tokio::sync::oneshot::Receiver<Vec<String>>,
-}
-
-impl Drop for PendingStatus {
-    fn drop(&mut self) {
-        // A view closed, replaced or superseded stops its probe.
-        self.task.abort();
-    }
-}
-
-/// Reads remote access settings, gateway health and the device count.
-pub(super) type StatusProbe = Arc<
-    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>> + Send + Sync,
->;
-
-/// How long a `/remote` snapshot may take before it reports a timeout: the
-/// gateway check's own bounds (connect, then answer) plus a margin.
-const STATUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(6);
 
 impl RemoteHost {
     pub(super) fn new(share: Arc<RemoteShare>, cwd: &std::path::Path) -> Self {
@@ -190,12 +160,7 @@ impl RemoteHost {
             choice: Cell::new(None),
             published: RefCell::new(None),
             admission: Cell::new(None),
-            probe: Arc::new(|| {
-                Box::pin(async {
-                    crate::remote_status::render_status(&crate::remote_gateway::status().await)
-                })
-            }),
-            status: RefCell::new(None),
+            status: super::status_host::StatusHost::new(cwd.to_path_buf()),
         }
     }
 
@@ -211,84 +176,6 @@ impl RemoteHost {
     pub(super) fn with_pairing(mut self, pairing: super::pairing_host::PairingHost) -> Self {
         self.pairing = pairing;
         self
-    }
-
-    /// The same host, reading remote status with `probe`.
-    #[cfg(test)]
-    pub(super) fn with_probe(mut self, probe: StatusProbe) -> Self {
-        self.probe = probe;
-        self
-    }
-
-    /// Open the `/remote` view: the sharing part now, remote access checked
-    /// off the terminal's loop within [`STATUS_DEADLINE`] and filled into this
-    /// same view. An earlier view's check is stopped.
-    fn request_status(&self, app: &mut AppModel) {
-        let session = self.share.tracked_session();
-        let sharing = sharing_lines(&self.share);
-        let mut lines = sharing.clone();
-        lines.push(String::new());
-        lines.push("Remote access: checking...".to_string());
-        app.open_report("Remote status (checking...)".to_string(), lines);
-        let Some(report) = app.report_generation() else {
-            return;
-        };
-        let probe = self.probe.clone();
-        let (tx, result) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let probed = match tokio::time::timeout(STATUS_DEADLINE, probe()).await {
-                Ok(text) => text.lines().map(str::to_string).collect::<Vec<_>>(),
-                Err(_) => vec![format!(
-                    "  Could not check remote access within {} s; reopen /remote to try again.",
-                    STATUS_DEADLINE.as_secs()
-                )],
-            };
-            let _ = tx.send(probed);
-        });
-        // Replacing the pending view drops (and so stops) the earlier check.
-        *self.status.borrow_mut() = Some(PendingStatus {
-            report,
-            session,
-            sharing,
-            task,
-            result,
-        });
-    }
-
-    /// Fill in the `/remote` view once its check finished, if it is still the
-    /// report shown for the same session; otherwise stop the check.
-    fn show_status(&self, app: &mut AppModel) {
-        let mut slot = self.status.borrow_mut();
-        let Some(pending) = slot.as_mut() else {
-            return;
-        };
-        if app.report_generation() != Some(pending.report)
-            || pending.session != self.share.tracked_session()
-        {
-            *slot = None;
-            return;
-        }
-        let probed = match pending.result.try_recv() {
-            Ok(probed) => probed,
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                vec!["  Could not check remote access; reopen /remote to try again.".to_string()]
-            }
-        };
-        let mut lines = std::mem::take(&mut pending.sharing);
-        lines.push(String::new());
-        lines.push("Remote access:".to_string());
-        lines.extend(probed);
-        let report = pending.report;
-        *slot = None;
-        let _ = app.update_report(
-            report,
-            format!(
-                "Remote status (snapshot at {}; reopen /remote to refresh)",
-                super::local_prompt_time()
-            ),
-            lines,
-        );
     }
 
     /// Publish whether work is running and how many follow-ups wait, when it
@@ -342,26 +229,64 @@ impl RemoteHost {
     }
 }
 
-/// The status-line label: sharing, and a pairing code still being settled.
-fn status_label(host: &RemoteHost, app: &AppModel) -> Option<String> {
-    let sharing = label(&host.share.state(), host.share.devices().as_deref());
-    match (sharing, host.pairing.status(app)) {
-        (Some(sharing), Some(pairing)) => Some(format!("{sharing} · {pairing}")),
-        (sharing, pairing) => sharing.or_else(|| pairing.map(str::to_string)),
+/// The status-line label (full, and short for a narrow line): sharing, and
+/// a pairing code still being settled. A device count is a number only from
+/// this session's confirmed attendance while shared.
+fn status_labels(host: &RemoteHost, app: &AppModel) -> (Option<String>, Option<String>) {
+    let (state, retry_at) = host.share.state_and_retry();
+    let attended = host
+        .share
+        .devices()
+        .filter(|_| matches!(state, ShareState::Shared));
+    let count = attended.as_ref().map(Vec::len);
+    let (full, short) = match &state {
+        ShareState::Off => (None, None),
+        ShareState::Connecting => (
+            Some("Sharing: connecting".to_string()),
+            Some("Sharing...".to_string()),
+        ),
+        ShareState::Shared => {
+            let devices = count.map_or_else(|| "unknown".to_string(), |n| n.to_string());
+            let short = count.map_or_else(|| "?".to_string(), |n| n.to_string());
+            (
+                Some(format!(
+                    "Shared: yes | Devices: {devices} | Relay: connected"
+                )),
+                Some(format!("Shared · {short}dev")),
+            )
+        }
+        ShareState::Interrupted { .. } => {
+            let seconds = retry_at.map(|at| {
+                at.saturating_duration_since(std::time::Instant::now())
+                    .as_secs()
+                    .max(1)
+            });
+            let full = match seconds {
+                Some(seconds) => format!(
+                    "Sharing interrupted | Devices: unknown | Relay: reconnecting in {seconds}s"
+                ),
+                None => "Sharing interrupted | Devices: unknown | Relay: reconnecting".to_string(),
+            };
+            let short = match seconds {
+                Some(seconds) => format!("Interrupted · ?dev · {seconds}s"),
+                None => "Interrupted · ?dev".to_string(),
+            };
+            (Some(full), Some(short))
+        }
+    };
+    match host.pairing.status(app) {
+        Some(pairing) => (
+            Some(full.map_or_else(|| pairing.to_string(), |full| format!("{full} · {pairing}"))),
+            Some(short.map_or_else(|| "pair?".to_string(), |short| format!("{short} · pair?"))),
+        ),
+        None => (full, short),
     }
 }
 
-/// The short status-line label for a sharing state (`None` when not shared).
-fn label(state: &ShareState, devices: Option<&[localpilot_rpc::AttendedDevice]>) -> Option<String> {
-    match state {
-        ShareState::Off => None,
-        ShareState::Connecting => Some("sharing: connecting".to_string()),
-        ShareState::Shared => Some(format!("shared · {}", devices_text(devices))),
-        ShareState::Interrupted { retry_in } => Some(format!(
-            "sharing interrupted · retry in {}s",
-            retry_in.as_secs().max(1)
-        )),
-    }
+/// Set the status-line label from the current state.
+fn refresh_labels(app: &mut AppModel, host: &RemoteHost) {
+    let (full, short) = status_labels(host, app);
+    app.set_remote_labels(full, short);
 }
 
 /// Show what the relay reported and keep the status line current.
@@ -430,8 +355,7 @@ pub(super) fn show_notices(app: &mut AppModel, host: &RemoteHost) {
             ))),
         }
     }
-    let status = status_label(host, app);
-    app.set_remote_label(status);
+    refresh_labels(app, host);
 }
 
 /// A device standing, as a notice says it.
@@ -444,49 +368,6 @@ fn standing_text(standing: localpilot_rpc::DeviceStanding) -> &'static str {
         DeviceStanding::Removed => "no longer paired",
         DeviceStanding::Unknown => "of unknown standing (the device registry cannot be read)",
     }
-}
-
-/// This session's sharing, as the `/remote` snapshot starts.
-fn sharing_lines(share: &RemoteShare) -> Vec<String> {
-    let mut lines = vec![format!(
-        "Sharing: {}",
-        match share.state() {
-            ShareState::Off => "off".to_string(),
-            ShareState::Connecting => "connecting".to_string(),
-            ShareState::Shared =>
-                "shared (phone access lasts while this terminal is open)".to_string(),
-            ShareState::Interrupted { retry_in } => format!(
-                "interrupted; reconnecting in {}s (phone actions are unavailable)",
-                retry_in.as_secs().max(1)
-            ),
-        }
-    )];
-    let devices = share.devices();
-    lines.push(format!("Attached: {}", devices_text(devices.as_deref())));
-    for device in devices.unwrap_or_default() {
-        let scope = match device.scope {
-            Some(localpilot_rpc::Scope::Control) => "control",
-            Some(localpilot_rpc::Scope::Observe) => "observe",
-            None => "scope unknown",
-        };
-        let standing = match device.standing {
-            localpilot_rpc::DeviceStanding::Active => String::new(),
-            localpilot_rpc::DeviceStanding::Unknown => {
-                ", access unconfirmed (registry unreadable)".to_string()
-            }
-            other => format!(", {}, being disconnected", standing_text(other)),
-        };
-        lines.push(format!(
-            "  {} [{}], {scope}{standing}",
-            device.name.as_deref().unwrap_or("(name unknown)"),
-            device.id
-        ));
-    }
-    lines.push(
-        "Commands: /remote share | /remote stop | /remote pair [observe] | /remote devices."
-            .to_string(),
-    );
-    lines
 }
 
 /// How many devices are attached, for the status line and the exit question.
@@ -529,8 +410,7 @@ pub(super) fn idle_tick(
     host.publish(runtime, false);
     host.publish_admission(false, 0);
     show_notices(app, host);
-    host.show_status(app);
-    tick_pairing(app, host);
+    tick_pairing(app, host, false);
     for _ in 0..REQUESTS_PER_TICK {
         let request = host.share.next_request()?;
         if let Some(work) = idle_request(app, runtime, host, request) {
@@ -653,8 +533,7 @@ pub(super) fn busy_tick(
 ) {
     host.release_steering(pending_steers);
     show_notices(app, host);
-    host.show_status(app);
-    tick_pairing(app, host);
+    tick_pairing(app, host, true);
     host.publish_admission(true, queue.len());
     for _ in 0..REQUESTS_PER_TICK {
         let Some(SourceRequest { command, ticket }) = host.share.next_request() else {
@@ -726,8 +605,10 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
     };
     match action {
         RemoteAction::Status => {
-            notice(app, "Checking remote status...");
-            host.request_status(app);
+            host.pairing.close_for_devices(app);
+            app.close_devices_view();
+            host.status
+                .open(app, &mut host.devices.controller(), host.share.tracked_session());
         }
         RemoteAction::Share => match host.share.share() {
             ShareOutcome::Connecting => {
@@ -762,12 +643,11 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
             "Use /remote [pair [observe|control] | devices | share | stop].",
         ),
     }
-    let status = status_label(host, app);
-    app.set_remote_label(status);
+    refresh_labels(app, host);
 }
 
 /// Keep the pairing overlay current (and closed if the session changed).
-fn tick_pairing(app: &mut AppModel, host: &RemoteHost) {
+fn tick_pairing(app: &mut AppModel, host: &RemoteHost, busy: bool) {
     let shared = !matches!(host.share.state(), ShareState::Off);
     host.pairing.tick(app, host.share.tracked_session(), shared);
     // Attendance here: only this session's confirmed list (when shared).
@@ -788,18 +668,76 @@ fn tick_pairing(app: &mut AppModel, host: &RemoteHost) {
         attached.as_deref(),
         incognito,
     );
-    let status = status_label(host, app);
-    app.set_remote_label(status);
+    if host.pairing.take_used() {
+        host.devices.controller().registry_changed();
+    }
+    // What the session does, from the host's own state: a permission ask
+    // this terminal or a device can answer, a question, running work.
+    let work = match &app.dialog {
+        _ if !host.share.source().asks().outstanding().is_empty() => {
+            super::status_host::Work::WaitingForPermission
+        }
+        Some(localpilot_terminal_ui::DialogState::Approval { .. }) => {
+            super::status_host::Work::WaitingForPermission
+        }
+        Some(localpilot_terminal_ui::DialogState::Question(_)) => {
+            super::status_host::Work::WaitingForAnswer
+        }
+        _ if busy => super::status_host::Work::Working,
+        _ => super::status_host::Work::Idle,
+    };
+    let (share, retry_at) = host.share.state_and_retry();
+    let attended = host
+        .share
+        .devices()
+        .filter(|_| matches!(share, ShareState::Shared));
+    let inputs = super::status_host::StatusInputs {
+        session: host.share.tracked_session(),
+        share,
+        retry_at,
+        attended: attended.as_deref(),
+        work,
+    };
+    host.status
+        .tick(app, &mut host.devices.controller(), &inputs);
+    refresh_labels(app, host);
 }
 
 /// The pairing pump and status line, as a tick runs them.
 #[cfg(test)]
 pub(super) fn idle_status_for_test(app: &mut AppModel, host: &RemoteHost) {
-    tick_pairing(app, host);
+    tick_pairing(app, host, false);
 }
 
 /// Route a key to the open pairing overlay.
 pub(super) fn pairing_key(app: &mut AppModel, host: &RemoteHost, key: crossterm::event::KeyEvent) {
+    if app.status_view().is_some() {
+        let action = host.status.key(app, &mut host.devices.controller(), key);
+        match action {
+            Some(super::status_host::StatusAction::Pair) => {
+                if app.incognito() {
+                    let refusal = crate::incognito::incognito_refusal(
+                        &localpilot_slash::SlashAction::Remote(RemoteAction::Pair {
+                            observe: false,
+                        }),
+                    )
+                    .unwrap_or_else(|| "not available in incognito".to_string());
+                    app.apply_runtime(RuntimeUpdate::Warning(refusal));
+                } else {
+                    host.pairing.open(app, false, host.share.tracked_session());
+                }
+            }
+            Some(super::status_host::StatusAction::Devices) => {
+                host.devices.open(app, host.share.tracked_session());
+            }
+            Some(super::status_host::StatusAction::Share) => {
+                command(app, host, RemoteAction::Share)
+            }
+            Some(super::status_host::StatusAction::Stop) => command(app, host, RemoteAction::Stop),
+            _ => {}
+        }
+        return;
+    }
     if app.devices_view().is_some() {
         let incognito = app.incognito();
         if host.devices.key(app, key, incognito) == super::devices_host::DevicesKey::Pair {
@@ -863,7 +801,12 @@ pub(super) fn request_exit(app: &mut AppModel, host: &RemoteHost, turn: &str) ->
                 sharing.to_string(),
                 format!(
                     "Devices attached: {}.",
-                    devices_text(host.share.devices().as_deref())
+                    devices_text(
+                        host.share
+                            .devices()
+                            .filter(|_| matches!(host.share.state(), ShareState::Shared))
+                            .as_deref()
+                    )
                 ),
                 format!("Current turn: {turn}"),
             ],

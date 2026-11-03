@@ -46,6 +46,17 @@ pub struct RemoteStatus {
     pub devices: Result<(usize, usize), String>,
 }
 
+/// A status, with when each part was observed: the settings when they were
+/// read, the gateway when its check resolved, the counts when the registry
+/// was read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedStatus {
+    pub status: RemoteStatus,
+    pub settings_at: std::time::SystemTime,
+    pub gateway_at: std::time::SystemTime,
+    pub devices_at: std::time::SystemTime,
+}
+
 /// The body `/healthz` answers with, which `localpilot remote status` checks.
 pub fn health_body() -> String {
     format!("localpilot-gateway {}", env!("CARGO_PKG_VERSION"))

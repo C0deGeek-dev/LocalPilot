@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/remote` in the full-screen terminal now opens a status canvas: relay,
+  config, gateway, phone address, whether a phone could pair, this session and
+  what it is doing, who is attached here, and the device counts, with actions
+  to pair, list devices, share or stop, and refresh. A probed row that could
+  not be checked keeps its last known value, labelled with when it was
+  observed, next to the current error, and nothing unknown is shown as zero or
+  healthy. The status
+  line reads "Shared: yes | Devices: 2 | Relay: connected" (or "Sharing
+  interrupted | Devices: unknown | Relay: reconnecting in 12s"), with a short
+  form in narrow windows (ADR-0258).
 - `/remote devices` in the full-screen terminal lists your paired devices (with
   their access, whether they reach this workspace and whether they are
   attached to this session) and revokes one after a confirmation that names it

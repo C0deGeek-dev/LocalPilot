@@ -194,6 +194,9 @@ struct Inner {
     attendance: Option<crate::relay_host::Telemetry>,
     /// The task of the share that ended last, for a bounded wait at exit.
     ending: Option<tokio::task::JoinHandle<()>>,
+    /// When the interrupted share's next attempt is due: set exactly when
+    /// the wait is scheduled, cleared on any other state, under this lock.
+    retry_at: Option<std::time::Instant>,
 }
 
 /// One terminal's sharing. See the module docs.
@@ -272,6 +275,7 @@ impl RemoteShare {
                 tracked: None,
                 notices: Vec::new(),
                 attendance: None,
+                retry_at: None,
                 ending: None,
             })),
             requests,
@@ -333,6 +337,18 @@ impl RemoteShare {
     /// How this share reaches its server (pairing dials the same one).
     pub(crate) fn dial(&self) -> Dial {
         self.dial.clone()
+    }
+
+    /// When an interrupted share tries again (`None` when not waiting).
+    #[cfg(test)]
+    pub(crate) fn retry_at(&self) -> Option<std::time::Instant> {
+        self.inner().retry_at
+    }
+
+    /// The share's state and its retry deadline, read together.
+    pub(crate) fn state_and_retry(&self) -> (ShareState, Option<std::time::Instant>) {
+        let inner = self.inner();
+        (inner.state.clone(), inner.retry_at)
     }
 
     pub(crate) fn tracked_session(&self) -> Option<SessionId> {
@@ -416,6 +432,7 @@ impl RemoteShare {
             session: tracked.session,
         });
         inner.state = ShareState::Connecting;
+        inner.retry_at = None;
         drop(inner);
         let identity = RelayIdentity {
             session: tracked.session,
@@ -471,6 +488,7 @@ fn end_current(inner: &mut Inner) {
         }
     }
     inner.state = ShareState::Off;
+    inner.retry_at = None;
 }
 
 /// Take one accepted attendance update for the current connection: keep it,
@@ -613,6 +631,10 @@ impl ShareTask {
             return false;
         }
         if let Some(state) = state {
+            inner.retry_at = match &state {
+                ShareState::Interrupted { retry_in } => Some(std::time::Instant::now() + *retry_in),
+                _ => None,
+            };
             inner.state = state;
         }
         if let Some(notice) = notice {
@@ -1341,6 +1363,74 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(f.dials.count(), 1, "no dial after stop");
         assert_eq!(f.share.state(), ShareState::Off);
+    }
+
+    /// A nap the test releases one wait at a time.
+    fn stepped_nap() -> (
+        Nap,
+        tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>,
+    ) {
+        let (waits, released) =
+            tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
+        let nap: Nap = Arc::new(move |_| {
+            let (go, wait) = tokio::sync::oneshot::channel::<()>();
+            let _ = waits.send(go);
+            Box::pin(async move {
+                let _ = wait.await;
+            })
+        });
+        (nap, released)
+    }
+
+    /// The retry deadline is the publisher's: set when each wait is
+    /// scheduled (fresh every time, even for the same delay), cleared on any
+    /// other state, and never a count of devices while not shared.
+    #[tokio::test]
+    async fn a_retry_deadline_is_set_for_each_wait_and_cleared_otherwise() {
+        let (nap, mut waits) = stepped_nap();
+        let f = fixture_napping(None, nap);
+        for _ in 0..3 {
+            f.dials.push_error(TransportError::Busy);
+        }
+        assert_eq!(f.share.share(), ShareOutcome::Connecting);
+        let mut last = None;
+        for _ in 0..3 {
+            let go = tokio::time::timeout(Duration::from_secs(5), waits.recv())
+                .await
+                .expect("a wait was scheduled")
+                .expect("the share is waiting");
+            let (state, retry_at) = f.share.state_and_retry();
+            let retry_in = match state {
+                ShareState::Interrupted { retry_in } => retry_in,
+                other => panic!("{other:?}"),
+            };
+            let retry_at = retry_at.expect("a deadline while interrupted");
+            let now = std::time::Instant::now();
+            assert!(
+                retry_at <= now + retry_in && retry_at + retry_in >= now,
+                "within its delay"
+            );
+            if let Some(last) = last {
+                assert!(retry_at > last, "a fresh deadline for each wait");
+            }
+            last = Some(retry_at);
+            assert!(f.share.devices().is_none(), "no count while interrupted");
+            let _ = go.send(());
+            until(|| f.share.retry_at().is_none() || f.share.retry_at() != Some(retry_at)).await;
+        }
+        // The next dial finds no server, so sharing may already be over.
+        let _ = f.share.stop();
+        assert_eq!(f.share.retry_at(), None, "cleared once not waiting");
+    }
+
+    #[tokio::test]
+    async fn stopping_during_a_wait_clears_its_deadline() {
+        let f = fixture_napping(None, held_nap());
+        f.dials.push_error(TransportError::Busy);
+        assert_eq!(f.share.share(), ShareOutcome::Connecting);
+        until(|| f.share.retry_at().is_some()).await;
+        assert_eq!(f.share.stop(), StopOutcome::Stopped);
+        assert_eq!(f.share.state_and_retry(), (ShareState::Off, None));
     }
 
     fn ended_for_ownership(notices: &[ShareNotice]) -> bool {

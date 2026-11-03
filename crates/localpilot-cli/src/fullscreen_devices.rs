@@ -100,6 +100,11 @@ impl DevicesHost {
         host
     }
 
+    /// The controller (the one worker, its reads, revokes and status checks).
+    pub(super) fn controller(&self) -> std::cell::RefMut<'_, Devices> {
+        self.devices.borrow_mut()
+    }
+
     /// `/remote devices`: open the view and read the list.
     pub(super) fn open(&self, app: &mut AppModel, session: Option<SessionId>) {
         self.session.set(session);

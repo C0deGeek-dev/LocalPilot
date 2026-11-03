@@ -188,6 +188,10 @@ pub(crate) struct DeviceRow {
 pub(crate) struct DeviceRows {
     pub(crate) rows: Vec<DeviceRow>,
     pub(crate) total: usize,
+    /// Active and revoked records, counted over the whole registry (before
+    /// the rows are capped), from the same read.
+    pub(crate) active: usize,
+    pub(crate) revoked: usize,
 }
 
 /// What became of a revoke.
@@ -582,8 +586,14 @@ impl DeviceRegistry {
         let file = self.current().map_err(DeviceError::Unavailable)?;
         let mut records: Vec<(&String, &DeviceRecord)> = file.devices.iter().collect();
         records.sort_by(|a, b| b.1.created_unix.cmp(&a.1.created_unix));
+        let revoked = records
+            .iter()
+            .filter(|(_, record)| record.revoked_unix.is_some())
+            .count();
         Ok(DeviceRows {
             total: records.len(),
+            active: records.len() - revoked,
+            revoked,
             rows: records
                 .into_iter()
                 .take(ROWS_SHOWN)

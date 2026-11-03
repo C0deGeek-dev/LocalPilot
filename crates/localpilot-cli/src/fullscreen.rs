@@ -8,6 +8,8 @@ mod harness_router;
 mod pairing_host;
 #[path = "fullscreen_remote.rs"]
 mod remote_host;
+#[path = "fullscreen_status.rs"]
+mod status_host;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -26893,7 +26895,7 @@ last_seen = "2026-08-10"
         bundle.runtime.close();
     }
 
-    // ---- attendance and the /remote snapshot --------------------------------
+    // ---- attendance and the /remote status canvas ---------------------------
 
     fn typed(text: &str) -> Vec<Event> {
         let mut events: Vec<Event> = text.chars().map(|c| key(KeyCode::Char(c))).collect();
@@ -26901,8 +26903,109 @@ last_seen = "2026-08-10"
         events
     }
 
+    /// A status check the test releases, which records whether it was
+    /// cancelled by the time it was released.
+    struct GatedCheck {
+        check: crate::remote_devices::StatusCheck,
+        release: std::sync::mpsc::Sender<()>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    fn gated_status() -> GatedCheck {
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(gate);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let check: crate::remote_devices::StatusCheck = {
+            let calls = calls.clone();
+            let cancelled = cancelled.clone();
+            std::sync::Arc::new(move |_: &std::path::Path, cancel: &CancellationToken| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = gate.lock().unwrap().recv();
+                if cancel.is_cancelled() {
+                    cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return None;
+                }
+                let now = std::time::SystemTime::now();
+                Some(crate::remote_status::ObservedStatus {
+                    status: crate::remote_status::RemoteStatus {
+                        settings: Ok(crate::remote_status::RemoteSettings {
+                            enabled: true,
+                            advertised: Ok(Some("https://pc.example.test".to_string())),
+                            port: 9417,
+                        }),
+                        gateway: Some(crate::remote_status::GatewayHealth::Running),
+                        workspaces: Vec::new(),
+                        devices: Ok((2, 1)),
+                    },
+                    settings_at: now,
+                    gateway_at: now,
+                    devices_at: now,
+                })
+            })
+        };
+        GatedCheck {
+            check,
+            release,
+            calls,
+            cancelled,
+        }
+    }
+
+    fn status_host(
+        dials: &crate::remote_share::test_support::Dials,
+        level: &std::sync::Arc<std::sync::atomic::AtomicU8>,
+        check: crate::remote_devices::StatusCheck,
+        answer: Duration,
+    ) -> std::rc::Rc<remote_host::RemoteHost> {
+        let inner = std::rc::Rc::try_unwrap(sharing_host(dials, level))
+            .ok()
+            .expect("one owner");
+        let devices = crate::remote_devices::Devices::new(std::sync::Arc::new(
+            crate::server_devices::DeviceRegistry::default(),
+        ))
+        .with_check(check)
+        .with_status_answer(answer);
+        std::rc::Rc::new(inner.with_devices(devices_host::DevicesHost::with_devices(devices)))
+    }
+
+    fn status_text(app: &AppModel) -> String {
+        app.status_view()
+            .map(|view| {
+                view.rows
+                    .iter()
+                    .map(|row| format!("{}: {}", row.label, row.value))
+                    .chain(view.actions.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    async fn pump_status(
+        app: &mut AppModel,
+        host: &remote_host::RemoteHost,
+        what: &str,
+        done: impl Fn(&AppModel) -> bool,
+    ) {
+        let started = std::time::Instant::now();
+        loop {
+            remote_host::idle_status_for_test(app, host);
+            if done(app) {
+                return;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "never reached {what}: {}",
+                status_text(app)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
-    async fn a_stalled_remote_status_never_holds_up_the_terminal_and_a_late_one_is_dropped() {
+    async fn a_stalled_status_check_never_holds_up_the_terminal() {
         let mut app = app();
         app.begin_work();
         let history = localpilot_store::PromptHistory::with_store(None);
@@ -26917,48 +27020,30 @@ last_seen = "2026-08-10"
         let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
         let dials = crate::remote_share::test_support::Dials::default();
         let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
-        let host = sharing_host(&dials, &level);
-        // The first probe never finishes on its own; the second answers.
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let probe: remote_host::StatusProbe = {
-            let calls = calls.clone();
-            std::sync::Arc::new(move || {
-                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Box::pin(async move {
-                    if call == 0 {
-                        std::future::pending::<()>().await;
-                    }
-                    "  second probe".to_string()
-                })
-            })
-        };
-        let host = {
-            let inner = std::rc::Rc::try_unwrap(host).ok().expect("one owner");
-            std::rc::Rc::new(inner.with_probe(probe))
-        };
+        let gated = gated_status();
+        let host = status_host(&dials, &level, gated.check.clone(), Duration::from_secs(60));
         let mut stages = StageHost::new();
         stages.remote = Some(host.clone());
         let events = queued(vec![]);
         let mut io = characterization_io(events.clone(), cell(0), cell(0), None);
+        let release = gated.release.clone();
         let script = {
             let events = events.clone();
             async move {
-                // `/remote` while a turn runs: its probe stalls.
+                // `/remote` while a turn runs: its check stalls.
                 events.borrow_mut().extend(typed("/remote"));
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 // A permission ask arrives and is answered from the keyboard
-                // while that probe is still stalled.
+                // while the check is still stalled.
                 let (reply, answer) = oneshot::channel();
                 approvals.send(approval(reply)).expect("queue approval");
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 events.borrow_mut().push_back(key(KeyCode::Char('y')));
                 let answered = tokio::time::timeout(Duration::from_secs(1), answer)
                     .await
-                    .expect("answered while the probe stalls");
-                // A second `/remote` replaces the first; the first one's late
-                // timeout must not replace the second's report.
-                events.borrow_mut().extend(typed("/remote"));
-                tokio::time::sleep(Duration::from_millis(2600)).await;
+                    .expect("answered while the check stalls");
+                let _ = release.send(());
+                tokio::time::sleep(Duration::from_millis(300)).await;
                 answered
             }
         };
@@ -26985,18 +27070,18 @@ last_seen = "2026-08-10"
         .await
         .expect("turn loop completes");
         assert_eq!(outcome.take().expect("the script ran"), Ok(true));
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        let (title, lines) = app.report().expect("the second snapshot is shown");
-        assert!(title.contains("snapshot at"), "{title}");
+        let text = status_text(&app);
         assert!(
-            lines.iter().any(|line| line.contains("second probe")),
-            "{lines:?}"
+            text.contains("Gateway: Running at 127.0.0.1:9417"),
+            "{text}"
         );
+        assert!(text.contains("Devices: 2 paired, 1 revoked"), "{text}");
         assert!(
-            !lines.iter().any(|line| line.contains("Could not check")),
-            "the first, late result was dropped: {lines:?}"
+            text.contains("Pairing: Address set; phone connection not checked"),
+            "{text}"
         );
-        assert!(timeline_has_notice(&app, "Checking remote status..."));
+        assert!(text.contains("Work: Working"), "{text}");
+        assert_eq!(gated.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -27008,7 +27093,11 @@ last_seen = "2026-08-10"
         let mut server = shared_over_fake(&dials, &host).await;
         let mut app = app();
         remote_host::show_notices(&mut app, &host);
-        assert_eq!(app.remote_label(), Some("shared · devices unknown"));
+        assert_eq!(
+            app.remote_label(),
+            Some("Shared: yes | Devices: unknown | Relay: connected")
+        );
+        assert_eq!(app.remote_label_short(), Some("Shared · ?dev"));
         server
             .devices(
                 1,
@@ -27028,7 +27117,10 @@ last_seen = "2026-08-10"
         .await
         .expect("attendance arrived");
         remote_host::show_notices(&mut app, &host);
-        assert_eq!(app.remote_label(), Some("shared · 2 devices"));
+        assert_eq!(
+            app.remote_label(),
+            Some("Shared: yes | Devices: 2 | Relay: connected")
+        );
         assert!(!remote_host::request_exit(&mut app, &host, "Idle"));
         let body = &app.choice().expect("asked").body;
         assert!(
@@ -27038,187 +27130,472 @@ last_seen = "2026-08-10"
         );
     }
 
-    /// A status probe that never finishes and says when it was stopped.
-    fn held_probe(
-        stopped: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> remote_host::StatusProbe {
-        struct Stopped(std::sync::Arc<std::sync::atomic::AtomicBool>);
-        impl Drop for Stopped {
-            fn drop(&mut self) {
-                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        let stopped = stopped.clone();
-        std::sync::Arc::new(move || {
-            let guard = Stopped(stopped.clone());
-            Box::pin(async move {
-                let _guard = guard;
-                std::future::pending::<()>().await;
-                String::new()
-            })
-        })
-    }
-
-    /// Run a turn whose script types `/remote` (its check never finishes),
-    /// then `then`, and reports whether the check was stopped.
-    async fn status_view_then(then: Vec<Event>) -> (AppModel, bool) {
-        let mut app = app();
-        app.begin_work();
-        let history = localpilot_store::PromptHistory::with_store(None);
-        let (_approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
-        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
-        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
-        let steer = SteerQueue::default();
-        let cancel = CancellationToken::new();
-        let mut queue = VecDeque::new();
-        let mut mouse_state = MouseState::default();
-        let mut paste_burst = PasteBurst::default();
-        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+    #[tokio::test]
+    async fn an_interrupted_share_counts_down_from_its_own_deadline_with_no_device_count() {
         let dials = crate::remote_share::test_support::Dials::default();
         let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
-        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let host = {
-            let inner = std::rc::Rc::try_unwrap(sharing_host(&dials, &level))
-                .ok()
-                .expect("one owner");
-            std::rc::Rc::new(inner.with_probe(held_probe(&stopped)))
-        };
-        let mut stages = StageHost::new();
-        stages.remote = Some(host.clone());
-        let events = queued(vec![]);
-        let mut io = characterization_io(events.clone(), cell(0), cell(0), None);
-        let script = {
-            let events = events.clone();
-            let stopped = stopped.clone();
-            async move {
-                events.borrow_mut().extend(typed("/remote"));
-                tokio::time::sleep(Duration::from_millis(150)).await;
-                assert!(
-                    !stopped.load(std::sync::atomic::Ordering::SeqCst),
-                    "checking"
-                );
-                events.borrow_mut().extend(then);
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-        };
-        drive_turn_loop(
-            &mut app,
-            &mut io,
-            &mut approval_rx,
-            &mut question_rx,
-            &mut rx,
-            &steer,
-            &cancel,
-            &image_capability(false),
-            &mut queue,
-            &history,
-            std::path::Path::new("."),
-            &mut mouse_state,
-            &mut paste_burst,
-            &mut workspace_index,
-            &mut stages,
-            script,
-            |_app: &mut AppModel, ()| {},
+        let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+            localpilot_rpc::AskRegistry::default(),
+        ));
+        let share = crate::remote_share::RemoteShare::new(
+            dials.dial(),
+            crate::remote_share::test_support::standing(&level),
+            std::sync::Arc::new(|_| Some("Pixel".to_string())),
+            source,
         )
-        .await
-        .expect("turn loop completes");
-        let stopped = stopped.load(std::sync::atomic::Ordering::SeqCst);
-        (app, stopped)
-    }
-
-    #[tokio::test]
-    async fn closing_the_remote_view_before_its_check_finishes_stops_the_check() {
-        let (app, stopped) = status_view_then(vec![key(KeyCode::Esc)]).await;
-        assert!(app.report().is_none(), "the view stays closed");
-        assert!(stopped, "its check was stopped");
-    }
-
-    #[tokio::test]
-    async fn a_session_change_stops_the_remote_views_check() {
-        let dials = crate::remote_share::test_support::Dials::default();
-        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
-        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let host = std::rc::Rc::try_unwrap(sharing_host(&dials, &level))
-            .ok()
-            .expect("one owner")
-            .with_probe(held_probe(&stopped));
-        let mut app = app();
-        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
-        let generation = app.report_generation();
-        assert!(generation.is_some(), "the checking view is open");
-        tokio::time::sleep(Duration::from_millis(30)).await; // the check is running
-        host.share.track(crate::remote_share::Tracked {
+        .with_nap(std::sync::Arc::new(|_| Box::pin(std::future::pending())));
+        share.track(crate::remote_share::Tracked {
             session: localpilot_core::SessionId::new(),
             claim: Some((1, "me".to_string())),
             gate: localpilot_core::admission::AdmissionGate::default(),
         });
-        let mut queue = VecDeque::new();
-        remote_host::busy_tick(
-            &mut app,
-            &host,
-            &mut queue,
-            &CancellationToken::new(),
-            None,
-            &VecDeque::new(),
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        dials.push_error(localpilot_server::TransportError::Busy);
+        let host = remote_host::RemoteHost::new(std::sync::Arc::new(share), &std::env::temp_dir());
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Share);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.share.state_and_retry().1.is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("interrupted");
+        remote_host::show_notices(&mut app, &host);
+        let label = app.remote_label().unwrap().to_string();
         assert!(
-            stopped.load(std::sync::atomic::Ordering::SeqCst),
-            "its check was stopped"
+            label.starts_with("Sharing interrupted | Devices: unknown | Relay: reconnecting in "),
+            "{label}"
         );
-        assert_eq!(
-            app.report_generation(),
-            generation,
-            "the view was not refilled"
+        assert!(app
+            .remote_label_short()
+            .unwrap()
+            .starts_with("Interrupted · ?dev · "));
+        assert!(!remote_host::request_exit(&mut app, &host, "Idle"));
+        let body = &app.choice().expect("asked").body;
+        assert!(
+            body.iter().any(|line| line.contains("devices unknown")),
+            "{body:?}"
         );
-        assert!(app.report().unwrap().0.contains("checking"));
+        host.share.stop();
     }
 
     #[tokio::test]
-    async fn another_view_over_the_remote_view_stops_its_check_and_is_never_replaced() {
+    async fn closing_replacing_or_a_session_change_retires_the_canvas_and_cancels_its_check() {
+        for how in ["close", "replace", "session"] {
+            let dials = crate::remote_share::test_support::Dials::default();
+            let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+            let gated = gated_status();
+            let host = status_host(&dials, &level, gated.check.clone(), Duration::from_secs(60));
+            let mut app = app();
+            remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+            assert!(app.status_view().is_some());
+            pump_status(&mut app, &host, "checking", |app| {
+                status_text(app).contains("Checking remote access...")
+            })
+            .await;
+            // The check is running on the worker (blocked) when the canvas goes.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while gated.calls.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the check started");
+            if how == "close" {
+                remote_host::pairing_key(&mut app, &host, press(KeyCode::Esc, KeyModifiers::NONE));
+            } else if how == "replace" {
+                app.open_help();
+            } else {
+                let _ = host.share.track(crate::remote_share::Tracked {
+                    session: localpilot_core::SessionId::new(),
+                    claim: Some((1, "me".to_string())),
+                    gate: localpilot_core::admission::AdmissionGate::default(),
+                });
+            }
+            remote_host::idle_status_for_test(&mut app, &host);
+            assert!(app.status_view().is_none(), "{how}: retired");
+            if how == "replace" {
+                assert!(app.has_takeover(), "the help it was replaced by stays");
+            }
+            gated.release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !gated.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{how}: its check was cancelled"));
+            for _ in 0..5 {
+                remote_host::idle_status_for_test(&mut app, &host);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(app.status_view().is_none(), "{how}: never reopened");
+            // Reopening checks once more, and only once.
+            remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+            gated.release.send(()).unwrap();
+            pump_status(&mut app, &host, "answered", |app| {
+                status_text(app).contains("Running at 127.0.0.1:9417")
+            })
+            .await;
+            assert_eq!(
+                gated.calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "{how}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_check_that_cannot_start_never_leaves_the_canvas_checking() {
         let dials = crate::remote_share::test_support::Dials::default();
         let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
-        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let host = std::rc::Rc::try_unwrap(sharing_host(&dials, &level))
-            .ok()
-            .expect("one owner")
-            .with_probe(held_probe(&stopped));
+        let gated = gated_status();
+        let host = status_host(&dials, &level, gated.check.clone(), Duration::from_secs(60));
+        let mut app = app();
+        // A good read first.
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+        gated.release.send(()).unwrap();
+        pump_status(&mut app, &host, "answered", |app| {
+            status_text(app).contains("Running at 127.0.0.1:9417")
+        })
+        .await;
+        // The worker can take no more requests: Refresh cannot start.
+        host.devices.controller().stop_worker_for_test();
+        let view = app.status_view_mut().unwrap();
+        while view.selected_action() != Some("Refresh status") {
+            view.move_action(true);
+        }
+        remote_host::pairing_key(&mut app, &host, press(KeyCode::Enter, KeyModifiers::NONE));
+        remote_host::idle_status_for_test(&mut app, &host);
+        let text = status_text(&app);
+        assert!(!text.contains("Checking remote access..."), "{text}");
+        assert!(text.contains("the check could not start"), "{text}");
+        assert!(
+            text.contains("last known: Running at 127.0.0.1:9417"),
+            "kept, labelled: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_devices_show_their_standing_and_ids_that_tell_them_apart() {
+        use localpilot_rpc::DeviceStanding;
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let gated = gated_status();
+        let host = status_host(&dials, &level, gated.check.clone(), Duration::from_secs(60));
+        let mut server = shared_over_fake(&dials, &host).await;
+        let device = |id: &str, standing| {
+            let mut device = crate::remote_share::test_support::device(id, standing);
+            device.id = id.to_string();
+            device
+        };
+        server
+            .devices(
+                1,
+                true,
+                (4, 0),
+                Some(vec![
+                    device("abcd1111", DeviceStanding::Active),
+                    device("abcd2222", DeviceStanding::Unknown),
+                    device("ffff0000", DeviceStanding::Revoked),
+                    device("eeee0000", DeviceStanding::NotGranted),
+                ]),
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.share.devices().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("attendance arrived");
         let mut app = app();
         remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+        remote_host::idle_status_for_test(&mut app, &host);
+        let text = status_text(&app);
+        assert!(text.contains("[abcd1]"), "ids told apart: {text}");
+        assert!(text.contains("[abcd2]"), "{text}");
+        assert!(text.contains("access unconfirmed"), "{text}");
+        assert!(text.contains("revoked, being disconnected"), "{text}");
         assert!(
-            app.report_generation().is_some(),
-            "the checking view is open"
+            text.contains("no longer allowed in this workspace, being disconnected"),
+            "{text}"
         );
-        tokio::time::sleep(Duration::from_millis(30)).await; // the check is running
-                                                             // Help takes the screen; then another report does.
-        app.open_help();
-        let mut queue = VecDeque::new();
-        remote_host::busy_tick(
-            &mut app,
-            &host,
-            &mut queue,
-            &CancellationToken::new(),
-            None,
-            &VecDeque::new(),
+        let _ = gated.release.send(());
+        host.share.stop();
+    }
+
+    /// A device paired while the canvas holds counts: they go stale once,
+    /// even when the pairing's outcome was told and let go before the
+    /// canvas looked, and a count read before the pairing never comes back
+    /// as current.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_paired_out_of_sight_still_makes_the_counts_stale() {
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+        let (_gateway, capability) = crate::server_cmd::tests::register_gateway(&endpoint).await;
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let gated = gated_status();
+        let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+            localpilot_rpc::AskRegistry::default(),
+        ));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let share = crate::remote_share::RemoteShare::new(
+            dials.dial(),
+            crate::remote_share::test_support::standing(&level),
+            std::sync::Arc::new(|_| Some("Pixel".to_string())),
+            source,
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            stopped.load(std::sync::atomic::Ordering::SeqCst),
-            "its check was stopped"
+        share.track(crate::remote_share::Tracked {
+            session: localpilot_core::SessionId::new(),
+            claim: Some((1, "me".to_string())),
+            gate: localpilot_core::admission::AdmissionGate::default(),
+        });
+        let devices = crate::remote_devices::Devices::new(std::sync::Arc::new(
+            crate::server_devices::DeviceRegistry::default(),
+        ))
+        .with_check(gated.check.clone())
+        .with_status_answer(Duration::from_secs(60));
+        let pairing =
+            pairing_host::PairingHost::new(script.dial(), crate::remote_pairing::tests::ready())
+                .with_copier(no_copy());
+        let host = std::rc::Rc::new(
+            remote_host::RemoteHost::new(std::sync::Arc::new(share), &std::env::temp_dir())
+                .with_pairing(pairing)
+                .with_devices(devices_host::DevicesHost::with_devices(devices)),
         );
-        app.open_report("Other".to_string(), vec!["other".to_string()]);
-        remote_host::busy_tick(
-            &mut app,
-            &host,
-            &mut queue,
-            &CancellationToken::new(),
-            None,
-            &VecDeque::new(),
+        let mut app = app();
+        create_code(&mut app, &host);
+        pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+        let code = crate::remote_pairing::tests::code_of(&shown_link(&app));
+        let _ = crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
+        // The outcome reaches the pairing view (pairing's own tick only).
+        pump_pairing(&mut app, &host, "used", |app, _| {
+            view_lines(app).contains("Paired phone")
+        })
+        .await;
+        // /remote closes that view, which lets the ended attempt go, before
+        // anything else looked; its check is asked before the change is seen.
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+        assert!(host.pairing.phase().is_none(), "the attempt was let go");
+        for _ in 0..5 {
+            remote_host::idle_status_for_test(&mut app, &host);
+        }
+        // The count read for this canvas was asked before the device was
+        // noticed: it answers now, and must not be current.
+        gated.release.send(()).unwrap();
+        pump_status(&mut app, &host, "answered", |app| {
+            status_text(app).contains("2 paired")
+        })
+        .await;
+        let text = status_text(&app);
+        assert!(text.contains("Devices: Last known: 2 paired"), "{text}");
+        assert_eq!(host.devices.controller().epoch(), 1, "invalidated once");
+        for _ in 0..5 {
+            remote_host::idle_status_for_test(&mut app, &host);
+        }
+        assert_eq!(host.devices.controller().epoch(), 1, "and only once");
+    }
+
+    /// The daemon ends the attempt Used, and nothing has looked at it yet
+    /// (no refresh, no hidden tell, no hide) when /remote pair reopens the
+    /// form and lets that attempt go: the change is still counted, once, and
+    /// a check asked before it is never current.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reopening_pairing_over_an_unseen_used_result_still_counts_the_change() {
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+        let (_gateway, capability) = crate::server_cmd::tests::register_gateway(&endpoint).await;
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let gated = gated_status();
+        let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+            localpilot_rpc::AskRegistry::default(),
+        ));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let share = crate::remote_share::RemoteShare::new(
+            dials.dial(),
+            crate::remote_share::test_support::standing(&level),
+            std::sync::Arc::new(|_| Some("Pixel".to_string())),
+            source,
         );
+        share.track(crate::remote_share::Tracked {
+            session: localpilot_core::SessionId::new(),
+            claim: Some((1, "me".to_string())),
+            gate: localpilot_core::admission::AdmissionGate::default(),
+        });
+        let devices = crate::remote_devices::Devices::new(std::sync::Arc::new(
+            crate::server_devices::DeviceRegistry::default(),
+        ))
+        .with_check(gated.check.clone())
+        .with_status_answer(Duration::from_secs(60));
+        let pairing =
+            pairing_host::PairingHost::new(script.dial(), crate::remote_pairing::tests::ready())
+                .with_copier(no_copy());
+        let host = std::rc::Rc::new(
+            remote_host::RemoteHost::new(std::sync::Arc::new(share), &std::env::temp_dir())
+                .with_pairing(pairing)
+                .with_devices(devices_host::DevicesHost::with_devices(devices)),
+        );
+        let mut app = app();
+        create_code(&mut app, &host);
+        pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+        let code = crate::remote_pairing::tests::code_of(&shown_link(&app));
+        // A check asked now, before the pairing (registry change 0).
         assert_eq!(
-            app.report().map(|(title, _)| title),
-            Some("Other"),
-            "never replaced"
+            host.devices
+                .controller()
+                .check_status(99, std::path::Path::new(".")),
+            crate::remote_devices::StatusAsked::Sent
         );
+        let _ = crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
+        // The daemon ends it Used; no tick runs, so nothing has seen it.
+        until_pairing(&host, used).await;
+        assert_eq!(host.devices.controller().epoch(), 0);
+        // /remote pair reopens the form over it, letting it go.
+        remote_host::command(
+            &mut app,
+            &host,
+            localpilot_slash::RemoteAction::Pair { observe: false },
+        );
+        assert!(app.pairing_setup().is_some());
+        assert!(
+            host.pairing.phase().is_none(),
+            "the ended attempt was let go"
+        );
+        for _ in 0..5 {
+            remote_host::idle_status_for_test(&mut app, &host);
+        }
+        assert_eq!(host.devices.controller().epoch(), 1, "counted once");
+        // The check asked before the change answers now: never current.
+        gated.release.send(()).unwrap();
+        let started = std::time::Instant::now();
+        let probe = loop {
+            host.devices.controller().poll(std::time::Instant::now());
+            if let Some(probe) = host.devices.controller().take_status(99) {
+                break probe.expect("answered");
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        let mut model = crate::remote_status_model::StatusModel::default();
+        model.merge(probe, host.devices.controller().epoch());
+        assert!(
+            model.counts_line().starts_with("Last known"),
+            "{}",
+            model.counts_line()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_that_takes_too_long_makes_every_probed_row_uncertain() {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let gated = gated_status();
+        let host = status_host(
+            &dials,
+            &level,
+            gated.check.clone(),
+            Duration::from_millis(50),
+        );
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+        pump_status(&mut app, &host, "late", |app| {
+            status_text(app).contains("the check is taking too long")
+        })
+        .await;
+        let text = status_text(&app);
+        assert!(
+            !text.contains("Running at"),
+            "nothing healthy invented: {text}"
+        );
+        assert!(
+            !text.contains("Devices: 0 paired"),
+            "no invented zero: {text}"
+        );
+        // Refresh while it is still outstanding starts nothing new.
+        let view = app.status_view_mut().unwrap();
+        while view.selected_action() != Some("Refresh status") {
+            view.move_action(true);
+        }
+        remote_host::pairing_key(&mut app, &host, press(KeyCode::Enter, KeyModifiers::NONE));
+        gated.release.send(()).unwrap();
+        pump_status(&mut app, &host, "answered", |app| {
+            status_text(app).contains("Running at 127.0.0.1:9417")
+        })
+        .await;
+        assert_eq!(gated.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn share_or_stop_does_exactly_what_was_shown() {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let gated = gated_status();
+        let host = status_host(&dials, &level, gated.check.clone(), Duration::from_secs(60));
+        let _server = shared_over_fake(&dials, &host).await;
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+        pump_status(&mut app, &host, "shown", |app| {
+            status_text(app).contains("Stop sharing")
+        })
+        .await;
+        let view = app.status_view_mut().unwrap();
+        while view.selected_action() != Some("Stop sharing") {
+            view.move_action(true);
+        }
+        // Sharing ends elsewhere before Enter; the canvas was not redrawn.
+        let _ = host.share.stop();
+        remote_host::pairing_key(&mut app, &host, press(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            host.share.state(),
+            crate::remote_share::ShareState::Off,
+            "Stop never shares"
+        );
+        assert!(timeline_has_notice(&app, "This session is not shared."));
+        let _ = gated.release.send(());
+    }
+
+    #[tokio::test]
+    async fn the_canvas_says_what_the_session_is_waiting_for_and_counts_go_stale_on_a_change() {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let gated = gated_status();
+        let host = status_host(&dials, &level, gated.check.clone(), Duration::from_secs(60));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Status);
+        gated.release.send(()).unwrap();
+        pump_status(&mut app, &host, "answered", |app| {
+            status_text(app).contains("Devices: 2 paired, 1 revoked")
+        })
+        .await;
+        assert!(status_text(&app).contains("Work: Idle"));
+        app.dialog = Some(localpilot_terminal_ui::DialogState::Approval {
+            tool: "tool".to_string(),
+            target: "target".to_string(),
+            risk_class: "test".to_string(),
+            incognito_creation: false,
+        });
+        remote_host::idle_status_for_test(&mut app, &host);
+        assert!(status_text(&app).contains("Work: Waiting for permission"));
+        app.dialog = None;
+        // A device was paired (or a revoke accepted): the counts go stale.
+        host.devices.controller().registry_changed();
+        remote_host::idle_status_for_test(&mut app, &host);
+        let text = status_text(&app);
+        assert!(
+            text.contains("Devices: Last known: 2 paired, 1 revoked"),
+            "{text}"
+        );
+        assert!(text.contains("changed since this check"), "{text}");
+        // Pair from the canvas is refused in incognito.
+        app.set_incognito(true);
+        let view = app.status_view_mut().unwrap();
+        while view.selected_action() != Some("Pair device") {
+            view.move_action(true);
+        }
+        remote_host::pairing_key(&mut app, &host, press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.pairing_setup().is_none());
+        assert!(format!("{:?}", app.active_timeline_mut().items())
+            .contains("not available in incognito"));
     }
 }

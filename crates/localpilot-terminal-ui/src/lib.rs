@@ -23,6 +23,7 @@ mod presentation;
 mod projection;
 mod render;
 mod sanitize;
+mod status;
 mod text;
 mod theme;
 mod timeline;
@@ -50,6 +51,7 @@ pub use render::{
     TimelineHits, TimelinePaneHits, TimelineRowHit, TrustHit, TrustPathHit,
 };
 pub use sanitize::sanitize_text;
+pub use status::{StatusRow, StatusView};
 pub use theme::{Theme, ThemeParseError, ThemeResolver, UiRole};
 pub use timeline::{
     ActivityState, AssistantPresentation, ContentPoint, ItemId, ItemKind, PinnedPrompt, ResultTone,
