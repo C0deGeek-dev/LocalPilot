@@ -2156,12 +2156,15 @@ pub fn devices_list() -> anyhow::Result<()> {
 /// workspace's server sees it at the device's next record (open connections
 /// within a second).
 pub fn devices_revoke(id: &str) -> anyhow::Result<()> {
+    use crate::server_devices::RevokeOutcome;
     let registry = cli_registry()?;
-    if registry.revoke(id)? {
-        registry.audit("revoked", Some(id), "from the command line");
-        println!("Revoked {id}.");
-    } else {
-        println!("No active device {id}.");
+    match registry.revoke_device(id)? {
+        RevokeOutcome::Revoked(_) => {
+            registry.audit("revoked", Some(id), "from the command line");
+            println!("Revoked {id}.");
+        }
+        RevokeOutcome::AlreadyRevoked(_) => println!("Device {id} was already revoked."),
+        RevokeOutcome::NotFound => println!("No device {id}."),
     }
     Ok(())
 }

@@ -47,6 +47,7 @@ const RETRY: &str = "Retry invalidation";
 const CHECK: &str = "Check status";
 const AGAIN: &str = "Create a new code";
 const SHARE: &str = "Share this session";
+const DEVICES: &str = "Devices";
 
 /// What a key in the pairing overlay asks the terminal to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,8 @@ pub(super) enum PairingKey {
     Handled,
     /// Share this session (offered after a device paired).
     Share,
+    /// Show the paired devices (offered after a device paired).
+    Devices,
 }
 
 /// The host's pairing state.
@@ -251,8 +254,8 @@ impl PairingHost {
         match key.code {
             KeyCode::Tab | KeyCode::Down => view.move_action(true),
             KeyCode::BackTab | KeyCode::Up => view.move_action(false),
-            KeyCode::PageDown => view.scroll_link(4),
-            KeyCode::PageUp => view.scroll_link(-4),
+            KeyCode::PageDown => view.page_down(),
+            KeyCode::PageUp => view.page_up(),
             KeyCode::Esc => self.leave(app),
             KeyCode::Enter => {
                 let action = view.selected_action().map(str::to_string);
@@ -333,6 +336,10 @@ impl PairingHost {
                 self.hide(app);
                 return PairingKey::Share;
             }
+            Some(DEVICES) => {
+                self.hide(app);
+                return PairingKey::Devices;
+            }
             _ => {}
         }
         PairingKey::Handled
@@ -400,6 +407,19 @@ impl PairingHost {
             _ => return,
         }
         *self.told.borrow_mut() = Some(phase.clone());
+    }
+
+    /// The devices view is opening in place of the pairing overlay: a form
+    /// is dropped, and a view goes as if closed (its code invalidated if
+    /// live, an outcome not yet seen told).
+    pub(super) fn close_for_devices(&self, app: &mut AppModel) {
+        app.close_pairing_setup();
+        if app.pairing_view().is_some() {
+            if let Some(view) = app.pairing_view_mut() {
+                view.wipe_secret();
+            }
+            self.hide(app);
+        }
     }
 
     /// The status-line note while an attempt is kept without its view.
@@ -632,8 +652,8 @@ fn describe(
         Phase::Finished(ended) => {
             let used = matches!(ended, Ended::Outcome(PairingOutcome::Used { .. }));
             let actions = match (used, shared) {
-                (true, false) => strings(&[SHARE, CLOSE]),
-                (true, true) => strings(&[CLOSE]),
+                (true, false) => strings(&[SHARE, DEVICES, CLOSE]),
+                (true, true) => strings(&[DEVICES, CLOSE]),
                 (false, _) => strings(&[AGAIN, CLOSE]),
             };
             let title = if used { "Device paired" } else { TITLE };

@@ -1641,6 +1641,8 @@ pub struct AppModel {
     /// Pairing a device: the setup form, or the view showing its code.
     pairing_setup: Option<crate::pairing::PairingSetup>,
     pairing_view: Option<crate::pairing::PairingView>,
+    /// The paired-devices view (the third remote overlay).
+    devices_view: Option<crate::devices::DevicesView>,
     /// Counts explicit navigation (takeovers, product tabs, the theme
     /// picker), and where the app stood when the pairing overlay opened:
     /// anything shown since replaces the overlay.
@@ -1774,6 +1776,7 @@ impl AppModel {
             choice: None,
             pairing_setup: None,
             pairing_view: None,
+            devices_view: None,
             takeovers: 0,
             pairing_opened_at: None,
             escape_armed_at: None,
@@ -1979,6 +1982,7 @@ impl AppModel {
     /// Open the pairing setup form (replacing any pairing view).
     pub fn open_pairing_setup(&mut self, setup: crate::pairing::PairingSetup) {
         self.pairing_view = None;
+        self.devices_view = None;
         self.pairing_setup = Some(setup);
         self.pairing_opened_at = Some(self.navigation_mark());
     }
@@ -2000,6 +2004,7 @@ impl AppModel {
     /// whose code is wiped).
     pub fn open_pairing_view(&mut self, view: crate::pairing::PairingView) {
         self.pairing_setup = None;
+        self.devices_view = None;
         self.pairing_view = Some(view);
         self.pairing_opened_at = Some(self.navigation_mark());
     }
@@ -2018,13 +2023,39 @@ impl AppModel {
         self.pairing_view = None;
     }
 
+    /// Open the devices view (replacing the pairing overlays, whose host
+    /// must already have let them go).
+    pub fn open_devices_view(&mut self, view: crate::devices::DevicesView) {
+        self.pairing_setup = None;
+        self.pairing_view = None;
+        self.devices_view = Some(view);
+        self.pairing_opened_at = Some(self.navigation_mark());
+    }
+
+    #[must_use]
+    pub fn devices_view(&self) -> Option<&crate::devices::DevicesView> {
+        self.devices_view.as_ref()
+    }
+
+    pub fn devices_view_mut(&mut self) -> Option<&mut crate::devices::DevicesView> {
+        self.devices_view.as_mut()
+    }
+
+    pub fn close_devices_view(&mut self) {
+        self.devices_view = None;
+    }
+
+    /// Whether one of the remote overlays (pairing setup, pairing view,
+    /// devices) is open, shown or not.
+    fn remote_overlay_open(&self) -> bool {
+        self.pairing_setup.is_some() || self.pairing_view.is_some() || self.devices_view.is_some()
+    }
+
     /// Whether a pairing overlay is open and shown: a permission request or
     /// question suspends it (it stays, hidden, and comes back afterwards).
     #[must_use]
     pub fn pairing_shown(&self) -> bool {
-        (self.pairing_setup.is_some() || self.pairing_view.is_some())
-            && self.dialog.is_none()
-            && !self.pairing_replaced()
+        self.remote_overlay_open() && self.dialog.is_none() && !self.pairing_replaced()
     }
 
     /// Whether something else (a report, help, settings or another takeover)
@@ -2032,8 +2063,7 @@ impl AppModel {
     /// and its host must close it.
     #[must_use]
     pub fn pairing_replaced(&self) -> bool {
-        (self.pairing_setup.is_some() || self.pairing_view.is_some())
-            && self.pairing_opened_at != Some(self.navigation_mark())
+        self.remote_overlay_open() && self.pairing_opened_at != Some(self.navigation_mark())
     }
 
     /// Where the app stands, as far as what fills the screen: whichever

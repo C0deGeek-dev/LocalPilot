@@ -2,6 +2,47 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0257: Listing And Revoking Devices From The Full-Screen Terminal
+
+**Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.
+
+**Context.** Revoking a phone meant leaving the terminal for `localpilot devices
+revoke`. A revoke from the terminal must never be reported as done, failed or
+disconnected when that is not known, must never hit a device other than the
+one shown, and must not run twice.
+
+**Decision.** `/remote devices` lists every paired device (newest first,
+revoked ones included, at most 256 with the total said) with its scope, its
+grant here (active, revoked, not granted here) and whether it is attached to
+this session. The list is metadata only, bounded and sanitized, never a
+credential or its hash, and each row is keyed by the registry's own key: a
+record whose id is not exactly its key is shown but cannot be revoked. All
+registry work runs on one worker thread in order; the terminal keeps at most
+one read and one revoke outstanding. A revoke is admitted to the registry's
+write lock only before a deadline carried from the moment it was confirmed
+(checked before every attempt and right after the lock is won); not admitted,
+it changes nothing and says the registry was busy. Once admitted it runs to
+completion while the process lives, so the terminal keeps the revoke from
+confirmation to the worker's own answer, says "result unknown" after its own
+deadline, and starts no other revoke meanwhile; the answer is told once, in
+the view when it is on screen or as a notice, and the next revoke needs a list
+read after it. The confirmation names the device by its full id, frozen when it
+opened, starts on Cancel, and is never changed by live updates. Whether a
+revoked device disconnected is said only for this session, from its confirmed
+attendance ("disconnecting here", "disconnected here", "connection here
+unknown", and after 10 s still attached "disconnect not confirmed here").
+Revoking is allowed in incognito as a confirmed reduction of access, and the
+confirmation says that the revocation and a metadata-only audit entry are saved
+anyway; pairing from the devices view still goes through the incognito
+refusal. `localpilot devices revoke` now says whether the device was revoked,
+was already revoked, or was not found.
+
+**Consequences.** A device revoked from the terminal loses access in every
+workspace (servers read the registry before each decision), and the terminal
+reports exactly what it knows. A revoke cut off by the process ending may or
+may not have been written; the registry's atomic replacement keeps it whole
+either way.
+
 ## ADR-0256: Pairing A Device From The Full-Screen Terminal
 
 **Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.

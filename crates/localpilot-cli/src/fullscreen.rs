@@ -1,5 +1,7 @@
 //! Crossterm host for the backend-neutral full-screen chat model.
 
+#[path = "fullscreen_devices.rs"]
+mod devices_host;
 #[path = "fullscreen_harness.rs"]
 mod harness_router;
 #[path = "fullscreen_pairing.rs"]
@@ -24175,7 +24177,10 @@ last_seen = "2026-08-10"
         .await;
         assert!(!view_shows_code(&app), "the used code is wiped");
         assert_eq!(app.pairing_view().unwrap().title, "Device paired");
-        assert_eq!(view_actions(&app), ["Share this session", "Close"]);
+        assert_eq!(
+            view_actions(&app),
+            ["Share this session", "Devices", "Close"]
+        );
         assert_eq!(hosts.devices.list().unwrap().len(), 1);
     }
 
@@ -24484,9 +24489,11 @@ last_seen = "2026-08-10"
                 until_pairing(&in_loop, used).await;
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 if choose_share {
-                    events
-                        .borrow_mut()
-                        .extend([key(KeyCode::Up), key(KeyCode::Enter)]);
+                    events.borrow_mut().extend([
+                        key(KeyCode::Up),
+                        key(KeyCode::Up),
+                        key(KeyCode::Enter),
+                    ]);
                 } else {
                     events.borrow_mut().push_back(key(KeyCode::Enter));
                 }
@@ -25005,6 +25012,803 @@ last_seen = "2026-08-10"
         pairing_press(&mut app, &host, KeyCode::Esc);
         remote_host::idle_status_for_test(&mut app, &host);
         assert_eq!(app.remote_label(), None, "cleared once settled");
+    }
+
+    // ---- paired devices in the terminal -------------------------------------
+
+    fn devices_host(
+        registry: &std::sync::Arc<crate::server_devices::DeviceRegistry>,
+        answer: Duration,
+    ) -> std::rc::Rc<remote_host::RemoteHost> {
+        let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+            localpilot_rpc::AskRegistry::default(),
+        ));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let share = crate::remote_share::RemoteShare::new(
+            dials.dial(),
+            crate::remote_share::test_support::standing(&level),
+            std::sync::Arc::new(|_| Some("Pixel".to_string())),
+            source,
+        );
+        share.track(crate::remote_share::Tracked {
+            session: localpilot_core::SessionId::new(),
+            claim: Some((1, "me".to_string())),
+            gate: localpilot_core::admission::AdmissionGate::default(),
+        });
+        let devices = crate::remote_devices::Devices::new(registry.clone())
+            .with_budgets(Duration::from_secs(5), answer);
+        std::rc::Rc::new(
+            remote_host::RemoteHost::new(std::sync::Arc::new(share), &std::env::temp_dir())
+                .with_devices(devices_host::DevicesHost::with_devices(devices)),
+        )
+    }
+
+    fn devices_text(app: &AppModel) -> String {
+        app.devices_view()
+            .map(|view| {
+                let mut lines = view.status.clone();
+                for (index, row) in view.rows.iter().enumerate() {
+                    lines.push(format!("{}  {}", row.name, row.info));
+                    if view.selected == Some(index) {
+                        lines.extend(row.details.clone());
+                    }
+                }
+                lines.extend(view.actions.clone());
+                if let Some(confirm) = &view.confirm {
+                    lines.extend(confirm.lines.clone());
+                    lines.extend(confirm.actions.clone());
+                }
+                lines.join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    /// Tick the host until `done` holds, with `attached` as this session's
+    /// confirmed attendance.
+    async fn pump_devices(
+        app: &mut AppModel,
+        host: &remote_host::RemoteHost,
+        attached: Option<&[String]>,
+        what: &str,
+        done: impl Fn(&AppModel) -> bool,
+    ) {
+        let started = std::time::Instant::now();
+        loop {
+            let incognito = app.incognito();
+            host.devices
+                .tick(app, host.share.tracked_session(), attached, incognito);
+            if done(app) {
+                return;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "never reached {what}: {}",
+                devices_text(app)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn devices_press(app: &mut AppModel, host: &remote_host::RemoteHost, code: KeyCode) {
+        remote_host::pairing_key(app, host, press(code, KeyModifiers::NONE));
+    }
+
+    fn select_device_action(app: &mut AppModel, label: &str) {
+        let view = app.devices_view_mut().unwrap();
+        view.focus = localpilot_terminal_ui::DevicesFocus::Actions;
+        for _ in 0..view.actions.len() {
+            if view.selected_action() == Some(label) {
+                break;
+            }
+            view.move_action(true);
+        }
+        assert_eq!(
+            view.selected_action(),
+            Some(label),
+            "offered: {:?}",
+            view.actions
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_is_revoked_from_the_terminal_only_after_confirming_it() {
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+        let (first, _) = registry
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let (second, _) = registry
+            .add("tablet", localpilot_rpc::Scope::Observe, false)
+            .unwrap();
+        let host = devices_host(&registry, Duration::from_secs(6));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+        pump_devices(&mut app, &host, None, "listed", |app| {
+            app.devices_view().is_some_and(|view| view.rows.len() == 2)
+        })
+        .await;
+        let target = app.devices_view().unwrap().rows[1].id.clone();
+        let other = if target == first.id {
+            second.id.clone()
+        } else {
+            first.id.clone()
+        };
+        // Through the real input loop: the second device, Revoke, then
+        // Enter on the default (Cancel), then again and confirm.
+        with_input_loop(&mut app, &host, |events| async move {
+            events.borrow_mut().extend([
+                key(KeyCode::Down),
+                key(KeyCode::Tab),
+                key(KeyCode::Up),
+                key(KeyCode::Up),
+                key(KeyCode::Up),
+                key(KeyCode::Enter),
+                key(KeyCode::Enter),
+            ]);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        })
+        .await;
+        assert!(
+            app.devices_view().unwrap().confirm.is_none(),
+            "Cancel closed it"
+        );
+        assert!(
+            registry.standing(&target).is_ok(),
+            "nothing revoked by Cancel"
+        );
+        let registry_seen = registry.clone();
+        let target_seen = target.clone();
+        with_input_loop(&mut app, &host, |events| async move {
+            events.borrow_mut().extend([key(KeyCode::Enter)]);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            events
+                .borrow_mut()
+                .extend([key(KeyCode::Tab), key(KeyCode::Enter)]);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while registry_seen.standing(&target_seen).is_ok() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("revoked");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        })
+        .await;
+        assert!(
+            registry.standing(&other).is_ok(),
+            "only the confirmed device"
+        );
+        pump_devices(&mut app, &host, None, "told", |app| {
+            devices_text(app).contains("Running work continues. Access removed in every workspace.")
+        })
+        .await;
+        let text = devices_text(&app);
+        assert!(text.contains("revoked; connection here unknown"), "{text}");
+        assert!(app.devices_view().unwrap().confirm.is_none());
+        assert_eq!(
+            app.devices_view().unwrap().selected_id(),
+            Some(target.as_str())
+        );
+        assert_eq!(
+            registry
+                .audit_lines()
+                .iter()
+                .filter(|line| line.contains("\"revoked\""))
+                .count(),
+            1
+        );
+    }
+
+    fn open_confirm_for(app: &mut AppModel, host: &remote_host::RemoteHost, id: &str) {
+        let view = app.devices_view_mut().unwrap();
+        view.focus = localpilot_terminal_ui::DevicesFocus::Rows;
+        view.selected = None;
+        for _ in 0..view.rows.len() {
+            view.move_row(true);
+            if view.selected_id() == Some(id) {
+                break;
+            }
+        }
+        assert_eq!(view.selected_id(), Some(id), "the device is listed");
+        let selected = view.selected;
+        devices_press(app, host, KeyCode::Up);
+        devices_press(app, host, KeyCode::Down);
+        let view = app.devices_view_mut().unwrap();
+        if view.selected != selected {
+            view.move_row(false);
+        }
+        select_device_action(app, "Revoke device...");
+        devices_press(app, host, KeyCode::Enter);
+        assert!(
+            app.devices_view().unwrap().confirm.is_some(),
+            "{}",
+            devices_text(app)
+        );
+        assert_eq!(
+            app.devices_view()
+                .unwrap()
+                .confirm
+                .as_ref()
+                .unwrap()
+                .selected_action(),
+            Some("Cancel"),
+            "Cancel first"
+        );
+    }
+
+    /// A revoke still waiting when the view goes is told once when its
+    /// answer comes, whether the view was closed or held under an ask; an
+    /// unknown warning first never stands in for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_revoke_answered_after_its_view_went_is_told_once() {
+        for under_ask in [false, true] {
+            let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+            let (device, _) = registry
+                .add("phone", localpilot_rpc::Scope::Control, false)
+                .unwrap();
+            let (release, gate) = std::sync::mpsc::channel::<()>();
+            let gate = std::sync::Mutex::new(gate);
+            registry.on_admitted_for_test(Some(std::sync::Arc::new(move || {
+                let _ = gate.lock().unwrap().recv();
+            })));
+            let host = devices_host(&registry, Duration::from_millis(100));
+            let mut app = app();
+            remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+            pump_devices(&mut app, &host, None, "listed", |app| {
+                app.devices_view().is_some_and(|view| !view.rows.is_empty())
+            })
+            .await;
+            open_confirm_for(&mut app, &host, &device.id);
+            devices_press(&mut app, &host, KeyCode::Tab);
+            devices_press(&mut app, &host, KeyCode::Enter);
+            pump_devices(&mut app, &host, None, "unknown", |app| {
+                devices_text(app).contains("result unknown")
+            })
+            .await;
+            if under_ask {
+                app.dialog = Some(localpilot_terminal_ui::DialogState::Approval {
+                    tool: "tool".to_string(),
+                    target: "target".to_string(),
+                    risk_class: "test".to_string(),
+                    incognito_creation: false,
+                });
+            } else {
+                devices_press(&mut app, &host, KeyCode::Esc);
+                devices_press(&mut app, &host, KeyCode::Esc);
+                assert!(app.devices_view().is_none());
+            }
+            release.send(()).unwrap();
+            let started = std::time::Instant::now();
+            while registry.standing(&device.id).is_ok()
+                || started.elapsed() < Duration::from_millis(300)
+            {
+                let incognito = app.incognito();
+                host.devices
+                    .tick(&mut app, host.share.tracked_session(), None, incognito);
+                assert!(started.elapsed() < Duration::from_secs(10));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            for _ in 0..5 {
+                let incognito = app.incognito();
+                host.devices
+                    .tick(&mut app, host.share.tracked_session(), None, incognito);
+            }
+            let told = format!("{:?}", app.active_timeline_mut().items());
+            assert_eq!(
+                told.matches("Revoked phone. Running work continues.")
+                    .count(),
+                1,
+                "told once (under ask {under_ask}): {told}"
+            );
+        }
+    }
+
+    /// The answer comes while the view cannot show it (the window is too
+    /// small): it is told as a notice all the same, once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_revoke_answer_the_view_cannot_show_is_still_told_once() {
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+        let (device, _) = registry
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let host = devices_host(&registry, Duration::from_secs(6));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+        pump_devices(&mut app, &host, None, "listed", |app| {
+            app.devices_view().is_some_and(|view| !view.rows.is_empty())
+        })
+        .await;
+        open_confirm_for(&mut app, &host, &device.id);
+        devices_press(&mut app, &host, KeyCode::Tab);
+        devices_press(&mut app, &host, KeyCode::Enter);
+        // Too small to show anything but how to leave.
+        let _ = draw_hit_map(&app, 80, 6);
+        pump_devices(&mut app, &host, None, "answered", |_| {
+            registry.standing(&device.id).is_err()
+        })
+        .await;
+        for _ in 0..5 {
+            let incognito = app.incognito();
+            host.devices
+                .tick(&mut app, host.share.tracked_session(), None, incognito);
+            let _ = draw_hit_map(&app, 80, 6);
+        }
+        devices_press(&mut app, &host, KeyCode::Esc);
+        let told = format!("{:?}", app.active_timeline_mut().items());
+        assert_eq!(
+            told.matches("Revoked phone. Running work continues.")
+                .count(),
+            1,
+            "{told}"
+        );
+    }
+
+    /// Unknown while waiting, then the worker dies after writing: both are
+    /// told, and the last word is not that an answer is still coming.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_worker_dying_after_an_unknown_answer_is_told_as_such() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::open(
+            dir.path(),
+            dir.path(),
+        ));
+        let (device, _) = registry
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(gate);
+        registry.on_admitted_for_test(Some(std::sync::Arc::new(move || {
+            let _ = gate.lock().unwrap().recv();
+        })));
+        registry.hook_at_for_test(
+            crate::server_devices::Hook::Committed,
+            Some(std::sync::Arc::new(|| {
+                panic!("the worker dies after the write")
+            })),
+        );
+        let host = devices_host(&registry, Duration::from_millis(100));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+        pump_devices(&mut app, &host, None, "listed", |app| {
+            app.devices_view().is_some_and(|view| !view.rows.is_empty())
+        })
+        .await;
+        open_confirm_for(&mut app, &host, &device.id);
+        devices_press(&mut app, &host, KeyCode::Tab);
+        devices_press(&mut app, &host, KeyCode::Enter);
+        pump_devices(&mut app, &host, None, "waiting", |app| {
+            devices_text(app).contains("Waiting for the registry")
+        })
+        .await;
+        release.send(()).unwrap();
+        pump_devices(&mut app, &host, None, "worker gone", |app| {
+            devices_text(app).contains("Refresh before trying again")
+        })
+        .await;
+        registry.hook_at_for_test(crate::server_devices::Hook::Committed, None);
+        let told = format!("{:?}", app.active_timeline_mut().items());
+        assert_eq!(
+            told.matches("Waiting for the registry").count(),
+            1,
+            "{told}"
+        );
+        assert_eq!(
+            told.matches("Refresh before trying again").count(),
+            1,
+            "{told}"
+        );
+        assert!(!devices_text(&app).contains("Waiting for the registry"));
+        // A refresh reconciles: it was written.
+        select_device_action(&mut app, "Refresh");
+        devices_press(&mut app, &host, KeyCode::Enter);
+        pump_devices(&mut app, &host, None, "reconciled", |app| {
+            devices_text(app).contains("revoked")
+                && !devices_text(app).contains("Reading the device list again")
+        })
+        .await;
+        assert!(registry.standing(&device.id).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_leaving_the_list_takes_the_selection_and_revoke_with_it() {
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+        let (first, _) = registry
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let (second, _) = registry
+            .add("tablet", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let host = devices_host(&registry, Duration::from_secs(6));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+        pump_devices(&mut app, &host, None, "listed", |app| {
+            app.devices_view().is_some_and(|view| view.rows.len() == 2)
+        })
+        .await;
+        let selected = app
+            .devices_view()
+            .unwrap()
+            .selected_id()
+            .unwrap()
+            .to_string();
+        let remaining = if selected == first.id {
+            second.id.clone()
+        } else {
+            first.id.clone()
+        };
+        // Revoke is focused when the selected device leaves.
+        select_device_action(&mut app, "Revoke device...");
+        registry.forget_for_test(&selected);
+        app.devices_view_mut().unwrap().focus = localpilot_terminal_ui::DevicesFocus::Rows;
+        devices_press(&mut app, &host, KeyCode::Tab);
+        select_device_action(&mut app, "Refresh");
+        devices_press(&mut app, &host, KeyCode::Enter);
+        pump_devices(&mut app, &host, None, "lost", |app| {
+            devices_text(app).contains("Device no longer listed")
+        })
+        .await;
+        for _ in 0..5 {
+            let incognito = app.incognito();
+            host.devices
+                .tick(&mut app, host.share.tracked_session(), None, incognito);
+        }
+        let view = app.devices_view().unwrap();
+        assert_eq!(view.selected_id(), None, "no replacement selection");
+        assert!(
+            devices_text(&app).contains("Device no longer listed"),
+            "the reason stays"
+        );
+        assert!(view
+            .actions
+            .contains(&"Revoke device (unavailable)".to_string()));
+        // Choosing the unavailable revoke opens nothing.
+        select_device_action(&mut app, "Revoke device (unavailable)");
+        devices_press(&mut app, &host, KeyCode::Enter);
+        assert!(app.devices_view().unwrap().confirm.is_none());
+        assert!(registry.standing(&remaining).is_ok());
+        // Picking a device again clears it.
+        app.devices_view_mut().unwrap().focus = localpilot_terminal_ui::DevicesFocus::Rows;
+        devices_press(&mut app, &host, KeyCode::Down);
+        let incognito = app.incognito();
+        host.devices
+            .tick(&mut app, host.share.tracked_session(), None, incognito);
+        assert_eq!(
+            app.devices_view().unwrap().selected_id(),
+            Some(remaining.as_str())
+        );
+        assert!(!devices_text(&app).contains("Device no longer listed"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn details_say_when_a_device_was_paired_and_revoked() {
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+        let (device, _) = registry
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let host = devices_host(&registry, Duration::from_secs(6));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+        pump_devices(&mut app, &host, None, "listed", |app| {
+            devices_text(app).contains("Paired: ")
+        })
+        .await;
+        assert!(!devices_text(&app).contains("Revoked: "));
+        assert!(devices_text(&app).contains(&format!("Id: {}", device.id)));
+        registry.revoke(&device.id).unwrap();
+        select_device_action(&mut app, "Refresh");
+        devices_press(&mut app, &host, KeyCode::Enter);
+        pump_devices(&mut app, &host, None, "revoked", |app| {
+            devices_text(app).contains("Revoked: ") && devices_text(app).contains(" UTC")
+        })
+        .await;
+        assert!(devices_text(&app).contains("Revoke device (unavailable)"));
+    }
+
+    fn screen_at(app: &AppModel, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, app);
+            })
+            .expect("draw screen");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Details taller than the window: PgDn reaches their end and stays
+    /// there across redraws, PgUp comes back, and moving the selection shows
+    /// the new row again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_selected_devices_details_can_be_scrolled_to_their_end() {
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+        let (first, _) = registry
+            .add("phone", localpilot_rpc::Scope::Control, true)
+            .unwrap();
+        registry
+            .add("tablet", localpilot_rpc::Scope::Control, true)
+            .unwrap();
+        registry.edit_for_test(&first.id, |record| {
+            record.workspaces = Some(
+                (0..16)
+                    .map(|n| format!("D:/work/a-rather-long-folder-name-for-workspace-number-{n}"))
+                    .collect(),
+            );
+        });
+        registry.revoke(&first.id).unwrap();
+        let host = devices_host(&registry, Duration::from_secs(6));
+        for (width, height) in [(80, 12), (80, 24)] {
+            let mut app = app();
+            remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+            pump_devices(&mut app, &host, None, "listed", |app| {
+                app.devices_view().is_some_and(|view| view.rows.len() == 2)
+            })
+            .await;
+            // Select the device with the long details, by key.
+            app.devices_view_mut().unwrap().focus = localpilot_terminal_ui::DevicesFocus::Rows;
+            for code in [KeyCode::Up, KeyCode::Up, KeyCode::Down, KeyCode::Down] {
+                if app.devices_view().unwrap().selected_id() == Some(first.id.as_str()) {
+                    break;
+                }
+                devices_press(&mut app, &host, code);
+            }
+            assert_eq!(
+                app.devices_view().unwrap().selected_id(),
+                Some(first.id.as_str())
+            );
+            let incognito = app.incognito();
+            host.devices
+                .tick(&mut app, host.share.tracked_session(), None, incognito);
+            let top = screen_at(&app, width, height);
+            assert!(top.contains("> phone"), "{width}x{height}: {top}");
+            let mut seen = rows_without_spaces_cli(&top);
+            let mut reached = false;
+            for _ in 0..40 {
+                devices_press(&mut app, &host, KeyCode::PageDown);
+                let incognito = app.incognito();
+                host.devices
+                    .tick(&mut app, host.share.tracked_session(), None, incognito);
+                let screen = screen_at(&app, width, height);
+                // A redraw keeps the hand-scrolled position.
+                assert_eq!(screen, screen_at(&app, width, height));
+                seen.push_str(&rows_without_spaces_cli(&screen));
+                if rows_without_spaces_cli(&screen).contains("Revoked:") {
+                    reached = true;
+                    break;
+                }
+            }
+            assert!(
+                reached,
+                "{width}x{height}: PgDn reaches the end of the details"
+            );
+            for n in 0..16 {
+                // Each root whole: followed by the next one's separator, or
+                // (the last) by the next detail.
+                let whole = if n < 15 {
+                    format!("number-{n},")
+                } else {
+                    "number-15Paired:".to_string()
+                };
+                assert!(
+                    seen.contains(&whole),
+                    "{width}x{height}: root {n} was readable"
+                );
+            }
+            assert!(seen.contains("Paired:"));
+            for _ in 0..40 {
+                devices_press(&mut app, &host, KeyCode::PageUp);
+            }
+            let back = screen_at(&app, width, height);
+            assert!(
+                back.contains("paired device(s)"),
+                "PgUp returns to the top: {back}"
+            );
+            assert!(!rows_without_spaces_cli(&back).contains("Revoked:") || height > 12);
+            // Moving the selection shows the newly selected row.
+            for _ in 0..10 {
+                devices_press(&mut app, &host, KeyCode::PageDown);
+            }
+            app.devices_view_mut().unwrap().focus = localpilot_terminal_ui::DevicesFocus::Rows;
+            devices_press(&mut app, &host, KeyCode::Up);
+            devices_press(&mut app, &host, KeyCode::Down);
+            let moved = screen_at(&app, width, height);
+            let selected = app
+                .devices_view()
+                .unwrap()
+                .selected_id()
+                .unwrap()
+                .to_string();
+            let name = if selected == first.id {
+                "> phone"
+            } else {
+                "> tablet"
+            };
+            assert!(moved.contains(name), "{width}x{height}: {moved}");
+            assert_eq!(
+                app.devices_view().unwrap().selected_id(),
+                Some(selected.as_str())
+            );
+        }
+    }
+
+    fn rows_without_spaces_cli(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn here_is_only_what_this_session_sees() {
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+        let (device, _) = registry
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let host = devices_host(&registry, Duration::from_secs(6));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+        let attached = vec![device.id.clone()];
+        pump_devices(&mut app, &host, Some(&attached), "listed", |app| {
+            devices_text(app).contains("attached here")
+        })
+        .await;
+        open_confirm_for(&mut app, &host, &device.id);
+        assert!(devices_text(&app).contains("Attached here: this session."));
+        devices_press(&mut app, &host, KeyCode::Tab);
+        devices_press(&mut app, &host, KeyCode::Enter);
+        pump_devices(&mut app, &host, Some(&attached), "disconnecting", |app| {
+            devices_text(app).contains("revoked; disconnecting here")
+        })
+        .await;
+        pump_devices(&mut app, &host, Some(&[]), "disconnected", |app| {
+            devices_text(app).contains("revoked; disconnected here")
+        })
+        .await;
+        pump_devices(&mut app, &host, None, "unknown", |app| {
+            devices_text(app).contains("revoked; connection here unknown")
+        })
+        .await;
+        let text = devices_text(&app);
+        assert!(!text.contains("every workspace disconnected"), "{text}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn incognito_lists_and_revokes_with_disclosure_but_never_pairs() {
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+        let (device, _) = registry
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let host = devices_host(&registry, Duration::from_secs(6));
+        let mut app = app();
+        app.set_incognito(true);
+        // A live command while a turn runs opens the list too.
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        let cancel = CancellationToken::new();
+        run_active_fullscreen_slash(
+            &mut app,
+            slash_input("/remote devices"),
+            None,
+            &cancel,
+            &stages,
+            Path::new("."),
+        );
+        assert!(
+            app.devices_view().is_some(),
+            "listing is allowed in incognito"
+        );
+        pump_devices(&mut app, &host, None, "listed", |app| {
+            app.devices_view().is_some_and(|view| !view.rows.is_empty())
+        })
+        .await;
+        select_device_action(&mut app, "Pair device");
+        devices_press(&mut app, &host, KeyCode::Enter);
+        assert!(app.pairing_setup().is_none(), "never pairs in incognito");
+        assert!(devices_text(&app).contains("not available in incognito"));
+        open_confirm_for(&mut app, &host, &device.id);
+        assert!(devices_text(&app).contains("This is saved even in incognito"));
+        devices_press(&mut app, &host, KeyCode::Tab);
+        devices_press(&mut app, &host, KeyCode::Enter);
+        pump_devices(&mut app, &host, None, "revoked", |app| {
+            devices_text(app).contains("Revoked phone")
+        })
+        .await;
+        assert!(registry.standing(&device.id).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stale_list_or_a_vanished_device_offers_no_revoke() {
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+        let (first, _) = registry
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        registry
+            .add("tablet", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let host = devices_host(&registry, Duration::from_secs(6));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+        pump_devices(&mut app, &host, None, "listed", |app| {
+            app.devices_view().is_some_and(|view| view.rows.len() == 2)
+        })
+        .await;
+        registry.fail_for_test(true);
+        select_device_action(&mut app, "Refresh");
+        devices_press(&mut app, &host, KeyCode::Enter);
+        pump_devices(&mut app, &host, None, "stale", |app| {
+            devices_text(app).contains("Showing last checked values")
+        })
+        .await;
+        select_device_action(&mut app, "Revoke device (unavailable)");
+        devices_press(&mut app, &host, KeyCode::Enter);
+        assert!(
+            app.devices_view().unwrap().confirm.is_none(),
+            "no revoke from a stale list"
+        );
+        assert!(devices_text(&app).contains("not current"));
+        registry.fail_for_test(false);
+        // The selected device leaves the registry.
+        let view = app.devices_view_mut().unwrap();
+        view.focus = localpilot_terminal_ui::DevicesFocus::Rows;
+        view.selected = None;
+        for _ in 0..view.rows.len() {
+            view.move_row(true);
+            if view.selected_id() == Some(first.id.as_str()) {
+                break;
+            }
+        }
+        assert_eq!(view.selected_id(), Some(first.id.as_str()));
+        devices_press(&mut app, &host, KeyCode::Up);
+        devices_press(&mut app, &host, KeyCode::Down);
+        let selected = app
+            .devices_view()
+            .unwrap()
+            .selected_id()
+            .unwrap()
+            .to_string();
+        registry.forget_for_test(&selected);
+        select_device_action(&mut app, "Refresh");
+        devices_press(&mut app, &host, KeyCode::Enter);
+        pump_devices(&mut app, &host, None, "vanished", |app| {
+            devices_text(app).contains("Device no longer listed.")
+        })
+        .await;
+        assert!(app.devices_view().unwrap().confirm.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn another_view_or_session_closes_the_devices_view_but_keeps_its_revoke() {
+        let registry = std::sync::Arc::new(crate::server_devices::DeviceRegistry::default());
+        registry
+            .add("phone", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let host = devices_host(&registry, Duration::from_secs(6));
+        let mut app = app();
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+        pump_devices(&mut app, &host, None, "listed", |app| {
+            app.devices_view().is_some_and(|view| !view.rows.is_empty())
+        })
+        .await;
+        app.open_report("Report".to_string(), vec!["kept".to_string()]);
+        let incognito = app.incognito();
+        host.devices
+            .tick(&mut app, host.share.tracked_session(), None, incognito);
+        assert!(app.devices_view().is_none());
+        assert!(app.report_generation().is_some());
+        remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Devices);
+        host.share.track(crate::remote_share::Tracked {
+            session: localpilot_core::SessionId::new(),
+            claim: Some((1, "me".to_string())),
+            gate: localpilot_core::admission::AdmissionGate::default(),
+        });
+        host.devices
+            .tick(&mut app, host.share.tracked_session(), None, incognito);
+        assert!(app.devices_view().is_none(), "a session change closes it");
     }
 
     async fn until_state(host: &remote_host::RemoteHost, want: crate::remote_share::ShareState) {

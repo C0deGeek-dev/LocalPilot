@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/remote devices` in the full-screen terminal lists your paired devices (with
+  their access, whether they reach this workspace and whether they are
+  attached to this session) and revokes one after a confirmation that names it
+  by its full id and starts on Cancel. The terminal says only what it knows: a
+  revoke the registry could not take in time changed nothing, one still
+  waiting is "result unknown" until the registry answers, and a disconnect is
+  reported only for this session. Revoking works in incognito (and says that
+  the revocation and its audit entry are saved). `localpilot devices revoke`
+  now says when a device was already revoked or does not exist (ADR-0257).
 - Pair a phone from the full-screen terminal with `/remote pair [observe]`: a
   short form (name, access, reach), then a view with a QR code or the exact
   link, which works once until it expires. Closing the view (or another view

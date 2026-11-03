@@ -142,6 +142,8 @@ pub(super) struct RemoteHost {
     status: RefCell<Option<PendingStatus>>,
     /// Pairing a device (`/remote pair`).
     pub(super) pairing: super::pairing_host::PairingHost,
+    /// The paired devices (`/remote devices`).
+    pub(super) devices: super::devices_host::DevicesHost,
 }
 
 /// A `/remote` view waiting for its probe.
@@ -176,9 +178,13 @@ impl RemoteHost {
             share.dial(),
             crate::remote_pairing::prerequisites_for(cwd.to_path_buf()),
         );
+        let devices = super::devices_host::DevicesHost::new(std::sync::Arc::new(
+            crate::server_devices::DeviceRegistry::for_user(cwd),
+        ));
         Self {
             share,
             pairing,
+            devices,
             steering: RefCell::new(Vec::new()),
             compact: RefCell::new(None),
             choice: Cell::new(None),
@@ -191,6 +197,13 @@ impl RemoteHost {
             }),
             status: RefCell::new(None),
         }
+    }
+
+    /// The same host, listing devices with `devices`.
+    #[cfg(test)]
+    pub(super) fn with_devices(mut self, devices: super::devices_host::DevicesHost) -> Self {
+        self.devices = devices;
+        self
     }
 
     /// The same host, pairing with `pairing`.
@@ -469,7 +482,10 @@ fn sharing_lines(share: &RemoteShare) -> Vec<String> {
             device.id
         ));
     }
-    lines.push("Commands: /remote share | /remote stop | /remote pair [observe].".to_string());
+    lines.push(
+        "Commands: /remote share | /remote stop | /remote pair [observe] | /remote devices."
+            .to_string(),
+    );
     lines
 }
 
@@ -737,10 +753,10 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
             host.pairing
                 .open(app, observe, host.share.tracked_session());
         }
-        RemoteAction::Devices => notice(
-            app,
-            "Devices are not in this terminal yet: use `localpilot devices list` or `localpilot devices revoke`.",
-        ),
+        RemoteAction::Devices => {
+            host.pairing.close_for_devices(app);
+            host.devices.open(app, host.share.tracked_session());
+        }
         RemoteAction::Usage => notice(
             app,
             "Use /remote [pair [observe|control] | devices | share | stop].",
@@ -754,6 +770,24 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
 fn tick_pairing(app: &mut AppModel, host: &RemoteHost) {
     let shared = !matches!(host.share.state(), ShareState::Off);
     host.pairing.tick(app, host.share.tracked_session(), shared);
+    // Attendance here: only this session's confirmed list (when shared).
+    let attached = host
+        .share
+        .devices()
+        .filter(|_| matches!(host.share.state(), ShareState::Shared))
+        .map(|devices| {
+            devices
+                .into_iter()
+                .map(|device| device.id)
+                .collect::<Vec<_>>()
+        });
+    let incognito = app.incognito();
+    host.devices.tick(
+        app,
+        host.share.tracked_session(),
+        attached.as_deref(),
+        incognito,
+    );
     let status = status_label(host, app);
     app.set_remote_label(status);
 }
@@ -766,9 +800,18 @@ pub(super) fn idle_status_for_test(app: &mut AppModel, host: &RemoteHost) {
 
 /// Route a key to the open pairing overlay.
 pub(super) fn pairing_key(app: &mut AppModel, host: &RemoteHost, key: crossterm::event::KeyEvent) {
+    if app.devices_view().is_some() {
+        let incognito = app.incognito();
+        if host.devices.key(app, key, incognito) == super::devices_host::DevicesKey::Pair {
+            host.pairing.open(app, false, host.share.tracked_session());
+        }
+        return;
+    }
     let shared = !matches!(host.share.state(), ShareState::Off);
-    if host.pairing.key(app, key, shared) == super::pairing_host::PairingKey::Share {
-        command(app, host, RemoteAction::Share);
+    match host.pairing.key(app, key, shared) {
+        super::pairing_host::PairingKey::Share => command(app, host, RemoteAction::Share),
+        super::pairing_host::PairingKey::Devices => command(app, host, RemoteAction::Devices),
+        super::pairing_host::PairingKey::Handled => {}
     }
 }
 

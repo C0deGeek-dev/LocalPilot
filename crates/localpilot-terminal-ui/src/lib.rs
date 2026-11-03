@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod devices;
 mod editor;
 mod layout;
 mod pairing;
@@ -35,6 +36,7 @@ pub use app::{
     StopState, TabId, TakeoverKind, TakeoverNavigation, TerminalCapabilities, TimelineNavigation,
     ToolAction, TrustAction, UsageTotals, UserShellCommand, UserShellOutput, WorkState,
 };
+pub use devices::{DevicesConfirm, DevicesFocus, DevicesRow, DevicesView};
 pub use editor::{Editor, EditorRow, ImageAttachment, PasteUnit, SubmittedInput};
 pub use layout::{
     FrameLayout, PairTimelineLayout, TimelineLayout, TimelinePaneLayout, MINIMUM_HEIGHT,

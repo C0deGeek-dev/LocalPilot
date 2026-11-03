@@ -1166,6 +1166,14 @@ opt-in step.
   invalidate it; when that cannot be confirmed the terminal says the code may
   still work, keeps that on the status line and keeps offering to retry. A permission request pauses
   the view without closing it. Incognito refuses pairing.
+- **Revoking from the terminal.** `/remote devices` lists the devices as
+  metadata only (never a credential or its hash) and revokes one exact device,
+  named by its full id in a confirmation that starts on Cancel. A revoke that
+  cannot take the registry's lock within its deadline changes nothing; one
+  that did is never repeated, and the terminal reports its result only from the
+  registry's own answer. Whether the device disconnected is reported for this
+  session only. Revoking is allowed in incognito, and saves the revocation and a
+  metadata-only audit entry there too.
 - **Files.** The `devices` directory and its files are readable by your user
   only (a protected owner-only DACL on Windows, `0700`/`0600` elsewhere) and
   carry a `.gitignore`. Changes take an exclusive lock and replace the file

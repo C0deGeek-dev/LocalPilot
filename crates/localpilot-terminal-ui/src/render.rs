@@ -455,6 +455,9 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         if let Some(setup) = app.pairing_setup() {
             setup.set_controls_visible(false);
         }
+        if let Some(view) = app.devices_view() {
+            view.set_controls_visible(false);
+        }
         frame.render_widget(
             Paragraph::new(format!(
                 "{APP_NAME}\nresize to at least {MINIMUM_WIDTH} × {MINIMUM_HEIGHT}"
@@ -3198,6 +3201,8 @@ fn render_pairing(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
         render_pairing_setup(frame, area, app, setup);
     } else if let Some(view) = app.pairing_view() {
         render_pairing_view(frame, area, app, view);
+    } else if let Some(view) = app.devices_view() {
+        render_devices_view(frame, area, app, view);
     }
 }
 
@@ -3305,6 +3310,7 @@ fn render_pairing_setup(
         body,
         controls,
         None,
+        None,
     );
     setup.set_controls_visible(shown.is_some());
 }
@@ -3401,7 +3407,8 @@ fn pairing_layout(
     body: Vec<Line<'static>>,
     controls: Vec<Line<'static>>,
     scroll: Option<usize>,
-) -> Option<bool> {
+    keep: Option<(usize, usize)>,
+) -> Option<(bool, usize, usize)> {
     let theme = theme(app);
     let width = width.min(area.width);
     let inner = width.saturating_sub(4).max(1);
@@ -3413,21 +3420,30 @@ fn pairing_layout(
         None => height >= chrome + body.len(),
     };
     if !fits || inner < 16 {
-        let lines = vec![
-            Line::styled(truncate_end(title, inner), theme.ui(UiRole::Prompt)),
-            Line::styled(
-                truncate_end("The window is too small. Enlarge it, or press Esc.", inner),
-                theme.ui(UiRole::Warning),
-            ),
-        ];
-        if let Some(content) = pairing_surface(frame, area, app, width, 4) {
+        let mut lines = vec![Line::styled(
+            truncate_end(title, inner),
+            theme.ui(UiRole::Prompt),
+        )];
+        for row in wrap_plain("The window is too small. Enlarge it, or press Esc.", inner) {
+            lines.push(Line::styled(row, theme.ui(UiRole::Warning)));
+        }
+        let rows = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+        if let Some(content) = pairing_surface(frame, area, app, width, rows) {
             frame.render_widget(Paragraph::new(lines), content);
         }
         return None;
     }
     let room = height - chrome;
     let scrolls = body.len() > room;
-    let start = scroll.unwrap_or(0).min(body.len().saturating_sub(room));
+    let mut start = scroll.unwrap_or(0).min(body.len().saturating_sub(room));
+    // Keep these body rows on screen (the selection), as far as they fit.
+    if let Some((first, last)) = keep {
+        if first < start {
+            start = first;
+        } else if last >= start + room {
+            start = (last + 1).saturating_sub(room).min(first);
+        }
+    }
     let shown: Vec<Line<'static>> = body.into_iter().skip(start).take(room).collect();
     let mut lines = vec![
         Line::styled(truncate_end(title, inner), theme.ui(UiRole::Prompt)),
@@ -3441,7 +3457,167 @@ fn pairing_layout(
     if let Some(content) = pairing_surface(frame, area, app, width, rows) {
         frame.render_widget(Paragraph::new(lines), content);
     }
-    Some(scrolls)
+    Some((scrolls, start, room))
+}
+
+fn render_devices_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppModel,
+    view: &crate::devices::DevicesView,
+) {
+    let theme = theme(app);
+    let width = area.width.saturating_sub(4).min(100);
+    let inner = width.saturating_sub(4).max(1);
+    if let Some(confirm) = &view.confirm {
+        // The target and what happens never scroll: all of it or Esc only.
+        let mut body = Vec::new();
+        for text in &confirm.lines {
+            for row in wrap_plain(text, inner) {
+                body.push(Line::styled(row, theme.ui(UiRole::Foreground)));
+            }
+        }
+        let mut controls: Vec<Line<'static>> = confirm
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let selected = index == confirm.selected;
+                let marker = if selected { "> " } else { "  " };
+                let role = if selected {
+                    UiRole::Accent
+                } else {
+                    UiRole::Foreground
+                };
+                Line::styled(
+                    truncate_end(&format!("{marker}{label}"), inner),
+                    theme.ui(role),
+                )
+            })
+            .collect();
+        controls.push(Line::styled(
+            truncate_end("Tab/Shift+Tab choose · Enter select · Esc cancel", inner),
+            theme.ui(UiRole::Muted),
+        ));
+        let shown = pairing_layout(
+            frame,
+            area,
+            app,
+            width,
+            "Revoke device?",
+            body,
+            controls,
+            None,
+            None,
+        );
+        view.set_controls_visible(shown.is_some());
+        return;
+    }
+    let mut body: Vec<Line<'static>> = Vec::new();
+    for text in &view.status {
+        for row in wrap_plain(text, inner) {
+            body.push(Line::styled(row, theme.ui(UiRole::Foreground)));
+        }
+    }
+    if !view.status.is_empty() {
+        body.push(Line::raw(""));
+    }
+    let mut keep = None;
+    for (index, row) in view.rows.iter().enumerate() {
+        let selected = view.selected == Some(index);
+        let marker = if selected && view.focus == crate::devices::DevicesFocus::Rows {
+            "> "
+        } else if selected {
+            "* "
+        } else {
+            "  "
+        };
+        let role = if selected {
+            UiRole::Accent
+        } else {
+            UiRole::Foreground
+        };
+        let first = body.len();
+        for line in device_row_lines(marker, row, inner) {
+            body.push(Line::styled(line, theme.ui(role)));
+        }
+        if selected {
+            for text in &row.details {
+                for line in wrap_indented(&format!("    {text}"), inner, 6) {
+                    body.push(Line::styled(line, theme.ui(UiRole::Muted)));
+                }
+            }
+            keep = Some((first, body.len().saturating_sub(1)));
+        }
+    }
+    let mut controls: Vec<Line<'static>> = view
+        .actions
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let selected =
+                index == view.action && view.focus == crate::devices::DevicesFocus::Actions;
+            let marker = if selected { "> " } else { "  " };
+            let role = if selected {
+                UiRole::Accent
+            } else {
+                UiRole::Foreground
+            };
+            Line::styled(
+                truncate_end(&format!("{marker}{label}"), inner),
+                theme.ui(role),
+            )
+        })
+        .collect();
+    controls.push(Line::styled(
+        truncate_end(
+            "Esc back · Up/Down device · Tab actions · Enter select · PgUp/PgDn scroll",
+            inner,
+        ),
+        theme.ui(UiRole::Muted),
+    ));
+    let title = view.title.clone();
+    let shown = pairing_layout(
+        frame,
+        area,
+        app,
+        width,
+        &title,
+        body,
+        controls,
+        Some(view.scroll()),
+        // Only when the selection moved: a hand-scrolled body stays put.
+        keep.filter(|_| view.take_follow()),
+    );
+    if let Some((_, start, room)) = shown {
+        view.set_scroll(start);
+        view.set_page(room);
+    }
+    view.set_controls_visible(shown.is_some());
+}
+
+/// A device's row: the marker and name, then what tells it apart. The name
+/// is shortened first; what follows it is never cut, and wraps onto the next
+/// rows (indented) when even a short name leaves no room for it.
+fn device_row_lines(marker: &str, row: &crate::devices::DevicesRow, inner: u16) -> Vec<String> {
+    let width = usize::from(inner);
+    let info_width = UnicodeWidthStr::width(row.info.as_str());
+    let marker_width = UnicodeWidthStr::width(marker);
+    // Room for the name on the same row, keeping at least 8 columns of it.
+    let room = width.saturating_sub(marker_width + 2 + info_width);
+    if room >= 8 {
+        let name = truncate_end(&row.name, u16::try_from(room).unwrap_or(u16::MAX));
+        return vec![format!("{marker}{name}  {}", row.info)];
+    }
+    let name = truncate_end(
+        &row.name,
+        u16::try_from(width.saturating_sub(marker_width)).unwrap_or(u16::MAX),
+    );
+    let mut lines = vec![format!("{marker}{name}")];
+    for line in wrap_plain(&row.info, inner.saturating_sub(4).max(1)) {
+        lines.push(format!("    {line}"));
+    }
+    lines
 }
 
 /// The colors a QR code is drawn in, whatever the theme: dark modules black
@@ -3552,7 +3728,11 @@ fn render_pairing_view(
         body,
         controls,
         Some(view.scroll),
+        None,
     );
+    if let Some((_, start, room)) = shown {
+        view.set_shown(start, room);
+    }
     view.set_controls_visible(shown.is_some());
 }
 
@@ -5388,6 +5568,235 @@ mod tests {
             ] {
                 assert!(flat.contains(whole), "{width}x{height}: nothing cut: {text}");
             }
+        }
+    }
+
+    fn devices_model(rows: usize) -> AppModel {
+        let mut app = model();
+        let mut view = crate::devices::DevicesView::new("Devices".to_string());
+        view.status = vec!["2 records".to_string()];
+        view.rows = (0..rows)
+            .map(|index| crate::devices::DevicesRow {
+                id: format!("{index:016x}"),
+                name: format!("phone {index}"),
+                info: format!("[{index:04x}]  control  active  attached here"),
+                details: vec![
+                    format!("Id: {index:016x}"),
+                    "Reach: every workspace this server serves".to_string(),
+                ],
+            })
+            .collect();
+        view.selected = Some(0);
+        view.set_actions(vec![
+            "Revoke device...".to_string(),
+            "Pair device".to_string(),
+            "Refresh".to_string(),
+            "Close".to_string(),
+        ]);
+        app.open_devices_view(view);
+        app
+    }
+
+    #[test]
+    fn the_devices_view_keeps_its_actions_on_screen_however_many_devices() {
+        for (width, height, rows) in [(80, 24, 2), (80, 24, 60), (120, 40, 300)] {
+            let app = devices_model(rows);
+            let text = screen_text(&app, width, height);
+            for label in [
+                "Revoke device...",
+                "Pair device",
+                "Refresh",
+                "Close",
+                "Esc back",
+            ] {
+                assert!(
+                    text.contains(label),
+                    "{width}x{height}/{rows}: {label}: {text}"
+                );
+            }
+            assert!(text.contains("> phone 0"), "{text}");
+            assert!(app.devices_view().unwrap().controls_visible());
+        }
+    }
+
+    #[test]
+    fn a_revoke_confirmation_shows_its_whole_target_or_only_how_to_leave() {
+        let mut app = devices_model(2);
+        app.devices_view_mut().unwrap().confirm = Some(crate::devices::DevicesConfirm {
+            id: format!("{:016x}", 0),
+            lines: vec![
+                format!("phone 0 [{:016x}]", 0),
+                "control | every workspace this server serves".to_string(),
+                "Removes this device's access in every workspace.".to_string(),
+                "It will disconnect. Running work continues.".to_string(),
+                "The device must pair again to reconnect.".to_string(),
+            ],
+            actions: vec!["Cancel".to_string(), "Revoke device".to_string()],
+            selected: 0,
+        });
+        let text = screen_text(&app, 80, 24);
+        assert!(text.contains("Revoke device?"));
+        assert!(text.contains(&format!("{:016x}", 0)), "the full id: {text}");
+        assert!(text.contains("> Cancel"));
+        assert!(app.devices_view().unwrap().controls_visible());
+        let text = screen_text(&app, 30, 12);
+        assert!(rows_without_spaces(&text).contains("toosmall"), "{text}");
+        assert!(!text.contains("> Cancel"));
+        assert!(!app.devices_view().unwrap().controls_visible());
+    }
+
+    #[test]
+    fn the_devices_view_is_a_remote_overlay_like_the_others() {
+        let mut app = devices_model(2);
+        assert!(app.pairing_shown());
+        app.dialog = Some(DialogState::Approval {
+            tool: "tool".to_string(),
+            target: "target".to_string(),
+            risk_class: "test".to_string(),
+            incognito_creation: false,
+        });
+        assert!(!app.pairing_shown(), "suspended under an ask");
+        app.dialog = None;
+        app.open_theme_picker();
+        assert!(app.pairing_replaced());
+        assert!(!rows_without_spaces(&screen_text(&app, 100, 40)).contains("phone0"));
+    }
+
+    fn wide_rows(app: &mut AppModel) {
+        let view = app.devices_view_mut().unwrap();
+        view.rows = vec![
+            crate::devices::DevicesRow {
+                id: "aaaa1111".to_string(),
+                name: "n".repeat(64),
+                info: "[aaaa1]  control  not granted here  unknown here".to_string(),
+                details: vec!["Id: aaaa1111".to_string()],
+            },
+            crate::devices::DevicesRow {
+                id: "aaaa2222".to_string(),
+                name: "電話".repeat(20),
+                info: "[aaaa2]  observe  revoked  not attached".to_string(),
+                details: vec!["Id: aaaa2222".to_string()],
+            },
+        ];
+        view.selected = Some(1);
+    }
+
+    #[test]
+    fn a_long_or_wide_name_never_hides_what_tells_devices_apart() {
+        for (width, height) in [(80, 24), (120, 40), (50, 24)] {
+            let mut app = devices_model(0);
+            wide_rows(&mut app);
+            let text = screen_text(&app, width, height);
+            let flat = rows_without_spaces(&text);
+            for info in [
+                "[aaaa1]controlnotgrantedhereunknownhere",
+                "[aaaa2]observerevokednotattached",
+            ] {
+                assert!(flat.contains(info), "{width}x{height}: {info}: {text}");
+            }
+            assert!(
+                flat.contains("Id:aaaa2222"),
+                "details under the selected row"
+            );
+            assert!(
+                !flat.contains("Id:aaaa1111"),
+                "only the selected row's details"
+            );
+        }
+    }
+
+    #[test]
+    fn the_selected_device_stays_on_screen_as_the_selection_moves() {
+        let mut app = devices_model(60);
+        let view = app.devices_view_mut().unwrap();
+        for _ in 0..45 {
+            view.move_row(true);
+        }
+        let text = screen_text(&app, 80, 24);
+        assert!(text.contains("> phone 45"), "{text}");
+        assert!(rows_without_spaces(&text).contains(&format!("Id:{:016x}", 45)));
+        assert!(text.contains("Esc back"));
+        // Back up past the top of the window.
+        let view = app.devices_view_mut().unwrap();
+        for _ in 0..40 {
+            view.move_row(false);
+        }
+        let text = screen_text(&app, 80, 24);
+        assert!(text.contains("> phone 5"), "{text}");
+    }
+
+    /// Paging never skips a row, whatever the body height: one, two or three
+    /// rows, and a body whose last page start is a multiple of four.
+    #[test]
+    fn paging_reaches_every_row_at_any_body_height() {
+        for height in [11, 12, 13] {
+            let mut app = model();
+            let mut view = crate::devices::DevicesView::new("Devices".to_string());
+            view.rows = vec![crate::devices::DevicesRow {
+                id: "a".to_string(),
+                name: "phone".to_string(),
+                info: "[a]  control  active  unknown here".to_string(),
+                details: (0..13).map(|n| format!("detail-{n:02}")).collect(),
+            }];
+            view.selected = Some(0);
+            view.set_actions(vec![
+                "Revoke device...".to_string(),
+                "Pair device".to_string(),
+                "Refresh".to_string(),
+                "Close".to_string(),
+            ]);
+            app.open_devices_view(view);
+            let mut seen = std::collections::BTreeSet::new();
+            let mut collect = |text: &str| {
+                for n in 0..13 {
+                    if text.contains(&format!("detail-{n:02}")) {
+                        seen.insert(n);
+                    }
+                }
+            };
+            collect(&screen_text(&app, 80, height));
+            let mut last = None;
+            for _ in 0..40 {
+                app.devices_view_mut().unwrap().page_down();
+                let text = screen_text(&app, 80, height);
+                collect(&text);
+                let start = app.devices_view().unwrap().scroll();
+                if last == Some(start) {
+                    break;
+                }
+                last = Some(start);
+            }
+            for _ in 0..40 {
+                app.devices_view_mut().unwrap().page_up();
+                collect(&screen_text(&app, 80, height));
+            }
+            assert_eq!(
+                seen.len(),
+                13,
+                "height {height}: every row reachable: {seen:?}"
+            );
+            assert_eq!(app.devices_view().unwrap().scroll(), 0, "back at the top");
+            assert_eq!(app.devices_view().unwrap().selected_id(), Some("a"));
+        }
+    }
+
+    #[test]
+    fn a_long_link_pages_without_skipping() {
+        let (mut app, link) = pairing_model(10, true);
+        let mut seen = String::new();
+        let height = 12;
+        seen.push_str(&rows_without_spaces(&screen_text(&app, 40, height)));
+        for _ in 0..20 {
+            app.pairing_view_mut().unwrap().page_down();
+            seen.push_str(&rows_without_spaces(&screen_text(&app, 40, height)));
+        }
+        let flat = rows_without_spaces(&link);
+        // Every 30-character stretch of the link was on screen at some point.
+        for start in (0..flat.len().saturating_sub(30)).step_by(10) {
+            assert!(
+                seen.contains(&flat[start..start + 30]),
+                "missing from {start}"
+            );
         }
     }
 

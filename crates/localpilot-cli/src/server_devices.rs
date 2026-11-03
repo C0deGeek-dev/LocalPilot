@@ -111,6 +111,91 @@ pub(crate) enum DeviceError {
     Persist(String),
     #[error("the operating system's random source failed")]
     Random,
+    /// The registry's write lock was not free before the deadline: nothing
+    /// was changed.
+    #[error("the device registry is busy")]
+    Busy,
+}
+
+/// At most this many devices are shown at once (the rest are counted).
+pub(crate) const ROWS_SHOWN: usize = 256;
+/// At most this many of a device's workspaces are shown (the rest counted).
+pub(crate) const ROOTS_SHOWN: usize = 16;
+/// Display text (names, folders) is cut to this many bytes.
+const TEXT_BYTES: usize = 256;
+
+/// `text` for display: control characters made spaces, cut to
+/// [`TEXT_BYTES`] on a character boundary (with an ellipsis when cut).
+fn bounded_text(text: &str) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if clean.len() <= TEXT_BYTES {
+        return clean;
+    }
+    let mut end = TEXT_BYTES - '…'.len_utf8();
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &clean[..end])
+}
+
+/// Whether `id` can be acted on exactly as written (an id the registry
+/// itself makes); anything else is shown but never revoked from the view.
+fn actionable_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// A device's grant, as seen from this workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeviceGrant {
+    Active,
+    Revoked,
+    NotGrantedHere,
+}
+
+/// Which workspaces a device may reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeviceReach {
+    All,
+    /// The first of them, and how many more.
+    Roots {
+        shown: Vec<String>,
+        more: usize,
+    },
+}
+
+/// One device, as shown: metadata only, bounded, never a credential or hash.
+/// `id` is the registry's key for it (bounded for display; exact whenever
+/// the row is actionable).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceRow {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) scope: Scope,
+    pub(crate) grant: DeviceGrant,
+    pub(crate) reach: DeviceReach,
+    pub(crate) created_unix: u64,
+    pub(crate) revoked_unix: Option<u64>,
+    /// Whether this row can be revoked from the view: its record's id is
+    /// exactly its registry key, and well formed.
+    pub(crate) actionable: bool,
+}
+
+/// The devices shown, and how many there are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceRows {
+    pub(crate) rows: Vec<DeviceRow>,
+    pub(crate) total: usize,
+}
+
+/// What became of a revoke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RevokeOutcome {
+    Revoked(DeviceRow),
+    AlreadyRevoked(DeviceRow),
+    NotFound,
 }
 
 /// One paired device, as stored.
@@ -192,7 +277,24 @@ pub(crate) struct DeviceRegistry {
     /// Tests: reading the registry fails while set.
     #[cfg(test)]
     failing: std::sync::atomic::AtomicBool,
+    /// Tests: run at points of a bounded change.
+    #[cfg(test)]
+    hooks: Mutex<HashMap<Hook, AdmittedHook>>,
 }
+
+/// Where a test hook runs in a bounded change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Hook {
+    /// Before each attempt at the write lock.
+    Attempting,
+    /// Just after admission (before anything is read or edited).
+    Admitted,
+    /// Just after the change was written.
+    Committed,
+}
+
+#[cfg(test)]
+pub(crate) type AdmittedHook = std::sync::Arc<dyn Fn() + Send + Sync>;
 
 impl Default for DeviceRegistry {
     fn default() -> Self {
@@ -204,6 +306,8 @@ impl Default for DeviceRegistry {
             disabled: None,
             #[cfg(test)]
             failing: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            hooks: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -293,6 +397,8 @@ impl DeviceRegistry {
             disabled: None,
             #[cfg(test)]
             failing: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            hooks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -452,6 +558,114 @@ impl DeviceRegistry {
             .store(failing, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Tests: run `hook` just after each bounded change is admitted to the
+    /// write lock (before it reads or edits anything).
+    #[cfg(test)]
+    pub(crate) fn on_admitted_for_test(&self, hook: Option<AdmittedHook>) {
+        self.hook_at_for_test(Hook::Admitted, hook);
+    }
+
+    /// Tests: run `hook` at `which` point of each bounded change.
+    #[cfg(test)]
+    pub(crate) fn hook_at_for_test(&self, which: Hook, hook: Option<AdmittedHook>) {
+        let mut hooks = self.hooks.lock().unwrap_or_else(PoisonError::into_inner);
+        match hook {
+            Some(hook) => hooks.insert(which, hook),
+            None => hooks.remove(&which),
+        };
+    }
+
+    /// Every device as metadata for display, newest first, from one read of
+    /// the registry: never a credential or its hash. At most [`ROWS_SHOWN`]
+    /// rows; `total` says how many there are.
+    pub(crate) fn rows(&self) -> Result<DeviceRows, DeviceError> {
+        let file = self.current().map_err(DeviceError::Unavailable)?;
+        let mut records: Vec<(&String, &DeviceRecord)> = file.devices.iter().collect();
+        records.sort_by(|a, b| b.1.created_unix.cmp(&a.1.created_unix));
+        Ok(DeviceRows {
+            total: records.len(),
+            rows: records
+                .into_iter()
+                .take(ROWS_SHOWN)
+                .map(|(key, record)| self.row_of(key, record))
+                .collect(),
+        })
+    }
+
+    /// A device as shown, keyed by the registry's own key: only a record
+    /// whose id is exactly that key (and a well-formed one) can be acted on,
+    /// so a revoke from the view always names the device the row shows.
+    fn row_of(&self, key: &str, record: &DeviceRecord) -> DeviceRow {
+        let grant = if record.revoked_unix.is_some() {
+            DeviceGrant::Revoked
+        } else if record.reaches(&self.workspace) {
+            DeviceGrant::Active
+        } else {
+            DeviceGrant::NotGrantedHere
+        };
+        let reach = match &record.workspaces {
+            None => DeviceReach::All,
+            Some(roots) => DeviceReach::Roots {
+                shown: roots
+                    .iter()
+                    .take(ROOTS_SHOWN)
+                    .map(|root| bounded_text(root))
+                    .collect(),
+                more: roots.len().saturating_sub(ROOTS_SHOWN),
+            },
+        };
+        DeviceRow {
+            actionable: record.id == key && actionable_id(key),
+            id: bounded_text(key),
+            name: bounded_text(&record.name),
+            scope: record.scope,
+            grant,
+            reach,
+            created_unix: record.created_unix,
+            revoked_unix: record.revoked_unix,
+        }
+    }
+
+    /// Revoke a device everywhere, saying what happened: decided and
+    /// persisted under one admission to the write lock, which must come
+    /// before `deadline` (otherwise [`DeviceError::Busy`], and nothing
+    /// changed). Once admitted, the change runs to completion.
+    pub(crate) fn revoke_device_within(
+        &self,
+        id: &str,
+        deadline: std::time::Instant,
+    ) -> Result<RevokeOutcome, DeviceError> {
+        let mut outcome = RevokeOutcome::NotFound;
+        self.change_within(Some(deadline), |file| {
+            if let Some(record) = file.devices.get_mut(id) {
+                if record.revoked_unix.is_none() {
+                    record.revoked_unix = Some(now_unix());
+                    outcome = RevokeOutcome::Revoked(self.row_of(id, record));
+                } else {
+                    outcome = RevokeOutcome::AlreadyRevoked(self.row_of(id, record));
+                }
+            }
+        })?;
+        Ok(outcome)
+    }
+
+    /// [`DeviceRegistry::revoke_device_within`], waiting for the lock as long
+    /// as it takes (the command line).
+    pub(crate) fn revoke_device(&self, id: &str) -> Result<RevokeOutcome, DeviceError> {
+        let mut outcome = RevokeOutcome::NotFound;
+        self.change_within(None, |file| {
+            if let Some(record) = file.devices.get_mut(id) {
+                if record.revoked_unix.is_none() {
+                    record.revoked_unix = Some(now_unix());
+                    outcome = RevokeOutcome::Revoked(self.row_of(id, record));
+                } else {
+                    outcome = RevokeOutcome::AlreadyRevoked(self.row_of(id, record));
+                }
+            }
+        })?;
+        Ok(outcome)
+    }
+
     pub(crate) fn list(&self) -> Result<Vec<DeviceRecord>, DeviceError> {
         let file = self.current().map_err(DeviceError::Unavailable)?;
         let mut devices: Vec<DeviceRecord> = file.devices.values().cloned().collect();
@@ -489,16 +703,7 @@ impl DeviceRegistry {
     /// Revoke a device everywhere. Persisted before it takes effect. Returns
     /// whether the device existed and was not already revoked.
     pub(crate) fn revoke(&self, id: &str) -> Result<bool, DeviceError> {
-        let mut changed = false;
-        self.change(|file| {
-            if let Some(record) = file.devices.get_mut(id) {
-                if record.revoked_unix.is_none() {
-                    record.revoked_unix = Some(now_unix());
-                    changed = true;
-                }
-            }
-        })?;
-        Ok(changed)
+        Ok(matches!(self.revoke_device(id)?, RevokeOutcome::Revoked(_)))
     }
 
     /// Append one audit entry: when, which workspace, what happened, and to
@@ -551,6 +756,22 @@ impl DeviceRegistry {
     /// Under the registry's write lock: read the latest registry, apply `edit`,
     /// and replace the file atomically. Only a successful write changes it.
     fn change(&self, edit: impl FnOnce(&mut RegistryFile)) -> Result<(), DeviceError> {
+        self.change_within(None, edit)
+    }
+
+    /// [`DeviceRegistry::change`], admitted to the write lock only before
+    /// `deadline` when one is given: the lock is tried, not waited for, so a
+    /// busy registry answers [`DeviceError::Busy`] with nothing changed. Once
+    /// admitted the change runs to completion.
+    fn change_within(
+        &self,
+        deadline: Option<std::time::Instant>,
+        edit: impl FnOnce(&mut RegistryFile),
+    ) -> Result<(), DeviceError> {
+        let expired = || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
+        if expired() {
+            return Err(DeviceError::Busy);
+        }
         if let Some(reason) = &self.disabled {
             return Err(DeviceError::Unavailable(reason.clone()));
         }
@@ -562,6 +783,10 @@ impl DeviceRegistry {
         }
         let Some(dir) = &self.dir else {
             let mut memory = self.memory.lock().unwrap_or_else(PoisonError::into_inner);
+            if expired() {
+                return Err(DeviceError::Busy);
+            }
+            self.admitted_for_test(deadline);
             let mut next = memory.clone();
             edit(&mut next);
             *memory = next;
@@ -569,22 +794,88 @@ impl DeviceRegistry {
         };
         prepare_dir(dir).map_err(|error| DeviceError::Persist(error.to_string()))?;
         let lock_path = dir.join("registry.lock");
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .map_err(|error| DeviceError::Persist(error.to_string()))?;
-        restrict(&lock_path).map_err(|error| DeviceError::Persist(error.to_string()))?;
-        let mut lock = fd_lock::RwLock::new(lock_file);
-        let _held = lock
-            .write()
-            .map_err(|error| DeviceError::Persist(error.to_string()))?;
-        // Under the lock no other writer is replacing the file: missing means
-        // never written.
-        let mut next = read_registry_from(dir, true).map_err(DeviceError::Unavailable)?;
-        edit(&mut next);
-        persist(dir, &next).map_err(|error| DeviceError::Persist(error.to_string()))
+        let persist_error = |error: std::io::Error| DeviceError::Persist(error.to_string());
+        loop {
+            // The deadline holds for every attempt, however long preparing,
+            // opening or sleeping took.
+            if expired() {
+                return Err(DeviceError::Busy);
+            }
+            self.attempting_for_test(deadline);
+            let lock_file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path)
+                .map_err(persist_error)?;
+            restrict(&lock_path).map_err(persist_error)?;
+            let mut lock = fd_lock::RwLock::new(lock_file);
+            let held = match deadline {
+                None => lock.write().map_err(persist_error)?,
+                Some(deadline) => match lock.try_write() {
+                    Ok(held) => held,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        let left = deadline.saturating_duration_since(std::time::Instant::now());
+                        if left.is_zero() {
+                            return Err(DeviceError::Busy);
+                        }
+                        std::thread::sleep(left.min(std::time::Duration::from_millis(50)));
+                        continue;
+                    }
+                    Err(error) => return Err(persist_error(error)),
+                },
+            };
+            // Admitted only within the deadline: a lock freed (or taken) after
+            // it is released again untouched.
+            if expired() {
+                drop(held);
+                return Err(DeviceError::Busy);
+            }
+            self.admitted_for_test(deadline);
+            // Under the lock no other writer is replacing the file: missing
+            // means never written.
+            let mut next = read_registry_from(dir, true).map_err(DeviceError::Unavailable)?;
+            edit(&mut next);
+            let written = persist(dir, &next).map_err(persist_error);
+            drop(held);
+            if written.is_ok() {
+                self.committed_for_test(deadline);
+            }
+            return written;
+        }
+    }
+
+    /// Tests: the hook run once a bounded change is admitted.
+    fn admitted_for_test(&self, deadline: Option<std::time::Instant>) {
+        self.hook_for_test(deadline, Hook::Admitted);
+    }
+
+    /// Tests: the hook run before each attempt of a bounded change.
+    fn attempting_for_test(&self, deadline: Option<std::time::Instant>) {
+        self.hook_for_test(deadline, Hook::Attempting);
+    }
+
+    /// Tests: the hook run once a bounded change is written.
+    fn committed_for_test(&self, deadline: Option<std::time::Instant>) {
+        self.hook_for_test(deadline, Hook::Committed);
+    }
+
+    #[allow(clippy::unused_self)]
+    fn hook_for_test(&self, deadline: Option<std::time::Instant>, which: Hook) {
+        #[cfg(test)]
+        if deadline.is_some() {
+            let hook = self
+                .hooks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&which)
+                .cloned();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        #[cfg(not(test))]
+        let _ = (deadline, which);
     }
 }
 

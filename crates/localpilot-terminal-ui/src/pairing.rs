@@ -250,6 +250,9 @@ pub struct PairingView {
     /// Whether the last frame showed the actions (a window too small for
     /// them shows only how to leave, and the host then takes only Esc).
     controls_visible: std::cell::Cell<bool>,
+    /// The body's first row and height as last drawn (paging moves from
+    /// what is on screen, by its height less one row).
+    shown: std::cell::Cell<(usize, usize)>,
 }
 
 impl PairingView {
@@ -264,7 +267,24 @@ impl PairingView {
             actions,
             selected: 0,
             controls_visible: std::cell::Cell::new(true),
+            shown: std::cell::Cell::new((0, 1)),
         }
+    }
+
+    pub(crate) fn set_shown(&self, start: usize, rows: usize) {
+        self.shown.set((start, rows));
+    }
+
+    /// One page down (or up): from the row shown first, by the body height
+    /// less one row of overlap, so nothing is skipped.
+    pub fn page_down(&mut self) {
+        let (start, rows) = self.shown.get();
+        self.scroll = start.saturating_add(rows.saturating_sub(1).max(1));
+    }
+
+    pub fn page_up(&mut self) {
+        let (start, rows) = self.shown.get();
+        self.scroll = start.saturating_sub(rows.saturating_sub(1).max(1));
     }
 
     /// Replace what the view says and offers. The selection stays on the same
