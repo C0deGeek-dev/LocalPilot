@@ -155,6 +155,8 @@ unicode-width = { workspace = true, optional = true }
 localpilot-winsec = { path = "../localpilot-winsec" }
 
 [dev-dependencies]
+# Paused clock for deterministic deadline tests.
+tokio = { workspace = true, features = ["test-util"] }
 yaml_serde = { workspace = true }
 assert_cmd = { workspace = true }
 localmind-store = { path = "../../external/localmind/crates/localmind-store" }

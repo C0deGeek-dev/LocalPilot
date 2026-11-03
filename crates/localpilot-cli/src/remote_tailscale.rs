@@ -72,8 +72,28 @@ impl std::fmt::Display for ApiFailure {
 
 /// Send one GET to the daemon's local API.
 pub(crate) async fn get(path: &str) -> Result<Reply, ApiFailure> {
-    let stream = connect().await?;
-    exchange(stream, Method::GET, path).await
+    request(connect(), Method::GET, path, EXCHANGE_WITHIN).await
+}
+
+/// One request under one budget, from before connecting to the last body
+/// byte. Running out before the connection is made is
+/// [`ApiFailure::Unreachable`]; after it, see [`exchange`].
+async fn request<C, S>(
+    connect: C,
+    method: Method,
+    path: &str,
+    within: Duration,
+) -> Result<Reply, ApiFailure>
+where
+    C: std::future::Future<Output = Result<S, ApiFailure>>,
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let deadline = tokio::time::Instant::now() + within;
+    let stream = match tokio::time::timeout_at(deadline, connect).await {
+        Ok(stream) => stream?,
+        Err(_) => return Err(ApiFailure::Unreachable("connecting timed out".to_string())),
+    };
+    exchange(stream, method, path, deadline).await
 }
 
 #[cfg(windows)]
@@ -89,12 +109,10 @@ async fn connect() -> Result<tokio::net::windows::named_pipe::NamedPipeClient, A
 #[cfg(unix)]
 async fn connect() -> Result<tokio::net::UnixStream, ApiFailure> {
     let path = socket_path()?;
-    let connect = tokio::net::UnixStream::connect(&path);
-    match tokio::time::timeout(EXCHANGE_WITHIN, connect).await {
-        Ok(Ok(stream)) => Ok(stream),
-        Ok(Err(error)) => Err(ApiFailure::Unreachable(unreachable_reason(&error))),
-        Err(_) => Err(ApiFailure::Unreachable("connecting timed out".to_string())),
-    }
+    // Bounded by the caller's one budget.
+    tokio::net::UnixStream::connect(&path)
+        .await
+        .map_err(|error| ApiFailure::Unreachable(unreachable_reason(&error)))
 }
 
 #[cfg(unix)]
@@ -140,9 +158,18 @@ fn unreachable_reason(error: &std::io::Error) -> String {
     }
 }
 
-/// One HTTP/1.1 request over an already connected stream, bounded in time and
-/// size. A connected stream that fails afterwards is [`ApiFailure::Interrupted`].
-async fn exchange<S>(stream: S, method: Method, path: &str) -> Result<Reply, ApiFailure>
+/// One HTTP/1.1 request over an already connected stream, ending by
+/// `deadline` and bounded in size. Before the response head arrives, any
+/// failure or the deadline is [`ApiFailure::Interrupted`]: whether the daemon
+/// acted is unknown. Once the head has arrived its status and tag are
+/// definite, so a body that breaks, stalls past the deadline or exceeds
+/// [`MAX_REPLY`] gives a truncated [`Reply`], never an unknown outcome.
+async fn exchange<S>(
+    stream: S,
+    method: Method,
+    path: &str,
+    deadline: tokio::time::Instant,
+) -> Result<Reply, ApiFailure>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
@@ -152,56 +179,60 @@ where
         .header(header::HOST, API_HOST)
         .body(Full::new(Bytes::new()))
         .map_err(|error| ApiFailure::Unreachable(error.to_string()))?;
-    let work = async move {
-        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-            .await
-            .map_err(|error| ApiFailure::Interrupted(error.to_string()))?;
-        let driver = tokio::spawn(connection);
-        let response = sender
-            .send_request(request)
-            .await
-            .map_err(|error| ApiFailure::Interrupted(error.to_string()))?;
-        let status = response.status().as_u16();
-        let etag = response
-            .headers()
-            .get(header::ETAG)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let mut body = response.into_body();
-        let mut collected = Vec::new();
-        let mut truncated = false;
-        while let Some(frame) = body.frame().await {
-            let frame = match frame {
-                Ok(frame) => frame,
-                // The status already arrived: a body that breaks after it is a
-                // cut reply, not an unknown outcome.
-                Err(_) => {
-                    truncated = true;
-                    break;
-                }
-            };
-            if let Ok(data) = frame.into_data() {
-                let room = MAX_REPLY - collected.len();
-                if data.len() > room {
-                    collected.extend_from_slice(&data[..room]);
-                    truncated = true;
-                    break;
-                }
-                collected.extend_from_slice(&data);
-            }
-        }
-        driver.abort();
-        Ok(Reply {
-            status,
-            etag,
-            body: collected,
-            truncated,
-        })
+    let handshake = hyper::client::conn::http1::handshake(TokioIo::new(stream));
+    let (mut sender, connection) = match tokio::time::timeout_at(deadline, handshake).await {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(error)) => return Err(ApiFailure::Interrupted(error.to_string())),
+        Err(_) => return Err(ApiFailure::Interrupted("timed out".to_string())),
     };
-    match tokio::time::timeout(EXCHANGE_WITHIN, work).await {
-        Ok(result) => result,
-        Err(_) => Err(ApiFailure::Interrupted("timed out".to_string())),
+    let driver = tokio::spawn(connection);
+    let response = match tokio::time::timeout_at(deadline, sender.send_request(request)).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            driver.abort();
+            return Err(ApiFailure::Interrupted(error.to_string()));
+        }
+        Err(_) => {
+            driver.abort();
+            return Err(ApiFailure::Interrupted("timed out".to_string()));
+        }
+    };
+    let status = response.status().as_u16();
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let mut body = response.into_body();
+    let mut collected = Vec::new();
+    let mut truncated = false;
+    loop {
+        let frame = match tokio::time::timeout_at(deadline, body.frame()).await {
+            Ok(Some(Ok(frame))) => frame,
+            Ok(None) => break,
+            // A body that breaks or stalls after the head: a cut reply.
+            Ok(Some(Err(_))) | Err(_) => {
+                truncated = true;
+                break;
+            }
+        };
+        if let Ok(data) = frame.into_data() {
+            let room = MAX_REPLY - collected.len();
+            if data.len() > room {
+                collected.extend_from_slice(&data[..room]);
+                truncated = true;
+                break;
+            }
+            collected.extend_from_slice(&data);
+        }
     }
+    driver.abort();
+    Ok(Reply {
+        status,
+        etag,
+        body: collected,
+        truncated,
+    })
 }
 
 /// Whether setup may change Serve on this daemon version. A stable release
@@ -273,6 +304,15 @@ fn object<'a>(value: &'a Value, at: &str) -> Result<&'a Map<String, Value>, Refu
         .ok_or_else(|| Refusal::Malformed(format!("{at} is not an object")))
 }
 
+/// A non-empty identity field: a plan for "no node" is no plan.
+fn identity(object: &Map<String, Value>, key: &str, at: &str) -> Result<String, Refusal> {
+    let value = text(object, key, at)?;
+    if value.trim().is_empty() {
+        return Err(Refusal::Malformed(format!("{at}{key} is empty")));
+    }
+    Ok(value.to_string())
+}
+
 pub(crate) fn read_node(status: &Value) -> Result<Node, Refusal> {
     let top = object(status, "the status")?;
     let own = object(top.get("Self").unwrap_or(&Value::Null), "Self")?;
@@ -310,8 +350,8 @@ pub(crate) fn read_node(status: &Value) -> Result<Node, Refusal> {
         name: text(own, "DNSName", "Self.")?
             .trim_end_matches('.')
             .to_string(),
-        node_id: text(own, "ID", "Self.")?.to_string(),
-        tailnet: text(tailnet, "Name", "CurrentTailnet.")?.to_string(),
+        node_id: identity(own, "ID", "Self.")?,
+        tailnet: identity(tailnet, "Name", "CurrentTailnet.")?,
         suffix: text(tailnet, "MagicDNSSuffix", "CurrentTailnet.")?
             .trim_end_matches('.')
             .to_string(),
@@ -521,7 +561,8 @@ fn assess_inner(
                             "Web" => {
                                 for (key, web) in entries(part, &format!("Services.{service}.Web"))?
                                 {
-                                    if key == &host_port {
+                                    let at = format!("Services.{service}.Web");
+                                    if origin_key(key, &host_port, &at)? {
                                         return Err(Refusal::InUse(format!(
                                             "the Tailscale service {service} serves this address"
                                         )));
@@ -614,7 +655,12 @@ fn inspect<'a>(
     if let Some(web) = level.get("Web") {
         for (key, site) in entries(web, &format!("{at}Web"))? {
             check_web(site, &format!("{at}Web.{key}"))?;
-            if key == host_port {
+            if origin_key(key, host_port, &format!("{at}Web"))? {
+                if found.web.is_some() {
+                    return Err(Refusal::InUse(format!(
+                        "{host_port} appears more than once in web handlers"
+                    )));
+                }
                 found.web = Some(site);
             }
         }
@@ -627,7 +673,7 @@ fn inspect<'a>(
                 )));
             }
             // Any entry for the origin, even `false`, is a setting someone made.
-            if key == host_port {
+            if origin_key(key, host_port, &format!("{at}AllowFunnel"))? {
                 found.funnel = true;
             }
         }
@@ -645,6 +691,28 @@ fn inspect<'a>(
     Ok(found)
 }
 
+/// A port written the one way Tailscale writes it: decimal, no sign or
+/// leading zero, in range.
+fn canonical_port(text: &str) -> bool {
+    text.parse::<u16>()
+        .is_ok_and(|port| port != 0 && port.to_string() == text)
+}
+
+/// Check a Web or Funnel key (`<host>:<port>`, canonical port) and say
+/// whether it names the phone origin. Host names compare without regard to
+/// case, so a differently cased key is never a second, separate entry.
+fn origin_key(key: &str, host_port: &str, at: &str) -> Result<bool, Refusal> {
+    let fits = key
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && canonical_port(port));
+    if !fits {
+        return Err(Refusal::Malformed(format!(
+            "{at} has a key {key:?} that is not host:port"
+        )));
+    }
+    Ok(key.eq_ignore_ascii_case(host_port))
+}
+
 fn entries<'a>(value: &'a Value, at: &str) -> Result<&'a Map<String, Value>, Refusal> {
     match value {
         Value::Object(map) => Ok(map),
@@ -654,7 +722,7 @@ fn entries<'a>(value: &'a Value, at: &str) -> Result<&'a Map<String, Value>, Ref
 
 fn check_tcp(value: &Value, at: &str) -> Result<(), Refusal> {
     for (port, handler) in entries(value, at)? {
-        if port.parse::<u16>().is_err() {
+        if !canonical_port(port) {
             return Err(Refusal::Malformed(format!(
                 "{at} has a non-port key {port}"
             )));
@@ -663,7 +731,8 @@ fn check_tcp(value: &Value, at: &str) -> Result<(), Refusal> {
             let fits = match field.as_str() {
                 "HTTPS" | "HTTP" => part.is_boolean(),
                 "TCPForward" | "TerminateTLS" => part.is_string(),
-                "ProxyProtocol" => part.is_number(),
+                // PROXY protocol version 1 or 2; 0 means none.
+                "ProxyProtocol" => part.as_u64().is_some_and(|version| version <= 2),
                 _ => false,
             };
             if !fits {
@@ -997,6 +1066,12 @@ mod tests {
             json!({ "Foreground": { "s": { "Web": { HP: web.clone() } } } }),
             json!({ "Foreground": { "s": { "AllowFunnel": { HP: true } } } }),
             json!({ "Services": { "svc:x": { "Web": { HP: web.clone() } } } }),
+            // The same origin in other letter case is the same origin.
+            json!({ "Web": { "PC.Tail1234.ts.net:443": web.clone() } }),
+            json!({ "AllowFunnel": { "PC.TAIL1234.TS.NET:443": false } }),
+            json!({ "TCP": { "443": tcp.clone() }, "Web": {
+                HP: web.clone(), "pc.TAIL1234.ts.net:443": web.clone()
+            } }),
         ];
         for config in cases {
             assert!(matches!(refused(&config), Refusal::InUse(_)), "{config}");
@@ -1022,6 +1097,18 @@ mod tests {
             json!({ "Services": { "svc:x": { "Mystery": 1 } } }),
             json!({ "Services": { "svc:x": { "TCP": { "1": { "Odd": 1 } } } } }),
             json!({ "Services": { "svc:x": { "Tun": "no" } } }),
+            // Ports written any way but Tailscale's own are ambiguous.
+            json!({ "TCP": { "0443": { "HTTPS": true } } }),
+            json!({ "TCP": { "+443": { "HTTPS": true } } }),
+            json!({ "TCP": { "0": { "HTTPS": true } } }),
+            json!({ "TCP": { "8443": { "ProxyProtocol": 1.5 } } }),
+            json!({ "TCP": { "8443": { "ProxyProtocol": 3 } } }),
+            json!({ "TCP": { "8443": { "ProxyProtocol": -1 } } }),
+            json!({ "Web": { "pc.tail1234.ts.net:0443": { "Handlers": {} } } }),
+            json!({ "Web": { "pc.tail1234.ts.net": { "Handlers": {} } } }),
+            json!({ "Web": { ":443": { "Handlers": {} } } }),
+            json!({ "AllowFunnel": { "pc.tail1234.ts.net:+443": true } }),
+            json!({ "Services": { "svc:x": { "Web": { "x:00443": { "Handlers": {} } } } } }),
         ];
         for config in cases {
             assert!(
@@ -1102,10 +1189,20 @@ mod tests {
                 "{name}"
             );
         }
-        assert!(matches!(
-            refused_status(&with(status(), &["Self", "ID"], Value::Null)),
-            Refusal::Malformed(_)
-        ));
+        for (path, value) in [
+            (&["Self", "ID"][..], Value::Null),
+            (&["Self", "ID"][..], json!("")),
+            (&["Self", "ID"][..], json!("  ")),
+            (&["CurrentTailnet", "Name"][..], json!("")),
+        ] {
+            assert!(
+                matches!(
+                    refused_status(&with(status(), path, value)),
+                    Refusal::Malformed(_)
+                ),
+                "{path:?}"
+            );
+        }
     }
 
     #[test]
@@ -1122,10 +1219,27 @@ mod tests {
         assert!(ready(&config).admin_note.is_some());
     }
 
+    fn soon() -> tokio::time::Instant {
+        tokio::time::Instant::now() + EXCHANGE_WITHIN
+    }
+
     /// A fake daemon on one end of an in-memory pipe: it records the request
-    /// head and writes `response` back.
+    /// head and writes `response` back, then closes.
     fn fake_daemon(
         response: Vec<u8>,
+    ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<String>) {
+        daemon(response, false)
+    }
+
+    /// Like [`fake_daemon`], but after writing `response` it keeps the
+    /// connection open and silent.
+    fn stalling_daemon(response: Vec<u8>) -> tokio::io::DuplexStream {
+        daemon(response, true).0
+    }
+
+    fn daemon(
+        response: Vec<u8>,
+        stall: bool,
     ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<String>) {
         let (client, mut server) = tokio::io::duplex(64 * 1024);
         let handle = tokio::spawn(async move {
@@ -1138,10 +1252,90 @@ mod tests {
                 head.push(byte[0]);
             }
             let _ = server.write_all(&response).await;
+            if stall {
+                std::future::pending::<()>().await;
+            }
             let _ = server.shutdown().await;
             String::from_utf8_lossy(&head).into_owned()
         });
         (client, handle)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_body_that_stalls_after_the_head_keeps_its_status() {
+        for (head, status) in [
+            (
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 100\r\n\r\nx",
+                403,
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nEtag: t1\r\nContent-Length: 100\r\n\r\n{",
+                200,
+            ),
+        ] {
+            let client = stalling_daemon(head.as_bytes().to_vec());
+            let started = tokio::time::Instant::now();
+            let reply = exchange(client, Method::GET, "/localapi/v0/status", soon())
+                .await
+                .expect("the head arrived, so this is a reply");
+            assert_eq!(reply.status, status);
+            assert!(reply.truncated);
+            assert_eq!(reply.body.len(), 1);
+            assert_eq!(started.elapsed(), EXCHANGE_WITHIN);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_head_by_the_deadline_is_interrupted() {
+        let client = stalling_daemon(Vec::new());
+        assert_eq!(
+            exchange(client, Method::GET, "/localapi/v0/status", soon()).await,
+            Err(ApiFailure::Interrupted("timed out".to_string()))
+        );
+        // A head cut off part-way is no head either.
+        let client = stalling_daemon(b"HTTP/1.1 403 Forb".to_vec());
+        assert!(matches!(
+            exchange(client, Method::GET, "/localapi/v0/status", soon()).await,
+            Err(ApiFailure::Interrupted(_))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connecting_and_the_exchange_share_one_budget() {
+        let within = Duration::from_secs(5);
+        // Connecting takes three seconds; the head never comes. The whole
+        // request ends at five seconds, not three plus five.
+        let started = tokio::time::Instant::now();
+        let slow_connect = async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            Ok(stalling_daemon(Vec::new()))
+        };
+        assert_eq!(
+            request(slow_connect, Method::GET, "/localapi/v0/status", within).await,
+            Err(ApiFailure::Interrupted("timed out".to_string()))
+        );
+        assert_eq!(started.elapsed(), within);
+
+        // Connecting alone outlasts the budget: nothing was sent.
+        let started = tokio::time::Instant::now();
+        let stuck_connect = async {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            Ok(stalling_daemon(Vec::new()))
+        };
+        assert_eq!(
+            request(stuck_connect, Method::GET, "/localapi/v0/status", within).await,
+            Err(ApiFailure::Unreachable("connecting timed out".to_string()))
+        );
+        assert_eq!(started.elapsed(), within);
+
+        // A failed connection is unreachable at once.
+        let refused = async {
+            Err::<tokio::io::DuplexStream, _>(ApiFailure::Unreachable("refused".to_string()))
+        };
+        assert_eq!(
+            request(refused, Method::GET, "/localapi/v0/status", within).await,
+            Err(ApiFailure::Unreachable("refused".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -1154,7 +1348,7 @@ mod tests {
         .into_bytes();
         response.extend_from_slice(body);
         let (client, server) = fake_daemon(response);
-        let reply = exchange(client, Method::GET, "/localapi/v0/serve-config")
+        let reply = exchange(client, Method::GET, "/localapi/v0/serve-config", soon())
             .await
             .expect("a reply");
         assert_eq!(reply.status, 200);
@@ -1183,7 +1377,7 @@ mod tests {
             format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {size}\r\n\r\n").into_bytes();
         response.extend(std::iter::repeat(b'x').take(size));
         let (client, _server) = fake_daemon(response);
-        let reply = exchange(client, Method::GET, "/localapi/v0/status")
+        let reply = exchange(client, Method::GET, "/localapi/v0/status", soon())
             .await
             .expect("a reply");
         assert_eq!(reply.status, 403);
@@ -1195,7 +1389,7 @@ mod tests {
     async fn a_closed_connection_without_an_answer_is_interrupted() {
         let (client, _server) = fake_daemon(Vec::new());
         assert!(matches!(
-            exchange(client, Method::GET, "/localapi/v0/status").await,
+            exchange(client, Method::GET, "/localapi/v0/status", soon()).await,
             Err(ApiFailure::Interrupted(_))
         ));
     }
