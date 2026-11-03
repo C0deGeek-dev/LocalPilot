@@ -914,19 +914,13 @@ like) are ignored.
 
 - **This computer only.** No proxy; useful for checking the gateway with
   `localpilot remote status`. A phone cannot reach it.
-- **Tailscale.** `tailscale serve --bg --https=443 127.0.0.1:47610` serves
+- **Tailscale.** `localpilot remote setup` does this for you; see
+  [Phone setup with Tailscale](#phone-setup-with-tailscale). By hand:
+  `tailscale serve --bg --https=443 127.0.0.1:47610` serves
   `https://<machine>.<tailnet>.ts.net/` to devices on your tailnet; use that
-  address as `advertised_url`. `localpilot remote setup --check` reads
-  Tailscale on this computer and says whether that address can be added
-  without touching your other Serve settings, or what stands in the way
-  (Tailscale not connected, MagicDNS or HTTPS certificates off in the admin
-  console, something already on port 443, a release it cannot change). It
-  changes nothing. It needs a stable Tailscale release from 1.102.0 on with
-  the open-source daemon; the macOS app builds are not supported yet. On
-  Linux, a user who is not root needs `sudo tailscale set --operator=$USER`
-  to manage Tailscale. Note that the HTTPS certificate publishes
-  `<machine>.<tailnet>.ts.net` in public Certificate Transparency logs; rename
-  the computer in Tailscale to something neutral first if its name is
+  address as `advertised_url`. The HTTPS certificate publishes
+  `<machine>.<tailnet>.ts.net` in public Certificate Transparency logs, so
+  rename the computer in Tailscale to something neutral first if its name is
   personal.
 - **Cloudflare Tunnel.** A named tunnel whose ingress rule maps your hostname
   to `service: http://localhost:47610`. To be explicit about the `Host` the
@@ -939,6 +933,84 @@ like) are ignored.
   `proxy_set_header Host $host;`) or listing the `Host` it sends in
   `proxy_hosts`. WebSocket upgrades must be passed through (`/api/socket`). A server started with `LOCALPILOT_SERVER_SOCKET`
 set uses a custom endpoint and is not reachable through the gateway.
+
+#### Phone setup with Tailscale
+
+`localpilot remote setup` gives your phone an HTTPS address for the gateway
+through Tailscale on this computer, with no account or server other than your
+own Tailscale. You need Tailscale installed and signed in, with MagicDNS and
+HTTPS Certificates turned on in the Tailscale admin console (under DNS).
+
+```text
+localpilot remote setup --check        # what setup would do; changes nothing
+localpilot remote setup                # asks, then sets up
+localpilot remote setup --random-name --yes   # without a prompt
+localpilot remote setup --keep-name --yes
+localpilot remote setup --undo [--yes]
+```
+
+What a run does, re-reading Tailscale before each step and stopping at the
+first thing it cannot confirm:
+
+1. **Checks before any change.** Tailscale must be connected and a stable
+   release from 1.102.0 on. Its Serve settings must contain only things
+   setup understands. Nothing else may use `https://<machine>.<tailnet>.ts.net/`
+   on port 443: no other handler, port setting, Funnel, terminal-run
+   `tailscale serve` or service. If something is in the way, setup says what,
+   changes nothing and tells you how to fix it.
+2. **Your consent.** Setup shows the address and that its certificate puts the
+   name permanently in public Certificate Transparency logs. It offers a
+   random neutral name for this computer (for example `lp-7f3k2q`), because
+   the name usually is your computer's host name. Renaming changes the name
+   for every device and app in your tailnet that uses it. Already paired
+   phones must pair again. Names in earlier certificates cannot be removed.
+   Cancel is the default. Without a terminal, setup needs `--yes` and either
+   `--random-name` or `--keep-name`.
+3. **A test save.** Setup sends Tailscale your settings exactly as read with a
+   deliberately wrong version tag. Tailscale must refuse it, which shows it
+   will not save over settings that changed in between. If it accepts it,
+   setup stops: the save changed nothing, because it was your settings as
+   they were, but this install cannot be changed safely.
+4. **The rename**, if you chose it. Setup waits up to 30 seconds for Tailscale
+   to show the new name with its certificate. Tailscale cannot make a name
+   change conditional, so a change made to the name elsewhere at the same
+   moment could be overwritten.
+5. **The phone address.** Setup adds port 443 and the address's root,
+   forwarding to `127.0.0.1:<port>`. The change is accepted only if your Serve
+   settings are still exactly as setup read them. Everything else in them
+   stays as it was. An address set up the same way outside LocalPilot is used
+   as it is and never removed.
+6. **Your config.** Setup sets `[remote] enabled = true` and `advertised_url`
+   in the user config, keeping everything else, comments included. It refuses
+   a file it cannot parse. Every LocalPilot writer of that file takes the same
+   lock (`config.toml.lock` beside it). An editor outside LocalPilot that saves
+   at the very moment setup writes is not detected.
+7. **The gateway.** Setup never starts or restarts it. It reports one of:
+   - not running;
+   - running with the new address;
+   - running with an older address (restart it);
+   - something else on the port, which it leaves alone.
+8. **A check from this computer.** Only with the gateway running on the new
+   address, setup fetches the address over normal HTTPS and makes a
+   WebSocket request without a credential, which must be refused as unpaired.
+   Success reads "Verified from this computer; the phone is not checked yet."
+
+Setup records what it confirmed in `~/.localpilot/remote/setup.json`. A
+change it could not confirm (an answer lost on the way, for example) is
+reported and never treated as LocalPilot's, so undo never touches it. Run
+setup again any time: it keeps what it already set up.
+
+`--undo` first removes the phone address, only while it is still exactly as
+setup made it. It then restores the earlier name setting, only while nothing
+uses the current name and the setting is still the one setup gave. Tailscale
+may not give back the exact earlier name. `advertised_url` stays in your
+config for you to change.
+
+On Linux, a user who is not root needs `sudo tailscale set --operator=$USER`
+to let Tailscale take changes from them. On macOS, setup supports the
+open-source `tailscaled` (for example from Homebrew); the Tailscale app builds
+are not supported yet. Use the manual `tailscale serve` command there; the
+app's CLI is `/Applications/Tailscale.app/Contents/MacOS/Tailscale`.
 
 ### `[terminal]`
 

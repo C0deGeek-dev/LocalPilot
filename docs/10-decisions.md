@@ -52,8 +52,28 @@ empty tag overwrites unconditionally.
    can issue a certificate and offers a random replacement name for the
    computer first.
 
-**Consequences.** The read-only check ships first; changes to Tailscale land
-separately, behind the same checks. A Serve setting the user owns is never
+6. `localpilot remote setup` changes Tailscale in a fixed order, re-reading
+   before each step: the test save, then the optional rename, then the phone
+   origin (conditional on the tag of the fresh read), then the user config
+   under its lock, then the gateway and address checks.
+   - **The rename** runs only after a full Serve preflight on the current and
+     the proposed name. It is refused when anything uses the current name at
+     any port, and when the paired-device list cannot be read. It settles only
+     when this same node shows the new name with its certificate.
+   - **Ownership.** The journal (`~/.localpilot/remote/setup.json`) keeps
+     confirmed ownership apart from the newest attempt. A change counts as
+     LocalPilot's only after the daemon accepted it and a fresh read shows it
+     on the same node. Unknown outcomes are reported, never adopted, and never
+     undone automatically.
+   - **The gateway** is identified by its exact health answer on
+     `/identify`, which answers only a loopback-literal `Host` (`/healthz`
+     keeps the host policy). Its address is
+     then checked with a browser-shaped request that must get the exact
+     missing-credential refusal. Setup never starts or restarts anything.
+   - **Undo** removes the origin first, then restores the name setting, each
+     only while it is exactly as recorded.
+
+**Consequences.** A Serve setting the user owns is never
 edited, removed or overwritten by setup. If a future Tailscale stopped
 enforcing the version tag, the test save would write back the settings just
 read, which could undo an edit made in that instant; setup then refuses and

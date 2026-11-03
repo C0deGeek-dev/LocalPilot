@@ -68,6 +68,7 @@ mod relay_source;
 mod remote_devices;
 mod remote_gateway;
 mod remote_pairing;
+mod remote_setup;
 mod remote_share;
 mod remote_status;
 mod remote_status_model;
@@ -915,12 +916,27 @@ enum RemoteAction {
     /// Show whether remote access is on, whether the gateway runs, the
     /// workspaces it can reach and how many devices are paired.
     Status,
-    /// Check whether Tailscale on this computer can give your phone an HTTPS
-    /// address for the gateway, and say what setup would change. Read-only.
+    /// Give your phone an HTTPS address for the gateway through Tailscale on
+    /// this computer: adds `https://<machine>.<tailnet>.ts.net/` forwarding to
+    /// the gateway, changing nothing else in your Serve settings, and sets
+    /// `[remote] advertised_url`. Offers a random machine name first, since the
+    /// certificate publishes the name.
     Setup {
         /// Only check and report; change nothing.
-        #[arg(long, required = true)]
+        #[arg(long, conflicts_with_all = ["undo", "random_name", "keep_name", "yes"])]
         check: bool,
+        /// Give this computer a random Tailscale name first.
+        #[arg(long, conflicts_with = "keep_name")]
+        random_name: bool,
+        /// Keep this computer's Tailscale name.
+        #[arg(long)]
+        keep_name: bool,
+        /// Confirm without asking.
+        #[arg(long)]
+        yes: bool,
+        /// Remove what setup added, each part only while it is unchanged.
+        #[arg(long, conflicts_with_all = ["random_name", "keep_name"])]
+        undo: bool,
     },
 }
 
@@ -2095,7 +2111,22 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         Command::Remote { action } => match action {
             RemoteAction::Gateway => remote_gateway::run().await?,
             RemoteAction::Status => remote_gateway::print_status().await,
-            RemoteAction::Setup { check: _ } => remote_tailscale::print_check().await?,
+            RemoteAction::Setup {
+                check,
+                random_name,
+                keep_name,
+                yes,
+                undo,
+            } => {
+                let flag = if random_name {
+                    remote_setup::NameFlag::Random
+                } else if keep_name {
+                    remote_setup::NameFlag::Keep
+                } else {
+                    remote_setup::NameFlag::Ask
+                };
+                remote_setup::command(check, undo, flag, yes).await?;
+            }
         },
 
         Command::ServerServe => {

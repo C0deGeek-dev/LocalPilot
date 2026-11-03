@@ -70,9 +70,57 @@ impl std::fmt::Display for ApiFailure {
     }
 }
 
+/// What a request carries besides its method and path.
+#[derive(Debug, Clone, Default)]
+struct Payload {
+    /// A JSON body.
+    body: Option<Vec<u8>>,
+    /// The version tag a write is conditional on.
+    if_match: Option<String>,
+}
+
 /// Send one GET to the daemon's local API.
 pub(crate) async fn get(path: &str) -> Result<Reply, ApiFailure> {
-    request(connect(), Method::GET, path, EXCHANGE_WITHIN).await
+    request(
+        connect(),
+        Method::GET,
+        path,
+        Payload::default(),
+        EXCHANGE_WITHIN,
+    )
+    .await
+}
+
+/// Send one conditional POST of a JSON document. An empty `if_match` is
+/// refused here: the daemon would treat it as "overwrite whatever is there".
+pub(crate) async fn post_json(
+    path: &str,
+    body: &Value,
+    if_match: &str,
+) -> Result<Reply, ApiFailure> {
+    if if_match.trim().is_empty() {
+        return Err(ApiFailure::Unreachable(
+            "refusing an unconditional write".to_string(),
+        ));
+    }
+    let payload = Payload {
+        body: Some(json_bytes(body)?),
+        if_match: Some(if_match.to_string()),
+    };
+    request(connect(), Method::POST, path, payload, EXCHANGE_WITHIN).await
+}
+
+/// Send one PATCH of a JSON document (the daemon has no conditional form).
+pub(crate) async fn patch_json(path: &str, body: &Value) -> Result<Reply, ApiFailure> {
+    let payload = Payload {
+        body: Some(json_bytes(body)?),
+        if_match: None,
+    };
+    request(connect(), Method::PATCH, path, payload, EXCHANGE_WITHIN).await
+}
+
+fn json_bytes(body: &Value) -> Result<Vec<u8>, ApiFailure> {
+    serde_json::to_vec(body).map_err(|error| ApiFailure::Unreachable(error.to_string()))
 }
 
 /// One request under one budget, from before connecting to the last body
@@ -82,6 +130,7 @@ async fn request<C, S>(
     connect: C,
     method: Method,
     path: &str,
+    payload: Payload,
     within: Duration,
 ) -> Result<Reply, ApiFailure>
 where
@@ -93,7 +142,7 @@ where
         Ok(stream) => stream?,
         Err(_) => return Err(ApiFailure::Unreachable("connecting timed out".to_string())),
     };
-    exchange(stream, method, path, deadline).await
+    exchange(stream, method, path, payload, deadline).await
 }
 
 #[cfg(windows)]
@@ -168,16 +217,24 @@ async fn exchange<S>(
     stream: S,
     method: Method,
     path: &str,
+    payload: Payload,
     deadline: tokio::time::Instant,
 ) -> Result<Reply, ApiFailure>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    let request = Request::builder()
+    let mut builder = Request::builder()
         .method(method)
         .uri(path)
-        .header(header::HOST, API_HOST)
-        .body(Full::new(Bytes::new()))
+        .header(header::HOST, API_HOST);
+    if payload.body.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    if let Some(tag) = &payload.if_match {
+        builder = builder.header(header::IF_MATCH, tag.as_str());
+    }
+    let request = builder
+        .body(Full::new(Bytes::from(payload.body.unwrap_or_default())))
         .map_err(|error| ApiFailure::Unreachable(error.to_string()))?;
     let handshake = hyper::client::conn::http1::handshake(TokioIo::new(stream));
     let (mut sender, connection) = match tokio::time::timeout_at(deadline, handshake).await {
@@ -441,14 +498,12 @@ impl Refusal {
 pub(crate) struct Change {
     /// `https://<name>`.
     pub origin: String,
-    /// The node and tailnet the change was planned for; the write re-checks
-    /// them. Only the tests read them until the conditional write lands.
+    /// The node and tailnet the change was planned for.
     #[cfg_attr(not(test), allow(dead_code))]
     pub node_id: String,
     #[cfg_attr(not(test), allow(dead_code))]
     pub tailnet: String,
     /// The full Serve config to write: what was read, plus the phone origin.
-    /// Only the tests read it until the conditional write lands.
     #[cfg_attr(not(test), allow(dead_code))]
     pub config: Value,
     /// The version tag the write must be conditional on.
@@ -485,6 +540,26 @@ fn assess_inner(
     etag: Option<&str>,
     port: u16,
 ) -> Result<Readiness, Refusal> {
+    let node = eligible(status)?;
+    let if_match = version_tag(etag)?;
+    let origin = format!("https://{}", node.name);
+    match origin_plan(config, &node.name, port)? {
+        OriginPlan::AlreadyServed => Ok(Readiness::AlreadyServed { origin }),
+        OriginPlan::Free(planned) => Ok(Readiness::Ready(Change {
+            origin,
+            node_id: node.node_id,
+            tailnet: node.tailnet,
+            config: planned,
+            if_match,
+            admin_note: admin_note(config),
+        })),
+    }
+}
+
+/// The observed node's prerequisites: a stable release setup may change,
+/// connected, MagicDNS on, a one-label name inside the tailnet, HTTPS
+/// certificates on and a certificate offered for the node's own current name.
+pub(crate) fn eligible(status: &Value) -> Result<Node, Refusal> {
     let node = read_node(status)?;
     if !supported(&node.version) {
         return Err(Refusal::Unsupported(node.version));
@@ -495,13 +570,7 @@ fn assess_inner(
     if !node.magic_dns {
         return Err(Refusal::NoMagicDns);
     }
-    let label = node
-        .name
-        .strip_suffix(&node.suffix)
-        .and_then(|rest| rest.strip_suffix('.'));
-    if node.suffix.is_empty()
-        || !matches!(label, Some(label) if !label.is_empty() && !label.contains('.'))
-    {
+    if !one_label(&node.name, &node.suffix) {
         return Err(Refusal::NameOutsideTailnet {
             name: node.name,
             suffix: node.suffix,
@@ -513,16 +582,51 @@ fn assess_inner(
     if !node.cert_domains.iter().any(|domain| domain == &node.name) {
         return Err(Refusal::NoCertificate(node.name));
     }
-    let if_match = match etag {
-        Some(tag) if !tag.trim().is_empty() => tag.to_string(),
-        _ => return Err(Refusal::NoTag),
-    };
-    let host_port = format!("{}:{HTTPS_PORT}", node.name);
-    let ours_tcp = serde_json::json!({ "HTTPS": true });
-    let ours_web = serde_json::json!({
-        "Handlers": { "/": { "Proxy": format!("http://127.0.0.1:{port}") } }
-    });
+    Ok(node)
+}
 
+/// Whether `name` is exactly one label followed by `.` and `suffix`.
+pub(crate) fn one_label(name: &str, suffix: &str) -> bool {
+    let label = name
+        .strip_suffix(suffix)
+        .and_then(|rest| rest.strip_suffix('.'));
+    !suffix.is_empty() && matches!(label, Some(label) if !label.is_empty() && !label.contains('.'))
+}
+
+/// The version tag a write must be conditional on; none means no write.
+pub(crate) fn version_tag(etag: Option<&str>) -> Result<String, Refusal> {
+    match etag {
+        Some(tag) if !tag.trim().is_empty() => Ok(tag.to_string()),
+        _ => Err(Refusal::NoTag),
+    }
+}
+
+/// The note shown when the existing config shares a file, folder or Unix
+/// socket, so Tailscale accepts any change only from an administrator.
+pub(crate) fn admin_note(config: &Value) -> Option<String> {
+    serves_files_or_sockets(config).then(|| {
+        "your existing Serve settings share a file, folder or Unix socket, so Tailscale \
+         will accept a change only from an administrator"
+            .to_string()
+    })
+}
+
+/// What the phone origin on `name` would take.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OriginPlan {
+    /// Nothing is on the origin: the config to write is the one read plus the
+    /// origin's two entries.
+    Free(Value),
+    /// Exactly the phone origin's two entries are already there.
+    AlreadyServed,
+}
+
+/// Structure, schema and exclusive-origin checks for `https://<name>/` on
+/// 443 forwarding to `127.0.0.1:<port>`, independent of what the node's
+/// status says about certificates.
+pub(crate) fn origin_plan(config: &Value, name: &str, port: u16) -> Result<OriginPlan, Refusal> {
+    let host_port = format!("{name}:{HTTPS_PORT}");
+    let (ours_tcp, ours_web) = our_entries(port);
     let mut top = match config {
         Value::Null => Map::new(),
         Value::Object(map) => map.clone(),
@@ -595,11 +699,10 @@ fn assess_inner(
             "Funnel (public internet access) is configured for this address".to_string(),
         ));
     }
-    let origin = format!("https://{}", node.name);
     match (found.tcp, found.web) {
         (None, None) => {}
         (Some(tcp), Some(web)) if tcp == &ours_tcp && web == &ours_web => {
-            return Ok(Readiness::AlreadyServed { origin });
+            return Ok(OriginPlan::AlreadyServed);
         }
         (Some(_), _) => {
             return Err(Refusal::InUse(
@@ -612,21 +715,100 @@ fn assess_inner(
             )))
         }
     }
-    let admin_note = serves_files_or_sockets(config).then(|| {
-        "your existing Serve settings share a file, folder or Unix socket, so Tailscale \
-         will accept a change only from an administrator"
-            .to_string()
-    });
     insert(&mut top, "TCP", HTTPS_PORT.to_string(), ours_tcp);
     insert(&mut top, "Web", host_port, ours_web);
-    Ok(Readiness::Ready(Change {
-        origin,
-        node_id: node.node_id,
-        tailnet: node.tailnet,
-        config: Value::Object(top),
-        if_match,
-        admin_note,
-    }))
+    Ok(OriginPlan::Free(Value::Object(top)))
+}
+
+/// The phone origin's two entries: port 443 as HTTPS, and the root of the
+/// origin forwarded to the gateway.
+fn our_entries(port: u16) -> (Value, Value) {
+    (
+        serde_json::json!({ "HTTPS": true }),
+        serde_json::json!({
+            "Handlers": { "/": { "Proxy": format!("http://127.0.0.1:{port}") } }
+        }),
+    )
+}
+
+/// Anything in a config (already accepted by [`origin_plan`]) that a new
+/// name for this computer would move: a listener on any port of the node, a
+/// web or Funnel entry for `name` at any port, at the top level or in a
+/// terminal-run session, or a service serving `name`. Services under their
+/// own names are not moved by renaming the computer.
+pub(crate) fn name_in_use(config: &Value, name: &str) -> Option<String> {
+    fn level(map: &Map<String, Value>, name: &str, at: &str) -> Option<String> {
+        if let Some(Value::Object(ports)) = map.get("TCP") {
+            if let Some(port) = ports.keys().next() {
+                return Some(format!("{at}port {port} of this computer is served"));
+            }
+        }
+        for section in ["Web", "AllowFunnel"] {
+            if let Some(Value::Object(keys)) = map.get(section) {
+                for key in keys.keys() {
+                    let host = key.rsplit_once(':').map_or(key.as_str(), |(host, _)| host);
+                    if host.eq_ignore_ascii_case(name) {
+                        return Some(format!("{at}{key} has a {section} setting"));
+                    }
+                }
+            }
+        }
+        None
+    }
+    let top = config.as_object()?;
+    if let Some(found) = level(top, name, "") {
+        return Some(found);
+    }
+    if let Some(Value::Object(sessions)) = top.get("Foreground") {
+        for inner in sessions.values() {
+            if let Some(found) = inner
+                .as_object()
+                .and_then(|inner| level(inner, name, "a terminal-run `tailscale serve`: "))
+            {
+                return Some(found);
+            }
+        }
+    }
+    if let Some(Value::Object(services)) = top.get("Services") {
+        for (service, inner) in services {
+            if let Some(Value::Object(keys)) = inner.get("Web") {
+                for key in keys.keys() {
+                    let host = key.rsplit_once(':').map_or(key.as_str(), |(host, _)| host);
+                    if host.eq_ignore_ascii_case(name) {
+                        return Some(format!("the Tailscale service {service} serves {key}"));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The config without the phone origin's two entries, for undo. The caller
+/// has seen [`origin_plan`] answer [`OriginPlan::AlreadyServed`] for the same
+/// config, so both entries are exactly ours.
+pub(crate) fn without_ours(config: &Value, name: &str) -> Value {
+    let host_port = format!("{name}:{HTTPS_PORT}");
+    let mut top = config.as_object().cloned().unwrap_or_default();
+    for (section, key) in [("TCP", HTTPS_PORT.to_string()), ("Web", host_port)] {
+        let now_empty = match top.get_mut(section) {
+            Some(Value::Object(map)) => {
+                let found = map
+                    .keys()
+                    .find(|existing| existing.eq_ignore_ascii_case(&key))
+                    .cloned();
+                if let Some(found) = found {
+                    map.remove(&found);
+                }
+                map.is_empty()
+            }
+            _ => false,
+        };
+        if now_empty {
+            top.remove(section);
+        }
+    }
+    Value::Object(top)
 }
 
 /// What one config level holds for the phone origin.
@@ -801,86 +983,6 @@ fn insert(top: &mut Map<String, Value>, key: &str, name: String, value: Value) {
     let mut section = Map::new();
     section.insert(name, value);
     top.insert(key.to_string(), Value::Object(section));
-}
-
-/// Read one local API document: a complete 200 reply with a JSON body.
-async fn read_document(path: &str, what: &str) -> anyhow::Result<(Value, Option<String>)> {
-    let reply = get(path)
-        .await
-        .map_err(|failure| anyhow::anyhow!("{failure}"))?;
-    match reply.status {
-        200 => {}
-        403 => anyhow::bail!(
-            "this user may not read Tailscale's {what}; nothing was changed. On Linux, \
-             `sudo tailscale set --operator=$USER` lets your user manage Tailscale."
-        ),
-        status => {
-            let detail = String::from_utf8_lossy(&reply.body);
-            let detail: String = detail.trim().chars().take(200).collect();
-            anyhow::bail!("Tailscale answered {status} when asked for its {what}: {detail}");
-        }
-    }
-    if reply.truncated {
-        anyhow::bail!("Tailscale's {what} was larger than setup reads; nothing was changed");
-    }
-    let value = serde_json::from_slice(&reply.body)
-        .map_err(|error| anyhow::anyhow!("Tailscale's {what} was not JSON: {error}"))?;
-    Ok((value, reply.etag))
-}
-
-/// `localpilot remote setup --check`: say what setup would do on this
-/// computer, changing nothing.
-pub(crate) async fn print_check() -> anyhow::Result<()> {
-    let cwd = std::env::current_dir()?;
-    let port = localpilot_config::load(
-        &localpilot_config::ConfigPaths::standard(&cwd),
-        &localpilot_config::CliOverrides::default(),
-    )?
-    .remote
-    .port;
-    let (status, _) = read_document("/localapi/v0/status?peers=false", "status").await?;
-    let (config, etag) = read_document("/localapi/v0/serve-config", "Serve settings").await?;
-    if let Ok(node) = read_node(&status) {
-        println!(
-            "Tailscale {} on {} (tailnet {}), {}.",
-            node.version,
-            if node.name.is_empty() {
-                "this computer"
-            } else {
-                &node.name
-            },
-            node.tailnet,
-            node.state
-        );
-    }
-    match assess(&status, &config, etag.as_deref(), port) {
-        Readiness::Ready(change) => {
-            println!(
-                "Setup would serve {}/ from the gateway on 127.0.0.1:{port}, changing nothing \
-                 else in your Serve settings (conditional on settings version {}).",
-                change.origin, change.if_match
-            );
-            if let Some(note) = &change.admin_note {
-                println!("Note: {note}.");
-            }
-            println!(
-                "Serving it publishes the name {} in public certificate logs.",
-                change.origin.trim_start_matches("https://")
-            );
-            println!("This check changed nothing; applying the change is not available yet.");
-            Ok(())
-        }
-        Readiness::AlreadyServed { origin } => {
-            println!(
-                "{origin}/ already forwards to the gateway on 127.0.0.1:{port}. It was not set \
-                 up by LocalPilot, so LocalPilot will never remove it."
-            );
-            Ok(())
-        }
-        Readiness::Refused(refusal) => {
-            anyhow::bail!("{}. {}", refusal.message(), refusal.remedy())
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1206,6 +1308,114 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_is_blocked_by_any_use_of_the_current_name() {
+        let web = json!({ "Handlers": { "/": { "Proxy": "http://127.0.0.1:3000" } } });
+        for config in [
+            json!({ "TCP": { "8443": { "HTTPS": true } } }),
+            json!({ "TCP": { "22": { "TCPForward": "127.0.0.1:22" } } }),
+            json!({ "Web": { "pc.tail1234.ts.net:8443": web.clone() } }),
+            json!({ "Web": { "PC.tail1234.ts.net:10000": web.clone() } }),
+            json!({ "AllowFunnel": { "pc.tail1234.ts.net:8443": false } }),
+            json!({ "Foreground": { "s": { "TCP": { "9000": { "HTTPS": true } } } } }),
+            json!({ "Services": { "svc:x": { "Web": { "pc.tail1234.ts.net:443": web.clone() } } } }),
+        ] {
+            assert!(name_in_use(&config, NAME).is_some(), "{config}");
+        }
+        for config in [
+            Value::Null,
+            json!({}),
+            json!({ "Web": { "other.tail1234.ts.net:443": web.clone() } }),
+            // A service under its own name is not moved by renaming the computer.
+            json!({ "Services": { "svc:x": { "TCP": { "443": { "HTTPS": true } },
+                "Web": { "x.tail1234.ts.net:443": web.clone() } } } }),
+        ] {
+            assert_eq!(name_in_use(&config, NAME), None, "{config}");
+        }
+    }
+
+    #[test]
+    fn the_proposed_name_is_planned_without_its_certificate() {
+        // Before a rename the node's status still offers only the old name;
+        // the origin plan for the new name is structural only.
+        let change = ready(&json!({}));
+        let planned = origin_plan(&json!({}), "lp-abc234.tail1234.ts.net", PORT);
+        let (tcp, web) = ours();
+        assert_eq!(
+            planned,
+            Ok(OriginPlan::Free(json!({
+                "TCP": { "443": tcp },
+                "Web": { "lp-abc234.tail1234.ts.net:443": web }
+            })))
+        );
+        assert_ne!(change.config, json!({}));
+    }
+
+    #[test]
+    fn undo_removes_exactly_the_two_entries() {
+        let (tcp, web) = ours();
+        let other = json!({ "Handlers": { "/": { "Proxy": "http://127.0.0.1:3000" } } });
+        let config = json!({
+            "TCP": { "443": tcp.clone(), "8443": { "HTTPS": true } },
+            "Web": { HP: web.clone(), "pc.tail1234.ts.net:8443": other.clone() }
+        });
+        assert_eq!(
+            origin_plan(&config, NAME, PORT),
+            Ok(OriginPlan::AlreadyServed)
+        );
+        assert_eq!(
+            without_ours(&config, NAME),
+            json!({
+                "TCP": { "8443": { "HTTPS": true } },
+                "Web": { "pc.tail1234.ts.net:8443": other }
+            })
+        );
+        let only = json!({ "TCP": { "443": tcp }, "Web": { HP: web } });
+        assert_eq!(without_ours(&only, NAME), json!({}));
+    }
+
+    #[tokio::test]
+    async fn a_write_carries_its_body_and_tag() {
+        let mut response =
+            b"HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\n\r\n".to_vec();
+        response.extend_from_slice(b"");
+        let (client, server) = fake_daemon(response);
+        let payload = Payload {
+            body: Some(br#"{"TCP":{}}"#.to_vec()),
+            if_match: Some("tag-9".to_string()),
+        };
+        let reply = exchange(
+            client,
+            Method::POST,
+            "/localapi/v0/serve-config",
+            payload,
+            soon(),
+        )
+        .await
+        .expect("a reply");
+        assert_eq!(reply.status, 412);
+        let head = server.await.expect("server").to_ascii_lowercase();
+        assert!(
+            head.starts_with("post /localapi/v0/serve-config http/1.1\r\n"),
+            "{head}"
+        );
+        assert!(head.contains("\r\nif-match: tag-9\r\n"), "{head}");
+        assert!(
+            head.contains("\r\ncontent-type: application/json\r\n"),
+            "{head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unconditional_write_is_never_sent() {
+        for tag in ["", "  "] {
+            assert!(matches!(
+                post_json("/localapi/v0/serve-config", &json!({}), tag).await,
+                Err(ApiFailure::Unreachable(_))
+            ));
+        }
+    }
+
+    #[test]
     fn a_config_sharing_files_or_sockets_notes_the_administrator_rule() {
         for handler in [
             json!({ "Path": "/srv/files" }),
@@ -1275,9 +1485,15 @@ mod tests {
         ] {
             let client = stalling_daemon(head.as_bytes().to_vec());
             let started = tokio::time::Instant::now();
-            let reply = exchange(client, Method::GET, "/localapi/v0/status", soon())
-                .await
-                .expect("the head arrived, so this is a reply");
+            let reply = exchange(
+                client,
+                Method::GET,
+                "/localapi/v0/status",
+                Payload::default(),
+                soon(),
+            )
+            .await
+            .expect("the head arrived, so this is a reply");
             assert_eq!(reply.status, status);
             assert!(reply.truncated);
             assert_eq!(reply.body.len(), 1);
@@ -1289,13 +1505,27 @@ mod tests {
     async fn no_head_by_the_deadline_is_interrupted() {
         let client = stalling_daemon(Vec::new());
         assert_eq!(
-            exchange(client, Method::GET, "/localapi/v0/status", soon()).await,
+            exchange(
+                client,
+                Method::GET,
+                "/localapi/v0/status",
+                Payload::default(),
+                soon()
+            )
+            .await,
             Err(ApiFailure::Interrupted("timed out".to_string()))
         );
         // A head cut off part-way is no head either.
         let client = stalling_daemon(b"HTTP/1.1 403 Forb".to_vec());
         assert!(matches!(
-            exchange(client, Method::GET, "/localapi/v0/status", soon()).await,
+            exchange(
+                client,
+                Method::GET,
+                "/localapi/v0/status",
+                Payload::default(),
+                soon()
+            )
+            .await,
             Err(ApiFailure::Interrupted(_))
         ));
     }
@@ -1311,7 +1541,14 @@ mod tests {
             Ok(stalling_daemon(Vec::new()))
         };
         assert_eq!(
-            request(slow_connect, Method::GET, "/localapi/v0/status", within).await,
+            request(
+                slow_connect,
+                Method::GET,
+                "/localapi/v0/status",
+                Payload::default(),
+                within
+            )
+            .await,
             Err(ApiFailure::Interrupted("timed out".to_string()))
         );
         assert_eq!(started.elapsed(), within);
@@ -1323,7 +1560,14 @@ mod tests {
             Ok(stalling_daemon(Vec::new()))
         };
         assert_eq!(
-            request(stuck_connect, Method::GET, "/localapi/v0/status", within).await,
+            request(
+                stuck_connect,
+                Method::GET,
+                "/localapi/v0/status",
+                Payload::default(),
+                within
+            )
+            .await,
             Err(ApiFailure::Unreachable("connecting timed out".to_string()))
         );
         assert_eq!(started.elapsed(), within);
@@ -1333,7 +1577,14 @@ mod tests {
             Err::<tokio::io::DuplexStream, _>(ApiFailure::Unreachable("refused".to_string()))
         };
         assert_eq!(
-            request(refused, Method::GET, "/localapi/v0/status", within).await,
+            request(
+                refused,
+                Method::GET,
+                "/localapi/v0/status",
+                Payload::default(),
+                within
+            )
+            .await,
             Err(ApiFailure::Unreachable("refused".to_string()))
         );
     }
@@ -1348,9 +1599,15 @@ mod tests {
         .into_bytes();
         response.extend_from_slice(body);
         let (client, server) = fake_daemon(response);
-        let reply = exchange(client, Method::GET, "/localapi/v0/serve-config", soon())
-            .await
-            .expect("a reply");
+        let reply = exchange(
+            client,
+            Method::GET,
+            "/localapi/v0/serve-config",
+            Payload::default(),
+            soon(),
+        )
+        .await
+        .expect("a reply");
         assert_eq!(reply.status, 200);
         assert_eq!(reply.etag.as_deref(), Some("abc123"));
         assert_eq!(reply.body, body);
@@ -1377,9 +1634,15 @@ mod tests {
             format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {size}\r\n\r\n").into_bytes();
         response.extend(std::iter::repeat(b'x').take(size));
         let (client, _server) = fake_daemon(response);
-        let reply = exchange(client, Method::GET, "/localapi/v0/status", soon())
-            .await
-            .expect("a reply");
+        let reply = exchange(
+            client,
+            Method::GET,
+            "/localapi/v0/status",
+            Payload::default(),
+            soon(),
+        )
+        .await
+        .expect("a reply");
         assert_eq!(reply.status, 403);
         assert!(reply.truncated);
         assert_eq!(reply.body.len(), MAX_REPLY);
@@ -1389,7 +1652,14 @@ mod tests {
     async fn a_closed_connection_without_an_answer_is_interrupted() {
         let (client, _server) = fake_daemon(Vec::new());
         assert!(matches!(
-            exchange(client, Method::GET, "/localapi/v0/status", soon()).await,
+            exchange(
+                client,
+                Method::GET,
+                "/localapi/v0/status",
+                Payload::default(),
+                soon()
+            )
+            .await,
             Err(ApiFailure::Interrupted(_))
         ));
     }

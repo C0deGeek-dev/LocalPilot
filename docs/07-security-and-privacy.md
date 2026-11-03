@@ -1279,7 +1279,12 @@ project file cannot set any `[remote]` key).
   explicit list (the advertised host, or `[remote] proxy_hosts`). Pairing and
   the device socket must also carry exactly one `Origin` equal to the advertised
   origin. Forwarded headers are never trusted; there are no wildcard or partial
-  matches.
+  matches. One exception: `GET /identify` answers only a loopback-literal
+  `Host` (`127.0.0.1` or `[::1]`, with or without a port), and it returns only
+  the gateway's version string. This lets `localpilot remote setup` recognise
+  the gateway whatever address it was started with. A page that rebinds its
+  own name to loopback still sends that name and is refused. `/healthz` keeps
+  the host policy, so a proxy that rewrites `Host` cannot look healthy there.
 - **Browser credential.** Pairing posts the code from the QR link's fragment in
   the request body; the credential comes back only in a `__Host-` cookie
   (`Secure`, `HttpOnly`, `SameSite=Strict`) that scripts cannot read, never in

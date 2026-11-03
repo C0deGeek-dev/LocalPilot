@@ -570,6 +570,16 @@ impl Gateway {
         armed: &Arm,
     ) -> Response<Full<Bytes>> {
         if !self.policy.host_ok(request.headers()) {
+            // Setup identifies the gateway on this computer without knowing
+            // the address it was started with. Only the version string is
+            // answered, only on this path and only to a loopback-literal
+            // `Host`; a page that rebinds its own name to loopback still
+            // sends that name. `/healthz` keeps the host policy, so a proxy
+            // that rewrites `Host` cannot look healthy there.
+            let identify = request.method() == Method::GET && request.uri().path() == IDENTIFY_PATH;
+            if identify && loopback_host(request.headers()) {
+                return plain(StatusCode::OK, &health_body());
+            }
             return plain(StatusCode::MISDIRECTED_REQUEST, "unknown host");
         }
         match (request.method(), request.uri().path()) {
@@ -1582,6 +1592,11 @@ async fn probe(port: u16, host: &str) -> GatewayHealth {
 /// Windows, so connecting gets three before the answer is called unknown.
 const PROBE_CONNECT: Duration = Duration::from_secs(3);
 const PROBE_EXCHANGE: Duration = Duration::from_secs(2);
+/// Where the gateway identifies itself to a loopback-literal `Host`.
+const IDENTIFY_PATH: &str = "/identify";
+/// The most of a reply the gateway checks read; a longer one is not the
+/// gateway's.
+const PROBE_REPLY_CAP: usize = 64 * 1024;
 
 async fn probe_within(
     port: u16,
@@ -1607,12 +1622,16 @@ async fn probe_within(
             )
             .await?;
         let mut raw = Vec::new();
-        socket.read_to_end(&mut raw).await?;
+        (&mut socket)
+            .take(PROBE_REPLY_CAP as u64 + 1)
+            .read_to_end(&mut raw)
+            .await?;
         Ok::<_, std::io::Error>(String::from_utf8_lossy(&raw).into_owned())
     };
     match tokio::time::timeout(exchange_within, exchange).await {
         Ok(Ok(text))
-            if text.starts_with("HTTP/1.1 200")
+            if text.len() <= PROBE_REPLY_CAP
+                && text.starts_with("HTTP/1.1 200")
                 && text.split_once("\r\n\r\n").map(|(_, body)| body) == Some(&health_body()) =>
         {
             GatewayHealth::Running
@@ -1624,6 +1643,168 @@ async fn probe_within(
         Ok(Ok(_)) => GatewayHealth::Unexpected,
         Ok(Err(error)) => GatewayHealth::CheckFailed(error.to_string()),
         Err(_) => GatewayHealth::TimedOut,
+    }
+}
+
+/// Whether the request's single `Host` is a loopback literal
+/// (`127.0.0.1[:port]` or `[::1][:port]`).
+fn loopback_host(headers: &HeaderMap) -> bool {
+    let Some(host) = single(headers, &header::HOST) else {
+        return false;
+    };
+    let address = match host.rsplit_once(':') {
+        Some((address, port)) if !address.ends_with(']') || host.starts_with('[') => {
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                if host == "[::1]" {
+                    return true;
+                }
+                return false;
+            }
+            address
+        }
+        _ => host,
+    };
+    address == "127.0.0.1" || address == "[::1]"
+}
+
+/// One raw HTTP/1.1 exchange with whatever listens on the gateway port. It
+/// reads until the reply is complete (head plus its declared body), the peer
+/// closes, `within` passes or [`PROBE_REPLY_CAP`] is exceeded; a connection
+/// kept open after a complete reply does not hold it up.
+async fn ask_raw<S>(mut stream: S, request: &[u8], within: Duration) -> Result<Vec<u8>, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+    let exchange = async {
+        stream.write_all(request).await?;
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..read]);
+            if raw.len() > PROBE_REPLY_CAP || status_and_body(&raw).is_some() {
+                break;
+            }
+        }
+        Ok::<_, std::io::Error>(raw)
+    };
+    match tokio::time::timeout(within, exchange).await {
+        Ok(Ok(raw)) if raw.len() > PROBE_REPLY_CAP => Err("the answer was too long".to_string()),
+        Ok(Ok(raw)) => Ok(raw),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("no complete answer in time".to_string()),
+    }
+}
+
+/// The status code and body of a raw reply, when it is a well-formed
+/// HTTP/1.1 response whose body is exactly its declared length.
+fn status_and_body(raw: &[u8]) -> Option<(u16, &[u8])> {
+    let split = raw.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let head = std::str::from_utf8(&raw[..split]).ok()?;
+    let body = &raw[split + 4..];
+    let mut lines = head.split("\r\n");
+    let status = lines.next()?.strip_prefix("HTTP/1.1 ")?;
+    let code: u16 = status.split(' ').next()?.parse().ok()?;
+    let length = lines
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())?;
+    (length == body.len()).then_some((code, body))
+}
+
+/// What setup found listening on the gateway port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Listener {
+    NotRunning,
+    /// The gateway's exact health answer to a loopback-literal `Host`.
+    Gateway,
+    Unidentified(String),
+}
+
+/// How the gateway answered a browser-shaped request for the new address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OriginAnswer {
+    /// The exact missing-credential refusal: it accepts this host and origin.
+    Current,
+    /// The exact refusal of a gateway started with another address.
+    OtherPolicy(String),
+    Unidentified(String),
+}
+
+fn classify_health(raw: &[u8]) -> Listener {
+    match status_and_body(raw) {
+        Some((200, body)) if body == health_body().as_bytes() => Listener::Gateway,
+        Some((code, _)) => Listener::Unidentified(format!("it answered {code}")),
+        None => Listener::Unidentified("its answer was not one the gateway gives".to_string()),
+    }
+}
+
+fn classify_origin(raw: &[u8]) -> OriginAnswer {
+    match status_and_body(raw) {
+        Some((401, b"this device is not paired")) => OriginAnswer::Current,
+        Some((403, b"forbidden")) => {
+            OriginAnswer::OtherPolicy("it refuses the new address as an origin".to_string())
+        }
+        Some((421, b"unknown host")) => {
+            OriginAnswer::OtherPolicy("it does not know the new address".to_string())
+        }
+        Some((code, _)) => OriginAnswer::Unidentified(format!("it answered {code}")),
+        None => OriginAnswer::Unidentified("its answer was not one the gateway gives".to_string()),
+    }
+}
+
+fn health_request(port: u16) -> Vec<u8> {
+    format!("GET {IDENTIFY_PATH} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+        .into_bytes()
+}
+
+/// A WebSocket upgrade a browser on the new address would send, without a
+/// device credential.
+fn origin_request(host: &str) -> Vec<u8> {
+    format!(
+        "GET /api/socket HTTP/1.1\r\nHost: {host}\r\nOrigin: https://{host}\r\n\
+         Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+async fn connect_gateway_port(port: u16) -> Result<tokio::net::TcpStream, std::io::Error> {
+    let connect = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port));
+    match tokio::time::timeout(PROBE_CONNECT, connect).await {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "connecting timed out",
+        )),
+    }
+}
+
+/// Whether the LocalPilot gateway listens on `port`, identified by its exact
+/// health answer, whatever address it was started with.
+pub(crate) async fn listener_on(port: u16) -> Listener {
+    match connect_gateway_port(port).await {
+        Ok(stream) => match ask_raw(stream, &health_request(port), PROBE_EXCHANGE).await {
+            Ok(raw) => classify_health(&raw),
+            Err(why) => Listener::Unidentified(why),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => Listener::NotRunning,
+        Err(error) => Listener::Unidentified(error.to_string()),
+    }
+}
+
+/// How the gateway on `port` answers a browser on `https://<host>`.
+pub(crate) async fn origin_on(port: u16, host: &str) -> OriginAnswer {
+    match connect_gateway_port(port).await {
+        Ok(stream) => match ask_raw(stream, &origin_request(host), PROBE_EXCHANGE).await {
+            Ok(raw) => classify_origin(&raw),
+            Err(why) => OriginAnswer::Unidentified(why),
+        },
+        Err(error) => OriginAnswer::Unidentified(error.to_string()),
     }
 }
 
@@ -2742,6 +2923,145 @@ mod tests {
         ] {
             assert!(socket_query(bad.as_deref()).is_none(), "{bad:?}");
         }
+    }
+
+    fn plain_gateway(origin: &str, hosts: &[String]) -> Arc<Gateway> {
+        let discovery = Discovery {
+            list: Arc::new(Vec::new),
+            dial: Arc::new(|_: &Workspace| {
+                Box::pin(async {
+                    Err::<Box<dyn DaemonStream>, _>(std::io::Error::other("no daemon"))
+                })
+            }),
+            verify: Arc::new(|_| None),
+            standing: Arc::new(|_, _| false),
+        };
+        Gateway::new(
+            Policy::new(origin, hosts),
+            discovery,
+            CancellationToken::new(),
+        )
+    }
+
+    async fn ask_gateway(gateway: &Arc<Gateway>, request: Vec<u8>) -> Vec<u8> {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(gateway.clone().serve_io(server));
+        ask_raw(client, &request, Duration::from_secs(5))
+            .await
+            .expect("an answer")
+    }
+
+    #[tokio::test]
+    async fn setup_identifies_the_gateway_and_its_address_exactly() {
+        let current = plain_gateway("https://pc.tail1.ts.net", &[]);
+        // The identify path answers a loopback-literal Host whatever the
+        // gateway's address, and nothing else is opened to it.
+        assert_eq!(
+            classify_health(&ask_gateway(&current, health_request(47610)).await),
+            Listener::Gateway
+        );
+        let other_path = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:47610\r\nConnection: close\r\n\r\n";
+        let raw = ask_gateway(&current, other_path.to_vec()).await;
+        assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(421));
+        let rebound =
+            b"GET /identify HTTP/1.1\r\nHost: evil.example:47610\r\nConnection: close\r\n\r\n";
+        let raw = ask_gateway(&current, rebound.to_vec()).await;
+        assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(421));
+        // `/healthz` keeps the host policy for loopback too.
+        let rebound =
+            b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:47610\r\nConnection: close\r\n\r\n";
+        let raw = ask_gateway(&current, rebound.to_vec()).await;
+        assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(421));
+
+        // The new address: accepted, so refused only for the missing credential.
+        assert_eq!(
+            classify_origin(&ask_gateway(&current, origin_request("pc.tail1.ts.net")).await),
+            OriginAnswer::Current
+        );
+        // A gateway started with an older address does not know the host.
+        let older = plain_gateway("https://old.tail1.ts.net", &[]);
+        assert!(matches!(
+            classify_origin(&ask_gateway(&older, origin_request("pc.tail1.ts.net")).await),
+            OriginAnswer::OtherPolicy(_)
+        ));
+        // A proxy host lets the request in, but the origin is still the old one.
+        let proxied = plain_gateway("https://old.tail1.ts.net", &["pc.tail1.ts.net".to_string()]);
+        assert_eq!(
+            classify_health(&ask_gateway(&proxied, health_request(47610)).await),
+            Listener::Gateway
+        );
+        assert!(matches!(
+            classify_origin(&ask_gateway(&proxied, origin_request("pc.tail1.ts.net")).await),
+            OriginAnswer::OtherPolicy(_)
+        ));
+    }
+
+    #[test]
+    fn answers_that_are_not_the_gateways_are_unidentified() {
+        let reply = |code: u16, body: &str| {
+            format!(
+                "HTTP/1.1 {code} X\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes()
+        };
+        assert!(matches!(
+            classify_health(&reply(200, "hello")),
+            Listener::Unidentified(_)
+        ));
+        assert!(matches!(
+            classify_health(&reply(421, "unknown host")),
+            Listener::Unidentified(_)
+        ));
+        for raw in [
+            reply(429, "slow down"),
+            reply(401, "this device is not paired!"),
+            reply(101, ""),
+            // A body longer or shorter than declared.
+            b"HTTP/1.1 401 X\r\nContent-Length: 99\r\n\r\nthis device is not paired".to_vec(),
+            // No length at all, or not HTTP/1.1.
+            b"HTTP/1.1 401 X\r\n\r\nthis device is not paired".to_vec(),
+            b"HTTP/1.0 401 X\r\nContent-Length: 25\r\n\r\nthis device is not paired".to_vec(),
+            Vec::new(),
+        ] {
+            assert!(
+                matches!(classify_origin(&raw), OriginAnswer::Unidentified(_)),
+                "{}",
+                String::from_utf8_lossy(&raw)
+            );
+        }
+        assert!(loopback_host(&headers(&[("host", "127.0.0.1:47610")])));
+        assert!(loopback_host(&headers(&[("host", "127.0.0.1")])));
+        assert!(loopback_host(&headers(&[("host", "[::1]:47610")])));
+        for host in [
+            "localhost:47610",
+            "127.0.0.2:1",
+            "127.0.0.1:x",
+            "127.0.0.1.evil:1",
+            "pc",
+        ] {
+            assert!(!loopback_host(&headers(&[("host", host)])), "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oversized_answer_is_never_the_gateway() {
+        let (mut client, mut server) = tokio::io::duplex(256 * 1024);
+        tokio::spawn(async move {
+            let mut sink = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut server, &mut sink).await;
+            let mut body = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                PROBE_REPLY_CAP + 10
+            )
+            .into_bytes();
+            body.extend(std::iter::repeat(b'x').take(PROBE_REPLY_CAP + 10));
+            let _ = server.write_all(&body).await;
+        });
+        let _ = &mut client;
+        assert!(ask_raw(client, &health_request(1), Duration::from_secs(5))
+            .await
+            .is_err());
     }
 
     #[tokio::test]

@@ -3564,6 +3564,10 @@ mod tests {
         ("localpilot-dist/src/install.rs", "updater"),
         ("localpilot-stack/src/lib.rs", "updater"),
         ("localpilot-cli/src/update.rs", "updater"),
+        (
+            "localpilot-cli/src/remote_setup.rs",
+            "setup the user started; only this computer's own tailnet address",
+        ),
     ];
 
     #[test]
