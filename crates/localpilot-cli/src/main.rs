@@ -57,6 +57,7 @@ mod outward_cmd;
 mod pair_cmd;
 #[cfg(feature = "tui")]
 mod pair_run;
+mod project_grants;
 #[cfg(all(test, feature = "tui"))]
 #[path = "../tests/support/proposal.rs"]
 mod proposal_fixture;
@@ -711,6 +712,22 @@ enum TrustCommand {
     },
     /// List every trusted folder.
     List,
+    /// Manage the projects authorized to run with Accept all.
+    Actions {
+        #[command(subcommand)]
+        command: ActionGrantCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ActionGrantCommand {
+    /// List the projects authorized to run with Accept all.
+    List,
+    /// Revoke a project's authorization (default: the current directory).
+    Revoke {
+        /// Project folder; defaults to the current directory.
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2018,6 +2035,10 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 TrustCommand::Add { path } => trust_cmd::add(path)?,
                 TrustCommand::Remove { path } => trust_cmd::remove(path)?,
                 TrustCommand::List => trust_cmd::list()?,
+                TrustCommand::Actions { command } => match command {
+                    ActionGrantCommand::List => project_grants::list_cmd()?,
+                    ActionGrantCommand::Revoke { path } => project_grants::revoke_cmd(path)?,
+                },
             }
         }
         Command::Credential { command } => match command {
@@ -2732,7 +2753,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             resume,
             incognito,
         } => {
-            let profile = session_cmd::launch_profile(permission.as_deref(), bypass)?;
+            let profile = session_cmd::launch_profile(permission.as_deref(), bypass, true)?;
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
             let outcome = repl::run_chat_with(
                 model.as_deref(),
@@ -2761,7 +2782,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             resume,
             turn_timeout,
         } => {
-            let profile = session_cmd::launch_profile(permission.as_deref(), bypass)?;
+            let profile = session_cmd::launch_profile(permission.as_deref(), bypass, false)?;
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
             let outcome = session_cmd::print_mode(
                 &prompt,
@@ -2794,7 +2815,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             verify_command,
             learn,
         } => {
-            let profile = session_cmd::launch_profile(permission.as_deref(), bypass)?;
+            let profile = session_cmd::launch_profile(permission.as_deref(), bypass, false)?;
             eval_cmd::run_eval(eval_cmd::EvalOptions {
                 problem: &problem,
                 model: &model,
@@ -3170,10 +3191,11 @@ async fn run_default() -> anyhow::Result<std::process::ExitCode> {
     #[cfg(feature = "tui")]
     {
         let cwd = std::env::current_dir()?;
-        if let Ok(config) =
+        if let Ok(mut config) =
             localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())
         {
             if config.resolve_model(None).is_some() {
+                project_grants::apply(&mut config, &cwd, true);
                 let profile = session_cmd::action_profile(
                     &config,
                     None,

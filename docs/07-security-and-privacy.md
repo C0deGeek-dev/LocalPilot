@@ -374,6 +374,12 @@ deliberately. Profiles apply in both agent mode and harness mode.
   line joined with `;` or `|` is judged command by command (ADR-0248): it is
   opaque only when one of its commands is, or when a command that receives a pipe
   is not a plain filter.
+- A project can ask for broad action authority (`permissions.requested_action_mode`,
+  or the legacy `bypass` or `unrestricted` profile in `.localpilot.toml`) but cannot
+  grant it to itself: the request is inert until the user authorizes it for that
+  project, in a terminal, through a stored grant bound to the project path
+  (`localpilot trust actions list|revoke`), or with
+  `LOCALPILOT_ACCEPT_PROJECT_ACTIONS` for one run (ADR-0262).
 - `unrestricted`: a launch mode that approves everything — out-of-workspace
   paths included — with no prompts at all. The user explicitly accepts full
   responsibility. Like `bypass` it is never the default, must be set explicitly

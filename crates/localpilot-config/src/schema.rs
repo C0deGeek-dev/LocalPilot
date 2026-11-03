@@ -38,6 +38,11 @@ pub struct Config {
     pub mesh: MeshConfig,
     pub lab: LabConfig,
     pub remote: RemoteConfig,
+    /// What the project file asked for that it may not grant itself. Filled by
+    /// the loader, never read from a file, and inert until the user authorizes it
+    /// for that project.
+    #[serde(skip)]
+    pub project_request: Option<ProjectRequest>,
 }
 
 impl Default for Config {
@@ -65,6 +70,7 @@ impl Default for Config {
             mesh: MeshConfig::default(),
             lab: LabConfig::default(),
             remote: RemoteConfig::default(),
+            project_request: None,
         }
     }
 }
@@ -1615,6 +1621,11 @@ pub struct PermissionsConfig {
     /// Optional user-owned action policy. Omission preserves legacy launch behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_mode: Option<ActionMode>,
+    /// A broader action authority the project asks for. Read from the project
+    /// file only, and a request is not a grant: it takes effect once the user
+    /// has authorized it for that project (see `ProjectRequest`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_action_mode: Option<ActionMode>,
     /// Private session scratch: true/default selects OS temp, false disables
     /// it, a string selects an absolute existing parent. User/environment only;
     /// a project cannot choose where the agent gains write authority.
@@ -1657,6 +1668,36 @@ pub struct AllowCommand {
     pub program: String,
     #[serde(default)]
     pub args_prefix: Vec<String>,
+}
+
+/// What a project file asked for that it may not grant itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectRequest {
+    pub mode: ActionMode,
+    pub source: ProjectRequestSource,
+}
+
+/// The project key that carried a [`ProjectRequest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectRequestSource {
+    /// `permissions.requested_action_mode = "accept_all"`.
+    RequestedActionMode,
+    /// The legacy `permissions.profile = "bypass"`.
+    BypassProfile,
+    /// The legacy `permissions.profile = "unrestricted"`.
+    UnrestrictedProfile,
+}
+
+impl ProjectRequestSource {
+    /// The key and value, as the project file wrote them.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::RequestedActionMode => "permissions.requested_action_mode = \"accept_all\"",
+            Self::BypassProfile => "permissions.profile = \"bypass\"",
+            Self::UnrestrictedProfile => "permissions.profile = \"unrestricted\"",
+        }
+    }
 }
 
 /// User-facing action authorization policy.

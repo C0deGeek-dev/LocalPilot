@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0262: A Project Can Ask For Accept All But Only The User Can Authorize It
+
+**Status:** accepted · **Date:** 2026-11-04. Refs LocalHub#265. Builds on ADR-0260.
+
+**Context.** `permissions.profile` was not a user-only key, so a project's
+`.localpilot.toml` could set `unrestricted` or `bypass` and the bare startup, `lab`
+and proposal validation honored it: a repository could grant itself broad action
+authority. ADR-0260 made `action_mode` user-only but left that route open.
+
+**Decision.** A project may ask, never grant. `permissions.requested_action_mode =
+"accept_all"` and the legacy `profile = "bypass"` or `"unrestricted"` in a project
+file become a request on the loaded config, and the project's own profile no longer
+applies: the profile is what the user's file, the environment and the command line
+choose. Narrowing (`readonly`, `default`, `relaxed`) stays project-settable. A
+request takes effect only through the user, from one of: a stored grant in
+`project-grants.json` beside the user config, an answer at a terminal (this session
+only, or remembered), or `LOCALPILOT_ACCEPT_PROJECT_ACTIONS=accept_all` for one
+run. A grant is bound to the canonical project path and to the requested mode, so a
+copied config or a changed request asks again; `localpilot trust actions list` and
+`revoke` manage them. A store that cannot be read grants nothing and is never
+overwritten. A launch with nobody to ask (`print`, `eval`, piped input) declines the
+request and says how to authorize it; it never waits. An explicit launch profile
+outranks a project's request and is not asked about. Folder trust is not consent for
+this and is not reused.
+
+**Consequences.** Only the long-lived chat and the bare startup prompt; hosts that do
+not read `action_mode` (harness, served, RPC, pairing) also do not read the request,
+and the project's broad profile no longer reaches them either. Audited and left: a
+project can still set `extra_read_roots`, which grants standing reads (never writes
+or execution) outside the workspace. Common resolution across hosts is #266.
+
 ## ADR-0261: Sharing Starts the Background Server Only When Asked, and Reconnects Only for the Wait It Was Asked In
 
 **Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.
@@ -44,6 +75,7 @@ meanwhile, or start a second server while the first was still booting.
 share it was chosen for, and at most once at a time. A share whose server is
 gone no longer ends by itself; it says so in `/remote` and the status line
 until the user starts the server or stops sharing.
+
 
 ## ADR-0260: Configure User-Owned Action Authorization
 

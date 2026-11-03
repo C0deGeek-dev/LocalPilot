@@ -1351,10 +1351,26 @@ Work sizing, required verification, incognito, session ownership, OS access
 controls and product-owned remote switches apply independently.
 
 
+A project cannot grant itself this. A project file that sets
+`requested_action_mode = "accept_all"`, or the legacy `profile = "bypass"` or
+`"unrestricted"`, only asks: the project's profile does not apply, and the request
+takes effect once you authorize it for that project. `localpilot chat` and bare
+startup ask once, with the choice of this session only or remembering it; the
+answer is stored in `project-grants.json` beside your user config, bound to the
+project's canonical path and to `accept_all`, so a copied config in another folder
+or a changed request asks again. A launch with nobody to ask (`print`, `eval`,
+piped input) declines the request and says how to authorize it. For one run,
+`LOCALPILOT_ACCEPT_PROJECT_ACTIONS=accept_all` authorizes the request for the
+current project. `localpilot trust actions list` shows the stored grants and
+`localpilot trust actions revoke [PATH]` removes one. An explicit `--permission`
+or `--bypass` outranks the request. Folder trust is not consent for Accept all.
+Narrowing a session (`readonly`, `default`, `relaxed`) stays a project setting.
+
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `profile` | `default` \| `relaxed` \| `readonly` \| `bypass` \| `unrestricted` | `default` | Permission profile. `bypass` and `unrestricted` are never the default and are always surfaced. `unrestricted` approves everything — out-of-workspace paths included — with no prompts; the user accepts full responsibility. `readonly` denies every write and every command above read-only, with no prompt |
 | `action_mode` | `normal` \| `accept_all` | unset | User-owned action authorization for bare interactive startup, `chat`, `print` and `eval`. `normal` uses the Default profile; `accept_all` uses Unrestricted, including opaque commands and external paths. A project file cannot set it. Unset keeps the legacy profile and flag behavior; an explicit launch flag or a read-only restriction wins. Environment: `LOCALPILOT_PERMISSIONS__ACTION_MODE` |
+| `requested_action_mode` | `accept_all` | unset | **Project file only.** A request for Accept all, not a setting: it takes effect only after you authorize it for that project (see above). Ignored in the user file and the environment |
 | `extra_read_roots` | array of string | `[]` | Absolute directories granted standing **read** scope in addition to the workspace, in every profile including non-interactive runs. Writes keep the workspace boundary; secret-like reads keep their gate. A missing directory is reported and skipped at startup |
 | `scratch_root` | bool or string | `true` | **User config and environment only.** `true` creates a unique per-session child under OS temp; `false` disables it; an absolute existing directory selects a custom parent. Only the owned child gets scratch scope and cleanup; the parent is never granted or removed. Failed creation warns and grants nothing. Ordinary scratch file reads/writes pass in trusted default/bypass headless sessions; secret-like names and session restrictions keep their gates |
 | `allow_commands` | array of `{ program, args_prefix }` | `[]` | **User config and environment only**; a project file that sets it is refused. A structured `run_shell` call (`program` + `args`, never a free-text `command`) whose program equals `program` and whose arguments start with `args_prefix` passes the command gate in `default`, `relaxed` and `readonly`, and runs headless. Exact string match. An entry admits every call that starts with it, so name a script's absolute path in `args_prefix`. The untrusted-workspace and incognito floors still apply. `localpilot doctor` lists the entries |

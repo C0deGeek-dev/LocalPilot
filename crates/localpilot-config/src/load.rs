@@ -60,9 +60,13 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
             figment = figment.merge(Toml::file(user));
         }
     }
+    // The layers below the project, kept for the one key the project may only
+    // ask for (see `separate_project_request`).
+    let mut below_project = None;
     if let Some(project) = &paths.project {
         if project.is_file() {
             refuse_user_only_keys(project)?;
+            below_project = Some(figment.clone());
             figment = figment.merge(Toml::file(project));
         }
     }
@@ -77,6 +81,9 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
     }
 
     let mut config: Config = figment.extract().map_err(ConfigError::from)?;
+    if let (Some(project), Some(below)) = (&paths.project, below_project) {
+        separate_project_request(&mut config, project, below, cli)?;
+    }
     synthesize_env_providers(&mut config);
     validate_checks(&config.harness.checks)?;
     validate_granularity(&config.harness.granularity)?;
@@ -84,6 +91,60 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
     // invalid only once every layer has been applied (see `validate_mcp_env`).
     validate_mcp_env(&config.mcp)?;
     Ok(config)
+}
+
+/// A project file may ask for broad action authority but never grant it to
+/// itself. Both ways of asking, the dedicated key and the legacy `bypass` or
+/// `unrestricted` profile, become a [`ProjectRequest`] on the config, and the
+/// project's own profile does not apply: the profile is what the layers below the
+/// project, the environment and the command line choose. Narrowing (`readonly`,
+/// `default`, `relaxed`) stays project-settable. The request takes effect only
+/// through the user's authorization for that project.
+fn separate_project_request(
+    config: &mut Config,
+    project: &Path,
+    below_project: Figment,
+    cli: &CliOverrides,
+) -> Result<(), ConfigError> {
+    use crate::schema::{ActionMode, ProjectRequest, ProjectRequestSource};
+
+    let layer = Figment::from(Toml::file(project));
+    let mut request = None;
+    if layer
+        .extract_inner::<ActionMode>("permissions.requested_action_mode")
+        .ok()
+        == Some(ActionMode::AcceptAll)
+    {
+        request = Some(ProjectRequest {
+            mode: ActionMode::AcceptAll,
+            source: ProjectRequestSource::RequestedActionMode,
+        });
+    }
+    config.permissions.requested_action_mode = None;
+    let source = match layer
+        .extract_inner::<PermissionProfile>("permissions.profile")
+        .ok()
+    {
+        Some(PermissionProfile::Unrestricted) => Some(ProjectRequestSource::UnrestrictedProfile),
+        Some(PermissionProfile::Bypass) => Some(ProjectRequestSource::BypassProfile),
+        _ => None,
+    };
+    if let Some(source) = source {
+        let mut without_project = below_project.merge(Env::prefixed("LOCALPILOT_").split("__"));
+        if let Some(profile) = &cli.permission_profile {
+            without_project =
+                without_project.merge(Serialized::default("permissions.profile", profile));
+        }
+        config.permissions.profile = without_project
+            .extract_inner::<PermissionProfile>("permissions.profile")
+            .map_err(ConfigError::from)?;
+        request.get_or_insert(ProjectRequest {
+            mode: ActionMode::AcceptAll,
+            source,
+        });
+    }
+    config.project_request = request;
+    Ok(())
 }
 
 /// Keys a project file must never set: they grant the agent more than the
@@ -515,6 +576,129 @@ mod tests {
             ));
             std::fs::remove_file(&project).unwrap();
         }
+    }
+
+    #[test]
+    fn a_project_can_ask_for_broad_authority_but_not_grant_it_to_itself() {
+        use crate::{ActionMode, ProjectRequestSource};
+
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join(".localpilot.toml");
+        let paths = ConfigPaths {
+            user: Some(user.clone()),
+            project: Some(project.clone()),
+        };
+        let load_with = |user_toml: &str, project_toml: &str, cli: &CliOverrides| {
+            std::fs::write(&user, user_toml).unwrap();
+            std::fs::write(&project, project_toml).unwrap();
+            load(&paths, cli).unwrap()
+        };
+        let none = CliOverrides::default();
+
+        // The legacy profile keys are requests: the project's profile does not apply.
+        for (value, source) in [
+            ("unrestricted", ProjectRequestSource::UnrestrictedProfile),
+            ("bypass", ProjectRequestSource::BypassProfile),
+        ] {
+            let toml = format!(
+                "[permissions]
+profile = {value:?}
+"
+            );
+            let config = load_with("", &toml, &none);
+            assert_eq!(config.permissions.profile, PermissionProfile::Default);
+            let request = config.project_request.unwrap();
+            assert_eq!(
+                (request.mode, request.source),
+                (ActionMode::AcceptAll, source)
+            );
+
+            // What the user's own layers choose stays, so a project cannot widen it.
+            let config = load_with(
+                "[permissions]
+profile = \"relaxed\"
+",
+                &toml,
+                &none,
+            );
+            assert_eq!(config.permissions.profile, PermissionProfile::Relaxed);
+            assert!(config.project_request.is_some());
+        }
+
+        // The dedicated key is a request too, and is never an effective setting.
+        let config = load_with(
+            "",
+            "[permissions]
+requested_action_mode = \"accept_all\"
+",
+            &none,
+        );
+        assert_eq!(config.permissions.profile, PermissionProfile::Default);
+        assert_eq!(config.permissions.action_mode, None);
+        assert_eq!(config.permissions.requested_action_mode, None);
+        assert_eq!(
+            config.project_request.unwrap().source,
+            ProjectRequestSource::RequestedActionMode
+        );
+
+        // Narrowing is the project's to choose and asks for nothing.
+        for value in ["readonly", "default", "relaxed"] {
+            let config = load_with(
+                "",
+                &format!(
+                    "[permissions]
+profile = {value:?}
+"
+                ),
+                &none,
+            );
+            assert!(config.project_request.is_none(), "{value}");
+        }
+        let config = load_with(
+            "",
+            "[permissions]
+requested_action_mode = \"normal\"
+",
+            &none,
+        );
+        assert!(config.project_request.is_none());
+        let config = load_with(
+            "",
+            "[permissions]
+profile = \"readonly\"
+",
+            &none,
+        );
+        assert_eq!(config.permissions.profile, PermissionProfile::Readonly);
+
+        // The user's own choices, in the file or on the command line, are theirs.
+        let config = load_with(
+            "[permissions]
+profile = \"unrestricted\"
+",
+            "[permissions]
+profile = \"unrestricted\"
+",
+            &none,
+        );
+        assert_eq!(config.permissions.profile, PermissionProfile::Unrestricted);
+        let cli = CliOverrides {
+            permission_profile: Some(PermissionProfile::Unrestricted),
+            ..CliOverrides::default()
+        };
+        let config = load_with(
+            "",
+            "[permissions]
+profile = \"bypass\"
+",
+            &cli,
+        );
+        assert_eq!(config.permissions.profile, PermissionProfile::Unrestricted);
+
+        // No request without a project file.
+        std::fs::remove_file(&project).unwrap();
+        assert!(load(&paths, &none).unwrap().project_request.is_none());
     }
 
     #[test]

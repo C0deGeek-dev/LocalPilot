@@ -50,9 +50,21 @@ pub fn resolve_profile(permission: Option<&str>, bypass: bool) -> Profile {
 }
 
 /// Resolve the action setting for the primary chat and single-turn CLI launches.
-pub fn launch_profile(permission: Option<&str>, bypass: bool) -> anyhow::Result<Profile> {
+/// `may_prompt` is true only for a long-lived chat, which may ask the user to
+/// authorize a project's request for Accept all; single-turn and evaluation runs
+/// never wait for an answer.
+pub fn launch_profile(
+    permission: Option<&str>,
+    bypass: bool,
+    may_prompt: bool,
+) -> anyhow::Result<Profile> {
     let cwd = std::env::current_dir()?;
-    let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    let mut config =
+        localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    // An explicit launch profile outranks a project's request, so it is not asked.
+    if permission.is_none() && !bypass {
+        crate::project_grants::apply(&mut config, &cwd, may_prompt);
+    }
     Ok(action_profile(
         &config,
         permission,

@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A project can ask for Accept all but only you can authorize it. A project file
+  that sets `permissions.requested_action_mode = "accept_all"`, or the legacy
+  `profile = "bypass"` or `"unrestricted"`, is now a request instead of a setting:
+  the project's profile no longer applies. `localpilot chat` asks once (this session
+  or remembered for the project), a stored grant in `project-grants.json` is bound
+  to the project path and the requested mode, and a launch with nobody to ask
+  declines it unless `LOCALPILOT_ACCEPT_PROJECT_ACTIONS=accept_all` is set. List or
+  revoke grants with `localpilot trust actions list|revoke` (ADR-0262, #265).
+
 - `/remote share` without a background server for the workspace no longer
   just ends: `/remote` offers "Start server and share", and starts it only
   when chosen. When the server stops under a shared session, sharing waits
