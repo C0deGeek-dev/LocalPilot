@@ -1146,7 +1146,15 @@ opt-in step.
 - **Credentials.** A device credential is 32 random bytes from the operating
   system. Only its SHA-256 is stored, and it is compared in constant time.
   Pairing codes are single use, expire after five minutes, and are withdrawn
-  after five wrong attempts. Codes, credentials and the gateway capability never
+  after five wrong attempts. A code opened by a pairing view is owned by that
+  view's connection: closing the view, or the connection ending for any reason,
+  withdraws it at once. The code ends in exactly one recorded state, which the
+  owner is told when its connection is still there and can otherwise ask for
+  by its receipt while the server keeps the result (not across a restart).
+  A phone presenting a code that was closed on the PC is told so; any other
+  refused code gets the same coarse answer as before. A request that was
+  already used, cancelled before it was opened, or meant for an earlier server
+  instance never makes a code. Codes, credentials and the gateway capability never
   appear in logs, the audit log or error messages; they are sent once, to the
   party they belong to.
 - **Files.** The `devices` directory and its files are readable by your user

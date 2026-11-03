@@ -554,6 +554,12 @@ impl DeviceRegistry {
         if let Some(reason) = &self.disabled {
             return Err(DeviceError::Unavailable(reason.clone()));
         }
+        #[cfg(test)]
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(DeviceError::Unavailable(
+                "the registry cannot be written (test)".to_string(),
+            ));
+        }
         let Some(dir) = &self.dir else {
             let mut memory = self.memory.lock().unwrap_or_else(PoisonError::into_inner);
             let mut next = memory.clone();
@@ -737,6 +743,172 @@ struct PendingPairing {
     this_workspace_only: bool,
     expires: std::time::Instant,
     failures: u8,
+    /// Set when an issuer owns this code (`pair_open`): it is told how the
+    /// code ends, exactly once. `None` for a code from `pair_begin`.
+    owner: Option<Owner>,
+}
+
+/// The issuer of an owned code and how to tell it the code's outcome.
+struct Owner {
+    stream: String,
+    n: u64,
+    receipt_sha256: String,
+    grant_sha256: String,
+    outcome: Option<tokio::sync::oneshot::Sender<localpilot_rpc::PairingOutcome>>,
+}
+
+/// Issuer streams whose replay fences a server keeps; a new stream past this
+/// is refused, never an old fence forgotten.
+const PAIRING_STREAMS: usize = 64;
+/// Ended owned attempts whose outcome stays readable by receipt.
+const FINISHED_KEPT: usize = 32;
+/// How long after its code's deadline an ended attempt stays readable.
+const FINISHED_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+/// Attempts cancelled before they were opened, remembered for status only
+/// (the stream's fence is what keeps them from ever being opened).
+const CANCEL_MARKERS: usize = 8;
+/// Cancelled codes a phone is told were closed on the PC.
+const TOMBSTONES: usize = 8;
+
+/// An ended owned attempt: hashes and its outcome, never a secret.
+struct Finished {
+    stream: String,
+    n: u64,
+    receipt_sha256: String,
+    grant_sha256: String,
+    outcome: localpilot_rpc::PairingOutcome,
+    kept_until: std::time::Instant,
+}
+
+/// An attempt cancelled before it was opened.
+struct Marker {
+    stream: String,
+    n: u64,
+    receipt_sha256: String,
+    until: std::time::Instant,
+}
+
+/// A cancelled code: a phone presenting exactly it is told it was closed.
+struct Tombstone {
+    id: String,
+    secret_sha256: String,
+    until: std::time::Instant,
+}
+
+/// Everything pairing keeps, behind one lock so that use, cancel, expiry,
+/// eviction, withdrawal and rollback are decided one at a time.
+#[derive(Default)]
+struct PairingBook {
+    pending: HashMap<String, PendingPairing>,
+    /// Per issuer stream, the highest request number taken (opened or
+    /// cancelled before opening) by this server instance.
+    streams: HashMap<String, u64>,
+    finished: std::collections::VecDeque<Finished>,
+    markers: std::collections::VecDeque<Marker>,
+    tombstones: std::collections::VecDeque<Tombstone>,
+}
+
+impl PairingBook {
+    /// End the pending entry `id` with `outcome`: its owner is told, and the
+    /// outcome stays readable by receipt for a while. Entries without an owner
+    /// simply go.
+    fn finish(&mut self, id: &str, outcome: localpilot_rpc::PairingOutcome) {
+        let Some(entry) = self.pending.remove(id) else {
+            return;
+        };
+        let Some(mut owner) = entry.owner else {
+            return;
+        };
+        if let Some(tell) = owner.outcome.take() {
+            let _ = tell.send(outcome.clone());
+        }
+        if matches!(outcome, localpilot_rpc::PairingOutcome::Cancelled) {
+            if self.tombstones.len() >= TOMBSTONES {
+                self.tombstones.pop_front();
+            }
+            self.tombstones.push_back(Tombstone {
+                id: id.to_string(),
+                secret_sha256: entry.secret_sha256,
+                until: entry.expires,
+            });
+        }
+        if self.finished.len() >= FINISHED_KEPT {
+            self.finished.pop_front();
+        }
+        self.finished.push_back(Finished {
+            stream: owner.stream,
+            n: owner.n,
+            receipt_sha256: owner.receipt_sha256,
+            grant_sha256: owner.grant_sha256,
+            outcome,
+            kept_until: entry.expires + FINISHED_FOR,
+        });
+    }
+
+    /// Expire what is due: codes past their deadline (an owned one ends as
+    /// expired) and remembered state past its time.
+    fn prune(&mut self, now: std::time::Instant) {
+        let due: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, pairing)| pairing.expires <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            self.finish(&id, localpilot_rpc::PairingOutcome::Expired);
+        }
+        self.finished.retain(|finished| finished.kept_until > now);
+        self.markers.retain(|marker| marker.until > now);
+        self.tombstones.retain(|tombstone| tombstone.until > now);
+    }
+
+    /// Make room for one more code by ending the one closest to expiry.
+    fn make_room(&mut self) {
+        if self.pending.len() < PAIRINGS_OUTSTANDING {
+            return;
+        }
+        if let Some(oldest) = self
+            .pending
+            .iter()
+            .min_by_key(|(_, pairing)| pairing.expires)
+            .map(|(id, _)| id.clone())
+        {
+            self.finish(&oldest, localpilot_rpc::PairingOutcome::Evicted);
+        }
+    }
+
+    /// Whether `receipt_sha256` already belongs to an attempt other than
+    /// (`stream`, `n`): live, ended or cancelled before opening. A receipt
+    /// names exactly one attempt.
+    fn receipt_elsewhere(&self, receipt_sha256: &str, stream: &str, n: u64) -> bool {
+        let same = |hash: &str| constant_time_eq(hash.as_bytes(), receipt_sha256.as_bytes());
+        let other = |s: &str, m: u64| s != stream || m != n;
+        self.pending
+            .values()
+            .filter_map(|p| p.owner.as_ref())
+            .any(|o| same(&o.receipt_sha256) && other(&o.stream, o.n))
+            || self
+                .finished
+                .iter()
+                .any(|f| same(&f.receipt_sha256) && other(&f.stream, f.n))
+            || self
+                .markers
+                .iter()
+                .any(|m| same(&m.receipt_sha256) && other(&m.stream, m.n))
+    }
+
+    /// The live owned entry holding `receipt_sha256`, if any.
+    fn live_by_receipt(&self, receipt_sha256: &str) -> Option<&String> {
+        self.pending.iter().find_map(|(id, pairing)| {
+            pairing
+                .owner
+                .as_ref()
+                .filter(|owner| {
+                    constant_time_eq(owner.receipt_sha256.as_bytes(), receipt_sha256.as_bytes())
+                })
+                .map(|_| id)
+        })
+    }
 }
 
 /// Outstanding pairing codes. A code is `<id>.<secret>`: the id (not secret)
@@ -744,9 +916,23 @@ struct PendingPairing {
 /// after a few failures; the secret is 32 random bytes and only its hash is
 /// kept. A code is single use, expires on a monotonic clock, and is consumed
 /// together with the new device's registration.
-#[derive(Default)]
+///
+/// A code opened by an issuer (`pair_open`) is owned: the issuer is told how
+/// it ended, exactly once, whatever ended it, and can ask by its receipt
+/// later. Its request key (stream and number, for this server instance) is
+/// never opened twice: a stream's highest number is its replay fence.
 pub(crate) struct Pairings {
-    pending: Mutex<HashMap<String, PendingPairing>>,
+    book: Mutex<PairingBook>,
+    ttl: std::time::Duration,
+}
+
+impl Default for Pairings {
+    fn default() -> Self {
+        Self {
+            book: Mutex::new(PairingBook::default()),
+            ttl: PAIRING_TTL,
+        }
+    }
 }
 
 /// Why a pairing exchange failed. Deliberately coarse on the wire.
@@ -754,11 +940,52 @@ pub(crate) struct Pairings {
 pub(crate) enum PairingRefusal {
     /// Unknown, expired, withdrawn or wrong code.
     Invalid,
+    /// This exact code was closed on the PC.
+    Closed,
     /// The registry could not take the new device.
     Registry(String),
 }
 
+/// What an issuer asks for when it opens a pairing.
+pub(crate) struct PairOpen<'a> {
+    pub(crate) instance: &'a str,
+    pub(crate) stream: &'a str,
+    pub(crate) n: u64,
+    pub(crate) receipt: &'a str,
+    pub(crate) name: &'a str,
+    pub(crate) scope: Scope,
+    pub(crate) this_workspace_only: bool,
+}
+
+/// What opening a pairing did.
+pub(crate) enum Opened {
+    /// A new code, owned by the caller; `id` names it for cancel and expiry.
+    Code {
+        id: String,
+        code: Secret,
+        lifetime: std::time::Duration,
+        outcome: tokio::sync::oneshot::Receiver<localpilot_rpc::PairingOutcome>,
+    },
+    /// The key was already taken: what is known about it (nothing was minted).
+    Known(localpilot_rpc::PairingState),
+    /// Refused, with the reason.
+    Refused(String),
+}
+
 impl Pairings {
+    /// Pairings whose codes live for `ttl` (tests).
+    #[cfg(test)]
+    pub(crate) fn with_ttl(ttl: std::time::Duration) -> Self {
+        Self {
+            ttl,
+            ..Self::default()
+        }
+    }
+
+    fn book(&self) -> std::sync::MutexGuard<'_, PairingBook> {
+        self.book.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Start pairing a device: a single-use code, valid for [`PAIRING_TTL`].
     pub(crate) fn begin(
         &self,
@@ -768,31 +995,260 @@ impl Pairings {
     ) -> Result<Secret, DeviceError> {
         let id = random_hex(6)?;
         let secret = random_token()?;
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut book = self.book();
         let now = std::time::Instant::now();
-        pending.retain(|_, pairing| pairing.expires > now);
-        if pending.len() >= PAIRINGS_OUTSTANDING {
-            // Make room by withdrawing the code closest to expiry.
-            if let Some(oldest) = pending
-                .iter()
-                .min_by_key(|(_, pairing)| pairing.expires)
-                .map(|(id, _)| id.clone())
-            {
-                pending.remove(&oldest);
-            }
-        }
-        pending.insert(
+        book.prune(now);
+        book.make_room();
+        book.pending.insert(
             id.clone(),
             PendingPairing {
                 secret_sha256: sha256_hex(&secret),
                 name: name.trim().chars().take(64).collect(),
                 scope,
                 this_workspace_only,
-                expires: now + PAIRING_TTL,
+                expires: now + self.ttl,
                 failures: 0,
+                owner: None,
             },
         );
         Ok(Secret(format!("{id}.{secret}")))
+    }
+
+    /// Open a pairing owned by the caller, under its request key. A key at or
+    /// below its stream's fence mints nothing: it answers what is known about
+    /// that attempt, if the receipt and grant match, or `unknown`.
+    pub(crate) fn open(&self, server_instance: &str, request: &PairOpen<'_>) -> Opened {
+        use localpilot_rpc::PairingState;
+        if request.instance != server_instance {
+            return Opened::Refused(
+                "this pairing was prepared for another server instance (the server restarted)"
+                    .to_string(),
+            );
+        }
+        let receipt_sha256 = sha256_hex(request.receipt);
+        let name: String = request.name.trim().chars().take(64).collect();
+        let grant_sha256 = sha256_hex(&format!(
+            "{name}\u{0}{:?}\u{0}{}",
+            request.scope, request.this_workspace_only
+        ));
+        let same = |receipt: &str, grant: &str| {
+            constant_time_eq(receipt.as_bytes(), receipt_sha256.as_bytes()) && grant == grant_sha256
+        };
+        let mut book = self.book();
+        let now = std::time::Instant::now();
+        book.prune(now);
+        // Already opened under this key, or cancelled before it was.
+        if let Some(owner) = book
+            .pending
+            .values()
+            .filter_map(|p| p.owner.as_ref())
+            .find(|o| o.stream == request.stream && o.n == request.n)
+        {
+            return if same(&owner.receipt_sha256, &owner.grant_sha256) {
+                Opened::Known(PairingState::Pending)
+            } else {
+                Opened::Refused("this request key belongs to another attempt".to_string())
+            };
+        }
+        if let Some(finished) = book
+            .finished
+            .iter()
+            .find(|f| f.stream == request.stream && f.n == request.n)
+        {
+            return if same(&finished.receipt_sha256, &finished.grant_sha256) {
+                Opened::Known(PairingState::Finished {
+                    outcome: finished.outcome.clone(),
+                })
+            } else {
+                Opened::Refused("this request key belongs to another attempt".to_string())
+            };
+        }
+        if let Some(marker) = book
+            .markers
+            .iter()
+            .find(|m| m.stream == request.stream && m.n == request.n)
+        {
+            return if constant_time_eq(marker.receipt_sha256.as_bytes(), receipt_sha256.as_bytes())
+            {
+                Opened::Known(PairingState::CancelledBeforeOpen)
+            } else {
+                Opened::Refused("this request key belongs to another attempt".to_string())
+            };
+        }
+        // A receipt names one attempt only; refused before any fence moves.
+        if book.receipt_elsewhere(&receipt_sha256, request.stream, request.n) {
+            return Opened::Refused("this receipt belongs to another attempt".to_string());
+        }
+        match book.streams.get(request.stream) {
+            // Taken before (and forgotten since): never opened again.
+            Some(fence) if request.n <= *fence => return Opened::Known(PairingState::Unknown),
+            Some(_) => {}
+            None if book.streams.len() >= PAIRING_STREAMS => {
+                return Opened::Refused("too many pairing streams; restart the server".to_string());
+            }
+            None => {}
+        }
+        let (Ok(id), Ok(secret)) = (random_hex(6), random_token()) else {
+            return Opened::Refused("could not create a pairing code".to_string());
+        };
+        book.streams.insert(request.stream.to_string(), request.n);
+        book.make_room();
+        let (tell, outcome) = tokio::sync::oneshot::channel();
+        book.pending.insert(
+            id.clone(),
+            PendingPairing {
+                secret_sha256: sha256_hex(&secret),
+                name,
+                scope: request.scope,
+                this_workspace_only: request.this_workspace_only,
+                expires: now + self.ttl,
+                failures: 0,
+                owner: Some(Owner {
+                    stream: request.stream.to_string(),
+                    n: request.n,
+                    receipt_sha256,
+                    grant_sha256,
+                    outcome: Some(tell),
+                }),
+            },
+        );
+        Opened::Code {
+            code: Secret(format!("{id}.{secret}")),
+            id,
+            lifetime: self.ttl,
+            outcome,
+        }
+    }
+
+    /// Cancel the owned code `id` (its issuer's connection asks).
+    pub(crate) fn cancel(&self, id: &str) {
+        let mut book = self.book();
+        book.prune(std::time::Instant::now());
+        if book.pending.get(id).is_some_and(|p| p.owner.is_some()) {
+            book.finish(id, localpilot_rpc::PairingOutcome::Cancelled);
+        }
+    }
+
+    /// End whatever is due (an owned code's own deadline reached).
+    pub(crate) fn expire_due(&self) {
+        self.book().prune(std::time::Instant::now());
+    }
+
+    /// The owned code `id`'s issuer is gone: a code still live ends.
+    pub(crate) fn issuer_gone(&self, id: &str) {
+        let mut book = self.book();
+        if book.pending.get(id).is_some_and(|p| p.owner.is_some()) {
+            book.finish(id, localpilot_rpc::PairingOutcome::IssuerGone);
+        }
+    }
+
+    /// What is known about the attempt holding `receipt`.
+    pub(crate) fn status(&self, receipt: &str) -> localpilot_rpc::PairingState {
+        use localpilot_rpc::PairingState;
+        let receipt_sha256 = sha256_hex(receipt);
+        let mut book = self.book();
+        book.prune(std::time::Instant::now());
+        if book.live_by_receipt(&receipt_sha256).is_some() {
+            return PairingState::Pending;
+        }
+        if let Some(finished) = book
+            .finished
+            .iter()
+            .find(|f| constant_time_eq(f.receipt_sha256.as_bytes(), receipt_sha256.as_bytes()))
+        {
+            return PairingState::Finished {
+                outcome: finished.outcome.clone(),
+            };
+        }
+        if book
+            .markers
+            .iter()
+            .any(|m| constant_time_eq(m.receipt_sha256.as_bytes(), receipt_sha256.as_bytes()))
+        {
+            return PairingState::CancelledBeforeOpen;
+        }
+        PairingState::Unknown
+    }
+
+    /// Cancel the attempt with this key and receipt: a live one ends as
+    /// cancelled, an ended one answers how it ended, and one not opened yet is
+    /// fenced off so it never will be.
+    pub(crate) fn cancel_by_receipt(
+        &self,
+        server_instance: &str,
+        instance: &str,
+        stream: &str,
+        n: u64,
+        receipt: &str,
+    ) -> Result<localpilot_rpc::PairingState, String> {
+        use localpilot_rpc::PairingState;
+        if instance != server_instance {
+            return Err(
+                "this pairing was prepared for another server instance (the server restarted)"
+                    .to_string(),
+            );
+        }
+        let receipt_sha256 = sha256_hex(receipt);
+        let matches = |hash: &str| constant_time_eq(hash.as_bytes(), receipt_sha256.as_bytes());
+        let mut book = self.book();
+        let now = std::time::Instant::now();
+        book.prune(now);
+        let live = book.pending.iter().find_map(|(id, p)| {
+            p.owner
+                .as_ref()
+                .filter(|o| o.stream == stream && o.n == n)
+                .map(|o| (id.clone(), matches(&o.receipt_sha256)))
+        });
+        if let Some((id, authorized)) = live {
+            if !authorized {
+                return Err("this receipt does not belong to that attempt".to_string());
+            }
+            book.finish(&id, localpilot_rpc::PairingOutcome::Cancelled);
+            return Ok(PairingState::Finished {
+                outcome: localpilot_rpc::PairingOutcome::Cancelled,
+            });
+        }
+        if let Some(finished) = book
+            .finished
+            .iter()
+            .find(|f| f.stream == stream && f.n == n)
+        {
+            if !matches(&finished.receipt_sha256) {
+                return Err("this receipt does not belong to that attempt".to_string());
+            }
+            return Ok(PairingState::Finished {
+                outcome: finished.outcome.clone(),
+            });
+        }
+        if let Some(marker) = book.markers.iter().find(|m| m.stream == stream && m.n == n) {
+            if !matches(&marker.receipt_sha256) {
+                return Err("this receipt does not belong to that attempt".to_string());
+            }
+            return Ok(PairingState::CancelledBeforeOpen);
+        }
+        match book.streams.get(stream) {
+            Some(fence) if n <= *fence => Ok(PairingState::Unknown),
+            None if book.streams.len() >= PAIRING_STREAMS => {
+                Err("too many pairing streams; restart the server".to_string())
+            }
+            _ if book.receipt_elsewhere(&receipt_sha256, stream, n) => {
+                Err("this receipt belongs to another attempt".to_string())
+            }
+            _ => {
+                // Not opened yet: take its number so it never can be.
+                book.streams.insert(stream.to_string(), n);
+                if book.markers.len() >= CANCEL_MARKERS {
+                    book.markers.pop_front();
+                }
+                book.markers.push_back(Marker {
+                    stream: stream.to_string(),
+                    n,
+                    receipt_sha256,
+                    until: now + self.ttl,
+                });
+                Ok(PairingState::CancelledBeforeOpen)
+            }
+        }
     }
 
     /// Exchange a pairing code for a device credential. The code is checked
@@ -804,35 +1260,77 @@ impl Pairings {
         registry: &DeviceRegistry,
     ) -> Result<(Standing, Secret), PairingRefusal> {
         let (id, secret) = code.split_once('.').ok_or(PairingRefusal::Invalid)?;
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(pairing) = pending.get_mut(id) else {
-            return Err(PairingRefusal::Invalid);
+        let mut book = self.book();
+        book.prune(std::time::Instant::now());
+        let Some(pairing) = book.pending.get_mut(id) else {
+            // A code closed on the PC, presented exactly: say so.
+            let closed = book.tombstones.iter().any(|tombstone| {
+                tombstone.id == id
+                    && constant_time_eq(
+                        sha256_hex(secret).as_bytes(),
+                        tombstone.secret_sha256.as_bytes(),
+                    )
+            });
+            return Err(if closed {
+                PairingRefusal::Closed
+            } else {
+                PairingRefusal::Invalid
+            });
         };
-        if pairing.expires <= std::time::Instant::now() {
-            pending.remove(id);
-            return Err(PairingRefusal::Invalid);
-        }
         if !constant_time_eq(
             sha256_hex(secret).as_bytes(),
             pairing.secret_sha256.as_bytes(),
         ) {
             pairing.failures += 1;
             if pairing.failures >= PAIRING_FAILURES {
-                pending.remove(id);
+                book.finish(id, localpilot_rpc::PairingOutcome::Withdrawn);
             }
             return Err(PairingRefusal::Invalid);
         }
-        let Some(pairing) = pending.remove(id) else {
-            return Err(PairingRefusal::Invalid);
-        };
-        match registry.add(&pairing.name, pairing.scope, pairing.this_workspace_only) {
-            Ok(paired) => Ok(paired),
-            Err(error) => {
-                // Nothing was registered: the owner's code stays usable.
-                pending.insert(id.to_string(), pairing);
-                Err(PairingRefusal::Registry(error.to_string()))
+        let (name, scope, this_workspace_only) = (
+            pairing.name.clone(),
+            pairing.scope,
+            pairing.this_workspace_only,
+        );
+        match registry.add(&name, scope, this_workspace_only) {
+            Ok((standing, credential)) => {
+                book.finish(
+                    id,
+                    localpilot_rpc::PairingOutcome::Used {
+                        device_id: standing.id.clone(),
+                        name,
+                        scope: standing.scope,
+                    },
+                );
+                Ok((standing, credential))
             }
+            // Nothing was registered: the code (and its owner) stay as they
+            // were.
+            Err(error) => Err(PairingRefusal::Registry(error.to_string())),
         }
+    }
+}
+
+/// An owned pairing code for as long as its issuer's connection is served:
+/// however that ends, a code still live ends as `issuer_gone`.
+pub(crate) struct OwnedPairing {
+    pairings: std::sync::Arc<Pairings>,
+    id: String,
+}
+
+impl OwnedPairing {
+    pub(crate) fn new(pairings: std::sync::Arc<Pairings>, id: String) -> Self {
+        Self { pairings, id }
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Drop for OwnedPairing {
+    fn drop(&mut self) {
+        self.pairings.issuer_gone(&self.id);
     }
 }
 
@@ -1250,5 +1748,369 @@ mod tests {
             leases.lease(&capability).is_none(),
             "and it cannot be reused"
         );
+    }
+
+    // ---- owned pairings ----------------------------------------------------
+
+    use localpilot_rpc::{PairingOutcome, PairingState};
+
+    const INSTANCE: &str = "this-server";
+
+    fn request<'a>(stream: &'a str, n: u64, receipt: &'a str) -> PairOpen<'a> {
+        PairOpen {
+            instance: INSTANCE,
+            stream,
+            n,
+            receipt,
+            name: "phone",
+            scope: Scope::Control,
+            this_workspace_only: false,
+        }
+    }
+
+    struct Live {
+        id: String,
+        code: Secret,
+        outcome: tokio::sync::oneshot::Receiver<PairingOutcome>,
+    }
+
+    fn open(pairings: &Pairings, stream: &str, n: u64, receipt: &str) -> Live {
+        match pairings.open(INSTANCE, &request(stream, n, receipt)) {
+            Opened::Code {
+                id, code, outcome, ..
+            } => Live { id, code, outcome },
+            Opened::Known(state) => panic!("expected a code, got {state:?}"),
+            Opened::Refused(why) => panic!("expected a code, refused: {why}"),
+        }
+    }
+
+    fn known(pairings: &Pairings, stream: &str, n: u64, receipt: &str) -> PairingState {
+        match pairings.open(INSTANCE, &request(stream, n, receipt)) {
+            Opened::Known(state) => state,
+            Opened::Code { .. } => panic!("a code was minted for {stream}/{n}"),
+            Opened::Refused(why) => panic!("refused: {why}"),
+        }
+    }
+
+    #[test]
+    fn every_way_an_owned_code_ends_is_told_once() {
+        let registry = DeviceRegistry::default();
+        let pairings = Pairings::default();
+        // Used.
+        let mut used = open(&pairings, "s", 1, "r1");
+        let (standing, _) = pairings.exchange(used.code.expose(), &registry).unwrap();
+        assert!(
+            matches!(used.outcome.try_recv(), Ok(PairingOutcome::Used { device_id, .. }) if device_id == standing.id)
+        );
+        // Cancelled.
+        let mut cancelled = open(&pairings, "s", 2, "r2");
+        pairings.cancel(&cancelled.id);
+        pairings.cancel(&cancelled.id);
+        assert_eq!(cancelled.outcome.try_recv(), Ok(PairingOutcome::Cancelled));
+        // Withdrawn after wrong secrets.
+        let mut withdrawn = open(&pairings, "s", 3, "r3");
+        let wrong = format!("{}.wrong", withdrawn.id);
+        for _ in 0..PAIRING_FAILURES {
+            assert_eq!(
+                pairings.exchange(&wrong, &registry).unwrap_err(),
+                PairingRefusal::Invalid
+            );
+        }
+        assert_eq!(withdrawn.outcome.try_recv(), Ok(PairingOutcome::Withdrawn));
+        // Issuer gone.
+        let mut gone = open(&pairings, "s", 4, "r4");
+        drop(OwnedPairing::new(
+            std::sync::Arc::new(Pairings::default()),
+            "other".into(),
+        ));
+        pairings.issuer_gone(&gone.id);
+        assert_eq!(gone.outcome.try_recv(), Ok(PairingOutcome::IssuerGone));
+        // Evicted to make room for newer codes.
+        let mut evicted = open(&pairings, "s", 5, "r5");
+        for _ in 0..PAIRINGS_OUTSTANDING {
+            pairings.begin("cli", Scope::Observe, false).unwrap();
+        }
+        assert_eq!(evicted.outcome.try_recv(), Ok(PairingOutcome::Evicted));
+        // Each is readable by receipt.
+        assert!(matches!(
+            pairings.status("r1"),
+            PairingState::Finished {
+                outcome: PairingOutcome::Used { .. }
+            }
+        ));
+        assert_eq!(
+            pairings.status("r2"),
+            PairingState::Finished {
+                outcome: PairingOutcome::Cancelled
+            }
+        );
+        assert_eq!(
+            pairings.status("r5"),
+            PairingState::Finished {
+                outcome: PairingOutcome::Evicted
+            }
+        );
+    }
+
+    #[test]
+    fn an_owned_code_expires_at_its_own_deadline() {
+        let pairings = Pairings::with_ttl(std::time::Duration::from_millis(20));
+        let mut live = open(&pairings, "s", 1, "r");
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        pairings.expire_due();
+        assert_eq!(live.outcome.try_recv(), Ok(PairingOutcome::Expired));
+        assert_eq!(
+            pairings.status("r"),
+            PairingState::Finished {
+                outcome: PairingOutcome::Expired
+            }
+        );
+    }
+
+    #[test]
+    fn a_registry_failure_leaves_the_code_and_its_owner_as_they_were() {
+        let registry = DeviceRegistry::default();
+        let pairings = Pairings::default();
+        let mut live = open(&pairings, "s", 1, "r");
+        registry.fail_for_test(true);
+        assert!(matches!(
+            pairings.exchange(live.code.expose(), &registry),
+            Err(PairingRefusal::Registry(_))
+        ));
+        assert!(live.outcome.try_recv().is_err(), "nothing was told");
+        assert_eq!(pairings.status("r"), PairingState::Pending);
+        registry.fail_for_test(false);
+        assert!(pairings.exchange(live.code.expose(), &registry).is_ok());
+        assert!(matches!(
+            live.outcome.try_recv(),
+            Ok(PairingOutcome::Used { .. })
+        ));
+    }
+
+    #[test]
+    fn a_used_or_reopened_key_never_mints_again() {
+        let registry = DeviceRegistry::default();
+        let pairings = Pairings::default();
+        let live = open(&pairings, "s", 1, "r1");
+        // The same key while live: what is known, nothing new.
+        assert_eq!(known(&pairings, "s", 1, "r1"), PairingState::Pending);
+        // The same key with another receipt or grant is refused.
+        assert!(matches!(
+            pairings.open(INSTANCE, &request("s", 1, "other")),
+            Opened::Refused(_)
+        ));
+        let mut changed = request("s", 1, "r1");
+        changed.scope = Scope::Observe;
+        assert!(matches!(
+            pairings.open(INSTANCE, &changed),
+            Opened::Refused(_)
+        ));
+        pairings.exchange(live.code.expose(), &registry).unwrap();
+        assert!(matches!(
+            known(&pairings, "s", 1, "r1"),
+            PairingState::Finished { .. }
+        ));
+        // A lower number on the stream: never minted.
+        let _two = open(&pairings, "s", 3, "r3");
+        assert_eq!(known(&pairings, "s", 2, "r2"), PairingState::Unknown);
+        // Another server instance cannot mint here.
+        let mut elsewhere = request("s", 9, "r9");
+        elsewhere.instance = "the-old-server";
+        assert!(
+            matches!(pairings.open(INSTANCE, &elsewhere), Opened::Refused(why) if why.contains("restarted"))
+        );
+        assert_eq!(registry.list().unwrap().len(), 1, "one device only");
+    }
+
+    #[test]
+    fn a_cancel_before_open_fences_the_attempt_even_after_its_marker_is_gone() {
+        let pairings = Pairings::with_ttl(std::time::Duration::from_millis(20));
+        assert_eq!(
+            pairings.cancel_by_receipt(INSTANCE, INSTANCE, "s", 1, "r1"),
+            Ok(PairingState::CancelledBeforeOpen)
+        );
+        assert_eq!(pairings.status("r1"), PairingState::CancelledBeforeOpen);
+        assert_eq!(
+            known(&pairings, "s", 1, "r1"),
+            PairingState::CancelledBeforeOpen
+        );
+        // More pre-open cancels than markers kept: the earliest is forgotten,
+        // its fence is not.
+        for n in 2..=(CANCEL_MARKERS as u64 + 3) {
+            pairings
+                .cancel_by_receipt(INSTANCE, INSTANCE, "s", n, &format!("r{n}"))
+                .unwrap();
+        }
+        assert_eq!(known(&pairings, "s", 1, "r1"), PairingState::Unknown);
+        // The marker's time passes: still never opened.
+        pairings
+            .cancel_by_receipt(INSTANCE, INSTANCE, "t", 1, "t1")
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert_eq!(known(&pairings, "t", 1, "t1"), PairingState::Unknown);
+        assert!(
+            pairings.book().pending.is_empty(),
+            "nothing was ever minted"
+        );
+    }
+
+    #[test]
+    fn reconciling_by_receipt_cancels_live_codes_and_reports_ended_ones() {
+        let registry = DeviceRegistry::default();
+        let pairings = Pairings::default();
+        let mut live = open(&pairings, "s", 1, "r1");
+        assert_eq!(pairings.status("r1"), PairingState::Pending);
+        // The wrong receipt for that attempt is refused and changes nothing.
+        assert!(pairings
+            .cancel_by_receipt(INSTANCE, INSTANCE, "s", 1, "nope")
+            .is_err());
+        assert_eq!(pairings.status("r1"), PairingState::Pending);
+        assert_eq!(
+            pairings.cancel_by_receipt(INSTANCE, INSTANCE, "s", 1, "r1"),
+            Ok(PairingState::Finished {
+                outcome: PairingOutcome::Cancelled
+            })
+        );
+        assert_eq!(live.outcome.try_recv(), Ok(PairingOutcome::Cancelled));
+        // A used one answers that it was used, and stays used.
+        let used = open(&pairings, "s", 2, "r2");
+        pairings.exchange(used.code.expose(), &registry).unwrap();
+        assert!(matches!(
+            pairings.cancel_by_receipt(INSTANCE, INSTANCE, "s", 2, "r2"),
+            Ok(PairingState::Finished {
+                outcome: PairingOutcome::Used { .. }
+            })
+        ));
+        assert_eq!(pairings.status("never-seen"), PairingState::Unknown);
+        assert!(pairings
+            .cancel_by_receipt(INSTANCE, "the-old-server", "s", 3, "r3")
+            .is_err());
+    }
+
+    #[test]
+    fn ended_attempts_are_forgotten_oldest_first_but_never_reopened() {
+        let pairings = Pairings::default();
+        for n in 1..=(FINISHED_KEPT as u64 + 2) {
+            let live = open(&pairings, "s", n, &format!("r{n}"));
+            pairings.cancel(&live.id);
+        }
+        // Forgotten before its code would have expired: unknown, not a guess.
+        assert_eq!(pairings.status("r1"), PairingState::Unknown);
+        assert_eq!(known(&pairings, "s", 1, "r1"), PairingState::Unknown);
+        assert_eq!(
+            pairings.status(&format!("r{}", FINISHED_KEPT + 2)),
+            PairingState::Finished {
+                outcome: PairingOutcome::Cancelled
+            }
+        );
+    }
+
+    #[test]
+    fn a_live_attempt_stays_readable_through_heavy_churn() {
+        let pairings = Pairings::default();
+        let _live = open(&pairings, "keep", 1, "keep");
+        for n in 1..=40u64 {
+            let other = open(&pairings, "churn", n, &format!("c{n}"));
+            pairings.cancel(&other.id);
+        }
+        assert_eq!(pairings.status("keep"), PairingState::Pending);
+    }
+
+    #[test]
+    fn new_streams_past_the_cap_are_refused_and_old_fences_stay() {
+        let pairings = Pairings::default();
+        for n in 0..PAIRING_STREAMS {
+            pairings
+                .cancel_by_receipt(INSTANCE, INSTANCE, &format!("s{n}"), 5, &format!("r{n}"))
+                .unwrap();
+        }
+        assert!(matches!(
+            pairings.open(INSTANCE, &request("one-more", 1, "x")),
+            Opened::Refused(_)
+        ));
+        assert!(pairings
+            .cancel_by_receipt(INSTANCE, INSTANCE, "one-more", 1, "x")
+            .is_err());
+        assert_eq!(
+            known(&pairings, "s0", 3, "old"),
+            PairingState::Unknown,
+            "the fence holds"
+        );
+    }
+
+    #[test]
+    fn a_phone_is_told_a_code_was_closed_only_for_that_exact_code() {
+        let registry = DeviceRegistry::default();
+        let pairings = Pairings::default();
+        let first = open(&pairings, "s", 1, "r1");
+        pairings.cancel(&first.id);
+        let id = first.id.clone();
+        assert_eq!(
+            pairings
+                .exchange(first.code.expose(), &registry)
+                .unwrap_err(),
+            PairingRefusal::Closed
+        );
+        // The id with a wrong secret: the usual refusal.
+        assert_eq!(
+            pairings
+                .exchange(&format!("{id}.wrong"), &registry)
+                .unwrap_err(),
+            PairingRefusal::Invalid
+        );
+        // More cancellations than kept: the earliest falls back to the usual
+        // refusal, and is still never usable.
+        for n in 2..=(TOMBSTONES as u64 + 1) {
+            let live = open(&pairings, "s", n, &format!("r{n}"));
+            pairings.cancel(&live.id);
+        }
+        assert_eq!(
+            pairings
+                .exchange(first.code.expose(), &registry)
+                .unwrap_err(),
+            PairingRefusal::Invalid
+        );
+        assert!(registry.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_receipt_names_exactly_one_attempt() {
+        let registry = DeviceRegistry::default();
+        let pairings = Pairings::default();
+        // One attempt with this receipt ends; another key cannot take it.
+        let first = open(&pairings, "s", 1, "shared");
+        pairings.exchange(first.code.expose(), &registry).unwrap();
+        assert!(matches!(
+            pairings.open(INSTANCE, &request("s", 2, "shared")),
+            Opened::Refused(why) if why.contains("another attempt")
+        ));
+        // Nor while one is live.
+        let _live = open(&pairings, "t", 1, "live");
+        assert!(matches!(
+            pairings.open(INSTANCE, &request("t", 2, "live")),
+            Opened::Refused(_)
+        ));
+        assert!(pairings
+            .cancel_by_receipt(INSTANCE, INSTANCE, "t", 3, "live")
+            .is_err());
+        // Nor one cancelled before it was opened.
+        pairings
+            .cancel_by_receipt(INSTANCE, INSTANCE, "u", 1, "early")
+            .unwrap();
+        assert!(matches!(
+            pairings.open(INSTANCE, &request("u", 2, "early")),
+            Opened::Refused(_)
+        ));
+        // The refusals moved no fence: the next numbers still open.
+        let _next = open(&pairings, "s", 2, "fresh-s2");
+        let _next = open(&pairings, "t", 2, "fresh-t2");
+        // Each receipt still reads its own attempt.
+        assert!(matches!(
+            pairings.status("shared"),
+            PairingState::Finished {
+                outcome: PairingOutcome::Used { .. }
+            }
+        ));
+        assert_eq!(pairings.status("live"), PairingState::Pending);
     }
 }

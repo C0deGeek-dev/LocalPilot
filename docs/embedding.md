@@ -267,6 +267,22 @@ use a new correlation id but must repeat the same command. Commands without
 
 - `pair_begin {name, scope, this_workspace_only}` (this computer only) — answers
   `pairing_code {code, expires_in_secs}` and ends. `localpilot devices pair` uses it;
+- `pair_hello` (this computer only) — answers `pairing_ready {instance}`, the
+  server instance a pairing would be bound to; no code is made;
+- `pair_open {instance, stream, n, attempt, receipt, name, scope,
+  this_workspace_only}` (this computer only) — answers `pairing_opened {attempt,
+  code, expires_in_secs, instance}`; the connection owns the code until it
+  answers `pairing_finished {attempt, outcome, instance}` once (`used`,
+  `cancelled`, `expired`, `evicted`, `withdrawn` or `issuer_gone`) and closes.
+  `pair_cancel {attempt}` on that connection cancels it; the connection ending
+  ends the code. The key (`instance`, `stream`, `n`) is never opened twice: a
+  key at or below its stream's highest number answers `pairing_status` instead
+  and makes no code. `receipt` is the caller's own secret, known before any
+  reply (ADR-0255);
+- `pair_status {receipt}` and `pair_cancel_receipt {instance, stream, n,
+  receipt}` (this computer only) — answer `pairing_status {instance, state}`
+  (`pending`, `finished` with its outcome, `cancelled_before_open` or
+  `unknown`); a cancel for an attempt not yet opened makes sure it never is;
 - `gateway_register` (this computer only) — answers
   `gateway_registered {capability}`. The capability is valid while this
   connection stays open; the connection accepts nothing else;

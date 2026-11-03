@@ -2,6 +2,48 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0255: A Pairing Code Can Be Owned By The Connection That Asked For It
+
+**Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.
+
+**Context.** `pair_begin` mints a code and closes; nothing ties the code to
+whoever shows it, nothing cancels it, and its issuer never learns its outcome.
+A pairing view in the terminal must invalidate its code when it closes
+(copied links included), say truthfully what became of it, and survive a lost
+reply without ever making a second code or a second device.
+
+**Decision.** A local connection may open an owned pairing (`pair_open`). The
+code is minted as before (single use, five minutes, eight outstanding, five
+wrong secrets) and the connection owns it: one loop serves its write, its
+reads (`pair_cancel` for its exact attempt, the connection ending), the
+outcome and the deadline, and a guard made at mint withdraws a still-live code
+however the connection ends, including a write cut off part-way. Every removal
+of an owned code is decided once under the pairing lock and told to its owner:
+`used` (only after the device was registered; a registry failure leaves the
+code as it was), `cancelled`, `expired`, `evicted` (room for a newer code),
+`withdrawn` (wrong secrets) or `issuer_gone`. The request key is the server
+instance (from a no-code `pair_hello`), an issuer stream and a request number;
+per instance the server keeps each stream's highest number (a fixed number of
+streams; new ones past it are refused), so a key at or below it never mints
+again, a request for another instance never mints, and a cancel that arrives
+before its open takes the number so that open never runs. The owner's own
+32-byte receipt, sent with the open, reconciles a lost reply (`pair_status`,
+`pair_cancel_receipt`); outcomes stay readable for a bounded while (32,
+oldest first) and are `unknown` once forgotten, never guessed. A phone
+presenting exactly a code that was closed on the PC is told so (a bounded
+cache, matched on the whole code); anything else gets the coarse refusal.
+Codes and receipts are stored as hashes, never logged.
+
+**Consequences.** Closing an owner withdraws its code at once. Each owned code
+ends in exactly one recorded state; telling its owner is best effort (the
+owner's connection may be gone), and the owner can reconcile a lost reply by
+receipt while the server still holds the result. A server restart (told by the
+instance) establishes that the old code can no longer be used, but whether it
+was used before the restart may stay unknown: that needs a look at the paired
+devices. `pair_begin` and `localpilot devices pair` are
+unchanged. The full-screen terminal's pairing view that uses this ships
+separately; until then nothing in LocalPilot opens owned pairings.
+
 ## ADR-0254: Configure Adaptive, Fixed Or Disabled Work Sizing
 
 **Status:** accepted · **Date:** 2026-11-02. Refs LocalHub#263.

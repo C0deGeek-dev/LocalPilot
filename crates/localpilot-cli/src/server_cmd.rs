@@ -1036,6 +1036,82 @@ where
             emit(&mut write, reply_id, event).await?;
             return Ok(());
         }
+        ClientCommand::PairHello => {
+            let instance = hosts.requests.instance().to_string();
+            emit(&mut write, reply_id, ServerEvent::PairingReady { instance }).await?;
+            return Ok(());
+        }
+        ClientCommand::PairOpen {
+            instance,
+            stream,
+            n,
+            attempt,
+            receipt,
+            name,
+            scope,
+            this_workspace_only,
+        } => {
+            let request = crate::server_devices::PairOpen {
+                instance: &instance,
+                stream: &stream,
+                n,
+                receipt: receipt.expose(),
+                name: &name,
+                scope,
+                this_workspace_only,
+            };
+            return serve_owned_pairing(
+                &mut reader,
+                &mut write,
+                hosts,
+                reply_id,
+                &attempt,
+                &request,
+            )
+            .await;
+        }
+        ClientCommand::PairCancel { .. } => {
+            emit(
+                &mut write,
+                reply_id,
+                ServerEvent::Error {
+                    message: "no pairing is open on this connection".to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+        ClientCommand::PairStatus { receipt } => {
+            let instance = hosts.requests.instance().to_string();
+            let state = hosts.pairings.status(receipt.expose());
+            emit(
+                &mut write,
+                reply_id,
+                ServerEvent::PairingStatus { instance, state },
+            )
+            .await?;
+            return Ok(());
+        }
+        ClientCommand::PairCancelReceipt {
+            instance: expected,
+            stream,
+            n,
+            receipt,
+        } => {
+            let instance = hosts.requests.instance().to_string();
+            let event = match hosts.pairings.cancel_by_receipt(
+                &instance,
+                &expected,
+                &stream,
+                n,
+                receipt.expose(),
+            ) {
+                Ok(state) => ServerEvent::PairingStatus { instance, state },
+                Err(message) => ServerEvent::Error { message },
+            };
+            emit(&mut write, reply_id, event).await?;
+            return Ok(());
+        }
         ClientCommand::PairExchange {
             capability,
             pairing,
@@ -1686,6 +1762,138 @@ async fn wait_for_slot<'a>(
 
 /// Exchange a pairing code, arriving through a registered gateway, for a
 /// device credential.
+/// How long a pairing's outcome may take to reach its issuer before the
+/// connection is simply closed (the outcome stays readable by receipt).
+const PAIRING_FINISH_WRITE: Duration = Duration::from_secs(2);
+
+/// One record as a line.
+fn record_line(reply_id: Option<String>, event: ServerEvent) -> Vec<u8> {
+    let record = ServerRecord {
+        v: RPC_PROTOCOL_VERSION,
+        id: reply_id,
+        seq: None,
+        event,
+    };
+    let mut line = serde_json::to_vec(&record).unwrap_or_default();
+    line.push(b'\n');
+    line
+}
+
+async fn write_line<W: AsyncWrite + Unpin>(write: &mut W, line: &[u8]) -> std::io::Result<()> {
+    write.write_all(line).await?;
+    write.flush().await
+}
+
+/// Serve a pairing this connection owns: the code, then exactly one record
+/// saying how it ended, then close. One loop drives the write, the reader
+/// (`pair_cancel`, the connection ending), the outcome and the code's
+/// deadline together, so a write that stalls never holds cancel or expiry.
+/// However this ends, a code still live ends as `issuer_gone`.
+async fn serve_owned_pairing<R, W>(
+    reader: &mut JsonRecordReader<R>,
+    write: &mut W,
+    hosts: &HostMap,
+    reply_id: Option<String>,
+    attempt: &str,
+    request: &crate::server_devices::PairOpen<'_>,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    use crate::server_devices::Opened;
+    let instance = hosts.requests.instance().to_string();
+    let (id, code, lifetime, mut outcome) = match hosts.pairings.open(&instance, request) {
+        Opened::Code {
+            id,
+            code,
+            lifetime,
+            outcome,
+        } => (id, code, lifetime, outcome),
+        Opened::Known(state) => {
+            emit(
+                write,
+                reply_id,
+                ServerEvent::PairingStatus { instance, state },
+            )
+            .await?;
+            return Ok(());
+        }
+        Opened::Refused(message) => {
+            emit(write, reply_id, ServerEvent::Error { message }).await?;
+            return Ok(());
+        }
+    };
+    // From here on, every way out ends a live code.
+    let owned = crate::server_devices::OwnedPairing::new(hosts.pairings.clone(), id);
+    let opened = record_line(
+        reply_id,
+        ServerEvent::PairingOpened {
+            attempt: attempt.to_string(),
+            code: localpilot_rpc::WireSecret::new(code.expose()),
+            expires_in_secs: lifetime.as_secs(),
+            instance: instance.clone(),
+        },
+    );
+    drop(code);
+    let deadline = tokio::time::sleep(lifetime);
+    tokio::pin!(deadline);
+    let delivered;
+    let ended = {
+        let mut sending = Some(Box::pin(write_line(write, &opened)));
+        let ended = loop {
+            tokio::select! {
+                sent = async {
+                    match sending.as_mut() {
+                        Some(write) => write.await,
+                        None => std::future::pending().await,
+                    }
+                }, if sending.is_some() => {
+                    if sent.is_err() {
+                        // The code may be cut off part-way: the connection
+                        // ends, and with it the code.
+                        return Ok(());
+                    }
+                    sending = None;
+                }
+                record = reader.next() => match record {
+                    Ok(Some(value)) => {
+                        let cancel = serde_json::from_value::<ClientRecord>(value)
+                            .ok()
+                            .is_some_and(|record| matches!(
+                                &record.command,
+                                ClientCommand::PairCancel { attempt: asked } if asked == attempt
+                            ));
+                        if cancel {
+                            hosts.pairings.cancel(owned.id());
+                        }
+                    }
+                    // The issuer went away.
+                    Ok(None) | Err(_) => return Ok(()),
+                },
+                ended = &mut outcome => break ended.ok(),
+                () = &mut deadline => hosts.pairings.expire_due(),
+            }
+        };
+        delivered = sending.is_none();
+        ended
+    };
+    drop(owned);
+    // The outcome is told only after the code itself went out whole.
+    if let (Some(outcome), true) = (ended, delivered) {
+        let finished = record_line(
+            None,
+            ServerEvent::PairingFinished {
+                attempt: attempt.to_string(),
+                outcome,
+                instance,
+            },
+        );
+        let _ = tokio::time::timeout(PAIRING_FINISH_WRITE, write_line(write, &finished)).await;
+    }
+    Ok(())
+}
+
 async fn exchange_pairing(
     hosts: &HostMap,
     capability: &str,
@@ -1724,6 +1932,12 @@ async fn exchange_pairing(
             let key = format!("pairing:{}", pairing.split('.').next().unwrap_or_default());
             tokio::time::sleep(hosts.delays.failed(&key)).await;
             Err("this pairing code is not valid (it may have expired or been used)".to_string())
+        }
+        Err(PairingRefusal::Closed) => {
+            hosts
+                .devices
+                .audit("pairing_refused", None, "code closed on the PC");
+            Err("This pairing code was closed on the PC. Create a new code there.".to_string())
         }
         Err(PairingRefusal::Registry(reason)) => Err(reason),
     }
@@ -9094,6 +9308,440 @@ pub(crate) mod tests {
         let end = timeout(DEADLINE, relay).await.unwrap().unwrap();
         assert_eq!(end, crate::relay_client::RelayEnd::TooLarge);
         assert_eq!(source.source.asks().outstanding().len(), 1);
+    }
+
+    // ---- pairings owned by their issuer -------------------------------------
+
+    async fn pair_hello(endpoint: &Endpoint) -> String {
+        let (_r, _w, ready) = first_record(endpoint, ClientCommand::PairHello).await;
+        match ready {
+            ServerEvent::PairingReady { instance } => instance,
+            other => panic!("expected pairing_ready, got {other:?}"),
+        }
+    }
+
+    fn pair_open(instance: &str, stream: &str, n: u64, receipt: &str) -> ClientCommand {
+        ClientCommand::PairOpen {
+            instance: instance.to_string(),
+            stream: stream.to_string(),
+            n,
+            attempt: format!("attempt-{n}"),
+            receipt: localpilot_rpc::WireSecret::new(receipt),
+            name: "phone".to_string(),
+            scope: localpilot_rpc::Scope::Control,
+            this_workspace_only: false,
+        }
+    }
+
+    async fn pairing_state(endpoint: &Endpoint, receipt: &str) -> localpilot_rpc::PairingState {
+        let (_r, _w, reply) = first_record(
+            endpoint,
+            ClientCommand::PairStatus {
+                receipt: localpilot_rpc::WireSecret::new(receipt),
+            },
+        )
+        .await;
+        match reply {
+            ServerEvent::PairingStatus { state, .. } => state,
+            other => panic!("expected pairing_status, got {other:?}"),
+        }
+    }
+
+    async fn exchange_with(endpoint: &Endpoint, capability: &str, code: &str) -> ServerEvent {
+        let (_r, _w, reply) = first_record(
+            endpoint,
+            ClientCommand::PairExchange {
+                capability: localpilot_rpc::WireSecret::new(capability),
+                pairing: localpilot_rpc::WireSecret::new(code),
+            },
+        )
+        .await;
+        reply
+    }
+
+    /// How the issuer's code ended, as the issuer is told.
+    async fn finished(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+    ) -> localpilot_rpc::PairingOutcome {
+        match read_event(reader).await {
+            ServerEvent::PairingFinished { outcome, .. } => outcome,
+            other => panic!("expected pairing_finished, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_issuer_hears_how_its_code_ended_and_the_phone_hears_it_was_closed() {
+        use localpilot_rpc::PairingOutcome;
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 16, hosts.clone());
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let instance = pair_hello(&endpoint).await;
+        // Used by a phone.
+        let (mut issuer, _w, opened) =
+            first_record(&endpoint, pair_open(&instance, "s", 1, "r1")).await;
+        let ServerEvent::PairingOpened { code, .. } = opened else {
+            panic!("{opened:?}")
+        };
+        let paired = exchange_with(&endpoint, &capability, code.expose()).await;
+        assert!(
+            matches!(paired, ServerEvent::DevicePaired { .. }),
+            "{paired:?}"
+        );
+        assert!(matches!(
+            finished(&mut issuer).await,
+            PairingOutcome::Used { .. }
+        ));
+        assert!(
+            timeout(DEADLINE, issuer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none(),
+            "then closed"
+        );
+        // Cancelled on the PC: the phone is told so.
+        let (mut issuer, mut write, opened) =
+            first_record(&endpoint, pair_open(&instance, "s", 2, "r2")).await;
+        let ServerEvent::PairingOpened { code, attempt, .. } = opened else {
+            panic!("{opened:?}")
+        };
+        send_command(&mut write, ClientCommand::PairCancel { attempt })
+            .await
+            .unwrap();
+        assert_eq!(finished(&mut issuer).await, PairingOutcome::Cancelled);
+        let refused = exchange_with(&endpoint, &capability, code.expose()).await;
+        assert!(
+            matches!(&refused, ServerEvent::Error { message } if message.contains("closed on the PC")),
+            "{refused:?}"
+        );
+        // The issuer goes away: the code ends with it.
+        let (issuer, write, _) = first_record(&endpoint, pair_open(&instance, "s", 3, "r3")).await;
+        drop((issuer, write));
+        timeout(DEADLINE, async {
+            while pairing_state(&endpoint, "r3").await == localpilot_rpc::PairingState::Pending {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            pairing_state(&endpoint, "r3").await,
+            localpilot_rpc::PairingState::Finished {
+                outcome: PairingOutcome::IssuerGone
+            }
+        );
+        assert_eq!(
+            hosts.devices.list().unwrap().len(),
+            1,
+            "only the used code paired"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_owned_code_expires_at_its_deadline_and_its_issuer_is_told() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap {
+            pairings: Arc::new(crate::server_devices::Pairings::with_ttl(
+                Duration::from_millis(300),
+            )),
+            ..HostMap::default()
+        };
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 4, hosts.clone());
+        let instance = pair_hello(&endpoint).await;
+        let (mut issuer, _w, _) = first_record(&endpoint, pair_open(&instance, "s", 1, "r1")).await;
+        assert_eq!(
+            finished(&mut issuer).await,
+            localpilot_rpc::PairingOutcome::Expired
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancel_racing_a_phone_has_exactly_one_winner() {
+        use localpilot_rpc::PairingOutcome;
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 64, hosts.clone());
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let instance = pair_hello(&endpoint).await;
+        let mut used = 0;
+        for n in 1..=12u64 {
+            let receipt = format!("race-{n}");
+            let (mut issuer, mut write, opened) =
+                first_record(&endpoint, pair_open(&instance, "race", n, &receipt)).await;
+            let ServerEvent::PairingOpened { code, attempt, .. } = opened else {
+                panic!("{opened:?}")
+            };
+            let phone = tokio::spawn({
+                let endpoint = endpoint.clone();
+                let capability = capability.clone();
+                let code = code.expose().to_string();
+                async move { exchange_with(&endpoint, &capability, &code).await }
+            });
+            send_command(&mut write, ClientCommand::PairCancel { attempt })
+                .await
+                .unwrap();
+            let outcome = finished(&mut issuer).await;
+            let phone = phone.await.unwrap();
+            match outcome {
+                PairingOutcome::Used { .. } => {
+                    used += 1;
+                    assert!(
+                        matches!(phone, ServerEvent::DevicePaired { .. }),
+                        "{phone:?}"
+                    );
+                }
+                PairingOutcome::Cancelled => {
+                    assert!(matches!(phone, ServerEvent::Error { .. }), "{phone:?}");
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(
+            hosts.devices.list().unwrap().len(),
+            used,
+            "a device only when used"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn only_the_issuer_cancels_and_a_lost_reply_is_reconciled_by_receipt() {
+        use localpilot_rpc::PairingState;
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 16, hosts.clone());
+        let instance = pair_hello(&endpoint).await;
+        // The issuer never reads its reply (it was lost).
+        let (read, mut write) = tokio::io::split(dial(&endpoint).await);
+        send_command(&mut write, pair_open(&instance, "s", 1, "lost"))
+            .await
+            .unwrap();
+        timeout(DEADLINE, async {
+            while pairing_state(&endpoint, "lost").await != PairingState::Pending {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Another connection cannot cancel it by attempt.
+        let (_r, _w, refused) = first_record(
+            &endpoint,
+            ClientCommand::PairCancel {
+                attempt: "attempt-1".into(),
+            },
+        )
+        .await;
+        assert!(matches!(refused, ServerEvent::Error { .. }), "{refused:?}");
+        // The wrong attempt on its own connection changes nothing.
+        send_command(
+            &mut write,
+            ClientCommand::PairCancel {
+                attempt: "someone-else".into(),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            pairing_state(&endpoint, "lost").await,
+            PairingState::Pending
+        );
+        // The receipt cancels it from anywhere local.
+        let cancel = |receipt: &str, n| ClientCommand::PairCancelReceipt {
+            instance: instance.clone(),
+            stream: "s".into(),
+            n,
+            receipt: localpilot_rpc::WireSecret::new(receipt),
+        };
+        let (_r, _w, wrong) = first_record(&endpoint, cancel("not-it", 1)).await;
+        assert!(matches!(wrong, ServerEvent::Error { .. }), "{wrong:?}");
+        let (_r, _w, cancelled) = first_record(&endpoint, cancel("lost", 1)).await;
+        assert!(
+            matches!(
+                &cancelled,
+                ServerEvent::PairingStatus {
+                    state: PairingState::Finished {
+                        outcome: localpilot_rpc::PairingOutcome::Cancelled
+                    },
+                    ..
+                }
+            ),
+            "{cancelled:?}"
+        );
+        // A cancel that comes before its open: the open never mints.
+        let (_r, _w, early) = first_record(&endpoint, cancel("early", 2)).await;
+        assert!(
+            matches!(
+                &early,
+                ServerEvent::PairingStatus {
+                    state: PairingState::CancelledBeforeOpen,
+                    ..
+                }
+            ),
+            "{early:?}"
+        );
+        let (_r, _w, late) = first_record(&endpoint, pair_open(&instance, "s", 2, "early")).await;
+        assert!(
+            matches!(
+                &late,
+                ServerEvent::PairingStatus {
+                    state: PairingState::CancelledBeforeOpen,
+                    ..
+                }
+            ),
+            "{late:?}"
+        );
+        drop(read);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_open_meant_for_an_earlier_server_mints_nothing_here() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let (old, _old_server) = spawn_server_on(factory.clone(), 4, HostMap::default());
+        let old_instance = pair_hello(&old).await;
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 4, HostMap::default());
+        assert_ne!(
+            pair_hello(&endpoint).await,
+            old_instance,
+            "another instance"
+        );
+        let (_r, _w, refused) =
+            first_record(&endpoint, pair_open(&old_instance, "s", 1, "r1")).await;
+        assert!(
+            matches!(&refused, ServerEvent::Error { message } if message.contains("restarted")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            pairing_state(&endpoint, "r1").await,
+            localpilot_rpc::PairingState::Unknown
+        );
+    }
+
+    /// A writer that takes `budget` bytes and then fails, or (`budget` none)
+    /// never takes anything.
+    struct Stuck {
+        budget: Option<usize>,
+    }
+
+    impl tokio::io::AsyncWrite for Stuck {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            match &mut self.budget {
+                None => std::task::Poll::Pending,
+                Some(0) => std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into())),
+                Some(budget) => {
+                    let taken = buf.len().min(*budget);
+                    *budget -= taken;
+                    std::task::Poll::Ready(Ok(taken))
+                }
+            }
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn serve_pairing_with(
+        hosts: &HostMap,
+        write: &mut Stuck,
+        input: tokio::io::DuplexStream,
+        receipt: &str,
+    ) {
+        let instance = hosts.requests.instance().to_string();
+        let request = crate::server_devices::PairOpen {
+            instance: &instance,
+            stream: "s",
+            n: 1,
+            receipt,
+            name: "phone",
+            scope: localpilot_rpc::Scope::Control,
+            this_workspace_only: false,
+        };
+        let mut reader = JsonRecordReader::new(input);
+        timeout(
+            DEADLINE,
+            serve_owned_pairing(&mut reader, write, hosts, None, "attempt-1", &request),
+        )
+        .await
+        .expect("the issuer connection ended")
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_code_cut_off_part_way_ends_with_its_connection() {
+        let hosts = HostMap::default();
+        let (_client, input) = tokio::io::duplex(256);
+        serve_pairing_with(&hosts, &mut Stuck { budget: Some(10) }, input, "cut").await;
+        assert_eq!(
+            hosts.pairings.status("cut"),
+            localpilot_rpc::PairingState::Finished {
+                outcome: localpilot_rpc::PairingOutcome::IssuerGone
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_write_still_lets_the_code_expire_or_be_cancelled() {
+        // Expiry while the code cannot be written.
+        let hosts = HostMap {
+            pairings: Arc::new(crate::server_devices::Pairings::with_ttl(
+                Duration::from_millis(200),
+            )),
+            ..HostMap::default()
+        };
+        let (_client, input) = tokio::io::duplex(256);
+        serve_pairing_with(&hosts, &mut Stuck { budget: None }, input, "stalled").await;
+        assert_eq!(
+            hosts.pairings.status("stalled"),
+            localpilot_rpc::PairingState::Finished {
+                outcome: localpilot_rpc::PairingOutcome::Expired
+            }
+        );
+        // A cancel while the code cannot be written, from a client that never
+        // reads.
+        let hosts = HostMap::default();
+        let (mut client, input) = tokio::io::duplex(256);
+        let mut line = serde_json::to_vec(&ClientRecord {
+            v: RPC_PROTOCOL_VERSION,
+            id: None,
+            request: None,
+            command: ClientCommand::PairCancel {
+                attempt: "attempt-1".to_string(),
+            },
+        })
+        .unwrap();
+        line.push(b'\n');
+        client.write_all(&line).await.unwrap();
+        serve_pairing_with(&hosts, &mut Stuck { budget: None }, input, "cancelled").await;
+        assert_eq!(
+            hosts.pairings.status("cancelled"),
+            localpilot_rpc::PairingState::Finished {
+                outcome: localpilot_rpc::PairingOutcome::Cancelled
+            }
+        );
+        // The client simply goes away before anything was delivered.
+        let hosts = HostMap::default();
+        let (client, input) = tokio::io::duplex(256);
+        drop(client);
+        serve_pairing_with(&hosts, &mut Stuck { budget: None }, input, "gone").await;
+        assert_eq!(
+            hosts.pairings.status("gone"),
+            localpilot_rpc::PairingState::Finished {
+                outcome: localpilot_rpc::PairingOutcome::IssuerGone
+            }
+        );
     }
 
     // ---- attendance: who is attached to a shared session --------------------

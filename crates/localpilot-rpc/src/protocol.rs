@@ -143,6 +143,38 @@ pub enum ClientCommand {
     GatewayRegister,
     /// First record of a local connection that starts pairing a device. The
     /// reply carries a single-use pairing code; the connection then ends.
+    /// This computer only: which server instance would take a pairing, before
+    /// any code exists (`pairing_ready`).
+    PairHello,
+    /// This computer only: open a pairing this connection owns until it ends.
+    /// The request key is (`instance`, `stream`, `n`): `n` increases per
+    /// stream, and a key at or below the stream's highest is never minted
+    /// again. `receipt` is the issuer's own secret for reconciling this
+    /// attempt later (`pair_status`, `pair_cancel_receipt`), known before any
+    /// reply.
+    PairOpen {
+        instance: String,
+        stream: String,
+        n: u64,
+        attempt: String,
+        receipt: WireSecret,
+        name: String,
+        scope: Scope,
+        #[serde(default)]
+        this_workspace_only: bool,
+    },
+    /// On the connection that opened it: cancel that attempt.
+    PairCancel { attempt: String },
+    /// This computer only: what became of the attempt holding `receipt`.
+    PairStatus { receipt: WireSecret },
+    /// This computer only: cancel the attempt holding `receipt` (or, before it
+    /// was opened, make sure it never is).
+    PairCancelReceipt {
+        instance: String,
+        stream: String,
+        n: u64,
+        receipt: WireSecret,
+    },
     PairBegin {
         name: String,
         scope: Scope,
@@ -244,6 +276,41 @@ pub struct AttendedDevice {
     pub standing: DeviceStanding,
 }
 
+/// How an owned pairing attempt ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum PairingOutcome {
+    /// A device was registered with the code.
+    Used {
+        device_id: String,
+        name: String,
+        scope: Scope,
+    },
+    Cancelled,
+    Expired,
+    /// Withdrawn to make room for a newer code.
+    Evicted,
+    /// Withdrawn after too many wrong secrets.
+    Withdrawn,
+    /// Its issuing connection ended.
+    IssuerGone,
+}
+
+/// What a server knows about a pairing attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PairingState {
+    /// The code is live.
+    Pending,
+    Finished {
+        outcome: PairingOutcome,
+    },
+    /// Cancelled before it was opened: it never will be.
+    CancelledBeforeOpen,
+    /// Not known (forgotten, or never opened here). Says nothing about use.
+    Unknown,
+}
+
 /// Whether an attached device is still allowed here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -291,6 +358,11 @@ impl ClientCommand {
             | Self::DeviceAttach { .. }
             | Self::DeviceSessions { .. }
             | Self::PairBegin { .. }
+            | Self::PairHello
+            | Self::PairOpen { .. }
+            | Self::PairCancel { .. }
+            | Self::PairStatus { .. }
+            | Self::PairCancelReceipt { .. }
             | Self::PairExchange { .. }
             | Self::RelayHost { .. } => Requirement::LocalOnly,
         }
@@ -487,6 +559,30 @@ pub enum ServerEvent {
     PairingCode {
         code: WireSecret,
         expires_in_secs: u64,
+    },
+    /// Reply to `pair_hello`: the server instance a pairing would be bound to.
+    PairingReady {
+        instance: String,
+    },
+    /// Reply to `pair_open`: the code, valid for `expires_in_secs`, owned by
+    /// this connection until `pairing_finished`.
+    PairingOpened {
+        attempt: String,
+        code: WireSecret,
+        expires_in_secs: u64,
+        instance: String,
+    },
+    /// How an owned pairing attempt ended, exactly once.
+    PairingFinished {
+        attempt: String,
+        outcome: PairingOutcome,
+        instance: String,
+    },
+    /// Reply to `pair_status`, `pair_cancel_receipt`, or a `pair_open` whose key
+    /// was already used.
+    PairingStatus {
+        instance: String,
+        state: PairingState,
     },
     /// Reply to `pair_exchange`: the new device's credential, sent once.
     DevicePaired {

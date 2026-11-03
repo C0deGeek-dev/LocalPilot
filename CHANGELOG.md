@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The server can now hand out pairing codes owned by the connection that asked
+  for them (`pair_open`): the code is withdrawn the moment that connection ends
+  or cancels it, it ends in exactly one recorded state (used, cancelled,
+  expired, pushed out by newer codes, withdrawn after wrong attempts, or owner
+  gone) that its owner is told while connected, and a lost reply can be
+  reconciled by the owner's own receipt while the server keeps the result. A phone
+  presenting a code closed on the PC is told so. `localpilot devices pair` is
+  unchanged. The full-screen terminal's pairing view that uses this is not
+  available yet (ADR-0255).
 - A shared session now shows who is attached: the status line says how many
   devices (or "devices unknown" while that is not known), the terminal notes
   each device that attaches or leaves (and arrivals and departures it could not

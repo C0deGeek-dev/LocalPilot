@@ -198,6 +198,11 @@ where
             | ClientCommand::DeviceSessions { .. }
             | ClientCommand::RelayHost { .. }
             | ClientCommand::PairBegin { .. }
+            | ClientCommand::PairHello
+            | ClientCommand::PairOpen { .. }
+            | ClientCommand::PairCancel { .. }
+            | ClientCommand::PairStatus { .. }
+            | ClientCommand::PairCancelReceipt { .. }
             | ClientCommand::PairExchange { .. } => {
                 emit(
                     &mut writer,
@@ -356,6 +361,11 @@ where
             | ClientCommand::DeviceSessions { .. }
             | ClientCommand::RelayHost { .. }
             | ClientCommand::PairBegin { .. }
+            | ClientCommand::PairHello
+            | ClientCommand::PairOpen { .. }
+            | ClientCommand::PairCancel { .. }
+            | ClientCommand::PairStatus { .. }
+            | ClientCommand::PairCancelReceipt { .. }
             | ClientCommand::PairExchange { .. } => {
                                 emit(writer, id, ServerEvent::Error {
                                     message: "attach is not supported on the stdio drive"
