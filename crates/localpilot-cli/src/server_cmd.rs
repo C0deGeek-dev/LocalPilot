@@ -2031,13 +2031,14 @@ pub async fn pair(
             };
             // The code is presented only to the workspace that issued it.
             let link = pairing_link(&origin, &code, &workspace);
-            match qrcode::QrCode::new(link.as_bytes()) {
-                Ok(qr) => writeln!(
+            match pairing_qr_rows(&link) {
+                Ok(rows) => writeln!(
                     out,
                     "{}",
-                    qr.render::<qrcode::render::unicode::Dense1x2>()
-                        .quiet_zone(true)
-                        .build()
+                    rows.join(
+                        "
+"
+                    )
                 )?,
                 Err(error) => writeln!(out, "(could not draw a QR code: {error})")?,
             }
@@ -2067,7 +2068,22 @@ pub async fn pair(
 /// requested from it.
 /// The QR link: the gateway origin, then the code and the issuing workspace in
 /// the fragment (never sent to a server by the browser), percent-encoded.
-fn pairing_link(origin: &str, code: &str, workspace: &str) -> String {
+/// A pairing link as QR rows: Dense1x2 cells (two modules per row) with the
+/// full quiet zone, the same everywhere a code is shown.
+pub(crate) fn pairing_qr_rows(link: &str) -> Result<Vec<String>, String> {
+    qrcode::QrCode::new(link.as_bytes())
+        .map(|qr| {
+            qr.render::<qrcode::render::unicode::Dense1x2>()
+                .quiet_zone(true)
+                .build()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn pairing_link(origin: &str, code: &str, workspace: &str) -> String {
     fn encode(value: &str) -> String {
         value
             .bytes()
@@ -9333,7 +9349,18 @@ pub(crate) mod tests {
         }
     }
 
-    async fn pairing_state(endpoint: &Endpoint, receipt: &str) -> localpilot_rpc::PairingState {
+    /// Hosts whose pairing codes live for `ttl`.
+    pub(crate) fn hosts_with_pairing_ttl(ttl: Duration) -> HostMap {
+        HostMap {
+            pairings: Arc::new(crate::server_devices::Pairings::with_ttl(ttl)),
+            ..HostMap::default()
+        }
+    }
+
+    pub(crate) async fn pairing_state(
+        endpoint: &Endpoint,
+        receipt: &str,
+    ) -> localpilot_rpc::PairingState {
         let (_r, _w, reply) = first_record(
             endpoint,
             ClientCommand::PairStatus {
@@ -9347,7 +9374,11 @@ pub(crate) mod tests {
         }
     }
 
-    async fn exchange_with(endpoint: &Endpoint, capability: &str, code: &str) -> ServerEvent {
+    pub(crate) async fn exchange_with(
+        endpoint: &Endpoint,
+        capability: &str,
+        code: &str,
+    ) -> ServerEvent {
         let (_r, _w, reply) = first_record(
             endpoint,
             ClientCommand::PairExchange {

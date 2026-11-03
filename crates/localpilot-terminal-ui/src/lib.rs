@@ -17,6 +17,7 @@
 mod app;
 mod editor;
 mod layout;
+mod pairing;
 mod presentation;
 mod projection;
 mod render;
@@ -40,6 +41,7 @@ pub use layout::{
     MINIMUM_WIDTH, PAIR_MINIMUM_HEIGHT, PAIR_WIDE_MINIMUM_WIDTH,
 };
 pub use localpilot_config::TimelineDensity;
+pub use pairing::{PairingField, PairingSecret, PairingSetup, PairingView, DEVICE_NAME_MAX};
 pub use projection::{PeerPane, SessionHeader};
 pub use render::{
     render, CompletionHit, HitMap, QuestionHit, ScrollbarGeometry, TabHit, TakeoverHit, ThemeHit,

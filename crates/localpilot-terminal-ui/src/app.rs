@@ -1191,6 +1191,18 @@ pub enum TakeoverNavigation {
     PageDown,
 }
 
+/// What fills the screen, for telling whether the pairing overlay was
+/// replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NavigationMark {
+    navigations: u64,
+    tab: TabId,
+    takeover: bool,
+    localmind: bool,
+    theme_picker: bool,
+    quick_help: bool,
+}
+
 /// A small choice the host asks for over everything else (closing a shared
 /// session, remote access during a permission ask): a title, what the choice
 /// means, and its actions, the first selected.
@@ -1626,6 +1638,14 @@ pub struct AppModel {
     reports_opened: u64,
     /// The host's open choice, if any (see [`Choice`]).
     choice: Option<Choice>,
+    /// Pairing a device: the setup form, or the view showing its code.
+    pairing_setup: Option<crate::pairing::PairingSetup>,
+    pairing_view: Option<crate::pairing::PairingView>,
+    /// Counts explicit navigation (takeovers, product tabs, the theme
+    /// picker), and where the app stood when the pairing overlay opened:
+    /// anything shown since replaces the overlay.
+    takeovers: u64,
+    pairing_opened_at: Option<NavigationMark>,
     escape_armed_at: Option<Instant>,
     print_transcript_on_exit: bool,
     copy_on_select: bool,
@@ -1752,6 +1772,10 @@ impl AppModel {
             remote_label: None,
             reports_opened: 0,
             choice: None,
+            pairing_setup: None,
+            pairing_view: None,
+            takeovers: 0,
+            pairing_opened_at: None,
             escape_armed_at: None,
             print_transcript_on_exit: false,
             copy_on_select: false,
@@ -1952,6 +1976,88 @@ impl AppModel {
         self.choice = None;
     }
 
+    /// Open the pairing setup form (replacing any pairing view).
+    pub fn open_pairing_setup(&mut self, setup: crate::pairing::PairingSetup) {
+        self.pairing_view = None;
+        self.pairing_setup = Some(setup);
+        self.pairing_opened_at = Some(self.navigation_mark());
+    }
+
+    #[must_use]
+    pub fn pairing_setup(&self) -> Option<&crate::pairing::PairingSetup> {
+        self.pairing_setup.as_ref()
+    }
+
+    pub fn pairing_setup_mut(&mut self) -> Option<&mut crate::pairing::PairingSetup> {
+        self.pairing_setup.as_mut()
+    }
+
+    pub fn close_pairing_setup(&mut self) {
+        self.pairing_setup = None;
+    }
+
+    /// Open the pairing view (replacing the setup form and any earlier view,
+    /// whose code is wiped).
+    pub fn open_pairing_view(&mut self, view: crate::pairing::PairingView) {
+        self.pairing_setup = None;
+        self.pairing_view = Some(view);
+        self.pairing_opened_at = Some(self.navigation_mark());
+    }
+
+    #[must_use]
+    pub fn pairing_view(&self) -> Option<&crate::pairing::PairingView> {
+        self.pairing_view.as_ref()
+    }
+
+    pub fn pairing_view_mut(&mut self) -> Option<&mut crate::pairing::PairingView> {
+        self.pairing_view.as_mut()
+    }
+
+    /// Close the pairing view; its code is wiped.
+    pub fn close_pairing_view(&mut self) {
+        self.pairing_view = None;
+    }
+
+    /// Whether a pairing overlay is open and shown: a permission request or
+    /// question suspends it (it stays, hidden, and comes back afterwards).
+    #[must_use]
+    pub fn pairing_shown(&self) -> bool {
+        (self.pairing_setup.is_some() || self.pairing_view.is_some())
+            && self.dialog.is_none()
+            && !self.pairing_replaced()
+    }
+
+    /// Whether something else (a report, help, settings or another takeover)
+    /// opened over the pairing overlay: it is replaced, never drawn again,
+    /// and its host must close it.
+    #[must_use]
+    pub fn pairing_replaced(&self) -> bool {
+        (self.pairing_setup.is_some() || self.pairing_view.is_some())
+            && self.pairing_opened_at != Some(self.navigation_mark())
+    }
+
+    /// Where the app stands, as far as what fills the screen: whichever
+    /// surface changed it, a different mark means something else is shown.
+    fn navigation_mark(&self) -> NavigationMark {
+        NavigationMark {
+            navigations: self.takeovers,
+            tab: self.active_tab,
+            takeover: self.takeover.is_some(),
+            localmind: self.localmind_tab.is_some(),
+            theme_picker: self.theme_picker.is_some(),
+            quick_help: self.quick_help,
+        }
+    }
+
+    /// Something else was asked to be shown: the pairing code goes from the
+    /// screen at once (its host closes the rest on its next tick).
+    fn navigated(&mut self) {
+        self.takeovers = self.takeovers.wrapping_add(1);
+        if let Some(view) = &mut self.pairing_view {
+            view.wipe_secret();
+        }
+    }
+
     /// A queued prompt will not run: it is no longer pending, and says why.
     pub fn mark_prompt_not_run(&mut self, id: ItemId, why: &str) -> bool {
         let timeline = &mut self.projections.active_mut().timeline;
@@ -2139,6 +2245,9 @@ impl AppModel {
         self.exit_armed = false;
         self.quick_help = false;
         self.input_overlay = None;
+        if self.active_tab != tab {
+            self.navigated();
+        }
         self.active_tab = tab;
         true
     }
@@ -3071,6 +3180,7 @@ impl AppModel {
         self.quick_help = false;
         self.input_overlay = None;
         self.takeover = None;
+        self.navigated();
         let selected = Theme::ALL
             .iter()
             .position(|theme| *theme == self.theme)
@@ -3090,6 +3200,7 @@ impl AppModel {
         else {
             return;
         };
+        self.navigated();
         let selected = Theme::ALL
             .iter()
             .position(|theme| *theme == self.theme)
@@ -3129,6 +3240,7 @@ impl AppModel {
         self.quick_help = false;
         self.close_theme_picker(true);
         self.input_overlay = None;
+        self.navigated();
         self.takeover = Some(TakeoverState {
             kind: TakeoverKind::Help,
             scroll: 0,
@@ -3158,6 +3270,7 @@ impl AppModel {
         let title = report_title(&title);
         let report_lines: Vec<String> = lines.iter().map(|line| sanitize_text(line)).collect();
         self.reports_opened += 1;
+        self.navigated();
         self.takeover = Some(TakeoverState {
             kind: TakeoverKind::Report,
             scroll: 0,
@@ -3188,6 +3301,7 @@ impl AppModel {
         self.close_theme_picker(true);
         self.input_overlay = None;
         self.takeover = None;
+        self.navigated();
         self.active_tab = TabId::LocalMind;
         self.localmind_tab = Some(TakeoverState {
             kind: TakeoverKind::LocalMind,
@@ -3790,6 +3904,7 @@ impl AppModel {
         self.quick_help = false;
         self.close_theme_picker(true);
         self.input_overlay = None;
+        self.navigated();
         self.takeover = Some(TakeoverState {
             kind: TakeoverKind::Settings,
             scroll: 0,
@@ -3945,6 +4060,7 @@ impl AppModel {
             })
             .collect::<Vec<_>>();
         let selected = first_diff_line(diff_files.first());
+        self.navigated();
         self.takeover = Some(TakeoverState {
             kind: TakeoverKind::Diff,
             scroll: 0,
@@ -3979,6 +4095,7 @@ impl AppModel {
             })
             .collect::<Vec<_>>();
         let selected = sessions.iter().position(|entry| entry.current).unwrap_or(0);
+        self.navigated();
         self.takeover = Some(TakeoverState {
             kind: TakeoverKind::Sessions,
             scroll: selected,

@@ -415,6 +415,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
                 let mut hit_map = render_takeover(frame, body, app, localmind);
                 hit_map.tabs = tabs;
                 hit_map.theme_rows = render_theme_picker(frame, area, app);
+                render_pairing(frame, area, app);
                 render_choice(frame, area, app);
                 return hit_map;
             }
@@ -447,6 +448,13 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         FrameLayout::calculate_for_mode(area, requested_editor_rows, app.capabilities.screen_reader)
     };
     let Some(layout) = layout else {
+        // Nothing of the pairing overlay is on screen: only Esc acts on it.
+        if let Some(view) = app.pairing_view() {
+            view.set_controls_visible(false);
+        }
+        if let Some(setup) = app.pairing_setup() {
+            setup.set_controls_visible(false);
+        }
         frame.render_widget(
             Paragraph::new(format!(
                 "{APP_NAME}\nresize to at least {MINIMUM_WIDTH} × {MINIMUM_HEIGHT}"
@@ -540,6 +548,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     render_footer(frame, layout.footer, app, layout.stacked);
     let theme_rows = render_theme_picker(frame, area, app);
     let dialog_hits = render_dialog(frame, area, active_timeline, app);
+    render_pairing(frame, area, app);
     render_choice(frame, area, app);
     HitMap {
         takeover: false,
@@ -3179,6 +3188,374 @@ fn timeline_search_projection(app: &AppModel, width: u16) -> Option<(String, usi
     Some((text, cursor))
 }
 
+/// The pairing overlay, over everything but the host's choice. A permission
+/// request or question suspends it: the dialog shows instead.
+fn render_pairing(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
+    if !app.pairing_shown() {
+        return;
+    }
+    if let Some(setup) = app.pairing_setup() {
+        render_pairing_setup(frame, area, app, setup);
+    } else if let Some(view) = app.pairing_view() {
+        render_pairing_view(frame, area, app, view);
+    }
+}
+
+/// A centered surface `width` x `height` (clamped to `area`); `None` when too
+/// small to draw.
+fn pairing_surface(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppModel,
+    width: u16,
+    height: u16,
+) -> Option<Rect> {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    if width < 8 || height < 3 {
+        return None;
+    }
+    let dialog = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, dialog);
+    frame.render_widget(
+        Block::default().style(theme(app).ui(UiRole::Surface)),
+        dialog,
+    );
+    Some(Rect::new(
+        dialog.x.saturating_add(2),
+        dialog.y.saturating_add(1),
+        dialog.width.saturating_sub(4),
+        dialog.height.saturating_sub(2),
+    ))
+}
+
+fn render_pairing_setup(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppModel,
+    setup: &crate::pairing::PairingSetup,
+) {
+    use crate::pairing::PairingField;
+    let theme = theme(app);
+    let width = area.width.saturating_sub(4).min(76);
+    let inner = width.saturating_sub(4).max(1);
+    let marker = |field: PairingField| if setup.focus == field { "> " } else { "  " };
+    let role = |field: PairingField| {
+        if setup.focus == field {
+            UiRole::Accent
+        } else {
+            UiRole::Foreground
+        }
+    };
+    let scope = if setup.control {
+        "control: watch, prompt now or as a follow-up, cancel, answer permission requests, run /clear /name /effort /compact (no steering)"
+    } else {
+        "observe: watch only"
+    };
+    let reach = if setup.this_workspace_only {
+        "this workspace only"
+    } else {
+        "every workspace this server serves, now and later"
+    };
+    let mut body = Vec::new();
+    body.push(name_line(setup, inner, theme.ui(role(PairingField::Name))));
+    for (field, label, value) in [
+        (PairingField::Scope, "Access", scope),
+        (PairingField::Reach, "Reach", reach),
+    ] {
+        for row in wrap_indented(&format!("{}{label}: {value}", marker(field)), inner, 2) {
+            body.push(Line::styled(row, theme.ui(role(field))));
+        }
+    }
+    if let Some(problem) = &setup.problem {
+        for row in wrap_plain(problem, inner) {
+            body.push(Line::styled(row, theme.ui(UiRole::Warning)));
+        }
+    }
+    let controls = vec![
+        Line::styled(
+            format!("{}Create code", marker(PairingField::Create)),
+            theme.ui(role(PairingField::Create)),
+        ),
+        Line::styled(
+            format!("{}Cancel", marker(PairingField::Cancel)),
+            theme.ui(role(PairingField::Cancel)),
+        ),
+        Line::styled(
+            truncate_end(
+                "Tab/Shift+Tab move · Left/Right/Space change · Enter · Esc cancel",
+                inner,
+            ),
+            theme.ui(UiRole::Muted),
+        ),
+    ];
+    // The whole grant is on screen whenever the form is: it never scrolls, so
+    // Create cannot act on a grant partly out of sight.
+    let shown = pairing_layout(
+        frame,
+        area,
+        app,
+        width,
+        "Pair a device",
+        body,
+        controls,
+        None,
+    );
+    setup.set_controls_visible(shown.is_some());
+}
+
+/// The name field, its cursor drawn as a reversed cell (the part of a long
+/// name around the cursor when it does not fit).
+fn name_line(
+    setup: &crate::pairing::PairingSetup,
+    inner: u16,
+    style: ratatui::style::Style,
+) -> Line<'static> {
+    let focused = setup.focus == crate::pairing::PairingField::Name;
+    let prefix = if focused { "> Name: " } else { "  Name: " };
+    let chars: Vec<char> = setup.name.chars().collect();
+    let room = usize::from(inner)
+        .saturating_sub(prefix.chars().count())
+        .saturating_sub(1)
+        .max(1);
+    let cursor = setup.cursor.min(chars.len());
+    let start = cursor.saturating_sub(room.saturating_sub(1));
+    let end = (start + room).min(chars.len());
+    let before: String = chars[start..cursor].iter().collect();
+    let at: String = chars.get(cursor).map_or(" ".to_string(), char::to_string);
+    let after: String = chars
+        .get(cursor.saturating_add(1)..end.max(cursor.saturating_add(1)))
+        .map(|rest| rest.iter().collect())
+        .unwrap_or_default();
+    let mut spans = vec![
+        Span::styled(prefix.to_string(), style),
+        Span::styled(before, style),
+    ];
+    if focused {
+        spans.push(Span::styled(
+            at,
+            style.add_modifier(ratatui::style::Modifier::REVERSED),
+        ));
+    } else {
+        spans.push(Span::styled(at, style));
+    }
+    spans.push(Span::styled(after, style));
+    Line::from(spans)
+}
+
+/// `text` cut into rows of at most `width` columns (by grapheme; a long
+/// unbroken link is never clipped, only wrapped).
+fn wrap_plain(text: &str, width: u16) -> Vec<String> {
+    let width = usize::from(width.max(1));
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for grapheme in text.graphemes(true) {
+        if UnicodeWidthStr::width(row.as_str()) + UnicodeWidthStr::width(grapheme) > width {
+            rows.push(std::mem::take(&mut row));
+        }
+        row.push_str(grapheme);
+    }
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// `text` wrapped at `width`, its continuation rows indented by `indent`
+/// columns and wrapped at the width left after it (nothing is cut).
+fn wrap_indented(text: &str, width: u16, indent: u16) -> Vec<String> {
+    let rows = wrap_plain(text, width);
+    let Some((first, rest)) = rows.split_first() else {
+        return rows;
+    };
+    let mut out = vec![first.clone()];
+    let rest = rest.concat();
+    if !rest.is_empty() {
+        let pad = " ".repeat(usize::from(indent));
+        for row in wrap_plain(&rest, width.saturating_sub(indent).max(1)) {
+            out.push(format!("{pad}{row}"));
+        }
+    }
+    out
+}
+
+/// Draw a pairing overlay: the title, then `body`, then `controls` pinned at
+/// the bottom. With `scroll` the body scrolls from that row when it does not
+/// fit; without it the body must fit whole. Every row is counted as drawn, so
+/// nothing is clipped. When the body cannot be shown so (not even one row, or
+/// not whole when it may not scroll), only how to leave is shown and `None`
+/// is returned (the host then takes only Esc). `Some` is whether the body
+/// scrolls.
+#[allow(clippy::too_many_arguments)] // one overlay's whole layout
+fn pairing_layout(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppModel,
+    width: u16,
+    title: &str,
+    body: Vec<Line<'static>>,
+    controls: Vec<Line<'static>>,
+    scroll: Option<usize>,
+) -> Option<bool> {
+    let theme = theme(app);
+    let width = width.min(area.width);
+    let inner = width.saturating_sub(4).max(1);
+    // Border, title and the gaps after the title and before the controls.
+    let chrome = 2 + 1 + 1 + 1 + controls.len();
+    let height = usize::from(area.height);
+    let fits = match scroll {
+        Some(_) => height > chrome,
+        None => height >= chrome + body.len(),
+    };
+    if !fits || inner < 16 {
+        let lines = vec![
+            Line::styled(truncate_end(title, inner), theme.ui(UiRole::Prompt)),
+            Line::styled(
+                truncate_end("The window is too small. Enlarge it, or press Esc.", inner),
+                theme.ui(UiRole::Warning),
+            ),
+        ];
+        if let Some(content) = pairing_surface(frame, area, app, width, 4) {
+            frame.render_widget(Paragraph::new(lines), content);
+        }
+        return None;
+    }
+    let room = height - chrome;
+    let scrolls = body.len() > room;
+    let start = scroll.unwrap_or(0).min(body.len().saturating_sub(room));
+    let shown: Vec<Line<'static>> = body.into_iter().skip(start).take(room).collect();
+    let mut lines = vec![
+        Line::styled(truncate_end(title, inner), theme.ui(UiRole::Prompt)),
+        Line::raw(""),
+    ];
+    let shown_rows = shown.len();
+    lines.extend(shown);
+    lines.push(Line::raw(""));
+    lines.extend(controls);
+    let rows = u16::try_from(chrome + shown_rows).unwrap_or(u16::MAX);
+    if let Some(content) = pairing_surface(frame, area, app, width, rows) {
+        frame.render_widget(Paragraph::new(lines), content);
+    }
+    Some(scrolls)
+}
+
+/// The colors a QR code is drawn in, whatever the theme: dark modules black
+/// on white, as scanners expect.
+fn qr_style() -> ratatui::style::Style {
+    ratatui::style::Style::default()
+        .fg(ratatui::style::Color::Black)
+        .bg(ratatui::style::Color::White)
+}
+
+fn render_pairing_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppModel,
+    view: &crate::pairing::PairingView,
+) {
+    let theme = theme(app);
+    let base = area.width.saturating_sub(4).min(76);
+    let qr = view
+        .secret()
+        .filter(|_| !view.show_link)
+        .and_then(|secret| secret.qr())
+        .filter(|rows| !rows.is_empty());
+    let qr_width = qr.map_or(0, |rows| {
+        rows.iter()
+            .map(|row| UnicodeWidthStr::width(row.as_str()))
+            .max()
+            .unwrap_or(0)
+    });
+    // The QR rows already carry their quiet zone; it is counted once here.
+    let qr_box = u16::try_from(qr_width + 4).unwrap_or(u16::MAX);
+    let width = if qr.is_some() && qr_box <= area.width {
+        base.max(qr_box)
+    } else {
+        base
+    };
+    let inner = width.saturating_sub(4).max(1);
+    let mut body: Vec<Line<'static>> = Vec::new();
+    for text in &view.lines {
+        for row in wrap_plain(text, inner) {
+            body.push(Line::styled(row, theme.ui(UiRole::Foreground)));
+        }
+    }
+    let mut controls: Vec<Line<'static>> = view
+        .actions
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let selected = index == view.selected;
+            let marker = if selected { "> " } else { "  " };
+            let role = if selected {
+                UiRole::Accent
+            } else {
+                UiRole::Foreground
+            };
+            Line::styled(
+                truncate_end(&format!("{marker}{label}"), inner),
+                theme.ui(role),
+            )
+        })
+        .collect();
+    let chrome = 2 + 1 + 1 + 1 + controls.len() + 1;
+    // The QR code is drawn whole (with the body above it, unscrolled) or not
+    // at all.
+    let qr_fits = qr.is_some_and(|rows| {
+        qr_box <= area.width && chrome + body.len() + 1 + rows.len() <= usize::from(area.height)
+    });
+    if let Some(secret) = view.secret() {
+        body.push(Line::raw(""));
+        match qr.filter(|_| qr_fits) {
+            Some(rows) => {
+                for row in rows {
+                    body.push(Line::styled(row.clone(), qr_style()));
+                }
+            }
+            None => {
+                if qr.is_some() {
+                    for row in wrap_plain(
+                        "The window is too small for the QR code; showing the link.",
+                        inner,
+                    ) {
+                        body.push(Line::styled(row, theme.ui(UiRole::Muted)));
+                    }
+                }
+                for row in wrap_plain(secret.link(), inner) {
+                    body.push(Line::styled(row, theme.ui(UiRole::Accent)));
+                }
+            }
+        }
+    }
+    let scrolls = body.len() + chrome > usize::from(area.height);
+    let hint = if scrolls {
+        "PgUp/PgDn scroll · Up/Down choose · Enter select · Esc close"
+    } else {
+        "Up/Down choose · Enter select · Esc close"
+    };
+    controls.push(Line::styled(
+        truncate_end(hint, inner),
+        theme.ui(UiRole::Muted),
+    ));
+    let title = view.title.clone();
+    let shown = pairing_layout(
+        frame,
+        area,
+        app,
+        width,
+        &title,
+        body,
+        controls,
+        Some(view.scroll),
+    );
+    view.set_controls_visible(shown.is_some());
+}
+
 /// The host's open choice, over everything else (a permission dialog stays
 /// open beneath it).
 fn render_choice(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
@@ -4710,6 +5087,307 @@ mod tests {
         assert_eq!(actual.len(), expected.len(), "{fixture} row count");
         for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
             assert_eq!(actual, expected, "{fixture} row {}", index + 1);
+        }
+    }
+
+    fn screen_text(app: &AppModel, width: u16, height: u16) -> String {
+        let (buffer, _) = render_test_frame(app, width, height);
+        rect_text(&buffer, Rect::new(0, 0, width, height))
+    }
+
+    /// A pairing view over `model()`, showing a code whose link is long and
+    /// whose QR code is `size` rows of `size` columns.
+    fn pairing_model(size: usize, show_link: bool) -> (AppModel, String) {
+        let mut app = model();
+        let link = format!(
+            "https://pc.example.test/#pair={}&w=workspace",
+            "c".repeat(90)
+        );
+        let mut view = crate::pairing::PairingView::new(
+            "Pair a device".to_string(),
+            vec!["Scan this QR code with the phone.".to_string()],
+            vec![
+                "Show link".to_string(),
+                "Copy link".to_string(),
+                "Close".to_string(),
+            ],
+            show_link,
+        );
+        view.show(crate::pairing::PairingSecret::new(
+            link.clone(),
+            Some(vec!["Q".repeat(size); size]),
+        ));
+        app.open_pairing_view(view);
+        (app, link)
+    }
+
+    fn rows_without_spaces(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn a_pairing_qr_code_is_drawn_whole_when_it_fits() {
+        let (app, _) = pairing_model(20, false);
+        let text = screen_text(&app, 100, 40);
+        assert!(text.contains("Pair a device"));
+        assert_eq!(
+            text.matches(&"Q".repeat(20)).count(),
+            20,
+            "every row, uncropped"
+        );
+        assert!(!text.contains("too small"));
+    }
+
+    #[test]
+    fn a_qr_code_that_does_not_fit_gives_way_to_the_whole_link() {
+        let (app, link) = pairing_model(40, false);
+        let text = screen_text(&app, 60, 30);
+        assert!(!text.contains(&"Q".repeat(40)), "never cropped");
+        assert!(text.contains("too small for the QR code"));
+        assert!(
+            rows_without_spaces(&text).contains(&rows_without_spaces(&link)),
+            "the whole link, wrapped and never clipped"
+        );
+    }
+
+    #[test]
+    fn a_long_link_scrolls_in_a_short_window() {
+        let (mut app, _) = pairing_model(10, true);
+        let full = screen_text(&app, 40, 40);
+        assert!(full.contains("https://pc.example.test/#pair="));
+        let top = screen_text(&app, 40, 13);
+        app.pairing_view_mut().unwrap().scroll_link(100);
+        let bottom = screen_text(&app, 40, 13);
+        assert!(top.contains("https://pc"), "{top}");
+        assert!(!rows_without_spaces(&top).contains("&w=workspace"), "{top}");
+        assert!(
+            rows_without_spaces(&bottom).contains("&w=workspace"),
+            "{bottom}"
+        );
+        assert!(!bottom.contains("https://pc"), "{bottom}");
+        assert!(bottom.contains("PgUp/PgDn"), "{bottom}");
+    }
+
+    #[test]
+    fn a_permission_request_suspends_the_pairing_view() {
+        let (mut app, link) = pairing_model(10, true);
+        app.dialog = Some(DialogState::Approval {
+            tool: "tool".to_string(),
+            target: "target".to_string(),
+            risk_class: "test".to_string(),
+            incognito_creation: false,
+        });
+        assert!(!app.pairing_shown());
+        let text = rows_without_spaces(&screen_text(&app, 100, 40));
+        assert!(!text.contains("Pairadevice"));
+        assert!(!text.contains(&rows_without_spaces(&link)[..30]));
+        app.dialog = None;
+        assert!(app.pairing_shown());
+        assert!(rows_without_spaces(&screen_text(&app, 100, 40)).contains("Pairadevice"));
+    }
+
+    #[test]
+    fn the_pairing_form_shows_every_field_and_what_control_grants() {
+        let mut app = model();
+        app.open_pairing_setup(crate::pairing::PairingSetup::new(true));
+        let text = screen_text(&app, 100, 30);
+        for expected in [
+            "Pair a device",
+            "> Name: phone",
+            "Access: control",
+            "no steering",
+            "Reach: every workspace",
+            "Create code",
+            "Cancel",
+        ] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+    }
+
+    /// A view as the host builds it for a live code: a long device name, the
+    /// status lines, a QR code `qr` columns wide (`qr / 2 + 1` rows, quiet
+    /// zone included) and a real-length link.
+    fn live_view(qr: usize) -> (crate::pairing::PairingView, String) {
+        let name = "n".repeat(crate::pairing::DEVICE_NAME_MAX);
+        let link = format!(
+            "https://pc.example.test/#pair={}.{}&w={}",
+            "a".repeat(12),
+            "b".repeat(43),
+            "c".repeat(16)
+        );
+        let mut view = crate::pairing::PairingView::new(
+            "Pair a device".to_string(),
+            vec![
+                "Scan this QR code with the phone.".to_string(),
+                format!("{name} gets control access to every workspace this server serves."),
+                "The code works once, for 4:59 more. Closing this view invalidates it.".to_string(),
+            ],
+            vec![
+                "Show link".to_string(),
+                "Copy link".to_string(),
+                "Close".to_string(),
+            ],
+            false,
+        );
+        view.show(crate::pairing::PairingSecret::new(
+            link.clone(),
+            Some(vec!["█".repeat(qr); qr / 2 + 1]),
+        ));
+        (view, link)
+    }
+
+    fn controls_shown(text: &str) -> bool {
+        ["Show link", "Copy link", "Close", "Esc close"]
+            .iter()
+            .all(|label| text.contains(label))
+    }
+
+    #[test]
+    fn a_real_sized_view_shows_the_whole_qr_or_the_whole_link_and_always_its_controls() {
+        for (width, height) in [(80, 24), (120, 40), (120, 60), (100, 30)] {
+            let (view, link) = live_view(61);
+            let mut app = model();
+            app.open_pairing_view(view);
+            let text = screen_text(&app, width, height);
+            assert!(controls_shown(&text), "{width}x{height}: {text}");
+            assert!(app.pairing_view().unwrap().controls_visible());
+            assert!(text.contains(&"n".repeat(20)), "the grant is disclosed");
+            let rows = text.matches(&"█".repeat(61)).count();
+            if rows > 0 {
+                assert_eq!(rows, 31, "{width}x{height}: the whole QR code");
+            } else {
+                assert!(text.contains("too small for the QR code"));
+                assert!(
+                    rows_without_spaces(&text).contains(&rows_without_spaces(&link)),
+                    "{width}x{height}: the whole link: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_qr_code_needs_every_row_it_takes_and_one_less_falls_back() {
+        let (view, _) = live_view(61);
+        let mut app = model();
+        app.open_pairing_view(view);
+        // Find the smallest height that shows it, at 120 columns.
+        let fits = (20..80)
+            .find(|height| {
+                screen_text(&app, 120, *height)
+                    .matches(&"█".repeat(61))
+                    .count()
+                    == 31
+            })
+            .expect("fits somewhere");
+        let short = screen_text(&app, 120, fits - 1);
+        assert_eq!(short.matches(&"█".repeat(61)).count(), 0, "never cropped");
+        assert!(short.contains("too small for the QR code"));
+        assert!(controls_shown(&short));
+        let (buffer, _) = render_test_frame(&app, 120, fits);
+        let mut bottom_border = false;
+        for y in 0..fits {
+            let row = rect_text(&buffer, Rect::new(0, y, 120, 1));
+            bottom_border |= row.contains("Esc close");
+        }
+        assert!(bottom_border, "the hint, under the QR code, is on screen");
+    }
+
+    #[test]
+    fn a_window_too_small_shows_only_how_to_leave() {
+        let (view, link) = live_view(61);
+        let mut app = model();
+        app.open_pairing_view(view);
+        let text = screen_text(&app, 80, 8);
+        assert!(text.contains("resize to at least"), "{text}");
+        assert!(!text.contains("Copy link"));
+        assert!(!rows_without_spaces(&text).contains(&rows_without_spaces(&link)[..20]));
+        assert!(!app.pairing_view().unwrap().controls_visible());
+        let _ = screen_text(&app, 80, 24);
+        assert!(app.pairing_view().unwrap().controls_visible());
+    }
+
+    #[test]
+    fn a_qr_code_is_black_on_white_in_every_theme() {
+        for theme in Theme::ALL {
+            let (view, _) = live_view(21);
+            let mut app = model();
+            app.theme = theme;
+            app.open_pairing_view(view);
+            let (buffer, _) = render_test_frame(&app, 100, 40);
+            let cell = (0..40)
+                .flat_map(|y| (0..100).map(move |x| (x, y)))
+                .map(|(x, y)| &buffer[(x, y)])
+                .find(|cell| cell.symbol() == "█")
+                .expect("a QR cell");
+            assert_eq!(cell.fg, ratatui::style::Color::Black, "{theme:?}");
+            assert_eq!(cell.bg, ratatui::style::Color::White, "{theme:?}");
+        }
+    }
+
+    #[test]
+    fn the_form_shows_a_full_length_name_at_its_cursor_and_keeps_its_controls() {
+        let mut app = model();
+        let mut setup = crate::pairing::PairingSetup::new(true)
+            .named(&"x".repeat(crate::pairing::DEVICE_NAME_MAX));
+        setup.cursor_to(false);
+        app.open_pairing_setup(setup);
+        for (width, height) in [(80, 24), (40, 30)] {
+            let text = screen_text(&app, width, height);
+            assert!(text.contains("> Name: xxx"), "{width}x{height}: {text}");
+            assert!(
+                text.contains("Create code") && text.contains("Cancel"),
+                "{text}"
+            );
+            assert!(app.pairing_setup().unwrap().controls_visible());
+        }
+        let text = screen_text(&app, 80, 6);
+        assert!(text.contains("resize to at least"), "{text}");
+        assert!(!app.pairing_setup().unwrap().controls_visible());
+    }
+
+    #[test]
+    fn a_takeover_opened_over_the_pairing_view_replaces_it() {
+        let (view, _) = live_view(21);
+        let mut app = model();
+        app.open_pairing_view(view);
+        assert!(app.pairing_shown());
+        app.open_report("Report".to_string(), vec!["report body".to_string()]);
+        assert!(app.pairing_replaced());
+        assert!(!app.pairing_shown());
+        let text = screen_text(&app, 100, 40);
+        assert!(text.contains("report body"));
+        assert!(
+            !text.contains("Pair a device"),
+            "never drawn over its replacement"
+        );
+    }
+
+    #[test]
+    fn a_form_that_cannot_show_its_whole_grant_shows_only_how_to_leave() {
+        let mut app = model();
+        app.open_pairing_setup(crate::pairing::PairingSetup::new(true));
+        for (width, height) in [(80, 10), (40, 12), (40, 14)] {
+            let text = screen_text(&app, width, height);
+            assert!(text.contains("too small"), "{width}x{height}: {text}");
+            assert!(!text.contains("Create code"), "{width}x{height}");
+            assert!(
+                !app.pairing_setup().unwrap().controls_visible(),
+                "{width}x{height}"
+            );
+        }
+        for (width, height) in [(80, 24), (40, 30)] {
+            let text = screen_text(&app, width, height);
+            assert!(
+                app.pairing_setup().unwrap().controls_visible(),
+                "{width}x{height}"
+            );
+            let flat = rows_without_spaces(&text);
+            for whole in [
+                "Access:control:watch,promptnoworasafollow-up,cancel,answerpermissionrequests,run/clear/name/effort/compact(nosteering)",
+                "Reach:everyworkspacethisserverserves,nowandlater",
+            ] {
+                assert!(flat.contains(whole), "{width}x{height}: nothing cut: {text}");
+            }
         }
     }
 

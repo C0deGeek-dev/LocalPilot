@@ -2,6 +2,8 @@
 
 #[path = "fullscreen_harness.rs"]
 mod harness_router;
+#[path = "fullscreen_pairing.rs"]
+mod pairing_host;
 #[path = "fullscreen_remote.rs"]
 mod remote_host;
 
@@ -4483,6 +4485,7 @@ async fn run_event_loop(
     let mut stages = StageHost::new();
     stages.remote = Some(std::rc::Rc::new(remote_host::RemoteHost::new(
         remote.clone(),
+        cwd,
     )));
     let guidance = config
         .harness
@@ -4565,6 +4568,16 @@ async fn run_event_loop(
                     && remote_host::choice_key(app, &host, *key) == remote_host::ChoiceKey::Close
                 {
                     break;
+                }
+            }
+            continue;
+        }
+        // The pairing overlay takes every key while it shows (a permission
+        // request or question suspends it, and keeps its own keys).
+        if app.pairing_shown() {
+            if let (Event::Key(key), Some(host)) = (&next, stages.remote.clone()) {
+                if is_key_action(*key) {
+                    remote_host::pairing_key(app, &host, *key);
                 }
             }
             continue;
@@ -8858,6 +8871,14 @@ fn handle_operation_terminal_event(
         }
         return OperationInputOutcome::Handled;
     }
+    if app.pairing_shown() {
+        if let (Event::Key(key), Some(host)) = (&next, stages.remote.clone()) {
+            if is_key_action(*key) {
+                remote_host::pairing_key(app, &host, *key);
+            }
+        }
+        return OperationInputOutcome::Handled;
+    }
     if matches!(next, Event::Paste(_)) {
         note_bracketed_paste(
             app,
@@ -9663,6 +9684,14 @@ fn run_active_fullscreen_slash(
         ));
         return false;
     };
+    // The same incognito floor as at idle: nothing durable from a live
+    // command either.
+    if app.incognito() {
+        if let Some(message) = crate::incognito::incognito_refusal(&action) {
+            app.apply_runtime(RuntimeUpdate::Warning(message));
+            return false;
+        }
+    }
     if !action.runs_live(Host::Fullscreen) {
         app.apply_runtime(RuntimeUpdate::Notice(
             "available during an active turn: /bg, /effort, profile commands, /think, /help, /theme, /search, and /quit"
@@ -22645,6 +22674,29 @@ last_seen = "2026-08-10"
         assert!(!stages.operation_active.get());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incognito_refuses_pairing_while_a_turn_runs_too() {
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(4);
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let mut app = app();
+        app.set_incognito(true);
+        let mut stages = StageHost::new();
+        stages.remote = Some(pairing_host(&script, no_copy()));
+        let cancel = CancellationToken::new();
+        assert!(!run_active_fullscreen_slash(
+            &mut app,
+            slash_input("/remote pair"),
+            None,
+            &cancel,
+            &stages,
+            Path::new(".")
+        ));
+        assert!(app.pairing_setup().is_none() && app.pairing_view().is_none());
+        let told = format!("{:?}", app.active_timeline_mut().items());
+        assert!(told.contains("a paired device"), "{told}");
+        assert_eq!(script.dials(), 0);
+    }
+
     #[test]
     fn harness_stop_does_not_cancel_unrelated_work() {
         for owns_harness in [false, true] {
@@ -23944,7 +23996,1015 @@ last_seen = "2026-08-10"
             claim: Some((1, "me".to_string())),
             gate: localpilot_core::admission::AdmissionGate::default(),
         });
-        std::rc::Rc::new(remote_host::RemoteHost::new(std::sync::Arc::new(share)))
+        std::rc::Rc::new(remote_host::RemoteHost::new(
+            std::sync::Arc::new(share),
+            &std::env::temp_dir(),
+        ))
+    }
+
+    // ---- pairing a device from the terminal ---------------------------------
+
+    fn pairing_host(
+        script: &std::sync::Arc<crate::remote_pairing::tests::Script>,
+        copier: pairing_host::Copier,
+    ) -> std::rc::Rc<remote_host::RemoteHost> {
+        let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+            localpilot_rpc::AskRegistry::default(),
+        ));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let share = crate::remote_share::RemoteShare::new(
+            dials.dial(),
+            crate::remote_share::test_support::standing(&level),
+            std::sync::Arc::new(|_| Some("Pixel".to_string())),
+            source,
+        );
+        share.track(crate::remote_share::Tracked {
+            session: localpilot_core::SessionId::new(),
+            claim: Some((1, "me".to_string())),
+            gate: localpilot_core::admission::AdmissionGate::default(),
+        });
+        let pairing =
+            pairing_host::PairingHost::new(script.dial(), crate::remote_pairing::tests::ready())
+                .with_copier(copier);
+        std::rc::Rc::new(
+            remote_host::RemoteHost::new(std::sync::Arc::new(share), &std::env::temp_dir())
+                .with_pairing(pairing),
+        )
+    }
+
+    fn no_copy() -> pairing_host::Copier {
+        std::sync::Arc::new(|_: &str| Err("no clipboard here".to_string()))
+    }
+
+    /// Tick the host's pairing until `done` holds.
+    async fn pump_pairing(
+        app: &mut AppModel,
+        host: &remote_host::RemoteHost,
+        what: &str,
+        done: impl Fn(&AppModel, &remote_host::RemoteHost) -> bool,
+    ) {
+        let started = std::time::Instant::now();
+        loop {
+            host.pairing.tick(app, host.share.tracked_session(), false);
+            if done(app, host) {
+                return;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "never reached {what}: {:?} / {:?}",
+                host.pairing.phase(),
+                app.pairing_view().map(|view| view.lines.clone())
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn pairing_press(app: &mut AppModel, host: &remote_host::RemoteHost, code: KeyCode) {
+        remote_host::pairing_key(app, host, press(code, KeyModifiers::NONE));
+    }
+
+    fn view_shows_code(app: &AppModel) -> bool {
+        app.pairing_view()
+            .is_some_and(|view| view.secret().is_some())
+    }
+
+    fn shown_link(app: &AppModel) -> String {
+        app.pairing_view()
+            .and_then(|view| view.secret())
+            .map(|secret| secret.link().to_string())
+            .expect("a code is shown")
+    }
+
+    fn view_lines(app: &AppModel) -> String {
+        app.pairing_view()
+            .map(|view| view.lines.join("\n"))
+            .unwrap_or_default()
+    }
+
+    fn view_actions(app: &AppModel) -> Vec<String> {
+        app.pairing_view()
+            .map(|view| view.actions.clone())
+            .unwrap_or_default()
+    }
+
+    /// Open `/remote pair` and create a code with the form's defaults.
+    fn create_code(app: &mut AppModel, host: &remote_host::RemoteHost) {
+        remote_host::command(
+            app,
+            host,
+            localpilot_slash::RemoteAction::Pair { observe: false },
+        );
+        assert_eq!(
+            app.pairing_setup().map(|setup| setup.focus),
+            Some(localpilot_terminal_ui::PairingField::Name)
+        );
+        // Tab to Create (Enter in the name only moves on).
+        for _ in 0..3 {
+            pairing_press(app, host, KeyCode::Tab);
+        }
+        pairing_press(app, host, KeyCode::Enter);
+        assert!(
+            app.pairing_setup().is_none(),
+            "the form gave way to the view"
+        );
+        assert!(app.pairing_view().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_code_shown_in_the_terminal_is_invalidated_as_soon_as_its_view_closes() {
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+        let (_gateway, capability) = crate::server_cmd::tests::register_gateway(&endpoint).await;
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        create_code(&mut app, &host);
+        pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+        let link = shown_link(&app);
+        let code = crate::remote_pairing::tests::code_of(&link);
+        assert!(app.pairing_view().unwrap().secret().unwrap().qr().is_some());
+        assert!(view_lines(&app).contains("phone gets control access"));
+        assert!(view_actions(&app).contains(&"Copy link".to_string()));
+        // Copy fails here: said in the view, and the link goes nowhere else.
+        let view = app.pairing_view_mut().unwrap();
+        while view.selected_action() != Some("Copy link") {
+            view.move_action(true);
+        }
+        pairing_press(&mut app, &host, KeyCode::Enter);
+        assert!(view_lines(&app).contains("Could not copy the link: no clipboard here"));
+        assert!(!format!("{:?}", app.active_timeline_mut().items()).contains(&code));
+        // Esc closes the code: wiped at once, then invalidated.
+        pairing_press(&mut app, &host, KeyCode::Esc);
+        assert!(!view_shows_code(&app));
+        pump_pairing(&mut app, &host, "invalidated", |app, _| {
+            view_lines(app).contains("Code invalidated")
+        })
+        .await;
+        assert_eq!(view_actions(&app), ["Create a new code", "Close"]);
+        let refused = crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
+        assert!(
+            matches!(refused, localpilot_rpc::ServerEvent::Error { .. }),
+            "{refused:?}"
+        );
+        pairing_press(&mut app, &host, KeyCode::Esc);
+        assert!(app.pairing_view().is_none());
+        assert!(
+            host.pairing.phase().is_none(),
+            "a settled attempt is not kept"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_code_used_while_shown_is_wiped_and_offers_to_share() {
+        let (endpoint, hosts) = crate::remote_pairing::tests::daemon(16);
+        let (_gateway, capability) = crate::server_cmd::tests::register_gateway(&endpoint).await;
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        create_code(&mut app, &host);
+        pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+        let code = crate::remote_pairing::tests::code_of(&shown_link(&app));
+        let paired = crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
+        assert!(
+            matches!(paired, localpilot_rpc::ServerEvent::DevicePaired { .. }),
+            "{paired:?}"
+        );
+        pump_pairing(&mut app, &host, "used", |app, _| {
+            view_lines(app).contains("Paired phone with control access.")
+        })
+        .await;
+        assert!(!view_shows_code(&app), "the used code is wiped");
+        assert_eq!(app.pairing_view().unwrap().title, "Device paired");
+        assert_eq!(view_actions(&app), ["Share this session", "Close"]);
+        assert_eq!(hosts.devices.list().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_shown_code_is_wiped_when_its_deadline_passes() {
+        let factory = std::sync::Arc::new(crate::server_cmd::tests::FakeFactory::new(
+            localpilot_llm::FakeProvider::new().text("x"),
+        ));
+        let hosts = crate::server_cmd::tests::hosts_with_pairing_ttl(Duration::from_millis(2500));
+        let (endpoint, _server) = crate::server_cmd::tests::spawn_server_on(factory, 8, hosts);
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        create_code(&mut app, &host);
+        pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+        // The display ends early, never late: gone before the server's own end.
+        pump_pairing(&mut app, &host, "wiped", |app, _| !view_shows_code(app)).await;
+        pump_pairing(&mut app, &host, "expired", |app, _| {
+            view_lines(app).contains("expired unused")
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_session_change_closes_the_pairing_view_and_invalidates_its_code() {
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        create_code(&mut app, &host);
+        pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+        host.share.track(crate::remote_share::Tracked {
+            session: localpilot_core::SessionId::new(),
+            claim: Some((1, "me".to_string())),
+            gate: localpilot_core::admission::AdmissionGate::default(),
+        });
+        host.pairing
+            .tick(&mut app, host.share.tracked_session(), false);
+        assert!(app.pairing_view().is_none(), "closed at once");
+        pump_pairing(&mut app, &host, "told", |_, host| {
+            host.pairing.phase().is_none()
+        })
+        .await;
+        let told = format!("{:?}", app.active_timeline_mut().items());
+        assert!(
+            told.contains("Pairing closed because the session changed."),
+            "{told}"
+        );
+        assert!(told.contains("Pairing closed. Code invalidated."), "{told}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unconfirmed_code_outlives_its_view_and_pairing_reopens_it() {
+        use crate::remote_pairing::tests::Leg;
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+        let script = crate::remote_pairing::tests::Script::new(
+            &endpoint,
+            vec![Leg::Real(endpoint.clone()), Leg::Silent, Leg::Silent],
+        );
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        create_code(&mut app, &host);
+        // The open has gone out on the issuer leg (which never answers).
+        pump_pairing(&mut app, &host, "the open", |_, _| script.dials() >= 2).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pairing_press(&mut app, &host, KeyCode::Esc);
+        pump_pairing(&mut app, &host, "unconfirmed", |app, _| {
+            view_lines(app).contains("Could not confirm")
+        })
+        .await;
+        assert_eq!(
+            view_actions(&app),
+            ["Retry invalidation", "Check status", "Hide"]
+        );
+        // Hidden, it is kept, and told once.
+        let view = app.pairing_view_mut().unwrap();
+        while view.selected_action() != Some("Hide") {
+            view.move_action(true);
+        }
+        pairing_press(&mut app, &host, KeyCode::Enter);
+        assert!(app.pairing_view().is_none());
+        host.pairing
+            .tick(&mut app, host.share.tracked_session(), false);
+        assert!(host.pairing.phase().is_some(), "kept while unconfirmed");
+        // `/remote pair` reopens it rather than making a second code.
+        remote_host::command(
+            &mut app,
+            &host,
+            localpilot_slash::RemoteAction::Pair { observe: false },
+        );
+        assert!(app.pairing_setup().is_none());
+        assert!(view_lines(&app).contains("Could not confirm"));
+        // Retry reaches the server this time and settles it.
+        let view = app.pairing_view_mut().unwrap();
+        while view.selected_action() != Some("Retry invalidation") {
+            view.move_action(true);
+        }
+        pairing_press(&mut app, &host, KeyCode::Enter);
+        pump_pairing(&mut app, &host, "invalidated", |app, _| {
+            view_lines(app).contains("Code invalidated")
+        })
+        .await;
+        assert_eq!(script.dials(), 4, "hello, open, one settle, one retry");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_permission_ask_suspends_the_pairing_view_and_gives_it_back() {
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        create_code(&mut app, &host);
+        pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+        let link = shown_link(&app);
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        let (reply, answer) = oneshot::channel();
+        approvals.send(approval(reply)).expect("queue approval");
+        let events = queued(vec![]);
+        let mut io = characterization_io(events.clone(), cell(0), cell(0), None);
+        let script_events = events.clone();
+        let script = async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // `y` answers the ask: keys go to it, not to the hidden view.
+            script_events
+                .borrow_mut()
+                .push_back(key(KeyCode::Char('y')));
+            tokio::time::timeout(Duration::from_secs(5), answer)
+                .await
+                .expect("answered in time")
+        };
+        let outcome = std::cell::Cell::new(None);
+        let suspended = std::cell::Cell::new(false);
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut stages,
+            script,
+            |app: &mut AppModel, result| {
+                suspended.set(!app.pairing_shown());
+                outcome.set(Some(result));
+            },
+        )
+        .await
+        .expect("turn loop completes");
+        assert_eq!(outcome.take(), Some(Ok(true)), "the ask was answered");
+        assert!(app.pairing_shown(), "the view is back after the ask");
+        assert_eq!(shown_link(&app), link, "with the same code");
+        assert!(matches!(
+            host.pairing.phase(),
+            Some(crate::remote_pairing::Phase::Active { .. })
+        ));
+        let _ = suspended.take();
+    }
+
+    /// Drive the real operation input loop (keys routed as in production,
+    /// the pairing pumped every frame) while `script` runs; it is given the
+    /// queue the loop reads its events from.
+    async fn with_input_loop<F, Fut, T>(
+        app: &mut AppModel,
+        host: &std::rc::Rc<remote_host::RemoteHost>,
+        script: F,
+    ) -> T
+    where
+        F: FnOnce(std::rc::Rc<std::cell::RefCell<VecDeque<Event>>>) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        let events = queued(vec![]);
+        let mut io = characterization_io(events.clone(), cell(0), cell(0), None);
+        let outcome = std::cell::RefCell::new(None);
+        drive_turn_loop(
+            app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut stages,
+            script(events),
+            |_app: &mut AppModel, result| *outcome.borrow_mut() = Some(result),
+        )
+        .await
+        .expect("turn loop completes");
+        outcome.into_inner().expect("the script finished")
+    }
+
+    async fn until_pairing(
+        host: &remote_host::RemoteHost,
+        done: impl Fn(Option<crate::remote_pairing::Phase>) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !done(host.pairing.phase()) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the attempt got there in time");
+    }
+
+    fn capturing_copier() -> (
+        pairing_host::Copier,
+        std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    ) {
+        let copied = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let copier: pairing_host::Copier = {
+            let copied = copied.clone();
+            std::sync::Arc::new(move |text: &str| {
+                *copied.lock().unwrap() = Some(text.to_string());
+                Ok(())
+            })
+        };
+        (copier, copied)
+    }
+
+    fn used(phase: Option<crate::remote_pairing::Phase>) -> bool {
+        matches!(
+            phase,
+            Some(crate::remote_pairing::Phase::Finished(
+                crate::remote_pairing::Ended::Outcome(localpilot_rpc::PairingOutcome::Used { .. })
+            ))
+        )
+    }
+
+    /// A phone pairing while Copy is selected must not turn the next Enter
+    /// into "Share this session".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pairing_finishing_under_the_cursor_never_shares_on_the_next_enter() {
+        for choose_share in [false, true] {
+            let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+            let (_gateway, capability) =
+                crate::server_cmd::tests::register_gateway(&endpoint).await;
+            let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+            let (copier, copied) = capturing_copier();
+            let host = pairing_host(&script, copier);
+            let mut app = app();
+            create_code(&mut app, &host);
+            pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+            assert_eq!(
+                app.pairing_view().unwrap().selected_action(),
+                Some("Close"),
+                "a new view starts on the safe action"
+            );
+            let in_loop = host.clone();
+            with_input_loop(&mut app, &host, |events| async move {
+                // Up to Copy link, and copy it.
+                events
+                    .borrow_mut()
+                    .extend([key(KeyCode::Up), key(KeyCode::Enter)]);
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while copied.lock().unwrap().is_none() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("copied");
+                let link = copied.lock().unwrap().clone().unwrap();
+                let code = crate::remote_pairing::tests::code_of(&link);
+                let paired =
+                    crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
+                assert!(matches!(
+                    paired,
+                    localpilot_rpc::ServerEvent::DevicePaired { .. }
+                ));
+                until_pairing(&in_loop, used).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if choose_share {
+                    events
+                        .borrow_mut()
+                        .extend([key(KeyCode::Up), key(KeyCode::Enter)]);
+                } else {
+                    events.borrow_mut().push_back(key(KeyCode::Enter));
+                }
+                until_pairing(&in_loop, |phase| phase.is_none()).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            })
+            .await;
+            assert!(app.pairing_view().is_none(), "Enter closed the view");
+            let told = format!("{:?}", app.active_timeline_mut().items());
+            let shared =
+                told.contains("Connecting this session") || told.contains("Could not share");
+            assert_eq!(shared, choose_share, "shares only when chosen: {told}");
+            if !choose_share {
+                assert_eq!(host.share.state(), crate::remote_share::ShareState::Off);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_device_name_edits_at_its_cursor_and_enter_never_creates_from_it() {
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(4);
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        remote_host::command(
+            &mut app,
+            &host,
+            localpilot_slash::RemoteAction::Pair { observe: false },
+        );
+        with_input_loop(&mut app, &host, |events| async move {
+            events.borrow_mut().extend([
+                key(KeyCode::Left),
+                key(KeyCode::Left),
+                key(KeyCode::Char('X')),
+                key(KeyCode::Delete),
+                key(KeyCode::Backspace),
+                key(KeyCode::Home),
+                key(KeyCode::Char('m')),
+                key(KeyCode::Enter),
+            ]);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        })
+        .await;
+        let setup = app.pairing_setup().expect("the form is still open");
+        assert_eq!(setup.name, "mphoe");
+        assert_eq!(setup.focus, localpilot_terminal_ui::PairingField::Scope);
+        assert!(
+            host.pairing.phase().is_none(),
+            "Enter in the name made no code"
+        );
+        assert_eq!(script.dials(), 0);
+    }
+
+    /// Another view opening over the pairing view (a report, help, settings)
+    /// replaces it: hidden at once, its code invalidated, the replacement kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_view_opened_over_the_pairing_view_invalidates_its_code() {
+        use localpilot_terminal_ui::TabId;
+        // Each explicit destination: a report, the theme picker, a product tab.
+        let replace = |app: &mut AppModel, kind: usize| match kind {
+            0 => app.open_report("Report".to_string(), vec!["kept".to_string()]),
+            1 => app.open_theme_picker(),
+            _ => assert!(app.activate_tab(TabId::LocalMind)),
+        };
+        let kept = |app: &AppModel, kind: usize| match kind {
+            0 => app.report_generation().is_some(),
+            1 => app.has_theme_picker(),
+            _ => true,
+        };
+        for (kind, while_creating) in [0, 1, 2]
+            .into_iter()
+            .flat_map(|kind| [(kind, true), (kind, false)])
+        {
+            let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+            let (_gateway, capability) =
+                crate::server_cmd::tests::register_gateway(&endpoint).await;
+            let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+            let prerequisites: crate::remote_pairing::Prerequisites = {
+                let gate = gate.clone();
+                std::sync::Arc::new(move || {
+                    let gate = gate.clone();
+                    Box::pin(async move {
+                        gate.notified().await;
+                        Ok(("https://pc.example.test".to_string(), "w1".to_string()))
+                    })
+                })
+            };
+            let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+            let (copier, copied) = capturing_copier();
+            let pairing =
+                pairing_host::PairingHost::new(script.dial(), prerequisites).with_copier(copier);
+            let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+                localpilot_rpc::AskRegistry::default(),
+            ));
+            let dials = crate::remote_share::test_support::Dials::default();
+            let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+            let share = crate::remote_share::RemoteShare::new(
+                dials.dial(),
+                crate::remote_share::test_support::standing(&level),
+                std::sync::Arc::new(|_| Some("Pixel".to_string())),
+                source,
+            );
+            let host = std::rc::Rc::new(
+                remote_host::RemoteHost::new(std::sync::Arc::new(share), &std::env::temp_dir())
+                    .with_pairing(pairing),
+            );
+            let mut app = app();
+            app.set_tabs([TabId::Session, TabId::LocalMind]);
+            create_code(&mut app, &host);
+            let code = if while_creating {
+                replace(&mut app, kind);
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+                // The creation finishes late, after the view was replaced.
+                gate.notify_one();
+                None
+            } else {
+                gate.notify_one();
+                pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+                let link = shown_link(&app);
+                *copied.lock().unwrap() = Some(link.clone());
+                replace(&mut app, kind);
+                assert!(!app.pairing_shown(), "never drawn over its replacement");
+                assert!(!view_shows_code(&app), "wiped as the destination opens");
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+                Some(crate::remote_pairing::tests::code_of(&link))
+            };
+            assert!(app.pairing_view().is_none(), "replaced at once ({kind})");
+            assert!(kept(&app, kind), "the replacement is kept ({kind})");
+            let started = std::time::Instant::now();
+            let ended = loop {
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+                let told = format!("{:?}", app.active_timeline_mut().items());
+                if told.contains("Pairing closed. Code invalidated.")
+                    || told.contains("Pairing cancelled. No code was created.")
+                {
+                    break told;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "no ending told (destination {kind}, creating {while_creating}, phase {:?}): {told}",
+                    host.pairing.phase()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            assert!(
+                ended.contains("Pairing closed because another view opened."),
+                "{ended}"
+            );
+            assert!(
+                app.pairing_view().is_none(),
+                "a late result never reopens it"
+            );
+            assert!(kept(&app, kind));
+            if let Some(code) = code {
+                let refused =
+                    crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
+                assert!(
+                    matches!(refused, localpilot_rpc::ServerEvent::Error { .. }),
+                    "{refused:?}"
+                );
+            }
+        }
+    }
+
+    /// The phone pairs just before the view goes (replaced, or Esc), so the
+    /// result was never shown in it: it is told once, as a notice, and the
+    /// destination stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_result_arriving_just_before_the_view_goes_is_told_once() {
+        for replaced in [true, false] {
+            let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+            let (_gateway, capability) =
+                crate::server_cmd::tests::register_gateway(&endpoint).await;
+            let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+            let host = pairing_host(&script, no_copy());
+            let mut app = app();
+            create_code(&mut app, &host);
+            pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+            let code = crate::remote_pairing::tests::code_of(&shown_link(&app));
+            let paired =
+                crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
+            assert!(matches!(
+                paired,
+                localpilot_rpc::ServerEvent::DevicePaired { .. }
+            ));
+            // Finished, with no tick since: the view still shows the code.
+            until_pairing(&host, used).await;
+            if replaced {
+                app.open_report("Report".to_string(), vec!["kept".to_string()]);
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+                assert!(app.report_generation().is_some(), "the destination stays");
+            } else {
+                pairing_press(&mut app, &host, KeyCode::Esc);
+            }
+            assert!(app.pairing_view().is_none());
+            for _ in 0..5 {
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+            }
+            let told = format!("{:?}", app.active_timeline_mut().items());
+            assert_eq!(
+                told.matches("Paired phone with control access.").count(),
+                1,
+                "told exactly once (replaced {replaced}): {told}"
+            );
+            assert_eq!(
+                told.contains("Pairing closed because another view opened."),
+                replaced
+            );
+            assert!(host.pairing.phase().is_none(), "nothing kept");
+        }
+    }
+
+    /// The view goes while a Retry or Check is still waiting for its answer:
+    /// the warning is said, and the answer that follows is told once as well.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_answer_arriving_after_an_unconfirmed_view_went_is_told() {
+        use crate::remote_pairing::tests::Leg;
+        for (replaced, check) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+            let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+            let script = crate::remote_pairing::tests::Script::new(
+                &endpoint,
+                vec![
+                    Leg::Real(endpoint.clone()),
+                    Leg::Silent,
+                    Leg::Silent,
+                    Leg::Later(gate.clone(), endpoint.clone()),
+                ],
+            );
+            let host = pairing_host(&script, no_copy());
+            let mut app = app();
+            create_code(&mut app, &host);
+            pump_pairing(&mut app, &host, "the open", |_, _| script.dials() >= 2).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            pairing_press(&mut app, &host, KeyCode::Esc);
+            pump_pairing(&mut app, &host, "unconfirmed", |app, _| {
+                view_lines(app).contains("Could not confirm")
+            })
+            .await;
+            let action = if check {
+                "Check status"
+            } else {
+                "Retry invalidation"
+            };
+            let view = app.pairing_view_mut().unwrap();
+            while view.selected_action() != Some(action) {
+                view.move_action(true);
+            }
+            pairing_press(&mut app, &host, KeyCode::Enter);
+            pump_pairing(&mut app, &host, "checking", |app, _| {
+                view_lines(app).contains("Checking with the server")
+            })
+            .await;
+            if replaced {
+                app.open_report("Report".to_string(), vec!["kept".to_string()]);
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+            } else {
+                // While it checks, Hide is all there is (and selected).
+                pairing_press(&mut app, &host, KeyCode::Enter);
+            }
+            assert!(app.pairing_view().is_none());
+            assert!(
+                host.pairing.phase().is_some(),
+                "kept while the answer is due"
+            );
+            let told = format!("{:?}", app.active_timeline_mut().items());
+            assert!(
+                told.contains("Could not confirm the code was invalidated"),
+                "{told}"
+            );
+            gate.notify_one();
+            // A Check of a code never opened still cannot confirm; a Retry
+            // settles it.
+            let want = if check {
+                "Could not confirm"
+            } else {
+                "Pairing closed. Code invalidated."
+            };
+            let started = std::time::Instant::now();
+            loop {
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+                remote_host::idle_status_for_test(&mut app, &host);
+                if check && script.dials() >= 4 && !host.pairing.settling_for_test() {
+                    break;
+                }
+                if !check && host.pairing.phase().is_none() {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "no answer told (replaced {replaced}, check {check}): {:?}",
+                    host.pairing.phase()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            for _ in 0..5 {
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+            }
+            remote_host::idle_status_for_test(&mut app, &host);
+            let told = format!("{:?}", app.active_timeline_mut().items());
+            if check {
+                assert!(told.contains(want));
+                assert_eq!(
+                    app.remote_label(),
+                    Some("pairing code unconfirmed · /remote pair"),
+                    "still unconfirmed, still shown"
+                );
+            } else {
+                assert_eq!(
+                    told.matches(want).count(),
+                    1,
+                    "the outcome told once: {told}"
+                );
+                assert_eq!(app.remote_label(), None, "no stale label");
+                assert!(host.pairing.phase().is_none(), "no stale attempt");
+            }
+            if replaced {
+                assert!(app.report_generation().is_some(), "the destination stays");
+            }
+        }
+    }
+
+    /// The phone pairs while a permission request holds the view: the result
+    /// was never on screen, so when the view is then closed (session change
+    /// or another view) it is told once; the ask stays and the code is wiped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_result_arriving_under_a_permission_request_is_told_when_its_view_goes() {
+        for session_change in [false, true] {
+            let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+            let (_gateway, capability) =
+                crate::server_cmd::tests::register_gateway(&endpoint).await;
+            let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+            let host = pairing_host(&script, no_copy());
+            let mut app = app();
+            create_code(&mut app, &host);
+            pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+            let code = crate::remote_pairing::tests::code_of(&shown_link(&app));
+            app.dialog = Some(localpilot_terminal_ui::DialogState::Approval {
+                tool: "tool".to_string(),
+                target: "target".to_string(),
+                risk_class: "test".to_string(),
+                incognito_creation: false,
+            });
+            assert!(!app.pairing_shown(), "held under the ask");
+            let _ = crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
+            until_pairing(&host, used).await;
+            // Pumped while held: wiped, but not shown, so not yet told.
+            for _ in 0..3 {
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+            }
+            assert!(!view_shows_code(&app), "the used code is wiped");
+            let told = format!("{:?}", app.active_timeline_mut().items());
+            assert!(!told.contains("Paired phone"), "{told}");
+            if session_change {
+                host.share.track(crate::remote_share::Tracked {
+                    session: localpilot_core::SessionId::new(),
+                    claim: Some((1, "me".to_string())),
+                    gate: localpilot_core::admission::AdmissionGate::default(),
+                });
+            } else {
+                app.open_report("Report".to_string(), vec!["kept".to_string()]);
+            }
+            for _ in 0..5 {
+                host.pairing
+                    .tick(&mut app, host.share.tracked_session(), false);
+            }
+            assert!(app.pairing_view().is_none());
+            assert!(app.dialog.is_some(), "the ask stays");
+            let told = format!("{:?}", app.active_timeline_mut().items());
+            assert_eq!(
+                told.matches("Paired phone with control access.").count(),
+                1,
+                "told once (session change {session_change}): {told}"
+            );
+            if !session_change {
+                assert!(app.report_generation().is_some(), "the destination stays");
+            }
+        }
+    }
+
+    /// A result shown in the view is not told again when the view goes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_result_shown_in_the_view_is_not_told_again() {
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+        let (_gateway, capability) = crate::server_cmd::tests::register_gateway(&endpoint).await;
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        create_code(&mut app, &host);
+        pump_pairing(&mut app, &host, "a code", |app, _| view_shows_code(app)).await;
+        let code = crate::remote_pairing::tests::code_of(&shown_link(&app));
+        let _ = crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
+        pump_pairing(&mut app, &host, "shown", |app, _| {
+            view_lines(app).contains("Paired phone")
+        })
+        .await;
+        app.open_report("Report".to_string(), vec!["kept".to_string()]);
+        for _ in 0..3 {
+            host.pairing
+                .tick(&mut app, host.share.tracked_session(), false);
+        }
+        let told = format!("{:?}", app.active_timeline_mut().items());
+        assert_eq!(
+            told.matches("Paired phone with control access.").count(),
+            0,
+            "{told}"
+        );
+    }
+
+    /// Too small to show the whole grant: the form acts only on Esc, so no
+    /// code is made from a grant the user could not see.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_form_too_small_for_its_grant_makes_no_code() {
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(4);
+        let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        remote_host::command(
+            &mut app,
+            &host,
+            localpilot_slash::RemoteAction::Pair { observe: false },
+        );
+        for (width, height) in [(80, 10), (40, 12)] {
+            let _ = draw_hit_map(&app, width, height);
+            for code in [
+                KeyCode::Tab,
+                KeyCode::Tab,
+                KeyCode::Char(' '),
+                KeyCode::Tab,
+                KeyCode::Enter,
+            ] {
+                pairing_press(&mut app, &host, code);
+            }
+            let setup = app.pairing_setup().expect("still the form");
+            assert_eq!(
+                setup.focus,
+                localpilot_terminal_ui::PairingField::Name,
+                "keys ignored"
+            );
+            assert!(
+                setup.control && !setup.this_workspace_only,
+                "the grant is unchanged"
+            );
+            assert!(host.pairing.phase().is_none());
+        }
+        assert_eq!(script.dials(), 0, "no code from an undisclosed grant");
+        // Large enough again, the form works.
+        let _ = draw_hit_map(&app, 100, 30);
+        pairing_press(&mut app, &host, KeyCode::Tab);
+        assert_eq!(
+            app.pairing_setup().unwrap().focus,
+            localpilot_terminal_ui::PairingField::Scope
+        );
+        // Esc always leaves.
+        let _ = draw_hit_map(&app, 80, 10);
+        pairing_press(&mut app, &host, KeyCode::Esc);
+        assert!(app.pairing_setup().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unconfirmed_code_stays_on_the_status_line_until_it_is_settled() {
+        use crate::remote_pairing::tests::Leg;
+        let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+        let script = crate::remote_pairing::tests::Script::new(
+            &endpoint,
+            vec![Leg::Real(endpoint.clone()), Leg::Silent, Leg::Silent],
+        );
+        let host = pairing_host(&script, no_copy());
+        let mut app = app();
+        create_code(&mut app, &host);
+        pump_pairing(&mut app, &host, "the open", |_, _| script.dials() >= 2).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pairing_press(&mut app, &host, KeyCode::Esc);
+        pump_pairing(&mut app, &host, "unconfirmed", |app, _| {
+            view_lines(app).contains("Could not confirm")
+        })
+        .await;
+        // Esc on the result hides it (Hide is the safe last action too).
+        pairing_press(&mut app, &host, KeyCode::Esc);
+        assert!(app.pairing_view().is_none());
+        let told = format!("{:?}", app.active_timeline_mut().items());
+        assert!(
+            told.contains("Could not confirm the code was invalidated"),
+            "{told}"
+        );
+        remote_host::idle_status_for_test(&mut app, &host);
+        assert_eq!(
+            app.remote_label(),
+            Some("pairing code unconfirmed · /remote pair")
+        );
+        remote_host::command(
+            &mut app,
+            &host,
+            localpilot_slash::RemoteAction::Pair { observe: false },
+        );
+        remote_host::idle_status_for_test(&mut app, &host);
+        assert_eq!(app.remote_label(), None, "shown in its view instead");
+        let view = app.pairing_view_mut().unwrap();
+        while view.selected_action() != Some("Retry invalidation") {
+            view.move_action(true);
+        }
+        pairing_press(&mut app, &host, KeyCode::Enter);
+        pump_pairing(&mut app, &host, "invalidated", |app, _| {
+            view_lines(app).contains("Code invalidated")
+        })
+        .await;
+        pairing_press(&mut app, &host, KeyCode::Esc);
+        remote_host::idle_status_for_test(&mut app, &host);
+        assert_eq!(app.remote_label(), None, "cleared once settled");
     }
 
     async fn until_state(host: &remote_host::RemoteHost, want: crate::remote_share::ShareState) {
@@ -24644,7 +25704,10 @@ last_seen = "2026-08-10"
             std::sync::Arc::new(|_| Some("Pixel".to_string())),
             source,
         );
-        std::rc::Rc::new(remote_host::RemoteHost::new(std::sync::Arc::new(share)))
+        std::rc::Rc::new(remote_host::RemoteHost::new(
+            std::sync::Arc::new(share),
+            &std::env::temp_dir(),
+        ))
     }
 
     /// Idle ticks (the terminal's own loop) until `done`.

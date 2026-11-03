@@ -438,7 +438,13 @@ impl SlashAction {
             | Self::Search(_)
             | Self::LocalMind
             | Self::Incognito { .. }
-            | Self::Remote(_)
+            | Self::Remote(
+                RemoteAction::Status
+                | RemoteAction::Share
+                | RemoteAction::Stop
+                | RemoteAction::Devices
+                | RemoteAction::Usage,
+            )
             | Self::Model { .. }
             | Self::Invalid { .. }
             | Self::Unknown(_) => Persistence::ReadOnly,
@@ -468,6 +474,9 @@ impl SlashAction {
             },
 
             Self::HarnessFeature(_) => Persistence::Persistent("brief.md and PROGRESS.md"),
+
+            // Pairing adds a device to the persistent registry.
+            Self::Remote(RemoteAction::Pair { .. }) => Persistence::Persistent("a paired device"),
 
             // Touch the session store only — in-memory under incognito, so these
             // leave nothing on disk there.
@@ -1593,6 +1602,7 @@ mod tests {
             },
             SlashAction::SelfImprove(SelfImproveAction::Next),
             SlashAction::Skills("install foo".into()),
+            SlashAction::Remote(RemoteAction::Pair { observe: false }),
         ];
         for action in persistent {
             let what = action.persistence().persistent_target();

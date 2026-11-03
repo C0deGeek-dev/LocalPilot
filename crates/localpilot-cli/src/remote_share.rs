@@ -330,6 +330,11 @@ impl RemoteShare {
     }
 
     /// The session the terminal runs now, as last tracked.
+    /// How this share reaches its server (pairing dials the same one).
+    pub(crate) fn dial(&self) -> Dial {
+        self.dial.clone()
+    }
+
     pub(crate) fn tracked_session(&self) -> Option<SessionId> {
         self.inner().tracked.as_ref().map(|tracked| tracked.session)
     }

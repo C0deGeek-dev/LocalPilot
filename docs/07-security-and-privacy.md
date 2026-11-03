@@ -1128,8 +1128,9 @@ Safety gates:
 
 ## Paired Devices
 
-A phone (or another device) can be paired with `localpilot devices pair` and then
-reach your `localpilot serve` sessions through a gateway. Pairing opens no
+A phone (or another device) can be paired with `localpilot devices pair`, or with
+`/remote pair` in the full-screen terminal, and then reach your `localpilot
+serve` sessions through a gateway. Pairing opens no
 network access by itself; the gateway and how it is reached are a separate,
 opt-in step.
 
@@ -1157,6 +1158,14 @@ opt-in step.
   instance never makes a code. Codes, credentials and the gateway capability never
   appear in logs, the audit log or error messages; they are sent once, to the
   party they belong to.
+- **Pairing from the terminal.** `/remote pair` shows its code only in a
+  transient view: never in the transcript, prompt history, a report, an export
+  or a log, and wiped when the view closes, the code is used or expires (the
+  view ends early, never late), the session changes or another view opens
+  over it. Closing the view hides the code at once and asks the server to
+  invalidate it; when that cannot be confirmed the terminal says the code may
+  still work, keeps that on the status line and keeps offering to retry. A permission request pauses
+  the view without closing it. Incognito refuses pairing.
 - **Files.** The `devices` directory and its files are readable by your user
   only (a protected owner-only DACL on Windows, `0700`/`0600` elsewhere) and
   carry a `.gitignore`. Changes take an exclusive lock and replace the file

@@ -66,6 +66,7 @@ mod relay_client;
 mod relay_host;
 mod relay_source;
 mod remote_gateway;
+mod remote_pairing;
 mod remote_share;
 mod remote_status;
 #[cfg(feature = "tui")]

@@ -140,6 +140,8 @@ pub(super) struct RemoteHost {
     /// The `/remote` view being filled in, if one is: only it may be updated,
     /// and only while it is the report shown, for the same session.
     status: RefCell<Option<PendingStatus>>,
+    /// Pairing a device (`/remote pair`).
+    pub(super) pairing: super::pairing_host::PairingHost,
 }
 
 /// A `/remote` view waiting for its probe.
@@ -169,9 +171,14 @@ pub(super) type StatusProbe = Arc<
 const STATUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(6);
 
 impl RemoteHost {
-    pub(super) fn new(share: Arc<RemoteShare>) -> Self {
+    pub(super) fn new(share: Arc<RemoteShare>, cwd: &std::path::Path) -> Self {
+        let pairing = super::pairing_host::PairingHost::new(
+            share.dial(),
+            crate::remote_pairing::prerequisites_for(cwd.to_path_buf()),
+        );
         Self {
             share,
+            pairing,
             steering: RefCell::new(Vec::new()),
             compact: RefCell::new(None),
             choice: Cell::new(None),
@@ -184,6 +191,13 @@ impl RemoteHost {
             }),
             status: RefCell::new(None),
         }
+    }
+
+    /// The same host, pairing with `pairing`.
+    #[cfg(test)]
+    pub(super) fn with_pairing(mut self, pairing: super::pairing_host::PairingHost) -> Self {
+        self.pairing = pairing;
+        self
     }
 
     /// The same host, reading remote status with `probe`.
@@ -315,6 +329,15 @@ impl RemoteHost {
     }
 }
 
+/// The status-line label: sharing, and a pairing code still being settled.
+fn status_label(host: &RemoteHost, app: &AppModel) -> Option<String> {
+    let sharing = label(&host.share.state(), host.share.devices().as_deref());
+    match (sharing, host.pairing.status(app)) {
+        (Some(sharing), Some(pairing)) => Some(format!("{sharing} · {pairing}")),
+        (sharing, pairing) => sharing.or_else(|| pairing.map(str::to_string)),
+    }
+}
+
 /// The short status-line label for a sharing state (`None` when not shared).
 fn label(state: &ShareState, devices: Option<&[localpilot_rpc::AttendedDevice]>) -> Option<String> {
     match state {
@@ -394,7 +417,8 @@ pub(super) fn show_notices(app: &mut AppModel, host: &RemoteHost) {
             ))),
         }
     }
-    app.set_remote_label(label(&host.share.state(), host.share.devices().as_deref()));
+    let status = status_label(host, app);
+    app.set_remote_label(status);
 }
 
 /// A device standing, as a notice says it.
@@ -445,10 +469,7 @@ fn sharing_lines(share: &RemoteShare) -> Vec<String> {
             device.id
         ));
     }
-    lines.push(
-        "Commands: /remote share | /remote stop. Pair a phone with `localpilot devices pair`."
-            .to_string(),
-    );
+    lines.push("Commands: /remote share | /remote stop | /remote pair [observe].".to_string());
     lines
 }
 
@@ -493,6 +514,7 @@ pub(super) fn idle_tick(
     host.publish_admission(false, 0);
     show_notices(app, host);
     host.show_status(app);
+    tick_pairing(app, host);
     for _ in 0..REQUESTS_PER_TICK {
         let request = host.share.next_request()?;
         if let Some(work) = idle_request(app, runtime, host, request) {
@@ -616,6 +638,7 @@ pub(super) fn busy_tick(
     host.release_steering(pending_steers);
     show_notices(app, host);
     host.show_status(app);
+    tick_pairing(app, host);
     host.publish_admission(true, queue.len());
     for _ in 0..REQUESTS_PER_TICK {
         let Some(SourceRequest { command, ticket }) = host.share.next_request() else {
@@ -710,16 +733,43 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
             }
             StopOutcome::NotShared => notice(app, "This session is not shared."),
         },
-        RemoteAction::Pair { .. } | RemoteAction::Devices => notice(
+        RemoteAction::Pair { observe } => {
+            host.pairing
+                .open(app, observe, host.share.tracked_session());
+        }
+        RemoteAction::Devices => notice(
             app,
-            "Pairing and devices are not in this terminal yet: use `localpilot devices pair`, `localpilot devices list` or `localpilot devices revoke`.",
+            "Devices are not in this terminal yet: use `localpilot devices list` or `localpilot devices revoke`.",
         ),
         RemoteAction::Usage => notice(
             app,
             "Use /remote [pair [observe|control] | devices | share | stop].",
         ),
     }
-    app.set_remote_label(label(&host.share.state(), host.share.devices().as_deref()));
+    let status = status_label(host, app);
+    app.set_remote_label(status);
+}
+
+/// Keep the pairing overlay current (and closed if the session changed).
+fn tick_pairing(app: &mut AppModel, host: &RemoteHost) {
+    let shared = !matches!(host.share.state(), ShareState::Off);
+    host.pairing.tick(app, host.share.tracked_session(), shared);
+    let status = status_label(host, app);
+    app.set_remote_label(status);
+}
+
+/// The pairing pump and status line, as a tick runs them.
+#[cfg(test)]
+pub(super) fn idle_status_for_test(app: &mut AppModel, host: &RemoteHost) {
+    tick_pairing(app, host);
+}
+
+/// Route a key to the open pairing overlay.
+pub(super) fn pairing_key(app: &mut AppModel, host: &RemoteHost, key: crossterm::event::KeyEvent) {
+    let shared = !matches!(host.share.state(), ShareState::Off);
+    if host.pairing.key(app, key, shared) == super::pairing_host::PairingKey::Share {
+        command(app, host, RemoteAction::Share);
+    }
 }
 
 /// End sharing before a command replaces the session.

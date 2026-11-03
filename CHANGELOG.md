@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Pair a phone from the full-screen terminal with `/remote pair [observe]`: a
+  short form (name, access, reach), then a view with a QR code or the exact
+  link, which works once until it expires. Closing the view (or another view
+  opening over it) hides the code at once and asks the server to invalidate
+  it; the view says how the code ended (used, invalidated, expired, or that
+  invalidation could not be confirmed, with Retry and Check, and the status
+  line keeps saying so until it is settled). The code
+  never enters the transcript, history or logs. A permission request pauses
+  the view rather than closing it, and a confirmed pairing offers to share
+  the session. Incognito refuses pairing, also while a turn runs (ADR-0256).
 - The server can now hand out pairing codes owned by the connection that asked
   for them (`pair_open`): the code is withdrawn the moment that connection ends
   or cancels it, it ends in exactly one recorded state (used, cancelled,
@@ -13,8 +23,7 @@ is SemVer-stable; the configuration schema stability policy is in
   gone) that its owner is told while connected, and a lost reply can be
   reconciled by the owner's own receipt while the server keeps the result. A phone
   presenting a code closed on the PC is told so. `localpilot devices pair` is
-  unchanged. The full-screen terminal's pairing view that uses this is not
-  available yet (ADR-0255).
+  unchanged (ADR-0255).
 - A shared session now shows who is attached: the status line says how many
   devices (or "devices unknown" while that is not known), the terminal notes
   each device that attaches or leaves (and arrivals and departures it could not

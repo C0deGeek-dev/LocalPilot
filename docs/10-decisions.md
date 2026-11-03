@@ -2,6 +2,48 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0256: Pairing A Device From The Full-Screen Terminal
+
+**Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.
+
+**Context.** ADR-0255 lets a connection own a pairing code. The full-screen
+terminal needs a way to pair a phone without leaving it, and the code it shows
+must never outlive the view showing it, never reach the transcript or a log,
+and never be reported as invalidated when that is not known.
+
+**Decision.** `/remote pair [observe]` opens a setup form (name, access, reach;
+control and every served workspace by default) and then a transient pairing
+view. Each attempt fixes its identity before anything is sent: this terminal's
+issuer stream, the next request number (never wrapped), a fresh receipt and
+attempt id. It checks remote access (enabled, a valid phone address, a running
+gateway) off the terminal's loop, asks the server for its instance on a
+connection of its own, then opens the owned code on a fresh connection.
+Stopping before any part of the open could have been sent ends with no code;
+from then on every cancel, timeout or error is settled by the receipt on the
+same identity, never with a new code. Closing the view, or another view
+(a report, help, settings, a product tab, the theme picker) opening over it, hides the code at once and asks
+the server to cancel it (within 2 s on the open connection, then by receipt);
+the result is the server's answer, never assumed. The
+attempt's state is one value whose outcome, once known, is never overwritten,
+and the code waits in one slot that ending, closing or the deadline empties.
+The view shows the code as a QR code drawn whole or not at all (falling back to
+the exact link, which wraps and scrolls; the link is the default for screen
+readers) and can copy the link on request. A permission request or question
+suspends the view without closing it; changing session closes it. An outcome
+that cannot be confirmed stays with the terminal after the view closes, offers
+Retry and Check one at a time, stays on the status line until settled, and
+`/remote pair` reopens it instead of making a second code. When the view's
+actions change under the cursor, the selection falls to the safe last action,
+so a key pressed as a result arrives never shares or recreates; only Create
+makes a code. A window too small for the controls, or for the form's whole grant (the
+form never scrolls), shows only how to leave and acts only on Esc. A QR code is drawn black on white in every theme. Pairing is
+refused in incognito (it adds a device).
+
+**Consequences.** A code shown in the terminal ends with its view, its
+deadline (shown early, never late), its use, or the terminal itself; the
+terminal says which, or that it could not confirm it. Only a confirmed use
+offers to share the session. `localpilot devices pair` is unchanged.
+
 ## ADR-0255: A Pairing Code Can Be Owned By The Connection That Asked For It
 
 **Status:** accepted · **Date:** 2026-11-03. Refs LocalHub#255.
@@ -41,8 +83,8 @@ receipt while the server still holds the result. A server restart (told by the
 instance) establishes that the old code can no longer be used, but whether it
 was used before the restart may stay unknown: that needs a look at the paired
 devices. `pair_begin` and `localpilot devices pair` are
-unchanged. The full-screen terminal's pairing view that uses this ships
-separately; until then nothing in LocalPilot opens owned pairings.
+unchanged. The full-screen terminal's pairing view (ADR-0256) is what opens
+owned pairings.
 
 ## ADR-0254: Configure Adaptive, Fixed Or Disabled Work Sizing
 
