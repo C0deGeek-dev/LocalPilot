@@ -19,7 +19,7 @@ is SemVer-stable; the configuration schema stability policy is in
   - `--check` reports what it would do and changes nothing. `--random-name`,
     `--keep-name` and `--yes` work without a prompt.
   - The gateway answers `GET /identify` with its version, only for requests
-    addressed to `127.0.0.1` or `[::1]`, so setup can recognise the gateway
+    addressed to `127.0.0.1:<port>` or `[::1]:<port>` on its own port, so setup can recognise the gateway
     whatever address it was started with (ADR-0259).
 - `/remote` in the full-screen terminal now opens a status canvas: relay,
   config, gateway, phone address, whether a phone could pair, this session and

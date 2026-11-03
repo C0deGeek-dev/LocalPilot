@@ -348,15 +348,25 @@ impl Setup<'_> {
         })
     }
 
+    /// A name with nothing of LocalPilot in it: the shape Windows gives a new
+    /// computer (`DESKTOP-` and seven letters or digits, lower-cased as
+    /// MagicDNS shows it), so in public certificate logs it is one of very
+    /// many and says nothing about what runs there.
     fn random_name(&self) -> String {
-        const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
-        let mut buffer = [0u8; 6];
-        (self.random)(&mut buffer);
-        let label: String = buffer
-            .iter()
-            .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
-            .collect();
-        format!("lp-{label}")
+        const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        // Bytes at or above this would favour some characters.
+        const FAIR: u8 = 252;
+        let mut label = String::new();
+        while label.len() < 7 {
+            let mut buffer = [0u8; 16];
+            (self.random)(&mut buffer);
+            for byte in buffer {
+                if byte < FAIR && label.len() < 7 {
+                    label.push(ALPHABET[usize::from(byte) % ALPHABET.len()] as char);
+                }
+            }
+        }
+        format!("desktop-{label}")
     }
 }
 
@@ -1973,7 +1983,11 @@ mod tests {
         );
         let new_name = sim.name.clone();
         assert!(
-            new_name.starts_with("lp-") && new_name.len() == 9,
+            new_name.starts_with("desktop-")
+                && new_name.len() == 15
+                && new_name[8..]
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
             "{new_name}"
         );
         assert_eq!(sim.config, ours(&sim.full(&new_name)));

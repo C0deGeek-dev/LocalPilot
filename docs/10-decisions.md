@@ -66,7 +66,7 @@ empty tag overwrites unconditionally.
      on the same node. Unknown outcomes are reported, never adopted, and never
      undone automatically.
    - **The gateway** is identified by its exact health answer on
-     `/identify`, which answers only a loopback-literal `Host` (`/healthz`
+     `/identify`, which answers only `Host: 127.0.0.1:<its port>` or `[::1]:<its port>` (`/healthz`
      keeps the host policy). Its address is
      then checked with a browser-shaped request that must get the exact
      missing-credential refusal. Setup never starts or restarts anything.

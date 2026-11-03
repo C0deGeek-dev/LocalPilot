@@ -1338,13 +1338,13 @@ mod tests {
         // Before a rename the node's status still offers only the old name;
         // the origin plan for the new name is structural only.
         let change = ready(&json!({}));
-        let planned = origin_plan(&json!({}), "lp-abc234.tail1234.ts.net", PORT);
+        let planned = origin_plan(&json!({}), "desktop-k7f3q2m.tail1234.ts.net", PORT);
         let (tcp, web) = ours();
         assert_eq!(
             planned,
             Ok(OriginPlan::Free(json!({
                 "TCP": { "443": tcp },
-                "Web": { "lp-abc234.tail1234.ts.net:443": web }
+                "Web": { "desktop-k7f3q2m.tail1234.ts.net:443": web }
             })))
         );
         assert_ne!(change.config, json!({}));

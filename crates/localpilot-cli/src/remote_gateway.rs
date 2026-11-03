@@ -101,6 +101,9 @@ pub(crate) struct Policy {
     origin: String,
     /// The exact `Host` values the proxy sends, lower-cased.
     pub(crate) hosts: Vec<String>,
+    /// The loopback port the gateway is bound to, which `/identify` must
+    /// name in its `Host`.
+    bound_port: Option<u16>,
 }
 
 impl Policy {
@@ -114,7 +117,25 @@ impl Policy {
         Self {
             origin: origin.to_string(),
             hosts,
+            bound_port: None,
         }
+    }
+
+    /// The port the gateway listens on; without it `/identify` answers no one.
+    pub(crate) fn with_bound_port(mut self, port: u16) -> Self {
+        self.bound_port = Some(port);
+        self
+    }
+
+    /// Exactly one `Host`, and it is `127.0.0.1:<bound port>` or
+    /// `[::1]:<bound port>`.
+    fn loopback_host(&self, headers: &HeaderMap) -> bool {
+        let Some(port) = self.bound_port else {
+            return false;
+        };
+        single(headers, &header::HOST).is_some_and(|host| {
+            host == format!("127.0.0.1:{port}") || host == format!("[::1]:{port}")
+        })
     }
 
     /// Exactly one `Host`, and it is one of the allowed values.
@@ -577,7 +598,7 @@ impl Gateway {
             // sends that name. `/healthz` keeps the host policy, so a proxy
             // that rewrites `Host` cannot look healthy there.
             let identify = request.method() == Method::GET && request.uri().path() == IDENTIFY_PATH;
-            if identify && loopback_host(request.headers()) {
+            if identify && self.policy.loopback_host(request.headers()) {
                 return plain(StatusCode::OK, &health_body());
             }
             return plain(StatusCode::MISDIRECTED_REQUEST, "unknown host");
@@ -1646,27 +1667,6 @@ async fn probe_within(
     }
 }
 
-/// Whether the request's single `Host` is a loopback literal
-/// (`127.0.0.1[:port]` or `[::1][:port]`).
-fn loopback_host(headers: &HeaderMap) -> bool {
-    let Some(host) = single(headers, &header::HOST) else {
-        return false;
-    };
-    let address = match host.rsplit_once(':') {
-        Some((address, port)) if !address.ends_with(']') || host.starts_with('[') => {
-            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
-                if host == "[::1]" {
-                    return true;
-                }
-                return false;
-            }
-            address
-        }
-        _ => host,
-    };
-    address == "127.0.0.1" || address == "[::1]"
-}
-
 /// One raw HTTP/1.1 exchange with whatever listens on the gateway port. It
 /// reads until the reply is complete (head plus its declared body), the peer
 /// closes, `within` passes or [`PROBE_REPLY_CAP`] is exceeded; a connection
@@ -1765,8 +1765,12 @@ fn health_request(port: u16) -> Vec<u8> {
 /// A WebSocket upgrade a browser on the new address would send, without a
 /// device credential.
 fn origin_request(host: &str) -> Vec<u8> {
+    origin_request_with_host(host, host)
+}
+
+fn origin_request_with_host(host: &str, origin_host: &str) -> Vec<u8> {
     format!(
-        "GET /api/socket HTTP/1.1\r\nHost: {host}\r\nOrigin: https://{host}\r\n\
+        "GET /api/socket HTTP/1.1\r\nHost: {host}\r\nOrigin: https://{origin_host}\r\n\
          Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
     )
@@ -1987,7 +1991,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         );
     };
     let origin = crate::server_cmd::pairing_origin(url)?;
-    let policy = Policy::new(&origin, &config.proxy_hosts);
+    let policy = Policy::new(&origin, &config.proxy_hosts).with_bound_port(config.port);
     let stop = CancellationToken::new();
     let gateway = Gateway::new(policy, user_discovery()?, stop.clone());
     // Loopback only, always: TLS and any network exposure belong to the
@@ -2937,7 +2941,7 @@ mod tests {
             standing: Arc::new(|_, _| false),
         };
         Gateway::new(
-            Policy::new(origin, hosts),
+            Policy::new(origin, hosts).with_bound_port(47610),
             discovery,
             CancellationToken::new(),
         )
@@ -2971,6 +2975,29 @@ mod tests {
         let rebound =
             b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:47610\r\nConnection: close\r\n\r\n";
         let raw = ask_gateway(&current, rebound.to_vec()).await;
+        assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(421));
+
+        // A loopback Host opens nothing else: pairing, sessions, the socket.
+        for request in [
+            "POST /api/pair HTTP/1.1\r\nHost: 127.0.0.1:47610\r\nOrigin: https://pc.tail1.ts.net\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "GET /api/sessions?workspace=x HTTP/1.1\r\nHost: 127.0.0.1:47610\r\nConnection: close\r\n\r\n",
+            "GET /api/workspaces HTTP/1.1\r\nHost: 127.0.0.1:47610\r\nConnection: close\r\n\r\n",
+        ] {
+            let raw = ask_gateway(&current, request.as_bytes().to_vec()).await;
+            assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(421), "{request}");
+        }
+        let raw = ask_gateway(
+            &current,
+            origin_request_with_host("127.0.0.1:47610", "pc.tail1.ts.net"),
+        )
+        .await;
+        assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(421));
+        // Another port, or no port, is not this gateway's loopback name.
+        let raw = ask_gateway(
+            &current,
+            b"GET /identify HTTP/1.1\r\nHost: 127.0.0.1:1\r\nConnection: close\r\n\r\n".to_vec(),
+        )
+        .await;
         assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(421));
 
         // The new address: accepted, so refused only for the missing credential.
@@ -3030,18 +3057,28 @@ mod tests {
                 String::from_utf8_lossy(&raw)
             );
         }
-        assert!(loopback_host(&headers(&[("host", "127.0.0.1:47610")])));
-        assert!(loopback_host(&headers(&[("host", "127.0.0.1")])));
-        assert!(loopback_host(&headers(&[("host", "[::1]:47610")])));
+        let policy = Policy::new("https://pc.tail1.ts.net", &[]).with_bound_port(47610);
+        assert!(policy.loopback_host(&headers(&[("host", "127.0.0.1:47610")])));
+        assert!(policy.loopback_host(&headers(&[("host", "[::1]:47610")])));
         for host in [
+            "127.0.0.1",
+            "127.0.0.1:47611",
+            "127.0.0.1:047610",
+            "[::1]",
             "localhost:47610",
-            "127.0.0.2:1",
-            "127.0.0.1:x",
-            "127.0.0.1.evil:1",
+            "127.0.0.2:47610",
+            "127.0.0.1.evil:47610",
             "pc",
         ] {
-            assert!(!loopback_host(&headers(&[("host", host)])), "{host}");
+            assert!(!policy.loopback_host(&headers(&[("host", host)])), "{host}");
         }
+        // Twice, or without a bound port: never.
+        assert!(!policy.loopback_host(&headers(&[
+            ("host", "127.0.0.1:47610"),
+            ("host", "127.0.0.1:47610")
+        ])));
+        let unbound = Policy::new("https://pc.tail1.ts.net", &[]);
+        assert!(!unbound.loopback_host(&headers(&[("host", "127.0.0.1:47610")])));
     }
 
     #[tokio::test]

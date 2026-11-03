@@ -959,9 +959,11 @@ first thing it cannot confirm:
    `tailscale serve` or service. If something is in the way, setup says what,
    changes nothing and tells you how to fix it.
 2. **Your consent.** Setup shows the address and that its certificate puts the
-   name permanently in public Certificate Transparency logs. It offers a
-   random neutral name for this computer (for example `lp-7f3k2q`), because
-   the name usually is your computer's host name. Renaming changes the name
+   name permanently in public Certificate Transparency logs. Because that name
+   usually is your computer's host name, setup offers a random one instead,
+   shaped like a default Windows computer name (for example
+   `desktop-k7f3q2m`), so the logs show nothing about you or about LocalPilot.
+   Renaming changes the name
    for every device and app in your tailnet that uses it. Already paired
    phones must pair again. Names in earlier certificates cannot be removed.
    Cancel is the default. Without a terminal, setup needs `--yes` and either

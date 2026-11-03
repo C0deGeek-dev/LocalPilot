@@ -1280,7 +1280,7 @@ project file cannot set any `[remote]` key).
   the device socket must also carry exactly one `Origin` equal to the advertised
   origin. Forwarded headers are never trusted; there are no wildcard or partial
   matches. One exception: `GET /identify` answers only a loopback-literal
-  `Host` (`127.0.0.1` or `[::1]`, with or without a port), and it returns only
+  `Host` naming the gateway's own port (`127.0.0.1:<port>` or `[::1]:<port>`), and it returns only
   the gateway's version string. This lets `localpilot remote setup` recognise
   the gateway whatever address it was started with. A page that rebinds its
   own name to loopback still sends that name and is refused. `/healthz` keeps
