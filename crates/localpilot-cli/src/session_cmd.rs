@@ -8,6 +8,11 @@
 
 use std::io::Write;
 
+use crate::host_policy::action_decision;
+pub use crate::host_policy::{
+    configured_host_profile, resolve_profile, resolve_profile_from_config, Reach,
+};
+
 use localpilot_config::{CliOverrides, ConfigPaths, StorageConfig};
 use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 use localpilot_llm::ProviderRegistry;
@@ -31,24 +36,6 @@ pub fn permission_value_parser() -> clap::builder::PossibleValuesParser {
     clap::builder::PossibleValuesParser::new(PERMISSION_PROFILES)
 }
 
-/// Map the `--permission` / `--bypass` flags to a permission profile. `--bypass`
-/// wins, and neither `bypass` nor `unrestricted` is ever the default. The flag
-/// is validated by [`permission_value_parser`]; a name that still gets here
-/// unrecognised fails closed, to `readonly`.
-#[must_use]
-pub fn resolve_profile(permission: Option<&str>, bypass: bool) -> Profile {
-    if bypass {
-        return Profile::Bypass;
-    }
-    match permission {
-        None | Some("default") => Profile::Default,
-        Some("relaxed") => Profile::Relaxed,
-        Some("bypass") => Profile::Bypass,
-        Some("unrestricted") => Profile::Unrestricted,
-        Some(_) => Profile::ReadOnly,
-    }
-}
-
 /// Resolve the action setting for the primary chat and single-turn CLI launches.
 /// `may_prompt` is true only for a long-lived chat, which may ask the user to
 /// authorize a project's request for Accept all; single-turn and evaluation runs
@@ -65,12 +52,65 @@ pub fn launch_profile(
     if permission.is_none() && !bypass {
         crate::project_grants::apply(&mut config, &cwd, may_prompt);
     }
-    Ok(action_profile(
-        &config,
-        permission,
-        bypass,
-        resolve_profile(permission, bypass),
-    ))
+    Ok(host_profile_for(&config, permission, bypass, Reach::Local))
+}
+
+/// Resolve the action setting for a host that cannot ask the user anything:
+/// `rpc`, `acp`, `mcp serve`, `serve`, `swarm`, `session resume` and
+/// `harness resume`. A stored grant or the environment may authorize a project's
+/// request, but no prompt is shown.
+pub fn host_profile(
+    permission: Option<&str>,
+    bypass: bool,
+    reach: Reach,
+) -> anyhow::Result<Profile> {
+    let cwd = std::env::current_dir()?;
+    let mut config =
+        localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    if reach == Reach::Local && permission.is_none() && !bypass {
+        crate::project_grants::apply(&mut config, &cwd, false);
+    }
+    Ok(host_profile_for(&config, permission, bypass, reach))
+}
+
+/// The one rule every host follows, over an already loaded configuration.
+///
+/// - An explicit `--permission` / `--bypass` always applies.
+/// - Otherwise a `Local` host takes the configured profile and Accept all.
+/// - A `Remote` host takes the configured profile only when it narrows
+///   (`readonly`, `relaxed`, `default`). A configured `bypass`, `unrestricted`
+///   or Accept all is not applied there, because the device on the other end
+///   did not choose it. The refusal is said on stderr.
+pub fn host_profile_for(
+    config: &localpilot_config::Config,
+    permission: Option<&str>,
+    bypass: bool,
+    reach: Reach,
+) -> Profile {
+    let explicit = permission.is_some() || bypass;
+    match reach {
+        Reach::Local => {
+            let fallback = if explicit {
+                resolve_profile(permission, bypass)
+            } else {
+                resolve_profile_from_config(config)
+            };
+            action_profile(config, permission, bypass, fallback)
+        }
+        Reach::Remote => {
+            if explicit {
+                return resolve_profile(permission, bypass);
+            }
+            let (profile, widened) = configured_host_profile(config, Reach::Remote);
+            if widened {
+                eprintln!(
+                    "Actions: the configured Accept all / bypass setting is not applied to a session other devices can drive. Pass --permission to choose it for this server."
+                );
+            }
+            eprintln!("Actions: {profile:?}.");
+            profile
+        }
+    }
 }
 
 pub fn action_profile(
@@ -79,25 +119,8 @@ pub fn action_profile(
     bypass: bool,
     fallback: Profile,
 ) -> Profile {
-    let Some(mode) = config.permissions.action_mode else {
+    let Some((profile, source)) = action_decision(config, permission, bypass) else {
         return fallback;
-    };
-    let (profile, source) = if permission == Some("readonly") {
-        (Profile::ReadOnly, "explicit launch restriction")
-    } else if crate::bypass::engaged() {
-        (Profile::Unrestricted, "explicit full-auto launch")
-    } else if permission.is_some() || bypass {
-        (
-            resolve_profile(permission, bypass),
-            "explicit launch profile",
-        )
-    } else if config.permissions.profile == localpilot_config::PermissionProfile::Readonly {
-        (Profile::ReadOnly, "configured read-only restriction")
-    } else {
-        match mode {
-            localpilot_config::ActionMode::Normal => (Profile::Default, "Normal"),
-            localpilot_config::ActionMode::AcceptAll => (Profile::Unrestricted, "Accept all"),
-        }
     };
     if profile == Profile::Unrestricted {
         eprintln!(
@@ -181,32 +204,6 @@ pub fn allowed_commands(config: &localpilot_config::Config) -> Vec<AllowedComman
             args_prefix: entry.args_prefix.clone(),
         })
         .collect()
-}
-
-/// Map the configured `[permissions] profile` to a permission profile. The default
-/// (no-argument) REPL has no `--permission`/`--bypass` flags to consult, so it reads
-/// the profile from config instead of always assuming `Default` — otherwise a
-/// project that opted into `profile = "bypass"` would still be prompted per action.
-///
-/// The sole caller is the `tui`-gated default REPL, so this is dead code in a
-/// non-`tui` build; the test below still exercises it under either feature set.
-#[must_use]
-#[cfg_attr(not(feature = "tui"), allow(dead_code))]
-
-pub fn resolve_profile_from_config(config: &localpilot_config::Config) -> Profile {
-    // A run launched with every prompt pre-approved outranks the configured
-    // profile. It is a narrower, louder, more deliberate statement than a config
-    // file: someone typed it on this run, having been shown what it costs.
-    if crate::bypass::engaged() {
-        return Profile::Unrestricted;
-    }
-    match config.permissions.profile {
-        localpilot_config::PermissionProfile::Default => Profile::Default,
-        localpilot_config::PermissionProfile::Relaxed => Profile::Relaxed,
-        localpilot_config::PermissionProfile::Readonly => Profile::ReadOnly,
-        localpilot_config::PermissionProfile::Bypass => Profile::Bypass,
-        localpilot_config::PermissionProfile::Unrestricted => Profile::Unrestricted,
-    }
 }
 
 /// The idle window for a served session: `None` when the operator asked for

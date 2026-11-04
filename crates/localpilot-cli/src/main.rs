@@ -23,6 +23,7 @@ mod eval_cmd;
 mod fullscreen;
 mod handoff_cmd;
 mod harness_cmd;
+mod host_policy;
 mod import_cmd;
 #[cfg(feature = "tui")]
 mod incognito;
@@ -2054,7 +2055,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             continue_latest,
             resume,
         } => {
-            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            let profile = session_cmd::host_profile(
+                permission.as_deref(),
+                bypass,
+                session_cmd::Reach::Local,
+            )?;
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
             rpc_cmd::run(
                 model.as_deref(),
@@ -2071,7 +2076,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             permission,
             bypass,
         } => {
-            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            let profile = session_cmd::host_profile(
+                permission.as_deref(),
+                bypass,
+                session_cmd::Reach::Local,
+            )?;
             rpc_cmd::run(
                 model.as_deref(),
                 provider.as_deref(),
@@ -2091,7 +2100,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             no_approvals,
             idle_timeout,
         }) => {
-            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            let profile = session_cmd::host_profile(
+                permission.as_deref(),
+                bypass,
+                session_cmd::Reach::Local,
+            )?;
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
             rpc_cmd::run(
                 model.as_deref(),
@@ -2111,7 +2124,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             permission,
             bypass,
         } => {
-            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            let profile = session_cmd::host_profile(
+                permission.as_deref(),
+                bypass,
+                session_cmd::Reach::Remote,
+            )?;
             server_cmd::serve(model.as_deref(), provider.as_deref(), profile).await?;
         }
         Command::Connect { resume, server } => {
@@ -2168,7 +2185,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             // carries no flags, so resolve model/provider from config and use the
             // default profile. If the endpoint is already owned, `serve` prints
             // that and exits 0.
-            let profile = session_cmd::resolve_profile(None, false);
+            let profile = session_cmd::host_profile(None, false, session_cmd::Reach::Remote)?;
             server_cmd::serve(None, None, profile).await?;
         }
         Command::EmbedReap {
@@ -2185,7 +2202,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 concurrency,
                 max_agents,
             } => {
-                let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+                let profile = session_cmd::host_profile(
+                    permission.as_deref(),
+                    bypass,
+                    session_cmd::Reach::Local,
+                )?;
                 swarm_cmd::run(
                     &plan,
                     model.as_deref(),
@@ -2387,7 +2408,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                     permission,
                     bypass,
                 } => {
-                    let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+                    let profile = session_cmd::host_profile(
+                        permission.as_deref(),
+                        bypass,
+                        session_cmd::Reach::Local,
+                    )?;
                     let mut stdout = io::stdout().lock();
                     harness_cmd::resume(&cwd, &model, provider.as_deref(), profile, &mut stdout)
                         .await?;
@@ -2398,7 +2423,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                     permission,
                     bypass,
                 } => {
-                    let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+                    let profile = session_cmd::host_profile(
+                        permission.as_deref(),
+                        bypass,
+                        session_cmd::Reach::Local,
+                    )?;
                     let mut stdout = io::stdout().lock();
                     harness_cmd::wait_resume(
                         &cwd,
@@ -2878,7 +2907,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 bypass,
                 allow_writes,
             } => {
-                let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+                let profile = session_cmd::host_profile(
+                    permission.as_deref(),
+                    bypass,
+                    session_cmd::Reach::Local,
+                )?;
                 let session = session_cmd::resolve_session_ref(&id)?;
                 let outcome = session_cmd::print_mode(
                     &prompt,

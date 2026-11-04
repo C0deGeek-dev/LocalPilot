@@ -270,6 +270,14 @@ pub struct PermissionsStatus {
     /// Each `[[permissions.allow_commands]]` entry as `program prefix-args…`.
     /// An entry admits every call that starts with it.
     pub allow_commands: Vec<String>,
+    /// The configured action mode (`normal`, `accept_all`), or `unset`.
+    pub action_mode: String,
+    /// A project's unauthorized request for more access, when it made one.
+    pub project_request: Option<String>,
+    /// What chat, print, rpc, acp, harness and swarm run with without flags.
+    pub local_hosts: String,
+    /// What `serve` and the auto-spawned daemon run with without flags.
+    pub remote_hosts: String,
 }
 
 fn permissions_status(config: &localpilot_config::Config) -> PermissionsStatus {
@@ -291,9 +299,36 @@ fn permissions_status(config: &localpilot_config::Config) -> PermissionsStatus {
                 .join(" ")
         })
         .collect();
+    let action_mode = match config.permissions.action_mode {
+        None => "unset",
+        Some(localpilot_config::ActionMode::Normal) => "normal",
+        Some(localpilot_config::ActionMode::AcceptAll) => "accept_all",
+    };
+    let project_request = config.project_request.as_ref().map(|request| {
+        format!(
+            "{} (from the project, applies only once you authorize it)",
+            match request.mode {
+                localpilot_config::ActionMode::Normal => "normal",
+                localpilot_config::ActionMode::AcceptAll => "accept_all",
+            }
+        )
+    });
+    let (local, _) =
+        crate::host_policy::configured_host_profile(config, crate::host_policy::Reach::Local);
+    let (remote, widened) =
+        crate::host_policy::configured_host_profile(config, crate::host_policy::Reach::Remote);
+    let remote_hosts = if widened {
+        format!("{remote:?} (the configured Accept all / bypass is not applied here)")
+    } else {
+        format!("{remote:?}")
+    };
     PermissionsStatus {
         profile: profile.to_string(),
         allow_commands,
+        action_mode: action_mode.to_string(),
+        project_request,
+        local_hosts: format!("{local:?}"),
+        remote_hosts,
     }
 }
 
@@ -996,6 +1031,20 @@ pub fn render(report: &DoctorReport) -> String {
         Some(permissions) => {
             let _ = writeln!(s, "permissions:");
             let _ = writeln!(s, "  profile: {}", permissions.profile);
+            let _ = writeln!(s, "  action_mode: {}", permissions.action_mode);
+            if let Some(request) = &permissions.project_request {
+                let _ = writeln!(s, "  project request: {request}");
+            }
+            let _ = writeln!(
+                s,
+                "  without flags, chat/print/rpc/acp/harness/swarm: {}",
+                permissions.local_hosts
+            );
+            let _ = writeln!(
+                s,
+                "  without flags, serve and paired devices: {}",
+                permissions.remote_hosts
+            );
             if permissions.allow_commands.is_empty() {
                 let _ = writeln!(s, "  allow_commands: none");
             } else {
@@ -1767,6 +1816,10 @@ mod tests {
                 allow_commands: vec![
                     "python /abs/skills/pair-programming/scripts/pair.py".to_string()
                 ],
+                action_mode: "unset".to_string(),
+                project_request: None,
+                local_hosts: "ReadOnly".to_string(),
+                remote_hosts: "ReadOnly".to_string(),
             }),
         }
     }

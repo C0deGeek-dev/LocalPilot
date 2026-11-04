@@ -1,9 +1,18 @@
+// `host_policy` asks the full-auto latch; a doctor run never engages it.
+mod bypass {
+    pub fn engaged() -> bool {
+        false
+    }
+}
 #[allow(dead_code)]
 #[path = "../src/context_window.rs"]
 mod context_window;
 #[allow(dead_code)]
 #[path = "../src/doctor.rs"]
 mod doctor;
+#[allow(dead_code)]
+#[path = "../src/host_policy.rs"]
+mod host_policy;
 
 // `doctor` references `crate::output::OutputFormat` and `crate::mcp_env`; include
 // the same modules so the standalone test build of `doctor.rs` resolves them

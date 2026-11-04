@@ -108,7 +108,11 @@ expression: render_json(&fixture())
     "profile": "readonly",
     "allow_commands": [
       "python /abs/skills/pair-programming/scripts/pair.py"
-    ]
+    ],
+    "action_mode": "unset",
+    "project_request": null,
+    "local_hosts": "ReadOnly",
+    "remote_hosts": "ReadOnly"
   },
   "skill_maintenance": {
     "stale": [

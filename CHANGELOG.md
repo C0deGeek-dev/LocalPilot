@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Every host now resolves its action setting the same way. `rpc`, `acp`, `mcp serve`,
+  `swarm`, `session resume`, `harness resume` and pairing honor the configured
+  profile and Accept all, and a configured `readonly` profile now also protects
+  `serve` and its daemon. A session other devices can drive does not take a
+  configured `bypass`, `unrestricted` or Accept all, and says so at launch.
+  `localpilot doctor` reports the action mode, any pending project request and
+  what each kind of host runs with (ADR-0263, LocalHub#266).
+
 - A project can ask for Accept all but only you can authorize it. A project file
   that sets `permissions.requested_action_mode = "accept_all"`, or the legacy
   `profile = "bypass"` or `"unrestricted"`, is now a request instead of a setting:

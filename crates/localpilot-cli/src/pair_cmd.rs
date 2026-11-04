@@ -93,7 +93,12 @@ impl PairArgs {
             task: self.task,
             a,
             b,
-            profile: crate::session_cmd::resolve_profile(self.permission.as_deref(), self.bypass),
+            profile: crate::session_cmd::host_profile_for(
+                config,
+                self.permission.as_deref(),
+                self.bypass,
+                crate::session_cmd::Reach::Local,
+            ),
             bounds: PairBounds {
                 max_rounds: self.max_rounds,
                 slot_timeout: Duration::from_secs(self.slot_timeout),

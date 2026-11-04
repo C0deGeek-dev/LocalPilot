@@ -1350,6 +1350,15 @@ selected profile. Unrestricted already admits ordinary writes without it.
 Work sizing, required verification, incognito, session ownership, OS access
 controls and product-owned remote switches apply independently.
 
+Every host follows the same rule. An explicit `--permission` or `--bypass` always
+applies. Without one, `chat`, `print`, `eval`, `rpc`, `acp`, `mcp serve`, `swarm`,
+`session resume`, `harness resume` and pairing take the configured profile and
+Accept all. `serve` and its background daemon take the configured profile only when
+it narrows; a configured `bypass`, `unrestricted` or Accept all is not applied to a
+session other devices can drive, and the launch says so. A configured `readonly`
+profile holds everywhere. `localpilot doctor` shows the action mode, any pending
+project request, and what each kind of host runs with.
+
 
 A project cannot grant itself this. A project file that sets
 `requested_action_mode = "accept_all"`, or the legacy `profile = "bypass"` or

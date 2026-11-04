@@ -2,6 +2,32 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0263: Every Host Resolves Its Action Setting Through One Rule
+
+**Status:** accepted · **Date:** 2026-11-04. Refs LocalHub#266. Builds on ADR-0260 and ADR-0262.
+
+**Context.** Only the bare startup, `chat`, `print`, `eval`, `lab` and proposal
+validation read the configured profile or `action_mode`. `rpc`, `acp`, `mcp serve`,
+`serve` (and its auto-spawned daemon), `swarm`, `session resume`, `harness resume`
+and pairing took the command-line flags alone, so a `profile = "readonly"` in the
+user's config did not protect them.
+
+**Decision.** One module (`host_policy`) answers the question for every host. An
+explicit `--permission` or `--bypass` always applies. Without one, a host the user
+runs from their own terminal or editor (`Local`) takes the configured profile and
+Accept all. A host other devices can drive (`Remote`: `serve`, the daemon) takes the
+configured profile only when it narrows (`readonly`, `default`, `relaxed`); a
+configured `bypass`, `unrestricted` or Accept all is not applied there, and the
+launch says so. A configured read-only restriction beats Accept all everywhere.
+Hosts that cannot ask the user (`rpc`, `acp`, `serve`, `session resume`, harness
+resume) honor a stored project grant or the environment variable but never prompt.
+`localpilot doctor` reports the action mode, any unauthorized project request, and
+what each kind of host runs with when no flag is given.
+
+**Consequences.** A user restriction now holds in every host. Accept all stays a
+decision made at the machine the user is sitting at. Session-level selection in
+screens and slash commands is still LocalHub#268 and #269.
+
 ## ADR-0262: A Project Can Ask For Accept All But Only The User Can Authorize It
 
 **Status:** accepted · **Date:** 2026-11-04. Refs LocalHub#265. Builds on ADR-0260.
