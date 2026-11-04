@@ -2002,15 +2002,6 @@ impl AppModel {
         }
     }
 
-    /// Select the open choice's action named `label`, if it has one.
-    pub fn select_choice(&mut self, label: &str) {
-        if let Some(choice) = &mut self.choice {
-            if let Some(index) = choice.options.iter().position(|option| option == label) {
-                choice.selected = index;
-            }
-        }
-    }
-
     /// Whether the open choice is shown and takes keys now (a yielding one
     /// does not while a permission request or question is open).
     #[must_use]

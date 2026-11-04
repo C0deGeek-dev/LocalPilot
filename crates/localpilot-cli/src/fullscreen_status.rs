@@ -91,11 +91,10 @@ pub(super) struct StatusHost {
     late_marked: Cell<bool>,
     /// The actions as last drawn, in order (Enter acts on these).
     drawn: RefCell<Vec<StatusAction>>,
-    /// The states whose own first action was already selected for this
-    /// opening: each is selected once (on opening, or on first entering that
-    /// state), never again, so a selection the user made survives the state
-    /// changing back and forth while reconnecting.
-    offered: RefCell<Vec<Primary>>,
+    /// The canvas has not been drawn since it opened: only then is the
+    /// state's own first action selected. A state change never moves the
+    /// selection (it stays on the same action by label).
+    fresh: Cell<bool>,
 }
 
 /// Which state's own first action the canvas offers.
@@ -118,7 +117,7 @@ impl StatusHost {
             seen_epoch: Cell::new(0),
             late_marked: Cell::new(false),
             drawn: RefCell::new(Vec::new()),
-            offered: RefCell::new(Vec::new()),
+            fresh: Cell::new(false),
         }
     }
 
@@ -137,7 +136,7 @@ impl StatusHost {
         self.late_marked.set(false);
         let asked = devices.check_status(generation, &self.cwd);
         self.not_started(asked);
-        self.offered.borrow_mut().clear();
+        self.fresh.set(true);
         app.open_status_view(StatusView::new("Remote".to_string()));
     }
 
@@ -373,12 +372,10 @@ impl StatusHost {
                 .map(|action| action.label().to_string())
                 .collect(),
         );
-        // The state's own first action is selected the first time this
-        // opening shows that state; otherwise the user's selection (kept by
-        // label) stays.
-        let mut offered = self.offered.borrow_mut();
-        if primary != Primary::None && !offered.contains(&primary) {
-            offered.push(primary);
+        // Only a fresh canvas selects its state's own first action; after
+        // that the user's selection (kept by label) stays whatever the state
+        // does.
+        if self.fresh.replace(false) && primary != Primary::None {
             view.action = 0;
         }
         *self.drawn.borrow_mut() = actions;

@@ -26265,6 +26265,8 @@ last_seen = "2026-08-10"
         spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         /// While set, the spawned server never answers.
         hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// While set, a server refuses (the start fails).
+        refuse: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     struct StartChild;
@@ -26279,6 +26281,9 @@ last_seen = "2026-08-10"
     impl crate::remote_server_start::Seams for StartSeams {
         async fn probe(&self, _within: Duration) -> crate::remote_server_start::Probe {
             use std::sync::atomic::Ordering;
+            if self.refuse.load(Ordering::SeqCst) {
+                return crate::remote_server_start::Probe::Refused("it refused: test".to_string());
+            }
             if self.spawned.load(Ordering::SeqCst) == 0 {
                 crate::remote_server_start::Probe::NotRunning
             } else if self.hold.load(Ordering::SeqCst) {
@@ -26299,10 +26304,15 @@ last_seen = "2026-08-10"
         dials: crate::remote_share::test_support::Dials,
         spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        refuse: std::sync::Arc<std::sync::atomic::AtomicBool>,
         gate: localpilot_core::admission::AdmissionGate,
     }
 
     fn start_fixture() -> StartFixture {
+        start_fixture_within(crate::remote_server_start::START_WITHIN)
+    }
+
+    fn start_fixture_within(within: Duration) -> StartFixture {
         let dials = crate::remote_share::test_support::Dials::default();
         let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
         let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
@@ -26325,21 +26335,25 @@ last_seen = "2026-08-10"
         });
         let spawned = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refuse = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seams = StartSeams {
             spawned: spawned.clone(),
             hold: hold.clone(),
+            refuse: refuse.clone(),
         };
         let host = std::rc::Rc::new(
             remote_host::RemoteHost::new(std::sync::Arc::new(share), &std::env::temp_dir())
-                .with_server_start(crate::remote_server_start::ServerStart::new(
-                    std::sync::Arc::new(seams),
-                )),
+                .with_server_start(
+                    crate::remote_server_start::ServerStart::new(std::sync::Arc::new(seams))
+                        .within(within),
+                ),
         );
         StartFixture {
             host,
             dials,
             spawned,
             hold,
+            refuse,
             gate,
         }
     }
@@ -26513,6 +26527,115 @@ last_seen = "2026-08-10"
         })
         .await;
         assert_eq!(f.spawned.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_late_start_keeps_cancel_selected_through_an_ask() {
+        for refusing in [true, false] {
+            let f = start_fixture_within(Duration::from_millis(300));
+            let mut app = app();
+            needs_server(&f, &mut app).await;
+            remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+            remote_host::idle_status_for_test(&mut app, &f.host);
+            remote_host::pairing_key(&mut app, &f.host, enter());
+            if refusing {
+                f.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                f.hold.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            remote_host::choice_key(&mut app, &f.host, enter());
+            assert_eq!(app.choice().unwrap().options, vec!["Cancel"]);
+            // A permission request arrives over it while it starts.
+            app.dialog = Some(localpilot_terminal_ui::DialogState::Approval {
+                tool: "tool".to_string(),
+                target: "target".to_string(),
+                risk_class: "test".to_string(),
+                incognito_creation: false,
+            });
+            let ended = if refusing {
+                "Could not start"
+            } else {
+                "has not answered yet"
+            };
+            pump_until(&mut app, &f.host, |app| {
+                app.choice()
+                    .is_some_and(|choice| choice.body.iter().any(|line| line.contains(ended)))
+            })
+            .await;
+            let choice = app.choice().unwrap();
+            assert_eq!(choice.options, vec!["Retry", "Cancel"]);
+            assert_eq!(
+                choice.options[choice.selected], "Cancel",
+                "the selected Cancel is kept"
+            );
+            // The ask closes; Enter does what is selected: cancel, no retry.
+            app.dialog = None;
+            let spawned = f.spawned.load(std::sync::atomic::Ordering::SeqCst);
+            remote_host::choice_key(&mut app, &f.host, enter());
+            assert!(app.choice().is_none());
+            assert!(timeline_has_notice(&app, "Sharing cancelled"));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                f.spawned.load(std::sync::atomic::Ordering::SeqCst),
+                spawned,
+                "no new attempt"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_selection_on_the_canvas_survives_interruption_and_a_stopped_server() {
+        for keep in ["Stop sharing", "Close"] {
+            let f = start_fixture();
+            let mut app = app();
+            let server = shared_over_fake(&f.dials, &f.host).await;
+            remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+            remote_host::idle_status_for_test(&mut app, &f.host);
+            for _ in 0..8 {
+                if app.status_view().unwrap().selected_action() == Some(keep) {
+                    break;
+                }
+                remote_host::pairing_key(
+                    &mut app,
+                    &f.host,
+                    press(KeyCode::Tab, KeyModifiers::NONE),
+                );
+            }
+            assert_eq!(app.status_view().unwrap().selected_action(), Some(keep));
+            drop(server);
+            // Through every interruption, reconnect attempt and the stopped
+            // server, the selection stays where the user put it.
+            let mut seen_interrupted = false;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    remote_host::idle_status_for_test(&mut app, &f.host);
+                    let state = f.host.share.state();
+                    seen_interrupted |=
+                        matches!(state, crate::remote_share::ShareState::Interrupted { .. });
+                    assert_eq!(
+                        app.status_view().unwrap().selected_action(),
+                        Some(keep),
+                        "in {state:?}"
+                    );
+                    if state == crate::remote_share::ShareState::ServerStopped {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .expect("in time");
+            assert!(seen_interrupted);
+            remote_host::idle_status_for_test(&mut app, &f.host);
+            assert_eq!(app.status_view().unwrap().selected_action(), Some(keep));
+            // A fresh opening does select the state's own action.
+            remote_host::command(&mut app, &f.host, localpilot_slash::RemoteAction::Status);
+            remote_host::idle_status_for_test(&mut app, &f.host);
+            assert_eq!(
+                app.status_view().unwrap().selected_action(),
+                Some("Start server and reconnect")
+            );
+        }
     }
 
     #[tokio::test]

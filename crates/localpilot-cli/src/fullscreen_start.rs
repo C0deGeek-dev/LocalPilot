@@ -174,9 +174,9 @@ impl StartHost {
         Ok(())
     }
 
-    /// Redraw the open choice for its stage, keeping the selected action
-    /// (or selecting `select` when the stage just changed to one with it).
-    fn redraw(app: &mut AppModel, open: &mut Open, select: Option<Act>) {
+    /// Redraw the open choice for its stage, keeping the selected action (or
+    /// the last, Cancel, when it went).
+    fn redraw(app: &mut AppModel, open: &mut Open) {
         open.acts = acts(&open.stage);
         app.update_choice(
             body(&open.stage),
@@ -185,11 +185,6 @@ impl StartHost {
                 .map(|act| act.label(open.then).to_string())
                 .collect(),
         );
-        if let Some(act) = select {
-            if open.acts.contains(&act) {
-                app.select_choice(act.label(open.then));
-            }
-        }
     }
 
     /// Enter or Esc on the start choice (the caller routes keys here only
@@ -233,7 +228,7 @@ impl StartHost {
                     Some(attempt) => Stage::Starting(attempt),
                     None => Stage::Waiting,
                 };
-                Self::redraw(app, open, None);
+                Self::redraw(app, open);
                 StartKey::Open
             }
         }
@@ -340,7 +335,7 @@ impl StartHost {
             Stage::Waiting => {
                 if let Some(attempt) = self.server.begin(authorized(share, &open.ticket)) {
                     open.stage = Stage::Starting(attempt);
-                    Self::redraw(app, open, None);
+                    Self::redraw(app, open);
                 }
                 None
             }
@@ -357,14 +352,16 @@ impl StartHost {
                     }
                     Some(then)
                 }
+                // Retry is offered, never selected for the user: the
+                // selected Cancel stays (also under a permission request).
                 Outcome::Failed(reason) => {
                     open.stage = Stage::Failed(reason);
-                    Self::redraw(app, open, Some(Act::Retry));
+                    Self::redraw(app, open);
                     None
                 }
                 Outcome::NotYet => {
                     open.stage = Stage::NotYet;
-                    Self::redraw(app, open, Some(Act::Retry));
+                    Self::redraw(app, open);
                     None
                 }
             },
