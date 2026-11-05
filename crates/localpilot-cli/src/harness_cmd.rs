@@ -1284,6 +1284,22 @@ where
             config.harness.verify_before_done,
             config.harness.verify_command.clone(),
         );
+        runtime.set_verification_policy(
+            config.harness.verification,
+            config.harness.commit_unverified,
+        );
+        if config.harness.verification != localpilot_config::VerificationPolicy::Current {
+            writeln!(
+                out,
+                "Verification: {}. A step whose checks did not pass is {}.",
+                config.harness.verification.as_str(),
+                if config.harness.commit_unverified {
+                    "committed (commit_unverified is on)"
+                } else {
+                    "left uncommitted (commit_unverified is off)"
+                }
+            )?;
+        }
         if let Some(mut profile) = runtime.work_profile() {
             if let Some(scope) = state
                 .documents

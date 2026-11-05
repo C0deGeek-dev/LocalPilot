@@ -278,6 +278,11 @@ pub struct PermissionsStatus {
     pub local_hosts: String,
     /// What `serve` and the auto-spawned daemon run with without flags.
     pub remote_hosts: String,
+    /// `[harness] verification`: `current`, `advisory` or `manual`.
+    pub verification: String,
+    /// Whether the user authorized committing steps whose verification did not
+    /// pass (`[harness] commit_unverified`).
+    pub commit_unverified: bool,
 }
 
 fn permissions_status(config: &localpilot_config::Config) -> PermissionsStatus {
@@ -329,6 +334,8 @@ fn permissions_status(config: &localpilot_config::Config) -> PermissionsStatus {
         project_request,
         local_hosts: format!("{local:?}"),
         remote_hosts,
+        verification: config.harness.verification.as_str().to_string(),
+        commit_unverified: config.harness.commit_unverified,
     }
 }
 
@@ -1031,6 +1038,11 @@ pub fn render(report: &DoctorReport) -> String {
         Some(permissions) => {
             let _ = writeln!(s, "permissions:");
             let _ = writeln!(s, "  profile: {}", permissions.profile);
+            let _ = writeln!(
+                s,
+                "  verification: {} (commit_unverified: {})",
+                permissions.verification, permissions.commit_unverified
+            );
             let _ = writeln!(s, "  action_mode: {}", permissions.action_mode);
             if let Some(request) = &permissions.project_request {
                 let _ = writeln!(s, "  project request: {request}");
@@ -1820,6 +1832,8 @@ mod tests {
                 project_request: None,
                 local_hosts: "ReadOnly".to_string(),
                 remote_hosts: "ReadOnly".to_string(),
+                verification: "current".to_string(),
+                commit_unverified: false,
             }),
         }
     }

@@ -192,6 +192,8 @@ pub async fn run_agent(
         require_mutation_verification: ctx.config.require_mutation_verification,
         verify_before_done: ctx.config.verify_before_done,
         verify_command: ctx.config.verify_command.clone(),
+        verification: ctx.config.verification,
+        commit_unverified: ctx.config.commit_unverified,
         model: definition
             .model
             .clone()

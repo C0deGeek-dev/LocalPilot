@@ -150,12 +150,13 @@ fn separate_project_request(
 /// Keys a project file must never set: they grant the agent more than the
 /// user's own settings do, and a repository must not be able to grant itself
 /// anything. Refused loudly rather than ignored, so the author sees why.
-const USER_ONLY_KEYS: [&str; 6] = [
+const USER_ONLY_KEYS: [&str; 7] = [
     "permissions.action_mode",
     "permissions.allow_commands",
     "permissions.scratch_root",
     "harness.granularity.headless_units",
     "harness.granularity.headless_rename_units",
+    "harness.commit_unverified",
     // The whole table: a repository must not choose where pairing points.
     "remote",
 ];
@@ -825,6 +826,57 @@ profile = \"readonly\"
             ),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_project_may_choose_verification_but_only_the_user_authorizes_unverified_commits() {
+        use crate::VerificationPolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(
+            &user,
+            "[harness]
+commit_unverified = true
+",
+        )
+        .unwrap();
+        std::fs::write(
+            &project,
+            "[harness]
+verification = \"manual\"
+",
+        )
+        .unwrap();
+        let paths = ConfigPaths {
+            user: Some(user),
+            project: Some(project.clone()),
+        };
+        let config = load(&paths, &CliOverrides::default()).unwrap();
+        assert_eq!(config.harness.verification, VerificationPolicy::Manual);
+        assert!(config.harness.commit_unverified);
+
+        std::fs::write(
+            &project,
+            "[harness]
+commit_unverified = true
+",
+        )
+        .unwrap();
+        let err = load(&paths, &CliOverrides::default()).expect_err("project grant refused");
+        assert!(
+            matches!(
+                err,
+                ConfigError::UserOnly {
+                    key: "harness.commit_unverified",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let defaults = Config::default().harness;
+        assert_eq!(defaults.verification, VerificationPolicy::Current);
+        assert!(!defaults.commit_unverified);
     }
 
     #[test]

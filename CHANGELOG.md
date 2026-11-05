@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `[harness] verification = "advisory"` or `"manual"` lets a project keep verification
+  from forcing repair or blocking completion, on every path (turn, step, phase and
+  bounded unit). Advisory still runs and records the checks; manual runs none and
+  records them as not run. The default `current` changes nothing. A harness step
+  whose verification did not pass is committed only with the user-only
+  `[harness] commit_unverified = true`; otherwise it stops with the work left in
+  place (ADR-0264, LocalHub#267).
+
 - Every host now resolves its action setting the same way. `rpc`, `acp`, `mcp serve`,
   `swarm`, `session resume`, `harness resume` and pairing honor the configured
   profile and Accept all, and a configured `readonly` profile now also protects

@@ -1246,3 +1246,85 @@ async fn a_whole_unit_session_runs_no_repository_helper() {
     assert!(!filter_marker.exists(), "a clean filter ran");
     assert!(!monitor_marker.exists(), "the filesystem monitor ran");
 }
+
+// ---- `[harness] verification` and bounded units (LocalHub#267) ----
+
+fn head(root: &Path) -> String {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn manual_verification_ends_a_unit_at_its_limit_with_a_handoff_and_no_commit() {
+    if !python() {
+        return;
+    }
+    let dir = two_site_repository(BOTH);
+    let before = head(dir.path());
+    let mut runtime = runtime(
+        dir.path(),
+        walled_then_answers(2),
+        Profile::Unrestricted,
+        ScriptedApprover::always(),
+        true,
+    );
+    runtime.set_verification_policy(localpilot_config::VerificationPolicy::Manual, true);
+
+    let stop = units(&mut runtime).await;
+
+    assert_eq!(stop, StopReason::NoProgress, "no checkpoint can be earned");
+    assert_eq!(unit_checkpoints(&runtime), 0);
+    let statuses = check_statuses(&runtime);
+    assert!(
+        !statuses.is_empty() && statuses.iter().all(|s| s == "not_run"),
+        "{statuses:?}"
+    );
+    assert_eq!(
+        head(dir.path()),
+        before,
+        "even authorized, a unit never commits"
+    );
+}
+
+#[tokio::test]
+async fn advisory_verification_keeps_the_earned_checkpoint_rule_and_commits_nothing() {
+    if !python() {
+        return;
+    }
+    let dir = two_site_repository(BOTH);
+    let before = head(dir.path());
+    let edits = [
+        edit("x", "x = 1", "x = 2"),
+        edit("y1", "y = 1", "y = 2"),
+        edit("y2", "y = 1", "y = 2"),
+    ];
+    let mut runtime = runtime(
+        dir.path(),
+        stubborn(&edits, 3),
+        Profile::Unrestricted,
+        ScriptedApprover::always(),
+        true,
+    );
+    runtime.set_verification_policy(localpilot_config::VerificationPolicy::Advisory, false);
+
+    let _ = units(&mut runtime).await;
+
+    // The full check fails at the first unit end and the unit check passes: the
+    // checkpoint is earned exactly as under `current`, and the failure stays recorded.
+    let statuses = check_statuses(&runtime);
+    assert_eq!(
+        statuses.first().map(String::as_str),
+        Some("failed"),
+        "{statuses:?}"
+    );
+    assert!(unit_checkpoints(&runtime) >= 1, "{statuses:?}");
+    assert_eq!(
+        head(dir.path()),
+        before,
+        "a checkpoint is a stop, not a commit"
+    );
+}

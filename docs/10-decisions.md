@@ -2,6 +2,42 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0264: Verification Can Be Made Advisory Or Manual By Configuration, And Committing Unverified Steps Needs The User
+
+**Status:** accepted · **Date:** 2026-11-05. Refs LocalHub#267. Builds on ADR-0263.
+
+**Context.** Automatic verification is several mechanisms, not one switch: the
+turn-finalization gate (`verify_before_done`, required mutation verification, the
+planned `verify:` line), the harness step checks and `test_command`, the phase
+checks, and the bounded-unit checkpoint checks. Setting `verify_before_done =
+false` removed none of the others, so there was no way to opt a project out of an
+unsuitable or expensive automatic check.
+
+**Decision.** `[harness] verification = "current" | "advisory" | "manual"`, default
+`current`, settable by the user or the project, in configuration only (no selector).
+- `current`: every existing obligation, check and exemption, unchanged.
+- `advisory`: automatic checks still run through the same permission-gated runner
+  and are recorded; a failure, a denied or errored check or a missing target does
+  not start a repair loop and does not block completion. A bounded unit that the
+  host ended keeps its refused edit pending, as after a passing check.
+- `manual`: no automatic check is scheduled on any path (turn, step, phase, unit).
+  What would have run is recorded as `not_run`. A unit that reaches its limit stops
+  with a handoff, because no checkpoint can be earned.
+
+A failed check stays failed and `not_run` is never `passed`; completion and check
+evidence are recorded separately. A check the user asks for explicitly is not
+automatic and is unaffected, as are `verify: none` exemptions. `eval` keeps its own
+verifier.
+
+A harness step whose verification did not pass (advisory with a failed, denied,
+errored or missing check; manual always) is committed only when the user-only
+`[harness] commit_unverified = true`. Otherwise the step stops with the work left in
+place and the reason says how to proceed. A repository cannot set that key.
+
+**Consequences.** A project can drop a check it cannot use without changing
+everyday defaults, and unverified work is never committed as a side effect of that
+choice. `localpilot doctor` and the harness launch line show the effective policy.
+
 ## ADR-0263: Every Host Resolves Its Action Setting Through One Rule
 
 **Status:** accepted · **Date:** 2026-11-04. Refs LocalHub#266. Builds on ADR-0260 and ADR-0262.

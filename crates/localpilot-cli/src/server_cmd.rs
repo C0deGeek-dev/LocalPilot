@@ -351,6 +351,8 @@ impl SessionSetup {
                 require_mutation_verification: Some(true),
                 verify_before_done: self.config.harness.verify_before_done,
                 verify_command: self.config.harness.verify_command.clone(),
+                verification: self.config.harness.verification,
+                commit_unverified: self.config.harness.commit_unverified,
                 ..SessionConfig::default()
             },
             Vec::new(),

@@ -823,6 +823,8 @@ fn interactive_config(
         require_mutation_verification: Some(true),
         verify_before_done: config.harness.verify_before_done,
         verify_command: config.harness.verify_command.clone(),
+        verification: config.harness.verification,
+        commit_unverified: config.harness.commit_unverified,
         ..SessionConfig::default()
     }
 }

@@ -112,7 +112,9 @@ expression: render_json(&fixture())
     "action_mode": "unset",
     "project_request": null,
     "local_hosts": "ReadOnly",
-    "remote_hosts": "ReadOnly"
+    "remote_hosts": "ReadOnly",
+    "verification": "current",
+    "commit_unverified": false
   },
   "skill_maintenance": {
     "stale": [

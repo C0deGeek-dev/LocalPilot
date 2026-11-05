@@ -378,6 +378,13 @@ pub struct SessionConfig {
     /// split on whitespace — no shell). `None` resolves the command from the
     /// workspace stack. Maps `[harness] verify_command`.
     pub verify_command: Option<String>,
+    /// How automatic verification behaves. `Current` keeps every obligation;
+    /// `Advisory` runs and records checks without forcing repair or blocking;
+    /// `Manual` schedules none. Maps `[harness] verification`.
+    pub verification: localpilot_config::VerificationPolicy,
+    /// Whether a harness step whose verification did not pass may be committed
+    /// anyway. Maps the user-only `[harness] commit_unverified`.
+    pub commit_unverified: bool,
     /// Elide a `read_file` result for a file+range already read this session and
     /// unchanged since (same mtime and length): return a compact stub instead of
     /// the full body to save context. Off by default; maps `[tools]
@@ -427,6 +434,8 @@ impl Default for SessionConfig {
             repair_mode: localpilot_config::RepairMode::Off,
             verify_before_done: false,
             verify_command: None,
+            verification: localpilot_config::VerificationPolicy::Current,
+            commit_unverified: false,
             elide_seen_reads: false,
             stop_repeated_observations: true,
             incognito: false,
@@ -2828,6 +2837,53 @@ impl SessionRuntime {
         self.config.verify_before_done = true;
     }
 
+    /// Set the verification policy and the user's authorization to commit
+    /// unverified steps.
+    pub fn set_verification_policy(
+        &mut self,
+        policy: localpilot_config::VerificationPolicy,
+        commit_unverified: bool,
+    ) {
+        if self.refuse_unless_owned("verification change") {
+            return;
+        }
+        self.config.verification = policy;
+        self.config.commit_unverified = commit_unverified;
+    }
+
+    /// The verification policy this session runs under.
+    #[must_use]
+    pub fn verification_policy(&self) -> localpilot_config::VerificationPolicy {
+        self.config.verification
+    }
+
+    /// Whether the user authorized committing a step whose verification did not
+    /// pass.
+    #[must_use]
+    pub fn commit_unverified(&self) -> bool {
+        self.config.commit_unverified
+    }
+
+    /// Record that `checks` were not run because verification is manual, so the
+    /// evidence reads `not_run` rather than staying silent or reading as passed.
+    pub fn record_skipped_checks(&mut self, checks: &[CheckConfig], trigger: Trigger) {
+        for check in checks {
+            if trigger_for_cadence(check.cadence) == trigger {
+                self.record_event(SessionEventKind::CheckRan {
+                    name: check.name.clone(),
+                    cadence: match check.cadence {
+                        Cadence::Step => "step",
+                        Cadence::Phase => "phase",
+                    }
+                    .to_string(),
+                    command_digest: check_command_digest(check),
+                    status: "not_run".to_string(),
+                    detail: "verification is manual; no automatic check was scheduled".to_string(),
+                });
+            }
+        }
+    }
+
     fn requires_mutation_verification(&self) -> bool {
         self.config.require_mutation_verification == Some(true)
             || self.unit_verify_command.is_some()
@@ -3695,7 +3751,32 @@ impl SessionRuntime {
         // `\\?\` working directory the gate would compile in `C:\Windows`, not the
         // workspace. Detection reads marker files, which resolve the same on either
         // spelling.
+        if self.config.verification == localpilot_config::VerificationPolicy::Manual {
+            // Nothing is scheduled. What would have run is recorded as not run.
+            if let Some(check) = crate::resolve_verify_check(
+                &root,
+                self.config
+                    .verify_command
+                    .as_deref()
+                    .or(self.unit_verify_command.as_deref()),
+            ) {
+                self.record_skipped_checks(std::slice::from_ref(&check), Trigger::PhaseComplete);
+            }
+            self.turn_verification = None;
+            let _ = events.send(RuntimeEvent::Warning(
+                "verification is manual: no automatic check ran for this turn; the work is unverified"
+                    .to_string(),
+            ));
+            if self.settling_host_unit {
+                return VerifyGate::GiveUp(
+                    "work envelope: the unit reached its limit and verification is manual, so no checkpoint can be earned; review the work, split what remains and continue"
+                        .to_string(),
+                );
+            }
+            return VerifyGate::Finalize;
+        }
         self.turn_has_changes = diff_mutated;
+        let advisory = self.config.verification == localpilot_config::VerificationPolicy::Advisory;
         let Some(check) = crate::resolve_verify_check(
             &root,
             self.config
@@ -3713,10 +3794,18 @@ impl SessionRuntime {
                 })
             })
         }) else {
-            if required {
+            if required && !advisory {
                 let detail = "work has no applicable verification target; set verify_command or review an explicit verify: none reason before completion".to_string();
                 let _ = events.send(RuntimeEvent::Warning(detail.clone()));
                 return VerifyGate::GiveUp(detail);
+            }
+            if required {
+                let _ = events.send(RuntimeEvent::Warning(
+                    "verification is advisory: this work has no applicable verification target, so it finishes unverified"
+                        .to_string(),
+                ));
+                self.turn_verification = None;
+                return self.advisory_finish();
             }
             // The gate is on but no build/test target was detected (and no
             // override): finalize unchanged, but surface it so a silently
@@ -3808,6 +3897,9 @@ impl SessionRuntime {
                         "finalizing without a verify signal"
                     }
                 )));
+                if advisory {
+                    return self.advisory_finish();
+                }
                 if required {
                     let planned = self
                         .unit_verify_command
@@ -3844,6 +3936,13 @@ impl SessionRuntime {
                         unit_continuation::UnitAttempt::NotEarned => {}
                     }
                 }
+                if advisory {
+                    let _ = events.send(RuntimeEvent::Warning(format!(
+                        "verification is advisory: `{}` failed and is recorded as failed; no repair was requested and the work is unverified",
+                        check.program
+                    )));
+                    return self.advisory_finish();
+                }
                 if self.failed_on_unchanged_material(&root, diff_mutated) {
                     let detail = format!(
                         "verification failed: `{}` did not pass; observed repository material was unchanged, so the answer is kept and no repair is requested",
@@ -3867,6 +3966,20 @@ impl SessionRuntime {
                 ))
             }
         }
+    }
+
+    /// How an advisory turn ends when its verification did not pass. A unit the
+    /// host ended after a bounds refusal keeps the refused edit pending, exactly as
+    /// after a passing check; any other turn finishes with its answer.
+    fn advisory_finish(&mut self) -> VerifyGate {
+        if self.settling_host_unit {
+            self.host_unit_declined = true;
+            return VerifyGate::Retry(
+                "The edit was refused because this unit is at its limit. If the task is complete, give your final answer; otherwise describe the remaining changes."
+                    .to_string(),
+            );
+        }
+        VerifyGate::Finalize
     }
 
     /// Seed a system message into the conversation — for example durable host

@@ -255,3 +255,169 @@ fn the_eval_setter_enables_the_gate_at_runtime() {
         "the runtime-enabled gate forced the fix, like the config-enabled gate"
     );
 }
+
+// ---- `[harness] verification` = advisory | manual (LocalHub#267) ----
+
+fn check_statuses(runtime: &SessionRuntime) -> Vec<String> {
+    runtime
+        .store()
+        .read_events(runtime.session_id())
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            localpilot_store::SessionEventKind::CheckRan { status, .. } => Some(status),
+            _ => None,
+        })
+        .collect()
+}
+
+fn run_with_policy(
+    policy: localpilot_config::VerificationPolicy,
+) -> (SessionRuntime, StopReason, tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let marker = "fixed.txt";
+    let command = marker_verify_command(&root, marker);
+    let mut runtime = runtime_with_verify(&root, fixes_on_second_chance(marker), Some(command));
+    runtime.set_verification_policy(policy, false);
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason = rt.block_on(runtime.run_turn("solve it", &events, &cancel));
+    (runtime, reason, dir, marker.to_string())
+}
+
+#[test]
+fn advisory_runs_the_check_records_the_failure_and_requests_no_repair() {
+    let (runtime, reason, dir, marker) =
+        run_with_policy(localpilot_config::VerificationPolicy::Advisory);
+
+    assert_eq!(reason, StopReason::Done, "the answer is kept");
+    assert!(
+        !dir.path().join(marker).exists(),
+        "no repair turn was requested"
+    );
+    assert_eq!(check_statuses(&runtime), ["failed"]);
+}
+
+#[test]
+fn manual_runs_no_check_and_records_that_it_did_not() {
+    let (runtime, reason, dir, marker) =
+        run_with_policy(localpilot_config::VerificationPolicy::Manual);
+
+    assert_eq!(reason, StopReason::Done);
+    assert!(!dir.path().join(marker).exists());
+    assert_eq!(check_statuses(&runtime), ["not_run"]);
+}
+
+#[test]
+fn current_still_feeds_the_failure_back() {
+    let (runtime, reason, dir, marker) =
+        run_with_policy(localpilot_config::VerificationPolicy::Current);
+
+    assert_eq!(reason, StopReason::Done);
+    assert!(dir.path().join(marker).is_file(), "the repair turn ran");
+    assert!(check_statuses(&runtime).iter().any(|s| s == "failed"));
+}
+
+/// A command that outlives the 300 s check timeout. Slow, so it runs on request:
+/// `cargo test -p localpilot-harness --test verify_gate -- --ignored hanging`.
+fn hanging_command() -> String {
+    #[cfg(windows)]
+    {
+        "ping -n 900 127.0.0.1".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        "sleep 900".to_string()
+    }
+}
+
+#[test]
+#[ignore = "waits for the 300 s check timeout"]
+fn hanging_check_under_each_policy() {
+    for policy in [
+        localpilot_config::VerificationPolicy::Advisory,
+        localpilot_config::VerificationPolicy::Current,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_verify(
+            dir.path(),
+            FakeProvider::new().text("All set.").text("Still done."),
+            Some(hanging_command()),
+        );
+        runtime.set_verification_policy(policy, false);
+        let (events, _rx) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let started = std::time::Instant::now();
+        let reason = rt.block_on(runtime.run_turn("solve it", &events, &cancel));
+        eprintln!(
+            "HANGING {policy:?}: stop={reason:?} after {:?}, checks={:?}",
+            started.elapsed(),
+            check_statuses(&runtime)
+        );
+        // A timeout is an errored check, never a pass, and the read-only turn ends.
+        assert_eq!(reason, StopReason::Done);
+        assert_eq!(check_statuses(&runtime), ["errored"]);
+    }
+}
+
+/// Required verification (the turn wrote a file) with a verifier that cannot run.
+fn required_but_unrunnable(
+    policy: localpilot_config::VerificationPolicy,
+) -> (SessionRuntime, StopReason, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let mut runtime = SessionRuntime::new(
+        Arc::new(
+            FakeProvider::new()
+                .tool_call(
+                    "w1",
+                    "write_file",
+                    json!({ "path": "out.txt", "content": "changed\n" }),
+                )
+                .text("done"),
+        ),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(&root),
+        Workspace::new(&root).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            require_mutation_verification: Some(true),
+            verify_command: Some("definitely-not-a-program-267".to_string()),
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    runtime.set_verification_policy(policy, false);
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason = rt.block_on(runtime.run_turn("write it", &events, &cancel));
+    (runtime, reason, dir)
+}
+
+#[test]
+fn a_verifier_that_cannot_run_blocks_required_work_only_under_current() {
+    use localpilot_config::VerificationPolicy::{Advisory, Current, Manual};
+    let (current, stop, _d1) = required_but_unrunnable(Current);
+    assert_eq!(stop, StopReason::NoProgress, "current stops, unverified");
+    assert!(!check_statuses(&current).iter().any(|s| s == "passed"));
+
+    let (advisory, stop, _d2) = required_but_unrunnable(Advisory);
+    assert_eq!(stop, StopReason::Done, "advisory records it and finishes");
+    let statuses = check_statuses(&advisory);
+    assert!(
+        !statuses.is_empty() && !statuses.iter().any(|s| s == "passed"),
+        "{statuses:?}"
+    );
+
+    let (manual, stop, _d3) = required_but_unrunnable(Manual);
+    assert_eq!(stop, StopReason::Done);
+    assert_eq!(check_statuses(&manual), ["not_run"]);
+}

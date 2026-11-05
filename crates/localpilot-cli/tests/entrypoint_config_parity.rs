@@ -23,6 +23,8 @@ const SERVER_SRC: &str = include_str!("../src/server_cmd.rs");
 const PARITY_KEYS: &[&str] = &[
     "verify_before_done: config.harness.verify_before_done",
     "verify_command: config.harness.verify_command.clone()",
+    "verification: config.harness.verification",
+    "commit_unverified: config.harness.commit_unverified",
     "rules: config.harness.rules.clone()",
     "enforce_claim_gate: config.harness.claim_gate.is_enabled()",
     "tool_marker_enabled: config.tools.marker",

@@ -1548,3 +1548,150 @@ async fn an_unpinned_url_already_in_the_repository_is_not_the_steps_to_fix() {
         .unwrap();
     assert!(outcome.committed, "{:?}", outcome.blocked_reason);
 }
+
+// ---- `[harness] verification` = advisory | manual (LocalHub#267) ----
+
+fn check_statuses(rt: &SessionRuntime) -> Vec<String> {
+    rt.store()
+        .read_events(rt.session_id())
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            localpilot_store::SessionEventKind::CheckRan { status, .. } => Some(status),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn advisory_records_a_failed_check_without_a_retry_and_leaves_the_step_uncommitted() {
+    use localpilot_config::VerificationPolicy::Advisory;
+    let dir = sample_repo();
+    let root = dir.path();
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let mut rt = runtime(root, Arc::clone(&provider));
+    rt.set_verification_policy(Advisory, false);
+    let before = commit_count(root);
+
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[marker_check()], 3)
+        .await
+        .unwrap();
+
+    assert!(
+        !outcome.committed,
+        "an unproven step needs the authorization"
+    );
+    assert!(outcome
+        .blocked_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("step not committed"));
+    assert_eq!(provider.requests().len(), 1, "no repair was requested");
+    assert_eq!(
+        check_statuses(&rt),
+        ["failed"],
+        "the failure stays recorded"
+    );
+    assert!(outcome.gate.iter().any(|o| !o.passed()));
+    assert_eq!(commit_count(root), before, "nothing was committed");
+}
+
+#[tokio::test]
+async fn advisory_commits_a_failed_step_once_the_user_authorized_it() {
+    use localpilot_config::VerificationPolicy::Advisory;
+    let dir = sample_repo();
+    let root = dir.path();
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let mut rt = runtime(root, Arc::clone(&provider));
+    rt.set_verification_policy(Advisory, true);
+
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[marker_check()], 3)
+        .await
+        .unwrap();
+
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(
+        check_statuses(&rt),
+        ["failed"],
+        "authorizing does not turn it green"
+    );
+}
+
+#[tokio::test]
+async fn advisory_with_every_check_passing_commits_without_the_authorization() {
+    use localpilot_config::VerificationPolicy::Advisory;
+    let dir = sample_repo();
+    let root = dir.path();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("c1", "write_file", write_marker_call())
+            .text("done"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+    rt.set_verification_policy(Advisory, false);
+
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[marker_check()], 3)
+        .await
+        .unwrap();
+
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    assert_eq!(check_statuses(&rt), ["passed"]);
+}
+
+#[tokio::test]
+async fn manual_schedules_no_check_and_needs_the_authorization_to_commit() {
+    use localpilot_config::VerificationPolicy::Manual;
+    for (authorized, expect_commit) in [(false, false), (true, true)] {
+        let dir = sample_repo();
+        let root = dir.path();
+        let provider = Arc::new(
+            FakeProvider::new()
+                .tool_call("c1", "write_file", write_marker_call())
+                .text("done"),
+        );
+        let mut rt = runtime(root, Arc::clone(&provider));
+        rt.set_verification_policy(Manual, authorized);
+
+        let rules = RuleEngine::with_baseline(&Default::default());
+        let outcome = resume_one_step(&mut rt, root, &rules, None, &[marker_check()], 3)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.committed, expect_commit,
+            "{:?}",
+            outcome.blocked_reason
+        );
+        assert!(outcome.gate.is_empty(), "no check ran");
+        let statuses = check_statuses(&rt);
+        assert!(
+            statuses.iter().all(|status| status == "not_run") && !statuses.is_empty(),
+            "skipped checks read as not run, never as passed: {statuses:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_current_policy_still_blocks_on_a_failed_check() {
+    let dir = sample_repo();
+    let root = dir.path();
+    let provider = Arc::new(FakeProvider::new().text("done"));
+    let mut rt = runtime(root, Arc::clone(&provider));
+    let audit = failing_check("audit", Some(RuleSeverity::Block));
+
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[audit], 3)
+        .await
+        .unwrap();
+
+    assert!(!outcome.committed);
+    assert!(!outcome
+        .blocked_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("step not committed"));
+}

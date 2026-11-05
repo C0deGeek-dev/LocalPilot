@@ -35,6 +35,7 @@ capabilities: doctor-json, models-json
 
 permissions:
   profile: readonly
+  verification: current (commit_unverified: false)
   action_mode: unset
   without flags, chat/print/rpc/acp/harness/swarm: ReadOnly
   without flags, serve and paired devices: ReadOnly

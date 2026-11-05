@@ -1701,6 +1701,25 @@ Failed-check retry feedback keeps repairs within the original user request.
 An unrelated existing failure can block verification; it does not authorize
 additional edits or count as a passing check. Existing retry and stop rules apply.
 
+### Advisory and manual verification (ADR-0264)
+
+`[harness] verification` chooses how all automatic verification behaves: the
+turn-finalization gate, the harness step and phase checks, `test_command`, and the
+bounded-unit checks. `current` (the default) is everything described above.
+`advisory` still runs the automatic checks through the same permission-gated runner
+and records each result, but a failed, denied, errored or missing check starts no
+repair loop and blocks nothing; the answer is kept and the work is reported as
+unverified. `manual` schedules no automatic check on any path and records what would
+have run as `not_run`; a bounded unit that reaches its limit then stops with a
+handoff, because no checkpoint can be earned. A failed check stays failed, `not_run`
+is never a pass, and completion is recorded apart from check evidence. A check the
+user asks for explicitly, and a reviewed `verify: none` exemption, are unaffected.
+
+Under `advisory` or `manual`, a harness step whose verification did not pass is
+committed only when the user-only `[harness] commit_unverified = true`; otherwise
+the step stops with its work left in place. A hanging check ends at the check
+timeout (300 s) and is recorded as `errored`.
+
 ## Anti-Sunk-Cost Loop
 
 For each step:

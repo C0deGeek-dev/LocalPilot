@@ -1243,6 +1243,17 @@ pub struct HarnessConfig {
     /// `go test ./...`); set this for a non-standard build/test invocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_command: Option<String>,
+    /// How automatic verification behaves: `current` (the default) keeps every
+    /// existing obligation, check and exemption; `advisory` still runs automatic
+    /// checks and records their results but never forces a repair loop or blocks
+    /// completion on them; `manual` schedules no automatic check at all. A failed
+    /// check stays failed and a skipped one is never reported as passed. A check
+    /// the user asks for explicitly is not automatic and is unaffected.
+    pub verification: VerificationPolicy,
+    /// Let the harness commit a step whose verification did not pass, because
+    /// `verification` is `advisory` or `manual`. Off by default; user-only, so a
+    /// repository cannot authorize committing its own unverified work.
+    pub commit_unverified: bool,
     /// Pre-brief guidance gate for `harness intake`. Off by default (features
     /// ship off); `--guidance` / `--no-guidance` override it per run.
     pub guidance: GuidanceConfig,
@@ -1266,7 +1277,35 @@ impl Default for HarnessConfig {
             teardown_sweep: false,
             verify_before_done: false,
             verify_command: None,
+            verification: VerificationPolicy::default(),
+            commit_unverified: false,
             guidance: GuidanceConfig::default(),
+        }
+    }
+}
+
+/// How automatic verification behaves (`[harness] verification`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationPolicy {
+    /// Existing verification obligations, checks and exemptions.
+    #[default]
+    Current,
+    /// Automatic checks run and are recorded; their failure or absence does not
+    /// force repair or block completion.
+    Advisory,
+    /// No automatic check is scheduled.
+    Manual,
+}
+
+impl VerificationPolicy {
+    /// The value as written in configuration.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Advisory => "advisory",
+            Self::Manual => "manual",
         }
     }
 }

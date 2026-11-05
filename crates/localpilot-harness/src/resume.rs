@@ -388,10 +388,24 @@ async fn run_step(
             step_checks.push(check);
         }
         step_checks.extend(checks.iter().cloned());
-        final_gate = runtime
-            .run_gate_checks(&step_checks, Trigger::StepComplete, root)
-            .await;
-        let tests_passed = final_gate
+        let policy = runtime.verification_policy();
+        final_gate = if policy == localpilot_config::VerificationPolicy::Manual {
+            runtime.record_skipped_checks(&step_checks, Trigger::StepComplete);
+            Vec::new()
+        } else {
+            runtime
+                .run_gate_checks(&step_checks, Trigger::StepComplete, root)
+                .await
+        };
+        // Under advisory or manual verification the results are recorded and
+        // reported, but they do not decide the step: the rules judge only what
+        // is not verification.
+        let judged_gate = if policy == localpilot_config::VerificationPolicy::Current {
+            final_gate.clone()
+        } else {
+            Vec::new()
+        };
+        let tests_passed = judged_gate
             .iter()
             .find(|outcome| outcome.name == "test")
             .map(CheckOutcome::passed);
@@ -429,7 +443,7 @@ async fn run_step(
                 attempts: 1,
                 max_attempts,
             },
-            final_gate.clone(),
+            judged_gate,
             unpinned_cdn,
         );
 
@@ -515,6 +529,18 @@ async fn run_step(
         }
     }
 
+    // A step whose verification did not pass is committed only when the user
+    // authorized that: the step stops here with the work left in place.
+    if let Some(reason) = unverified_step_reason(runtime, &final_gate) {
+        return Ok(ResumeOutcome {
+            step_number: step.number,
+            committed: false,
+            blocked_reason: Some(reason),
+            paused: false,
+            gate: final_gate,
+        });
+    }
+
     // Commit the step.
     if let Some(before) = &work_baseline {
         if git(root, &["rev-parse", "HEAD"])?.trim() != before.head.trim() {
@@ -586,9 +612,15 @@ async fn run_step(
         .and_then(|raw| Progress::parse(&raw).ok())
         .is_some_and(|updated| updated.next_incomplete().is_none());
     if plan_complete {
-        let phase_outcomes = runtime
-            .run_gate_checks(checks, Trigger::PhaseComplete, root)
-            .await;
+        let phase_outcomes =
+            if runtime.verification_policy() == localpilot_config::VerificationPolicy::Manual {
+                runtime.record_skipped_checks(checks, Trigger::PhaseComplete);
+                Vec::new()
+            } else {
+                runtime
+                    .run_gate_checks(checks, Trigger::PhaseComplete, root)
+                    .await
+            };
         if !phase_outcomes.is_empty() {
             // Reduce through the same `quality_gate` rule the step gate uses (it
             // triggers on both cadences). A blocking phase finding (e.g. a failing
@@ -598,8 +630,10 @@ async fn run_step(
                 gate_outcomes: phase_outcomes.clone(),
                 ..RuleContext::default()
             };
-            let phase_block =
-                first_blocking_reason(rule_engine, Trigger::PhaseComplete, &phase_ctx);
+            let phase_block = (runtime.verification_policy()
+                == localpilot_config::VerificationPolicy::Current)
+                .then(|| first_blocking_reason(rule_engine, Trigger::PhaseComplete, &phase_ctx))
+                .flatten();
             gate.extend(phase_outcomes);
             if let Some(reason) = phase_block {
                 return Ok(ResumeOutcome {
@@ -619,6 +653,33 @@ async fn run_step(
         blocked_reason: None,
         paused: false,
         gate,
+    })
+}
+
+/// Why a step must not be committed on its own, when `[harness] verification` is
+/// `advisory` or `manual` and the user has not authorized `commit_unverified`.
+/// `None` for `current` (its gates already decided), for an authorized run, and
+/// for an advisory step whose every check passed.
+fn unverified_step_reason(runtime: &SessionRuntime, gate: &[CheckOutcome]) -> Option<String> {
+    use localpilot_config::VerificationPolicy::{Current, Manual};
+    let policy = runtime.verification_policy();
+    if policy == Current || runtime.commit_unverified() {
+        return None;
+    }
+    let unproven = match policy {
+        Manual => true,
+        _ => {
+            gate.iter().any(|outcome| !outcome.passed())
+                || runtime
+                    .current_turn_verification()
+                    .is_some_and(|status| status != crate::CheckStatus::Passed)
+        }
+    };
+    unproven.then(|| {
+        format!(
+            "step not committed: verification is {} and its checks did not pass, so the work is left in place; review it, then commit it yourself or set the user-only `[harness] commit_unverified = true` and resume",
+            if policy == Manual { "manual" } else { "advisory" }
+        )
     })
 }
 
