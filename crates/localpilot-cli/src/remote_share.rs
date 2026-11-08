@@ -513,10 +513,12 @@ impl RemoteShare {
     /// Wait at most `within` for the last ended share's relay to finish (its
     /// closing notice to the server), so a confirmed exit is orderly but never
     /// held up by an unresponsive server.
-    pub(crate) async fn wind_down(&self, within: Duration) {
+    /// Returns whether it finished in time (true when nothing was ending).
+    pub(crate) async fn wind_down(&self, within: Duration) -> bool {
         let ending = self.inner().ending.take();
-        if let Some(ending) = ending {
-            let _ = tokio::time::timeout(within, ending).await;
+        match ending {
+            Some(ending) => tokio::time::timeout(within, ending).await.is_ok(),
+            None => true,
         }
     }
 

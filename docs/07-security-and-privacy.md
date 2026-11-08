@@ -1242,6 +1242,11 @@ server only relays it.
   first may still be starting, and it counts as ready only once it answers a
   session-free hello. The choice steps aside while a permission request or
   question is open.
+- **Who did what.** The transcript names the device behind every phone
+  prompt, permission answer and turn cancel by its registry name and a short
+  id (`Pixel [a19c]`), sanitized to one line; a device with no name is
+  `remote device [a19c]`, never a guess. While shared, answers given on this
+  PC, expiries and cancellations are said too.
 - **Reconnecting.** A dropped connection retries on a short schedule. When
   the server is gone for good, sharing waits, with phone access closed, until
   it is started from `/remote`; nothing restarts on its own. "Reconnect now"

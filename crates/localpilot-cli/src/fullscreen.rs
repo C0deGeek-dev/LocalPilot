@@ -9018,6 +9018,10 @@ where
     };
     let servicing = matches!(questions, QuestionMode::Serviced);
     tokio::pin!(operation);
+    // A device's cancel names only the operation it was taken for.
+    if let Some(host) = stages.remote.clone() {
+        remote_host::operation_started(&host);
+    }
     let mut pending: Option<oneshot::Sender<bool>> = None;
     let mut pending_questions: Option<PendingQuestions> = None;
     let mut pending_steer_items = VecDeque::new();
@@ -9310,6 +9314,9 @@ where
                     progress.drain(app);
                     if let Some(done) = on_complete.take() {
                         done(app, reason);
+                    }
+                    if let Some(host) = stages.remote.clone() {
+                        remote_host::operation_ended(app, &host, cancel.is_cancelled());
                     }
                     let _ = (io.draw)(app)?;
                     return Ok(false);
@@ -26231,6 +26238,131 @@ last_seen = "2026-08-10"
         server
     }
 
+    #[test]
+    fn a_device_is_named_by_its_sanitized_name_and_a_short_id() {
+        assert_eq!(
+            remote_host::device_label(Some("Pixel"), "a19c77de"),
+            "Pixel [a19c]"
+        );
+        assert_eq!(
+            remote_host::device_label(None, "a19c77de"),
+            "remote device [a19c]",
+            "never a guessed name"
+        );
+        assert_eq!(
+            remote_host::device_label(Some("   "), "a19c"),
+            "remote device [a19c]"
+        );
+        let hostile = remote_host::device_label(Some("Pix\u{1b}[2Jel\nNext line"), "zz\u{7}99");
+        assert!(
+            !hostile.contains('\u{1b}') && !hostile.contains('\n'),
+            "{hostile:?}"
+        );
+        assert!(!hostile.contains('\u{7}'), "{hostile:?}");
+        let long = remote_host::device_label(Some(&"x".repeat(200)), "abcd");
+        assert!(long.chars().count() <= 40 + " [abcd]".len(), "{long}");
+    }
+
+    fn open_ask(host: &remote_host::RemoteHost, id: &str) -> localpilot_rpc::OpenAsk {
+        host.share
+            .source()
+            .asks()
+            .open_unbounded(localpilot_rpc::PendingAsk {
+                ask_id: id.to_string(),
+                tool: "shell".to_string(),
+                detail: "ls".to_string(),
+                risk: "low".to_string(),
+                expires_at_ms: 0,
+            })
+    }
+
+    #[tokio::test]
+    async fn who_answered_a_permission_ask_is_said_once_and_only_when_it_matters() {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let mut app = app();
+        let asks = host.share.source().asks().clone();
+        // Not shared: a local answer reads as it always did.
+        let _one = open_ask(&host, "ask-1");
+        asks.reply("ask-1", true, localpilot_rpc::Principal::Local)
+            .unwrap();
+        remote_host::show_notices(&mut app, &host);
+        assert!(!timeline_has_notice(&app, "on this PC"));
+        // Shared: every outcome says who decided it.
+        let _server = shared_over_fake(&dials, &host).await;
+        let _two = open_ask(&host, "ask-2");
+        asks.reply(
+            "ask-2",
+            true,
+            localpilot_rpc::Principal::Device {
+                id: "a19c77de".to_string(),
+            },
+        )
+        .unwrap();
+        let _three = open_ask(&host, "ask-3");
+        asks.reply("ask-3", false, localpilot_rpc::Principal::Local)
+            .unwrap();
+        let four = open_ask(&host, "ask-4");
+        drop(four);
+        remote_host::show_notices(&mut app, &host);
+        assert!(timeline_has_notice(&app, "Allowed once from Pixel [a19c]."));
+        assert!(timeline_has_notice(&app, "Denied on this PC."));
+        assert!(timeline_has_notice(&app, "Permission ask cancelled."));
+        // A late answer after the first one changes nothing and says nothing.
+        assert!(asks
+            .reply("ask-2", false, localpilot_rpc::Principal::Local)
+            .is_err());
+        let before = app.active_timeline().items().len();
+        remote_host::show_notices(&mut app, &host);
+        assert_eq!(app.active_timeline().items().len(), before);
+    }
+
+    #[tokio::test]
+    async fn a_turn_cancelled_from_a_device_is_named_once_when_it_ends_cancelled() {
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let mut app = app();
+        remote_host::note_cancel_for_test(&mut app, &host, "Pixel [a19c]");
+        remote_host::note_cancel_for_test(&mut app, &host, "Other [ffff]");
+        remote_host::operation_ended(&mut app, &host, true);
+        remote_host::operation_ended(&mut app, &host, true);
+        let notices: Vec<String> = app
+            .active_timeline()
+            .items()
+            .iter()
+            .map(|item| item.text.clone())
+            .filter(|text| text.contains("Turn cancel"))
+            .collect();
+        assert_eq!(
+            notices,
+            vec![
+                "Turn cancellation requested from Pixel [a19c].".to_string(),
+                "Turn cancelled from Pixel [a19c].".to_string(),
+            ],
+            "the first cancel is named, once each"
+        );
+        // A cancel left over from an operation that ended another way is
+        // never credited to the next one.
+        remote_host::note_cancel_for_test(&mut app, &host, "Stale [0000]");
+        remote_host::operation_started(&host);
+        remote_host::operation_ended(&mut app, &host, true);
+        assert!(!timeline_has_notice(&app, "Turn cancelled from Stale"));
+        // An operation that ended without being cancelled says nothing.
+        remote_host::note_cancel_for_test(&mut app, &host, "Pixel [a19c]");
+        remote_host::operation_ended(&mut app, &host, false);
+        remote_host::operation_ended(&mut app, &host, true);
+        assert_eq!(
+            app.active_timeline()
+                .items()
+                .iter()
+                .filter(|item| item.text.starts_with("Turn cancelled"))
+                .count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn a_stop_menu_left_open_after_sharing_ended_never_shares_again() {
         let dials = crate::remote_share::test_support::Dials::default();
@@ -27550,8 +27682,8 @@ last_seen = "2026-08-10"
         assert!(!remote_host::request_exit(&mut app, &host, "Idle"));
         let body = &app.choice().expect("asked").body;
         assert!(
-            body.iter()
-                .any(|line| line == "Devices attached: 2 devices."),
+            body.iter().any(|line| line
+                == "Devices attached: a-phone [a], control; b-phone [b], control."),
             "{body:?}"
         );
     }

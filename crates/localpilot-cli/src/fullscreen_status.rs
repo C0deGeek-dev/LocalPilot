@@ -360,6 +360,12 @@ impl StatusHost {
             }
         }
         rows.push(row("Devices", model.counts_line()));
+        if !matches!(inputs.share, ShareState::Off) {
+            rows.push(row(
+                "Note",
+                "Closing this terminal ends phone access.".to_string(),
+            ));
+        }
         drop(model);
         let (primary, actions) = actions_for(&inputs.share, inputs.server_needed);
         let Some(view) = app.status_view_mut() else {

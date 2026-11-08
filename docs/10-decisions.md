@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0265: The Terminal Says Which Device Did What, and Never Guesses
+
+**Status:** accepted · **Date:** 2026-11-08. Refs LocalHub#255.
+
+**Context.** With a session shared, a phone can send prompts, answer
+permission asks and cancel the running turn. The terminal showed a phone
+prompt with the device's name, but an ask answered from a phone just closed,
+and a cancel said only "cancelling the current work".
+
+**Decision.**
+1. A device is named by its registry name, sanitized to one line and capped,
+   and the first four characters of its id: `Pixel [a19c]`. With no
+   registry name it is `remote device [a19c]`; a name is never guessed.
+   Phone prompts read `(phone: Pixel [a19c]) …`.
+2. Every permission ask a device decides is said in the transcript:
+   "Allowed once from Pixel [a19c]." or "Denied from Pixel [a19c].". While
+   the session is shared, the other outcomes are said too: "Allowed once on
+   this PC.", "Denied on this PC.", "Permission ask expired.", "Permission
+   ask cancelled.", and "Permission ask answered on another client." when no
+   one is recorded. Missed events are summarised, never invented. An unshared
+   session reads as before.
+3. A device's cancel says "Turn cancellation requested from …" for the first
+   cancel of the running operation, and "Turn cancelled from …" once if that
+   operation ended cancelled.
+4. The close confirmation names the attached devices (at most three, then a
+   count), or says "No devices attached. Closing ends this shared session."
+   When the phone disconnect cannot be confirmed at exit, the terminal says
+   so after it closes. `/remote` notes that closing the terminal ends phone
+   access.
+
+**Consequences.** Who decided an ask or cancelled a turn is visible where the
+user works, from the session's own records. Device names stay text from
+elsewhere and cannot change the display.
+
 ## ADR-0264: Verification Can Be Made Advisory Or Manual By Configuration, And Committing Unverified Steps Needs The User
 
 **Status:** accepted · **Date:** 2026-11-05. Refs LocalHub#267. Builds on ADR-0263.

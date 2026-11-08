@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A shared session now says which device did what: phone prompts read
+  `(phone: Pixel [a19c]) …`, a permission ask answered from a phone says
+  "Allowed once from Pixel [a19c]." (and, while shared, "Denied on this
+  PC.", "Permission ask expired." and the like), and a phone's cancel says
+  "Turn cancellation requested from …" and then "Turn cancelled from …". The
+  close confirmation lists the attached devices, and the terminal says when
+  the phone disconnect could not be confirmed at exit (ADR-0265).
 - `[harness] verification = "advisory"` or `"manual"` lets a project keep verification
   from forcing repair or blocking completion, on every path (turn, step, phase and
   bounded unit). Advisory still runs and records the checks; manual runs none and

@@ -282,10 +282,14 @@ pub async fn run_chat_with(
     .await;
     // Closing the terminal ends phone access to its session: stop sharing and
     // give the relay a moment to tell the server, never longer.
+    let was_shared = remote.active();
     remote.stop();
-    remote
+    let confirmed = remote
         .wind_down(std::time::Duration::from_millis(500))
         .await;
+    if was_shared && !confirmed {
+        println!("Phone disconnect could not be confirmed. This session is closing.");
+    }
     // A session still incognito at exit (launched with `--incognito`, or entered
     // via `/incognito` and never turned off) reports what it created and closes
     // out nothing. `/incognito off` already reported and cleared the entry cell,

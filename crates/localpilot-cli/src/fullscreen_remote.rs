@@ -84,6 +84,39 @@ impl std::fmt::Debug for RemoteTag {
     }
 }
 
+/// How many characters of a device id the terminal shows beside its name.
+const SHORT_ID: usize = 4;
+/// The longest device name the terminal shows (it is the user's own label,
+/// but it is still text from elsewhere).
+const NAME_LIMIT: usize = 40;
+
+/// A device as the transcript and notices name it: its sanitized name and a
+/// short id (`Pixel [a19c]`), or `remote device [a19c]` when the registry has
+/// no name for it. A name is never guessed.
+pub(super) fn device_label(name: Option<&str>, id: &str) -> String {
+    let short: String = localpilot_terminal_ui::sanitize_text(id)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .take(SHORT_ID)
+        .collect();
+    // One line: no control characters, line breaks or tabs.
+    let name = name
+        .map(localpilot_terminal_ui::sanitize_text)
+        .map(|name| {
+            name.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(NAME_LIMIT)
+                .collect::<String>()
+        })
+        .filter(|name| !name.is_empty());
+    match name {
+        Some(name) => format!("{name} [{short}]"),
+        None => format!("remote device [{short}]"),
+    }
+}
+
 impl RemoteTag {
     fn new(ticket: Ticket, device: String) -> Self {
         Self(Arc::new(RemoteOrigin {
@@ -142,6 +175,10 @@ pub(super) struct RemoteHost {
     pub(super) devices: super::devices_host::DevicesHost,
     /// Starting the background server from `/remote`.
     pub(super) start: super::start_host::StartHost,
+    /// The device whose cancel the running operation took, until it ends.
+    cancel_from: RefCell<Option<String>>,
+    /// How the session's permission asks were decided, to say who answered.
+    ask_events: RefCell<tokio::sync::broadcast::Receiver<localpilot_rpc::AskEvent>>,
 }
 
 impl RemoteHost {
@@ -160,8 +197,11 @@ impl RemoteHost {
                     dial: share.dial(),
                 }),
             ));
+        let ask_events = RefCell::new(share.source().asks().subscribe());
         Self {
             share,
+            ask_events,
+            cancel_from: RefCell::new(None),
             pairing,
             devices,
             steering: RefCell::new(Vec::new()),
@@ -315,6 +355,7 @@ fn refresh_labels(app: &mut AppModel, host: &RemoteHost) {
 
 /// Show what the relay reported and keep the status line current.
 pub(super) fn show_notices(app: &mut AppModel, host: &RemoteHost) {
+    show_ask_answers(app, host);
     for notice in host.share.take_notices() {
         match notice {
             ShareNotice::Shared => app.apply_runtime(RuntimeUpdate::Notice(
@@ -414,6 +455,87 @@ fn devices_text(devices: Option<&[localpilot_rpc::AttendedDevice]>) -> String {
     }
 }
 
+/// Say who decided each permission ask: a device always, and while the
+/// session is shared also this PC, an expiry or a cancellation (an
+/// unshared session reads as it always did).
+fn show_ask_answers(app: &mut AppModel, host: &RemoteHost) {
+    use localpilot_rpc::{AskEvent, AskOutcome, Principal};
+    use tokio::sync::broadcast::error::TryRecvError;
+    let shared = host.share.active();
+    loop {
+        let event = host.ask_events.borrow_mut().try_recv();
+        let text = match event {
+            Ok(AskEvent::Resolved { outcome, by, .. }) => match (outcome, by) {
+                (AskOutcome::Allowed | AskOutcome::Denied, Some(Principal::Device { id })) => {
+                    let label = device_label(host.share.device_name(&id).as_deref(), &id);
+                    Some(if outcome.allows() {
+                        format!("Allowed once from {label}.")
+                    } else {
+                        format!("Denied from {label}.")
+                    })
+                }
+                (AskOutcome::Allowed, Some(Principal::Local)) if shared => {
+                    Some("Allowed once on this PC.".to_string())
+                }
+                (AskOutcome::Denied, Some(Principal::Local)) if shared => {
+                    Some("Denied on this PC.".to_string())
+                }
+                (AskOutcome::Expired, _) if shared => Some("Permission ask expired.".to_string()),
+                (AskOutcome::Cancelled, _) if shared => {
+                    Some("Permission ask cancelled.".to_string())
+                }
+                (AskOutcome::Allowed | AskOutcome::Denied, _) if shared => {
+                    Some("Permission ask answered on another client.".to_string())
+                }
+                _ => None,
+            },
+            Ok(AskEvent::Raised(_)) => None,
+            Err(TryRecvError::Lagged(_)) if shared => {
+                Some("Some permission answers were not shown.".to_string())
+            }
+            Err(TryRecvError::Lagged(_)) => None,
+            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+        };
+        if let Some(text) = text {
+            app.apply_runtime(RuntimeUpdate::Notice(text));
+        }
+    }
+}
+
+/// A device's cancel of the running operation: the first one names who
+/// asked; another one for the same operation adds nothing.
+fn note_cancel(app: &mut AppModel, host: &RemoteHost, label: &str) {
+    if host.cancel_from.borrow().is_some() {
+        return;
+    }
+    *host.cancel_from.borrow_mut() = Some(label.to_string());
+    app.apply_runtime(RuntimeUpdate::Notice(format!(
+        "Turn cancellation requested from {label}."
+    )));
+}
+
+#[cfg(test)]
+pub(super) fn note_cancel_for_test(app: &mut AppModel, host: &RemoteHost, label: &str) {
+    note_cancel(app, host, label);
+}
+
+/// An operation starts: no earlier device cancel is credited to it.
+pub(super) fn operation_started(host: &RemoteHost) {
+    host.cancel_from.borrow_mut().take();
+}
+
+/// A running operation ended: if a device's cancel was what it took, and it
+/// did end cancelled, say so once.
+pub(super) fn operation_ended(app: &mut AppModel, host: &RemoteHost, cancelled: bool) {
+    if let Some(label) = host.cancel_from.borrow_mut().take() {
+        if cancelled {
+            app.apply_runtime(RuntimeUpdate::Notice(format!(
+                "Turn cancelled from {label}."
+            )));
+        }
+    }
+}
+
 /// What a device asked the idle host to run.
 pub(super) enum IdleWork {
     /// A prompt, already shown in the transcript as the device's.
@@ -454,10 +576,12 @@ pub(super) fn idle_tick(
     None
 }
 
+/// The device's label (see [`device_label`]).
 fn device_name(host: &RemoteHost, ticket: &Ticket) -> String {
-    host.share
-        .device_name(ticket.device())
-        .unwrap_or_else(|| "a paired device".to_string())
+    device_label(
+        host.share.device_name(ticket.device()).as_deref(),
+        ticket.device(),
+    )
 }
 
 /// A phone prompt as a queued operation, shown in the transcript as the
@@ -468,7 +592,11 @@ fn phone_prompt(
     tag: RemoteTag,
     pending: bool,
 ) -> Option<super::QueuedOperation> {
-    let display = format!("(phone: {}) {text}", tag.device());
+    let display = if tag.device().starts_with("remote device [") {
+        format!("({}) {text}", tag.device())
+    } else {
+        format!("(phone: {}) {text}", tag.device())
+    };
     let item_id = app.append_prompt(display, Some(super::local_prompt_time()), pending)?;
     Some(super::QueuedOperation::Prompt(super::QueuedPrompt {
         text,
@@ -603,11 +731,8 @@ pub(super) fn busy_tick(
                 None => tag.reject("the terminal could not take the prompt"),
             },
             ClientCommand::Cancel => {
+                note_cancel(app, host, tag.device());
                 cancel.cancel();
-                app.apply_runtime(RuntimeUpdate::Notice(format!(
-                    "cancelling the current work (from {})",
-                    tag.device()
-                )));
                 tag.done(None);
             }
             ClientCommand::RunCommand { name, args } => {
@@ -885,19 +1010,40 @@ pub(super) fn request_exit(app: &mut AppModel, host: &RemoteHost, turn: &str) ->
             _ => "This session is shared with paired devices. Closing ends this session and phone access; it does not keep running on the server.",
         };
         host.choice.set(Some(ChoiceKind::Exit));
+        let attended = host
+            .share
+            .devices()
+            .filter(|_| matches!(host.share.state(), ShareState::Shared));
+        let devices = match attended.as_deref() {
+            Some([]) => "No devices attached. Closing ends this shared session.".to_string(),
+            Some(devices) => {
+                let mut names: Vec<String> = devices
+                    .iter()
+                    .take(3)
+                    .map(|device| {
+                        let scope = match device.scope {
+                            Some(localpilot_rpc::Scope::Control) => "control",
+                            Some(localpilot_rpc::Scope::Observe) => "observe",
+                            None => "scope unknown",
+                        };
+                        format!(
+                            "{}, {scope}",
+                            device_label(device.name.as_deref(), &device.id)
+                        )
+                    })
+                    .collect();
+                if devices.len() > 3 {
+                    names.push(format!("and {} more", devices.len() - 3));
+                }
+                format!("Devices attached: {}.", names.join("; "))
+            }
+            None => format!("Devices attached: {}.", devices_text(None)),
+        };
         app.open_choice(
             "Close this shared session?".to_string(),
             vec![
                 sharing.to_string(),
-                format!(
-                    "Devices attached: {}.",
-                    devices_text(
-                        host.share
-                            .devices()
-                            .filter(|_| matches!(host.share.state(), ShareState::Shared))
-                            .as_deref()
-                    )
-                ),
+                devices,
                 format!("Current turn: {turn}"),
             ],
             vec![
