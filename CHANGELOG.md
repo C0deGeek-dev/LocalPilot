@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The embedded companion app can answer permission asks from a phone (with
+  clear answered-elsewhere, expired and unknown-outcome states), shows an
+  Attention view and this phone's device record with a revoke action, and can
+  turn phone notifications on, test them through the real push path, and turn
+  them off. Its notification worker is served at `/push-worker.js`.
 - `/settings` has Work limits and Actions rows. Enter opens the real choices,
   starting on the one in force, and applying one runs `/limits` or `/actions`, so
   read-only, incognito and between-turn rules are the same as when typed. A refused

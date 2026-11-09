@@ -25,6 +25,7 @@ export class Sessions {
     this.resetView();
   }
   resetView() {
+    this.approval = null;
     this.history = [];
     this.entries = [];
     this.plan = [];
@@ -108,7 +109,10 @@ export class Sessions {
     ++this.generation;
     ++this.listGeneration;
     this.unschedule(this.attachTimer);
-    for (const pending of this.pending.values()) this.unschedule(pending.timer);
+    for (const pending of this.pending.values()) {
+      this.unschedule(pending.timer);
+      if (pending.command.type === 'permission_reply' && this.approval?.ask_id === pending.command.ask_id) this.approval.state = 'unknown';
+    }
     if (this.pending.size) {
       this.outcomeIssue = `${this.workspace?.label || 'Project'} / ${this.selected?.name || 'session'}: ${unknownOutcome}`;
       this.notice = this.outcomeIssue; this.uncertain = true;
@@ -192,6 +196,7 @@ export class Sessions {
       this.entries = event.turn === 'running' && event.turn_text ? [{ type: 'assistant', text: event.turn_text }] : [];
       this.plan = event.plan || [];
       this.asks = event.asks;
+      this.reconcileApproval();
       this.truncated = event.history_truncated || event.turn_text_truncated;
       this.phase = 'ready';
       this.unschedule(this.attachTimer);
@@ -249,8 +254,14 @@ export class Sessions {
       case 'plan': this.plan = event.steps; break;
       case 'stopped': this.turn = 'idle'; this.busy = false; this.clearActionNotice(); break;
       case 'permission_ask': this.asks = [...this.asks.filter((ask) => ask.ask_id !== event.ask_id), event]; break;
-      case 'permission_resolved': this.asks = this.asks.filter((ask) => ask.ask_id !== event.ask_id); break;
-      case 'asks_resync': this.asks = event.asks; break;
+      case 'permission_resolved':
+        this.asks = this.asks.filter((ask) => ask.ask_id !== event.ask_id);
+        if (this.approval?.ask_id === event.ask_id) {
+          this.approval.resolution = event;
+          if (this.approval.state !== 'submitting' && this.approval.state !== 'unknown') this.approval.state = event.outcome === 'expired' ? 'expired' : event.outcome === 'cancelled' ? 'cancelled' : this.approval.state === 'resolved' ? 'resolved' : 'elsewhere';
+        }
+        break;
+      case 'asks_resync': this.asks = event.asks; this.reconcileApproval(); break;
       case 'warning': this.notice = event.message; break;
       case 'quota_paused': this.notice = `Paused by the provider. Reset: ${event.reset}`; break;
     }
@@ -272,6 +283,33 @@ export class Sessions {
     } else this.mutate({ type: 'prompt', text, disposition: this.busy ? 'follow_up' : 'immediate' }, text);
   }
   stop() { if (this.canStop) this.mutate({ type: 'cancel' }); }
+  openApproval(id) {
+    if ([...this.pending.values()].some((pending) => pending.command.type === 'permission_reply')) return;
+    const ask = this.asks.find((ask) => ask.ask_id === id);
+    if (!ask) return;
+    if (this.approval?.ask_id === id && this.approval.key === this.key && !['unavailable', 'refused'].includes(this.approval.state)) return;
+    this.approval = { ...ask, key: this.key, epoch: this.epoch, state: 'pending' };
+    this.emit();
+  }
+  reconcileApproval() {
+    const approval = this.approval;
+    if (!approval || ['submitting', 'unknown', 'resolved', 'elsewhere', 'expired', 'cancelled', 'unavailable'].includes(approval.state)) return;
+    const current = this.asks.find((ask) => ask.ask_id === approval.ask_id);
+    if (approval.key !== this.key || !current || ['tool', 'detail', 'risk', 'expires_at_ms'].some((field) => current[field] !== approval[field])) approval.state = 'unavailable';
+    else approval.epoch = this.epoch;
+  }
+  get canApprove() {
+    const ask = this.approval;
+    return !!ask && typeof ask.detail === 'string' && !!ask.detail && typeof ask.tool === 'string' && typeof ask.risk === 'string' &&
+      Number.isSafeInteger(ask.expires_at_ms) && ask.expires_at_ms >= 0 && ask.state === 'pending' && this.canControl && ask.key === this.key && ask.epoch === this.epoch &&
+      this.asks.some((item) => item.ask_id === ask.ask_id) && (!ask.expires_at_ms || ask.expires_at_ms > this.now()) &&
+      ![...this.pending.values()].some((p) => p.command.type === 'permission_reply');
+  }
+  answerApproval(allow) {
+    if (!this.canApprove || typeof allow !== 'boolean') return;
+    this.approval.state = 'submitting';
+    this.mutate({ type: 'permission_reply', ask_id: this.approval.ask_id, allow });
+  }
   mutate(command, draft) {
     const id = `action-${++this.nextId}`;
     const pending = { command, draft, key: this.key };
@@ -287,6 +325,25 @@ export class Sessions {
     const pending = this.pending.get(id);
     this.unschedule(pending.timer);
     this.pending.delete(id);
+    if (pending.command.type === 'permission_reply') {
+      const approval = this.approval;
+      if (!approval || approval.ask_id !== pending.command.ask_id || approval.key !== pending.key) return;
+      if (event.type === 'accepted') {
+        approval.state = 'resolved';
+        approval.allow = pending.command.allow;
+        this.asks = this.asks.filter((ask) => ask.ask_id !== approval.ask_id);
+      } else {
+        approval.state = event.code === 'already_resolved' ? 'elsewhere' : event.code === 'expired' ? 'expired' :
+          event.code === 'unknown_ask' ? 'unavailable' : ['outcome_unknown', 'in_progress'].includes(event.code) ? 'unknown' : 'refused';
+        approval.message = event.message;
+        if (approval.state === 'unknown') {
+          this.uncertain = true;
+          this.outcomeIssue = `${this.workspace.label} / ${this.selected.name || 'session'}: Approval outcome unknown. Check the PC before answering again. Nothing will be retried.`;
+        }
+      }
+      this.notice = '';
+      return;
+    }
     if (event.type === 'rejected' || event.type === 'error') {
       this.actionNotice = false;
       if (event.code === 'outcome_unknown' || event.code === 'in_progress') {

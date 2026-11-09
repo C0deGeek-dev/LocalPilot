@@ -10,6 +10,11 @@
   --selected: #e2eee7;
 }
 * { box-sizing: border-box; }
+#attention-list { margin-top: 1.5rem; }
+#approval-sheet { color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 1rem; width: min(100%, 48rem); max-height: 95dvh; min-height: 70dvh; padding: 1.5rem; overflow: auto; }
+#approval-sheet::backdrop { background: #0009; }
+#approval-detail { white-space: pre-wrap; overflow-wrap: anywhere; font: .95rem/1.6 ui-monospace, monospace; padding: 1rem; border: 1px solid var(--border); }
+.approval-content { min-width: 0; }
 body { margin: 0; }
 a { color: inherit; }
 [hidden] { display: none !important; }

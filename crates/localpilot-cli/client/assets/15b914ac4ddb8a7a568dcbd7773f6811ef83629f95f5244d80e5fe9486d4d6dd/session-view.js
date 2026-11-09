@@ -132,7 +132,7 @@ export function mountSessions(document, window) {
     setText('session-notice', [...new Set([model.outcomeIssue, model.notice].filter(Boolean))].join(' '));
     el('reconnect-session').hidden = !['disconnected', 'refused', 'incompatible'].includes(model.phase);
     el('pending-attention').hidden = !model.asks.length;
-    setText('pending-attention', `${model.asks.length} request${model.asks.length === 1 ? '' : 's'} need attention. Answer on your PC. Phone approval is still being built.`);
+    setText('pending-attention', `${model.asks.length} request${model.asks.length === 1 ? '' : 's'} need attention. Open Attention to review.`);
     setText('history-limit', model.truncated ? 'Only the most recent conversation text is available.' : '');
     el('session-plan').hidden = !model.plan.length;
     const planStatus = { pending: 'Pending', in_progress: 'In progress', completed: 'Completed', done: 'Done', skipped: 'Skipped' };

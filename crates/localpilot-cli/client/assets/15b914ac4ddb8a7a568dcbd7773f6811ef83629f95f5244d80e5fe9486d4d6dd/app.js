@@ -1,5 +1,6 @@
 import { Pairing, PairingCamera, cameraMessages, messages, takePairingLink } from './pairing.js';
 import { mountSessions } from './session-view.js';
+import { mountCompanion } from './companion-view.js';
 
 // Navigation is local. A network connection alone never enables session controls.
 const destinations = new Set(['sessions', 'attention', 'devices']);
@@ -71,6 +72,7 @@ if (typeof document !== 'undefined') {
     },
   });
   sessions.accessLost = () => void pairing.check();
+  mountCompanion(document, window, sessions, async () => { await pairing.check(); return pairing.state === 'paired'; });
   function focusPairing() {
     (pairing.state === 'confirm' ? element('confirm-pair') : element('pair-title')).focus();
   }

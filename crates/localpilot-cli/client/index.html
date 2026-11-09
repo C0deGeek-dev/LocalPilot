@@ -8,9 +8,9 @@
     <meta name="referrer" content="no-referrer">
     <title>LocalLink</title>
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="icon" href="/assets/03e598ecf4d384dba2a13ce4d2b85dbf8a5e326f019f4a13d836fa00f296e526/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/03e598ecf4d384dba2a13ce4d2b85dbf8a5e326f019f4a13d836fa00f296e526/style.css">
-    <script type="module" src="/assets/03e598ecf4d384dba2a13ce4d2b85dbf8a5e326f019f4a13d836fa00f296e526/app.js"></script>
+    <link rel="icon" href="/assets/15b914ac4ddb8a7a568dcbd7773f6811ef83629f95f5244d80e5fe9486d4d6dd/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/15b914ac4ddb8a7a568dcbd7773f6811ef83629f95f5244d80e5fe9486d4d6dd/style.css">
+    <script type="module" src="/assets/15b914ac4ddb8a7a568dcbd7773f6811ef83629f95f5244d80e5fe9486d4d6dd/app.js"></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -93,13 +93,17 @@
         <section data-panel="attention" aria-labelledby="attention-title" hidden>
           <p class="eyebrow">Attention</p>
           <h1 id="attention-title">Stay close to<br>the next decision.</h1>
-          <div class="empty-state"><h2>No live requests</h2><p>Connect to your computer to see requests that need your attention. This preview cannot receive or answer requests.</p></div>
+          <p id="attention-status" role="status"></p><a href="#sessions">Choose or reconnect a session</a><div id="attention-list" class="session-list"></div>
         </section>
         <section data-panel="devices" aria-labelledby="devices-title" hidden>
           <p class="eyebrow">Devices</p>
           <h1 id="devices-title">Your connection.<br>Your choice.</h1>
-          <div class="empty-state"><h2>Manage access on your PC</h2><p>Use LocalPilot’s remote device settings on your computer to view or revoke access. To pair this phone, open Sessions. Notifications are still being built.</p></div>
+          <div class="empty-state"><h2>This device</h2><p id="device-status" role="status"></p><ul id="device-list"></ul><div class="actions"><button id="refresh-device" class="secondary">Refresh access</button><button id="revoke-device" class="secondary">Revoke this device</button></div>
+            <div id="revoke-confirm" hidden><p>End this phone’s access to all projects on this PC? Pair again on your PC to reconnect.</p><div class="actions"><button id="confirm-revoke">Revoke access</button><button id="cancel-revoke" class="secondary">Keep access</button></div></div>
+          </div>
+          <div id="notification-settings" class="empty-state" hidden><h2>Notifications</h2><p>Connected in app and notifications enabled are separate. Lock-screen notifications contain generic text. Opening one fetches current state and never approves a request.</p><label for="notification-workspace">Project for notifications</label><select id="notification-workspace"></select><p id="notification-status" role="status"></p><div class="actions"><button id="enable-notifications">Enable notifications</button><button id="test-notification" class="secondary">Test notification</button><button id="off-notifications" class="secondary">Turn notifications off</button></div></div>
         </section>
+        <dialog id="approval-sheet" aria-labelledby="approval-tool" aria-describedby="approval-status"><div class="approval-content"><p id="approval-project" class="eyebrow"></p><h2 id="approval-tool"></h2><pre id="approval-detail" tabindex="0"></pre><p id="approval-risk"></p><p id="approval-expiry"></p><p id="approval-status" role="status" aria-atomic="true"></p><div class="actions"><button id="deny-approval" class="secondary">Deny</button><button id="allow-approval">Allow once</button><button id="close-approval" class="secondary">Close</button></div></div></dialog>
         <noscript><p>Enable JavaScript to switch between Sessions, Attention and Devices.</p></noscript>
       </main>
       <nav aria-label="Main navigation">
