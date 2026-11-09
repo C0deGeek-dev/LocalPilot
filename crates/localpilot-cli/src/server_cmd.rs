@@ -2177,6 +2177,11 @@ pub async fn pair(
         }
         None => {
             writeln!(out, "Pairing code: {code}")?;
+            // The app needs the issuing workspace too; it cannot look it up
+            // before it is paired.
+            if let Some(workspace) = crate::server_index::discovery_id(&std::env::current_dir()?) {
+                writeln!(out, "Workspace: {workspace}")?;
+            }
             writeln!(
                 out,
                 "Pairing only authorizes the device; it does not open any network access. \

@@ -1328,9 +1328,12 @@ project file cannot set any `[remote]` key).
   registration hold; the connection is closed after the response. Pairing links name the workspace that issued the code, and the code
   is presented only to that workspace's server.
 - **Exact request checks.** Every request must carry exactly one `Host` from an
-  explicit list (the advertised host, or `[remote] proxy_hosts`). Pairing and
-  the device socket must also carry exactly one `Origin` equal to the advertised
-  origin. Forwarded headers are never trusted; there are no wildcard or partial
+  explicit list (the advertised host, or `[remote] proxy_hosts`). Pairing,
+  notification changes and the device socket must also carry exactly one
+  `Origin` equal to the advertised origin. Reads (`GET`) may leave `Origin` out,
+  as browsers do on same-origin reads. A read must never carry another
+  `Origin`, and a read whose `Sec-Fetch-Site` is not `same-origin` is refused.
+  Forwarded headers are never trusted; there are no wildcard or partial
   matches. One exception: `GET /identify` answers only a loopback-literal
   `Host` naming the gateway's own port (`127.0.0.1:<port>` or `[::1]:<port>`), and it returns only
   the gateway's version string. This lets `localpilot remote setup` recognise

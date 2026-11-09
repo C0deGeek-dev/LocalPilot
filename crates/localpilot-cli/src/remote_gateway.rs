@@ -10,7 +10,8 @@
 //!
 //! What a browser request must carry is exact: one `Host` from an explicit
 //! list, and, for anything that acts, one `Origin` equal to the advertised
-//! origin. Forwarded headers are never trusted. Every browser frame is parsed
+//! origin. A read (`GET`) may come without `Origin`, as browsers send it,
+//! but never with another one or from another site. Forwarded headers are never trusted. Every browser frame is parsed
 //! as one JSON value and re-encoded before it reaches the daemon, so a frame
 //! can never become two records, and records that only the gateway or the
 //! local machine may send are refused here as well as in the daemon.
@@ -151,6 +152,27 @@ impl Policy {
     /// The host check, plus exactly one `Origin` equal to the advertised one.
     fn origin_ok(&self, headers: &HeaderMap) -> bool {
         self.host_ok(headers) && single(headers, &header::ORIGIN) == Some(self.origin.as_str())
+    }
+
+    /// The check for a read (`GET`). Browsers leave `Origin` off a
+    /// same-origin `GET`, so it may be absent, but when present it must be
+    /// the advertised one; `Sec-Fetch-Site`, when the browser sends it, must
+    /// say `same-origin`. A cross-site page still gets nothing: the host
+    /// check stops rebinding, the device cookie is `SameSite=Strict`, and no
+    /// response allows cross-origin reads.
+    fn read_ok(&self, headers: &HeaderMap) -> bool {
+        let origin = match headers.get_all(header::ORIGIN).iter().count() {
+            0 => true,
+            _ => single(headers, &header::ORIGIN) == Some(self.origin.as_str()),
+        };
+        let fetch_site = match headers.get_all("sec-fetch-site").iter().count() {
+            0 => true,
+            _ => {
+                single(headers, &header::HeaderName::from_static("sec-fetch-site"))
+                    == Some("same-origin")
+            }
+        };
+        self.host_ok(headers) && origin && fetch_site
     }
 }
 
@@ -630,7 +652,7 @@ impl Gateway {
     /// Read-only; the credential is verified and each workspace's grant
     /// checked before anything about it is returned or probed.
     async fn workspaces(&self, request: &Request<Incoming>) -> Response<Full<Bytes>> {
-        if !self.policy.origin_ok(request.headers()) {
+        if !self.policy.read_ok(request.headers()) {
             return plain(StatusCode::FORBIDDEN, "forbidden");
         }
         let device = match self.device(request.headers()) {
@@ -663,7 +685,7 @@ impl Gateway {
     /// A workspace's sessions for this device, before it attaches: metadata
     /// only, decided and delivered by the workspace's server.
     async fn sessions(&self, request: &Request<Incoming>, armed: &Arm) -> Response<Full<Bytes>> {
-        if !self.policy.origin_ok(request.headers()) {
+        if !self.policy.read_ok(request.headers()) {
             return plain(StatusCode::FORBIDDEN, "forbidden");
         }
         let (device, credential) = match self.device(request.headers()) {
@@ -755,7 +777,12 @@ impl Gateway {
     /// server; the subscription is kept in the per-user device registry.
     async fn push(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
         use localpilot_rpc::PushRequest;
-        if !self.policy.origin_ok(request.headers()) {
+        let allowed = if request.method() == Method::GET {
+            self.policy.read_ok(request.headers())
+        } else {
+            self.policy.origin_ok(request.headers())
+        };
+        if !allowed {
             return plain(StatusCode::FORBIDDEN, "forbidden");
         }
         let (device, credential) = match self.device(request.headers()) {
@@ -2286,6 +2313,59 @@ mod tests {
     }
 
     #[test]
+    fn a_read_may_omit_origin_but_never_name_another_site() {
+        let policy = Policy::new("https://pc.example.ts.net", &[]);
+        for good in [
+            // A browser's same-origin GET: no Origin.
+            vec![("host", "pc.example.ts.net")],
+            vec![
+                ("host", "pc.example.ts.net"),
+                ("sec-fetch-site", "same-origin"),
+            ],
+            vec![
+                ("host", "pc.example.ts.net"),
+                ("origin", "https://pc.example.ts.net"),
+                ("sec-fetch-site", "same-origin"),
+            ],
+        ] {
+            assert!(policy.read_ok(&headers(&good)), "{good:?}");
+            // Acting still needs the Origin.
+            if good.iter().all(|(name, _)| *name != "origin") {
+                assert!(!policy.origin_ok(&headers(&good)), "{good:?}");
+            }
+        }
+        for hostile in [
+            vec![("host", "evil.example")],
+            vec![("host", "pc.example.ts.net"), ("origin", "null")],
+            vec![
+                ("host", "pc.example.ts.net"),
+                ("origin", "https://evil.example"),
+            ],
+            vec![
+                ("host", "pc.example.ts.net"),
+                ("origin", "https://pc.example.ts.net"),
+                ("origin", "https://pc.example.ts.net"),
+            ],
+            vec![
+                ("host", "pc.example.ts.net"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+            vec![
+                ("host", "pc.example.ts.net"),
+                ("sec-fetch-site", "same-site"),
+            ],
+            vec![("host", "pc.example.ts.net"), ("sec-fetch-site", "none")],
+            vec![
+                ("host", "pc.example.ts.net"),
+                ("sec-fetch-site", "same-origin"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+        ] {
+            assert!(!policy.read_ok(&headers(&hostile)), "{hostile:?}");
+        }
+    }
+
+    #[test]
     fn a_proxy_that_rewrites_host_is_listed_exactly() {
         let policy = Policy::new(
             "https://pc.example.ts.net",
@@ -3312,6 +3392,54 @@ mod tests {
         ask_raw(client, &request, Duration::from_secs(5))
             .await
             .expect("an answer")
+    }
+
+    #[tokio::test]
+    async fn a_browser_read_without_origin_reaches_the_credential_check() {
+        let gateway = plain_gateway("https://pc.example.test", &[]);
+        let ask = |path: &str, extra: &str| {
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: pc.example.test\r\n{extra}Connection: close\r\n\r\n"
+            )
+            .into_bytes()
+        };
+        // What a browser sends for a same-origin fetch: the read is let
+        // through and refused only for the missing credential.
+        for path in [
+            "/api/workspaces",
+            "/api/sessions?workspace=x",
+            "/api/push?workspace=x",
+        ] {
+            for extra in ["", "Sec-Fetch-Site: same-origin\r\n"] {
+                let raw = ask_gateway(&gateway, ask(path, extra)).await;
+                assert_eq!(
+                    status_and_body(&raw),
+                    Some((401, &b"this device is not paired"[..])),
+                    "{path} {extra:?}"
+                );
+            }
+            // Another site, or another origin, is refused before anything.
+            for extra in [
+                "Sec-Fetch-Site: cross-site\r\n",
+                "Origin: https://evil.example\r\n",
+            ] {
+                let raw = ask_gateway(&gateway, ask(path, extra)).await;
+                assert_eq!(
+                    status_and_body(&raw).map(|(code, _)| code),
+                    Some(403),
+                    "{path} {extra:?}"
+                );
+            }
+        }
+        // Acting still requires the Origin.
+        let raw = ask_gateway(
+            &gateway,
+            b"POST /api/push?workspace=x HTTP/1.1\r\nHost: pc.example.test\r\n\
+              Content-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        )
+        .await;
+        assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(403));
     }
 
     #[tokio::test]

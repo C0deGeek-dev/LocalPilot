@@ -906,6 +906,12 @@ already run HTTPS tunnels or proxies; LocalPilot should not ship one.
 3. Browser requests must match exactly: one `Host` from an explicit list
    (default the advertised host) and, for pairing and sockets, one `Origin` equal
    to the advertised origin. No forwarded-header trust.
+   Amendment (2026-11-09): browsers send no `Origin` on a same-origin `GET`,
+   so the read routes (`GET /api/workspaces`, `/api/sessions`, `/api/push`)
+   accept a missing `Origin`. When present it must still be exactly the
+   advertised one, and a `Sec-Fetch-Site` other than `same-origin` is refused.
+   Everything that acts keeps the `Origin` requirement. The `Host` check and the
+   `SameSite=Strict` cookie keep other sites out of reads.
 4. The device credential lives only in a `__Host-` `Secure` `HttpOnly`
    `SameSite=Strict` cookie set by the pairing response; the socket presents it
    on a fresh `device_attach` before `101`, and the daemon's answer admits it.

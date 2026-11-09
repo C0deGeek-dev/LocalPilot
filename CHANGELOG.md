@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The remote gateway's read requests (`/api/workspaces`, `/api/sessions`, and
+  reading the `/api/push` key) now work from a browser. Browsers send no
+  `Origin` on a same-origin `GET`, so those reads were always refused. A read
+  that names another origin, or comes from another site, is still refused.
+  Pairing a device without `--url` also prints the workspace id, which the
+  companion app needs to pair by hand.
 - The remote gateway serves the LocalLink companion app from the binary: one
   pinned, verified release build (`crates/localpilot-cli/client.pin`). The
   build stops if the copy is missing or differs from the pin. `localpilot
