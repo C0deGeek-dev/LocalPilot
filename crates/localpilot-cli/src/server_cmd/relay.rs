@@ -1120,10 +1120,13 @@ fn reply_for(
             }),
         },
         RelayRequestState::Rejected { reason } => {
-            let code = if reason == "already answered" {
-                RejectCode::AlreadyResolved
-            } else {
-                RejectCode::Forbidden
+            // The terminal's ask answers keep their own codes, so a device can
+            // tell a race from an expiry from a refusal.
+            let code = match reason.as_str() {
+                "already answered" => RejectCode::AlreadyResolved,
+                "the request expired" => RejectCode::Expired,
+                "no such request" => RejectCode::UnknownAsk,
+                _ => RejectCode::Forbidden,
             };
             Some(refusal(acks, code, &reason))
         }

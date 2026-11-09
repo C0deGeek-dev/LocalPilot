@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The remote gateway gives the companion app what its Devices and
+  notification screens need: `GET /api/device` (this device's own record:
+  name, scope, workspace limit, paired date; never other devices),
+  `POST /api/device/revoke` (the device revokes itself and its cookie is
+  cleared), and a test notification (`POST /api/push` with `{"op": "test"}`,
+  once every 30 seconds, through the real push path). Answers to permission
+  asks from a phone now say why they were refused (`already_resolved`,
+  `expired`, `unknown_ask`). A device limited to one workspace is now told its
+  scope in `GET /api/workspaces`; it was reported as unknown.
+
 - The embedded companion app can now follow a shared session: pick a project
   and a session shared from the PC terminal, read the conversation, send a
   message (or a follow-up while a turn runs), stop the turn, and run the slash

@@ -347,8 +347,19 @@ pub(crate) type Dial = Arc<
 pub(crate) type Verify = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 /// Whether a device may currently reach the workspace at a root.
 pub(crate) type Reach = Arc<dyn Fn(&str, &std::path::Path) -> bool + Send + Sync>;
-/// A verified device's scope, if its record can be read.
-pub(crate) type DeviceScope = Arc<dyn Fn(&str) -> Option<localpilot_rpc::Scope> + Send + Sync>;
+/// What a device is told about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceView {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) scope: localpilot_rpc::Scope,
+    pub(crate) this_workspace_only: bool,
+    pub(crate) paired_unix: u64,
+}
+/// A verified device's own record, if it can be read.
+pub(crate) type Describe = Arc<dyn Fn(&str) -> Option<DeviceView> + Send + Sync>;
+/// Revoke a device everywhere; `true` when this call revoked it.
+pub(crate) type Revoke = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// How the gateway finds workspaces and checks devices. The servers remain
 /// the authority on every grant; the gateway uses `verify` and `standing`
@@ -362,9 +373,12 @@ pub(crate) struct Discovery {
     pub(crate) verify: Verify,
     /// Whether the device may currently reach the workspace at `root`.
     pub(crate) standing: Reach,
-    /// The device's scope, when its record can be read. Shown to the device
-    /// so it can tell what it may do; the server still decides every action.
-    pub(crate) scope: DeviceScope,
+    /// The device's own record, when it can be read. Shown to the device so
+    /// it can tell what it may do; the server still decides every action.
+    pub(crate) describe: Describe,
+    /// Revoke a device everywhere; `true` when this call revoked it. Used
+    /// only for the device's own credential, which only lowers authority.
+    pub(crate) revoke: Revoke,
 }
 
 /// A workspace's registration: its capability, valid while the control
@@ -638,6 +652,8 @@ impl Gateway {
             (&Method::GET, "/api/sessions") => self.sessions(&request, armed).await,
             (&Method::POST, "/api/pair") => self.pair(request).await,
             (&Method::GET | &Method::POST, "/api/push") => self.push(request).await,
+            (&Method::GET, "/api/device") => self.this_device(&request),
+            (&Method::POST, "/api/device/revoke") => self.revoke_this_device(&request),
             (&Method::GET, "/api/socket") => {
                 // A refused upgrade closes its connection rather than waiting
                 // for another request.
@@ -652,6 +668,53 @@ impl Gateway {
             (&Method::GET, path) => client_file(path),
             _ => plain(StatusCode::NOT_FOUND, "not found"),
         }
+    }
+
+    /// What this device is: its id, name, scope, whether it is limited to
+    /// one workspace, and when it was paired. Nothing about other devices.
+    fn this_device(&self, request: &Request<Incoming>) -> Response<Full<Bytes>> {
+        if !self.policy.read_ok(request.headers()) {
+            return plain(StatusCode::FORBIDDEN, "forbidden");
+        }
+        let device = match self.device(request.headers()) {
+            Ok((device, _)) => device,
+            Err(response) => return response,
+        };
+        if let Err(response) = self.spend_device(&device, true) {
+            return response;
+        }
+        match (self.discovery.describe)(&device) {
+            Some(view) => json(&serde_json::json!({
+                "id": view.id,
+                "name": view.name,
+                "scope": view.scope,
+                "this_workspace_only": view.this_workspace_only,
+                "paired_unix": view.paired_unix,
+            })),
+            None => plain(StatusCode::UNAUTHORIZED, "this device is not paired"),
+        }
+    }
+
+    /// Revoke this device everywhere and clear its cookie. Its sockets end
+    /// at the next standing check.
+    fn revoke_this_device(&self, request: &Request<Incoming>) -> Response<Full<Bytes>> {
+        if !self.policy.origin_ok(request.headers()) {
+            return plain(StatusCode::FORBIDDEN, "forbidden");
+        }
+        let device = match self.device(request.headers()) {
+            Ok((device, _)) => device,
+            Err(response) => return response,
+        };
+        if !(self.discovery.revoke)(&device) {
+            return plain(StatusCode::UNAUTHORIZED, "this device is not paired");
+        }
+        let mut response = json(&serde_json::json!({ "revoked": true }));
+        if let Ok(cookie) = HeaderValue::from_str(&format!(
+            "{DEVICE_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"
+        )) {
+            response.headers_mut().insert(header::SET_COOKIE, cookie);
+        }
+        response
     }
 
     /// The workspaces this device may reach, with whether each is online.
@@ -685,7 +748,7 @@ impl Gateway {
                 })
             })
             .collect();
-        let scope = (self.discovery.scope)(&device);
+        let scope = (self.discovery.describe)(&device).map(|view| view.scope);
         json(&serde_json::json!({ "scope": scope, "workspaces": items }))
     }
 
@@ -832,6 +895,7 @@ impl Gateway {
                 // A struct variant: serde ignores unknown fields on a unit variant
                 // of an internally tagged enum.
                 Unsubscribe {},
+                Test {},
             }
             match serde_json::from_slice::<Change>(&body.to_bytes()) {
                 Ok(Change::Subscribe {
@@ -846,10 +910,11 @@ impl Gateway {
                     key_id,
                 },
                 Ok(Change::Unsubscribe {}) => PushRequest::Unsubscribe,
+                Ok(Change::Test {}) => PushRequest::Test,
                 _ => {
                     return plain(
                         StatusCode::BAD_REQUEST,
-                        "expected {\"op\": \"subscribe\", ...} or {\"op\": \"unsubscribe\"}",
+                        "expected {\"op\": \"subscribe\", ...}, {\"op\": \"unsubscribe\"} or {\"op\": \"test\"}",
                     )
                 }
             }
@@ -884,6 +949,13 @@ impl Gateway {
             Ok((Some(ServerEvent::PushSaved { subscribed }), _)) => {
                 json(&serde_json::json!({ "subscribed": subscribed }))
             }
+            Ok((
+                Some(ServerEvent::PushTested {
+                    outcome,
+                    retry_after_secs,
+                }),
+                _,
+            )) => tested(&outcome, retry_after_secs),
             Ok((Some(ServerEvent::Error { message }), _)) => plain(StatusCode::FORBIDDEN, &message),
             _ => plain(StatusCode::BAD_GATEWAY, "the server did not answer"),
         }
@@ -1647,6 +1719,31 @@ fn with_headers(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
     response
 }
 
+/// The answer to a test notification.
+fn tested(outcome: &str, retry_after_secs: Option<u64>) -> Response<Full<Bytes>> {
+    match outcome {
+        "sent" => json(&serde_json::json!({ "sent": true })),
+        "no_subscription" => plain(
+            StatusCode::CONFLICT,
+            "notifications are off for this device",
+        ),
+        "off" => plain(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "notifications are turned off on this computer",
+        ),
+        "too_soon" => too_many(retry_after_secs.unwrap_or(30)),
+        "gone" => plain(
+            StatusCode::GONE,
+            "this browser's notification subscription no longer exists; turn notifications on again",
+        ),
+        "not_allowed" => plain(StatusCode::FORBIDDEN, "this device may not be notified"),
+        _ => plain(
+            StatusCode::BAD_GATEWAY,
+            "the notification service did not accept the test",
+        ),
+    }
+}
+
 /// `429 Too Many Requests`, with when to retry.
 fn too_many(retry_after_secs: u64) -> Response<Full<Bytes>> {
     let mut response = plain(
@@ -1759,18 +1856,27 @@ fn user_discovery() -> anyhow::Result<Discovery> {
             registry.standing_in(device, root).is_ok()
         })
     };
-    let scope = Arc::new(move |device: &str| {
-        registry
-            .standing(device)
-            .ok()
-            .map(|standing| standing.scope)
+    let describe = {
+        let registry = registry.clone();
+        Arc::new(move |device: &str| crate::server_devices::device_view(&registry, device))
+    };
+    let revoke = Arc::new(move |device: &str| {
+        let revoked = matches!(
+            registry.revoke_device(device),
+            Ok(crate::server_devices::RevokeOutcome::Revoked(_))
+        );
+        if revoked {
+            registry.audit("revoked", Some(device), "by the device itself");
+        }
+        revoked
     });
     Ok(Discovery {
         list,
         dial,
         verify,
         standing,
-        scope,
+        describe,
+        revoke,
     })
 }
 
@@ -3066,7 +3172,8 @@ mod tests {
             dial: fake_server(&id, Vec::new(), CancellationToken::new()),
             verify: Arc::new(|_| Some("device".to_string())),
             standing: Arc::new(move |_, _| allowed),
-            scope: Arc::new(|_| Some(localpilot_rpc::Scope::Observe)),
+            describe: Arc::new(|_| None),
+            revoke: Arc::new(|_| false),
         };
         let gateway = Gateway::new(
             Policy::new("https://pc.example.test", &[]),
@@ -3243,7 +3350,8 @@ mod tests {
                 let allowed = allowed.clone();
                 Arc::new(move |_, _| allowed.load(std::sync::atomic::Ordering::SeqCst))
             },
-            scope: Arc::new(|_| Some(localpilot_rpc::Scope::Observe)),
+            describe: Arc::new(|_| None),
+            revoke: Arc::new(|_| false),
         };
         let gateway = Gateway::new(
             Policy::new("https://pc.example.test", &[]),
@@ -3397,7 +3505,8 @@ mod tests {
             }),
             verify: Arc::new(|_| None),
             standing: Arc::new(|_, _| false),
-            scope: Arc::new(|_| None),
+            describe: Arc::new(|_| None),
+            revoke: Arc::new(|_| false),
         };
         Gateway::new(
             Policy::new(origin, hosts).with_bound_port(47610),

@@ -249,6 +249,9 @@ pub enum PushRequest {
     },
     /// Turn notifications off.
     Unsubscribe,
+    /// Send one content-free test notification to this device's saved
+    /// subscription, through the real push path.
+    Test,
 }
 
 /// A secret carried on the wire (a gateway capability, a device credential, a
@@ -678,6 +681,16 @@ pub enum ServerEvent {
     /// now has notifications on.
     PushSaved {
         subscribed: bool,
+    },
+    /// Reply to a device's test notification: `outcome` is `sent`,
+    /// `no_subscription`, `off` (notifications are off on this computer),
+    /// `too_soon` (with `retry_after_secs`), `gone` (the browser's
+    /// subscription no longer exists and was removed), `not_allowed`, or
+    /// `failed`.
+    PushTested {
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_secs: Option<u64>,
     },
     /// Reply to a `run_command` that ran.
     CommandResult {

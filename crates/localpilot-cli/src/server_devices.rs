@@ -316,6 +316,27 @@ pub(crate) struct Standing {
 /// now, from one read of the registry.
 pub(crate) type DeviceStandingRead = (Option<DeviceRecord>, Result<Scope, Refusal>);
 
+/// What a verified device that is not revoked is told about itself. Read
+/// from its record, not from a standing: a standing answers for the
+/// registry's own workspace, and the gateway serves every workspace.
+pub(crate) fn device_view(
+    registry: &DeviceRegistry,
+    id: &str,
+) -> Option<crate::remote_gateway::DeviceView> {
+    let file = registry.current().ok()?;
+    let record = file.devices.get(id)?;
+    if record.revoked_unix.is_some() {
+        return None;
+    }
+    Some(crate::remote_gateway::DeviceView {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        scope: record.scope,
+        this_workspace_only: record.workspaces.is_some(),
+        paired_unix: record.created_unix,
+    })
+}
+
 /// The paired devices of this user. See the module docs.
 pub(crate) struct DeviceRegistry {
     /// The registry directory, or `None` for an in-memory registry (tests).

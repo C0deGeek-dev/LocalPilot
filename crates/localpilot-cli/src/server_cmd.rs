@@ -1798,12 +1798,35 @@ async fn push_for_device(
         };
     }
     let Some(keys) = hosts.remote.push.clone() else {
+        if matches!(request, PushRequest::Test) {
+            return ServerEvent::PushTested {
+                outcome: "off".to_string(),
+                retry_after_secs: None,
+            };
+        }
         return error(
             "notifications are off on this computer: set `[remote.push] enabled = true` in its user config",
         );
     };
     match request {
         PushRequest::Unsubscribe => error("unreachable"),
+        PushRequest::Test => {
+            let Some(sender) = hosts.push_sender.clone() else {
+                return ServerEvent::PushTested {
+                    outcome: "off".to_string(),
+                    retry_after_secs: None,
+                };
+            };
+            let outcome = sender.test(&device).await;
+            let retry_after_secs = match outcome {
+                crate::remote_push_send::TestOutcome::TooSoon(secs) => Some(secs),
+                _ => None,
+            };
+            ServerEvent::PushTested {
+                outcome: outcome.name().to_string(),
+                retry_after_secs,
+            }
+        }
         PushRequest::Key => match tokio::task::spawn_blocking(move || keys.ensure()).await {
             Ok(Ok(key)) => ServerEvent::PushKey {
                 public_key: base64::Engine::encode(
@@ -6751,13 +6774,17 @@ pub(crate) mod tests {
             .map(|(workspace, connect)| (workspace.id, connect))
             .collect();
         let verify_devices = devices.clone();
-        let scope_devices = devices.clone();
+        let describe_devices = devices.clone();
+        let revoke_devices = devices.clone();
         let discovery = crate::remote_gateway::Discovery {
-            scope: Arc::new(move |device: &str| {
-                scope_devices
-                    .standing(device)
-                    .ok()
-                    .map(|standing| standing.scope)
+            describe: Arc::new(move |device: &str| {
+                crate::server_devices::device_view(&describe_devices, device)
+            }),
+            revoke: Arc::new(move |device: &str| {
+                matches!(
+                    revoke_devices.revoke_device(device),
+                    Ok(crate::server_devices::RevokeOutcome::Revoked(_))
+                )
             }),
             list: Arc::new(move || listed.clone()),
             dial: Arc::new(move |workspace: &crate::remote_gateway::Workspace| {
@@ -7241,6 +7268,87 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_reads_its_own_record_and_can_revoke_only_itself() {
+        let home = tempfile::tempdir().unwrap();
+        let registry_dir = home.path().join("devices");
+        let a = space(home.path(), "alpha", &registry_dir, "a");
+        let (phone, credential) = a
+            .hosts
+            .devices
+            .add("Pixel", localpilot_rpc::Scope::Observe, true)
+            .unwrap();
+        let (other, _) = a
+            .hosts
+            .devices
+            .add("tablet", localpilot_rpc::Scope::Control, false)
+            .unwrap();
+        let credential = credential.expose().to_string();
+        let registry = Arc::new(DeviceRegistry::open(&registry_dir, home.path()));
+        let (address, stop) = start_gateway_for(
+            vec![(a.workspace.clone(), daemon_dial(&a.hosts, &a.factory))],
+            registry.clone(),
+        )
+        .await;
+        let cookie = crate::remote_gateway::DEVICE_COOKIE;
+        // A browser's same-origin read: no Origin.
+        let read = format!(
+            "GET /api/device HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: close\r\n\
+             Sec-Fetch-Site: same-origin\r\nCookie: {cookie}={credential}\r\n\r\n"
+        );
+        let (status, _, body) = http(address, &read).await;
+        assert_eq!(status, 200, "{body}");
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["id"], phone.id.as_str());
+        assert_eq!(view["name"], "Pixel");
+        assert_eq!(view["scope"], "observe");
+        assert_eq!(view["this_workspace_only"], true);
+        assert!(view["paired_unix"].as_u64().is_some_and(|secs| secs > 0));
+        assert!(
+            !body.contains("tablet"),
+            "never lists other devices: {body}"
+        );
+
+        // Revoking needs the Origin, like every change.
+        let revoke = |origin: &str| {
+            format!(
+                "POST /api/device/revoke HTTP/1.1\r\nHost: {GATEWAY_HOST}\r\nConnection: close\r\n\
+                 {origin}Content-Length: 0\r\nCookie: {cookie}={credential}\r\n\r\n"
+            )
+        };
+        let (status, _, _) = http(address, &revoke("")).await;
+        assert_eq!(status, 403);
+        assert!(
+            registry.push_of(&phone.id).is_none()
+                && crate::server_devices::device_view(&registry, &phone.id).is_some(),
+            "nothing revoked"
+        );
+        let (status, head, body) =
+            http(address, &revoke(&format!("Origin: {GATEWAY_ORIGIN}\r\n"))).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, r#"{"revoked":true}"#);
+        let head = head.to_ascii_lowercase();
+        assert!(
+            head.contains(&format!("set-cookie: {}=;", cookie.to_ascii_lowercase()))
+                && head.contains("max-age=0"),
+            "{head}"
+        );
+        assert!(
+            crate::server_devices::device_view(&registry, &phone.id).is_none(),
+            "revoked"
+        );
+        assert!(
+            crate::server_devices::device_view(&registry, &other.id).is_some(),
+            "only itself"
+        );
+        // Afterwards the credential is no longer accepted.
+        let (status, _, body) = http(address, &read).await;
+        assert_eq!((status, body.as_str()), (401, "this device is not paired"));
+        let (status, _, _) = http(address, &revoke(&format!("Origin: {GATEWAY_ORIGIN}\r\n"))).await;
+        assert_eq!(status, 401);
+        stop.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn one_pairing_reaches_two_workspaces_through_one_gateway() {
         let home = tempfile::tempdir().unwrap();
         let registry_dir = home.path().join("devices");
@@ -7327,6 +7435,8 @@ pub(crate) mod tests {
         .await;
         let (_, _, body) = http(address, &workspaces_request(&credential)).await;
         let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // Its scope is reported even though its grant names one workspace.
+        assert_eq!(listed["scope"], "control", "{body}");
         let items = listed["workspaces"].as_array().unwrap();
         assert_eq!(items.len(), 1, "{body}");
         assert_eq!(items[0]["id"], a.workspace.id.as_str());

@@ -47,6 +47,8 @@ const STOPPED_TTL_SECS: u64 = 900;
 pub(crate) enum Kind {
     Ask,
     Stopped,
+    /// A test the device asked for.
+    Test,
 }
 
 impl Kind {
@@ -54,13 +56,14 @@ impl Kind {
         match self {
             Self::Ask => br#"{"k":"ask"}"#,
             Self::Stopped => br#"{"k":"stopped"}"#,
+            Self::Test => br#"{"k":"test"}"#,
         }
     }
 
     fn urgency(self) -> &'static str {
         match self {
             Self::Ask => "high",
-            Self::Stopped => "normal",
+            Self::Stopped | Self::Test => "normal",
         }
     }
 }
@@ -268,6 +271,46 @@ struct Window {
 struct State {
     sessions: HashMap<SessionId, SessionState>,
     windows: HashMap<(String, Kind), Window>,
+    /// When each device last asked for a test notification.
+    tests: HashMap<String, tokio::time::Instant>,
+}
+
+/// How often a device may ask for a test notification.
+const TEST_EVERY: Duration = Duration::from_secs(30);
+/// How long the push service keeps a test notification.
+const TEST_TTL_SECS: u64 = 60;
+
+/// What became of a device's test notification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TestOutcome {
+    /// The push service accepted it.
+    Sent,
+    /// The device has no saved subscription, or it was made for a key that
+    /// is no longer current.
+    NoSubscription,
+    /// Asked again too soon: wait this many seconds.
+    TooSoon(u64),
+    /// The push service says the subscription no longer exists; it was
+    /// removed.
+    Gone,
+    /// The device may no longer be notified.
+    NotAllowed,
+    /// The push service could not be reached or refused it.
+    Failed,
+}
+
+impl TestOutcome {
+    /// The wire name of the outcome.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::NoSubscription => "no_subscription",
+            Self::TooSoon(_) => "too_soon",
+            Self::Gone => "gone",
+            Self::NotAllowed => "not_allowed",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// The sender for one workspace server.
@@ -395,6 +438,8 @@ impl PushSender {
                 (left > 0).then(|| left.min(ASK_TTL_SECS))
             }
             Kind::Stopped => session.open.is_empty().then_some(STOPPED_TTL_SECS),
+            // Tests are sent directly by `test`, never through a session.
+            Kind::Test => None,
         }
     }
 
@@ -512,6 +557,84 @@ impl PushSender {
         }
         let ttl = self.due(job.kind, job.cause)?;
         Some((push, ttl))
+    }
+
+    /// Send one test notification to `device`'s saved subscription, through
+    /// the same checks and delivery as a real one, at most once per
+    /// [`TEST_EVERY`] per device.
+    pub(crate) async fn test(&self, device: &str) -> TestOutcome {
+        {
+            let mut state = self.state();
+            let now = tokio::time::Instant::now();
+            if let Some(last) = state.tests.get(device) {
+                let since = now.saturating_duration_since(*last);
+                if since < TEST_EVERY {
+                    return TestOutcome::TooSoon((TEST_EVERY - since).as_secs().max(1));
+                }
+            }
+            state.tests.insert(device.to_string(), now);
+        }
+        if self.registry.standing(device).is_err() {
+            return TestOutcome::NotAllowed;
+        }
+        let Some(push) = self.registry.push_of(device) else {
+            return TestOutcome::NoSubscription;
+        };
+        let Some(key) = self.keys.current().ok().flatten() else {
+            return TestOutcome::NoSubscription;
+        };
+        if key.id() != push.key_id {
+            return TestOutcome::NoSubscription;
+        }
+        let Ok(host) = check_endpoint(&push.endpoint).map(|endpoint| endpoint.host) else {
+            return TestOutcome::Failed;
+        };
+        let Ok((public, auth)) = check_keys(&push.p256dh, &push.auth) else {
+            return TestOutcome::Failed;
+        };
+        let Ok(body) =
+            crate::remote_push_crypto::encrypt(&public, &auth, Kind::Test.payload(), PADDED)
+        else {
+            return TestOutcome::Failed;
+        };
+        let audience = format!("https://{host}");
+        let expires = now_ms() / 1000 + 12 * 60 * 60;
+        let Ok(authorization) =
+            crate::remote_push_crypto::vapid_authorization(key.pair(), &audience, expires)
+        else {
+            return TestOutcome::Failed;
+        };
+        let out = Outgoing {
+            endpoint: push.endpoint.clone(),
+            host: host.clone(),
+            ttl_secs: TEST_TTL_SECS,
+            urgency: Kind::Test.urgency(),
+            authorization,
+            body,
+        };
+        let rev = push.rev.clone();
+        let recheck = || {
+            self.registry.standing(device).is_ok()
+                && self
+                    .registry
+                    .push_of(device)
+                    .is_some_and(|current| current.rev == rev)
+        };
+        let outcome = deliver(&self.resolve, &self.post, out, &recheck).await;
+        let detail = match &outcome {
+            Ok(status) => format!("{host} {status}"),
+            Err(error) => format!("{host} {error}"),
+        };
+        self.registry.audit("push_test", Some(device), &detail);
+        match outcome {
+            Ok(200..=299) => TestOutcome::Sent,
+            Ok(404 | 410) => {
+                let _ = self.registry.clear_push_rev(device, &push.rev);
+                TestOutcome::Gone
+            }
+            Err(SendError::Withdrawn) => TestOutcome::NotAllowed,
+            _ => TestOutcome::Failed,
+        }
     }
 
     async fn send_checked(&self, job: &Job<'_>) -> Option<(String, Result<u16, SendError>)> {
@@ -1002,5 +1125,54 @@ mod tests {
             "{line}"
         );
         assert!(!audit.contains("/fcm/send/phone"), "{audit}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_test_notification_goes_through_the_real_path_at_most_every_30_seconds() {
+        let rig = rig(201);
+        assert_eq!(rig.sender.test(&rig.device).await, TestOutcome::Sent);
+        {
+            let sent = rig.sent.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].0, "https://fcm.googleapis.com/fcm/send/phone");
+            assert_eq!((sent[0].1, sent[0].2), (TEST_TTL_SECS, "normal"));
+        }
+        // Asked again at once: refused with the wait, nothing sent.
+        match rig.sender.test(&rig.device).await {
+            TestOutcome::TooSoon(secs) => assert!((1..=30).contains(&secs), "{secs}"),
+            other => panic!("expected too soon, got {other:?}"),
+        }
+        assert_eq!(rig.sent.lock().unwrap().len(), 1);
+        tokio::time::advance(TEST_EVERY).await;
+        assert_eq!(rig.sender.test(&rig.device).await, TestOutcome::Sent);
+        assert_eq!(rig.sent.lock().unwrap().len(), 2);
+        let audit = rig.registry.audit_lines().join("\n");
+        assert!(audit.contains("push_test"), "{audit}");
+        assert!(!audit.contains("/fcm/send/phone"), "{audit}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_test_notification_reports_why_it_was_not_sent() {
+        // No subscription.
+        let r = rig(201);
+        r.registry.clear_push(&r.device).unwrap();
+        assert_eq!(r.sender.test(&r.device).await, TestOutcome::NoSubscription);
+        // A subscription made for a key that was rotated away.
+        let r = rig_with(201, public_resolve());
+        // Rotated against another registry, so the stale subscription stays.
+        r.keys.rotate(&DeviceRegistry::default()).unwrap();
+        assert_eq!(r.sender.test(&r.device).await, TestOutcome::NoSubscription);
+        // The push service says it is gone: removed.
+        let r = rig(410);
+        assert_eq!(r.sender.test(&r.device).await, TestOutcome::Gone);
+        assert!(r.registry.push_of(&r.device).is_none());
+        // A revoked device is never notified.
+        let r = rig(201);
+        r.registry.revoke_device(&r.device).unwrap();
+        assert_eq!(r.sender.test(&r.device).await, TestOutcome::NotAllowed);
+        assert!(r.sent.lock().unwrap().is_empty());
+        // A push service that refuses it.
+        let r = rig(500);
+        assert_eq!(r.sender.test(&r.device).await, TestOutcome::Failed);
     }
 }

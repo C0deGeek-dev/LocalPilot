@@ -1314,6 +1314,22 @@ project file cannot set any `[remote]` key).
   the device's credential, and only the server's answer admits it. When a
   server's registration ends, that workspace's device connections close; the
   others continue. When the gateway stops, every capability ends.
+- **A device's own record.** `GET /api/device` tells a paired device its own
+  id, name, scope, whether it is limited to one workspace, and when it was
+  paired, read from its record; nothing about any other device is returned
+  (other devices are managed on the PC). `POST /api/device/revoke` (with the
+  `Origin`, like every change) revokes the calling device everywhere, which
+  only lowers authority, and clears its cookie; its sockets end at the next
+  standing check. An already revoked or unknown credential gets `401`.
+- **Test notification.** `POST /api/push?workspace=<id>` with
+  `{"op": "test"}` sends one content-free notification to the calling
+  device's saved subscription through the same checks and delivery as a real
+  one (the device's standing, the exact subscription and the current key; a
+  public push-service address), at most once every 30 seconds per device.
+  It answers `sent`, or why not: no subscription (`409`), notifications off on
+  this computer (`503`), too soon (`429` with `Retry-After`), the browser's
+  subscription gone (`410`, and it is removed), or the push service refusing
+  (`502`). The audit log records the push service's host and status only.
 - **Choosing a workspace.** A paired device lists the workspaces it may reach
   (`GET /api/workspaces`: its credential is verified and each workspace's grant
   checked first; only ids, folder names and whether each is online are
