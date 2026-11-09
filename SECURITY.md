@@ -29,6 +29,8 @@ Security-sensitive areas:
 - transcript persistence
 - MCP server integration
 - web research egress
+- the opt-in remote gateway, paired devices and the phone companion app
+- phone notifications (Web Push)
 
 ## Security Defaults
 
@@ -54,6 +56,20 @@ Security-sensitive areas:
   connected), and there is no configuration in which the constraint is off.
   See [docs/07-security-and-privacy.md](docs/07-security-and-privacy.md)
   §LocalMind Inference Egress.
+- Remote access is off by default. `localpilot remote gateway` runs only when
+  `[remote] enabled` is set in the user config (a project file cannot set it),
+  binds loopback only, and is reached through an HTTPS component the user runs
+  on the same computer. There is no LocalX server, relay or account. Every
+  change needs the exact advertised `Origin`; reads refuse another origin or
+  site. A paired device's credential lives only in a `__Host-` `Secure`
+  `HttpOnly` `SameSite=Strict` cookie, the workspace server decides every
+  action, and a device can be revoked from the computer or by itself. Pairing
+  codes are single-use, short-lived and bound to one workspace. A stolen,
+  unlocked phone acts as that device until it is revoked. See
+  [docs/07-security-and-privacy.md](docs/07-security-and-privacy.md)
+  §Paired Devices and ADR-0269.
+- Phone notifications are off by default (`[remote.push] enabled`) and
+  content-free; the push service still sees delivery metadata.
 - Web research is off by default. The research loop is local-only unless the
   operator opts in for that run with the headless `localpilot research --web`
   flag, which discloses what egresses, fetches only allowlisted domains (others
