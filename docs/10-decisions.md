@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0270: The Settings Screen Chooses Work Limits And Actions By Running The Same Slash Command
+
+**Status:** accepted · **Date:** 2026-11-09. Refs LocalHub#269. Builds on ADR-0266.
+
+**Context.** ADR-0266 made the work-limit mode and the action mode changeable by
+`/limits` and `/actions`. A user should be able to find and change them without
+remembering the commands, but a second place that decides what a choice means
+would drift from the first.
+
+**Decision.** `/settings` shows two session rows, Work limits and Actions. Enter on
+a row opens a short list of the real choices (Automatic, Wide, Very wide, Off;
+Normal, Accept all), starting on the one in force, with the command it will run
+named in its footer. Up/Down choose, Enter applies, Esc closes the list and leaves
+the settings screen open.
+- The screen only chooses. Applying runs the same slash command a user would type
+  (`/limits very-wide`, `/actions accept-all`) through the host's ordinary slash
+  path, so the read-only refusal, the incognito floor, the "between turns" rule for
+  work limits and every message come from ADR-0266 and not from a second copy.
+- The rows show what the runtime is doing, read each time the host is idle and
+  after a live change, together with where it came from (this session, or launch
+  and configuration). A refused change therefore leaves the row on the real value;
+  it never shows an Accept all that is not in force.
+- An older precise profile (relaxed, bypass, read-only) is named as such and marks
+  neither choice as in force.
+- Nothing is written to configuration or to a grant. There is no custom editor, no
+  verification control and no preset that changes verification.
+
+**Consequences.** The controls are discoverable and cannot disagree with the
+commands. Only `/settings` has them; the same list can be offered from another
+surface by emitting the same command.
+
 ## ADR-0269: A Self-Hosted Phone Companion Narrows The Deferral Of A Browser Client And Remote Control
 
 **Status:** accepted · **Date:** 2026-11-09. Refs LocalHub#255. Narrows the

@@ -367,7 +367,9 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     match app.active_body() {
         ActiveBody::Takeover => {
             if let Some(takeover) = app.takeover() {
-                return render_takeover(frame, area, app, takeover);
+                let hit_map = render_takeover(frame, area, app, takeover);
+                render_value_picker(frame, area, app);
+                return hit_map;
             }
         }
         ActiveBody::LocalMind => {
@@ -1629,6 +1631,97 @@ fn render_diff_takeover(
     } else {
         (start, file.lines.len(), viewport_rows, line_hits, file_hits)
     }
+}
+
+/// The session-control list opened from a settings row: a short centered list
+/// whose rows are plain text, so a screen reader reads each choice, which one is
+/// in force and which one is selected.
+fn render_value_picker(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) {
+    let Some(picker) = app.value_picker() else {
+        return;
+    };
+    let screen_reader = app.capabilities.screen_reader;
+    let rows = u16::try_from(picker.rows.len()).unwrap_or(u16::MAX);
+    let width = 78
+        .min(frame_area.width.saturating_sub(2))
+        .max(20.min(frame_area.width));
+    let height = rows.saturating_add(4).min(frame_area.height);
+    if width == 0 || height < 3 {
+        return;
+    }
+    let area = Rect::new(
+        frame_area
+            .x
+            .saturating_add(frame_area.width.saturating_sub(width) / 2),
+        frame_area
+            .y
+            .saturating_add(frame_area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    );
+    let theme = theme(app);
+    frame.render_widget(Clear, area);
+    let inner = if screen_reader {
+        frame.render_widget(Block::default().style(theme.ui(UiRole::Background)), area);
+        frame.render_widget(
+            Paragraph::new(format!("Choose {}", picker.title)).style(theme.ui(UiRole::Prompt)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+        Rect::new(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            area.height.saturating_sub(1),
+        )
+    } else {
+        let block = Block::bordered()
+            .title(format!(" {} ", picker.title))
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .style(theme.ui(UiRole::Surface))
+            .border_style(theme.ui(UiRole::Border));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    };
+    for (index, (text, selected, current)) in picker.rows.iter().enumerate() {
+        let y = inner
+            .y
+            .saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+        if y >= inner.bottom().saturating_sub(1) {
+            break;
+        }
+        let marker = if *selected { "❯" } else { " " };
+        let in_force = if *current { " (in force)" } else { "" };
+        let line = format!("{marker} {text}{in_force}");
+        let style = if *selected {
+            theme.ui(UiRole::Focus)
+        } else {
+            theme.ui(UiRole::Foreground)
+        };
+        frame.render_widget(
+            Paragraph::new(truncate_end(&line, inner.width)).style(style),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+    }
+    let footer_y = inner.bottom().saturating_sub(1);
+    let footer = if screen_reader {
+        let selected = picker
+            .rows
+            .iter()
+            .position(|(_, selected, _)| *selected)
+            .map_or(0, |index| index + 1);
+        format!(
+            "Current selection: {selected} of {}. Enter runs {} <choice>. Esc cancels.",
+            picker.rows.len(),
+            picker.command
+        )
+    } else {
+        format!("{} · runs {} <choice>", picker.hint, picker.command)
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_end(&footer, inner.width)).style(theme.ui(UiRole::Muted)),
+        Rect::new(inner.x, footer_y, inner.width, 1),
+    );
 }
 
 fn render_theme_picker(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) -> Vec<ThemeHit> {
@@ -7148,6 +7241,46 @@ mod tests {
             assert_eq!(hit_map.theme_rows.len(), 5);
             if screen_reader {
                 assert!(rendered.contains("Current selection: 2. Default"));
+                assert!(!rendered.contains('╭'));
+            } else {
+                assert!(rendered.contains('╭'));
+            }
+        }
+    }
+
+    #[test]
+    fn the_session_control_list_names_each_choice_and_the_command_it_runs() {
+        for screen_reader in [false, true] {
+            let mut app = model();
+            app.capabilities.screen_reader = screen_reader;
+            app.set_session_control(
+                crate::SessionControl::Actions,
+                "normal",
+                "Normal (launch and configuration)",
+                true,
+            );
+            app.open_settings([crate::SettingEntry {
+                section: "Session".into(),
+                name: "Actions".into(),
+                value: "unknown".into(),
+                description: "actions".into(),
+                edit: Some(crate::SettingEdit::Actions),
+                is_default: true,
+            }]);
+            let _ = app.handle_input(crate::InputAction::Submit, 80);
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let _ = render(frame, &app);
+                })
+                .expect("draw the list");
+            let rendered = terminal.backend().to_string();
+            assert!(rendered.contains("Normal - asks before risky actions (in force)"));
+            assert!(rendered.contains("Accept all - tools can change files outside the workspace"));
+            assert!(rendered.to_lowercase().contains("runs /actions <choice>"));
+            if screen_reader {
+                assert!(rendered.contains("Choose Actions"));
+                assert!(rendered.contains("Current selection: 1 of 2."));
                 assert!(!rendered.contains('╭'));
             } else {
                 assert!(rendered.contains('╭'));

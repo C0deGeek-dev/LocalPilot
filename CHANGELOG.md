@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/settings` has Work limits and Actions rows. Enter opens the real choices,
+  starting on the one in force, and applying one runs `/limits` or `/actions`, so
+  read-only, incognito and between-turn rules are the same as when typed. A refused
+  choice leaves the row on the real value, Esc cancels with no effect, and nothing
+  is written to configuration (ADR-0270, LocalHub#269).
 - The remote gateway gives the companion app what its Devices and
   notification screens need: `GET /api/device` (this device's own record:
   name, scope, workspace limit, paired date; never other devices),

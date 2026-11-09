@@ -591,6 +591,7 @@ struct TakeoverState {
     report_title: String,
     report_lines: Vec<String>,
     localmind: Option<LocalMindState>,
+    value_picker: Option<ValuePicker>,
 }
 
 impl fmt::Debug for TakeoverState {
@@ -662,6 +663,111 @@ pub enum SettingEdit {
     TimelineDensity,
     SuccessfulToolGrouping,
     Theme,
+    /// The session's work-limit mode, chosen from a list and applied by the host.
+    WorkLimits,
+    /// The session's action mode, chosen from a list and applied by the host.
+    Actions,
+}
+
+/// A session control the settings screen can change by running a slash command.
+/// The screen only chooses a value; the host applies it through the same
+/// command a user would type, so there is one place that decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionControl {
+    WorkLimits,
+    Actions,
+}
+
+/// One choice in a session-control list.
+struct ControlOption {
+    label: &'static str,
+    /// The slash argument this choice runs with.
+    argument: &'static str,
+    hint: &'static str,
+}
+
+impl SessionControl {
+    fn options(self) -> &'static [ControlOption] {
+        match self {
+            Self::WorkLimits => &[
+                ControlOption {
+                    label: "Automatic",
+                    argument: "automatic",
+                    hint: "adapts to the context and how reliable the model has been",
+                },
+                ControlOption {
+                    label: "Wide",
+                    argument: "wide",
+                    hint: "fixed, larger ceilings for one coherent edit",
+                },
+                ControlOption {
+                    label: "Very wide",
+                    argument: "very-wide",
+                    hint: "fixed, substantially larger ceilings",
+                },
+                ControlOption {
+                    label: "Off",
+                    argument: "off",
+                    hint: "no size limits; not advised without a reason",
+                },
+            ],
+            Self::Actions => &[
+                ControlOption {
+                    label: "Normal",
+                    argument: "normal",
+                    hint: "asks before risky actions",
+                },
+                ControlOption {
+                    label: "Accept all",
+                    argument: "accept-all",
+                    hint: "tools can change files outside the workspace and run commands without asking",
+                },
+            ],
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::WorkLimits => "Work limits",
+            Self::Actions => "Actions",
+        }
+    }
+
+    const fn command(self) -> &'static str {
+        match self {
+            Self::WorkLimits => "/limits",
+            Self::Actions => "/actions",
+        }
+    }
+}
+
+/// What the host last reported for a session control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlState {
+    /// The slash argument of the choice in force, or empty when none of the
+    /// listed choices is (an older, narrower profile).
+    argument: String,
+    /// The text the settings row shows.
+    value: String,
+    /// True while the value is the one launch and configuration chose.
+    is_default: bool,
+}
+
+/// An open session-control list on the settings screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValuePicker {
+    control: SessionControl,
+    selected: usize,
+    /// The option that is in force now, if it is one of the listed ones.
+    current: Option<usize>,
+}
+
+/// What the renderer needs to draw an open session-control list.
+pub(crate) struct ValuePickerView {
+    pub title: &'static str,
+    pub rows: Vec<(String, bool, bool)>,
+    pub hint: &'static str,
+    pub command: &'static str,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1672,6 +1778,9 @@ pub struct AppModel {
     takeover: Option<TakeoverState>,
     localmind_tab: Option<TakeoverState>,
     theme_picker: Option<ThemePickerState>,
+    /// The value in force for each session control, as the host last reported.
+    limits_state: Option<ControlState>,
+    actions_state: Option<ControlState>,
     quick_help: bool,
     /// Host-level canonical reasoning visibility (`/think`). Propagated to every
     /// projection timeline; reapplied when a timeline is reset.
@@ -1806,6 +1915,8 @@ impl AppModel {
             takeover: None,
             localmind_tab: None,
             theme_picker: None,
+            limits_state: None,
+            actions_state: None,
             quick_help: false,
             reasoning_visible: true,
             input_overlay: None,
@@ -3383,6 +3494,7 @@ impl AppModel {
             report_title: String::new(),
             report_lines: Vec::new(),
             localmind: None,
+            value_picker: None,
         });
     }
 
@@ -3413,6 +3525,7 @@ impl AppModel {
             report_title: title,
             report_lines,
             localmind: None,
+            value_picker: None,
         });
     }
 
@@ -3454,6 +3567,7 @@ impl AppModel {
                 editing_replacement: false,
                 replacement_draft: String::new(),
             }),
+            value_picker: None,
         });
     }
 
@@ -4057,7 +4171,9 @@ impl AppModel {
             report_title: String::new(),
             report_lines: Vec::new(),
             localmind: None,
+            value_picker: None,
         });
+        self.apply_control_rows();
     }
 
     /// Open settings with the filter pre-filled from `query` (e.g. from
@@ -4158,8 +4274,166 @@ impl AppModel {
                 self.sync_setting_values();
             }
             Some(SettingEdit::Theme) => self.open_theme_picker_from_settings(),
-            None => {}
+            Some(SettingEdit::WorkLimits) if !reset => {
+                self.open_value_picker(SessionControl::WorkLimits);
+            }
+            Some(SettingEdit::Actions) if !reset => {
+                self.open_value_picker(SessionControl::Actions);
+            }
+            Some(SettingEdit::WorkLimits | SettingEdit::Actions) | None => {}
         }
+    }
+
+    /// The text of a named settings row while the settings screen is open.
+    #[must_use]
+    pub fn setting_value(&self, name: &str) -> Option<&str> {
+        self.takeover
+            .as_ref()
+            .filter(|state| state.kind == TakeoverKind::Settings)?
+            .settings
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.value.as_str())
+    }
+
+    /// Record which choice is in force for a session control and update its
+    /// settings row. The host calls this whenever the real value is known, so
+    /// the row and the list start from what the runtime is doing, not from what
+    /// was last asked for.
+    pub fn set_session_control(
+        &mut self,
+        control: SessionControl,
+        current_argument: &str,
+        value: &str,
+        is_default: bool,
+    ) {
+        let reported = ControlState {
+            argument: current_argument.to_string(),
+            value: sanitize_inline(value),
+            is_default,
+        };
+        match control {
+            SessionControl::WorkLimits => self.limits_state = Some(reported),
+            SessionControl::Actions => self.actions_state = Some(reported),
+        }
+        self.apply_control_rows();
+    }
+
+    /// Copy the reported session-control values into the open settings rows.
+    fn apply_control_rows(&mut self) {
+        let limits = self.limits_state.clone();
+        let actions = self.actions_state.clone();
+        let Some(state) = self
+            .takeover
+            .as_mut()
+            .filter(|state| state.kind == TakeoverKind::Settings)
+        else {
+            return;
+        };
+        for setting in &mut state.settings {
+            let reported = match setting.edit {
+                Some(SettingEdit::WorkLimits) => &limits,
+                Some(SettingEdit::Actions) => &actions,
+                _ => continue,
+            };
+            if let Some(reported) = reported {
+                setting.value.clone_from(&reported.value);
+                setting.is_default = reported.is_default;
+            }
+        }
+    }
+
+    fn open_value_picker(&mut self, control: SessionControl) {
+        let current_argument = match control {
+            SessionControl::WorkLimits => self.limits_state.as_ref(),
+            SessionControl::Actions => self.actions_state.as_ref(),
+        }
+        .map(|reported| reported.argument.as_str());
+        let current = current_argument.and_then(|argument| {
+            control
+                .options()
+                .iter()
+                .position(|o| o.argument == argument)
+        });
+        if let Some(state) = self
+            .takeover
+            .as_mut()
+            .filter(|state| state.kind == TakeoverKind::Settings)
+        {
+            state.value_picker = Some(ValuePicker {
+                control,
+                selected: current.unwrap_or(0),
+                current,
+            });
+        }
+    }
+
+    /// The open session-control list, for drawing.
+    #[must_use]
+    pub(crate) fn value_picker(&self) -> Option<ValuePickerView> {
+        let picker = self.takeover.as_ref()?.value_picker?;
+        let options = picker.control.options();
+        Some(ValuePickerView {
+            title: picker.control.title(),
+            rows: options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| {
+                    (
+                        format!("{} - {}", option.label, option.hint),
+                        index == picker.selected,
+                        Some(index) == picker.current,
+                    )
+                })
+                .collect(),
+            hint: "Up/Down choose, Enter apply, Esc cancel",
+            command: picker.control.command(),
+        })
+    }
+
+    fn handle_value_picker_input(&mut self, action: InputAction) -> AppCommand {
+        let Some(picker) = self.takeover.as_ref().and_then(|state| state.value_picker) else {
+            return AppCommand::None;
+        };
+        let len = picker.control.options().len().max(1);
+        let set = |app: &mut Self, picker: Option<ValuePicker>| {
+            if let Some(state) = app.takeover.as_mut() {
+                state.value_picker = picker;
+            }
+        };
+        match action {
+            InputAction::Escape => set(self, None),
+            InputAction::MoveUp => set(
+                self,
+                Some(ValuePicker {
+                    selected: (picker.selected + len - 1) % len,
+                    ..picker
+                }),
+            ),
+            InputAction::MoveDown => set(
+                self,
+                Some(ValuePicker {
+                    selected: (picker.selected + 1) % len,
+                    ..picker
+                }),
+            ),
+            InputAction::Submit | InputAction::AcceptCompletion => {
+                set(self, None);
+                let Some(option) = picker.control.options().get(picker.selected) else {
+                    return AppCommand::None;
+                };
+                let line = format!("{} {}", picker.control.command(), option.argument);
+                return AppCommand::RunSlash(SubmittedInput {
+                    shown: line.clone(),
+                    display: line.clone(),
+                    prompt: line,
+                    pastes: Vec::new(),
+                    images: Vec::new(),
+                });
+            }
+            _ => {}
+        }
+        AppCommand::None
     }
 
     pub fn open_diff(&mut self, files: impl IntoIterator<Item = DiffFile>) {
@@ -4203,6 +4477,7 @@ impl AppModel {
             report_title: String::new(),
             report_lines: Vec::new(),
             localmind: None,
+            value_picker: None,
         });
     }
 
@@ -4238,6 +4513,7 @@ impl AppModel {
             report_title: String::new(),
             report_lines: Vec::new(),
             localmind: None,
+            value_picker: None,
         });
     }
 
@@ -5369,7 +5645,7 @@ impl AppModel {
                     setting.value = self.theme.display_name().to_string();
                     setting.is_default = self.theme == self.default_theme;
                 }
-                None => {}
+                Some(SettingEdit::WorkLimits | SettingEdit::Actions) | None => {}
             }
         }
     }
@@ -5462,6 +5738,13 @@ impl AppModel {
     }
 
     fn handle_takeover_input(&mut self, action: InputAction) -> AppCommand {
+        if self
+            .takeover
+            .as_ref()
+            .is_some_and(|state| state.value_picker.is_some())
+        {
+            return self.handle_value_picker_input(action);
+        }
         match action {
             InputAction::Escape => {
                 if self.clear_settings_query() {
@@ -8246,6 +8529,139 @@ mod tests {
         assert!(app.takeover().expect("settings").settings_query.is_empty());
         assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
         assert!(!app.has_takeover());
+    }
+
+    fn session_control_rows() -> [SettingEntry; 2] {
+        [
+            SettingEntry {
+                section: "Session".into(),
+                name: "Work limits".into(),
+                value: "unknown".into(),
+                description: "limits".into(),
+                edit: Some(SettingEdit::WorkLimits),
+                is_default: true,
+            },
+            SettingEntry {
+                section: "Session".into(),
+                name: "Actions".into(),
+                value: "unknown".into(),
+                description: "actions".into(),
+                edit: Some(SettingEdit::Actions),
+                is_default: true,
+            },
+        ]
+    }
+
+    fn run_slash_text(command: AppCommand) -> String {
+        let AppCommand::RunSlash(submitted) = command else {
+            panic!("expected a slash command, got {command:?}");
+        };
+        submitted.prompt
+    }
+
+    #[test]
+    fn a_session_control_list_starts_on_the_value_in_force_and_runs_the_typed_command() {
+        let mut app = model();
+        app.set_session_control(
+            SessionControl::WorkLimits,
+            "automatic",
+            "automatic (from configuration)",
+            true,
+        );
+        app.open_settings(session_control_rows());
+        assert_eq!(
+            app.takeover().expect("settings").settings[0].value,
+            "automatic (from configuration)",
+            "a row shows what the host last reported"
+        );
+
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        let view = app.value_picker().expect("the list is open");
+        assert_eq!(view.title, "Work limits");
+        assert_eq!(view.rows.len(), 4);
+        assert!(
+            view.rows[0].1 && view.rows[0].2,
+            "starts on the value in force"
+        );
+
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        let command = app.handle_input(InputAction::Submit, 80);
+        assert_eq!(run_slash_text(command), "/limits very-wide");
+        assert!(app.value_picker().is_none(), "applying closes the list");
+        assert!(app.has_takeover(), "and returns to the settings screen");
+    }
+
+    #[test]
+    fn cancelling_a_session_control_list_changes_nothing_and_keeps_the_settings_open() {
+        let mut app = model();
+        app.set_session_control(
+            SessionControl::Actions,
+            "normal",
+            "Normal (launch and configuration)",
+            true,
+        );
+        app.open_settings(session_control_rows());
+        app.scroll_takeover_by(1, 2, 2);
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        let view = app.value_picker().expect("actions list");
+        assert_eq!(view.title, "Actions");
+        assert_eq!(view.rows.len(), 2);
+        assert!(view.rows[0].2, "Normal is the one in force");
+
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(app.value_picker().is_none());
+        assert!(app.has_takeover(), "Esc only closes the list");
+        assert_eq!(
+            app.takeover().expect("settings").settings[1].value,
+            "Normal (launch and configuration)"
+        );
+    }
+
+    #[test]
+    fn an_older_profile_starts_the_actions_list_on_neither_choice_as_in_force() {
+        let mut app = model();
+        app.set_session_control(
+            SessionControl::Actions,
+            "",
+            "relaxed profile (this session)",
+            false,
+        );
+        app.open_settings(session_control_rows());
+        app.scroll_takeover_by(1, 2, 2);
+        let _ = app.handle_input(InputAction::Submit, 80);
+        let view = app.value_picker().expect("actions list");
+        assert!(
+            view.rows.iter().all(|row| !row.2),
+            "nothing is marked in force"
+        );
+    }
+
+    #[test]
+    fn a_reported_value_updates_an_open_settings_row_and_its_default_marker() {
+        let mut app = model();
+        app.open_settings(session_control_rows());
+        app.set_session_control(
+            SessionControl::Actions,
+            "accept-all",
+            "Accept all (this session)",
+            false,
+        );
+        let row = &app.takeover().expect("settings").settings[1];
+        assert_eq!(row.value, "Accept all (this session)");
+        assert!(!row.is_default);
+    }
+
+    #[test]
+    fn resetting_a_session_control_row_opens_no_list() {
+        let mut app = model();
+        app.open_settings(session_control_rows());
+        assert_eq!(
+            app.handle_input(InputAction::OpenReverseHistory, 80),
+            AppCommand::None
+        );
+        assert!(app.value_picker().is_none());
     }
 
     #[test]

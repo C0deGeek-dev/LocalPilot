@@ -33,9 +33,10 @@ pub use app::{
     DiffLineKind, Focus, Header, ImageAttachBlock, InputAction, KeyboardSupport, LocalMindData,
     LocalMindReviewAction, LocalMindReviewIntent, LocalMindReviewRow, LocalMindSection, PairStatus,
     PairStatusCandidate, PlanEntry, QuestionAction, QuestionOption, QuestionResponse,
-    RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection, SettingEdit, SettingEntry,
-    StopState, TabId, TakeoverKind, TakeoverNavigation, TerminalCapabilities, TimelineNavigation,
-    ToolAction, TrustAction, UsageTotals, UserShellCommand, UserShellOutput, WorkState,
+    RecoveryState, RuntimeUpdate, SessionControl, SessionEntry, SessionSelection, SettingEdit,
+    SettingEntry, StopState, TabId, TakeoverKind, TakeoverNavigation, TerminalCapabilities,
+    TimelineNavigation, ToolAction, TrustAction, UsageTotals, UserShellCommand, UserShellOutput,
+    WorkState,
 };
 pub use devices::{DevicesConfirm, DevicesFocus, DevicesRow, DevicesView};
 pub use editor::{Editor, EditorRow, ImageAttachment, PasteUnit, SubmittedInput};

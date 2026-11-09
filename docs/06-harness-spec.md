@@ -791,6 +791,7 @@ An unapproved draft does not survive a restart; approved documents do.
 | `/harness-stop` | Signal the active harness operation and await cancellation, or discard its idle unapproved conversation |
 | `/limits [automatic\|wide\|very-wide\|off]` | Show or set this session's work-limit mode. A value takes effect from the next turn and clears an earlier size refusal; it keeps explicit ceilings and leaves permission, verification and earlier evidence unchanged. Not available while a turn is running (ADR-0266) |
 | `/actions [normal\|accept-all]` | Show or set this session's action mode: Normal is the default profile, Accept all the unrestricted one. Applies from the next tool call, also during a turn; a read-only session is not changed. Never written to configuration or a grant (ADR-0266) |
+| `/settings` rows Work limits and Actions | Show the effective mode and where it came from. Enter opens the choices; applying one runs `/limits <choice>` or `/actions <choice>`, so every rule of those commands applies. Esc cancels (ADR-0270) |
 | `/disable-envelope`, `/enable-envelope` | Switch the work envelope's size limits off or on for this session, including the steps `/harness-resume` runs. Disabling is not advised without a reason; permission and verification are unchanged |
 
 No arguments are accepted by status, resume or stop; feature requires a

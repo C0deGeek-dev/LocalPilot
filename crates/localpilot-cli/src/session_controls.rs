@@ -9,6 +9,7 @@
 use localpilot_config::WorkLimitMode;
 use localpilot_sandbox::Profile;
 use localpilot_slash::{ActionSetting, Profile as UiProfile, WorkLimitSetting};
+use localpilot_terminal_ui::{AppModel, SessionControl};
 
 /// The config mode a `/limits` argument selects.
 pub(crate) const fn limit_mode(setting: WorkLimitSetting) -> WorkLimitMode {
@@ -72,6 +73,57 @@ pub(crate) fn describe_actions(current: Profile, changed_here: bool) -> String {
         "actions: {} ({source}). /actions normal|accept-all changes it for this session only; /relaxed and /bypass remain the narrower older profiles",
         action_label(current)
     )
+}
+
+/// The slash argument of the action mode a profile stands for, or empty when
+/// none of the listed choices does (an older, narrower profile).
+const fn action_argument(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Default => "normal",
+        Profile::Unrestricted => "accept-all",
+        Profile::Relaxed | Profile::Bypass | Profile::ReadOnly => "",
+    }
+}
+
+/// Tell the settings screen what the work limits are now, so its row and list
+/// show the runtime's value rather than the last one asked for.
+pub(crate) fn publish_limits(
+    app: &mut AppModel,
+    effective: WorkLimitMode,
+    configured: WorkLimitMode,
+    changed_here: bool,
+) {
+    let value = if changed_here {
+        format!(
+            "{} (this session; configured: {})",
+            limit_label(effective),
+            limit_label(configured)
+        )
+    } else {
+        format!("{} (from configuration)", limit_label(effective))
+    };
+    app.set_session_control(
+        SessionControl::WorkLimits,
+        limit_label(effective),
+        &value,
+        !changed_here,
+    );
+}
+
+/// Tell the settings screen what the action mode is now.
+pub(crate) fn publish_actions(app: &mut AppModel, current: Profile, changed_here: bool) {
+    let source = if changed_here {
+        "this session"
+    } else {
+        "launch and configuration"
+    };
+    let value = format!("{} ({source})", action_label(current));
+    app.set_session_control(
+        SessionControl::Actions,
+        action_argument(current),
+        &value,
+        !changed_here,
+    );
 }
 
 /// The outcome of asking for an action mode.

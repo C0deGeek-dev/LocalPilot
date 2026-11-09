@@ -1970,6 +1970,26 @@ fn fullscreen_settings_with_effort(
         edit: None,
         is_default: effort.is_none(),
     });
+    // Session controls: the host reports their value through
+    // `session_controls::publish_*`, and a choice runs `/limits` or `/actions`.
+    settings.push(SettingEntry {
+        section: "Session".to_string(),
+        name: "Work limits".to_string(),
+        value: "unknown".to_string(),
+        description:
+            "How large one unit of work may be. Enter chooses; this session only, same as /limits."
+                .to_string(),
+        edit: Some(localpilot_terminal_ui::SettingEdit::WorkLimits),
+        is_default: true,
+    });
+    settings.push(SettingEntry {
+        section: "Session".to_string(),
+        name: "Actions".to_string(),
+        value: "unknown".to_string(),
+        description: "Normal asks before risky actions; Accept all does not. Enter chooses; this session only, same as /actions.".to_string(),
+        edit: Some(localpilot_terminal_ui::SettingEdit::Actions),
+        is_default: true,
+    });
     settings
 }
 
@@ -3676,6 +3696,7 @@ async fn execute_fullscreen_slash_action(
         SlashAction::SetProfile(profile) => {
             runtime.set_permission_profile(crate::repl::sandbox_profile(profile), Vec::new());
             app.set_shared_profile(profile.label());
+            stages.actions_changed.set(true);
             app.apply_runtime(RuntimeUpdate::Notice(format!(
                 "permission profile set to {}",
                 profile.label()
@@ -4573,6 +4594,19 @@ async fn run_event_loop(
     // takes of the config.
     let execution = ExecutionSnapshot::of(&config.harness);
     loop {
+        // What the settings screen shows for the work limits and the action mode
+        // is read from the runtime, never remembered from the last request.
+        crate::session_controls::publish_limits(
+            app,
+            runtime.work_limit_mode(),
+            config.harness.granularity.mode,
+            stages.limits_changed.get(),
+        );
+        crate::session_controls::publish_actions(
+            app,
+            runtime.permission_engine_handle().snapshot().profile(),
+            stages.actions_changed.get(),
+        );
         if app.exit_requested {
             if exit_allowed(app, &stages, "Idle") {
                 break;
@@ -9872,6 +9906,12 @@ fn run_active_fullscreen_slash(
                             .with_profile(crate::repl::sandbox_profile(profile), Vec::new()),
                     );
                     app.set_shared_profile(profile.label());
+                    stages.actions_changed.set(true);
+                    crate::session_controls::publish_actions(
+                        app,
+                        live.permissions.snapshot().profile(),
+                        true,
+                    );
                     app.apply_runtime(RuntimeUpdate::Notice(format!(
                         "permission profile: {} (in force from the next tool call)",
                         profile.label()
@@ -9906,6 +9946,11 @@ fn run_active_fullscreen_slash(
                                         ));
                                     app.set_shared_profile(profile.label());
                                     stages.actions_changed.set(true);
+                                    crate::session_controls::publish_actions(
+                                        app,
+                                        live.permissions.snapshot().profile(),
+                                        true,
+                                    );
                                     app.apply_runtime(if warn {
                                         RuntimeUpdate::Warning(notice)
                                     } else {
@@ -26472,6 +26517,130 @@ last_seen = "2026-08-10"
         )
         .await;
         assert_eq!(profile(&bundle), localpilot_sandbox::Profile::ReadOnly);
+        assert!(timeline_has_notice(&app, "this session is read-only"));
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn a_settings_list_choice_runs_the_typed_command_and_changes_the_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let mut bundle = brief_session(cwd, scripted(&[])).await;
+        let config = localpilot_config::Config::default();
+        let mut app = app();
+        let mut stages = StageHost::new();
+        let publish =
+            |app: &mut AppModel, bundle: &InteractiveSessionBundle, stages: &StageHost| {
+                crate::session_controls::publish_limits(
+                    app,
+                    bundle.runtime.work_limit_mode(),
+                    config.harness.granularity.mode,
+                    stages.limits_changed.get(),
+                );
+                crate::session_controls::publish_actions(
+                    app,
+                    bundle
+                        .runtime
+                        .permission_engine_handle()
+                        .snapshot()
+                        .profile(),
+                    stages.actions_changed.get(),
+                );
+            };
+        publish(&mut app, &bundle, &stages);
+        app.open_settings(fullscreen_settings_with_effort(&app, &config, None));
+        let row = |app: &AppModel, name: &str| app.setting_value(name).expect("row").to_string();
+        assert_eq!(row(&app, "Work limits"), "automatic (from configuration)");
+        assert_eq!(row(&app, "Actions"), "Normal (launch and configuration)");
+
+        // Move to the Work limits row, then choose "Very wide" from its list.
+        let listed = fullscreen_settings_with_effort(&app, &config, None);
+        let limits_at = listed
+            .iter()
+            .position(|entry| entry.name == "Work limits")
+            .expect("the Work limits row");
+        app.scroll_takeover_by(
+            isize::try_from(limits_at).unwrap(),
+            listed.len(),
+            listed.len(),
+        );
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        let AppCommand::RunSlash(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("choosing a value runs a slash command");
+        };
+        assert_eq!(
+            parse_slash_for(Host::Fullscreen, &submitted.prompt),
+            parse_slash_for(Host::Fullscreen, "/limits very-wide"),
+            "a choice is the same action as typing it"
+        );
+        let action = parse_slash_for(Host::Fullscreen, &submitted.prompt).unwrap();
+        execute_fullscreen_slash_action(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            &mut stages,
+            &RefCell::new(None),
+            &localpilot_store::PromptHistory::with_store(None),
+            action,
+        )
+        .await;
+        publish(&mut app, &bundle, &stages);
+        assert_eq!(
+            bundle.runtime.work_limit_mode(),
+            localpilot_config::WorkLimitMode::VeryWide
+        );
+        assert_eq!(
+            row(&app, "Work limits"),
+            "very-wide (this session; configured: automatic)"
+        );
+        assert!(
+            !cwd.join(".localpilot.toml").exists(),
+            "a choice never writes project configuration"
+        );
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn a_refused_settings_choice_leaves_the_row_on_the_real_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let mut bundle = brief_session(cwd, scripted(&[])).await;
+        bundle
+            .runtime
+            .set_permission_profile(localpilot_sandbox::Profile::ReadOnly, Vec::new());
+        let config = localpilot_config::Config::default();
+        let mut app = app();
+        let mut stages = StageHost::new();
+        let action = parse_slash_for(Host::Fullscreen, "/actions accept-all").unwrap();
+        execute_fullscreen_slash_action(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            &mut stages,
+            &RefCell::new(None),
+            &localpilot_store::PromptHistory::with_store(None),
+            action,
+        )
+        .await;
+        crate::session_controls::publish_actions(
+            &mut app,
+            bundle
+                .runtime
+                .permission_engine_handle()
+                .snapshot()
+                .profile(),
+            stages.actions_changed.get(),
+        );
+        app.open_settings(fullscreen_settings_with_effort(&app, &config, None));
+        let value = app.setting_value("Actions").unwrap().to_string();
+        assert!(
+            value.starts_with("read-only"),
+            "not shown as Accept all: {value}"
+        );
         assert!(timeline_has_notice(&app, "this session is read-only"));
         bundle.runtime.close();
     }
