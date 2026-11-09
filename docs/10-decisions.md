@@ -2,6 +2,50 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0269: A Self-Hosted Phone Companion Narrows The Deferral Of A Browser Client And Remote Control
+
+**Status:** accepted · **Date:** 2026-11-09. Refs LocalHub#255. Narrows the
+earlier deferral of a web client, browser UI and remote control plane, and
+the "no HTTP server" stance in `docs/embedding.md`, for the gateway only.
+
+**Context.** LocalPilot deferred a browser client and any remote control
+plane: an inbound listener and a second client surface widen the attack
+surface and the maintenance load. Users asked to follow and answer a running
+session from their phone without a hosted service. The companion work
+(ADR-0245, ADR-0247 to ADR-0251, ADR-0255 to ADR-0259, ADR-0265, ADR-0267,
+ADR-0268) built that in steps. This record states the boundary those steps
+share, so the deferral is narrowed on purpose and not by drift.
+
+**Decision.**
+1. **Narrowed, not lifted.** One remote surface exists: a phone web app
+   (LocalLink) that a paired device uses to follow and steer sessions the
+   user shares from the full-screen terminal. A desktop or hosted web client,
+   a public API and a general remote control plane stay deferred.
+2. **Self-hosted only.** No LocalX server, relay, domain or account is
+   involved. The app is served by the user's own computer, the same origin as
+   its API; any third-party tunnel or push service only carries traffic.
+3. **A separate, opt-in gateway.** `localpilot remote gateway` is its own
+   process, off unless `[remote] enabled` is set in the user config (D007).
+   It binds loopback only; TLS ends in a trusted HTTPS component the user runs
+   on the same computer (a tunnel agent, `tailscale serve` or a reverse
+   proxy). There is no plaintext network mode and no direct-IP,
+   self-signed mode: a web app cannot pin a certificate (D001, D002, D011).
+4. **The daemon decides.** Device registry, scopes and revocation live with
+   the workspace server; the gateway proves itself with a capability the
+   server issues and never grants anything itself (D006, ADR-0245,
+   ADR-0247).
+5. **A pinned app, not a version match.** LocalPilot serves one pinned,
+   verified LocalLink build; compatibility is that build's manifest
+   (protocol range and capabilities), not equal product versions (D005,
+   D010, ADR-0268).
+6. **Push is opt-in and content-free** (D003, ADR-0267); Android is the first
+   target, iOS is not excluded (D004).
+
+**Consequences.** `docs/embedding.md` keeps "no HTTP server" for the library
+and IPC contract and points here for the gateway. Security detail stays in
+`docs/07-security-and-privacy.md`. Any further remote surface needs its own
+record that narrows the deferral again.
+
 ## ADR-0268: The Gateway Serves One Pinned, Verified Build Of The Companion App
 
 **Status:** accepted · **Date:** 2026-11-09. Refs LocalHub#255.

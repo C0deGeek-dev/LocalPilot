@@ -12,7 +12,9 @@ preference:
 
 There is deliberately no HTTP server and no packaged product SDK: the library
 surface below is the embedding contract, and the RPC protocol is its
-process-boundary mirror.
+process-boundary mirror. The one exception is the separate, opt-in remote
+gateway that serves the phone companion app (ADR-0269); it is not part of the
+embedding contract.
 
 This document uses “embedding” for hosting the agent runtime. The vector-model
 server used by LocalMind has a separate lifecycle: session-bearing CLI commands
