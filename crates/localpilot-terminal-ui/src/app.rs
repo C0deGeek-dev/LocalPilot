@@ -1626,6 +1626,9 @@ pub struct AppModel {
     /// Live host-projected incognito state. Kept separate from the permission
     /// profile label so a profile switch cannot erase the privacy indicator.
     incognito: bool,
+    /// How the last projected stop ended, kept until the host takes it, so a
+    /// host can say what an operation actually ended as.
+    last_stop: Option<StopState>,
     pub capabilities: TerminalCapabilities,
     pub theme: Theme,
     pub tabs: Vec<TabId>,
@@ -1770,6 +1773,7 @@ impl AppModel {
             projections,
             pair_status: None,
             incognito: false,
+            last_stop: None,
             capabilities,
             theme: Theme::Default,
             tabs,
@@ -2719,7 +2723,16 @@ impl AppModel {
     }
 
     pub fn apply_runtime(&mut self, update: RuntimeUpdate) {
+        if let RuntimeUpdate::Stopped(state) = &update {
+            self.last_stop = Some(*state);
+        }
         Self::apply_runtime_projection(self.projections.active_mut(), update);
+    }
+
+    /// Take how the last projected stop ended (`None` when none was
+    /// projected since the last take).
+    pub fn take_last_stop(&mut self) -> Option<StopState> {
+        self.last_stop.take()
     }
 
     /// Applies a runtime update to one named peer without changing the active

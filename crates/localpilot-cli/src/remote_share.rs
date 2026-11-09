@@ -510,14 +510,16 @@ impl RemoteShare {
         &self.source
     }
 
-    /// Wait at most `within` for the last ended share's relay to finish (its
-    /// closing notice to the server), so a confirmed exit is orderly but never
-    /// held up by an unresponsive server.
-    /// Returns whether it finished in time (true when nothing was ending).
+    /// Wait at most `within` for the last ended share's relay task to finish
+    /// (it sends its closing notice to the server), so a confirmed exit is
+    /// orderly but never held up by an unresponsive server.
+    /// Returns whether the task completed normally in time (true when nothing
+    /// was ending). A panicked or aborted task, or a timeout, is false. Even
+    /// a normal completion is not the server's acknowledgement.
     pub(crate) async fn wind_down(&self, within: Duration) -> bool {
         let ending = self.inner().ending.take();
         match ending {
-            Some(ending) => tokio::time::timeout(within, ending).await.is_ok(),
+            Some(ending) => matches!(tokio::time::timeout(within, ending).await, Ok(Ok(()))),
             None => true,
         }
     }
@@ -1440,6 +1442,27 @@ mod tests {
         server.ready().await;
         until(|| f.share.state() == ShareState::Shared).await;
         server
+    }
+
+    #[tokio::test]
+    async fn winding_down_confirms_only_a_relay_task_that_completed_normally() {
+        let f = fixture();
+        assert!(f.share.wind_down(QUICK).await, "nothing ending");
+        f.share.inner().ending = Some(tokio::spawn(async {}));
+        assert!(f.share.wind_down(QUICK).await, "completed normally");
+        f.share.inner().ending = Some(tokio::spawn(std::future::pending::<()>()));
+        assert!(
+            !f.share.wind_down(Duration::from_millis(20)).await,
+            "not finished in time"
+        );
+        f.share.inner().ending = Some(tokio::spawn(async {
+            panic!("the relay task failed");
+        }));
+        assert!(!f.share.wind_down(QUICK).await, "a failed task");
+        let aborted = tokio::spawn(std::future::pending::<()>());
+        aborted.abort();
+        f.share.inner().ending = Some(aborted);
+        assert!(!f.share.wind_down(QUICK).await, "an aborted task");
     }
 
     #[tokio::test]

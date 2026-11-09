@@ -9018,7 +9018,9 @@ where
     };
     let servicing = matches!(questions, QuestionMode::Serviced);
     tokio::pin!(operation);
-    // A device's cancel names only the operation it was taken for.
+    // A device's cancel names only the operation it was taken for, and only
+    // this operation's own stop says how it ended.
+    let _ = app.take_last_stop();
     if let Some(host) = stages.remote.clone() {
         remote_host::operation_started(&host);
     }
@@ -9315,8 +9317,11 @@ where
                     if let Some(done) = on_complete.take() {
                         done(app, reason);
                     }
+                    // The projected stop is the outcome; a cancel request
+                    // the operation finished anyway is not a cancellation.
+                    let ended_cancelled = app.take_last_stop() == Some(StopState::Cancelled);
                     if let Some(host) = stages.remote.clone() {
-                        remote_host::operation_ended(app, &host, cancel.is_cancelled());
+                        remote_host::operation_ended(app, &host, ended_cancelled);
                     }
                     let _ = (io.draw)(app)?;
                     return Ok(false);
@@ -26928,6 +26933,86 @@ last_seen = "2026-08-10"
         assert!(!cancel.is_cancelled());
         let _ = told; // shared helper for other cases
         bundle.runtime.close();
+    }
+
+    /// Run one turn through the real operation pump while a device cancels
+    /// it, and the turn then stops as `stop`. Returns the turn-cancel lines.
+    async fn a_device_cancel_then(stop: StopReason) -> Vec<String> {
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (events, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let dials = crate::remote_share::test_support::Dials::default();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+        let host = sharing_host(&dials, &level);
+        let mut server = shared_over_fake(&dials, &host).await;
+        let mut stages = StageHost::new();
+        stages.remote = Some(host.clone());
+        let input = queued(vec![]);
+        let mut io = characterization_io(input, cell(0), cell(0), None);
+        let requested = cancel.clone();
+        let turn = async move {
+            server
+                .command("d1", 1, localpilot_rpc::ClientCommand::Cancel)
+                .await;
+            tokio::time::timeout(Duration::from_secs(5), requested.cancelled())
+                .await
+                .expect("the device cancel reached the turn");
+            // The turn ends as it ends, whatever was asked.
+            let _ = events.send(RuntimeEvent::Stopped(stop));
+            server
+        };
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            &mut stages,
+            turn,
+            |_app: &mut AppModel, _server| {},
+        )
+        .await
+        .expect("turn loop completes");
+        app.active_timeline()
+            .items()
+            .iter()
+            .map(|item| item.text.clone())
+            .filter(|text| text.starts_with("Turn cancel"))
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_device_cancel_is_called_a_cancellation_only_when_the_turn_ended_cancelled() {
+        assert_eq!(
+            a_device_cancel_then(StopReason::Done).await,
+            vec!["Turn cancellation requested from Pixel [d1].".to_string()],
+            "a turn that finished anyway was not cancelled"
+        );
+        assert_eq!(
+            a_device_cancel_then(StopReason::Cancelled).await,
+            vec![
+                "Turn cancellation requested from Pixel [d1].".to_string(),
+                "Turn cancelled from Pixel [d1].".to_string(),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]

@@ -25,11 +25,14 @@ and a cancel said only "cancelling the current work".
    session reads as before.
 3. A device's cancel says "Turn cancellation requested from …" for the first
    cancel of the running operation, and "Turn cancelled from …" once if that
-   operation ended cancelled.
+   operation's own stop says it ended cancelled. A request the operation
+   finished anyway (one that cannot be interrupted, or a late cancel) is not
+   called a cancellation.
 4. The close confirmation names the attached devices (at most three, then a
    count), or says "No devices attached. Closing ends this shared session."
-   When the phone disconnect cannot be confirmed at exit, the terminal says
-   so after it closes. `/remote` notes that closing the terminal ends phone
+   When the phone disconnect cannot be confirmed at exit (the relay task did
+   not complete normally in time, or failed), the terminal says so after it
+   closes. A normal completion is still not the server's acknowledgement. `/remote` notes that closing the terminal ends phone
    access.
 
 **Consequences.** Who decided an ask or cancelled a turn is visible where the
