@@ -11,6 +11,12 @@ is SemVer-stable; the configuration schema stability policy is in
   Attention view and this phone's device record with a revoke action, and can
   turn phone notifications on, test them through the real push path, and turn
   them off. Its notification worker is served at `/push-worker.js`.
+- A session records which task guidance each provider request held: every
+  project instruction file, skill summary or skill body on offer, why it was
+  chosen, and whether its text was in the assembled request (intact, altered or
+  absent). The record is read from the request after budget and compaction, kept
+  in memory, and available to hosts and tests as `SessionRuntime::task_guidance()`.
+  Requests themselves are unchanged (ADR-0271, LocalHub#270).
 - `/settings` has Work limits and Actions rows. Enter opens the real choices,
   starting on the one in force, and applying one runs `/limits` or `/actions`, so
   read-only, incognito and between-turn rules are the same as when typed. A refused

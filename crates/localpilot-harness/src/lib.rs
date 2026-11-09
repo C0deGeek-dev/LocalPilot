@@ -46,6 +46,7 @@ mod session_scratch;
 mod step_sessions;
 mod summarizer;
 mod system_prompt;
+mod task_guidance;
 mod verify_target;
 mod worker;
 mod workspace_state;
@@ -109,6 +110,9 @@ pub use scorecard::{
     SchemaValidator,
 };
 pub use step_sessions::STEP_SESSIONS_KEY;
+pub use task_guidance::{
+    GuidanceDelivery, GuidanceEntry, GuidancePlacement, GuidanceSegment, RequestGuidance,
+};
 // The shared eval surface (scorecard contract, discipline metrics, blinded
 // judge, ablation) re-exported so consumers keep one import path.
 pub use localx_eval_core::{

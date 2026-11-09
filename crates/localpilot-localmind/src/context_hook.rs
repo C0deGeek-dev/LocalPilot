@@ -384,6 +384,7 @@ impl ContextHook for LocalMindContext {
         ContextContribution {
             text: (!blocks.is_empty()).then(|| blocks.join("\n")),
             memories,
+            guidance: Vec::new(),
         }
     }
 

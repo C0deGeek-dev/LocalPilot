@@ -1564,6 +1564,9 @@ pub struct SessionRuntime {
     /// hooks once at the turn's exit (`stop`) for best-effort usage tracking —
     /// post-turn, never on the retrieval read path.
     turn_memories_used: Vec<localpilot_store::MemoryUsed>,
+    /// Which task guidance each assembled request held. In memory only; it
+    /// changes nothing about a request.
+    task_guidance: crate::task_guidance::TaskGuidanceLog,
     /// The handoff summarizing the most recently finished turn, built at the
     /// single exit (`stop`). Read by a non-interactive caller for a terminal
     /// state even when the turn timed out.
@@ -1714,6 +1717,7 @@ impl SessionRuntime {
             turn_reported_failures: 0,
             turn_stuck_tools: Vec::new(),
             turn_memories_used: Vec::new(),
+            task_guidance: crate::task_guidance::TaskGuidanceLog::default(),
             last_handoff: None,
             turn_verification: None,
             turn_has_changes: false,
@@ -2522,6 +2526,7 @@ impl SessionRuntime {
                 unavailable_backend: None,
                 permission_denial: None,
                 work_envelope_refusal: false,
+                guidance: Vec::new(),
             };
         }
         self.record_event(SessionEventKind::ToolStarted {
@@ -2555,6 +2560,7 @@ impl SessionRuntime {
                         unavailable_backend: None,
                         permission_denial: None,
                         work_envelope_refusal: false,
+                        guidance: Vec::new(),
                     },
                     true,
                 ),
@@ -4676,7 +4682,8 @@ impl SessionRuntime {
         // as `cancel`. A clone shares the underlying token, so a request raised on
         // the runtime's handle from another task is seen here.
         let quiesce = self.quiesce.clone();
-        let contribution = self.hooks.contribute(user_input);
+        let mut contribution = self.hooks.contribute(user_input);
+        let contributed_guidance = std::mem::take(&mut contribution.guidance);
         // Where each hook's text goes. An answer-only turn moves all of it beside
         // the question (ADR-0211). An ordinary session moves only what was
         // retrieved for the question and leaves standing instructions in the
@@ -4693,6 +4700,36 @@ impl SessionRuntime {
         } else {
             (contribution.all(), String::new())
         };
+        // Follow this turn's guidance by where its hook's text was just placed.
+        let answer_only = self.config.answer_only;
+        self.task_guidance
+            .begin_turn(
+                contributed_guidance
+                    .into_iter()
+                    .map(|(placement, segment)| {
+                        let beside = answer_only
+                            || (beside_question
+                                && placement == crate::ContextPlacement::BesideQuestion);
+                        let placement = if beside {
+                            crate::GuidancePlacement::BesideQuestion
+                        } else {
+                            crate::GuidancePlacement::System
+                        };
+                        (placement, segment)
+                    }),
+            );
+        if self.config.package_discovery_disabled_but_present {
+            self.task_guidance.set_standing(
+                localpilot_core::GuidanceSource::new(
+                    localpilot_core::GuidanceKind::HostNotice,
+                    localpilot_core::GuidanceForm::Metadata,
+                    "package-discovery-disabled",
+                    "system prompt",
+                    "skill packages are installed while model discovery is off",
+                ),
+                crate::system_prompt::package_discovery_disabled_but_present_cue().to_string(),
+            );
+        }
         if !contribution.memories.is_empty() {
             // Stash the injected set for a single best-effort usage bump at the
             // turn's exit (`stop`) — post-turn, off the retrieval read path.
@@ -4912,6 +4949,9 @@ impl SessionRuntime {
                 .with_tools(tools)
                 .with_reasoning_effort(self.reasoning_effort.snapshot())
                 .with_tool_constraint(tool_constraint);
+            // Read from the assembled request, after the budget, compaction and
+            // any image trim, so the record is what the provider is handed.
+            self.task_guidance.capture(&request.messages);
 
             self.record_event(SessionEventKind::TurnStarted {
                 model: self.config.model.clone(),
@@ -5744,6 +5784,7 @@ impl SessionRuntime {
                 let mut repaired_dispatched = false;
                 let mut bounded_write_dispatched = false;
                 let mut unavailable_backend = None;
+                let mut tool_guidance = Vec::new();
                 let mut permission_denial = None;
                 let mut work_envelope_refusal = false;
                 let result = match decision {
@@ -5951,6 +5992,7 @@ impl SessionRuntime {
                                         is_opaque_launch(name, &active_call.input)
                                             && dispatch.permission_denial.is_none();
                                     unavailable_backend = dispatch.unavailable_backend;
+                                    tool_guidance = dispatch.guidance;
                                     work_envelope_refusal = dispatch.work_envelope_refusal;
                                     if let Some(denial) = &dispatch.permission_denial {
                                         let _ = events.send(RuntimeEvent::Warning(
@@ -6402,6 +6444,10 @@ impl SessionRuntime {
                     id: result.id.to_string(),
                     verdict,
                 });
+                // Hashed as it enters the history, after any hint was appended,
+                // so a later request is compared with what the model first saw.
+                self.task_guidance
+                    .tool_result(&result.id, &result.output, tool_guidance);
                 self.append(Message::new(
                     Role::Tool,
                     vec![ContentBlock::ToolResult(result)],
@@ -6431,6 +6477,16 @@ impl SessionRuntime {
     #[must_use]
     pub fn paths_in_play(&self) -> crate::PathsInPlay {
         self.paths_in_play.clone()
+    }
+
+    /// Which task guidance each of this session's recent turn-loop requests
+    /// held, oldest first: every source on offer, where it was placed, and
+    /// whether its text was in the assembled request. Read from the request
+    /// itself, so it never lists guidance the provider was not handed. A
+    /// bounded window, kept in memory for the running session only.
+    #[must_use]
+    pub fn task_guidance(&self) -> Vec<crate::RequestGuidance> {
+        self.task_guidance.requests()
     }
 
     /// The handoff for the most recently finished turn, if any — a bounded,

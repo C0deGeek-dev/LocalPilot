@@ -15,7 +15,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use localpilot_core::{one_line, Locator, SUMMARY_CHARS};
+use localpilot_core::{
+    one_line, GuidanceForm, GuidanceKind, GuidanceSource, Locator, SUMMARY_CHARS,
+};
 use localpilot_sandbox::Effect;
 use localpilot_tools::{Tool, ToolContext, ToolError, ToolOutput};
 use schemars::JsonSchema;
@@ -123,6 +125,14 @@ impl SkillSearch {
     pub fn new() -> Self {
         Self { home: home_dir() }
     }
+
+    /// Construct the tool with a given home directory for the global skill
+    /// baseline, or none. For a caller that must not read the environment's
+    /// home, such as a fixture.
+    #[must_use]
+    pub fn with_home(home: Option<PathBuf>) -> Self {
+        Self { home }
+    }
 }
 
 impl Default for SkillSearch {
@@ -183,6 +193,21 @@ impl Tool for SkillSearch {
         // the count is taken before any truncation, so overflow is honest.
         let ranked = set.ranked(&input.query);
         let total = ranked.len();
+        // Only the locators that are shown: a match past the cap reached no one.
+        let guidance: Vec<GuidanceSource> = ranked
+            .iter()
+            .take(MAX_LOCATORS)
+            .map(|(skill, score)| {
+                skill_source(
+                    skill,
+                    GuidanceForm::Metadata,
+                    format!(
+                        "matched the model's search \"{}\" with score {score}",
+                        one_line(&input.query, SUMMARY_CHARS)
+                    ),
+                )
+            })
+            .collect();
         let mut locators: Vec<Locator> = ranked
             .into_iter()
             .map(|(skill, score)| {
@@ -222,7 +247,7 @@ impl Tool for SkillSearch {
                 locators.len()
             );
         }
-        Ok(ToolOutput::ok(out))
+        Ok(ToolOutput::ok(out).with_guidance(guidance))
     }
 }
 
@@ -250,6 +275,14 @@ impl SkillLoad {
     #[must_use]
     pub fn new() -> Self {
         Self { home: home_dir() }
+    }
+
+    /// Construct the tool with a given home directory for the global skill
+    /// baseline, or none. For a caller that must not read the environment's
+    /// home, such as a fixture.
+    #[must_use]
+    pub fn with_home(home: Option<PathBuf>) -> Self {
+        Self { home }
     }
 }
 
@@ -309,7 +342,13 @@ impl Tool for SkillLoad {
             Err(_) => return Ok(ToolOutput::ok("skills are unreadable")),
         };
         match set.by_name(input.name.trim()) {
-            Some(skill) => Ok(ToolOutput::ok(render_skill(skill))),
+            Some(skill) => Ok(
+                ToolOutput::ok(render_skill(skill)).with_guidance([skill_source(
+                    skill,
+                    GuidanceForm::Body,
+                    "the model loaded it by name",
+                )]),
+            ),
             None => Ok(ToolOutput::ok(format!(
                 "no skill named \"{}\"",
                 input.name.trim()
@@ -387,6 +426,14 @@ impl SkillList {
     #[must_use]
     pub fn new() -> Self {
         Self { home: home_dir() }
+    }
+
+    /// Construct the tool with a given home directory for the global skill
+    /// baseline, or none. For a caller that must not read the environment's
+    /// home, such as a fixture.
+    #[must_use]
+    pub fn with_home(home: Option<PathBuf>) -> Self {
+        Self { home }
     }
 }
 
@@ -490,8 +537,27 @@ impl Tool for SkillList {
                 plural(user_only)
             );
         }
-        Ok(ToolOutput::ok(out))
+        let guidance = skills[input.offset..end].iter().map(|skill| {
+            skill_source(
+                skill,
+                GuidanceForm::Metadata,
+                "the model listed the catalog",
+            )
+        });
+        Ok(ToolOutput::ok(out).with_guidance(guidance))
     }
+}
+
+/// A package skill as a guidance source: its name, the scope and version of the
+/// definition in force, and why this call returned it.
+fn skill_source(skill: &Skill, form: GuidanceForm, reason: impl Into<String>) -> GuidanceSource {
+    GuidanceSource::new(
+        GuidanceKind::PackageSkill,
+        form,
+        skill.manifest.name.clone(),
+        format!("{} v{}", skill.scope.label(), skill.manifest.version),
+        reason,
+    )
 }
 
 #[cfg(test)]

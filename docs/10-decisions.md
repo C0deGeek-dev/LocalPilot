@@ -2,6 +2,55 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0271: A Session Records Which Task Guidance Each Provider Request Held
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#270. Builds on ADR-0027
+and ADR-0217.
+
+**Context.** Guidance reaches a model by separate routes: project instruction
+files rendered by a context hook each turn, skill summaries and bodies returned by
+a tool, a fixed sentence in the system prompt. Each route knows its own source and
+none knows the finished request, which a character budget, a compaction or a
+recovery step can still change. Nothing tied a source and the reason it was chosen
+to what the provider was handed, so a selector result or a log line could say a
+skill was used when its text never arrived. Work that selects or loads guidance
+automatically needs that measurement first.
+
+**Decision.** The code that produces guidance reports its source as a typed value
+beside the text, and the session reads each assembled request to see what of it is
+there.
+- `GuidanceSource` (in `localpilot-core`) names the kind (project instructions,
+  package skill, learned skill, host notice), the form (metadata or body), an id,
+  an origin and the reason. A context hook returns its sources with the text they
+  belong to (`ContextContribution::guidance`); a tool returns them on its output
+  (`ToolOutput::guidance`). Nothing parses model-facing text to find a source.
+- The project-instructions hook reports one source per file that applies, with why
+  (`applies to every turn`, or the `applyTo` glob and the path it matched).
+  `skill_list`, `skill_search` and `active_skills` report metadata; `skill_load`
+  and an `active_skills` read report a body.
+- For every turn-loop request the session records each source on offer, where it
+  was placed, a SHA-256 and length of its text, and a delivery: intact, altered
+  (cut by a budget, masked by a compaction, annotated after the tool returned) or
+  absent. Hook text is looked up in the request's system and user text; a tool
+  result is followed by its call id and compared by hash. The record is taken
+  after the budget, compaction and image trim, from the request itself.
+- The record is in memory, bounded (the last 64 requests, 256 followed tool
+  results), and read with `SessionRuntime::task_guidance()`. It is not a session
+  event and is not persisted.
+- Reporting a source changes no request, registers no tool and grants nothing.
+
+**Alternatives.** A persisted session event was left out: the selection and
+lifecycle work that follows decides what such an event must carry, and a shape
+written to the log now would have to be migrated. Deriving sources by parsing the
+request text was rejected because the text does not say why something was chosen
+and a rendering change would silently break it.
+
+**Consequences.** A test can assert which guidance was selected, why, in which
+form, and whether it reached the provider, against a synthetic project and home.
+Requests are unchanged. A record does not survive the session, and a summarizer,
+judge or planning request is not recorded. Memory retrieval keeps its own record
+(`MemoriesUsed`).
+
 ## ADR-0270: The Settings Screen Chooses Work Limits And Actions By Running The Same Slash Command
 
 **Status:** accepted · **Date:** 2026-11-09. Refs LocalHub#269. Builds on ADR-0266.

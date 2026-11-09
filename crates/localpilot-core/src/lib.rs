@@ -9,6 +9,7 @@
 
 pub mod admission;
 mod error;
+mod guidance;
 mod id;
 mod message;
 mod search;
@@ -19,6 +20,7 @@ mod tool;
 mod usage;
 
 pub use error::CoreError;
+pub use guidance::{GuidanceForm, GuidanceKind, GuidanceSource};
 pub use id::{EventId, MessageId, SessionId, ToolUseId, TurnId};
 pub use message::{
     ContentBlock, Message, MessageMetadata, Role, RESEARCH_RESULT_ORIGIN, RESEARCH_TOPIC_ORIGIN,

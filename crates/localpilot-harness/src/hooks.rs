@@ -40,6 +40,11 @@ pub struct ContextContribution {
     pub text: Option<String>,
     /// The memory records the injected text represents, in injection order.
     pub memories: Vec<localpilot_store::MemoryUsed>,
+    /// The parts of the injected text that are task guidance, each with its
+    /// source. Empty for a hook that contributes none. Reporting these never
+    /// changes what is injected; it lets the session record which guidance a
+    /// request held.
+    pub guidance: Vec<crate::GuidanceSegment>,
 }
 
 pub trait ContextHook: Send + Sync {
@@ -70,6 +75,7 @@ pub trait ContextHook: Send + Sync {
         ContextContribution {
             text: self.context_for(prompt),
             memories: self.memories_used(prompt),
+            guidance: Vec::new(),
         }
     }
     /// Record that `memories` were injected this turn, for usage tracking. Called
@@ -89,6 +95,8 @@ pub trait ContextHook: Send + Sync {
 pub(crate) struct TurnContribution {
     pub(crate) segments: Vec<(ContextPlacement, String)>,
     pub(crate) memories: Vec<localpilot_store::MemoryUsed>,
+    /// The guidance parts of those segments, each with its hook's placement.
+    pub(crate) guidance: Vec<(ContextPlacement, crate::GuidanceSegment)>,
 }
 
 impl TurnContribution {
@@ -130,14 +138,26 @@ impl HookFabric {
     pub(crate) fn contribute(&self, prompt: &str) -> TurnContribution {
         let mut segments = Vec::new();
         let mut memories = Vec::new();
+        let mut guidance = Vec::new();
         for hook in &self.context_hooks {
             let contribution = hook.contribute(prompt);
             if let Some(text) = contribution.text {
                 segments.push((hook.placement(), text));
+                // Guidance is a part of the text; without text there is none.
+                guidance.extend(
+                    contribution
+                        .guidance
+                        .into_iter()
+                        .map(|segment| (hook.placement(), segment)),
+                );
             }
             memories.extend(contribution.memories);
         }
-        TurnContribution { segments, memories }
+        TurnContribution {
+            segments,
+            memories,
+            guidance,
+        }
     }
 
     /// Deliver this turn's injected-memory set to every context hook for usage

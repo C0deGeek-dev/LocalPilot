@@ -148,6 +148,12 @@ pub struct ContextFile {
 }
 
 impl ContextFile {
+    /// The name of this file's precedence scope, as a render prints it.
+    #[must_use]
+    pub fn scope_label(&self) -> &'static str {
+        scope_label(self.scope)
+    }
+
     /// Whether this file applies given the workspace-relative paths currently in
     /// play. A file with no `applyTo` globs always applies (every unscoped kind,
     /// and a scoped file whose frontmatter omits or empties the key — treating
@@ -309,22 +315,39 @@ impl ProjectContext {
         self.render_files(self.files.iter().filter(|f| f.applies_to(paths_in_play)))
     }
 
+    /// Each file that applies to `paths_in_play`, with the block
+    /// [`ProjectContext::render_for`] emits for it, in the same order. The
+    /// blocks joined by a blank line are exactly that render, so a caller can
+    /// tell which file a part of the rendered text came from.
+    #[must_use]
+    pub fn segments_for(&self, paths_in_play: &[String]) -> Vec<(&ContextFile, String)> {
+        self.files
+            .iter()
+            .filter(|f| f.applies_to(paths_in_play))
+            .map(|file| (file, render_file(file)))
+            .collect()
+    }
+
     fn render_files<'a>(&self, files: impl Iterator<Item = &'a ContextFile>) -> String {
         let mut out = String::new();
         for file in files {
             if !out.is_empty() {
                 out.push_str("\n\n");
             }
-            out.push_str(&format!(
-                "<!-- {} ({}) -->\n",
-                file.path.display(),
-                scope_label(file.scope)
-            ));
-            out.push_str(file.body.trim_end());
-            out.push('\n');
+            out.push_str(&render_file(file));
         }
         out
     }
+}
+
+/// One file's block in a render: a provenance comment, then the body.
+fn render_file(file: &ContextFile) -> String {
+    format!(
+        "<!-- {} ({}) -->\n{}\n",
+        file.path.display(),
+        scope_label(file.scope),
+        file.body.trim_end()
+    )
 }
 
 fn scope_label(scope: ContextScope) -> &'static str {
@@ -977,6 +1000,35 @@ mod tests {
 
         // The unfiltered render still shows everything discovered.
         assert!(ctx.render().contains("web rule"));
+    }
+
+    #[test]
+    fn the_segments_of_a_render_join_back_into_that_render() {
+        let ws = tempfile::tempdir().unwrap();
+        write(&ws.path().join("CLAUDE.md"), "always\n\n");
+        write(&ws.path().join("AGENTS.md"), "agents rules");
+        write(
+            &ws.path()
+                .join(".github")
+                .join("instructions")
+                .join("ts.instructions.md"),
+            "---\napplyTo: \"**/*.ts\"\n---\nweb rule",
+        );
+        let ctx = discovery(ws.path(), None).discover();
+
+        for paths in [Vec::new(), vec!["src/app.ts".to_string()]] {
+            let segments = ctx.segments_for(&paths);
+            let joined = segments
+                .iter()
+                .map(|(_, block)| block.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            assert_eq!(joined, ctx.render_for(&paths));
+            for (file, block) in &segments {
+                assert!(block.contains(file.body.trim_end()));
+                assert!(block.contains(file.scope_label()));
+            }
+        }
     }
 
     #[test]

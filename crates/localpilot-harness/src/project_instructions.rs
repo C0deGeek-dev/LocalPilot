@@ -21,9 +21,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use localpilot_config::redact;
-use localpilot_config::{ContextDiscovery, ProjectContext};
+use localpilot_config::{ContextDiscovery, ContextFile, ProjectContext};
+use localpilot_core::{GuidanceForm, GuidanceKind, GuidanceSource};
 
-use crate::{ContextHook, ContextPlacement, PathsInPlay, SessionRuntime};
+use crate::{
+    ContextContribution, ContextHook, ContextPlacement, GuidanceSegment, PathsInPlay,
+    SessionRuntime,
+};
 
 /// A context hook that contributes the merged, bounded, redacted project
 /// instruction text before each turn.
@@ -52,8 +56,26 @@ impl ProjectInstructionsContext {
     /// has actually touched.
     #[must_use]
     pub fn with_paths_in_play(root: &Path, char_budget: usize, paths_in_play: PathsInPlay) -> Self {
+        Self::with_context(
+            root,
+            ContextDiscovery::new(root).discover(),
+            char_budget,
+            paths_in_play,
+        )
+    }
+
+    /// A hook over instruction files that were already discovered, for a caller
+    /// that chooses where discovery looks (a fixture with no global tier, for
+    /// one) rather than taking the environment's.
+    #[must_use]
+    pub fn with_context(
+        root: &Path,
+        context: ProjectContext,
+        char_budget: usize,
+        paths_in_play: PathsInPlay,
+    ) -> Self {
         Self {
-            context: ContextDiscovery::new(root).discover(),
+            context,
             root: root.to_path_buf(),
             paths_in_play,
             char_budget,
@@ -114,15 +136,77 @@ impl ContextHook for ProjectInstructionsContext {
     }
 
     fn context_for(&self, prompt: &str) -> Option<String> {
-        let rendered = self.context.render_for(&self.paths_for(prompt));
+        self.framed(&self.context.render_for(&self.paths_for(prompt)))
+    }
+
+    /// The same text as [`ContextHook::context_for`], with the file each part
+    /// of it came from and why that file applies this turn.
+    fn contribute(&self, prompt: &str) -> ContextContribution {
+        let paths = self.paths_for(prompt);
+        let Some(text) = self.framed(&self.context.render_for(&paths)) else {
+            return ContextContribution::default();
+        };
+        let guidance = self
+            .context
+            .segments_for(&paths)
+            .into_iter()
+            .map(|(file, block)| GuidanceSegment {
+                source: GuidanceSource::new(
+                    GuidanceKind::ProjectInstructions,
+                    GuidanceForm::Body,
+                    self.display_path(&file.path),
+                    file.scope_label(),
+                    applies_because(file, &paths),
+                ),
+                // Redacted like the injected text, but not bounded: a file the
+                // character budget cut off must show as cut, not as delivered.
+                text: redact::redact(&block),
+            })
+            .collect();
+        ContextContribution {
+            text: Some(text),
+            memories: Vec::new(),
+            guidance,
+        }
+    }
+}
+
+impl ProjectInstructionsContext {
+    /// Redact, bound and label a render; `None` when there is nothing to say.
+    fn framed(&self, rendered: &str) -> Option<String> {
         if rendered.trim().is_empty() {
             return None;
         }
-        let redacted = redact::redact(&rendered);
+        let redacted = redact::redact(rendered);
         let bounded = bound_with_marker(&redacted, self.char_budget);
         Some(format!(
             "Project instructions (authoritative — follow these):\n{bounded}"
         ))
+    }
+
+    /// A file's path relative to the workspace with `/` separators, or the full
+    /// path for a file outside it (the global tier).
+    fn display_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+}
+
+/// Why `file` applies to a turn with `paths` in play.
+fn applies_because(file: &ContextFile, paths: &[String]) -> String {
+    if file.apply_to.is_empty() {
+        return "applies to every turn".to_string();
+    }
+    let globs = file.apply_to.join(", ");
+    match paths
+        .iter()
+        .find(|path| file.applies_to(std::slice::from_ref(path)))
+    {
+        Some(path) => format!("applyTo {globs} matched {path}"),
+        // `applies_to` falls back to always applying when no glob parses.
+        None => format!("applyTo {globs} could not be parsed, so it applies to every turn"),
     }
 }
 

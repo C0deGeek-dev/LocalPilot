@@ -58,6 +58,9 @@ pub struct ToolDispatchResult {
     pub permission_denial: Option<PermissionDenial>,
     /// Host-only classification; never inferred from model-visible output.
     pub work_envelope_refusal: bool,
+    /// The task guidance the invoked tool says its output carries. Host
+    /// accounting only; empty for a refusal or a failed invocation.
+    pub guidance: Vec<localpilot_core::GuidanceSource>,
 }
 
 /// Fresh permission evidence. Human guidance has crossed the redaction boundary.
@@ -78,6 +81,7 @@ impl ToolDispatchResult {
             unavailable_backend: None,
             permission_denial: None,
             work_envelope_refusal: false,
+            guidance: Vec::new(),
         }
     }
 }
@@ -580,6 +584,7 @@ impl ToolRegistry {
                     unavailable_backend: output.unavailable_backend,
                     permission_denial: None,
                     work_envelope_refusal: false,
+                    guidance: output.guidance,
                 }
             }
             Err(err) => ToolDispatchResult {

@@ -10,6 +10,7 @@
 //! skills (see `docs/localmind-integration.md`).
 
 use async_trait::async_trait;
+use localpilot_core::{GuidanceForm, GuidanceKind, GuidanceSource};
 use localpilot_sandbox::Effect;
 use localpilot_tools::{Tool, ToolContext, ToolError, ToolOutput};
 use schemars::JsonSchema;
@@ -110,7 +111,25 @@ fn list_skills(root: &Path) -> ToolOutput {
         "\nCall this tool with a skill id to read its body, then apply the guidance yourself. \
          Enabling/disabling skills stays a human step.",
     );
-    ToolOutput::ok(out)
+    let guidance = skills.iter().map(|skill| {
+        learned_source(
+            &skill.id,
+            GuidanceForm::Metadata,
+            "the model listed the active skills",
+        )
+    });
+    ToolOutput::ok(out).with_guidance(guidance)
+}
+
+/// An active skill as a guidance source.
+fn learned_source(id: &str, form: GuidanceForm, reason: &str) -> GuidanceSource {
+    GuidanceSource::new(
+        GuidanceKind::LearnedSkill,
+        form,
+        id,
+        "active (enabled by a human)",
+        reason,
+    )
 }
 
 fn show_skill(root: &Path, id: &str) -> ToolOutput {
@@ -130,6 +149,11 @@ fn show_skill(root: &Path, id: &str) -> ToolOutput {
                 "Active skill {} (advisory — apply as guidance, do not execute)\nname: {}\n\n{}",
                 skill.id, skill.name, body
             ))
+            .with_guidance([learned_source(
+                &skill.id,
+                GuidanceForm::Body,
+                "the model read it by id",
+            )])
         }
         None => ToolOutput::ok(format!("no active skill with id \"{id}\"")),
     }
@@ -225,6 +249,44 @@ mod tests {
             "the body must be framed as advisory guidance: {}",
             out.text
         );
+    }
+
+    #[tokio::test]
+    async fn a_listing_reports_metadata_and_a_read_reports_the_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = seed_active_skill(dir.path());
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let listed = ActiveSkills.invoke(json!({}), &context(&ws)).await.unwrap();
+        let read = ActiveSkills
+            .invoke(json!({ "skill_id": id }), &context(&ws))
+            .await
+            .unwrap();
+        let missing = ActiveSkills
+            .invoke(json!({ "skill_id": "no-such-skill" }), &context(&ws))
+            .await
+            .unwrap();
+
+        let forms = |out: &ToolOutput| -> Vec<(GuidanceKind, GuidanceForm, String)> {
+            out.guidance
+                .iter()
+                .map(|source| (source.kind, source.form, source.id.clone()))
+                .collect()
+        };
+        assert_eq!(
+            forms(&listed),
+            [(
+                GuidanceKind::LearnedSkill,
+                GuidanceForm::Metadata,
+                id.clone()
+            )]
+        );
+        assert_eq!(
+            forms(&read),
+            [(GuidanceKind::LearnedSkill, GuidanceForm::Body, id)]
+        );
+        // Nothing was returned, so nothing is reported.
+        assert!(missing.guidance.is_empty());
     }
 
     #[tokio::test]

@@ -807,6 +807,14 @@ is searched for and chosen (the skill model is ADR-0027).
   `active_skills`/`skill_drafts` are a *separate* lane of memory-derived advisory
   workflows; the tool descriptions and prompt cues say so, and the presence or
   absence of one lane's results never establishes anything about the other.
+- **What a request held.** A tool that returns guidance reports each source on
+  its output (`ToolOutput::guidance`): `skill_list`, `skill_search` and an
+  `active_skills` listing report metadata, `skill_load` and an `active_skills`
+  read report a body, each with the skill's scope and why it was returned. The
+  session follows that tool result by its call id and records, for every later
+  request, whether it is still there unchanged, changed, or gone
+  (`SessionRuntime::task_guidance()`, ADR-0271). This is host accounting: it is
+  not shown to the model and grants nothing.
 
 All three tools are read-only (`Effect::ReadPath`) and trust-gated: project-local
 skills load only when the workspace is trusted. Loading a skill injects *content

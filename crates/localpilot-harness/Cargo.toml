@@ -42,6 +42,9 @@ insta = { workspace = true }
 # is a dev-dependency cycle — allowed by cargo (dev-deps are excluded from the
 # normal dependency graph) — used only by tests/discipline.rs.
 localpilot-localmind = { path = "../localpilot-localmind" }
+# Test-only: the task-guidance fixtures drive the real skill tools, so the
+# record is checked against what those tools return rather than a stand-in.
+localpilot-skills = { path = "../localpilot-skills" }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

@@ -924,3 +924,21 @@ path-effects retain the same protection. A sharing-locked deletion after a
 successful create verifies typed reported failure, the retained completed touch,
 unchanged locked file and monotone mutation obligation. These tests use synthetic
 fixture content and no live provider.
+
+### Task guidance record
+
+`cargo test -p localpilot-harness --test task_guidance` builds a synthetic project
+and a synthetic home in one temporary directory, runs a real session with the
+scripted provider and the real skill tools, and compares the session's guidance
+record with the requests the provider received. It covers an unscoped and a
+path-scoped instruction file with their reasons, a scoped rule that matches
+nothing, a file cut by the character budget, a search recorded as metadata and a
+load as a body, a listing, a user-only package, an untrusted workspace, discovery
+switched off, and a project with no guidance. A delivery is only accepted when the
+text is found in the request independently of the record. The global skill
+baseline and instruction discovery are given the fixture's directories, so the
+tests read no host home directory, user store, credential or network.
+`cargo test -p localpilot-harness --lib task_guidance` covers the delivery rules
+and the bounded window; `cargo test -p localpilot-localmind active_skills` covers
+the learned-skill sources. These are offline mechanism tests and say nothing about
+whether guidance improves a model's work.

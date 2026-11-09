@@ -760,6 +760,7 @@ impl Tool for RunShell {
             })),
             touches: Vec::new(),
             unavailable_backend: None,
+            guidance: Vec::new(),
         })
     }
 }

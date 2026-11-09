@@ -1781,6 +1781,7 @@ dependencies = [
  "localpilot-quota",
  "localpilot-recovery",
  "localpilot-sandbox",
+ "localpilot-skills",
  "localpilot-store",
  "localpilot-tools",
  "localpilot-verify",

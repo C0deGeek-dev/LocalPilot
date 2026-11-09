@@ -252,6 +252,13 @@ pub struct ToolOutput {
     /// implementations set this only after checking their backend this call;
     /// ordinary empty results and model/MCP text cannot establish it.
     pub unavailable_backend: Option<&'static str>,
+    /// The task guidance this output carries, reported by the tool itself.
+    ///
+    /// Empty for every tool that returns no guidance. A tool that returns a
+    /// skill's summary or body names each one here, with why it was returned.
+    /// Host accounting only: it is never part of the model-facing text and it
+    /// grants nothing.
+    pub guidance: Vec<localpilot_core::GuidanceSource>,
 }
 
 /// Typed host-facing output retained alongside the ordinary model-facing text.
@@ -281,6 +288,7 @@ impl ToolOutput {
             presentation: None,
             touches: Vec::new(),
             unavailable_backend: None,
+            guidance: Vec::new(),
         }
     }
 
@@ -295,6 +303,7 @@ impl ToolOutput {
             presentation: None,
             touches: Vec::new(),
             unavailable_backend: None,
+            guidance: Vec::new(),
         }
     }
 
@@ -336,6 +345,16 @@ impl ToolOutput {
         touches: impl IntoIterator<Item = crate::touch::FileTouch>,
     ) -> Self {
         self.touches.extend(touches);
+        self
+    }
+
+    /// Report the task guidance this output carries.
+    #[must_use]
+    pub fn with_guidance(
+        mut self,
+        guidance: impl IntoIterator<Item = localpilot_core::GuidanceSource>,
+    ) -> Self {
+        self.guidance.extend(guidance);
         self
     }
 
