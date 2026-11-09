@@ -2,6 +2,51 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0267: Phone Notifications Are Content-Free Web Pushes Sent By The Workspace Server
+
+**Status:** accepted · **Date:** 2026-11-09. Refs LocalHub#255.
+
+**Context.** A paired phone should learn that a shared session waits on a
+permission ask or stopped while the phone is not connected, which is exactly
+when no socket reaches it. The product rules allow no LocalX-operated server
+or account; a third-party carrier is acceptable only end-to-end encrypted.
+
+**Decision.**
+1. Opt-in: `[remote.push] enabled` (off by default, user config only). The
+   workspace server sends, because it sees the relay mirror; the gateway only
+   proxies sockets.
+2. Web Push (RFC 8030) through the phone's browser push service, encrypted
+   end to end (RFC 8291, `aes128gcm`) and signed with a key this computer
+   makes for itself (VAPID, RFC 8292, `aud` and `exp` only, no contact
+   claim). The payload is only the kind (`ask` or `stopped`), padded to one
+   size; the phone fetches everything else after it opens.
+3. Subscriptions are kept in the per-user device registry (an optional field;
+   the format version is unchanged). Each carries a fresh random 128-bit
+   revision and the id of the key it was made against. A send, a 404/410
+   removal and a rotation's cleanup act only on the exact revision and key
+   they were made for. Key creation and rotation hold one stable lock; lock
+   order is key, then registry.
+4. Accepted endpoints: HTTPS on port 443 at `fcm.googleapis.com`,
+   `updates.push.services.mozilla.com`, `*.push.apple.com` or
+   `*.notify.windows.com`, with no user name or fragment. Each send resolves
+   the name itself, refuses unless every address is public, pins the
+   connection to those addresses, uses no proxy and follows no redirect,
+   all within one 10-second deadline that starts before resolution.
+5. Triggers are only what the relay mirror committed: an ask open in a
+   verified snapshot or opened by an in-order event (once per ask per server
+   run), and a stop event (once per feed position, held while an ask is
+   open). One push of a kind per device per 30 seconds per workspace server,
+   with a trailing re-check of current state. TTL: an ask's remaining expiry,
+   at most 300 seconds; a stop 900 seconds.
+6. Every send is audited with the device id, the push service's host and the
+   result; the endpoint and keys never appear in logs, audit or status.
+
+**Consequences.** Delivery is best effort and throttled by the phone's OS.
+Stopping sharing, revoking a device, turning notifications off or rotating
+the key prevents new sends only: a push service may still deliver one it
+already accepted, later; it says nothing but its kind. A server restart may
+repeat one notification for an ask that is still open.
+
 ## ADR-0266: The Full-Screen Session Can Change Its Work Limits And Action Mode By Slash Command
 
 **Status:** accepted · **Date:** 2026-11-08. Refs LocalHub#268. Builds on ADR-0260, ADR-0262, ADR-0263.

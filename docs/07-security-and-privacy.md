@@ -1247,6 +1247,30 @@ server only relays it.
   id (`Pixel [a19c]`), sanitized to one line; a device with no name is
   `remote device [a19c]`, never a guess. While shared, answers given on this
   PC, expiries and cancellations are said too.
+- **Phone notifications (`[remote.push]`, off by default).** A paired phone
+  can turn notifications on through the gateway (`GET`/`POST /api/push`,
+  authenticated by its device credential like every device request). The
+  server accepts a subscription only for HTTPS on port 443 at a known
+  browser push service (`fcm.googleapis.com`,
+  `updates.push.services.mozilla.com`, `*.push.apple.com`,
+  `*.notify.windows.com`) with no user name or fragment, and only when it was
+  made against this computer's current notification key. The subscription is
+  kept in the owner-only device registry; its endpoint and keys never appear
+  in logs, the audit log (which records the push service's host only) or
+  status output. Revoking a device, rotating the key
+  (`localpilot remote push rotate`) or the phone turning notifications off
+  removes it; turning off works even while notifications are off on this
+  computer.
+- **What a notification sends.** While a session is shared, the workspace
+  server sends each subscribed, still-allowed phone a Web Push when the
+  session waits on a permission ask or stops: end-to-end encrypted, saying
+  only which of the two it is, signed with this computer's own key. It goes
+  only to a public address of the allowed push service (resolved and pinned
+  by the server, no proxy, no redirect, one 10-second deadline), at most one
+  of a kind per phone per 30 seconds per workspace. Each send is audited by
+  device id, push host and result. Stopping, revoking or turning
+  notifications off prevents new sends; a push the service already accepted
+  may still arrive later, and it carries nothing but its kind (ADR-0267).
 - **Reconnecting.** A dropped connection retries on a short schedule. When
   the server is gone for good, sharing waits, with phone access closed, until
   it is started from `/remote`; nothing restarts on its own. "Reconnect now"

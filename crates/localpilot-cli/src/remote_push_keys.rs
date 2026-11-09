@@ -7,10 +7,6 @@
 //! lock, never the other way round. The file itself is replaced atomically,
 //! so a reader without the lock sees the old key or the new one.
 
-// Library-only until the push sender calls it; `remote push rotate` is the
-// only production caller so far.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::path::{Path, PathBuf};
 
 use ring::rand::SystemRandom;
@@ -121,20 +117,29 @@ impl PushKeys {
         self.locked(|dir| match read_key(dir)? {
             Some(key) => Ok(key),
             None => write_new(dir),
-        })
+        })?
     }
 
-    /// Replace the key with a new one. Every subscription made against the
-    /// old key stops working.
-    pub(crate) fn rotate(&self) -> Result<PushKey, PushKeyError> {
-        self.locked(write_new)
-    }
-
-    /// Run `work` while holding the key lock.
-    pub(crate) fn locked<T>(
+    /// Replace the key with a new one, then remove every subscription made
+    /// against another key from `registry`, all under the key lock (so a
+    /// subscription made against the new key is never removed, even by a
+    /// late cleanup of an earlier rotation).
+    pub(crate) fn rotate(
         &self,
-        work: impl FnOnce(&Path) -> Result<T, PushKeyError>,
-    ) -> Result<T, PushKeyError> {
+        registry: &crate::server_devices::DeviceRegistry,
+    ) -> Result<(PushKey, usize), PushKeyError> {
+        self.locked(|dir| {
+            let key = write_new(dir)?;
+            let removed = registry
+                .clear_push_except_key(key.id())
+                .map_err(|error| PushKeyError::Write(std::io::Error::other(error.to_string())))?;
+            Ok((key, removed))
+        })?
+    }
+
+    /// Run `work` while holding the key lock. Lock order: a caller that also
+    /// changes the device registry does so inside `work`, never the reverse.
+    pub(crate) fn locked<T>(&self, work: impl FnOnce(&Path) -> T) -> Result<T, PushKeyError> {
         prepare_dir(&self.dir).map_err(PushKeyError::Write)?;
         let lock_path = self.dir.join(LOCK_FILE);
         let file = std::fs::OpenOptions::new()
@@ -148,7 +153,7 @@ impl PushKeys {
         let held = lock.write().map_err(PushKeyError::Write)?;
         let result = work(&self.dir);
         drop(held);
-        result
+        Ok(result)
     }
 }
 
@@ -171,9 +176,15 @@ fn write_new(dir: &Path) -> Result<PushKey, PushKeyError> {
 
 /// `localpilot remote push rotate`.
 pub(crate) fn rotate_command() -> anyhow::Result<()> {
-    let key = PushKeys::user()?.rotate()?;
+    let cwd = std::env::current_dir()?;
+    let registry = crate::server_devices::DeviceRegistry::for_user(&cwd);
+    let (key, removed) = PushKeys::user()?.rotate(&registry)?;
     println!("New push key {}.", key.id());
-    println!("Every phone that had notifications on must turn them on again.");
+    match removed {
+        0 => println!("No phone had notifications on."),
+        1 => println!("1 phone had notifications on; it must turn them on again."),
+        n => println!("{n} phones had notifications on; they must turn them on again."),
+    }
     Ok(())
 }
 
@@ -201,7 +212,8 @@ mod tests {
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,
             first.public_key()
         )));
-        let rotated = keys.rotate().unwrap();
+        let registry = crate::server_devices::DeviceRegistry::default();
+        let (rotated, _) = keys.rotate(&registry).unwrap();
         assert_ne!(rotated.id(), first.id());
         assert_eq!(keys.current().unwrap().unwrap().id(), rotated.id());
     }

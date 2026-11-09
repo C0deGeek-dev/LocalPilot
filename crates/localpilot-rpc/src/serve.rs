@@ -196,6 +196,7 @@ where
             | ClientCommand::GatewayRegister
             | ClientCommand::DeviceAttach { .. }
             | ClientCommand::DeviceSessions { .. }
+            | ClientCommand::DevicePush { .. }
             | ClientCommand::RelayHost { .. }
             | ClientCommand::PairBegin { .. }
             | ClientCommand::PairHello
@@ -359,6 +360,7 @@ where
             | ClientCommand::GatewayRegister
             | ClientCommand::DeviceAttach { .. }
             | ClientCommand::DeviceSessions { .. }
+            | ClientCommand::DevicePush { .. }
             | ClientCommand::RelayHost { .. }
             | ClientCommand::PairBegin { .. }
             | ClientCommand::PairHello

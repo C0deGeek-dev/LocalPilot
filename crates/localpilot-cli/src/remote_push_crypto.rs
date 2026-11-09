@@ -6,9 +6,6 @@
 //! size; the result is the request body. The VAPID part signs a token for one
 //! push-service origin with the sender's key.
 
-// Library-only until the push sender calls it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::SecureRandom as _;
@@ -21,8 +18,13 @@ pub(crate) const AUTH_LEN: usize = 16;
 const SALT_LEN: usize = 16;
 const TAG_LEN: usize = 16;
 /// The single record's size, written in the header. One record always holds
-/// the whole padded message.
+/// the whole padded message, and must be strictly smaller (RFC 8291 section 4).
 const RECORD_SIZE: u32 = 4096;
+/// The largest request body every push service accepts (RFC 8030 section
+/// 7.2), header included.
+const MAX_BODY: usize = 4096;
+/// The header: salt, record size, key-id length, the sender's public key.
+const HEADER_LEN: usize = SALT_LEN + 4 + 1 + PUBLIC_KEY_LEN;
 
 /// Why a message could not be encrypted or signed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -92,8 +94,13 @@ fn seal_with(
     padded: usize,
 ) -> Result<Vec<u8>, PushCryptoError> {
     // The delimiter octet (0x02, last record) follows the plaintext; zeros
-    // fill the rest.
-    if plaintext.len() + 1 > padded || padded + TAG_LEN > RECORD_SIZE as usize {
+    // fill the rest. The record (padded + tag) stays below the record size,
+    // and the whole body within what every push service accepts.
+    let fits = plaintext.len() < padded
+        && padded
+            .checked_add(TAG_LEN + HEADER_LEN)
+            .is_some_and(|body| body <= MAX_BODY && body - HEADER_LEN < RECORD_SIZE as usize);
+    if !fits || as_public.len() != PUBLIC_KEY_LEN {
         return Err(PushCryptoError::TooLong);
     }
     let (cek, nonce) = derive(ecdh_secret, auth, ua_public, as_public, salt)?;
@@ -307,6 +314,23 @@ mod tests {
             Err(PushCryptoError::TooLong),
             "no room for the delimiter"
         );
+        // The largest body every push service takes: 86-byte header, record,
+        // tag. One byte more, or an absurd size, is refused (never overflows).
+        let largest = MAX_BODY - HEADER_LEN - TAG_LEN;
+        assert_eq!(largest, 3994);
+        let body = encrypt(&ua_public, &auth, b"x", largest).unwrap();
+        assert_eq!(body.len(), MAX_BODY);
+        assert!(
+            body.len() - HEADER_LEN < RECORD_SIZE as usize,
+            "record below rs"
+        );
+        for too_large in [largest + 1, RECORD_SIZE as usize - TAG_LEN, usize::MAX] {
+            assert_eq!(
+                encrypt(&ua_public, &auth, b"x", too_large),
+                Err(PushCryptoError::TooLong),
+                "{too_large}"
+            );
+        }
     }
 
     #[test]

@@ -75,11 +75,12 @@ const COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60;
 
 /// Records a browser must never send: binding a connection, or registering
 /// and pairing, belong to the gateway and the local machine.
-const FORBIDDEN_RECORDS: [&str; 12] = [
+const FORBIDDEN_RECORDS: [&str; 13] = [
     "attach",
     "gateway_register",
     "device_attach",
     "device_sessions",
+    "device_push",
     "pair_begin",
     "pair_hello",
     "pair_open",
@@ -609,6 +610,7 @@ impl Gateway {
             (&Method::GET, "/api/workspaces") => self.workspaces(&request).await,
             (&Method::GET, "/api/sessions") => self.sessions(&request, armed).await,
             (&Method::POST, "/api/pair") => self.pair(request).await,
+            (&Method::GET | &Method::POST, "/api/push") => self.push(request).await,
             (&Method::GET, "/api/socket") => {
                 // A refused upgrade closes its connection rather than waiting
                 // for another request.
@@ -743,6 +745,114 @@ impl Gateway {
             }
             Ok((Some(ServerEvent::Error { message }), _)) => plain(StatusCode::FORBIDDEN, &message),
             _ => plain(StatusCode::BAD_GATEWAY, "the server did not list sessions"),
+        }
+    }
+
+    /// A device's phone notifications in one workspace: `GET` answers the key
+    /// to subscribe with; `POST` saves a subscription
+    /// (`{"subscribe": {"endpoint", "p256dh", "auth", "key_id"}}`) or turns
+    /// notifications off (`{"unsubscribe": true}`). Decided by the workspace's
+    /// server; the subscription is kept in the per-user device registry.
+    async fn push(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
+        use localpilot_rpc::PushRequest;
+        if !self.policy.origin_ok(request.headers()) {
+            return plain(StatusCode::FORBIDDEN, "forbidden");
+        }
+        let (device, credential) = match self.device(request.headers()) {
+            Ok(found) => found,
+            Err(response) => return response,
+        };
+        if let Err(response) = self.spend_device(&device, true) {
+            return response;
+        }
+        let Some(id) = workspace_query(request.uri().query()) else {
+            return plain(
+                StatusCode::BAD_REQUEST,
+                "choose a workspace: ?workspace=<id>",
+            );
+        };
+        let asked = if request.method() == Method::GET {
+            PushRequest::Key
+        } else {
+            let is_json = single(request.headers(), &header::CONTENT_TYPE)
+                .is_some_and(|value| value.starts_with("application/json"));
+            if !is_json {
+                return plain(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "expected application/json",
+                );
+            }
+            let body = Limited::new(request.into_body(), MAX_BODY).collect();
+            let Ok(Ok(body)) = tokio::time::timeout(self.step, body).await else {
+                return plain(StatusCode::BAD_REQUEST, "unreadable request");
+            };
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Subscription {
+                endpoint: String,
+                p256dh: String,
+                auth: String,
+                key_id: String,
+            }
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields, rename_all = "snake_case")]
+            enum Change {
+                Subscribe(Subscription),
+                Unsubscribe(bool),
+            }
+            match serde_json::from_slice::<Change>(&body.to_bytes()) {
+                Ok(Change::Subscribe(Subscription {
+                    endpoint,
+                    p256dh,
+                    auth,
+                    key_id,
+                })) => PushRequest::Subscribe {
+                    endpoint: WireSecret::new(endpoint),
+                    p256dh: WireSecret::new(p256dh),
+                    auth: WireSecret::new(auth),
+                    key_id,
+                },
+                Ok(Change::Unsubscribe(true)) => PushRequest::Unsubscribe,
+                _ => {
+                    return plain(
+                        StatusCode::BAD_REQUEST,
+                        "expected {\"subscribe\": {...}} or {\"unsubscribe\": true}",
+                    )
+                }
+            }
+        };
+        let Some(workspace) = self.workspace(&id) else {
+            return plain(StatusCode::NOT_FOUND, "that workspace is not being served");
+        };
+        if !(self.discovery.standing)(&device, &workspace.root) {
+            return plain(
+                StatusCode::FORBIDDEN,
+                "this device may not reach that workspace",
+            );
+        }
+        let Some(live) = self.reach(&workspace).await else {
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "that workspace is offline");
+        };
+        let answered = self
+            .ask_daemon(
+                &workspace,
+                &live,
+                ClientCommand::DevicePush {
+                    capability: live.capability.clone(),
+                    credential: WireSecret::new(credential),
+                    request: asked,
+                },
+            )
+            .await;
+        match answered {
+            Ok((Some(ServerEvent::PushKey { public_key, key_id }), _)) => {
+                json(&serde_json::json!({ "public_key": public_key, "key_id": key_id }))
+            }
+            Ok((Some(ServerEvent::PushSaved { subscribed }), _)) => {
+                json(&serde_json::json!({ "subscribed": subscribed }))
+            }
+            Ok((Some(ServerEvent::Error { message }), _)) => plain(StatusCode::FORBIDDEN, &message),
+            _ => plain(StatusCode::BAD_GATEWAY, "the server did not answer"),
         }
     }
 
@@ -2745,6 +2855,20 @@ mod tests {
                         capability: WireSecret::new("cap"),
                         workspace: Some(id),
                     },
+                    // Echo what was asked, so a test sees what reached it.
+                    "device_push" => match first["command"]["request"]["op"].as_str() {
+                        Some("key") => ServerEvent::PushKey {
+                            public_key: "pk".to_string(),
+                            key_id: "kid".to_string(),
+                        },
+                        Some("subscribe") => ServerEvent::Error {
+                            message: first["command"]["request"]["endpoint"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        },
+                        _ => ServerEvent::PushSaved { subscribed: false },
+                    },
                     _ => ServerEvent::Sessions { items },
                 };
                 let record = ServerRecord {
@@ -2766,6 +2890,99 @@ mod tests {
             });
             Box::pin(async move { Ok(Box::new(near) as Box<dyn DaemonStream>) })
         })
+    }
+
+    /// One request to a gateway whose single workspace is answered by
+    /// [`fake_server`]; `allowed` is the device's standing there.
+    async fn push_request(request: &str, allowed: bool) -> String {
+        let id = "0123456789abcdef".to_string();
+        let discovery = Discovery {
+            list: {
+                let id = id.clone();
+                Arc::new(move || {
+                    vec![Workspace {
+                        id: id.clone(),
+                        label: "w".to_string(),
+                        root: std::env::temp_dir(),
+                    }]
+                })
+            },
+            dial: fake_server(&id, Vec::new(), CancellationToken::new()),
+            verify: Arc::new(|_| Some("device".to_string())),
+            standing: Arc::new(move |_, _| allowed),
+        };
+        let gateway = Gateway::new(
+            Policy::new("https://pc.example.test", &[]),
+            discovery,
+            CancellationToken::new(),
+        );
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let connection = tokio::spawn(gateway.serve_io(server));
+        let request = request.replace("{id}", &id).replace(
+            "{headers}",
+            &format!(
+                "Host: pc.example.test\r\nOrigin: https://pc.example.test\r\n\
+                 Cookie: {DEVICE_COOKIE}=x.y.z\r\nConnection: close"
+            ),
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut received = Vec::new();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::io::AsyncReadExt::read_to_end(&mut client, &mut received),
+        )
+        .await;
+        connection.abort();
+        String::from_utf8_lossy(&received).into_owned()
+    }
+
+    #[tokio::test]
+    async fn the_push_endpoint_carries_key_subscribe_and_off_to_the_workspace() {
+        let key = push_request(
+            "GET /api/push?workspace={id} HTTP/1.1\r\n{headers}\r\n\r\n",
+            true,
+        )
+        .await;
+        assert!(key.starts_with("HTTP/1.1 200"), "{key}");
+        assert!(
+            key.contains(r#""public_key":"pk""#) && key.contains(r#""key_id":"kid""#),
+            "{key}"
+        );
+        let body = r#"{"subscribe":{"endpoint":"https://fcm.googleapis.com/e","p256dh":"p","auth":"a","key_id":"kid"}}"#;
+        let saved = push_request(
+            &format!(
+                "POST /api/push?workspace={{id}} HTTP/1.1\r\n{{headers}}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+            true,
+        )
+        .await;
+        assert!(
+            saved.contains("https://fcm.googleapis.com/e"),
+            "the subscription reached the server: {saved}"
+        );
+        let off = r#"{"unsubscribe":true}"#;
+        let request = format!(
+            "POST /api/push?workspace={{id}} HTTP/1.1\r\n{{headers}}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{off}",
+            off.len()
+        );
+        let answered = push_request(&request, true).await;
+        assert!(answered.contains(r#""subscribed":false"#), "{answered}");
+        let refused = push_request(&request, false).await;
+        assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
+        let extra = r#"{"unsubscribe":true,"x":1}"#;
+        let bad = push_request(
+            &format!(
+                "POST /api/push?workspace={{id}} HTTP/1.1\r\n{{headers}}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{extra}",
+                extra.len()
+            ),
+            true,
+        )
+        .await;
+        assert!(bad.starts_with("HTTP/1.1 400"), "{bad}");
     }
 
     /// How access ends in [`listing_after`].

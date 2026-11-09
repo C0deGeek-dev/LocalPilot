@@ -3538,6 +3538,10 @@ mod tests {
         ("localpilot-cli/src/research.rs", "consent seam"),
         ("localpilot-cli/src/skill_discovery.rs", "consent seam"),
         (
+            "localpilot-cli/src/remote_push_send.rs",
+            "phone notifications the user turned on ([remote.push], user config only)",
+        ),
+        (
             "localpilot-tools/src/builtins.rs",
             "tool permission (Effect::Network)",
         ),

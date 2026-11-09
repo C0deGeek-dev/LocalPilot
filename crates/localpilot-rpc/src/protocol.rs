@@ -211,6 +211,15 @@ pub enum ClientCommand {
         capability: WireSecret,
         credential: WireSecret,
     },
+    /// First record of a gateway request about a paired device's phone
+    /// notifications: the gateway's capability, the device's credential and
+    /// what it asks. The reply is one `push_key`, `push_saved` or `error`
+    /// record, and the connection then ends.
+    DevicePush {
+        capability: WireSecret,
+        credential: WireSecret,
+        request: PushRequest,
+    },
     /// First record of a local connection publishing a session this process
     /// runs, so paired devices can follow it (a relay). `owner_generation` and
     /// `holder_instance` must match the session's owner record; `share` is the
@@ -222,6 +231,24 @@ pub enum ClientCommand {
         holder_instance: String,
         share: String,
     },
+}
+
+/// What a device asks about its phone notifications.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PushRequest {
+    /// The public key to subscribe with.
+    Key,
+    /// Turn notifications on (or replace the subscription) with the browser's
+    /// push subscription, made against the key `key_id`.
+    Subscribe {
+        endpoint: WireSecret,
+        p256dh: WireSecret,
+        auth: WireSecret,
+        key_id: String,
+    },
+    /// Turn notifications off.
+    Unsubscribe,
 }
 
 /// A secret carried on the wire (a gateway capability, a device credential, a
@@ -357,6 +384,7 @@ impl ClientCommand {
             | Self::GatewayRegister
             | Self::DeviceAttach { .. }
             | Self::DeviceSessions { .. }
+            | Self::DevicePush { .. }
             | Self::PairBegin { .. }
             | Self::PairHello
             | Self::PairOpen { .. }
@@ -640,6 +668,17 @@ pub enum ServerEvent {
     Sessions {
         items: Vec<SessionInfo>,
     },
+    /// Reply to a `device_push` key request: this computer's notification
+    /// public key (uncompressed P-256, base64url) and its id.
+    PushKey {
+        public_key: String,
+        key_id: String,
+    },
+    /// Reply to a `device_push` subscribe or unsubscribe: whether the device
+    /// now has notifications on.
+    PushSaved {
+        subscribed: bool,
+    },
     /// Reply to a `run_command` that ran.
     CommandResult {
         name: String,
@@ -843,6 +882,16 @@ mod tests {
             ClientCommand::DeviceSessions {
                 capability: WireSecret::new(sentinel),
                 credential: WireSecret::new(sentinel),
+            },
+            ClientCommand::DevicePush {
+                capability: WireSecret::new(sentinel),
+                credential: WireSecret::new(sentinel),
+                request: PushRequest::Subscribe {
+                    endpoint: WireSecret::new(sentinel),
+                    p256dh: WireSecret::new(sentinel),
+                    auth: WireSecret::new(sentinel),
+                    key_id: "k".to_string(),
+                },
             },
         ];
         for command in &commands {

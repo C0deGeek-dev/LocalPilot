@@ -216,6 +216,57 @@ pub(crate) struct DeviceRecord {
     pub(crate) created_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) revoked_unix: Option<u64>,
+    /// The device's phone-notification subscription, while notifications are
+    /// on. An additive field: a registry without it reads as "off".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) push: Option<PushSubscription>,
+}
+
+/// A browser push subscription, as stored. The endpoint and both keys are
+/// secrets to anyone but the browser's push service: `Debug` shows only the
+/// endpoint's host, the revision and the key id.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PushSubscription {
+    pub(crate) endpoint: String,
+    /// The browser's public key (uncompressed P-256, base64url).
+    pub(crate) p256dh: String,
+    /// The browser's authentication secret (base64url).
+    pub(crate) auth: String,
+    /// A fresh random value for every subscribe or replace: a queued send or
+    /// a cleanup acts only on the exact subscription it was made for.
+    pub(crate) rev: String,
+    /// The id of the notification key the browser subscribed with.
+    pub(crate) key_id: String,
+    pub(crate) created_unix: u64,
+}
+
+impl PushSubscription {
+    /// The endpoint's host, the only part shown or audited.
+    pub(crate) fn host(&self) -> String {
+        reqwest::Url::parse(&self.endpoint)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for PushSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushSubscription")
+            .field("host", &self.host())
+            .field("rev", &self.rev)
+            .field("key_id", &self.key_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a subscription could not be saved.
+#[derive(Debug)]
+pub(crate) enum PushSaveError {
+    /// The device is unknown or revoked.
+    NotAllowed,
+    /// The registry could not be read or written.
+    Registry,
 }
 
 impl DeviceRecord {
@@ -650,6 +701,7 @@ impl DeviceRegistry {
             if let Some(record) = file.devices.get_mut(id) {
                 if record.revoked_unix.is_none() {
                     record.revoked_unix = Some(now_unix());
+                    record.push = None;
                     outcome = RevokeOutcome::Revoked(self.row_of(id, record));
                 } else {
                     outcome = RevokeOutcome::AlreadyRevoked(self.row_of(id, record));
@@ -667,6 +719,7 @@ impl DeviceRegistry {
             if let Some(record) = file.devices.get_mut(id) {
                 if record.revoked_unix.is_none() {
                     record.revoked_unix = Some(now_unix());
+                    record.push = None;
                     outcome = RevokeOutcome::Revoked(self.row_of(id, record));
                 } else {
                     outcome = RevokeOutcome::AlreadyRevoked(self.row_of(id, record));
@@ -703,11 +756,107 @@ impl DeviceRegistry {
             workspaces: this_workspace_only.then(|| vec![self.workspace.clone()]),
             created_unix: now_unix(),
             revoked_unix: None,
+            push: None,
         };
         self.change(|file| {
             file.devices.insert(id.clone(), record);
         })?;
         Ok((Standing { id, scope }, Secret(credential)))
+    }
+
+    /// Save a device's push subscription (replacing any earlier one) under a
+    /// fresh revision, which is returned. Refused for an unknown or revoked
+    /// device. The caller holds the notification-key lock and has checked
+    /// that `key_id` is the current key (lock order: key, then registry).
+    pub(crate) fn set_push(
+        &self,
+        id: &str,
+        endpoint: &str,
+        p256dh: &str,
+        auth: &str,
+        key_id: &str,
+    ) -> Result<String, PushSaveError> {
+        let rev = random_hex(16).map_err(|_| PushSaveError::Registry)?;
+        let mut saved = false;
+        self.change(|file| {
+            if let Some(record) = file.devices.get_mut(id) {
+                if record.revoked_unix.is_none() {
+                    record.push = Some(PushSubscription {
+                        endpoint: endpoint.to_string(),
+                        p256dh: p256dh.to_string(),
+                        auth: auth.to_string(),
+                        rev: rev.clone(),
+                        key_id: key_id.to_string(),
+                        created_unix: now_unix(),
+                    });
+                    saved = true;
+                }
+            }
+        })
+        .map_err(|_| PushSaveError::Registry)?;
+        if saved {
+            Ok(rev)
+        } else {
+            Err(PushSaveError::NotAllowed)
+        }
+    }
+
+    /// Turn a device's notifications off. Returns whether one was on.
+    pub(crate) fn clear_push(&self, id: &str) -> Result<bool, DeviceError> {
+        let mut cleared = false;
+        self.change(|file| {
+            if let Some(record) = file.devices.get_mut(id) {
+                cleared = record.push.take().is_some();
+            }
+        })?;
+        Ok(cleared)
+    }
+
+    /// Remove a device's subscription only if it is still the one with
+    /// revision `rev` (a push service said it is gone). A replacement made
+    /// meanwhile is kept.
+    pub(crate) fn clear_push_rev(&self, id: &str, rev: &str) -> Result<bool, DeviceError> {
+        let mut cleared = false;
+        self.change(|file| {
+            if let Some(record) = file.devices.get_mut(id) {
+                if record.push.as_ref().is_some_and(|push| push.rev == rev) {
+                    record.push = None;
+                    cleared = true;
+                }
+            }
+        })?;
+        Ok(cleared)
+    }
+
+    /// Remove every subscription made against a key other than `key_id` (the
+    /// key was rotated). The caller holds the notification-key lock and read
+    /// `key_id` under it. Returns how many were removed.
+    pub(crate) fn clear_push_except_key(&self, key_id: &str) -> Result<usize, DeviceError> {
+        let mut cleared = 0;
+        self.change(|file| {
+            for record in file.devices.values_mut() {
+                if record
+                    .push
+                    .as_ref()
+                    .is_some_and(|push| push.key_id != key_id)
+                {
+                    record.push = None;
+                    cleared += 1;
+                }
+            }
+        })?;
+        Ok(cleared)
+    }
+
+    /// A device's current subscription, read fresh (`None` when off,
+    /// unknown or revoked).
+    pub(crate) fn push_of(&self, id: &str) -> Option<PushSubscription> {
+        let file = self.current().ok()?;
+        let record = file.devices.get(id)?;
+        if record.revoked_unix.is_some() {
+            return None;
+        }
+        record.push.clone()
     }
 
     /// Revoke a device everywhere. Persisted before it takes effect. Returns
@@ -752,6 +901,19 @@ impl DeviceRegistry {
         if let Err(error) = written {
             eprintln!("localpilot: could not write the device audit log: {error}");
         }
+    }
+
+    /// Whether a device record exists and is not revoked (tests).
+    #[cfg(test)]
+    pub(crate) fn verify_id_for_test(&self, id: &str) -> bool {
+        self.current()
+            .ok()
+            .and_then(|file| {
+                file.devices
+                    .get(id)
+                    .map(|record| record.revoked_unix.is_none())
+            })
+            .unwrap_or(false)
     }
 
     /// The audit lines of an in-memory registry (tests).
@@ -1791,6 +1953,105 @@ mod tests {
         assert!(registry.revoke(&standing.id).unwrap());
         assert_eq!(registry.verify(credential.expose()), Err(Refusal::Revoked));
         assert_eq!(registry.standing(&standing.id), Err(Refusal::Revoked));
+    }
+
+    const ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/secret-path";
+
+    #[test]
+    fn a_late_push_cleanup_never_removes_a_newer_subscription() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("devices");
+        let registry = DeviceRegistry::open(&dir, home.path());
+        let (standing, _) = registry.add("phone", Scope::Observe, false).unwrap();
+        let first = registry
+            .set_push(&standing.id, ENDPOINT, "p", "a", "key1")
+            .unwrap();
+        assert_eq!(first.len(), 32, "128 random bits");
+        assert_eq!(registry.push_of(&standing.id).unwrap().rev, first);
+        // An older binary rewrites the registry without the field.
+        let path = dir.join("registry.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw["devices"][&standing.id]
+            .as_object_mut()
+            .unwrap()
+            .remove("push");
+        std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+        assert!(registry.push_of(&standing.id).is_none(), "reads as off");
+        // The phone turns notifications on again: a new, unrelated revision.
+        let second = registry
+            .set_push(&standing.id, ENDPOINT, "p", "a", "key1")
+            .unwrap();
+        assert_ne!(second, first);
+        // The push service's late "gone" answer for the first subscription.
+        assert!(!registry.clear_push_rev(&standing.id, &first).unwrap());
+        assert_eq!(registry.push_of(&standing.id).unwrap().rev, second);
+        assert!(registry.clear_push_rev(&standing.id, &second).unwrap());
+        assert!(registry.push_of(&standing.id).is_none());
+    }
+
+    #[test]
+    fn revoke_and_rotation_cleanup_remove_subscriptions_and_nothing_else() {
+        let registry = DeviceRegistry::default();
+        let (old_key, _) = registry.add("old", Scope::Observe, false).unwrap();
+        let (new_key, _) = registry.add("new", Scope::Control, false).unwrap();
+        let (revoked, _) = registry.add("gone", Scope::Control, false).unwrap();
+        registry
+            .set_push(&old_key.id, ENDPOINT, "p", "a", "key1")
+            .unwrap();
+        registry
+            .set_push(&new_key.id, ENDPOINT, "p", "a", "key2")
+            .unwrap();
+        registry
+            .set_push(&revoked.id, ENDPOINT, "p", "a", "key2")
+            .unwrap();
+        assert!(registry.revoke(&revoked.id).unwrap());
+        assert!(registry.push_of(&revoked.id).is_none(), "revoke clears it");
+        assert!(matches!(
+            registry.set_push(&revoked.id, ENDPOINT, "p", "a", "key2"),
+            Err(PushSaveError::NotAllowed)
+        ));
+        assert!(matches!(
+            registry.set_push("unknown", ENDPOINT, "p", "a", "key2"),
+            Err(PushSaveError::NotAllowed)
+        ));
+        assert_eq!(registry.clear_push_except_key("key2").unwrap(), 1);
+        assert!(registry.push_of(&old_key.id).is_none());
+        assert!(
+            registry.push_of(&new_key.id).is_some(),
+            "the newest key's stays"
+        );
+        assert!(registry.clear_push(&new_key.id).unwrap());
+        assert!(!registry.clear_push(&new_key.id).unwrap(), "already off");
+        assert!(
+            registry.verify_id_for_test(&new_key.id),
+            "the device itself stays"
+        );
+    }
+
+    #[test]
+    fn a_subscription_shows_only_its_host_and_a_registry_without_one_still_reads() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("devices");
+        let registry = DeviceRegistry::open(&dir, home.path());
+        let (standing, credential) = registry.add("phone", Scope::Observe, false).unwrap();
+        let before = std::fs::read(dir.join("registry.json")).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&before).contains("push"),
+            "nothing written while off"
+        );
+        registry
+            .set_push(&standing.id, ENDPOINT, "the-p256dh", "the-auth", "key1")
+            .unwrap();
+        let shown = format!("{:?}", registry.push_of(&standing.id).unwrap());
+        assert!(shown.contains("fcm.googleapis.com"), "{shown}");
+        for secret in ["secret-path", "the-p256dh", "the-auth"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+        let listed = format!("{:?}", registry.list().unwrap());
+        assert!(!listed.contains("secret-path"), "{listed}");
+        // The device's credential still verifies after the field was added.
+        assert_eq!(registry.verify(credential.expose()).unwrap(), standing);
     }
 
     #[test]

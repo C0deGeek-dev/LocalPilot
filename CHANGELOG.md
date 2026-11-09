@@ -6,9 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
-- `localpilot remote push rotate` and the `[remote.push] enabled` setting
-  (off by default) are the first parts of phone notifications: this computer
-  keeps its own owner-only signing key for them. Nothing is sent yet.
+- Phone notifications (`[remote.push] enabled`, off by default): a paired
+  phone can turn them on or off through the gateway (`/api/push`), and while
+  a session is shared the workspace server sends it a content-free,
+  end-to-end encrypted Web Push when the session waits on a permission ask or
+  stops. Only known browser push services, only public addresses, at most one
+  of a kind per 30 s; subscriptions are removed on revoke, rotation
+  (`localpilot remote push rotate`) or a "gone" answer (ADR-0267).
 - `/limits [automatic|wide|very-wide|off]` and `/actions [normal|accept-all]` show
   and change the work-limit mode and the action mode of a running full-screen
   session. They last for the session, never write `.localpilot.toml` or a grant,

@@ -500,6 +500,8 @@ pub(crate) struct HostMap {
     /// Whether a remote gateway may register, and the workspace it would
     /// reach.
     remote: Arc<RemoteGate>,
+    /// Phone notifications for relayed sessions, when `[remote.push]` is on.
+    pub(crate) push_sender: Option<Arc<crate::remote_push_send::PushSender>>,
     /// Sessions other local processes run and share with devices (relays).
     relays: Arc<StdMutex<HashMap<SessionId, Arc<relay::RelayedSession>>>>,
     /// How long a device waits for a shared session's first decision on a
@@ -520,6 +522,8 @@ struct RemoteGate {
     refused: Option<String>,
     /// This workspace's discovery id.
     discovery: Option<String>,
+    /// The notification key store, when `[remote.push] enabled` is on.
+    push: Option<Arc<crate::remote_push_keys::PushKeys>>,
 }
 
 /// Bounds the device handshakes the server verifies at once. Under a flood a
@@ -1019,6 +1023,25 @@ where
                 credential.expose(),
             )
             .await;
+        }
+        ClientCommand::DevicePush {
+            capability,
+            credential,
+            request,
+        } => {
+            let event = match verify_device(
+                hosts,
+                capability.expose(),
+                credential.expose(),
+                "push_request",
+            )
+            .await
+            {
+                Ok((standing, _lease)) => push_for_device(hosts, &standing.id, request).await,
+                Err(message) => ServerEvent::Error { message },
+            };
+            emit(&mut write, reply_id, event).await?;
+            return Ok(());
         }
         ClientCommand::PairBegin {
             name,
@@ -1745,6 +1768,112 @@ async fn list_sessions_for_device<W: AsyncWrite + Unpin>(
         None => return Ok(()),
     }
     Ok(())
+}
+
+/// Answer a verified device's notification request: the key to subscribe
+/// with, a subscription to save (checked, and bound to the current key under
+/// the key lock), or turning notifications off (always allowed, so a phone
+/// can stop them even when they are off on this computer).
+async fn push_for_device(
+    hosts: &HostMap,
+    device: &str,
+    request: localpilot_rpc::PushRequest,
+) -> ServerEvent {
+    use localpilot_rpc::PushRequest;
+    let error = |message: &str| ServerEvent::Error {
+        message: message.to_string(),
+    };
+    let registry = hosts.devices.clone();
+    let device = device.to_string();
+    if matches!(request, PushRequest::Unsubscribe) {
+        let audit = registry.clone();
+        let id = device.clone();
+        let cleared = tokio::task::spawn_blocking(move || registry.clear_push(&id)).await;
+        return match cleared {
+            Ok(Ok(_)) => {
+                audit.audit("push_unsubscribed", Some(&device), "");
+                ServerEvent::PushSaved { subscribed: false }
+            }
+            _ => error("notifications could not be turned off; try again"),
+        };
+    }
+    let Some(keys) = hosts.remote.push.clone() else {
+        return error(
+            "notifications are off on this computer: set `[remote.push] enabled = true` in its user config",
+        );
+    };
+    match request {
+        PushRequest::Unsubscribe => error("unreachable"),
+        PushRequest::Key => match tokio::task::spawn_blocking(move || keys.ensure()).await {
+            Ok(Ok(key)) => ServerEvent::PushKey {
+                public_key: base64::Engine::encode(
+                    &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                    key.public_key(),
+                ),
+                key_id: key.id().to_string(),
+            },
+            _ => error("the notification key is not available"),
+        },
+        PushRequest::Subscribe {
+            endpoint,
+            p256dh,
+            auth,
+            key_id,
+        } => {
+            let checked = crate::remote_push_endpoint::check_endpoint(endpoint.expose()).and_then(
+                |endpoint| {
+                    crate::remote_push_endpoint::check_keys(p256dh.expose(), auth.expose())
+                        .map(|_| endpoint)
+                },
+            );
+            let host = match checked {
+                Ok(endpoint) => endpoint.host,
+                Err(refusal) => return error(&refusal.to_string()),
+            };
+            let audit = registry.clone();
+            let id = device.clone();
+            let saved = tokio::task::spawn_blocking(move || {
+                keys.locked(|dir| {
+                    let current = crate::remote_push_keys::PushKeys::at(dir.to_path_buf())
+                        .current()
+                        .ok()
+                        .flatten();
+                    if current.as_ref().map(crate::remote_push_keys::PushKey::id)
+                        != Some(key_id.as_str())
+                    {
+                        return Err(
+                            "the notification key changed; turn notifications on again".to_string()
+                        );
+                    }
+                    registry
+                        .set_push(
+                            &id,
+                            endpoint.expose(),
+                            p256dh.expose(),
+                            auth.expose(),
+                            &key_id,
+                        )
+                        .map_err(|refusal| match refusal {
+                            crate::server_devices::PushSaveError::NotAllowed => {
+                                "this device is no longer allowed".to_string()
+                            }
+                            crate::server_devices::PushSaveError::Registry => {
+                                "notifications could not be saved; try again".to_string()
+                            }
+                        })
+                })
+            })
+            .await;
+            match saved {
+                Ok(Ok(Ok(_rev))) => {
+                    audit.audit("push_subscribed", Some(&device), &host);
+                    ServerEvent::PushSaved { subscribed: true }
+                }
+                Ok(Ok(Err(message))) => error(&message),
+                _ => error("notifications could not be saved; try again"),
+            }
+        }
+    }
 }
 
 /// Wait for a handshake slot, giving up if the gateway's control channel
@@ -3022,15 +3151,24 @@ pub async fn serve(
     let registry = SessionRegistry::new();
     let remote =
         localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?.remote;
+    let devices = Arc::new(DeviceRegistry::for_user(&cwd));
+    let push_keys = (remote.enabled && remote.push.enabled)
+        .then(crate::remote_push_keys::PushKeys::user)
+        .and_then(Result::ok)
+        .map(Arc::new);
     let hosts = HostMap {
+        push_sender: push_keys
+            .clone()
+            .map(|keys| crate::remote_push_send::PushSender::new(devices.clone(), keys)),
         // One registry per user, shared by every workspace's server.
-        devices: Arc::new(DeviceRegistry::for_user(&cwd)),
+        devices,
         remote: Arc::new(RemoteGate {
             refused: (!remote.enabled).then(|| {
                 "remote access is off: set `[remote] enabled = true` in your user config"
                     .to_string()
             }),
             discovery: crate::server_index::discovery_id(&cwd),
+            push: push_keys,
         }),
         ..HostMap::default()
     };
@@ -5494,6 +5632,119 @@ pub(crate) mod tests {
         }
     }
 
+    fn device_push(
+        capability: &str,
+        credential: &str,
+        request: localpilot_rpc::PushRequest,
+    ) -> ClientCommand {
+        ClientCommand::DevicePush {
+            capability: localpilot_rpc::WireSecret::new(capability),
+            credential: localpilot_rpc::WireSecret::new(credential),
+            request,
+        }
+    }
+
+    fn subscribe(key_id: &str, endpoint: &str) -> localpilot_rpc::PushRequest {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        localpilot_rpc::PushRequest::Subscribe {
+            endpoint: localpilot_rpc::WireSecret::new(endpoint),
+            p256dh: localpilot_rpc::WireSecret::new(b64.encode([4u8; 65])),
+            auth: localpilot_rpc::WireSecret::new(b64.encode([9u8; 16])),
+            key_id: key_id.to_string(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_turns_notifications_on_and_off_against_the_current_key() {
+        use localpilot_rpc::PushRequest;
+        const ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/abc";
+        let keys_dir = tempfile::tempdir().unwrap();
+        let keys = Arc::new(crate::remote_push_keys::PushKeys::at(
+            keys_dir.path().join("devices"),
+        ));
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap {
+            remote: Arc::new(RemoteGate {
+                refused: None,
+                discovery: None,
+                push: Some(keys.clone()),
+            }),
+            ..HostMap::default()
+        };
+        let (endpoint, server) = spawn_server_on(factory, 8, hosts.clone());
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (device, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Observe,
+        )
+        .await;
+        let ask = |request| first_record(&endpoint, device_push(&capability, &credential, request));
+        // The key is made on first request and kept.
+        let (_, _, reply) = ask(PushRequest::Key).await;
+        let ServerEvent::PushKey { public_key, key_id } = reply else {
+            panic!("expected `push_key`, got {reply:?}");
+        };
+        assert_eq!(public_key.len(), 87, "65 bytes, base64url");
+        let (_, _, again) = ask(PushRequest::Key).await;
+        assert!(matches!(again, ServerEvent::PushKey { key_id: ref same, .. } if *same == key_id));
+        // A refused endpoint and a stale key change nothing.
+        let (_, _, reply) = ask(subscribe(&key_id, "https://127.0.0.1/x")).await;
+        assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
+        let (_, _, reply) = ask(subscribe("0000000000000000", ENDPOINT)).await;
+        assert!(
+            matches!(reply, ServerEvent::Error { ref message } if message.contains("key changed")),
+            "{reply:?}"
+        );
+        assert!(hosts.devices.push_of(&device).is_none());
+        // Saved against the current key, audited by host only.
+        let (_, _, reply) = ask(subscribe(&key_id, ENDPOINT)).await;
+        assert_eq!(reply, ServerEvent::PushSaved { subscribed: true });
+        assert_eq!(hosts.devices.push_of(&device).unwrap().key_id, key_id);
+        let audit = hosts.devices.audit_lines().join("\n");
+        assert!(audit.contains("push_subscribed") && audit.contains("fcm.googleapis.com"));
+        assert!(!audit.contains("/fcm/send/abc"), "{audit}");
+        // A rotation removes it; turning off works with or without one.
+        let (_, removed) = keys.rotate(&hosts.devices).unwrap();
+        assert_eq!(removed, 1);
+        let (_, _, reply) = ask(PushRequest::Unsubscribe).await;
+        assert_eq!(reply, ServerEvent::PushSaved { subscribed: false });
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn notifications_off_on_this_computer_refuse_on_but_allow_off() {
+        use localpilot_rpc::PushRequest;
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 8, hosts.clone());
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (device, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Observe,
+        )
+        .await;
+        let ask = |request| first_record(&endpoint, device_push(&capability, &credential, request));
+        let (_, _, reply) = ask(PushRequest::Key).await;
+        assert!(
+            matches!(reply, ServerEvent::Error { ref message } if message.contains("[remote.push]")),
+            "{reply:?}"
+        );
+        let (_, _, reply) = ask(subscribe("k", "https://fcm.googleapis.com/x")).await;
+        assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
+        let (_, _, reply) = ask(PushRequest::Unsubscribe).await;
+        assert_eq!(reply, ServerEvent::PushSaved { subscribed: false });
+        // A revoked device is refused even for that.
+        assert!(hosts.devices.revoke(&device).unwrap());
+        let (_, _, reply) = ask(PushRequest::Unsubscribe).await;
+        assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
+        server.abort();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_observing_device_lists_sessions_without_opening_any() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
@@ -6378,6 +6629,7 @@ pub(crate) mod tests {
             remote: Arc::new(RemoteGate {
                 refused: None,
                 discovery: Some(id.to_string()),
+                push: None,
             }),
             ..HostMap::default()
         }
@@ -7840,6 +8092,7 @@ pub(crate) mod tests {
             remote: Arc::new(RemoteGate {
                 refused: Some("remote access is off".to_string()),
                 discovery: Some(GATEWAY_WORKSPACE.to_string()),
+                push: None,
             }),
             ..HostMap::default()
         };
@@ -8963,6 +9216,7 @@ pub(crate) mod tests {
             remote: Arc::new(RemoteGate {
                 refused: Some("remote access is off".to_string()),
                 discovery: None,
+                push: None,
             }),
             ..HostMap::default()
         };

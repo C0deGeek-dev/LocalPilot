@@ -262,6 +262,8 @@ pub(super) struct RelayedSession {
     deadline: Duration,
     /// The devices attached to this relay (never another relay's).
     pub(super) attendance: Arc<Attendance>,
+    /// Phone notifications for what this mirror commits, when on.
+    pub(super) push: Option<Arc<crate::remote_push_send::PushSender>>,
     /// Tests: the writer waits for a permit before it starts.
     #[cfg(test)]
     hold: Option<Arc<tokio::sync::Semaphore>>,
@@ -366,6 +368,7 @@ where
                     forward,
                     deadline: hosts.relay_deadline.unwrap_or(DECIDE_DEADLINE),
                     attendance: Attendance::new(),
+                    push: hosts.push_sender.clone(),
                     #[cfg(test)]
                     hold: hosts.telemetry_hold.clone(),
                 });
@@ -403,6 +406,9 @@ where
         {
             relays.remove(&session);
         }
+    }
+    if let Some(push) = &relayed.push {
+        push.observe(session, crate::remote_push_send::Mirror::Gone);
     }
     let reason = match &outcome {
         Ok(Some(reason)) => reason.clone(),
@@ -710,6 +716,18 @@ where
                 };
                 if relayed.feed.install(&received.snapshot) {
                     position = Some((received.epoch, received.seq));
+                    if let (Some(push), ServerEvent::Snapshot { asks, .. }) =
+                        (&relayed.push, &received.snapshot)
+                    {
+                        let open = asks
+                            .iter()
+                            .map(|ask| (ask.ask_id.clone(), ask.expires_at_ms))
+                            .collect();
+                        push.observe(
+                            relayed.session,
+                            crate::remote_push_send::Mirror::Baseline(open),
+                        );
+                    }
                 }
             }
             RelayRecord::RelayEvent { epoch, seq, event } => {
@@ -724,8 +742,26 @@ where
                     }
                     continue;
                 }
-                position = Some((epoch, seq));
+                position = Some((epoch.clone(), seq));
                 if relayable(&event) {
+                    if let Some(push) = &relayed.push {
+                        use crate::remote_push_send::Mirror;
+                        let fact = match &event {
+                            ServerEvent::PermissionAsk {
+                                ask_id,
+                                expires_at_ms,
+                                ..
+                            } => Some(Mirror::AskOpened(ask_id.clone(), *expires_at_ms)),
+                            ServerEvent::PermissionResolved { ask_id, .. } => {
+                                Some(Mirror::AskEnded(ask_id.clone()))
+                            }
+                            ServerEvent::Stopped { .. } => Some(Mirror::Stopped(epoch, seq)),
+                            _ => None,
+                        };
+                        if let Some(fact) = fact {
+                            push.observe(relayed.session, fact);
+                        }
+                    }
                     relayed.feed.relay(event);
                 }
             }
@@ -921,6 +957,7 @@ pub(super) fn relayed_for_test(hosts: &HostMap) -> SessionId {
         forward,
         deadline: DECIDE_DEADLINE,
         attendance: Attendance::new(),
+        push: None,
         hold: None,
     });
     relayed.feed.install(&ServerEvent::Snapshot {
@@ -1311,6 +1348,7 @@ mod tests {
             forward: forward.clone(),
             deadline: DECIDE_DEADLINE,
             attendance: Attendance::new(),
+            push: None,
             hold: None,
         };
         // A device queued its command during the handshake.
@@ -1407,6 +1445,7 @@ mod tests {
             forward: forward.clone(),
             deadline: DECIDE_DEADLINE,
             attendance: Attendance::new(),
+            push: None,
             hold: None,
         };
         let (decided, mut waiter) = oneshot::channel();
@@ -1465,6 +1504,7 @@ mod tests {
             forward,
             deadline: DECIDE_DEADLINE,
             attendance: Attendance::new(),
+            push: None,
             hold: None,
         };
         let many: Vec<_> = (0..5000)
