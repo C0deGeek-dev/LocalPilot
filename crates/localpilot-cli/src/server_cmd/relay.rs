@@ -693,6 +693,9 @@ where
                 // is complete; until then it is unknown.
                 relayed.feed.forget();
                 position = None;
+                if let Some(push) = &relayed.push {
+                    push.observe(relayed.session, crate::remote_push_send::Mirror::Gap);
+                }
                 assembly = match SnapshotAssembly::begin(epoch, seq, parts, bytes) {
                     Ok(assembly) => Some(assembly),
                     Err(error) => return Ok(Some(error.to_string())),
@@ -739,6 +742,9 @@ where
                     if position.is_some() {
                         relayed.feed.forget();
                         position = None;
+                        if let Some(push) = &relayed.push {
+                            push.observe(relayed.session, crate::remote_push_send::Mirror::Gap);
+                        }
                     }
                     continue;
                 }

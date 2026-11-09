@@ -31,12 +31,18 @@ or account; a third-party carrier is acceptable only end-to-end encrypted.
    `*.notify.windows.com`, with no user name or fragment. Each send resolves
    the name itself, refuses unless every address is public, pins the
    connection to those addresses, uses no proxy and follows no redirect,
-   all within one 10-second deadline that starts before resolution.
+   all within one 10-second deadline that starts before resolution. The
+   device's standing, the exact subscription, the current key and the
+   session's view are checked before encrypting and again after the name
+   resolved, right before the request starts.
 5. Triggers are only what the relay mirror committed: an ask open in a
    verified snapshot or opened by an in-order event (once per ask per server
    run), and a stop event (once per feed position, held while an ask is
-   open). One push of a kind per device per 30 seconds per workspace server,
-   with a trailing re-check of current state. TTL: an ask's remaining expiry,
+   open). Each push is tied to its session and that session's verified
+   view: a mirror gap or rebuild suspends the session until the next verified
+   baseline, and work queued before a gap, a rebuild or the share ending is
+   never sent. One push of a kind per device per 30 seconds per workspace
+   server, with a trailing re-check of current state. TTL: an ask's remaining expiry,
    at most 300 seconds; a stop 900 seconds.
 6. Every send is audited with the device id, the push service's host and the
    result; the endpoint and keys never appear in logs, audit or status.

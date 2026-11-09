@@ -916,6 +916,37 @@ impl DeviceRegistry {
             .unwrap_or(false)
     }
 
+    /// The newest audit entry for `event`: when (Unix seconds) and its
+    /// detail. Reads only the log's last 64 KiB.
+    pub(crate) fn last_audit(&self, event: &str) -> Option<(u64, String)> {
+        use std::io::{Read as _, Seek as _};
+        let text = match &self.dir {
+            Some(dir) => {
+                let mut file = std::fs::File::open(dir.join("audit.jsonl")).ok()?;
+                let len = file.metadata().ok()?.len();
+                let start = len.saturating_sub(64 * 1024);
+                file.seek(std::io::SeekFrom::Start(start)).ok()?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).ok()?;
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+            None => self
+                .audit_memory
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .join("\n"),
+        };
+        text.lines().rev().find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            (value["event"] == event).then(|| {
+                (
+                    value["at"].as_u64().unwrap_or(0),
+                    value["detail"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+        })
+    }
+
     /// The audit lines of an in-memory registry (tests).
     #[cfg(test)]
     pub(crate) fn audit_lines(&self) -> Vec<String> {

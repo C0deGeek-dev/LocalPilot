@@ -86,6 +86,9 @@ pub(crate) enum SendError {
     TimedOut,
     #[error("the request failed")]
     Failed,
+    /// Not sent: what it was for no longer held after the name resolved.
+    #[error("no longer due")]
+    Withdrawn,
 }
 
 /// Resolve a host to addresses (a seam for tests).
@@ -167,6 +170,7 @@ pub(crate) async fn deliver(
     resolve: &Resolve,
     post: &Post,
     out: Outgoing,
+    recheck: &(dyn Fn() -> bool + Sync),
 ) -> Result<u16, SendError> {
     let deadline = tokio::time::Instant::now() + SEND_DEADLINE;
     tokio::time::timeout_at(deadline, async {
@@ -181,6 +185,9 @@ pub(crate) async fn deliver(
         if !addresses.iter().all(|address| is_public(address.ip())) {
             return Err(SendError::NotPublic);
         }
+        if !recheck() {
+            return Err(SendError::Withdrawn);
+        }
         post(out, addresses, deadline).await
     })
     .await
@@ -190,7 +197,7 @@ pub(crate) async fn deliver(
 /// What the relay mirror tells the sender.
 #[derive(Debug, Clone)]
 pub(crate) enum Mirror {
-    /// A verified snapshot: the asks open now.
+    /// A verified snapshot: the asks open now. The session is eligible again.
     Baseline(Vec<(String, u64)>),
     /// An ask opened (id, expiry in ms since the epoch; 0 = none).
     AskOpened(String, u64),
@@ -198,6 +205,9 @@ pub(crate) enum Mirror {
     AskEnded(String),
     /// The session's turn stopped, at feed position (epoch, seq).
     Stopped(String, u64),
+    /// The mirror lost track (a gap, or a snapshot being rebuilt): nothing is
+    /// sent for this session until the next verified baseline.
+    Gap,
     /// The session is no longer relayed here.
     Gone,
 }
@@ -209,6 +219,11 @@ struct SessionState {
     notified_set: HashSet<String>,
     stops: HashSet<(String, u64)>,
     stop_pending: bool,
+    /// Bumped whenever what the mirror knows is lost (a gap, a rebuild, the
+    /// relay ending): work queued for an older generation is never sent.
+    generation: u64,
+    /// A verified baseline holds for `generation`.
+    live: bool,
 }
 
 impl SessionState {
@@ -225,12 +240,27 @@ impl SessionState {
         }
         true
     }
+
+    fn lose_track(&mut self) {
+        self.generation += 1;
+        self.live = false;
+        self.open.clear();
+        self.stop_pending = false;
+    }
+}
+
+/// What a push is for: one session, as the mirror knew it then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Cause {
+    session: SessionId,
+    generation: u64,
 }
 
 #[derive(Default)]
 struct Window {
     last_sent: Option<tokio::time::Instant>,
-    dirty: bool,
+    /// What arrived inside the window, for the trailing re-check.
+    pending: Vec<Cause>,
     trailing: bool,
 }
 
@@ -278,12 +308,17 @@ impl PushSender {
 
     /// Take one committed mirror fact for `session`.
     pub(crate) fn observe(self: &Arc<Self>, session: SessionId, fact: Mirror) {
-        let kinds = {
+        let wanted = {
             let mut state = self.state();
             let entry = state.sessions.entry(session).or_default();
+            let cause = Cause {
+                session,
+                generation: entry.generation,
+            };
             let mut kinds = Vec::new();
             match fact {
                 Mirror::Baseline(asks) => {
+                    entry.live = true;
                     entry.open = asks.iter().cloned().collect();
                     // An ask already open gets one notification; one notified
                     // before (a rebuild or reconnect) gets none.
@@ -294,6 +329,8 @@ impl PushSender {
                         kinds.push(Kind::Ask);
                     }
                 }
+                // Events count only on top of a verified baseline.
+                _ if !entry.live && !matches!(fact, Mirror::Gap | Mirror::Gone) => {}
                 Mirror::AskOpened(id, expires) => {
                     entry.open.insert(id.clone(), expires);
                     if entry.remember(&id) {
@@ -320,28 +357,45 @@ impl PushSender {
                         }
                     }
                 }
-                Mirror::Gone => {
-                    // Notified ids are kept so a re-share does not repeat them;
-                    // what is open is no longer known.
-                    entry.open.clear();
-                    entry.stop_pending = false;
-                }
+                // Notified ids are kept, so a re-share does not repeat them.
+                Mirror::Gap | Mirror::Gone => entry.lose_track(),
             }
             kinds
+                .into_iter()
+                .map(|kind| (kind, cause))
+                .collect::<Vec<_>>()
         };
-        for kind in kinds {
-            self.want(kind);
+        for (kind, cause) in wanted {
+            self.want(kind, cause);
         }
     }
 
-    /// Whether an ask is still open in some session (for the trailing check).
-    fn any_open_ask(&self) -> Option<u64> {
+    /// Whether a push of `kind` for `cause` is still due, and with which TTL:
+    /// the session is still relayed with the same verified view, and for an
+    /// ask one is still open (and not expired); for a stop none is open.
+    fn due(&self, kind: Kind, cause: Cause) -> Option<u64> {
         let state = self.state();
-        state
-            .sessions
-            .values()
-            .flat_map(|session| session.open.values().copied())
-            .max_by_key(|expires| if *expires == 0 { u64::MAX } else { *expires })
+        let session = state.sessions.get(&cause.session)?;
+        if !session.live || session.generation != cause.generation {
+            return None;
+        }
+        match kind {
+            Kind::Ask => {
+                let latest = session.open.values().copied().max_by_key(|expires| {
+                    if *expires == 0 {
+                        u64::MAX
+                    } else {
+                        *expires
+                    }
+                })?;
+                if latest == 0 {
+                    return Some(ASK_TTL_SECS);
+                }
+                let left = latest.saturating_sub(now_ms()) / 1000;
+                (left > 0).then(|| left.min(ASK_TTL_SECS))
+            }
+            Kind::Stopped => session.open.is_empty().then_some(STOPPED_TTL_SECS),
+        }
     }
 
     /// Every subscribed device allowed in this workspace now.
@@ -355,7 +409,7 @@ impl PushSender {
             .collect()
     }
 
-    fn want(self: &Arc<Self>, kind: Kind) {
+    fn want(self: &Arc<Self>, kind: Kind, cause: Cause) {
         for (device, push) in self.recipients() {
             let now = tokio::time::Instant::now();
             let mut state = self.state();
@@ -365,11 +419,13 @@ impl PushSender {
                 .is_none_or(|last| now.duration_since(last) >= self.window);
             if open {
                 window.last_sent = Some(now);
-                window.dirty = false;
+                window.pending.clear();
                 drop(state);
-                self.dispatch(device, push.rev, push.key_id, kind);
+                self.dispatch(device, push.rev, push.key_id, kind, cause);
             } else {
-                window.dirty = true;
+                if !window.pending.contains(&cause) {
+                    window.pending.push(cause);
+                }
                 if !window.trailing {
                     window.trailing = true;
                     let at = window.last_sent.unwrap_or(now) + self.window;
@@ -384,52 +440,51 @@ impl PushSender {
         }
     }
 
-    /// The end of a window with something left over: send once more only if
-    /// it still holds now.
+    /// The end of a window with something left over: send once more, for
+    /// the first cause that is still due now.
     fn trailing(self: &Arc<Self>, device: String, kind: Kind) {
-        let dirty = {
+        let pending = {
             let mut state = self.state();
             let window = state.windows.entry((device.clone(), kind)).or_default();
             window.trailing = false;
-            std::mem::take(&mut window.dirty)
+            std::mem::take(&mut window.pending)
         };
-        let still = match kind {
-            Kind::Ask => self.any_open_ask().is_some(),
-            // A stop seen in the window, with no ask open now.
-            Kind::Stopped => self.any_open_ask().is_none(),
+        let Some(cause) = pending
+            .into_iter()
+            .find(|cause| self.due(kind, *cause).is_some())
+        else {
+            return;
         };
-        if dirty && still {
-            if let Some(push) = self.registry.push_of(&device) {
-                self.state()
-                    .windows
-                    .entry((device.clone(), kind))
-                    .or_default()
-                    .last_sent = Some(tokio::time::Instant::now());
-                self.dispatch(device, push.rev, push.key_id, kind);
-            }
+        if let Some(push) = self.registry.push_of(&device) {
+            self.state()
+                .windows
+                .entry((device.clone(), kind))
+                .or_default()
+                .last_sent = Some(tokio::time::Instant::now());
+            self.dispatch(device, push.rev, push.key_id, kind, cause);
         }
     }
 
     /// Send one push to `device`, for the exact subscription `rev` made
-    /// against `key_id`, after checking that all of it still holds.
-    fn dispatch(self: &Arc<Self>, device: String, rev: String, key_id: String, kind: Kind) {
-        let ttl = match kind {
-            Kind::Ask => match self.any_open_ask() {
-                Some(0) => ASK_TTL_SECS,
-                Some(expires) => {
-                    let left = expires.saturating_sub(now_ms()) / 1000;
-                    if left == 0 {
-                        return; // already expired
-                    }
-                    left.min(ASK_TTL_SECS)
-                }
-                None => return,
-            },
-            Kind::Stopped => STOPPED_TTL_SECS,
-        };
+    /// against `key_id`, for `cause`, if all of it still holds when it goes.
+    fn dispatch(
+        self: &Arc<Self>,
+        device: String,
+        rev: String,
+        key_id: String,
+        kind: Kind,
+        cause: Cause,
+    ) {
         let sender = self.clone();
         tokio::spawn(async move {
-            let outcome = sender.send_checked(&device, &rev, &key_id, kind, ttl).await;
+            let job = Job {
+                device: &device,
+                rev: &rev,
+                key_id: &key_id,
+                kind,
+                cause,
+            };
+            let outcome = sender.send_checked(&job).await;
             let detail = match &outcome {
                 Some((host, Ok(status))) => format!("{host} {status}"),
                 Some((host, Err(error))) => format!("{host} {error}"),
@@ -442,29 +497,30 @@ impl PushSender {
         });
     }
 
-    async fn send_checked(
-        &self,
-        device: &str,
-        rev: &str,
-        key_id: &str,
-        kind: Kind,
-        ttl_secs: u64,
-    ) -> Option<(String, Result<u16, SendError>)> {
-        // Everything is read fresh: a revoke, a new subscription or a rotated
-        // key since the trigger means nothing is sent.
-        self.registry.standing(device).ok()?;
-        let push = self.registry.push_of(device)?;
-        if push.rev != rev || push.key_id != key_id {
+    /// Whether `job` may still go now, with its TTL: the device's standing,
+    /// the exact subscription revision and key, the current key, and the
+    /// cause still due. Read fresh every time.
+    fn still_valid(&self, job: &Job<'_>) -> Option<(PushSubscription, u64)> {
+        self.registry.standing(job.device).ok()?;
+        let push = self.registry.push_of(job.device)?;
+        if push.rev != job.rev || push.key_id != job.key_id {
             return None;
         }
         let key = self.keys.current().ok().flatten()?;
-        if key.id() != key_id {
+        if key.id() != job.key_id {
             return None;
         }
+        let ttl = self.due(job.kind, job.cause)?;
+        Some((push, ttl))
+    }
+
+    async fn send_checked(&self, job: &Job<'_>) -> Option<(String, Result<u16, SendError>)> {
+        let (push, ttl_secs) = self.still_valid(job)?;
+        let key = self.keys.current().ok().flatten()?;
         let host = check_endpoint(&push.endpoint).ok()?.host;
         let (public, auth) = check_keys(&push.p256dh, &push.auth).ok()?;
         let body =
-            crate::remote_push_crypto::encrypt(&public, &auth, kind.payload(), PADDED).ok()?;
+            crate::remote_push_crypto::encrypt(&public, &auth, job.kind.payload(), PADDED).ok()?;
         let audience = format!("https://{host}");
         let expires = now_ms() / 1000 + 12 * 60 * 60;
         let authorization =
@@ -473,12 +529,28 @@ impl PushSender {
             endpoint: push.endpoint,
             host: host.clone(),
             ttl_secs,
-            urgency: kind.urgency(),
+            urgency: job.kind.urgency(),
             authorization,
             body,
         };
-        Some((host, deliver(&self.resolve, &self.post, out).await))
+        // Checked again after the name resolved, right before the request
+        // starts: a revoke, replacement, rotation or the share ending during
+        // resolution means nothing is sent.
+        let recheck = || self.still_valid(job).is_some();
+        match deliver(&self.resolve, &self.post, out, &recheck).await {
+            Err(SendError::Withdrawn) => None,
+            outcome => Some((host, outcome)),
+        }
     }
+}
+
+/// One push to send.
+struct Job<'a> {
+    device: &'a str,
+    rev: &'a str,
+    key_id: &'a str,
+    kind: Kind,
+    cause: Cause,
 }
 
 fn now_ms() -> u64 {
@@ -541,18 +613,18 @@ mod tests {
             &["[fd00::1]:443"][..],
         ] {
             assert_eq!(
-                deliver(&answers(private), &post, outgoing()).await,
+                deliver(&answers(private), &post, outgoing(), &|| true).await,
                 Err(SendError::NotPublic),
                 "{private:?}"
             );
         }
         assert_eq!(
-            deliver(&answers(&[]), &post, outgoing()).await,
+            deliver(&answers(&[]), &post, outgoing(), &|| true).await,
             Err(SendError::Unresolved)
         );
         assert!(sent.lock().unwrap().is_empty(), "nothing was sent");
         assert_eq!(
-            deliver(&answers(&["142.250.1.1:443"]), &post, outgoing()).await,
+            deliver(&answers(&["142.250.1.1:443"]), &post, outgoing(), &|| true).await,
             Ok(201)
         );
         let pinned = sent.lock().unwrap()[0].3.clone();
@@ -572,7 +644,7 @@ mod tests {
             })
         });
         assert_eq!(
-            deliver(&slow, &recording_post(&sent, 201), outgoing()).await,
+            deliver(&slow, &recording_post(&sent, 201), outgoing(), &|| true).await,
             Err(SendError::TimedOut)
         );
         assert!(sent.lock().unwrap().is_empty());
@@ -588,6 +660,10 @@ mod tests {
     }
 
     fn rig(status: u16) -> Rig {
+        rig_with(status, public_resolve())
+    }
+
+    fn rig_with(status: u16, resolve: Resolve) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let keys = Arc::new(PushKeys::at(dir.path().join("devices")));
         let key = keys.ensure().unwrap();
@@ -612,7 +688,7 @@ mod tests {
         let sender = PushSender::with(
             registry.clone(),
             keys.clone(),
-            public_resolve(),
+            resolve,
             recording_post(&sent, status),
             WINDOW,
         );
@@ -632,6 +708,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
             tokio::task::yield_now().await;
         }
+    }
+
+    /// A session shared with a verified, empty baseline.
+    fn shared(rig: &Rig) -> SessionId {
+        let session = SessionId::new();
+        rig.sender.observe(session, Mirror::Baseline(Vec::new()));
+        session
     }
 
     fn kinds(rig: &Rig) -> Vec<&'static str> {
@@ -664,7 +747,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_burst_coalesces_and_an_ask_still_open_gets_the_trailing_push() {
         let rig = rig(201);
-        let session = SessionId::new();
+        let session = shared(&rig);
         rig.sender
             .observe(session, Mirror::AskOpened("a1".to_string(), 0));
         settle().await;
@@ -695,7 +778,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_stop_waits_for_open_asks_and_is_never_replayed() {
         let rig = rig(201);
-        let session = SessionId::new();
+        let session = shared(&rig);
         rig.sender
             .observe(session, Mirror::AskOpened("a1".to_string(), 0));
         settle().await;
@@ -718,7 +801,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_trailing_stop_is_dropped_when_an_ask_opened_meanwhile() {
         let rig = rig(201);
-        let session = SessionId::new();
+        let session = shared(&rig);
         rig.sender
             .observe(session, Mirror::Stopped("e".to_string(), 1));
         settle().await;
@@ -744,37 +827,157 @@ mod tests {
         let rig1 = rig(201);
         assert!(rig1.registry.revoke(&rig1.device).unwrap());
         rig1.sender
-            .observe(SessionId::new(), Mirror::AskOpened("a".to_string(), 0));
+            .observe(shared(&rig1), Mirror::AskOpened("a".to_string(), 0));
         settle().await;
         assert!(kinds(&rig1).is_empty(), "revoked");
         let rig2 = rig(201);
         rig2.keys.rotate(&DeviceRegistry::default()).unwrap();
         rig2.sender
-            .observe(SessionId::new(), Mirror::AskOpened("a".to_string(), 0));
+            .observe(shared(&rig2), Mirror::AskOpened("a".to_string(), 0));
         settle().await;
         assert!(kinds(&rig2).is_empty(), "made against the old key");
         let rig3 = rig(201);
         let current = rig3.registry.push_of(&rig3.device).unwrap();
+        let session = shared(&rig3);
         rig3.sender.dispatch(
             rig3.device.clone(),
             "not-the-current-rev".to_string(),
             current.key_id,
             Kind::Stopped,
+            Cause {
+                session,
+                generation: 0,
+            },
         );
         settle().await;
         assert!(kinds(&rig3).is_empty(), "replaced since the trigger");
         let rig4 = rig(201);
         rig4.sender
-            .observe(SessionId::new(), Mirror::AskOpened("a".to_string(), 1));
+            .observe(shared(&rig4), Mirror::AskOpened("a".to_string(), 1));
         settle().await;
         assert!(kinds(&rig4).is_empty(), "already expired");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nothing_is_sent_for_a_session_that_stopped_being_shared() {
+        // A stop inside the window, then the share ends: no trailing stop.
+        let rig1 = rig(201);
+        let session = shared(&rig1);
+        rig1.sender
+            .observe(session, Mirror::Stopped("e".to_string(), 1));
+        settle().await;
+        rig1.sender
+            .observe(session, Mirror::Stopped("e".to_string(), 2));
+        rig1.sender.observe(session, Mirror::Gone);
+        tokio::time::sleep(WINDOW * 2).await;
+        settle().await;
+        assert_eq!(kinds(&rig1), vec!["normal"], "no trailing stop after Gone");
+        // A stop whose send has not started when the share ends.
+        let rig2 = rig(201);
+        let session = shared(&rig2);
+        rig2.sender
+            .observe(session, Mirror::Stopped("e".to_string(), 1));
+        rig2.sender.observe(session, Mirror::Gone);
+        settle().await;
+        assert!(kinds(&rig2).is_empty(), "the queued stop was dropped");
+        // Ending one share leaves another one's pushes alone.
+        let rig3 = rig(201);
+        let (ending, staying) = (shared(&rig3), shared(&rig3));
+        rig3.sender
+            .observe(ending, Mirror::AskOpened("a".to_string(), 0));
+        rig3.sender.observe(ending, Mirror::Gone);
+        settle().await;
+        assert!(kinds(&rig3).is_empty());
+        // The dropped send still used the window; the other session's ask
+        // goes with the trailing re-check.
+        rig3.sender
+            .observe(staying, Mirror::AskOpened("b".to_string(), 0));
+        tokio::time::sleep(WINDOW).await;
+        settle().await;
+        assert_eq!(kinds(&rig3), vec!["high"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_mirror_gap_suspends_pushes_until_a_verified_baseline() {
+        let rig = rig(201);
+        let session = shared(&rig);
+        rig.sender.observe(session, Mirror::Gap);
+        rig.sender
+            .observe(session, Mirror::AskOpened("a".to_string(), 0));
+        rig.sender
+            .observe(session, Mirror::Stopped("e".to_string(), 3));
+        settle().await;
+        assert!(
+            kinds(&rig).is_empty(),
+            "nothing between a gap and a baseline"
+        );
+        rig.sender
+            .observe(session, Mirror::Baseline(vec![("a".to_string(), 0)]));
+        settle().await;
+        assert_eq!(kinds(&rig), vec!["high"], "the open ask, once verified");
+    }
+
+    /// A resolver that answers only when released.
+    fn held_resolve(release: &Arc<tokio::sync::Notify>) -> Resolve {
+        let release = release.clone();
+        Arc::new(move |_| {
+            let release = release.clone();
+            Box::pin(async move {
+                release.notified().await;
+                Ok(vec!["142.250.1.1:443".parse().unwrap()])
+            })
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_change_while_the_name_resolves_stops_the_request() {
+        for change in ["revoke", "unsubscribe", "replace", "rotate", "gone"] {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let rig = rig_with(201, held_resolve(&release));
+            let session = shared(&rig);
+            rig.sender
+                .observe(session, Mirror::AskOpened("a".to_string(), 0));
+            settle().await;
+            match change {
+                "revoke" => assert!(rig.registry.revoke(&rig.device).unwrap()),
+                "unsubscribe" => assert!(rig.registry.clear_push(&rig.device).unwrap()),
+                "replace" => {
+                    let push = rig.registry.push_of(&rig.device).unwrap();
+                    rig.registry
+                        .set_push(
+                            &rig.device,
+                            &push.endpoint,
+                            &push.p256dh,
+                            &push.auth,
+                            &push.key_id,
+                        )
+                        .unwrap();
+                }
+                "rotate" => {
+                    rig.keys.rotate(&DeviceRegistry::default()).unwrap();
+                }
+                _ => rig.sender.observe(session, Mirror::Gone),
+            }
+            release.notify_one();
+            settle().await;
+            assert!(kinds(&rig).is_empty(), "{change}: no request started");
+        }
+        // Unchanged, the same held send goes.
+        let release = Arc::new(tokio::sync::Notify::new());
+        let rig = rig_with(201, held_resolve(&release));
+        rig.sender
+            .observe(shared(&rig), Mirror::AskOpened("a".to_string(), 0));
+        settle().await;
+        release.notify_one();
+        settle().await;
+        assert_eq!(kinds(&rig), vec!["high"]);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_gone_subscription_is_removed_and_audited_by_host_only() {
         let rig = rig(410);
         rig.sender
-            .observe(SessionId::new(), Mirror::AskOpened("a".to_string(), 0));
+            .observe(shared(&rig), Mirror::AskOpened("a".to_string(), 0));
         settle().await;
         assert_eq!(kinds(&rig).len(), 1);
         assert!(
@@ -785,6 +988,18 @@ mod tests {
         assert!(
             audit.contains("push_sent") && audit.contains("fcm.googleapis.com 410"),
             "{audit}"
+        );
+        // `remote status` shows it as the last send.
+        let (_, last) = rig.registry.last_audit("push_sent").unwrap();
+        assert_eq!(last, "fcm.googleapis.com 410");
+        let line = crate::remote_status::render_push(&crate::remote_status::PushStatus {
+            enabled: true,
+            subscribed: Ok(0),
+            last: rig.registry.last_audit("push_sent"),
+        });
+        assert!(
+            line.contains("on; 0 phones") && line.contains("fcm.googleapis.com 410"),
+            "{line}"
         );
         assert!(!audit.contains("/fcm/send/phone"), "{audit}");
     }

@@ -2095,7 +2095,37 @@ pub(crate) async fn status_at(cwd: &std::path::Path) -> RemoteStatus {
 
 /// `localpilot remote status`.
 pub(crate) async fn print_status() {
-    print!("remote access:\n{}", render_status(&status().await));
+    let cwd = std::env::current_dir().unwrap_or_default();
+    print!(
+        "remote access:\n{}{}",
+        render_status(&status_at(&cwd).await),
+        crate::remote_status::render_push(&push_status(&cwd))
+    );
+}
+
+/// Whether notifications are on, how many phones turned them on, and the
+/// last send recorded in the device audit log.
+fn push_status(cwd: &std::path::Path) -> crate::remote_status::PushStatus {
+    let enabled = localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(cwd),
+        &localpilot_config::CliOverrides::default(),
+    )
+    .is_ok_and(|config| config.remote.enabled && config.remote.push.enabled);
+    let registry = crate::server_devices::DeviceRegistry::for_user(cwd);
+    let subscribed = registry
+        .list()
+        .map(|devices| {
+            devices
+                .iter()
+                .filter(|record| record.revoked_unix.is_none() && record.push.is_some())
+                .count()
+        })
+        .map_err(|error| error.to_string());
+    crate::remote_status::PushStatus {
+        enabled,
+        subscribed,
+        last: registry.last_audit("push_sent"),
+    }
 }
 
 /// The gateway's listener: loopback only, always. There is no setting that

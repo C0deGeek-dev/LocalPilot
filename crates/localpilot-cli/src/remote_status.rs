@@ -62,6 +62,38 @@ pub fn health_body() -> String {
     format!("localpilot-gateway {}", env!("CARGO_PKG_VERSION"))
 }
 
+/// Phone notifications as `remote status` reports them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PushStatus {
+    /// `[remote] enabled` and `[remote.push] enabled` are both on.
+    pub enabled: bool,
+    /// Phones with notifications on (not revoked); `Err` names why the
+    /// registry could not be read.
+    pub subscribed: Result<usize, String>,
+    /// The last send this user's servers recorded: when (Unix seconds) and
+    /// what it said (the push service's host and its answer).
+    pub last: Option<(u64, String)>,
+}
+
+/// The notifications line.
+pub fn render_push(push: &PushStatus) -> String {
+    let state = if push.enabled {
+        "on"
+    } else {
+        "off ([remote.push] enabled = false)"
+    };
+    let phones = match &push.subscribed {
+        Ok(1) => "1 phone turned them on".to_string(),
+        Ok(n) => format!("{n} phones turned them on"),
+        Err(reason) => format!("phones cannot be read: {reason}"),
+    };
+    let last = match &push.last {
+        Some((at, detail)) => format!("last sent {at} (Unix time): {detail}"),
+        None => "none sent yet".to_string(),
+    };
+    format!("  notifications:  {state}; {phones}; {last}\n")
+}
+
 /// The status as indented text lines.
 pub fn render_status(status: &RemoteStatus) -> String {
     use std::fmt::Write as _;

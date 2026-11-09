@@ -1267,7 +1267,10 @@ server only relays it.
   only which of the two it is, signed with this computer's own key. It goes
   only to a public address of the allowed push service (resolved and pinned
   by the server, no proxy, no redirect, one 10-second deadline), at most one
-  of a kind per phone per 30 seconds per workspace. Each send is audited by
+  of a kind per phone per 30 seconds per workspace. Everything it depends on
+  (the phone's standing and exact subscription, the current key, the session
+  still shared with a verified view) is checked again after the name
+  resolves, right before the request starts. Each send is audited by
   device id, push host and result. Stopping, revoking or turning
   notifications off prevents new sends; a push the service already accepted
   may still arrive later, and it carries nothing but its kind (ADR-0267).
