@@ -7,6 +7,35 @@ behaviour at the current `VERSION`. See **[[Getting-Started]]** first.
 > under `docs/wiki/` and synced one-way on every push to `main`. Edit the source
 > in `docs/wiki/`; web edits are overwritten on the next sync.
 
+## Follow a session from your phone
+
+LocalPilot can show a session you share from the full-screen terminal on your
+phone, through LocalLink, a web app your own computer serves. Nothing goes
+through a LocalX server. It is off until you turn it on.
+
+1. **Give the phone an HTTPS address.** With Tailscale installed and signed in
+   on the computer and the phone, run `localpilot remote setup` and accept.
+   It sets `[remote] enabled = true` and `advertised_url` in your user config.
+   With your own tunnel or reverse proxy, set both by hand
+   ([configuration](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/configuration.md#remote)).
+2. **Start the gateway** and keep it running: `localpilot remote gateway`.
+3. **Pair the phone.** In the full-screen terminal run `/remote pair`, or run
+   `localpilot devices pair --url <your HTTPS address>`. Scan the QR code with
+   the phone, check that the address shown matches yours, and choose
+   **Pair this phone**. Without a camera, paste the link, or type the code and
+   the workspace id the computer prints.
+4. **Share a session.** In the full-screen terminal run `/remote share`. If no
+   background server runs for the project yet, `/remote` offers to start one.
+5. **Open it on the phone.** Choose the project and the shared session. You can
+   read the conversation, send a message (or a follow-up while a turn runs),
+   stop the turn, and run the slash commands the computer offers. A phone
+   paired with `observe` can only watch.
+
+`/remote stop` ends sharing. `/remote devices` (or `localpilot devices list` and
+`localpilot devices revoke <id>`) shows and revokes paired devices.
+`localpilot remote status` reports the gateway, the address, the served
+projects and the paired devices.
+
 ## Initialize a project
 
 ```sh

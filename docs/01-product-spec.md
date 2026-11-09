@@ -49,7 +49,8 @@ second-class port:
 - no hidden telemetry
 - no cloud sync in v1
 - no remote code execution service in v1
-- no browser IDE replacement in v1
+- no browser IDE replacement in v1 (the opt-in phone companion follows
+  shared sessions only; ADR-0269)
 - no model training or fine-tuning in v1
 
 ## Core Jobs
@@ -499,6 +500,19 @@ Scriptable commands:
 - `localpilot harness status`
 - `localpilot harness feature`
 - `localpilot harness wait-resume`
+
+### Phone Companion (opt-in)
+
+A paired phone follows sessions shared from the full-screen terminal through
+LocalLink, a web app served by the user's own computer (ADR-0269):
+
+- off unless the user turns on `[remote]` and runs the gateway
+- no LocalX server, relay or account; the user's own HTTPS path carries it
+- the workspace server decides every action; a phone paired to observe only
+  watches
+- read the conversation, send or queue a message, stop the turn, run the
+  offered slash commands
+- a desktop or hosted client is not offered
 
 ### Print Mode
 

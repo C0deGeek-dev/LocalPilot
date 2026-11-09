@@ -869,6 +869,30 @@ single-agent turn takes.
   models) run at once, the RAM/VRAM bound; `--max-agents` is the lifetime runaway
   guard — resource containment (`SwarmLimits`), never a token or spend budget.
 
+#### Remote gateway and phone companion (opt-in)
+
+`localpilot remote gateway` is a separate process (ADR-0247, ADR-0269). It
+binds loopback only; a trusted HTTPS component the user runs on the same
+computer (a tunnel agent, `tailscale serve`, a reverse proxy) ends TLS and
+forwards to it. It finds served workspaces in the per-user index, registers
+with each workspace server for a capability, and relays a paired device's
+requests and socket to that server, which verifies the device against the
+per-user registry and decides every grant (ADR-0245). The terminal that runs a
+session shares it with `/remote share`; the server mirrors it and forwards
+device commands back to the terminal, which decides them in its own loop
+(ADR-0250, ADR-0251). The gateway also serves one pinned, verified build of the
+LocalLink phone app (ADR-0268). Notifications are content-free Web Pushes the
+workspace server sends (ADR-0267). Details: `07-security-and-privacy.md`
+§Paired Devices.
+
+```text
+phone (LocalLink) --HTTPS--> user's HTTPS proxy --loopback--> remote gateway
+                                                                  |
+                                     workspace server (decides) <-+
+                                                |
+                            full-screen terminal running the shared session
+```
+
 #### Pair collaboration (opt-in)
 
 `localpilot pair <task>` adopts two fresh sessions atomically into the exact-two

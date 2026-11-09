@@ -478,6 +478,15 @@ It is a local-only Unix-socket / Windows-named-pipe transport — never a networ
 server — and stays entirely opt-in. See
 [embedding.md](embedding.md#running-the-opt-in-server-serve--connect).
 
+## The phone companion
+
+Nothing extra to install on the computer: the remote gateway and the LocalLink
+phone app are part of the `localpilot` binary. The phone needs only a browser
+and an HTTPS address for your computer, for example through Tailscale
+(`localpilot remote setup`). See
+[configuration.md](configuration.md#remote) and the
+[how-to](wiki/How-To.md#follow-a-session-from-your-phone).
+
 ## Next steps
 
 - Configure a provider — see [providers.md](providers.md).

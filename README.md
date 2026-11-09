@@ -325,6 +325,15 @@ coordinator ──seeds──> task graph ──dispatch──> workers ──ha
 
 </details>
 
+## Your session on your phone (opt-in)
+
+Share the session you are running in the full-screen terminal with your phone:
+follow the conversation, answer, send a follow-up or stop the turn from the
+LocalLink web app. Your own computer serves the app and decides every action.
+There is no LocalX server or account; your own Tailscale or tunnel carries the
+traffic over HTTPS. Off until you turn it on: see
+[Follow a session from your phone](docs/wiki/How-To.md#follow-a-session-from-your-phone).
+
 ## Pick the right guide
 
 | Topic | Guide |
@@ -335,6 +344,7 @@ coordinator ──seeds──> task graph ──dispatch──> workers ──ha
 | Tools and permissions | [Tool system](docs/05-tool-system.md) and [Security](docs/security.md) |
 | MCP servers | [MCP](docs/mcp.md) |
 | Embedding, RPC, and ACP | [Embedding](docs/embedding.md) |
+| Phone companion and remote access | [Configuration](docs/configuration.md#remote) and [Companion app](docs/companion-app.md) |
 | Adding providers or tools | [Extending](docs/extending.md) |
 | Harness guarantees | [Harness specification](docs/06-harness-spec.md) |
 | Release history | [Changelog](CHANGELOG.md) |
