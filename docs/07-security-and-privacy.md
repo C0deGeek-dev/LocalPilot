@@ -1317,7 +1317,9 @@ project file cannot set any `[remote]` key).
 - **Choosing a workspace.** A paired device lists the workspaces it may reach
   (`GET /api/workspaces`: its credential is verified and each workspace's grant
   checked first; only ids, folder names and whether each is online are
-  returned, never paths), and names one explicitly to connect. A workspace id
+  returned, never paths, plus the device's own scope, `observe` or `control`,
+  so the app knows which controls to offer; the server still decides every
+  action), and names one explicitly to connect. A workspace id
   is only a key into the list. Before attaching, a device can list a
   workspace's sessions (`GET /api/sessions?workspace=<id>`): the workspace's
   server checks the credential and the device's standing itself, answers with

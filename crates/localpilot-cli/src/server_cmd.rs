@@ -6751,7 +6751,14 @@ pub(crate) mod tests {
             .map(|(workspace, connect)| (workspace.id, connect))
             .collect();
         let verify_devices = devices.clone();
+        let scope_devices = devices.clone();
         let discovery = crate::remote_gateway::Discovery {
+            scope: Arc::new(move |device: &str| {
+                scope_devices
+                    .standing(device)
+                    .ok()
+                    .map(|standing| standing.scope)
+            }),
             list: Arc::new(move || listed.clone()),
             dial: Arc::new(move |workspace: &crate::remote_gateway::Workspace| {
                 match connects.get(&workspace.id) {
@@ -7261,6 +7268,8 @@ pub(crate) mod tests {
             .contains("cache-control: no-store"));
         assert!(!head.to_ascii_lowercase().contains("access-control-allow"));
         let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // The device is told its own scope, read from the registry.
+        assert_eq!(listed["scope"], "control", "{body}");
         let items = listed["workspaces"].as_array().unwrap();
         assert_eq!(items.len(), 2, "{body}");
         assert!(items.iter().all(|item| item["online"] == true), "{body}");

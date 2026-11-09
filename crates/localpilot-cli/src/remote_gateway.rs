@@ -347,6 +347,8 @@ pub(crate) type Dial = Arc<
 pub(crate) type Verify = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 /// Whether a device may currently reach the workspace at a root.
 pub(crate) type Reach = Arc<dyn Fn(&str, &std::path::Path) -> bool + Send + Sync>;
+/// A verified device's scope, if its record can be read.
+pub(crate) type DeviceScope = Arc<dyn Fn(&str) -> Option<localpilot_rpc::Scope> + Send + Sync>;
 
 /// How the gateway finds workspaces and checks devices. The servers remain
 /// the authority on every grant; the gateway uses `verify` and `standing`
@@ -360,6 +362,9 @@ pub(crate) struct Discovery {
     pub(crate) verify: Verify,
     /// Whether the device may currently reach the workspace at `root`.
     pub(crate) standing: Reach,
+    /// The device's scope, when its record can be read. Shown to the device
+    /// so it can tell what it may do; the server still decides every action.
+    pub(crate) scope: DeviceScope,
 }
 
 /// A workspace's registration: its capability, valid while the control
@@ -680,7 +685,8 @@ impl Gateway {
                 })
             })
             .collect();
-        json(&serde_json::json!({ "workspaces": items }))
+        let scope = (self.discovery.scope)(&device);
+        json(&serde_json::json!({ "scope": scope, "workspaces": items }))
     }
 
     /// A workspace's sessions for this device, before it attaches: metadata
@@ -1747,14 +1753,24 @@ fn user_discovery() -> anyhow::Result<Discovery> {
         let registry = registry.clone();
         Arc::new(move |credential: &str| registry.verify_device(credential).ok())
     };
-    let standing = Arc::new(move |device: &str, root: &std::path::Path| {
-        registry.standing_in(device, root).is_ok()
+    let standing = {
+        let registry = registry.clone();
+        Arc::new(move |device: &str, root: &std::path::Path| {
+            registry.standing_in(device, root).is_ok()
+        })
+    };
+    let scope = Arc::new(move |device: &str| {
+        registry
+            .standing(device)
+            .ok()
+            .map(|standing| standing.scope)
     });
     Ok(Discovery {
         list,
         dial,
         verify,
         standing,
+        scope,
     })
 }
 
@@ -3050,6 +3066,7 @@ mod tests {
             dial: fake_server(&id, Vec::new(), CancellationToken::new()),
             verify: Arc::new(|_| Some("device".to_string())),
             standing: Arc::new(move |_, _| allowed),
+            scope: Arc::new(|_| Some(localpilot_rpc::Scope::Observe)),
         };
         let gateway = Gateway::new(
             Policy::new("https://pc.example.test", &[]),
@@ -3226,6 +3243,7 @@ mod tests {
                 let allowed = allowed.clone();
                 Arc::new(move |_, _| allowed.load(std::sync::atomic::Ordering::SeqCst))
             },
+            scope: Arc::new(|_| Some(localpilot_rpc::Scope::Observe)),
         };
         let gateway = Gateway::new(
             Policy::new("https://pc.example.test", &[]),
@@ -3379,6 +3397,7 @@ mod tests {
             }),
             verify: Arc::new(|_| None),
             standing: Arc::new(|_, _| false),
+            scope: Arc::new(|_| None),
         };
         Gateway::new(
             Policy::new(origin, hosts).with_bound_port(47610),
