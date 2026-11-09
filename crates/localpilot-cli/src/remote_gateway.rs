@@ -11,8 +11,9 @@
 //! What a browser request must carry is exact: one `Host` from an explicit
 //! list, and, for anything that acts, one `Origin` equal to the advertised
 //! origin. A read (`GET`) may come without `Origin`, as browsers send it,
-//! but never with another one or from another site. Forwarded headers are never trusted. Every browser frame is parsed
-//! as one JSON value and re-encoded before it reaches the daemon, so a frame
+//! but never with another one or from another site. Forwarded headers are
+//! never trusted. Every browser frame is parsed as one JSON value and
+//! re-encoded before it reaches the daemon, so a frame
 //! can never become two records, and records that only the gateway or the
 //! local machine may send are refused here as well as in the daemon.
 
