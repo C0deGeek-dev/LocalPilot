@@ -25,6 +25,19 @@ h1 { margin: 1.5rem 0; font-size: clamp(2rem, 7vw, 3.25rem); line-height: 1.12; 
 .empty-state { margin-top: 2.5rem; padding: 1.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 1rem; }
 h2 { margin: 0; font-size: 1.125rem; }
 .empty-state p { margin-bottom: 0; color: var(--muted); line-height: 1.65; }
+.pairing { margin-top: 2rem; }
+.pairing button { margin-top: 1rem; }
+button, input { font: inherit; min-height: 48px; border-radius: .5rem; border: 1px solid var(--border); padding: .75rem 1rem; max-width: 100%; }
+button { cursor: pointer; background: var(--accent); color: var(--surface); font-weight: 650; }
+button.secondary { background: var(--surface); color: inherit; }
+button:disabled { cursor: wait; opacity: .6; }
+input { width: 100%; background: var(--surface); color: inherit; }
+label { display: block; font-weight: 650; margin: 1.5rem 0 .5rem; }
+.empty-state .help { color: var(--muted); font-size: .875rem; line-height: 1.6; margin: .5rem 0; font-weight: 400; }
+.address { font-family: ui-monospace, monospace; padding: 1rem; background: var(--selected); border-radius: .5rem; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; }
+video { display: block; width: 100%; max-height: 20rem; border-radius: .5rem; margin-top: 1rem; background: #1c2422; }
+#pair-retry:empty, #pair-issue:empty, #camera-status:empty { display: none; }
 nav { position: sticky; bottom: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .25rem; padding: .5rem .5rem max(.5rem, env(safe-area-inset-bottom)); background: var(--surface); border-top: 1px solid var(--border); }
 nav a { display: grid; place-items: center; text-decoration: none; min-height: 48px; padding: .5rem .25rem; overflow-wrap: anywhere; border-radius: .5rem; font-size: .875rem; }
 nav a[aria-current] { background: var(--selected); color: var(--accent); font-weight: 700; }

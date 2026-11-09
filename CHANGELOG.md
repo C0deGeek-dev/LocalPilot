@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The embedded companion app can now pair a phone: scan the QR code from
+  `localpilot devices pair --url <address>` or the full-screen pairing screen,
+  or enter the link, or the code and workspace id, by hand. The app confirms
+  the address first, exchanges the code once, and checks that the browser kept
+  the device credential. Session viewing and controls are not in the app yet.
 - The remote gateway's read requests (`/api/workspaces`, `/api/sessions`, and
   reading the `/api/push` key) now work from a browser. Browsers send no
   `Origin` on a same-origin `GET`, so those reads were always refused. A read

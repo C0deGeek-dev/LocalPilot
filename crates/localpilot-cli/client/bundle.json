@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "version": "0.1.0",
-  "source_revision": "769745116addcb976e319385eb61d8ef445f87be",
+  "source_revision": "0719014a658440431d044fce7503938cabebba3b",
   "source_dirty": false,
-  "client_status": "scaffold",
+  "client_status": "pairing",
   "protocol": {
     "min": 1,
     "max": 1,
@@ -16,44 +16,50 @@
   },
   "files": [
     {
-      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/app.js",
-      "sha256": "bddee12cbf5eabd9b23f1d07bea7ff777876d26b5a604bdb8841b21185303b1c",
-      "bytes": 936,
+      "path": "assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/app.js",
+      "sha256": "603b156e1e1579192e938f5f973e9d930d207bdb74478ddaf7e8fe000265b8b5",
+      "bytes": 5632,
       "content_type": "application/javascript; charset=utf-8"
     },
     {
-      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/icon-192.png",
+      "path": "assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/icon-192.png",
       "sha256": "188de0c85de967f1d7175faee8546cbffeb687822cb4e2fc44330925401a382e",
       "bytes": 719,
       "content_type": "image/png"
     },
     {
-      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/icon-512.png",
+      "path": "assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/icon-512.png",
       "sha256": "0a7187b0c69c7958fc6a6e2a3821ec59adf78ddceb1df0f063add33175c3f955",
       "bytes": 2702,
       "content_type": "image/png"
     },
     {
-      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/icon.svg",
+      "path": "assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/icon.svg",
       "sha256": "00130aadf64b0538a5f4b2565181f829550d9b5b8a8893933a8d8e6db4600190",
       "bytes": 291,
       "content_type": "image/svg+xml"
     },
     {
-      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/style.css",
-      "sha256": "6b6e1c4d99161d889baae8e05dc356b53574e5e9310182757d764fae0cbe9500",
-      "bytes": 2500,
+      "path": "assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/pairing.js",
+      "sha256": "f7f8f653b383af794adb44641cd32523a37410e8273b4328a11fe5ea68183586",
+      "bytes": 11737,
+      "content_type": "application/javascript; charset=utf-8"
+    },
+    {
+      "path": "assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/style.css",
+      "sha256": "79ca065e6899c3f22aa2c269bb90cd7825dc66880c199dce984ea42784c9a1a2",
+      "bytes": 3571,
       "content_type": "text/css; charset=utf-8"
     },
     {
       "path": "index.html",
-      "sha256": "b00a8962f982d7e1399c2b22816d9ebc67860b85d5ed189a80340b267176364f",
-      "bytes": 2850,
+      "sha256": "0a484e6fbb71157ff2375ecb634a48124ab45162864dd564a83e01df041680fc",
+      "bytes": 5221,
       "content_type": "text/html; charset=utf-8"
     },
     {
       "path": "manifest.webmanifest",
-      "sha256": "65a2e6e1f3183dce3c78d6af5cb23c4495312a48007777247a09b5bbacadd2fc",
+      "sha256": "46bc41c26b6015848e4748c1697db565366313f77eb07ae6f5f087010c403838",
       "bytes": 621,
       "content_type": "application/manifest+json"
     }
