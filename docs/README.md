@@ -31,6 +31,7 @@ in two places. `CLAUDE.md` ("## The specs") routes here; ADRs in
 |---|---|
 | [`install.md`](install.md) | Installation |
 | [`configuration.md`](configuration.md) | Configuration reference |
+| [`companion-app.md`](companion-app.md) | The embedded companion phone app: pin, checks and update steps |
 | [`providers.md`](providers.md) | Per-provider usage |
 | [`mcp.md`](mcp.md) | MCP server integration |
 | [`extending.md`](extending.md) | Extending LocalPilot |

@@ -10,3 +10,7 @@
 
 # Render snapshots preserve terminal-cell padding as observable geometry.
 *.snap -whitespace
+
+# The embedded companion app is pinned by digest: its bytes must reach every
+# checkout exactly as committed.
+crates/localpilot-cli/client/** -text

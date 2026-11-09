@@ -1,0 +1,36 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  color: #263a36;
+  background: #f5f3ec;
+  --surface: #fffcf5;
+  --muted: #566963;
+  --border: #ccd5cd;
+  --accent: #17665d;
+  --selected: #e2eee7;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: inherit; }
+[hidden] { display: none !important; }
+.shell { max-width: 48rem; min-height: 100dvh; margin: auto; display: flex; flex-direction: column; }
+.masthead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.5rem; border-bottom: 1px solid var(--border); }
+.brand { min-height: 48px; text-decoration: none; font-size: 1.5rem; font-weight: 700; letter-spacing: -.05em; }
+.brand span { display: block; margin-top: .25rem; color: var(--muted); font-size: .625rem; letter-spacing: .16em; }
+.connection { padding: .5rem .75rem; border: 1px solid var(--border); border-radius: 2rem; font-size: .875rem; }
+main { flex: 1; padding: 2.5rem 1.5rem 3rem; overflow-wrap: anywhere; }
+.eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: .14em; font-size: .75rem; font-weight: 700; }
+h1 { margin: 1.5rem 0; font-size: clamp(2rem, 7vw, 3.25rem); line-height: 1.12; font-weight: 550; letter-spacing: -.045em; }
+.intro { max-width: 30rem; font-size: 1.125rem; line-height: 1.65; color: var(--muted); }
+.empty-state { margin-top: 2.5rem; padding: 1.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 1rem; }
+h2 { margin: 0; font-size: 1.125rem; }
+.empty-state p { margin-bottom: 0; color: var(--muted); line-height: 1.65; }
+nav { position: sticky; bottom: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .25rem; padding: .5rem .5rem max(.5rem, env(safe-area-inset-bottom)); background: var(--surface); border-top: 1px solid var(--border); }
+nav a { display: grid; place-items: center; text-decoration: none; min-height: 48px; padding: .5rem .25rem; overflow-wrap: anywhere; border-radius: .5rem; font-size: .875rem; }
+nav a[aria-current] { background: var(--selected); color: var(--accent); font-weight: 700; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.skip { position: absolute; top: -8rem; padding: 1rem; background: var(--surface); z-index: 2; }
+.skip:focus { top: 0; }
+@media (prefers-color-scheme: dark) {
+  :root { color: #e4e9e3; background: #1c2422; --surface: #252f2c; --muted: #b1c0b8; --border: #45564e; --accent: #8bd5c7; --selected: #314b43; }
+}

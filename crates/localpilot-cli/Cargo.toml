@@ -149,6 +149,11 @@ localpilot-tools = { path = "../localpilot-tools" }
 localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }
 unicode-width = { workspace = true, optional = true }
 
+# The build script checks the embedded companion app bundle (client.pin).
+[build-dependencies]
+serde_json.workspace = true
+sha2 = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 # Owner-only named pipes for `mesh run --listen` (ADR-0189).
 localpilot-winsec = { path = "../localpilot-winsec" }

@@ -3892,6 +3892,162 @@ mod tests {
 #[path = "../build_meta.rs"]
 mod build_meta;
 
+/// The build script's companion-app check, included from the same file the
+/// script uses.
+#[cfg(test)]
+#[path = "../client_bundle.rs"]
+mod client_bundle;
+
+#[cfg(test)]
+mod client_bundle_tests {
+    use super::client_bundle::{parse_pin, render, safe_path, verify, Pin, MANIFEST};
+    use sha2::{Digest, Sha256};
+    use std::path::Path;
+
+    fn hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        bytes.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+    }
+
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// Write a bundle with `files` (path, bytes) and a manifest built from
+    /// them, after `edit` changes the manifest; return its pin.
+    fn bundle(
+        dir: &Path,
+        files: &[(&str, &[u8])],
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> Pin {
+        let mut listed = Vec::new();
+        for (path, bytes) in files {
+            let target = dir.join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(&target, bytes).unwrap();
+            let kind = match path.rsplit_once('.').unwrap().1 {
+                "html" => "text/html; charset=utf-8",
+                "js" => "application/javascript; charset=utf-8",
+                "png" => "image/png",
+                _ => "application/octet-stream",
+            };
+            listed.push(serde_json::json!({
+                "path": path, "sha256": hex(&Sha256::digest(bytes)),
+                "bytes": bytes.len(), "content_type": kind,
+            }));
+        }
+        let mut manifest = serde_json::json!({
+            "schema_version": 1, "version": "0.1.0", "source_revision": REVISION,
+            "source_dirty": false, "client_status": "scaffold",
+            "protocol": {"min": 1, "max": 1, "required_capabilities": ["acks", "resume"]},
+            "files": listed,
+        });
+        edit(&mut manifest);
+        let raw = serde_json::to_vec(&manifest).unwrap();
+        std::fs::write(dir.join(MANIFEST), &raw).unwrap();
+        Pin {
+            revision: REVISION.to_string(),
+            bundle_sha256: hex(&Sha256::digest(&raw)),
+        }
+    }
+
+    const GOOD: &[(&str, &[u8])] = &[
+        ("assets/abc/app.js", b"console.log(1);\n"),
+        ("index.html", b"<!doctype html>\n"),
+    ];
+
+    #[test]
+    fn a_pinned_clean_bundle_is_embedded_with_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = bundle(dir.path(), GOOD, |_| {});
+        let verified = verify(dir.path(), &pin).unwrap();
+        assert_eq!(verified.files.len(), 2);
+        assert_eq!((verified.protocol_min, verified.protocol_max), (1, 1));
+        let source = render(dir.path(), &verified);
+        assert!(source.contains("include_bytes!("), "{source}");
+        assert!(source.contains("\"assets/abc/app.js\""), "{source}");
+        assert!(!source.contains(MANIFEST), "the manifest is never served");
+    }
+
+    #[test]
+    fn a_bundle_that_is_not_exactly_the_pinned_build_is_refused() {
+        type Edit = fn(&mut serde_json::Value);
+        let cases: [(&str, Edit); 7] = [
+            ("dirty", |m| m["source_dirty"] = true.into()),
+            ("revision", |m| m["source_revision"] = "f".repeat(40).into()),
+            ("schema", |m| m["schema_version"] = 2.into()),
+            ("traversal", |m| m["files"][0]["path"] = "../app.js".into()),
+            ("type", |m| {
+                m["files"][0]["content_type"] = "text/plain".into()
+            }),
+            ("digest", |m| {
+                m["files"][1]["sha256"] = "0".repeat(64).into()
+            }),
+            ("order", |m| {
+                let files = m["files"].as_array_mut().unwrap();
+                files.reverse();
+            }),
+        ];
+        for (name, edit) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let pin = bundle(dir.path(), GOOD, edit);
+            assert!(verify(dir.path(), &pin).is_err(), "{name} was accepted");
+        }
+
+        // The pin's own digest, an unlisted file, and a missing bundle.
+        let dir = tempfile::tempdir().unwrap();
+        let mut pin = bundle(dir.path(), GOOD, |_| {});
+        let good = pin.clone();
+        pin.bundle_sha256 = "0".repeat(64);
+        assert!(verify(dir.path(), &pin).is_err(), "another manifest digest");
+        std::fs::write(dir.path().join("extra.js"), b"x").unwrap();
+        assert!(verify(dir.path(), &good).is_err(), "an unlisted file");
+        let empty = tempfile::tempdir().unwrap();
+        let missing = verify(empty.path(), &good).unwrap_err();
+        assert!(missing.contains("missing"), "{missing}");
+    }
+
+    #[test]
+    fn only_plain_relative_paths_are_safe() {
+        for path in [
+            "index.html",
+            "assets/0a1b/app.js",
+            "assets/x-y_z/icon-192.png",
+        ] {
+            assert!(safe_path(path), "{path}");
+        }
+        for path in [
+            "",
+            "/index.html",
+            "a//b.js",
+            "./a.js",
+            "a/../b.js",
+            "..",
+            r"a\b.js",
+            ".hidden.js",
+            "a.js.",
+            "a/b.js/",
+            "a b.js",
+            "a%2e.js",
+        ] {
+            assert!(!safe_path(path), "{path} was accepted");
+        }
+    }
+
+    #[test]
+    fn a_pin_names_one_revision_and_one_digest() {
+        let text = format!(
+            "# note\nrevision {REVISION}\nbundle-sha256 {}\n",
+            "a".repeat(64)
+        );
+        assert_eq!(parse_pin(&text).unwrap().revision, REVISION);
+        assert!(parse_pin(&format!("revision {REVISION}\n")).is_err());
+        assert!(parse_pin(&text.replace(REVISION, "HEAD")).is_err());
+        assert!(parse_pin(&format!("{text}revision {REVISION}\n")).is_err());
+    }
+}
+
 #[cfg(test)]
 mod build_meta_tests {
     use super::build_meta::{resolve, UNKNOWN_HASH};

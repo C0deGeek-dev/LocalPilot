@@ -10,6 +10,9 @@ use std::process::Command;
 #[path = "build_meta.rs"]
 mod build_meta;
 
+#[path = "client_bundle.rs"]
+mod client_bundle;
+
 fn main() {
     let meta = build_meta::resolve(
         std::env::var("LOCALPILOT_VERSION").ok(),
@@ -36,6 +39,38 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LOCALPILOT_SOURCE_FINGERPRINT");
     if meta.watch_git {
         emit_git_rerun_triggers();
+    }
+    embed_client();
+}
+
+/// Check the pinned companion app bundle and generate the table that embeds
+/// it. A missing or altered bundle stops the build with the reason.
+fn embed_client() {
+    println!("cargo:rerun-if-changed=client.pin");
+    println!("cargo:rerun-if-changed=client");
+    let root = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
+    );
+    let fail = |reason: String| -> ! {
+        eprintln!("error: the companion app bundle cannot be embedded: {reason}");
+        eprintln!(
+            "  The app is pinned by crates/localpilot-cli/client.pin and copied into crates/localpilot-cli/client/; see docs/companion-app.md to refresh it."
+        );
+        std::process::exit(1);
+    };
+    let pin = std::fs::read_to_string(root.join("client.pin"))
+        .map_err(|e| format!("client.pin: {e}"))
+        .and_then(|text| client_bundle::parse_pin(&text))
+        .unwrap_or_else(|reason| fail(reason));
+    let dir = root.join("client");
+    let bundle = client_bundle::verify(&dir, &pin).unwrap_or_else(|reason| fail(reason));
+    let out =
+        std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".".to_string()));
+    if let Err(e) = std::fs::write(
+        out.join("client_bundle.rs"),
+        client_bundle::render(&dir, &bundle),
+    ) {
+        fail(format!("cannot write the embedded table: {e}"));
     }
 }
 

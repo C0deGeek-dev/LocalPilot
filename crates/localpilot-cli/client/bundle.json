@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "source_revision": "1474ace5c7de28289d89cadbd3613051e86fd083",
+  "source_dirty": false,
+  "client_status": "scaffold",
+  "protocol": {
+    "min": 1,
+    "max": 1,
+    "required_capabilities": [
+      "acks",
+      "resume",
+      "retry",
+      "commands"
+    ]
+  },
+  "files": [
+    {
+      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/app.js",
+      "sha256": "bddee12cbf5eabd9b23f1d07bea7ff777876d26b5a604bdb8841b21185303b1c",
+      "bytes": 936,
+      "content_type": "application/javascript; charset=utf-8"
+    },
+    {
+      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/icon-192.png",
+      "sha256": "188de0c85de967f1d7175faee8546cbffeb687822cb4e2fc44330925401a382e",
+      "bytes": 719,
+      "content_type": "image/png"
+    },
+    {
+      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/icon-512.png",
+      "sha256": "0a7187b0c69c7958fc6a6e2a3821ec59adf78ddceb1df0f063add33175c3f955",
+      "bytes": 2702,
+      "content_type": "image/png"
+    },
+    {
+      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/icon.svg",
+      "sha256": "00130aadf64b0538a5f4b2565181f829550d9b5b8a8893933a8d8e6db4600190",
+      "bytes": 291,
+      "content_type": "image/svg+xml"
+    },
+    {
+      "path": "assets/7771108cd918cff06ee010eea7abe6e4366067764b9d66ace91b611fcd29210a/style.css",
+      "sha256": "6b6e1c4d99161d889baae8e05dc356b53574e5e9310182757d764fae0cbe9500",
+      "bytes": 2500,
+      "content_type": "text/css; charset=utf-8"
+    },
+    {
+      "path": "index.html",
+      "sha256": "b00a8962f982d7e1399c2b22816d9ebc67860b85d5ed189a80340b267176364f",
+      "bytes": 2850,
+      "content_type": "text/html; charset=utf-8"
+    },
+    {
+      "path": "manifest.webmanifest",
+      "sha256": "65a2e6e1f3183dce3c78d6af5cb23c4495312a48007777247a09b5bbacadd2fc",
+      "bytes": 621,
+      "content_type": "application/manifest+json"
+    }
+  ]
+}

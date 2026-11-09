@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The remote gateway serves the LocalLink companion app from the binary: one
+  pinned, verified release build (`crates/localpilot-cli/client.pin`). The
+  build stops if the copy is missing or differs from the pin. `localpilot
+  remote status` shows the app's version. See `docs/companion-app.md`.
 - Phone notifications (`[remote.push] enabled`, off by default): a paired
   phone can turn them on or off through the gateway (`/api/push`), and while
   a session is shared the workspace server sends it a content-free,

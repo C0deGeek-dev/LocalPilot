@@ -2,6 +2,33 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0268: The Gateway Serves One Pinned, Verified Build Of The Companion App
+
+**Status:** accepted · **Date:** 2026-11-09. Refs LocalHub#255.
+
+**Context.** The companion app is built in its own repository. The gateway
+must serve it from the user's own computer with no third-party host, and a
+build that differs from the reviewed one must never reach a phone.
+
+**Decision.**
+1. A copy of one release build lives in `crates/localpilot-cli/client/`, and
+   `client.pin` names it by LocalLink revision and the SHA-256 of its
+   `bundle.json`.
+2. The build script verifies the copy (pinned digest and revision, clean
+   source, every file's size, digest, safe relative path and allowed content
+   type, and the exact file set). Any failure stops the build with the
+   reason. It then embeds the files with `include_bytes!`. No new crate.
+3. The gateway serves only the listed paths (`/` is `index.html`, no fallback
+   route, `bundle.json` never served). Content-addressed assets are cached as
+   immutable, and the rest is revalidated.
+4. A test checks that the app's protocol range and required capabilities fit
+   this server. This is a test, not a build-time check. Negotiating the
+   protocol at runtime belongs to the app when it attaches to a session.
+
+**Consequences.** Updating the app is a commit here (folder and pin
+together, see `docs/companion-app.md`). The folder is marked `-text` so
+checkouts keep the exact bytes. The placeholder page is gone.
+
 ## ADR-0267: Phone Notifications Are Content-Free Web Pushes Sent By The Workspace Server
 
 **Status:** accepted · **Date:** 2026-11-09. Refs LocalHub#255.
