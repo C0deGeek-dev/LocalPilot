@@ -1,4 +1,5 @@
 import { Pairing, PairingCamera, cameraMessages, messages, takePairingLink } from './pairing.js';
+import { mountSessions } from './session-view.js';
 
 // Navigation is local. A network connection alone never enables session controls.
 const destinations = new Set(['sessions', 'attention', 'devices']);
@@ -21,6 +22,7 @@ export function showDestination(document, hash) {
 
 if (typeof document !== 'undefined') {
   let incoming = takePairingLink(window.location, window.history);
+  const sessions = mountSessions(document, window);
   const element = (id) => document.getElementById(id);
   const form = element('pair-form');
   const code = element('pair-code');
@@ -33,7 +35,7 @@ if (typeof document !== 'undefined') {
   element('connected-origin').textContent = origin;
   const pairing = new Pairing({
     origin, secure: window.isSecureContext, fetch: window.fetch.bind(window),
-    changed({ state, busy, scope, retryAt, issue }) {
+    changed({ state, busy, scope, workspaces, retryAt, issue }) {
       const [title, description] = messages[state];
       element('pair-title').textContent = title;
       element('pair-description').textContent = description;
@@ -42,6 +44,9 @@ if (typeof document !== 'undefined') {
       element('pair-retry').textContent = state === 'throttled' ? `Try after ${new Date(retryAt).toLocaleTimeString()}.` : '';
       element('pair-status').setAttribute('aria-busy', String(busy));
       const paired = state === 'paired';
+      if (paired) sessions.access(scope, workspaces);
+      else if (['revoked', 'unpaired'].includes(state)) sessions.revoke();
+      else if (sessions.ready) sessions.fail('disconnected');
       element('pair-connected').hidden = !paired;
       element('pair-scope').textContent = scope === 'control' ? 'Access granted: control.' : scope === 'observe' ? 'Access granted: observe only.' : 'Access confirmed by your computer.';
       element('connection').textContent = paired ? 'Paired' : state === 'revoked' ? 'Access ended' : 'Not connected';
@@ -65,6 +70,7 @@ if (typeof document !== 'undefined') {
       cameraStatus.textContent = cameraMessages[state] || (state === 'starting' ? 'Waiting for camera access…' : 'Point the camera at the pairing QR code on your PC.');
     },
   });
+  sessions.accessLost = () => void pairing.check();
   function focusPairing() {
     (pairing.state === 'confirm' ? element('confirm-pair') : element('pair-title')).focus();
   }

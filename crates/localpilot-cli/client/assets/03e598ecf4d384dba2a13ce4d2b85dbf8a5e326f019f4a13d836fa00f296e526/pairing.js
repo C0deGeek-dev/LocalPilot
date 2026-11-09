@@ -36,7 +36,7 @@ export const messages = {
   unpaired: ['Connect your computer', 'Scan the QR code on your PC, or enter its pairing link below.'],
   confirm: ['Is this your computer?', 'Check this HTTPS address against the one shown on your PC before pairing.'],
   submitting: ['Pairing this phone', 'Waiting for your computer. Keep this page open.'],
-  paired: ['Phone paired', 'Your secure connection is ready. Session viewing and controls are still being built.'],
+  paired: ['Phone paired', 'Choose a project and a shared terminal session below. Your work stays on your PC.'],
   invalid: ['Check the pairing details', 'Use the complete pairing link, or the code and 16-character workspace ID shown on your PC.'],
   'workspace-required': ['Workspace ID needed', 'Enter the Workspace line shown with the code on your PC, or copy the complete link from localpilot devices pair --url <your HTTPS address>.'],
   'wrong-origin': ['This link is for another address', 'Open the HTTPS address shown on your PC and enter the link there. No code was sent.'],
@@ -74,12 +74,13 @@ export class Pairing {
     this.retryAt = 0;
     this.pending = null;
     this.scope = null;
+    this.workspaces = [];
     this.issue = null;
     this.set('checking');
   }
   set(state) {
     this.state = state;
-    this.changed({ state, busy: this.busy, scope: this.scope, retryAt: this.retryAt, issue: this.issue });
+    this.changed({ state, busy: this.busy, scope: this.scope, workspaces: this.workspaces, retryAt: this.retryAt, issue: this.issue });
   }
   async request(path, options = {}) {
     const response = await this.fetch(path, {
@@ -96,6 +97,9 @@ export class Pairing {
         let data;
         try { data = JSON.parse(result.body); } catch { return this.set('protocol'); }
         if (!data || !Array.isArray(data.workspaces)) return this.set('protocol');
+        // Older gateways omit scope. An explicit null always removes control.
+        if (Object.hasOwn(data, 'scope')) this.scope = ['control', 'observe'].includes(data.scope) ? data.scope : null;
+        this.workspaces = data.workspaces;
         this.wasPaired = true;
         return this.set('paired');
       }

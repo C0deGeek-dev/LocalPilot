@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The embedded companion app can now follow a shared session: pick a project
+  and a session shared from the PC terminal, read the conversation, send a
+  message (or a follow-up while a turn runs), stop the turn, and run the slash
+  commands the PC offers. Controls stay locked for an observe-only device.
 - `GET /api/workspaces` on the remote gateway also returns the device's own
   scope (`observe` or `control`), so the companion app knows after a reload
   which controls to offer. The server still decides every action.

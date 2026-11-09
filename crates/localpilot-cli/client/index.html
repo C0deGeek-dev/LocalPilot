@@ -8,9 +8,9 @@
     <meta name="referrer" content="no-referrer">
     <title>LocalLink</title>
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="icon" href="/assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/style.css">
-    <script type="module" src="/assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/app.js"></script>
+    <link rel="icon" href="/assets/03e598ecf4d384dba2a13ce4d2b85dbf8a5e326f019f4a13d836fa00f296e526/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/03e598ecf4d384dba2a13ce4d2b85dbf8a5e326f019f4a13d836fa00f296e526/style.css">
+    <script type="module" src="/assets/03e598ecf4d384dba2a13ce4d2b85dbf8a5e326f019f4a13d836fa00f296e526/app.js"></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -21,10 +21,10 @@
       </header>
       <main id="main" tabindex="-1">
         <section data-panel="sessions" aria-labelledby="sessions-title">
-          <p class="eyebrow">Sessions</p>
+          <p class="eyebrow" id="sessions-eyebrow">Sessions</p>
           <h1 id="sessions-title">Your work stays<br>on your computer.</h1>
-          <p class="intro">A quiet place to follow your LocalPilot sessions from your phone.</p>
-          <div class="empty-state pairing">
+          <p class="intro" id="sessions-intro">A quiet place to follow your LocalPilot sessions from your phone.</p>
+          <div class="empty-state pairing" id="pair-card">
             <div id="pair-status" role="status" aria-live="polite" aria-atomic="true">
               <h2 id="pair-title" tabindex="-1">Connect your computer</h2>
               <p id="pair-description">Scan the QR code on your PC, or enter its pairing link below.</p>
@@ -53,6 +53,41 @@
               <div class="actions"><button id="confirm-pair" type="button" data-pair-control>Pair this phone</button><button id="cancel-pair" type="button" class="secondary" data-pair-control>Cancel</button></div>
             </div>
             <button id="check-connection" type="button" class="secondary" data-pair-control>Check connection</button>
+          </div>
+          <details id="session-browser" class="session-browser" open hidden>
+            <summary>Choose a shared session</summary>
+            <p class="help">Open a session in your PC terminal and enable phone access. Choose the same project here.</p>
+            <label for="session-workspace">Project</label>
+            <select id="session-workspace"><option value="">Choose a project</option></select>
+            <button id="refresh-sessions" type="button" class="secondary">Refresh sessions</button>
+            <p id="sessions-status" role="status"></p>
+            <div id="session-list" class="session-list"></div>
+          </details>
+          <div id="session-view" hidden>
+            <header class="session-heading">
+              <p id="session-project" class="eyebrow"></p>
+              <h2 id="session-name"></h2>
+              <p id="session-state" role="status"></p>
+              <p id="last-sync" class="help"></p>
+              <details class="connection-details"><summary id="session-access">Access scope unconfirmed</summary><p id="session-pc" class="help"></p><button id="session-check-access" type="button" class="secondary">Check access</button></details>
+              <button id="reconnect-session" type="button" class="secondary" hidden>Reconnect</button>
+            </header>
+            <p id="pending-attention" class="attention-banner" role="status" hidden></p>
+            <details id="session-plan" class="plan-panel" hidden><summary>Session plan</summary><ol id="plan-steps"></ol></details>
+            <p id="history-limit" class="help"></p>
+            <div id="timeline" aria-label="Conversation"></div>
+            <p class="help">Tool activity shows only the turn in progress. Messages typed on your PC appear when the next snapshot arrives.</p>
+            <details id="command-picker" hidden><summary>Slash commands</summary><div id="command-list"></div></details>
+            <p id="session-notice" role="status" aria-atomic="true"></p>
+            <div class="composer-panel">
+              <form id="session-composer">
+                <label for="session-draft" class="visually-hidden">Message or slash command</label>
+                <textarea id="session-draft" rows="2" maxlength="65536" placeholder="Keep the work moving…" aria-describedby="composer-help"></textarea>
+                <p id="composer-help" class="help">Follow up queues a message after this turn.</p>
+                <div class="composer-actions"><button id="send-input" type="submit" disabled>Send</button><button id="stop-turn" type="button" class="secondary" disabled>Stop turn</button></div>
+              </form>
+              <p id="stop-project" class="help"></p>
+            </div>
           </div>
         </section>
         <section data-panel="attention" aria-labelledby="attention-title" hidden>

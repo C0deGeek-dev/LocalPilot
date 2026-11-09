@@ -10,7 +10,7 @@
   "background_color": "#f5f3ec",
   "theme_color": "#17665d",
   "icons": [
-    { "src": "/assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/assets/824d63b581eeea2ed85e6df2b50c6fa18da0f73eaadbcb4d82146efbdf5c5543/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+    { "src": "/assets/03e598ecf4d384dba2a13ce4d2b85dbf8a5e326f019f4a13d836fa00f296e526/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/assets/03e598ecf4d384dba2a13ce4d2b85dbf8a5e326f019f4a13d836fa00f296e526/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
   ]
 }
