@@ -746,6 +746,10 @@ struct StageHost {
     guided: bool,
     operation_active: Cell<bool>,
     stop_requested: Cell<bool>,
+    /// Whether a session command has changed the work-limit mode or the action
+    /// mode, so the query can say where the setting came from.
+    limits_changed: Cell<bool>,
+    actions_changed: Cell<bool>,
     next_generation: u64,
     live: Option<(StageGeneration, LiveStage)>,
     /// The saved plan this conversation may replace. Approval refuses later
@@ -772,6 +776,8 @@ impl StageHost {
             guided: false,
             operation_active: Cell::new(false),
             stop_requested: Cell::new(false),
+            limits_changed: Cell::new(false),
+            actions_changed: Cell::new(false),
             next_generation: 0,
             live: None,
             plan_source: None,
@@ -3811,13 +3817,74 @@ async fn execute_fullscreen_slash_action(
             harness_router::status(app, cwd, stages, runtime.work_profile())
         }
         SlashAction::HarnessStop => harness_router::stop(app, stages),
+        SlashAction::Limits(None) => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                crate::session_controls::describe_limits(
+                    runtime.work_limit_mode(),
+                    config.harness.granularity.mode,
+                    stages.limits_changed.get(),
+                ),
+            ));
+        }
+        SlashAction::Limits(Some(setting)) => {
+            let mode = crate::session_controls::limit_mode(setting);
+            if runtime.set_work_limit_mode(mode) {
+                stages.limits_changed.set(true);
+                let text = format!(
+                    "work limits: {} for this session only. Permission and verification are unchanged; a size refusal from the earlier mode no longer applies",
+                    setting.label()
+                );
+                if mode == localpilot_config::WorkLimitMode::Off {
+                    app.apply_runtime(RuntimeUpdate::Warning(format!(
+                        "{text}. Turning the limits off is not advised without a reason"
+                    )));
+                } else {
+                    app.apply_runtime(RuntimeUpdate::Notice(text));
+                }
+            } else {
+                app.apply_runtime(RuntimeUpdate::Warning(
+                    "work limits not changed: this runtime does not own its session".to_string(),
+                ));
+            }
+        }
+        SlashAction::Actions(None) => {
+            let current = runtime.permission_engine_handle().snapshot().profile();
+            app.apply_runtime(RuntimeUpdate::Notice(
+                crate::session_controls::describe_actions(current, stages.actions_changed.get()),
+            ));
+        }
+        SlashAction::Actions(Some(setting)) => {
+            let current = runtime.permission_engine_handle().snapshot().profile();
+            match crate::session_controls::plan_action_change(current, setting) {
+                crate::session_controls::ActionChange::Apply {
+                    profile,
+                    notice,
+                    warn,
+                } => {
+                    runtime
+                        .set_permission_profile(crate::repl::sandbox_profile(profile), Vec::new());
+                    app.set_shared_profile(profile.label());
+                    stages.actions_changed.set(true);
+                    app.apply_runtime(if warn {
+                        RuntimeUpdate::Warning(notice)
+                    } else {
+                        RuntimeUpdate::Notice(notice)
+                    });
+                }
+                crate::session_controls::ActionChange::Refuse(reason) => {
+                    app.apply_runtime(RuntimeUpdate::Warning(reason));
+                }
+            }
+        }
         SlashAction::DisableEnvelope => {
+            stages.limits_changed.set(true);
             runtime.set_envelope_enabled(false);
             app.apply_runtime(RuntimeUpdate::Warning(
                 "work envelope off: this session's writes and harness steps are no longer sized. Not advised without a reason; permission and verification still apply. /enable-envelope turns it back on".to_string(),
             ));
         }
         SlashAction::EnableEnvelope => {
+            stages.limits_changed.set(true);
             runtime.set_envelope_enabled(true);
             app.apply_runtime(RuntimeUpdate::Notice(
                 "work envelope on: the configured size limits apply again".to_string(),
@@ -9712,7 +9779,7 @@ fn run_active_fullscreen_slash(
     }
     if !action.runs_live(Host::Fullscreen) {
         app.apply_runtime(RuntimeUpdate::Notice(
-            "available during an active turn: /bg, /effort, profile commands, /think, /help, /theme, /search, and /quit"
+            "available during an active turn: /bg, /effort, profile commands, /actions, /think, /help, /theme, /search, and /quit. /limits waits until the turn ends"
                 .to_string(),
         ));
         return false;
@@ -9809,6 +9876,48 @@ fn run_active_fullscreen_slash(
                         "permission profile: {} (in force from the next tool call)",
                         profile.label()
                     )));
+                }
+                None => unavailable_live_controls_notice(app),
+            }
+            false
+        }
+        SlashAction::Actions(setting) => {
+            match live {
+                Some(live) => {
+                    let current = live.permissions.snapshot().profile();
+                    match setting {
+                        None => app.apply_runtime(RuntimeUpdate::Notice(
+                            crate::session_controls::describe_actions(
+                                current,
+                                stages.actions_changed.get(),
+                            ),
+                        )),
+                        Some(setting) => {
+                            match crate::session_controls::plan_action_change(current, setting) {
+                                crate::session_controls::ActionChange::Apply {
+                                    profile,
+                                    notice,
+                                    warn,
+                                } => {
+                                    live.permissions
+                                        .set(live.permissions.snapshot().with_profile(
+                                            crate::repl::sandbox_profile(profile),
+                                            Vec::new(),
+                                        ));
+                                    app.set_shared_profile(profile.label());
+                                    stages.actions_changed.set(true);
+                                    app.apply_runtime(if warn {
+                                        RuntimeUpdate::Warning(notice)
+                                    } else {
+                                        RuntimeUpdate::Notice(notice)
+                                    });
+                                }
+                                crate::session_controls::ActionChange::Refuse(reason) => {
+                                    app.apply_runtime(RuntimeUpdate::Warning(reason));
+                                }
+                            }
+                        }
+                    }
                 }
                 None => unavailable_live_controls_notice(app),
             }
@@ -14839,6 +14948,14 @@ mod tests {
                 "enable-envelope",
                 "Turn the work envelope's size limits back on",
             ),
+            (
+                "limits",
+                "Show or set the work-limit mode for this session: automatic|wide|very-wide|off",
+            ),
+            (
+                "actions",
+                "Show or set the action mode for this session: normal|accept-all",
+            ),
             ("wait-resume", "Wait for quota, then resume"),
             ("harness-intake", "Turn an idea into a reviewed brief"),
             ("harness-brief", "Review the brief, or approve/reject a draft"),
@@ -14886,7 +15003,7 @@ mod tests {
                 "Remote access: status, or share | stop this session with paired devices",
             ),
         ];
-        assert_eq!(full_screen.len(), 51);
+        assert_eq!(full_screen.len(), 53);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
@@ -16299,6 +16416,68 @@ mod tests {
             question.handle_question_input(InputAction::Submit),
             QuestionAction::Submit(QuestionResponse::Other("abc d".to_string()))
         );
+    }
+
+    #[test]
+    fn actions_apply_during_an_active_turn_and_limits_wait_for_it_to_end() {
+        let mut app = app();
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let mut queue = VecDeque::new();
+        let stages = StageHost::new();
+        let live = LiveControls {
+            permissions: PermissionEngineHandle::new(localpilot_sandbox::PermissionEngine::new(
+                localpilot_sandbox::Profile::Default,
+                Vec::new(),
+            )),
+            background: Arc::new(BackgroundProcesses::new()),
+            reasoning_effort: localpilot_llm::ReasoningEffortHandle::new(None),
+        };
+        let mut submit = |app: &mut AppModel, line: &str| {
+            app.editor.insert(line);
+            assert!(!handle_turn_event_impl(
+                app,
+                Event::Key(press(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+                &cancel,
+                &event_hit_map(),
+                &mut queue,
+                &history,
+                Path::new("fixture"),
+                &image_capability(false),
+                &stages,
+                Some(&live),
+                None,
+            ));
+        };
+
+        submit(&mut app, "/actions accept-all");
+        assert_eq!(
+            live.permissions.profile(),
+            localpilot_sandbox::Profile::Unrestricted
+        );
+        assert_eq!(app.shared_profile(), "UNRESTRICTED");
+        submit(&mut app, "/actions normal");
+        assert_eq!(
+            live.permissions.profile(),
+            localpilot_sandbox::Profile::Default
+        );
+        submit(&mut app, "/limits wide");
+        assert!(timeline_has_notice(
+            &app,
+            "/limits waits until the turn ends"
+        ));
+        live.permissions.set(
+            live.permissions
+                .snapshot()
+                .with_profile(localpilot_sandbox::Profile::ReadOnly, Vec::new()),
+        );
+        submit(&mut app, "/actions accept-all");
+        assert_eq!(
+            live.permissions.profile(),
+            localpilot_sandbox::Profile::ReadOnly
+        );
+        assert!(timeline_has_notice(&app, "this session is read-only"));
     }
 
     #[test]
@@ -26120,6 +26299,181 @@ last_seen = "2026-08-10"
         assert!(out, "Close session and exit closes");
         assert_eq!(host.share.state(), crate::remote_share::ShareState::Off);
         assert!(app.choice().is_none());
+    }
+
+    async fn run_idle_slash(
+        app: &mut AppModel,
+        bundle: &mut InteractiveSessionBundle,
+        config: &localpilot_config::Config,
+        cwd: &Path,
+        stages: &mut StageHost,
+        line: &str,
+    ) {
+        let action = parse_slash_for(Host::Fullscreen, line).expect("a slash command");
+        execute_fullscreen_slash_action(
+            app,
+            &mut bundle.runtime,
+            config,
+            cwd,
+            stages,
+            &RefCell::new(None),
+            &localpilot_store::PromptHistory::with_store(None),
+            action,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn limits_query_and_set_use_the_runtime_and_stay_in_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let mut bundle = brief_session(cwd, scripted(&[])).await;
+        let config = localpilot_config::Config::default();
+        let mut app = app();
+        let mut stages = StageHost::new();
+
+        run_idle_slash(&mut app, &mut bundle, &config, cwd, &mut stages, "/limits").await;
+        assert!(timeline_has_notice(
+            &app,
+            "work limits: automatic (from configuration)"
+        ));
+
+        run_idle_slash(
+            &mut app,
+            &mut bundle,
+            &config,
+            cwd,
+            &mut stages,
+            "/limits very-wide",
+        )
+        .await;
+        assert_eq!(
+            bundle.runtime.work_limit_mode(),
+            localpilot_config::WorkLimitMode::VeryWide
+        );
+        run_idle_slash(&mut app, &mut bundle, &config, cwd, &mut stages, "/limits").await;
+        assert!(timeline_has_notice(
+            &app,
+            "very-wide (set in this session; configured: automatic)"
+        ));
+
+        run_idle_slash(
+            &mut app,
+            &mut bundle,
+            &config,
+            cwd,
+            &mut stages,
+            "/limits off",
+        )
+        .await;
+        assert!(!bundle.runtime.envelope_enabled());
+        run_idle_slash(
+            &mut app,
+            &mut bundle,
+            &config,
+            cwd,
+            &mut stages,
+            "/limits bogus",
+        )
+        .await;
+        assert!(timeline_has_notice(
+            &app,
+            "usage: /limits [automatic|wide|very-wide|off]"
+        ));
+        assert!(
+            !bundle.runtime.envelope_enabled(),
+            "an invalid value changes nothing"
+        );
+        run_idle_slash(
+            &mut app,
+            &mut bundle,
+            &config,
+            cwd,
+            &mut stages,
+            "/enable-envelope",
+        )
+        .await;
+        assert!(bundle.runtime.envelope_enabled());
+        assert!(
+            !cwd.join(".localpilot.toml").exists(),
+            "a session change never writes project configuration"
+        );
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn actions_set_the_session_profile_and_a_read_only_session_is_not_widened() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let mut bundle = brief_session(cwd, scripted(&[])).await;
+        let config = localpilot_config::Config::default();
+        let mut app = app();
+        let mut stages = StageHost::new();
+        let profile = |bundle: &InteractiveSessionBundle| {
+            bundle
+                .runtime
+                .permission_engine_handle()
+                .snapshot()
+                .profile()
+        };
+
+        run_idle_slash(
+            &mut app,
+            &mut bundle,
+            &config,
+            cwd,
+            &mut stages,
+            "/actions accept-all",
+        )
+        .await;
+        assert_eq!(profile(&bundle), localpilot_sandbox::Profile::Unrestricted);
+        assert_eq!(app.shared_profile(), "UNRESTRICTED");
+        run_idle_slash(&mut app, &mut bundle, &config, cwd, &mut stages, "/actions").await;
+        assert!(timeline_has_notice(
+            &app,
+            "actions: Accept all (set in this session)"
+        ));
+        run_idle_slash(
+            &mut app,
+            &mut bundle,
+            &config,
+            cwd,
+            &mut stages,
+            "/actions normal",
+        )
+        .await;
+        assert_eq!(profile(&bundle), localpilot_sandbox::Profile::Default);
+
+        run_idle_slash(
+            &mut app,
+            &mut bundle,
+            &config,
+            cwd,
+            &mut stages,
+            "/actions bogus",
+        )
+        .await;
+        assert!(timeline_has_notice(
+            &app,
+            "usage: /actions [normal|accept-all]"
+        ));
+        assert_eq!(profile(&bundle), localpilot_sandbox::Profile::Default);
+
+        bundle
+            .runtime
+            .set_permission_profile(localpilot_sandbox::Profile::ReadOnly, Vec::new());
+        run_idle_slash(
+            &mut app,
+            &mut bundle,
+            &config,
+            cwd,
+            &mut stages,
+            "/actions accept-all",
+        )
+        .await;
+        assert_eq!(profile(&bundle), localpilot_sandbox::Profile::ReadOnly);
+        assert!(timeline_has_notice(&app, "this session is read-only"));
+        bundle.runtime.close();
     }
 
     fn host_for(

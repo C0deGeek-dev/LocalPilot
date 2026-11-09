@@ -345,11 +345,12 @@ An always-on terminal session with:
 - optional thinking/reasoning side panel
 
 Interactive slash commands are REPL-scoped. Mode and permission switches
-(`/agent`, `/harness`, `/default`, `/relaxed`, `/bypass`, `/unrestricted`), the
+(`/agent`, `/harness`, `/default`, `/relaxed`, `/bypass`, `/unrestricted`,
+`/actions`), the work-limit mode (`/limits`, between turns), the
 reasoning panel (`/think`), reasoning effort (`/effort <level>`), and session
 controls (`/new`, `/fork`, `/clone`, `/tree`, `/sessions`, `/session <id>`) act
 on the live session. During a full-screen model turn, the shared
-host-aware live set is profile switches, `/bg`, `/effort`, and `/think`; the
+host-aware live set is profile switches (`/actions` included), `/bg`, `/effort`, and `/think`; the
 full-screen host additionally keeps `/help`, `/theme`, `/search`, and exit
 available (ADR-0147). Profile switches govern the next tool call because the
 permission engine is consulted fresh per call (ADR-0071); `/effort` governs the

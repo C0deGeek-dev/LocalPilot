@@ -3038,6 +3038,43 @@ impl SessionRuntime {
             })
     }
 
+    /// The work-limit mode in force: `Off` while the envelope is switched off
+    /// for the session, otherwise the configured or last selected mode.
+    #[must_use]
+    pub fn work_limit_mode(&self) -> localpilot_config::WorkLimitMode {
+        use localpilot_config::WorkLimitMode;
+        if self.envelope_off {
+            return WorkLimitMode::Off;
+        }
+        self.config
+            .granularity
+            .as_ref()
+            .map_or(WorkLimitMode::Automatic, |caps| caps.mode)
+    }
+
+    /// Select the work-limit mode for this session only. `Off` is the same
+    /// switch as [`Self::set_envelope_enabled`]. Any other mode first turns the
+    /// envelope back on, then replaces the mode in the configured ceilings, so
+    /// `max_files` and the other explicit caps keep applying. A size refusal
+    /// made under the earlier mode is cleared; permission, verification and the
+    /// turn's mutation and check evidence are not touched. Returns false when
+    /// this runtime does not own its session.
+    pub fn set_work_limit_mode(&mut self, mode: localpilot_config::WorkLimitMode) -> bool {
+        use localpilot_config::WorkLimitMode;
+        if self.refuse_unless_owned("work limit change") {
+            return false;
+        }
+        if mode == WorkLimitMode::Off {
+            self.set_envelope_enabled(false);
+            return true;
+        }
+        self.set_envelope_enabled(true);
+        let mut caps = self.config.granularity.clone().unwrap_or_default();
+        caps.mode = mode;
+        self.set_granularity(caps);
+        true
+    }
+
     /// The reviewed step selects timely verification; a stated exemption does
     /// not waive the caller's ratified quality gate or explicit session gate.
     pub fn set_harness_checkpoint_owner(&mut self, scope: Option<crate::granularity::WorkScope>) {

@@ -2,6 +2,41 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0266: The Full-Screen Session Can Change Its Work Limits And Action Mode By Slash Command
+
+**Status:** accepted · **Date:** 2026-11-08. Refs LocalHub#268. Builds on ADR-0260, ADR-0262, ADR-0263.
+
+**Context.** Work limits could be turned off and on (`/disable-envelope`,
+`/enable-envelope`) but not chosen, and Accept all could only be reached through
+the legacy `/unrestricted` profile. Neither could be queried.
+
+**Decision.** Two full-screen commands change a running session only:
+- `/limits [automatic|wide|very-wide|off]`. Bare, it shows the effective mode and
+  whether it came from configuration or from this session. With a value it selects
+  that mode through the runtime's existing switches: `off` is the envelope switch,
+  any other mode turns the envelope back on and replaces only the mode, so explicit
+  ceilings such as `max_files` keep applying. A size refusal made under the earlier
+  mode is cleared; permission, verification and the turn's mutation and check
+  evidence are untouched. It runs between turns, because the runtime is borrowed
+  while a turn runs; during a turn the host says so.
+- `/actions [normal|accept-all]`. Bare, it shows the effective setting and source.
+  `normal` is the Default profile and `accept-all` is the Unrestricted profile, the
+  same mapping a launch uses (ADR-0260). It runs during a turn as well, through the
+  same engine swap the profile commands use, so an incognito floor survives and the
+  change governs the next tool call. A read-only session is never changed by it.
+
+Neither command writes configuration or a stored grant. Typing `/actions
+accept-all` is the user's own request for that session, the same authority
+`/unrestricted` always had; a project's request still needs ADR-0262.
+`/default`, `/relaxed`, `/bypass`, `/unrestricted`, `/disable-envelope` and
+`/enable-envelope` keep their meaning; `/relaxed` and `/bypass` are shown by their
+own names and are never reported as Accept all. The commands are full-screen only:
+they are not offered to a served or paired session, so the remote command
+allowlist (ADR-0242) is unchanged.
+
+**Consequences.** A user can adjust a running session without a restart or a
+config edit. The tool-call checks stay where they were; only the setting they read
+changes.
 ## ADR-0265: The Terminal Says Which Device Did What, and Never Guesses
 
 **Status:** accepted · **Date:** 2026-11-08. Refs LocalHub#255.

@@ -116,6 +116,46 @@ impl Profile {
     }
 }
 
+/// A work-limit mode `/limits` can select for the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkLimitSetting {
+    Automatic,
+    Wide,
+    VeryWide,
+    Off,
+}
+
+impl WorkLimitSetting {
+    /// The spelling shown to the user and accepted by `/limits`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Wide => "wide",
+            Self::VeryWide => "very-wide",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// An action mode `/actions` can select for the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionSetting {
+    Normal,
+    AcceptAll,
+}
+
+impl ActionSetting {
+    /// The spelling shown to the user and accepted by `/actions`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::AcceptAll => "accept-all",
+        }
+    }
+}
+
 /// A parsed interactive slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashAction {
@@ -157,6 +197,10 @@ pub enum SlashAction {
     DisableEnvelope,
     /// Switch the work envelope's sizing limits back on.
     EnableEnvelope,
+    /// Show (`None`) or set this session's work-limit mode.
+    Limits(Option<WorkLimitSetting>),
+    /// Show (`None`) or set this session's action mode.
+    Actions(Option<ActionSetting>),
     WaitResume,
     /// Start a conversation that turns an idea into a reviewed `brief.md`.
     /// `Some(idea)` supplies it up front; `None` asks for it.
@@ -421,6 +465,8 @@ impl SlashAction {
             | Self::HarnessStop
             | Self::DisableEnvelope
             | Self::EnableEnvelope
+            | Self::Limits(_)
+            | Self::Actions(_)
             | Self::WaitResume
             // Starting a brief conversation writes nothing: the draft lives in
             // the session until someone approves it. Approval is classified
@@ -527,7 +573,11 @@ impl SlashAction {
     pub const fn runs_live(&self, host: Host) -> bool {
         let shared = matches!(
             self,
-            Self::SetProfile(_) | Self::ToggleThinking | Self::SetEffort(_) | Self::Background(_)
+            Self::SetProfile(_)
+                | Self::Actions(_)
+                | Self::ToggleThinking
+                | Self::SetEffort(_)
+                | Self::Background(_)
         );
 
         (shared && matches!(host, Host::Fullscreen))
@@ -742,7 +792,7 @@ slash_commands! {
         Model, Localbox, Selfimprove, New, Fork, Clone, Tree, Sessions, Session, Name,
         Continue, Clear, Compact, HarnessResume, WaitResume, HarnessIntake, HarnessBrief,
         HarnessPlan, HarnessReplan, HarnessStatus, HarnessFeature, HarnessStop,
-        DisableEnvelope, EnableEnvelope,
+        DisableEnvelope, EnableEnvelope, Limits, Actions,
         Ingest, Knowledge,
         Context, Research, Agents, Skills, Bg, Exit,
         // Full-screen/pair takeover identities: `parse_slash_for(Fullscreen|Pair)`
@@ -809,6 +859,8 @@ slash_commands! {
         HarnessStop => fullscreen_only("harness-stop", NoArg, Reject, "Stop harness work and discard its unapproved draft"),
         DisableEnvelope => fullscreen_only("disable-envelope", NoArg, Reject, "Turn the work envelope's size limits off (not advised without a reason)"),
         EnableEnvelope => fullscreen_only("enable-envelope", NoArg, Reject, "Turn the work envelope's size limits back on"),
+        Limits => fullscreen_only("limits", Optional, Fall, "Show or set the work-limit mode for this session: automatic|wide|very-wide|off"),
+        Actions => fullscreen_only("actions", Optional, Fall, "Show or set the action mode for this session: normal|accept-all"),
         WaitResume => fullscreen_only("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
         HarnessIntake => fullscreen_only(
             "harness-intake",
@@ -999,6 +1051,8 @@ impl SlashAction {
             SlashAction::HarnessStop => C::HarnessStop,
             SlashAction::DisableEnvelope => C::DisableEnvelope,
             SlashAction::EnableEnvelope => C::EnableEnvelope,
+            SlashAction::Limits(_) => C::Limits,
+            SlashAction::Actions(_) => C::Actions,
             SlashAction::HarnessIntake(_) => C::HarnessIntake,
             SlashAction::HarnessBrief(_) => C::HarnessBrief,
             SlashAction::HarnessPlan(_) => C::HarnessPlan,
@@ -1322,6 +1376,38 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
         C::HarnessStop => no_arg(spelling, name, args, command, SlashAction::HarnessStop),
         C::DisableEnvelope => no_arg(spelling, name, args, command, SlashAction::DisableEnvelope),
         C::EnableEnvelope => no_arg(spelling, name, args, command, SlashAction::EnableEnvelope),
+        C::Limits => {
+            let setting = match args.trim().to_ascii_lowercase().as_str() {
+                "" => Ok(None),
+                "automatic" | "auto" => Ok(Some(WorkLimitSetting::Automatic)),
+                "wide" => Ok(Some(WorkLimitSetting::Wide)),
+                "very-wide" | "very_wide" | "verywide" => Ok(Some(WorkLimitSetting::VeryWide)),
+                "off" => Ok(Some(WorkLimitSetting::Off)),
+                _ => Err(()),
+            };
+            match setting {
+                Ok(setting) => SlashAction::Limits(setting),
+                Err(()) => SlashAction::Invalid {
+                    command: name.to_string(),
+                    reason: "usage: /limits [automatic|wide|very-wide|off]".to_string(),
+                },
+            }
+        }
+        C::Actions => {
+            let setting = match args.trim().to_ascii_lowercase().as_str() {
+                "" => Ok(None),
+                "normal" => Ok(Some(ActionSetting::Normal)),
+                "accept-all" | "accept_all" | "acceptall" => Ok(Some(ActionSetting::AcceptAll)),
+                _ => Err(()),
+            };
+            match setting {
+                Ok(setting) => SlashAction::Actions(setting),
+                Err(()) => SlashAction::Invalid {
+                    command: name.to_string(),
+                    reason: "usage: /actions [normal|accept-all]".to_string(),
+                },
+            }
+        }
         C::HarnessFeature => {
             if args.trim().is_empty() {
                 SlashAction::Invalid {
@@ -1730,7 +1816,7 @@ mod tests {
             from_table, from_enum,
             "SLASH_SPELLINGS identities must equal SlashCommand::ALL"
         );
-        assert_eq!(from_enum.len(), 49, "expected 49 command identities");
+        assert_eq!(from_enum.len(), 51, "expected 51 command identities");
     }
 
     #[test]
@@ -1762,7 +1848,7 @@ mod tests {
         // 41→43 adds `harness-intake` and `harness-brief`, the reviewable brief
         // conversation; 43→45 adds `harness-plan` and `harness-replan`, the same
         // review conversation for `PROGRESS.md`.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 51);
+        assert_eq!(specs_for(Host::Fullscreen).len(), 53);
         assert_eq!(specs_for(Host::Pair).len(), 8);
         let remote: Vec<&str> = specs_for(Host::Remote).iter().map(|s| s.0).collect();
         assert_eq!(remote, ["effort", "name", "rename", "clear", "compact"]);

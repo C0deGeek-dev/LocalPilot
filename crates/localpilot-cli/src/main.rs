@@ -90,6 +90,8 @@ mod server_feed;
 mod server_index;
 mod server_requests;
 mod session_cmd;
+#[cfg(feature = "tui")]
+mod session_controls;
 mod skill_discovery;
 mod skill_output;
 mod skills_cmd;

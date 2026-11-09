@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/limits [automatic|wide|very-wide|off]` and `/actions [normal|accept-all]` show
+  and change the work-limit mode and the action mode of a running full-screen
+  session. They last for the session, never write `.localpilot.toml` or a grant,
+  and leave permission, verification and earlier evidence alone. `/actions` also
+  works during a turn; a read-only session is never changed by it. The older
+  profile and envelope commands keep working (ADR-0266, LocalHub#268).
+
 - A shared session now says which device did what: phone prompts read
   `(phone: Pixel [a19c]) …`, a permission ask answered from a phone says
   "Allowed once from Pixel [a19c]." (and, while shared, "Denied on this

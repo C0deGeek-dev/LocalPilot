@@ -1807,3 +1807,72 @@ async fn full_action_authority_still_meets_the_sizing_limit_and_names_it() {
         "the refusal names the work limit, not a permission"
     );
 }
+
+#[tokio::test]
+async fn a_session_work_limit_change_lets_a_refused_write_be_retried() {
+    use localpilot_config::WorkLimitMode;
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "big",
+                "write_file",
+                json!({"path":"index.html", "content":html_rows(900)}),
+            )
+            .text("refused")
+            .tool_call(
+                "retry",
+                "write_file",
+                json!({"path":"index.html", "content":html_rows(900)}),
+            )
+            .text("written"),
+    );
+    let mut agent = runtime(dir.path(), provider, Profile::Bypass, None);
+    assert_eq!(agent.work_limit_mode(), WorkLimitMode::Automatic);
+    let policy = agent.verification_policy();
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::ToolFinished { id, is_error: true, output, .. }
+            if id == "big" && output.contains("new-file lines 900/")
+    )));
+    assert!(!dir.path().join("index.html").exists());
+
+    assert!(agent.set_work_limit_mode(WorkLimitMode::VeryWide));
+    assert_eq!(agent.work_limit_mode(), WorkLimitMode::VeryWide);
+    assert!(agent.envelope_enabled());
+    assert_eq!(
+        agent.verification_policy(),
+        policy,
+        "verification is independent"
+    );
+    let (_, events) = turn(&mut agent).await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "retry"
+        )),
+        "the retry is admitted under the wider mode: {events:?}"
+    );
+    assert!(dir.path().join("index.html").exists());
+}
+
+#[tokio::test]
+async fn off_is_the_envelope_switch_and_a_mode_turns_the_envelope_back_on() {
+    use localpilot_config::WorkLimitMode;
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FakeProvider::new().text("idle"));
+    let mut agent = runtime(dir.path(), provider, Profile::Bypass, None);
+    assert!(agent.set_work_limit_mode(WorkLimitMode::Off));
+    assert_eq!(agent.work_limit_mode(), WorkLimitMode::Off);
+    assert!(!agent.envelope_enabled() && agent.work_profile().is_none());
+    assert!(agent.set_work_limit_mode(WorkLimitMode::Wide));
+    assert_eq!(agent.work_limit_mode(), WorkLimitMode::Wide);
+    assert!(agent.envelope_enabled());
+    agent.set_envelope_enabled(false);
+    assert_eq!(
+        agent.work_limit_mode(),
+        WorkLimitMode::Off,
+        "/disable-envelope reads as off"
+    );
+}
