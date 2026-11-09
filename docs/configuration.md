@@ -890,6 +890,12 @@ repository must not choose where pairing points.
 | `advertised_url` | string | none | The trusted HTTPS origin the phone uses, served by a tunnel or reverse proxy on this computer that forwards to the gateway (for example `https://pc.example.ts.net`). An origin only: no path, query, fragment or user name. Also the default address for `localpilot devices pair` QR codes. |
 | `port` | integer | `47610` | The loopback port the gateway listens on. The gateway binds `127.0.0.1` only. |
 | `proxy_hosts` | array of strings | `[]` | The exact `Host` values your proxy sends to the gateway. Empty means the advertised host, which is what a proxy that preserves `Host` sends. Exact matches only; no wildcards. |
+| `push.enabled` | bool | `false` | Phone notifications (`[remote.push]`). Not yet sent by this version: the setting is reserved, and only the signing key below exists. |
+
+`[remote.push]` notifications are signed with a key this computer makes for
+itself (P-256, kept owner-only beside the device registry as
+`~/.localpilot/devices/vapid.p8`). `localpilot remote push rotate` replaces it;
+phones that had notifications on must turn them on again.
 
 ```toml
 [remote]

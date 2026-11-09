@@ -2304,6 +2304,7 @@ mod tests {
             advertised_url: url.map(str::to_string),
             port: 9, // discard: nothing answers there
             proxy_hosts: Vec::new(),
+            push: localpilot_config::RemotePushConfig::default(),
         }
     }
 

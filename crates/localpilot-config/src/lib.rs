@@ -31,7 +31,7 @@ pub use schema::{
     LookupPolicy, McpConfig, McpEnvEntry, McpEnvObject, McpServerConfig, MemoryConfig, MeshConfig,
     MeshWriter, Mode, PermissionProfile, PermissionsConfig, ProjectRequest, ProjectRequestSource,
     ProviderAuth, ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig, RemoteConfig,
-    RenderMode, RepairMode, ResearchConfig, ResearchMcpConfig, ResearchMcpTool,
+    RemotePushConfig, RenderMode, RepairMode, ResearchConfig, ResearchMcpConfig, ResearchMcpTool,
     ResearchRenderConfig, ResearchWebConfig, ResolvedRails, RuleSeverity, ScratchRootConfig,
     SelfImprovementConfig, SensitiveLiteral, SkillsConfig, StorageConfig, TerminalConfig,
     TimelineDensity, ToolsConfig, VerificationPolicy, WorkLimitMode,

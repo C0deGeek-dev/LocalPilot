@@ -70,6 +70,8 @@ mod relay_source;
 mod remote_devices;
 mod remote_gateway;
 mod remote_pairing;
+mod remote_push_crypto;
+mod remote_push_keys;
 mod remote_server_start;
 mod remote_setup;
 mod remote_share;
@@ -963,6 +965,19 @@ enum RemoteAction {
         #[arg(long, conflicts_with_all = ["random_name", "keep_name"])]
         resolve: bool,
     },
+    /// Phone notifications (`[remote.push]`).
+    Push {
+        #[command(subcommand)]
+        action: RemotePushAction,
+    },
+}
+
+/// `localpilot remote push` actions.
+#[derive(Subcommand, Debug)]
+enum RemotePushAction {
+    /// Replace the key this computer signs notifications with. Phones that
+    /// had notifications on must turn them on again.
+    Rotate,
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -2180,6 +2195,9 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 };
                 remote_setup::command(mode, yes).await?;
             }
+            RemoteAction::Push {
+                action: RemotePushAction::Rotate,
+            } => remote_push_keys::rotate_command()?,
         },
 
         Command::ServerServe => {

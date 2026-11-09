@@ -905,16 +905,23 @@ pub(crate) fn prepare_dir(dir: &Path) -> std::io::Result<()> {
 /// The caller holds the write lock and has prepared the directory.
 fn persist(dir: &Path, file: &RegistryFile) -> std::io::Result<()> {
     let bytes = serde_json::to_vec_pretty(file).map_err(std::io::Error::other)?;
-    let temp = dir.join(format!("registry.json.{}.tmp", std::process::id()));
+    replace_restricted(dir, "registry.json", &bytes)
+}
+
+/// Replace `dir/name` with `bytes`: a restricted temporary file, then an
+/// atomic rename, so a reader sees the old or the new file, never a part.
+/// The caller holds the file's write lock and has prepared the directory.
+pub(crate) fn replace_restricted(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let temp = dir.join(format!("{name}.{}.tmp", std::process::id()));
     {
         let mut out = std::fs::File::create(&temp)?;
         restrict(&temp)?;
-        out.write_all(&bytes)?;
+        out.write_all(bytes)?;
         out.sync_all()?;
     }
     // A reader holding the file open makes Windows refuse the replacement for
     // a moment; retry rather than fail the change.
-    let target = dir.join("registry.json");
+    let target = dir.join(name);
     let mut renamed = std::fs::rename(&temp, &target);
     for _ in 0..200 {
         match &renamed {

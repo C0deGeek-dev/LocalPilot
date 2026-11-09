@@ -94,6 +94,8 @@ pub struct RemoteConfig {
     /// means the advertised URL's host, which is what a proxy that preserves
     /// `Host` sends. Exact matches only: no wildcards.
     pub proxy_hosts: Vec<String>,
+    /// `[remote.push]`: notifications to paired phones.
+    pub push: RemotePushConfig,
 }
 
 impl Default for RemoteConfig {
@@ -103,8 +105,19 @@ impl Default for RemoteConfig {
             advertised_url: None,
             port: 47610,
             proxy_hosts: Vec::new(),
+            push: RemotePushConfig::default(),
         }
     }
+}
+
+/// `[remote.push]`: send a content-free, end-to-end encrypted notification
+/// to phones that turned notifications on, through their browser's push
+/// service, when a shared session waits on a permission ask or stops. Off by
+/// default; user config only, like the rest of `[remote]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemotePushConfig {
+    pub enabled: bool,
 }
 
 /// `localpilot mesh`: which implementation writes the pair-programming

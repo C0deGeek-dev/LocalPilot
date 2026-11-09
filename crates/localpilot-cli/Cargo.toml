@@ -31,7 +31,6 @@ tui = [
     "dep:localpilot-terminal-ui",
     "dep:ignore",
     "dep:arboard",
-    "dep:base64",
     "dep:image",
     "dep:time",
     "dep:unicode-width",
@@ -55,7 +54,7 @@ anstyle.workspace = true
 async-trait.workspace = true
 # Clipboard image capture for pasting images into the chat input (TUI only).
 arboard = { workspace = true, optional = true }
-base64 = { workspace = true, optional = true }
+base64 = { workspace = true }
 image = { workspace = true, optional = true }
 clap.workspace = true
 dunce.workspace = true
