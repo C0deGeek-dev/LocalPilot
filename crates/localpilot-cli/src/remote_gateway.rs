@@ -787,36 +787,35 @@ impl Gateway {
                 return plain(StatusCode::BAD_REQUEST, "unreadable request");
             };
             #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Subscription {
-                endpoint: String,
-                p256dh: String,
-                auth: String,
-                key_id: String,
-            }
-            #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields, rename_all = "snake_case")]
+            #[serde(tag = "op", deny_unknown_fields, rename_all = "snake_case")]
             enum Change {
-                Subscribe(Subscription),
-                Unsubscribe(bool),
+                Subscribe {
+                    endpoint: String,
+                    p256dh: String,
+                    auth: String,
+                    key_id: String,
+                },
+                // A struct variant: serde ignores unknown fields on a unit variant
+                // of an internally tagged enum.
+                Unsubscribe {},
             }
             match serde_json::from_slice::<Change>(&body.to_bytes()) {
-                Ok(Change::Subscribe(Subscription {
+                Ok(Change::Subscribe {
                     endpoint,
                     p256dh,
                     auth,
                     key_id,
-                })) => PushRequest::Subscribe {
+                }) => PushRequest::Subscribe {
                     endpoint: WireSecret::new(endpoint),
                     p256dh: WireSecret::new(p256dh),
                     auth: WireSecret::new(auth),
                     key_id,
                 },
-                Ok(Change::Unsubscribe(true)) => PushRequest::Unsubscribe,
+                Ok(Change::Unsubscribe {}) => PushRequest::Unsubscribe,
                 _ => {
                     return plain(
                         StatusCode::BAD_REQUEST,
-                        "expected {\"subscribe\": {...}} or {\"unsubscribe\": true}",
+                        "expected {\"op\": \"subscribe\", ...} or {\"op\": \"unsubscribe\"}",
                     )
                 }
             }
@@ -2978,7 +2977,7 @@ mod tests {
             key.contains(r#""public_key":"pk""#) && key.contains(r#""key_id":"kid""#),
             "{key}"
         );
-        let body = r#"{"subscribe":{"endpoint":"https://fcm.googleapis.com/e","p256dh":"p","auth":"a","key_id":"kid"}}"#;
+        let body = r#"{"op":"subscribe","endpoint":"https://fcm.googleapis.com/e","p256dh":"p","auth":"a","key_id":"kid"}"#;
         let saved = push_request(
             &format!(
                 "POST /api/push?workspace={{id}} HTTP/1.1\r\n{{headers}}\r\n\
@@ -2992,7 +2991,7 @@ mod tests {
             saved.contains("https://fcm.googleapis.com/e"),
             "the subscription reached the server: {saved}"
         );
-        let off = r#"{"unsubscribe":true}"#;
+        let off = r#"{"op":"unsubscribe"}"#;
         let request = format!(
             "POST /api/push?workspace={{id}} HTTP/1.1\r\n{{headers}}\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{off}",
@@ -3002,17 +3001,23 @@ mod tests {
         assert!(answered.contains(r#""subscribed":false"#), "{answered}");
         let refused = push_request(&request, false).await;
         assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
-        let extra = r#"{"unsubscribe":true,"x":1}"#;
-        let bad = push_request(
-            &format!(
-                "POST /api/push?workspace={{id}} HTTP/1.1\r\n{{headers}}\r\n\
-                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{extra}",
-                extra.len()
-            ),
-            true,
-        )
-        .await;
-        assert!(bad.starts_with("HTTP/1.1 400"), "{bad}");
+        // Unknown fields, and the shape without an "op" tag, are refused.
+        for wrong in [
+            r#"{"op":"unsubscribe","x":1}"#,
+            r#"{"unsubscribe":true}"#,
+            r#"{"op":"subscribe","endpoint":"https://fcm.googleapis.com/e"}"#,
+        ] {
+            let bad = push_request(
+                &format!(
+                    "POST /api/push?workspace={{id}} HTTP/1.1\r\n{{headers}}\r\n\
+                     Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{wrong}",
+                    wrong.len()
+                ),
+                true,
+            )
+            .await;
+            assert!(bad.starts_with("HTTP/1.1 400"), "{wrong}: {bad}");
+        }
     }
 
     /// How access ends in [`listing_after`].
