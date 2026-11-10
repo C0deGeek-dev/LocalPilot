@@ -1071,3 +1071,16 @@ and grades both states independently, printing every check. The Rust test needs
 only the pinned toolchain and runs offline. The .NET test needs a .NET SDK of the
 pinned major and is skipped with a message without one; restore is limited to no
 package sources, so it never reaches a network.
+
+### Observation routes
+
+`cargo test -p localpilot-mcp client::tests` covers forwarding an MCP image block,
+the note for an image-only result, and refusing non-image types, non-base64 data
+and missing data. `cargo test -p localpilot-harness --test observation_routes`
+drives a controlled MCP browser server through a session: the calls reach the
+server in order and come back, interaction is observed, and a screenshot is
+inspected for an image-capable provider but only captured for a text-only one;
+without browser tools the claim is unavailable; a call the approver refuses never
+reaches the server and is denied; WPF desktop and Godot engine claims are deferred
+with their reasons while the turn still runs. No real browser, desktop session or
+engine is used.

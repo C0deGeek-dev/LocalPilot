@@ -6667,20 +6667,27 @@ impl SessionRuntime {
     /// unavailable, denied, failed or passed, with the calls that decided it.
     #[must_use]
     pub fn requested_evidence(&self) -> Vec<crate::RequestedEvidence> {
-        let names = self.tool_names();
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut available = crate::capabilities_from_tools(&names);
-        if names.contains(&"fetch") {
-            available.insert("http.observe".to_string());
-        }
-        if names.contains(&"read_image") && self.active_accepts_images() {
-            available.insert("image.inspect".to_string());
-        }
+        let available: std::collections::BTreeSet<String> = self
+            .observation_routes()
+            .into_iter()
+            .filter(|route| matches!(route.status, crate::RouteStatus::Available(_)))
+            .map(|route| route.capability.to_string())
+            .collect();
         crate::requested_evidence(
             self.guidance_selection().as_ref(),
             &available,
             &self.task_evidence.observations(),
         )
+    }
+
+    /// Each observation capability guidance can ask for, and whether this
+    /// session can provide it: available (with the tools), unavailable here, or
+    /// deferred because LocalPilot has no qualified route yet.
+    #[must_use]
+    pub fn observation_routes(&self) -> Vec<crate::ObservationRoute> {
+        let names = self.tool_names();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        crate::observation_routes(&names, self.active_accepts_images())
     }
 
     /// The user's recent instructions in this session, shared with hooks.
@@ -6708,6 +6715,7 @@ impl SessionRuntime {
         let requests = self.task_guidance.requests();
         let mut report =
             crate::guidance_report(self.guidance_selection().as_ref(), requests.last());
+        let routes = self.observation_routes();
         for requested in self.requested_evidence() {
             let state = match requested.state {
                 crate::EvidenceState::Planned => "planned, nothing observed yet",
@@ -6726,6 +6734,14 @@ impl SessionRuntime {
                 requested.capability,
                 requested.requested_by.join(", ")
             ));
+            if let Some(crate::RouteStatus::Unavailable(why) | crate::RouteStatus::Deferred(why)) =
+                routes
+                    .iter()
+                    .find(|route| route.capability == requested.capability)
+                    .map(|route| &route.status)
+            {
+                report.header.push(format!("  route: {why}"));
+            }
         }
         report
     }

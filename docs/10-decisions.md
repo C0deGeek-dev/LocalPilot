@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0285: Observation Routes Are Qualified Before Visual Or Interaction Claims
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#282. Builds on ADR-0282.
+
+**Context.** Image support in a provider and a browser tool being configured do not
+show that an observation reaches a model. The MCP client passed only text content
+on, so an image-only result arrived empty. No native desktop or engine adapter
+exists, and `run_shell` runs buffered with stdin closed. Guidance must not let a
+model claim a visual or interaction check that could not happen.
+
+**Decision.**
+- MCP tool results forward their first image block (an `image/*` type with base64
+  data, at most 8 MiB) as the tool output's image and say so in the text
+  (`[image attached: image/png]`); further image blocks are counted, not sent. The
+  registry's redaction and the provider's own image handling still apply.
+- A session reports a route per observation capability (`observation_routes`):
+  `process.capture` and `process.background` from the shell tools; `browser.interact`
+  when tools that navigate and click are connected; `image.inspect` when a tool
+  returns images (`read_image`, a screenshot tool) and the provider accepts images;
+  `http.observe` stays unavailable because `fetch` sends GET only;
+  `terminal.interact`, `desktop.interact` and `engine.run` are deferred with the
+  reason. Requested evidence (ADR-0282) is unavailable for any route that is not
+  available, and `/skills guidance` prints the reason under it.
+- Browser actions and screenshots from such tools are recorded as observations, and
+  a screenshot counts as inspected only once an image-capable provider answered the
+  request that held it.
+- Qualified with a controlled MCP browser server: tools registered from its
+  descriptors with the CLI's effects, authorized by the permission engine (a refused
+  call never reaches the server and is denied evidence), dispatched in order, and
+  delivered back. A WPF project's desktop claims and a Godot project's engine claims
+  are deferred while the work itself continues.
+
+**Consequences.** Browser interaction and screenshot inspection are supported where
+a browser server is connected and the model reads images. Desktop interaction,
+engine runs and terminal interaction remain unqualified, and claims that need them
+cannot be made; adding one is a separate decision with its own adapter and
+fixtures. No real browser, desktop session or engine was exercised.
+
 ## ADR-0284: The Rust CLI And .NET Service Workflows Are Qualified Against Reference Projects
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#281. Builds on ADR-0280

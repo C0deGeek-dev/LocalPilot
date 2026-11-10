@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- MCP tool results now pass their first image on to the model (an image-only
+  result no longer arrives empty). Sessions report which observation routes they
+  can provide: browser interaction when navigate and click tools are connected,
+  image inspection only for a provider that reads images, and desktop, engine and
+  terminal interaction as not yet qualified, so guidance claims that need them are
+  shown as unavailable (ADR-0285, LocalHub#282).
 - Reference projects qualify the Rust CLI and .NET service workflows: a session
   builds and fixes a defective CLI and a defective minimal API through the
   ordinary tools, and an independent grader checks exit codes, output, HTTP

@@ -1779,6 +1779,7 @@ dependencies = [
  "localpilot-core",
  "localpilot-llm",
  "localpilot-localmind",
+ "localpilot-mcp",
  "localpilot-quota",
  "localpilot-recovery",
  "localpilot-sandbox",

@@ -336,6 +336,40 @@ fn resource_uri(input: &Value) -> Result<&str, ToolError> {
         .ok_or_else(|| ToolError::InvalidInput("uri must be a non-empty string".to_string()))
 }
 
+/// The largest base64 image payload forwarded from an MCP result, in bytes.
+const MAX_IMAGE_BASE64: usize = 8 * 1024 * 1024;
+
+/// The first image content block of an MCP tool result, when it is an image
+/// type with plausible base64 data within the size cap, and how many further
+/// image blocks were left out.
+fn extract_image(result: &Value) -> (Option<localpilot_core::ToolImage>, usize) {
+    let images: Vec<&Value> = result["content"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| item["type"] == "image")
+                .collect()
+        })
+        .unwrap_or_default();
+    let first = images.first().and_then(|item| {
+        let media_type = item["mimeType"].as_str()?;
+        let data = item["data"].as_str()?;
+        let plausible = media_type.starts_with("image/")
+            && !data.is_empty()
+            && data.len() <= MAX_IMAGE_BASE64
+            && data.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\n' | b'\r')
+            });
+        plausible.then(|| localpilot_core::ToolImage {
+            media_type: media_type.to_string(),
+            data: data.to_string(),
+        })
+    });
+    let skipped = images.len().saturating_sub(usize::from(first.is_some()));
+    (first, skipped)
+}
+
 fn extract_text(result: &Value) -> String {
     if let Some(items) = result["content"].as_array() {
         items
@@ -415,16 +449,36 @@ impl Tool for McpTool {
             .call_tool_raw(&self.remote_name, input)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
-        let text = extract_text(&result);
+        let mut text = extract_text(&result);
+        // An image block is forwarded as the result's image, so a model that
+        // reads images receives it; the registry and provider decide whether it
+        // is sent. The text says so, so an image-only result is never empty.
+        let (image, skipped) = extract_image(&result);
+        if let Some(image) = &image {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&format!("[image attached: {}]", image.media_type));
+        }
+        if skipped > 0 {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&format!("[{skipped} further image block(s) not forwarded]"));
+        }
         // A well-formed response carrying `isError: true` is the server saying
         // the call failed. The tool worked — transport up, server answered —
         // so this is the wrapped work reporting failure, and it must reach the
         // model as one, not as `status: success`. Only a transport/protocol
         // fault above is a malfunction.
+        let mut output = ToolOutput::ok(text);
+        if let Some(image) = image {
+            output = output.with_image(image);
+        }
         if result["isError"].as_bool() == Some(true) {
-            Ok(ToolOutput::ok(text).with_outcome(localpilot_core::ToolOutcome::ReportedFailure))
+            Ok(output.with_outcome(localpilot_core::ToolOutcome::ReportedFailure))
         } else {
-            Ok(ToolOutput::ok(text))
+            Ok(output)
         }
     }
 }
@@ -455,6 +509,57 @@ mod tests {
         let tools = client.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
+    }
+
+    #[test]
+    fn an_image_block_is_forwarded_and_a_bad_one_is_not() {
+        let result = json!({ "content": [
+            { "type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo=" },
+            { "type": "image", "mimeType": "image/png", "data": "AAAA" },
+        ] });
+        let (image, skipped) = extract_image(&result);
+        assert_eq!(image.unwrap().media_type, "image/png");
+        assert_eq!(skipped, 1);
+
+        for bad in [
+            json!({ "content": [{ "type": "image", "mimeType": "text/html", "data": "AAAA" }] }),
+            json!({ "content": [{ "type": "image", "mimeType": "image/png", "data": "<script>" }] }),
+            json!({ "content": [{ "type": "image", "mimeType": "image/png" }] }),
+            json!({ "content": [{ "type": "text", "text": "no image" }] }),
+        ] {
+            assert!(extract_image(&bad).0.is_none(), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_image_only_result_reaches_the_tool_output_with_a_note() {
+        let transport = Arc::new(ScriptedTransport::new().with(
+            "tools/call",
+            json!({ "content": [{ "type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo=" }] }),
+        ));
+        let tool = McpTool::new(
+            &McpToolDescriptor {
+                name: "screenshot".to_string(),
+                description: String::new(),
+                input_schema: json!({ "type": "object" }),
+            },
+            Vec::new(),
+            transport,
+        );
+        let workspace = localpilot_sandbox::Workspace::new(&std::env::temp_dir()).unwrap();
+        let ctx = ToolContext {
+            workspace: &workspace,
+            interactivity: localpilot_sandbox::Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        let output = tool.invoke(json!({}), &ctx).await.unwrap();
+        assert_eq!(output.text, "[image attached: image/png]");
+        assert_eq!(output.image.unwrap().data, "iVBORw0KGgo=");
     }
 
     #[tokio::test]

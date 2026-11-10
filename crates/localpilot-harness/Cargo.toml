@@ -44,6 +44,9 @@ insta = { workspace = true }
 # is a dev-dependency cycle — allowed by cargo (dev-deps are excluded from the
 # normal dependency graph) — used only by tests/discipline.rs.
 localpilot-localmind = { path = "../localpilot-localmind" }
+# Test-only: the observation-route qualification drives real MCP tool
+# wrappers against a controlled browser server.
+localpilot-mcp = { path = "../localpilot-mcp" }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

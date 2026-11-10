@@ -417,6 +417,11 @@ pub fn capabilities_from_tools(names: &[&str]) -> BTreeSet<String> {
     if names.contains(&"run_background") {
         out.insert("process.background".to_string());
     }
+    // A browser adapter (for example an MCP browser server) is recognized by
+    // having both a navigation and a click tool.
+    if names.iter().any(|n| n.contains("navigate")) && names.iter().any(|n| n.contains("click")) {
+        out.insert("browser.interact".to_string());
+    }
     out
 }
 

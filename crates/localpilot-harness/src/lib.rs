@@ -121,7 +121,8 @@ pub use scorecard::{
 };
 pub use step_sessions::STEP_SESSIONS_KEY;
 pub use task_evidence::{
-    requested_evidence, EvidenceState, ImageState, Observation, RequestedEvidence,
+    observation_routes, requested_evidence, EvidenceState, ImageState, Observation,
+    ObservationRoute, RequestedEvidence, RouteStatus,
 };
 pub use task_guidance::{
     GuidanceDelivery, GuidanceEntry, GuidancePlacement, GuidanceSegment, RequestGuidance,

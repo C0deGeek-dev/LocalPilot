@@ -196,8 +196,131 @@ fn capability_of(tool: &str) -> Option<&'static str> {
         "run_background" => Some("process.background"),
         "fetch" => Some("http.observe"),
         "read_image" => Some("image.inspect"),
+        // Browser adapter tools, by what they do.
+        name if name.contains("screenshot") => Some("image.inspect"),
+        name if [
+            "navigate",
+            "click",
+            "fill",
+            "type_text",
+            "press_key",
+            "hover",
+            "select_option",
+        ]
+        .iter()
+        .any(|action| name.contains(action)) =>
+        {
+            Some("browser.interact")
+        }
         _ => None,
     }
+}
+
+/// Whether a capability's route can be used in this session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteStatus {
+    /// These tools provide it.
+    Available(Vec<String>),
+    /// LocalPilot has a route, but not in this session, for this reason.
+    Unavailable(String),
+    /// No route is qualified in LocalPilot yet; claims that need it cannot be
+    /// made anywhere.
+    Deferred(String),
+}
+
+/// One observation capability and its route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationRoute {
+    pub capability: &'static str,
+    pub status: RouteStatus,
+}
+
+/// Every observation capability guidance can ask for, and whether this
+/// session can provide it, given its tool names and whether its provider
+/// accepts images.
+#[must_use]
+pub fn observation_routes(names: &[&str], accepts_images: bool) -> Vec<ObservationRoute> {
+    let tools = |pick: &dyn Fn(&str) -> bool| -> Vec<String> {
+        names
+            .iter()
+            .filter(|n| pick(n))
+            .map(|n| (*n).to_string())
+            .collect()
+    };
+    let available = |list: Vec<String>, missing: &str| {
+        if list.is_empty() {
+            RouteStatus::Unavailable(missing.to_string())
+        } else {
+            RouteStatus::Available(list)
+        }
+    };
+    let browser = {
+        let capabilities = crate::capabilities_from_tools(names);
+        if capabilities.contains("browser.interact") {
+            RouteStatus::Available(tools(&|n| capability_of(n) == Some("browser.interact")))
+        } else {
+            RouteStatus::Unavailable(
+                "no browser tools (navigate and click) are connected".to_string(),
+            )
+        }
+    };
+    let image_tools = tools(&|n| capability_of(n) == Some("image.inspect"));
+    let image = if image_tools.is_empty() {
+        RouteStatus::Unavailable("no tool returns images".to_string())
+    } else if !accepts_images {
+        RouteStatus::Unavailable(
+            "the provider does not accept images; an image can be captured but not inspected"
+                .to_string(),
+        )
+    } else {
+        RouteStatus::Available(image_tools)
+    };
+    vec![
+        ObservationRoute {
+            capability: "process.capture",
+            status: available(tools(&|n| n == "run_shell"), "run_shell is not registered"),
+        },
+        ObservationRoute {
+            capability: "process.background",
+            status: available(tools(&|n| n == "run_background"), "run_background is not registered"),
+        },
+        ObservationRoute {
+            capability: "http.observe",
+            status: RouteStatus::Unavailable(if names.contains(&"fetch") {
+                "fetch sends GET requests only; request and response checks of a service need a \
+                 client that can send them"
+                    .to_string()
+            } else {
+                "no HTTP client tool is registered".to_string()
+            }),
+        },
+        ObservationRoute {
+            capability: "browser.interact",
+            status: browser,
+        },
+        ObservationRoute {
+            capability: "image.inspect",
+            status: image,
+        },
+        ObservationRoute {
+            capability: "terminal.interact",
+            status: RouteStatus::Deferred(
+                "commands run buffered with stdin closed; no terminal (PTY) adapter is qualified".to_string(),
+            ),
+        },
+        ObservationRoute {
+            capability: "desktop.interact",
+            status: RouteStatus::Deferred(
+                "no native desktop adapter is qualified; headless tests are not window interaction".to_string(),
+            ),
+        },
+        ObservationRoute {
+            capability: "engine.run",
+            status: RouteStatus::Deferred(
+                "no game-engine adapter is qualified; a headless engine command is process evidence only".to_string(),
+            ),
+        },
+    ]
 }
 
 /// How each capability asked for by the selected guidance stands, given the
