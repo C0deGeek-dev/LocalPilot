@@ -48,6 +48,7 @@ mod session_scratch;
 mod step_sessions;
 mod summarizer;
 mod system_prompt;
+mod task_evidence;
 mod task_guidance;
 mod task_guidance_hook;
 mod task_selection;
@@ -119,6 +120,9 @@ pub use scorecard::{
     SchemaValidator,
 };
 pub use step_sessions::STEP_SESSIONS_KEY;
+pub use task_evidence::{
+    requested_evidence, EvidenceState, ImageState, Observation, RequestedEvidence,
+};
 pub use task_guidance::{
     GuidanceDelivery, GuidanceEntry, GuidancePlacement, GuidanceSegment, RequestGuidance,
 };

@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Sessions record the evidence task guidance asks for against what tools observed:
+  command exit codes, refusals, fetches, and images as captured, delivered or
+  inspected by an image-capable model. `/skills guidance` shows each requested
+  capability as planned, unavailable, denied, failed or passed. Checks, gates and
+  permissions are unchanged (ADR-0282, LocalHub#279).
 - Project packages can declare reviewed run recipes (`[[recipe]]` in
   `skill.toml`): directory, program and arguments, readiness, scenario, cleanup,
   variable and credential names, and the files they were validated against. With

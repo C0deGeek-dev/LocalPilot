@@ -1596,6 +1596,9 @@ pub struct SessionRuntime {
     user_requests: crate::UserRequests,
     /// The live trust state, shared with hooks that read the project overlay.
     trust_flag: crate::TrustFlag,
+    /// What was observed, for the evidence guidance asks for. In memory only;
+    /// it changes no check or gate.
+    task_evidence: crate::task_evidence::TaskEvidence,
     /// The last task-guidance selection, for the guidance report. Shared with
     /// the task-guidance hook that makes it.
     guidance_selection: crate::SelectionSlot,
@@ -1754,6 +1757,7 @@ impl SessionRuntime {
             task_guidance: crate::task_guidance::TaskGuidanceLog::default(),
             user_requests: crate::UserRequests::default(),
             trust_flag: crate::TrustFlag::new(config_trusted),
+            task_evidence: crate::task_evidence::TaskEvidence::default(),
             guidance_selection: crate::SelectionSlot::default(),
             last_handoff: None,
             turn_verification: None,
@@ -5054,6 +5058,9 @@ impl SessionRuntime {
             // Read from the assembled request, after the budget, compaction and
             // any image trim, so the record is what the provider is handed.
             self.task_guidance.capture(&request.messages);
+            let accepts_images = self.active_accepts_images();
+            self.task_evidence
+                .request_sent(&request.messages, accepts_images);
 
             self.record_event(SessionEventKind::TurnStarted {
                 model: self.config.model.clone(),
@@ -5385,6 +5392,10 @@ impl SessionRuntime {
             } else {
                 detect(&text, !calls.is_empty())
             };
+            if bad.is_none() {
+                // The provider answered what it was sent, images included.
+                self.task_evidence.response_received();
+            }
             if let Some(kind) = bad {
                 let diagnostic = self.recovery.record_bad_turn(kind);
                 self.persist_recovery(&diagnostic);
@@ -5887,6 +5898,7 @@ impl SessionRuntime {
                 let mut bounded_write_dispatched = false;
                 let mut unavailable_backend = None;
                 let mut tool_guidance = Vec::new();
+                let mut tool_exit_code: Option<i32> = None;
                 let mut permission_denial = None;
                 let mut work_envelope_refusal = false;
                 let result = match decision {
@@ -6095,6 +6107,12 @@ impl SessionRuntime {
                                             && dispatch.permission_denial.is_none();
                                     unavailable_backend = dispatch.unavailable_backend;
                                     tool_guidance = dispatch.guidance;
+                                    tool_exit_code = match &dispatch.presentation {
+                                        Some(localpilot_tools::ToolOutputPresentation::Shell(
+                                            shell,
+                                        )) => Some(shell.exit_code),
+                                        _ => None,
+                                    };
                                     work_envelope_refusal = dispatch.work_envelope_refusal;
                                     if let Some(denial) = &dispatch.permission_denial {
                                         let _ = events.send(RuntimeEvent::Warning(
@@ -6560,6 +6578,18 @@ impl SessionRuntime {
                 // so a later request is compared with what the model first saw.
                 self.task_guidance
                     .tool_result(&result.id, &result.output, tool_guidance);
+                let selection = self.guidance_selection();
+                self.task_evidence.tool_finished(
+                    &crate::task_evidence::ToolFacts {
+                        tool: name,
+                        call: &result.id,
+                        is_error: result.is_error(),
+                        denied: permission_denial.is_some(),
+                        exit_code: tool_exit_code,
+                        has_image: result.image.is_some(),
+                    },
+                    selection.as_ref(),
+                );
                 self.append(Message::new(
                     Role::Tool,
                     vec![ContentBlock::ToolResult(result)],
@@ -6625,6 +6655,34 @@ impl SessionRuntime {
         self.tools.names().into_iter().map(str::to_string).collect()
     }
 
+    /// What tools observed this session, linked to the guidance in force:
+    /// command exits, refusals, images and how far each image got. Read-only
+    /// and in memory; it changes no check or gate.
+    #[must_use]
+    pub fn task_observations(&self) -> Vec<crate::Observation> {
+        self.task_evidence.observations()
+    }
+
+    /// How each capability the selected guidance asks for stands: planned,
+    /// unavailable, denied, failed or passed, with the calls that decided it.
+    #[must_use]
+    pub fn requested_evidence(&self) -> Vec<crate::RequestedEvidence> {
+        let names = self.tool_names();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut available = crate::capabilities_from_tools(&names);
+        if names.contains(&"fetch") {
+            available.insert("http.observe".to_string());
+        }
+        if names.contains(&"read_image") && self.active_accepts_images() {
+            available.insert("image.inspect".to_string());
+        }
+        crate::requested_evidence(
+            self.guidance_selection().as_ref(),
+            &available,
+            &self.task_evidence.observations(),
+        )
+    }
+
     /// The user's recent instructions in this session, shared with hooks.
     #[must_use]
     pub fn user_requests(&self) -> crate::UserRequests {
@@ -6648,7 +6706,28 @@ impl SessionRuntime {
     #[must_use]
     pub fn guidance_report(&self) -> crate::GuidanceReport {
         let requests = self.task_guidance.requests();
-        crate::guidance_report(self.guidance_selection().as_ref(), requests.last())
+        let mut report =
+            crate::guidance_report(self.guidance_selection().as_ref(), requests.last());
+        for requested in self.requested_evidence() {
+            let state = match requested.state {
+                crate::EvidenceState::Planned => "planned, nothing observed yet",
+                crate::EvidenceState::Unavailable => "unavailable in this session",
+                crate::EvidenceState::Denied => "refused by permission",
+                crate::EvidenceState::Failed => "observed failing",
+                crate::EvidenceState::Passed => "observed passing",
+            };
+            let calls = if requested.calls.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", requested.calls.join(", "))
+            };
+            report.header.push(format!(
+                "evidence {} for {}: {state}{calls}",
+                requested.capability,
+                requested.requested_by.join(", ")
+            ));
+        }
+        report
     }
 
     /// The handoff for the most recently finished turn, if any — a bounded,

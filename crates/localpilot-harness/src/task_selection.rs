@@ -123,6 +123,9 @@ pub struct SelectedGuidance {
     /// Capabilities the package needs for a claim that are not available.
     /// Claims depending on them are unsupported; the guidance still applies.
     pub unsupported_claims: Vec<String>,
+    /// Every capability a claim made under this guidance needs, available or
+    /// not: the evidence it asks for.
+    pub required_for_claim: Vec<String>,
 }
 
 /// A package that was considered and left out, with why.
@@ -389,6 +392,7 @@ pub fn select_guidance(
                         name,
                         reason: format!("the component shows {}", hits.join(", ")),
                         unsupported_claims,
+                        required_for_claim: metadata.capabilities_required_for_claim.clone(),
                     },
                 ));
             }
@@ -410,6 +414,7 @@ pub fn select_guidance(
             name: skill.manifest.name.clone(),
             reason: "named explicitly by the user".to_string(),
             unsupported_claims: Vec::new(),
+            required_for_claim: Vec::new(),
         }),
         None => procedures
             .first()
@@ -417,6 +422,7 @@ pub fn select_guidance(
                 name: skill.manifest.name.clone(),
                 reason: reason.clone(),
                 unsupported_claims: Vec::new(),
+                required_for_claim: Vec::new(),
             }),
     };
     for (_, skill, _) in procedures.iter().skip(1) {
@@ -456,6 +462,7 @@ pub fn select_guidance(
             name: skill.manifest.name.clone(),
             reason: format!("its description matches the request (score {score})"),
             unsupported_claims: Vec::new(),
+            required_for_claim: Vec::new(),
         })
         .collect();
 

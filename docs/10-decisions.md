@@ -2,6 +2,41 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0282: Guidance Names The Evidence It Needs; The Session Records What Was Observed
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#279. Builds on ADR-0276,
+ADR-0277 and ADR-0280.
+
+**Context.** The same completion claim needs different evidence for a library, a
+service, a terminal program, a desktop app or a game. A loaded workflow or a tool
+being available is not evidence, and a screenshot saved to disk is not an image a
+model looked at. The verification gate already owns mandatory checks, cadence and
+completion; a second gate would add friction and disagree with the first.
+
+**Decision.** An in-memory evidence record in the session.
+- Observations come from typed tool results only: `run_shell` gives
+  `process.capture` with its exit code, `run_background` `process.background`,
+  `fetch` `http.observe`, `read_image` `image.inspect`. A permission refusal is
+  denied, a non-zero exit or error result failed, otherwise passed. Each records
+  the call, and the component and first intent of the selection in force. Tools
+  that read the workspace or load guidance record nothing.
+- An image is captured when a tool returns it, delivered when a request holding it
+  goes to a provider that accepts images, and inspected only once that provider
+  answered the request. An image sent to a text-only provider stays captured.
+- Requested evidence is the capabilities the selected supplements list as required
+  for a claim. Each is planned, unavailable (the session has no tool for it),
+  denied, failed or passed, decided by the latest usable observation for the
+  selection's component; an image counts only when inspected.
+- `SessionRuntime::task_observations()` and `requested_evidence()` expose it, and
+  `/skills guidance` lists the requested evidence with its state and calls.
+- Nothing is persisted and nothing gates: no check is added or removed, cadence and
+  permissions are unchanged, and the completion gate is not consulted or fed.
+  "Passed" says what the tool reported, not that the task's behaviour is verified.
+
+**Consequences.** A report can say which claims have supporting observations and
+which cannot be made in this session. Whether an observation exercised the changed
+behaviour remains a judgment the record does not make.
+
 ## ADR-0281: Projects Can Declare Reviewed Run Recipes As Advice
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#278. Builds on ADR-0272,

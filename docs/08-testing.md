@@ -1040,3 +1040,15 @@ project_recipes` runs suggest-mode sessions: the API component's recipe reaches 
 request with its source; another component, an explanation and an untrusted
 workspace get none; a global package's recipe is left out; a stale recipe says
 which file changed; and the tools are unchanged with no command run.
+
+### Guidance evidence
+
+`cargo test -p localpilot-harness --lib task_evidence` keeps reading and guidance
+tools out of the record, decides states from exit codes and refusals, and keeps an
+image captured for a text-only provider while one for an image-capable provider
+becomes delivered and then inspected. `cargo test -p localpilot-harness --test
+task_evidence` runs real shell commands under assisted guidance: exit 3 then exit
+0 decide the CLI guidance's process evidence, a turn with only loaded guidance
+leaves it planned, a read-only profile makes it denied, a Godot project's engine
+evidence stays unavailable after an unrelated command, and the recorded session
+events and completion check are identical with guidance off and on.
