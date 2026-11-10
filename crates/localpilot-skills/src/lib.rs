@@ -19,6 +19,7 @@ mod install;
 mod loader;
 mod manager;
 mod manifest;
+mod recipe;
 mod source;
 mod suggest;
 mod templates;
@@ -47,6 +48,9 @@ pub use manager::{
     SkillCatalogStyle, SkillsManager, UpdateTarget,
 };
 pub use manifest::{Invocation, SkillManifest, SkillTriggers};
+pub use recipe::{
+    draft_recipe, read_recipes, Cleanup, Readiness, Recipe, RecipeSet, RecipeValidation,
+};
 pub use source::{normalize_url, source_id, SkillSource, SourceRegistry};
 pub use suggest::{SkillDraft, SuggestionEngine};
 pub use templates::{standard_template_dirs, PromptTemplate, TemplateSet};

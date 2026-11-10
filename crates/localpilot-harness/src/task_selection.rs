@@ -132,6 +132,25 @@ pub struct ExcludedGuidance {
     pub reason: String,
 }
 
+/// A reviewed project run recipe chosen for the component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedRecipe {
+    /// The package that declares it, and the recipe's name in it.
+    pub package: String,
+    pub name: String,
+    pub summary: String,
+    pub validation: localpilot_skills::RecipeValidation,
+    pub reason: String,
+}
+
+impl SelectedRecipe {
+    /// `package/name`.
+    #[must_use]
+    pub fn id(&self) -> String {
+        format!("{}/{}", self.package, self.name)
+    }
+}
+
 /// Whether selection may load instruction bodies or only offer metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadDecision {
@@ -153,6 +172,8 @@ pub struct GuidanceSelection {
     /// Relevant packages offered by name and summary only.
     pub suggestions: Vec<SelectedGuidance>,
     pub excluded: Vec<ExcludedGuidance>,
+    /// Reviewed run recipes from project packages for this component.
+    pub recipes: Vec<SelectedRecipe>,
     pub loading: LoadDecision,
     pub loading_reason: String,
 }
@@ -468,6 +489,14 @@ pub fn select_guidance(
         )
     };
 
+    let recipes = select_recipes(
+        catalog,
+        &component.component,
+        intent.primary(),
+        facts.root(),
+        &mut excluded,
+    );
+
     excluded.sort_by(|a, b| a.name.cmp(&b.name));
     excluded.dedup_by(|a, b| a.name == b.name);
     GuidanceSelection {
@@ -479,9 +508,73 @@ pub fn select_guidance(
         supplements: chosen_supplements,
         suggestions,
         excluded,
+        recipes,
         loading,
         loading_reason,
     }
+}
+
+/// Recipes from trusted project packages whose component is `component`. A
+/// global or built-in package names no project, so its recipes never apply.
+/// Explanation and review do not run anything, so they get none.
+fn select_recipes(
+    catalog: &SkillSet,
+    component: &str,
+    intent: Option<TaskIntent>,
+    root: &Path,
+    excluded: &mut Vec<ExcludedGuidance>,
+) -> Vec<SelectedRecipe> {
+    let mut out = Vec::new();
+    for skill in catalog.discoverable() {
+        let project = matches!(
+            skill.scope,
+            localpilot_skills::SkillScope::ProjectLocalPilot
+                | localpilot_skills::SkillScope::ProjectAgents
+        );
+        for invalid in &skill.recipes.invalid {
+            excluded.push(ExcludedGuidance {
+                name: format!(
+                    "{}/{}",
+                    skill.manifest.name,
+                    invalid.split(':').next().unwrap_or_default()
+                ),
+                reason: format!("its recipe cannot be used: {invalid}"),
+            });
+        }
+        for recipe in &skill.recipes.recipes {
+            let id = format!("{}/{}", skill.manifest.name, recipe.name);
+            if !project {
+                excluded.push(ExcludedGuidance {
+                    name: id,
+                    reason: "a recipe outside a project package names no project".to_string(),
+                });
+                continue;
+            }
+            if recipe.component != component {
+                continue;
+            }
+            if !intent.is_some_and(TaskIntent::acts) {
+                excluded.push(ExcludedGuidance {
+                    name: id,
+                    reason: "this request does not run anything, so run recipes are left out"
+                        .to_string(),
+                });
+                continue;
+            }
+            out.push(SelectedRecipe {
+                package: skill.manifest.name.clone(),
+                name: recipe.name.clone(),
+                summary: recipe.summary(),
+                validation: recipe.validation(root),
+                reason: format!(
+                    "reviewed recipe for component {component} from {} ({})",
+                    skill.manifest.name,
+                    skill.scope.label()
+                ),
+            });
+        }
+    }
+    out
 }
 
 /// One point for a package the user or the project installed, so on an

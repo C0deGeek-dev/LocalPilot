@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0281: Projects Can Declare Reviewed Run Recipes As Advice
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#278. Builds on ADR-0272,
+ADR-0276 and ADR-0278.
+
+**Context.** A Rust, .NET, browser or game procedure cannot know how one repository
+starts its application or test fixture, waits for it, exercises it and stops it.
+Rediscovering that every session is slow and error-prone. A second command runner,
+or a recipe that carries authority or secrets, would undo the permission model.
+
+**Decision.** `[[recipe]]` entries in a project package's `skill.toml`.
+- Fields: `name`, `component`, `working_directory` (both workspace-relative),
+  `program`, `args`, `prerequisites`, `env` and `credentials` (names only),
+  `readiness` (`output_contains`, `http_get` on localhost, or `exit_zero`),
+  `scenario`, `cleanup` (`stop_started_process` or `nothing`) and
+  `validated_against` (workspace-relative files with their SHA-256). Unknown keys
+  are rejected, so a recipe cannot carry a permission or replace a check.
+- A value that is not a variable name in `env` or `credentials`, or an argument
+  that looks like a credential (known token prefixes, `password=`-style pairs,
+  `user:password@` URLs), makes the recipe invalid with the reason. An invalid
+  recipe never hides its package.
+- Selection offers recipes of trusted project packages whose component is the
+  task's component, for intents that act. Recipes in global or built-in packages
+  name no project and are left out with the reason, as are recipes for an
+  explanation or review.
+- A recipe whose recorded files changed is shown as not validated since those
+  files changed; one without recorded files as not validated.
+- The guidance hook shows each chosen recipe as one line with its state and a
+  `ProjectRecipe` source. The host never runs a recipe: commands go through the
+  ordinary tools and their permission checks, and nothing becomes standing
+  execution authority.
+- `draft_recipe` turns a successful command into a draft for a person to review,
+  with any credential-like argument masked. It writes nothing and commits nothing.
+
+**Consequences.** Projects can record how they run once and have it offered where
+it fits. Whether a recipe still works is shown, not assumed. No UI writes drafts
+yet.
+
 ## ADR-0280: Built-In Task Procedures And Initial Stack Supplements, Present Only With Guidance On
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#277. Builds on ADR-0275,

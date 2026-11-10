@@ -19,6 +19,8 @@ pub enum GuidanceKind {
     PackageSkill,
     /// A human-enabled skill distilled from accepted memory.
     LearnedSkill,
+    /// A reviewed run recipe from a project package.
+    ProjectRecipe,
     /// A fixed sentence the host itself adds about guidance (for example that
     /// packages are installed while discovery is off).
     HostNotice,

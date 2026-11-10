@@ -1028,3 +1028,15 @@ app, a Godot game and a Three.js browser game, a Python project outside the set,
 missing capability, a project package that replaces a built-in one, an installed
 procedure that outranks the built-in one, and a catalog without guidance. These
 check selection and content shape, not model behaviour.
+
+### Project run recipes
+
+`cargo test -p localpilot-skills --lib recipe` covers a reviewed recipe, the
+rejection of credential-like arguments, values in `env`, permission or check keys,
+paths outside the workspace, remote readiness URLs and unknown cleanup, the
+validation state before and after a recorded file changes, and a draft that masks
+a credential and writes nothing. `cargo test -p localpilot-harness --test
+project_recipes` runs suggest-mode sessions: the API component's recipe reaches the
+request with its source; another component, an explanation and an untrusted
+workspace get none; a global package's recipe is left out; a stale recipe says
+which file changed; and the tools are unchanged with no command run.

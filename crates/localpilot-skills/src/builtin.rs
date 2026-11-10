@@ -24,6 +24,7 @@ pub fn builtin_guidance() -> Vec<Skill> {
             let dir = PathBuf::from(format!("<built-in>/{name}"));
             Some(Skill {
                 guidance: crate::read_applicability(manifest, &dir, body),
+                recipes: crate::RecipeSet::default(),
                 manifest: parsed,
                 instructions: (*body).to_string(),
                 dir,

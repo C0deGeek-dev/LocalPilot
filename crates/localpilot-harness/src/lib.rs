@@ -128,8 +128,8 @@ pub use task_guidance_hook::{
 };
 pub use task_selection::{
     products_of, read_intent, select_guidance, stacks_of, ComponentReading, ExcludedGuidance,
-    GuidanceSelection, IntentReading, LoadDecision, SelectedGuidance, SelectionConfidence,
-    SelectionInput, TaskIntent, MAX_SUGGESTIONS, MAX_SUPPLEMENTS,
+    GuidanceSelection, IntentReading, LoadDecision, SelectedGuidance, SelectedRecipe,
+    SelectionConfidence, SelectionInput, TaskIntent, MAX_SUGGESTIONS, MAX_SUPPLEMENTS,
 };
 pub use user_requests::{TrustFlag, UserRequests};
 // The shared eval surface (scorecard contract, discipline metrics, blinded

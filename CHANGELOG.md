@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Project packages can declare reviewed run recipes (`[[recipe]]` in
+  `skill.toml`): directory, program and arguments, readiness, scenario, cleanup,
+  variable and credential names, and the files they were validated against. With
+  task guidance on, the recipe for the task's component is offered with whether
+  it is still validated. Recipes hold no secrets, grant nothing and are never run
+  by the host (ADR-0281, LocalHub#278).
 - Built-in task guidance: six short procedures (explain, investigate, implement,
   refactor, review, measure) and supplements for Rust, .NET, web, Three.js,
   Tailwind, Godot 4, CLIs, libraries, services, desktop apps and games. They are

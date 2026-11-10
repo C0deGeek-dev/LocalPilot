@@ -249,7 +249,37 @@ fn render(
         });
     }
 
-    if segments.is_empty() && metadata.is_empty() {
+    // Reviewed run recipes for the component, as the project wrote them.
+    let mut recipes: Vec<GuidanceSegment> = Vec::new();
+    for recipe in &selection.recipes {
+        let state = match &recipe.validation {
+            localpilot_skills::RecipeValidation::Current => {
+                "validated for the current files".to_string()
+            }
+            localpilot_skills::RecipeValidation::Stale(files) => format!(
+                "not validated since {} changed; treat it as a starting point",
+                files.join(", ")
+            ),
+            localpilot_skills::RecipeValidation::Unvalidated => "not validated".to_string(),
+        };
+        let line = format!("- {}: {} ({state})", recipe.id(), recipe.summary);
+        if used + line.len() > METADATA_CHAR_BUDGET {
+            break;
+        }
+        used += line.len();
+        recipes.push(GuidanceSegment {
+            source: GuidanceSource::new(
+                GuidanceKind::ProjectRecipe,
+                GuidanceForm::Body,
+                recipe.id(),
+                state,
+                &recipe.reason,
+            ),
+            text: line,
+        });
+    }
+
+    if segments.is_empty() && metadata.is_empty() && recipes.is_empty() {
         return ContextContribution::default();
     }
     let mut text = String::new();
@@ -282,7 +312,24 @@ fn render(
                 .join("\n"),
         );
     }
+    if !recipes.is_empty() {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(
+            "Project run recipes for this component (reviewed by the project; run them with the \
+             ordinary tools, which still check permission):\n",
+        );
+        text.push_str(
+            &recipes
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
     segments.extend(metadata);
+    segments.extend(recipes);
     ContextContribution {
         text: Some(text),
         memories: Vec::new(),

@@ -89,6 +89,9 @@ pub struct Skill {
     /// it is for. Absent for a `SKILL.md`-only package; an unusable section is
     /// reported here and never keeps the package from loading.
     pub guidance: crate::Applicability,
+    /// Reviewed run recipes the package declares (`[[recipe]]`), and the ones
+    /// that cannot be used. Empty for a `SKILL.md`-only package.
+    pub recipes: crate::RecipeSet,
 }
 
 impl Skill {
@@ -258,6 +261,7 @@ impl SkillSet {
             Ok(Skill {
                 manifest: SkillManifest::parse(&text)?,
                 guidance: crate::read_applicability(&text, skill_dir, &instructions),
+                recipes: crate::read_recipes(&text),
                 instructions,
                 dir: skill_dir.to_path_buf(),
                 scope,
@@ -270,6 +274,7 @@ impl SkillSet {
                 dir: skill_dir.to_path_buf(),
                 scope,
                 guidance: crate::Applicability::Absent,
+                recipes: crate::RecipeSet::default(),
             })
         }
     }

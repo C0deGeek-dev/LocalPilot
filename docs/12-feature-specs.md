@@ -131,6 +131,28 @@ capabilities_required_for_claim = ["process.capture"]
 body_sections = ["#Exit codes", "references/cargo.md"]  # a SKILL.md heading or a package file
 ```
 
+A project package may also declare reviewed run recipes (ADR-0281):
+
+```toml
+[[recipe]]
+name = "api-dev"
+component = "api"                  # the component it is for
+working_directory = "api"
+program = "dotnet"
+args = ["run", "--urls", "http://127.0.0.1:5199"]
+env = ["ASPNETCORE_ENVIRONMENT"]   # names only, never values
+credentials = ["ORDERS_DB_PASSWORD"]
+readiness = { kind = "http_get", value = "http://127.0.0.1:5199/health" }
+scenario = ["POST an order", "GET it back"]
+cleanup = "stop_started_process"   # or "nothing"
+validated_against = { "api/packages.lock.json" = "<sha256>" }
+```
+
+A recipe is advice: the model runs it with the ordinary tools, which still check
+permission. A credential-like argument, a value in `env`, an unknown key or a path
+outside the workspace makes the recipe invalid; global and built-in packages'
+recipes are never offered.
+
 A package without `[guidance]` is discovered and ranked exactly as before, and a
 `SKILL.md`-only package has none. A section that cannot be used (a missing or
 unsupported `schema_version`, a value outside the lists above, an unknown key, a
