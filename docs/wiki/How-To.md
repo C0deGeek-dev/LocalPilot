@@ -45,9 +45,11 @@ through a LocalX server. It is off until you turn it on.
 
 Browsing another project leaves the session you are in connected, and drafts
 are kept per project and session while the app stays open. If the computer
-becomes unreachable, the app still opens and shows the last view as stale with
-controls locked; it reconnects with a fresh copy of the session and never
-resends what you typed. A new LocalLink version takes over once every LocalLink
+becomes unreachable while the app is open, it keeps the last view, marked
+stale, with controls locked; it reconnects with a fresh copy of the session
+and never resends what you typed. Session content and drafts live only in that
+open window: after the app is closed or reloaded, it can still open while the
+computer is unreachable, but it shows no conversation until it reconnects. A new LocalLink version takes over once every LocalLink
 window on the phone is closed. **Devices** also shows this phone's access, lets
 it revoke itself, and has an **Appearance** setting (Follow system, Light or
 Dark).
