@@ -114,6 +114,30 @@ skills/<skill-name>/
 - permissions
 - assets
 - scripts
+- optionally, `[guidance]`: which tasks the instructions are for (ADR-0275)
+
+```toml
+[guidance]
+schema_version = 1                 # required; this build reads 1
+role = "supplement"                # "procedure" (default) or "supplement"
+intents = ["investigate", "implement"]   # explain, investigate, implement,
+                                   # refactor, review, measure, package
+exclude_intents = ["explain"]
+stacks = ["rust"]                  # lowercase ids, matched against project facts
+products = ["cli"]                 # library, cli, tui, service, desktop, browser, game
+component_globs = ["crates/**"]    # workspace-relative
+capabilities_optional = ["process.capture"]
+capabilities_required_for_claim = ["process.capture"]
+body_sections = ["#Exit codes", "references/cargo.md"]  # a SKILL.md heading or a package file
+```
+
+A package without `[guidance]` is discovered and ranked exactly as before, and a
+`SKILL.md`-only package has none. A section that cannot be used (a missing or
+unsupported `schema_version`, a value outside the lists above, an unknown key, a
+glob or section reference that leaves the workspace or package, a heading that
+does not exist) is reported by `localpilot skills show` with the reason, and the
+package is still listed, searched and loadable. The section has no field that
+grants a permission, allows a tool or runs a hook. `[triggers]` keeps its meaning.
 
 Trigger semantics:
 

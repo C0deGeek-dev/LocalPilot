@@ -80,6 +80,10 @@ pub struct Skill {
     pub dir: PathBuf,
     /// The discovery scope this skill's effective definition came from.
     pub scope: SkillScope,
+    /// What the package's optional `[guidance]` section says about which tasks
+    /// it is for. Absent for a `SKILL.md`-only package; an unusable section is
+    /// reported here and never keeps the package from loading.
+    pub guidance: crate::Applicability,
 }
 
 impl Skill {
@@ -220,9 +224,12 @@ impl SkillSet {
         let manifest_path = skill_dir.join("skill.toml");
         let instructions_path = skill_dir.join("SKILL.md");
         if manifest_path.is_file() {
+            let text = read(&manifest_path)?;
+            let instructions = read(&instructions_path)?;
             Ok(Skill {
-                manifest: SkillManifest::parse(&read(&manifest_path)?)?,
-                instructions: read(&instructions_path)?,
+                manifest: SkillManifest::parse(&text)?,
+                guidance: crate::read_applicability(&text, skill_dir, &instructions),
+                instructions,
                 dir: skill_dir.to_path_buf(),
                 scope,
             })
@@ -233,6 +240,7 @@ impl SkillSet {
                 instructions: body,
                 dir: skill_dir.to_path_buf(),
                 scope,
+                guidance: crate::Applicability::Absent,
             })
         }
     }

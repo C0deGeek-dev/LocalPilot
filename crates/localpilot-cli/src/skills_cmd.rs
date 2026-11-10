@@ -486,6 +486,25 @@ fn render_show(
                     skill.manifest.permissions.join(", ")
                 )?;
             }
+            match &skill.guidance {
+                localpilot_skills::Applicability::Absent => {}
+                localpilot_skills::Applicability::Valid(metadata) => writeln!(
+                    out,
+                    "guidance: {} for intents [{}], stacks [{}], products [{}]",
+                    match metadata.role {
+                        localpilot_skills::GuidanceRole::Procedure => "procedure",
+                        localpilot_skills::GuidanceRole::Supplement => "supplement",
+                    },
+                    metadata.intents.join(", "),
+                    metadata.stacks.join(", "),
+                    metadata.products.join(", ")
+                )?,
+                localpilot_skills::Applicability::Invalid(reason) => writeln!(
+                    out,
+                    "guidance: not used for task selection — {reason} (the skill itself is \
+                     unaffected)"
+                )?,
+            }
             writeln!(out, "\n{}", skill.instructions.trim_end())?;
         }
         None => writeln!(out, "no skill named \"{}\"", name.trim())?,

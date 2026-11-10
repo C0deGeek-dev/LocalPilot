@@ -12,6 +12,7 @@ mod catalog;
 mod discovery;
 mod error;
 mod fetch;
+mod guidance;
 mod install;
 mod loader;
 mod manager;
@@ -30,6 +31,10 @@ pub use discovery::{
 };
 pub use error::SkillError;
 pub use fetch::{GitFetcher, RepoFetcher, Snapshot};
+pub use guidance::{
+    read_applicability, section_text, Applicability, BodySection, GuidanceMetadata, GuidanceRole,
+    CAPABILITIES, GUIDANCE_SCHEMA_VERSION, INTENTS, PRODUCTS,
+};
 pub use install::{InstallLedger, Provenance};
 pub use loader::{
     discovery_roots, global_skill_dirs, standard_skill_dirs, Shadowed, Skill, SkillScope, SkillSet,

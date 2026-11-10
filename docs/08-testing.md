@@ -959,3 +959,13 @@ create files, and requires it unchanged. The cache test edits files and counts
 detections. Tool presence is decided by a stand-in, not the host's `PATH`.
 `cargo test -p localpilot-harness --lib project_facts` covers version and XML
 reading and path bounds.
+
+### Skill applicability metadata
+
+`cargo test -p localpilot-skills --lib guidance` covers each way a `[guidance]`
+section can be unusable and the reason given, the rejection of permission, tool
+and hook keys, and heading sections. `cargo test -p localpilot-skills --test
+guidance_metadata` reads packages through ordinary discovery: a valid section
+beside an unchanged manifest, an unusable one whose package is still listed,
+loadable and ranked exactly as the same package without it, a `SKILL.md`-only
+package, and (on Unix) a section file that links outside its package.

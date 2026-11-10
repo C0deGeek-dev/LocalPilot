@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Skill packages can declare in an optional `[guidance]` section of `skill.toml`
+  which intents, stacks, products, paths and capabilities their guidance is for,
+  and which `SKILL.md` headings or package files can be loaded on their own.
+  Packages without it are unchanged; an unusable section is shown with its reason
+  by `localpilot skills show` and never hides the package (ADR-0275, LocalHub#272).
 - `localpilot remote setup` says when it starts checking the new address from
   this computer, and gives that check up to 90 seconds per request instead
   of 15. Right after a new machine name, Tailscale first gets the HTTPS

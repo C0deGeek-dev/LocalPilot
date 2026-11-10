@@ -2,6 +2,39 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0275: Skill Packages Can Declare Which Tasks Their Guidance Is For
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#272. Builds on ADR-0027
+and ADR-0272.
+
+**Context.** Skill ranking uses the name, the description and command triggers.
+Selecting guidance by task needs to know which intents, stacks, products and
+paths a package's instructions are for, and which capabilities a claim made under
+them needs. `[triggers]` declares file globs and regexes that nothing consumes;
+giving them a new meaning would change installed packages without their authors
+knowing. Packages already in use must keep loading and ranking as they do.
+
+**Decision.** An optional, versioned `[guidance]` table in `skill.toml`.
+- Fields: `schema_version` (required, 1), `role` (procedure or supplement),
+  `intents` and `exclude_intents`, `stacks`, `products`, `component_globs`,
+  `capabilities_optional`, `capabilities_required_for_claim` and `body_sections`.
+  Intents, products and capabilities come from fixed lists; stacks are lowercase
+  ids. A procedure names at least one intent.
+- It is read apart from the manifest: the manifest parses exactly as before, and
+  the result is `Skill::guidance`, which is absent, valid, or invalid with a
+  reason. An invalid section never makes the package skipped, hidden or ranked
+  differently. `localpilot skills show` prints the result.
+- Unknown keys are an error, not ignored, so the section cannot carry a
+  permission, tool or hook field, or a misspelt key, unnoticed.
+- A body section is a heading in `SKILL.md` or a file inside the package. A file
+  reference must be relative, without `..`, and must still be inside the package
+  after links are resolved. Component globs must be relative to the workspace.
+- `[triggers]` keeps its meaning and nothing new reads it. `SKILL.md`-only
+  packages have no section.
+
+**Consequences.** Selection can match packages on structured applicability while
+existing packages behave as before. The vocabulary is fixed by this build: a new
+intent, product or capability needs a code change and a schema decision.
 ## ADR-0274: Phone Setup Reaches The Tailscale App For macOS By Its Recorded Port And Token
 
 **Status:** accepted · **Date:** 2026-11-12. Refs LocalHub#283, LocalHub#255.

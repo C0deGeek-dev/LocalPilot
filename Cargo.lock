@@ -2103,6 +2103,7 @@ dependencies = [
  "async-trait",
  "fd-lock",
  "figment",
+ "globset",
  "localpilot-core",
  "localpilot-sandbox",
  "localpilot-tools",
