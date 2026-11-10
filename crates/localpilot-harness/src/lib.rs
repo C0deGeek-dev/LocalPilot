@@ -34,6 +34,7 @@ mod planning;
 mod precondition;
 mod progress;
 mod project_analysis;
+mod project_facts;
 mod project_instructions;
 mod project_start;
 mod quality;
@@ -90,6 +91,9 @@ pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step, Verification};
 pub use project_analysis::{
     analyze_project, register_project_analysis_context, ProjectAnalysis, ProjectAnalysisContext,
+};
+pub use project_facts::{
+    ComponentFacts, FactConfidence, ProjectFact, ProjectFacts, ToolLookup, UnknownFact,
 };
 pub use project_instructions::{register_project_instructions_context, ProjectInstructionsContext};
 pub use quality::{

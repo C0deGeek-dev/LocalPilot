@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `ProjectFacts` reads bounded, read-only facts about the component a path
+  belongs to: Cargo, .NET, Node, Godot, Unity, Unreal, Python and Go manifests,
+  versions and toolchain pins, existing test targets and scripts, and tools on
+  `PATH`. Each fact names its source file and whether it is confirmed, declared
+  by the user or tentative; what cannot be read is reported as unknown. Facts
+  are cached until a file they came from changes. Nothing runs, and sessions and
+  prompts are unchanged (ADR-0272, LocalHub#271).
 - The embedded companion app can answer permission asks from a phone (with
   clear answered-elsewhere, expired and unknown-outcome states), shows an
   Attention view and this phone's device record with a revoke action, and can

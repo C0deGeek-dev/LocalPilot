@@ -942,3 +942,19 @@ tests read no host home directory, user store, credential or network.
 and the bounded window; `cargo test -p localpilot-localmind active_skills` covers
 the learned-skill sources. These are offline mechanism tests and say nothing about
 whether guidance improves a model's work.
+
+### Project facts
+
+`cargo test -p localpilot-harness --test project_facts` writes small projects into
+a temporary directory and reads their facts back: a Cargo workspace with a binary
+and a library member and a root toolchain pin, a solution with an ASP.NET Core
+API and a React frontend side by side, Godot and Unity projects with their
+generated project files, a WPF app with a test project, a lockfile version beside
+a declared range, an empty project with declared intent, unreadable and
+unsupported manifests, the dependency and build directories that are never
+components, and a path outside the workspace. One test lists the whole tree
+before and after detection of a project whose scripts and build script would
+create files, and requires it unchanged. The cache test edits files and counts
+detections. Tool presence is decided by a stand-in, not the host's `PATH`.
+`cargo test -p localpilot-harness --lib project_facts` covers version and XML
+reading and path bounds.

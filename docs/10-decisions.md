@@ -2,6 +2,64 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0272: Project Facts Belong To A Component And Say How Sure They Are
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#271. Builds on ADR-0271.
+
+**Context.** Task guidance has to fit the project it is used in. The existing
+detection looks only at the workspace root and serves one purpose each: project
+analysis renders a prompt block, the quality gate proposes checks, the verify
+target picks one command. In a repository with an API, a web frontend and a game,
+root inventory says little about the file a task is about, and a generated
+`.csproj` beside a Godot or Unity project says nothing about how that game is
+launched. A user's description of a project that does not exist yet is not
+evidence that its manifests or tools exist.
+
+**Decision.** A read-only fact layer in `localpilot-harness` (`ProjectFacts`).
+- A component is the nearest directory at or above a path, within the workspace,
+  that holds a project marker (`Cargo.toml`, `package.json`, `pyproject.toml`,
+  `go.mod`, `project.godot`, Unity's `ProjectSettings/ProjectVersion.txt`, a
+  `.csproj`, `.fsproj` or `.uproject`). A path inside a dependency or build
+  directory (`node_modules`, `target`, `bin`, `obj`, hidden directories, ...)
+  belongs to the component above it. `.` when nothing matches.
+- Each fact has a dotted id (`cargo.bin`, `aspnet.project`, `godot.version`), an
+  optional value, the workspace-relative file that established it, and a
+  confidence: confirmed (read from a manifest), declared (said by the user, kept
+  apart from detection, surviving a refresh) or tentative (an inference that
+  allows another reading, such as a browser product from a Vite dependency).
+- The first set covers Cargo packages, targets, workspaces and toolchain pins;
+  SDK-style .NET projects with Web, WPF, Avalonia and test projects, target
+  frameworks and `global.json`; Node packages with a fixed list of dependencies,
+  their declared range and the version in `package-lock.json`, and a fixed list
+  of scripts; Godot, Unity and Unreal projects and versions, with a project file
+  beside an engine project marked generated; Python and Go. Tool presence is a
+  lookup on `PATH`.
+- What cannot be read or is not supported (invalid manifest, a file over the read
+  limit, a legacy project format, a missing tool, a directory with no marker)
+  is recorded as unknown with a reason, beside the facts that could be read.
+- Detection runs nothing: no package script, build, import or project plugin, no
+  installation and no network. Reads are bounded (256 KiB per manifest, 16 MiB
+  per lockfile, 512 entries per directory); a component reads its own directory
+  and, for workspace and toolchain pins, its ancestors within the workspace. The
+  component inventory looks two levels deep and is a fallback only.
+- Facts are cached per component against the length and modification time of
+  every file read and directory listed, present or absent. A change to one of
+  them, or `refresh()`, makes the next request detect again.
+- Nothing is wired into a session or a prompt. Project analysis, quality-gate
+  discovery and the verify target are unchanged.
+
+**Alternatives.** Extending project analysis was rejected because it renders
+prompt text every turn; changing it would change requests, which belongs to a
+separate decision. Running `cargo metadata`, `dotnet` or the engine to learn the
+same facts was rejected: those evaluate project code. Choosing a component from
+`PathsInPlay` alone was rejected because it accumulates paths over a session.
+
+**Consequences.** Selection can ask for the facts of the component a task is
+about and see which are evidence and which are inference. An unsupported project
+yields unknowns and ordinary work continues. A fact set is only as current as
+its stamps: a same-length edit within the file system's timestamp resolution is
+not seen until a refresh.
+
 ## ADR-0271: A Session Records Which Task Guidance Each Provider Request Held
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#270. Builds on ADR-0027
