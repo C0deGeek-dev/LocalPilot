@@ -26,10 +26,31 @@ through a LocalX server. It is off until you turn it on.
    the workspace id the computer prints.
 4. **Share a session.** In the full-screen terminal run `/remote share`. If no
    background server runs for the project yet, `/remote` offers to start one.
-5. **Open it on the phone.** Choose the project and the shared session. You can
-   read the conversation, send a message (or a follow-up while a turn runs),
-   stop the turn, and run the slash commands the computer offers. A phone
-   paired with `observe` can only watch.
+5. **Open it on the phone.** Sessions lists every project this phone may
+   reach, each marked online or offline. Open a project to load its shared
+   sessions, then choose one. You can read the conversation, send a message
+   (or a follow-up while a turn runs), stop the turn, and run the slash
+   commands the computer offers. A phone paired with `observe` can only watch.
+6. **Answer permission requests.** When the session asks to run a tool, the
+   request appears under **Attention**. Open it to see the exact request and
+   choose **Allow once** or **Deny**. The project and session are named on the
+   request and beside **Stop**, with the project's ID when two projects share
+   a folder name. If the outcome is unclear (for example the connection
+   dropped), the phone says so and never resends; check the computer.
+7. **Turn on notifications (optional).** Under **Devices**, choose the project,
+   then **Enable notifications** and allow the browser prompt. **Test
+   notification** sends one through the real push path. Notifications show
+   generic text only, and tapping one opens the app; it never approves
+   anything. **Turn notifications off** stops them.
+
+Browsing another project leaves the session you are in connected, and drafts
+are kept per project and session while the app stays open. If the computer
+becomes unreachable, the app still opens and shows the last view as stale with
+controls locked; it reconnects with a fresh copy of the session and never
+resends what you typed. A new LocalLink version takes over once every LocalLink
+window on the phone is closed. **Devices** also shows this phone's access, lets
+it revoke itself, and has an **Appearance** setting (Follow system, Light or
+Dark).
 
 `/remote stop` ends sharing. `/remote devices` (or `localpilot devices list` and
 `localpilot devices revoke <id>`) shows and revokes paired devices.
