@@ -1061,3 +1061,13 @@ frozen corpus digest, runs all 30 cases as real sessions in temporary projects
 whose misses are printed. A miss in the frozen cases fails; a held-out miss only
 fails when it breaks a hard invariant (a tool-set change, user-only or untrusted
 text in a request).
+
+### Reference projects
+
+`cargo test -p localpilot-harness --test reference_projects -- --nocapture` builds
+`tests/reference/rust-cli` and `tests/reference/dotnet-api` in temporary
+directories through a session's `run_shell`, applies the fix with `write_file`,
+and grades both states independently, printing every check. The Rust test needs
+only the pinned toolchain and runs offline. The .NET test needs a .NET SDK of the
+pinned major and is skipped with a message without one; restore is limited to no
+package sources, so it never reaches a network.

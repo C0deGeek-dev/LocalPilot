@@ -2,6 +2,43 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0284: The Rust CLI And .NET Service Workflows Are Qualified Against Reference Projects
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#281. Builds on ADR-0280
+and ADR-0282.
+
+**Context.** Guidance that says what evidence fits a CLI or a service is only
+useful if the workflow it describes works through LocalPilot's tools, and a grader
+that only checks whether a command exited 0 would call a broken program done.
+
+**Decision.** Two reference projects under `crates/localpilot-harness/tests/reference/`
+with a known defect and a separate fix, and `tests/reference_projects.rs`.
+- V1, a dependency-free Rust CLI (`counter --count N`) that exits 0 for negative,
+  malformed and missing values. V2, an ASP.NET Core minimal API that stores items
+  without a name or with a quantity below 1.
+- A real session with the built-in guidance in assisted mode and a scripted
+  provider builds the project (`run_shell`), and in a second turn writes the fix
+  (`write_file`) and builds again, with the permission engine in force. The
+  session's evidence record shows each build's exit.
+- A grader in the test, independent of the session, then exercises the result. For
+  V1: valid output, exit 2 with the expected stderr for invalid values, and held-out
+  inputs. For V2: the built service on a free local port, real readiness, valid
+  and invalid requests including a held-out one, and the stored state afterwards.
+- Both runs are graded: before the fix the build passes and behaviour fails, and
+  the failures are kept; after it every check passes. V1 also checks that an
+  unrelated file did not change.
+- The Rust project pins the repository's toolchain and builds offline into its own
+  target directory. The .NET project pins its SDK major in `global.json`, clears
+  package sources in `NuGet.config`, needs no package and builds without
+  persistent build servers. Its test is skipped with a message when no `dotnet` is
+  on `PATH`; a skip is not a qualification. Nothing reaches a network, a
+  production service or an external database. Manifests carry a `.fixture`
+  suffix so this repository's own tooling ignores them.
+
+**Consequences.** The CLI and service paths are qualified on this machine (Rust
+1.82.0, .NET SDK 10.0.303). The model's part is scripted: this shows the tools,
+evidence and grader work, not that a model finds the fix.
+
 ## ADR-0283: The Routing Corpus Runs End To End Against Real Sessions
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#280. Builds on ADR-0271

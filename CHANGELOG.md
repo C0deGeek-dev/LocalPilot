@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Reference projects qualify the Rust CLI and .NET service workflows: a session
+  builds and fixes a defective CLI and a defective minimal API through the
+  ordinary tools, and an independent grader checks exit codes, output, HTTP
+  responses and stored state before and after, keeping the build-passes,
+  behaviour-fails result (ADR-0284, LocalHub#281).
 - The 30 task-guidance routing and lifecycle cases from the research corpus run
   end to end against real sessions and fail the suite on any miss; a separate
   held-out paraphrase set reports its misses. Selection now keeps a refactor's
