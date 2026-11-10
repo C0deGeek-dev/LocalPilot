@@ -9,9 +9,9 @@
     <meta name="referrer" content="no-referrer">
     <title>LocalLink</title>
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="icon" href="/assets/483642f20413b2370a0e765b2ee012ae7525c7d9d8c3175f30939e8630da46da/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/483642f20413b2370a0e765b2ee012ae7525c7d9d8c3175f30939e8630da46da/style.css">
-    <script type="module" src="/assets/483642f20413b2370a0e765b2ee012ae7525c7d9d8c3175f30939e8630da46da/app.js"></script>
+    <link rel="icon" href="/assets/058fb88b2a206885786dcaf09fd33cb017a9039394e976f8237c349d8dc0dd47/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/058fb88b2a206885786dcaf09fd33cb017a9039394e976f8237c349d8dc0dd47/style.css">
+    <script type="module" src="/assets/058fb88b2a206885786dcaf09fd33cb017a9039394e976f8237c349d8dc0dd47/app.js"></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -57,11 +57,10 @@
             <button id="check-connection" type="button" class="secondary" data-pair-control>Check connection</button>
           </div>
           <details id="session-browser" class="session-browser" open hidden>
-            <summary>Choose a shared session</summary>
-            <p class="help">Open a session in your PC terminal and enable phone access. Choose the same project here.</p>
-            <label for="session-workspace">Project</label>
-            <select id="session-workspace"><option value="">Choose a project</option></select>
-            <button id="refresh-sessions" type="button" class="secondary">Refresh sessions</button>
+            <summary id="session-browser-title">Choose a shared session</summary>
+            <p class="help">Open a project to see its shared sessions. Your current session stays connected while you browse.</p>
+            <button id="refresh-projects" type="button" class="secondary">Refresh projects</button>
+            <p id="projects-status" class="help" role="status"></p>
             <p id="sessions-status" role="status"></p>
             <div id="session-list" class="session-list"></div>
           </details>
@@ -89,7 +88,7 @@
                 <label for="session-draft" class="visually-hidden">Message or slash command</label>
                 <textarea id="session-draft" rows="2" maxlength="65536" placeholder="Keep the work moving…" aria-describedby="composer-help"></textarea>
                 <p id="composer-help" class="help">Follow up queues a message after this turn.</p>
-                <div class="composer-actions"><button id="send-input" type="submit" disabled>Send</button><button id="stop-turn" type="button" class="secondary" disabled>Stop turn</button></div>
+                <div class="composer-actions"><button id="send-input" type="submit" disabled>Send</button><button id="stop-turn" type="button" class="secondary" aria-describedby="stop-project" disabled>Stop turn</button></div>
               </form>
               <p id="stop-project" class="help"></p>
             </div>
@@ -109,7 +108,7 @@
           </div>
           <div id="notification-settings" class="empty-state" hidden><h2>Notifications</h2><p>Connected in app and notifications enabled are separate. Lock-screen notifications contain generic text. Opening one fetches current state and never approves a request.</p><label for="notification-workspace">Project for notifications</label><select id="notification-workspace"></select><p id="notification-status" role="status"></p><div class="actions"><button id="enable-notifications">Enable notifications</button><button id="test-notification" class="secondary">Test notification</button><button id="off-notifications" class="secondary">Turn notifications off</button></div></div>
         </section>
-        <dialog id="approval-sheet" aria-labelledby="approval-tool" aria-describedby="approval-status"><div class="approval-content"><p id="approval-project" class="eyebrow"></p><h2 id="approval-tool" tabindex="-1" autofocus></h2><pre id="approval-detail" tabindex="0"></pre><p id="approval-risk"></p><p id="approval-expiry"></p><p id="approval-status" role="status" aria-atomic="true"></p><div class="actions"><button id="deny-approval" class="secondary">Deny</button><button id="allow-approval">Allow once</button><button id="close-approval" class="secondary">Close</button></div></div></dialog>
+        <dialog id="approval-sheet" aria-labelledby="approval-tool" aria-describedby="approval-status"><div class="approval-content"><p id="approval-project" class="eyebrow"></p><h2 id="approval-tool" tabindex="-1" autofocus></h2><pre id="approval-detail" tabindex="0"></pre><p id="approval-risk"></p><p id="approval-expiry"></p><p id="approval-status" role="status" aria-atomic="true"></p><p id="approval-action-project" class="help"></p><div class="actions"><button id="deny-approval" class="secondary">Deny</button><button id="allow-approval">Allow once</button><button id="close-approval" class="secondary">Close</button></div></div></dialog>
         <noscript><p>Enable JavaScript to switch between Sessions, Attention and Devices.</p></noscript>
       </main>
       <nav aria-label="Main navigation">

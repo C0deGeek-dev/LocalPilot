@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The embedded companion app groups shared sessions by project. Every project
+  this phone may reach is listed with its online or offline state, and a
+  project's sessions load only when you open it; browsing another project
+  leaves the session you are in connected. Drafts are kept per project and
+  session, and the project (name and ID, so two folders with the same name are
+  told apart) is shown on the approval sheet and beside Stop. A permission ask
+  without a deadline can now be answered as soon as it arrives instead of only
+  after the next resynchronisation.
 - The embedded companion app is easier to use with a screen reader, keyboard
   and large text: replies update in place without moving your reading
   position, a finished reply is announced once (never word by word), the

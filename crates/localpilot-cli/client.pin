@@ -1,4 +1,4 @@
 # The LocalLink companion app build this binary embeds.
 # Update it with the steps in docs/companion-app.md.
-revision 3c8a1553d29319d492201a6f01ec0188efeb5935
-bundle-sha256 79869e208f62c011f4dd0802a35af4e8a0ffa5281a3af6df45fb9e54f2e9b9ce
+revision 65f4eaef05436ceded3c378c4de44ee85dbfc779
+bundle-sha256 b37243ccd87fb273c290c87512f3261047007d4799807048cb7e1fedfbcaea02

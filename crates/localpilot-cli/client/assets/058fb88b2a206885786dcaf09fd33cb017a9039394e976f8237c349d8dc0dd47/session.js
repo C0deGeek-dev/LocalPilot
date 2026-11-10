@@ -3,17 +3,25 @@ import { compatibilityIssue, protocol } from './compatibility.js';
 const terminalReplies = new Set(['accepted', 'queued', 'command_result', 'rejected', 'error']);
 const unknownOutcome = 'Outcome unknown. Check the session on your PC before sending again. Nothing will be retried automatically.';
 
+function normalizeAsk(ask) {
+  if (!ask || typeof ask !== 'object') throw new Error('ask');
+  // RPC zero means no deadline; live events omit it while snapshots include it.
+  const expires = ask.expires_at_ms === undefined ? 0 : ask.expires_at_ms;
+  if (!Number.isSafeInteger(expires) || expires < 0) throw new Error('ask deadline');
+  return { ...ask, expires_at_ms: expires };
+}
+
 export class Sessions {
   constructor({ origin, fetch, socket, changed, schedule, unschedule, now = () => Date.now(), timeout = 15000, supported = protocol }) {
     Object.assign(this, { origin, fetch, socket, changed, schedule, unschedule, now, timeout });
     this.supported = supported;
     this.generation = 0;
-    this.listGeneration = 0;
     this.nextId = 0;
     this.snapshotWait = 0;
     this.scope = null;
     this.authorized = false;
     this.workspaces = [];
+    this.projects = new Map();
     this.items = [];
     this.workspace = null;
     this.selected = null;
@@ -50,6 +58,10 @@ export class Sessions {
   }
   emit() { this.changed(this); }
   get key() { return this.selected && `${this.workspace.id}/${this.selected.id}`; }
+  projectLabel(workspace = this.workspace) {
+    if (!workspace) return 'Project';
+    return `${workspace.label} · ${workspace.id}`;
+  }
   get draft() { return this.drafts.get(this.key) || ''; }
   setDraft(text) { if (this.key) this.drafts.set(this.key, text); }
   get ready() { return this.phase === 'ready'; }
@@ -60,9 +72,19 @@ export class Sessions {
     this.authorized = true;
     this.scope = ['control', 'observe'].includes(scope) ? scope : null;
     this.workspaces = workspaces.filter((item) => item && /^[a-f0-9]{16}$/.test(item.id) && typeof item.label === 'string' && typeof item.online === 'boolean');
+    // A verified access refresh invalidates in-flight inventory reads, but does
+    // not switch the attended session or fetch every project's session list.
+    this.projects = new Map(this.workspaces.map((workspace) => {
+      const previous = this.projects.get(workspace.id);
+      return [workspace.id, { workspace, items: workspace.online ? previous?.items || [] : [],
+        phase: !workspace.online ? 'offline' : previous?.phase === 'ready' ? 'ready' : 'idle', sequence: 0 }];
+    }));
     if (this.phase === 'unpaired') this.phase = 'choose';
+    const current = this.workspaces.find((item) => item.id === this.workspace?.id);
+    if (current) this.workspace = current;
     if (this.workspace && !this.workspaces.some((item) => item.id === this.workspace.id && item.online)) {
       this.close('offline');
+      this.viewStale = true;
     }
     this.emit();
   }
@@ -70,6 +92,7 @@ export class Sessions {
     this.authorized = false;
     this.scope = null;
     this.workspaces = [];
+    this.projects.clear();
     this.close('unpaired');
     this.items = [];
     this.workspace = null;
@@ -81,45 +104,67 @@ export class Sessions {
     this.resetView();
     this.emit();
   }
-  async list(workspaceId) {
-    this.close('loading');
-    this.workspace = this.workspaces.find((item) => item.id === workspaceId) || null;
-    this.selected = null;
-    this.items = [];
-    this.resetView();
-    const generation = ++this.listGeneration;
-    if (!this.workspace?.online) { this.phase = 'offline'; this.emit(); return; }
+  async loadProject(workspaceId) {
+    const project = this.projects.get(workspaceId);
+    if (!this.authorized || !project?.workspace.online || project.phase === 'loading') return;
+    project.phase = 'loading';
+    project.items = [];
+    const sequence = ++project.sequence;
+    const current = () => this.authorized && this.projects.get(workspaceId) === project && project.sequence === sequence;
     this.emit();
     try {
       const response = await this.fetch(`/api/sessions?workspace=${encodeURIComponent(workspaceId)}`, {
         credentials: 'same-origin', mode: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(this.timeout),
       });
-      if (generation !== this.listGeneration) return;
-      if (response.status === 401 || response.status === 403) { this.revoke(); this.accessLost?.(); return; }
+      if (!current()) return;
+      if (response.status === 401) { this.revoke(); this.accessLost?.(); return; }
+      if (response.status === 403) {
+        project.phase = 'forbidden';
+        if (this.workspace?.id === workspaceId) this.fail('refused');
+        this.emit(); this.accessLost?.(); return;
+      }
+      if (response.status === 429 || response.status === 503) {
+        project.phase = response.status === 429 ? 'throttled' : 'offline';
+        this.emit(); return;
+      }
       if (!response.ok) throw new Error('listing');
       const data = await response.json();
-      if (generation !== this.listGeneration) return;
-      if (!Array.isArray(data.sessions) || data.sessions.some((item) =>
+      if (!current()) return;
+      if (!Array.isArray(data.sessions) || data.sessions.some((item) => !item ||
         typeof item.id !== 'string' || !/^[a-f0-9-]{36}$/i.test(item.id) || typeof item.live !== 'boolean' ||
         (item.name !== undefined && item.name !== null && typeof item.name !== 'string'))) throw new Error('listing');
-      this.items = data.sessions;
-      this.phase = 'choose';
+      project.items = data.sessions;
+      project.phase = 'ready';
     } catch {
-      if (generation !== this.listGeneration) return;
-      this.phase = 'list-error';
+      if (!current()) return;
+      project.phase = 'error';
     }
     this.emit();
   }
+  openProjectSession(workspaceId, sessionId) {
+    const project = this.projects.get(workspaceId);
+    if (!this.authorized || !project?.workspace.online || project.phase !== 'ready' ||
+      !project.items.some((item) => item.id === sessionId && item.live)) return;
+    if (this.workspace?.id === workspaceId && this.selected?.id === sessionId && this.connection) return;
+    const sameProject = this.workspace?.id === workspaceId;
+    if (!sameProject) {
+      this.close();
+      this.selected = null;
+      this.resetView();
+    }
+    this.workspace = project.workspace;
+    this.items = project.items;
+    this.attach(sessionId);
+  }
   close(phase = 'disconnected') {
     ++this.generation;
-    ++this.listGeneration;
     this.unschedule(this.attachTimer);
     for (const pending of this.pending.values()) {
       this.unschedule(pending.timer);
       if (pending.command.type === 'permission_reply' && this.approval?.ask_id === pending.command.ask_id) this.approval.state = 'unknown';
     }
     if (this.pending.size) {
-      this.outcomeIssue = `${this.workspace?.label || 'Project'} / ${this.selected?.name || 'session'}: ${unknownOutcome}`;
+      this.outcomeIssue = `${this.projectLabel()} / ${this.selected?.name || 'session'}: ${unknownOutcome}`;
       this.notice = this.outcomeIssue; this.uncertain = true;
     }
     this.pending.clear();
@@ -199,6 +244,7 @@ export class Sessions {
         !Array.isArray(event.asks) || (event.plan !== undefined && event.plan !== null && (!Array.isArray(event.plan) ||
           event.plan.some((step) => typeof step.title !== 'string' || typeof step.status !== 'string'))) ||
         (event.turn_text !== undefined && event.turn_text !== null && typeof event.turn_text !== 'string')) throw new Error('snapshot');
+      const asks = event.asks.map(normalizeAsk);
       this.seq = event.seq;
       // A newer mirror install can win while this connection handles a resync.
       // The complete verified snapshot owns its epoch, not the earlier notice.
@@ -212,8 +258,8 @@ export class Sessions {
         this.historyUnconfirmed = !event.history.length;
         if (event.history.length) this.history = event.history;
         // Empty mirror rebuilds cannot prove a previously shown ask vanished.
-        this.unknownAsksConfirmed = event.asks.length > 0;
-        if (this.unknownAsksConfirmed) { this.asks = event.asks; this.reconcileApproval(); }
+        this.unknownAsksConfirmed = asks.length > 0;
+        if (this.unknownAsksConfirmed) { this.asks = asks; this.reconcileApproval(); }
         this.unschedule(this.attachTimer);
         this.emit(); return;
       }
@@ -223,7 +269,7 @@ export class Sessions {
       this.history = event.history;
       this.entries = event.turn === 'running' && event.turn_text ? [{ type: 'assistant', text: event.turn_text }] : [];
       this.plan = event.plan || [];
-      this.asks = event.asks;
+      this.asks = asks;
       this.reconcileApproval();
       this.truncated = event.history_truncated || event.turn_text_truncated;
       this.phase = 'ready';
@@ -286,7 +332,7 @@ export class Sessions {
       }
       case 'plan': this.plan = event.steps; break;
       case 'stopped': this.turn = 'idle'; this.busy = false; this.clearActionNotice(); break;
-      case 'permission_ask': this.asks = [...this.asks.filter((ask) => ask.ask_id !== event.ask_id), event]; break;
+      case 'permission_ask': this.asks = [...this.asks.filter((ask) => ask.ask_id !== event.ask_id), normalizeAsk(event)]; break;
       case 'permission_resolved':
         this.asks = this.asks.filter((ask) => ask.ask_id !== event.ask_id);
         if (this.approval?.ask_id === event.ask_id) {
@@ -294,7 +340,9 @@ export class Sessions {
           if (this.approval.state !== 'submitting' && this.approval.state !== 'unknown') this.approval.state = event.outcome === 'expired' ? 'expired' : event.outcome === 'cancelled' ? 'cancelled' : this.approval.state === 'resolved' ? 'resolved' : 'elsewhere';
         }
         break;
-      case 'asks_resync': this.asks = event.asks; this.reconcileApproval(); break;
+      case 'asks_resync':
+        if (!Array.isArray(event.asks)) throw new Error('asks');
+        this.asks = event.asks.map(normalizeAsk); this.reconcileApproval(); break;
       case 'warning': this.notice = event.message; break;
       case 'quota_paused': this.notice = `Paused by the provider. Reset: ${event.reset}`; break;
     }
@@ -371,7 +419,7 @@ export class Sessions {
         approval.message = event.message;
         if (approval.state === 'unknown') {
           this.uncertain = true;
-          this.outcomeIssue = `${this.workspace.label} / ${this.selected.name || 'session'}: Approval outcome unknown. Check the PC before answering again. Nothing will be retried.`;
+          this.outcomeIssue = `${this.projectLabel()} / ${this.selected.name || 'session'}: Approval outcome unknown. Check the PC before answering again. Nothing will be retried.`;
         }
       }
       this.notice = '';
@@ -380,7 +428,7 @@ export class Sessions {
     if (event.type === 'rejected' || event.type === 'error') {
       this.actionNotice = false;
       if (event.code === 'outcome_unknown' || event.code === 'in_progress') {
-        this.outcomeIssue = `${this.workspace.label} / ${this.selected.name || 'session'}: ${unknownOutcome}`;
+        this.outcomeIssue = `${this.projectLabel()} / ${this.selected.name || 'session'}: ${unknownOutcome}`;
         this.notice = this.outcomeIssue; this.uncertain = true;
       } else this.notice = `Not accepted: ${event.message}`;
       return;

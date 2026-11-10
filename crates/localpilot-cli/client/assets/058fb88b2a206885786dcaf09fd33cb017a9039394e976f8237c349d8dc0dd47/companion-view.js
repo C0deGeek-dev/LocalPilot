@@ -41,12 +41,12 @@ export function mountCompanion(document, window, sessions, checkAccess) {
   }
   let attentionKey;
   function renderAttention() {
-    const key = JSON.stringify([sessions.key, sessions.phase, sessions.asks, sessions.approval, sessions.canApprove]);
+    const key = JSON.stringify([sessions.key, sessions.projectLabel(), sessions.phase, sessions.asks, sessions.approval, sessions.canApprove]);
     if (key !== attentionKey) {
       attentionKey = key;
-      text('attention-status', !sessions.authorized ? 'Pair this phone in Sessions.' : !sessions.selected ? 'Choose a shared session in Sessions to see its requests.' : `${sessions.workspace.label} / ${sessions.selected.name || 'Unnamed session'} · ${sessions.ready ? 'Connected in app' : 'View may be stale; approval controls locked. Answer waiting requests on the PC'}. Requests cover this attached session only.`);
+      text('attention-status', !sessions.authorized ? 'Pair this phone in Sessions.' : !sessions.selected ? 'Choose a shared session in Sessions to see its requests.' : `${sessions.projectLabel()} / ${sessions.selected.name || 'Unnamed session'} · ${sessions.ready ? 'Connected in app' : 'View may be stale; approval controls locked. Answer waiting requests on the PC'}. Requests cover this attached session only.`);
       keyedItems(el('attention-list'), sessions.asks, (ask) => `${sessions.key}/${ask.ask_id}`, () => make('button', ''), (button, ask) => {
-        setText(button, `${ask.tool || 'Request'} · ${ask.risk || 'Review required'}`);
+        setText(button, `${ask.tool || 'Request'} · ${ask.risk || 'Review required'} · ${sessions.projectLabel()} / ${sessions.selected.name || 'Unnamed session'}`);
         button.type = 'button';
         button.onclick = () => {
           approvalInvoker = button;
@@ -59,7 +59,9 @@ export function mountCompanion(document, window, sessions, checkAccess) {
     }
     const ask = sessions.approval;
     if (!ask) { if (el('approval-sheet').open) el('approval-sheet').close(); return; }
-    text('approval-project', `${sessions.workspace.label} / ${sessions.selected.name || 'Unnamed session'}`);
+    const context = `${sessions.projectLabel()} / Session: ${sessions.selected.name || 'Unnamed session'}`;
+    text('approval-project', context);
+    text('approval-action-project', context);
     text('approval-tool', ask.tool || 'Permission request');
     text('approval-detail', ask.detail || 'Details unavailable. Check the request on your PC.');
     text('approval-risk', `Risk: ${ask.risk || 'Not supplied'}`);

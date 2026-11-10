@@ -50,6 +50,12 @@ textarea { resize: vertical; line-height: 1.6; }
 .session-list { display: grid; gap: .75rem; }
 .session-choice { text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .session-choice[aria-pressed="true"] { border-color: var(--accent); background: var(--selected); }
+.project-group { margin: 0; min-width: 0; }
+.project-group summary span { display: block; overflow-wrap: anywhere; }
+.project-group summary .help { margin-top: .35rem; font-weight: 400; }
+.project-content { padding: 0 1rem 1rem; }
+.project-content .session-list { margin: .75rem 0; }
+#session-project, #approval-project { text-transform: none; letter-spacing: .02em; font-size: .875rem; }
 .session-heading h1 { font-size: 1.625rem; letter-spacing: -.025em; }
 .session-heading .help { margin: .5rem 0; }
 main.viewing-session { padding-top: 1rem; }
@@ -93,6 +99,12 @@ nav a[aria-current] { background: var(--selected); color: var(--accent); font-we
 .skip:focus { top: 0; }
 .standalone-link { display: flex; align-items: center; min-height: 48px; padding: .75rem 0; }
 @media (max-width: 360px) { main { padding: 1.5rem .75rem; } .empty-state, #approval-sheet { padding: 1rem; } .composer-panel, nav { position: static; } }
+@media (max-width: 360px) {
+  .session-browser > p, .session-browser > button, .session-browser > div { margin-left: 8px; margin-right: 8px; max-width: calc(100% - 16px); }
+  .session-browser summary { padding: 12px; }
+  .project-content { padding: 0 8px 12px; }
+  .project-content button { padding-left: 12px; padding-right: 12px; }
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
 }

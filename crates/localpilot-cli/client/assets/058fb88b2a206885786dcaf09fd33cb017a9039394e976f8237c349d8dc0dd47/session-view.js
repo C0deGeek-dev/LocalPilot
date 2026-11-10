@@ -24,8 +24,6 @@ export function mountSessions(document, window) {
   let frame;
   let timelineKey;
   let commandsKey;
-  let listKey;
-  let workspaceKey;
   let historyKeys = new Map();
   let nextHistoryKey = 0;
   const announceReply = replyAnnouncer(el('reply-announcement'));
@@ -112,6 +110,64 @@ export function mountSessions(document, window) {
     }
     reconcile(timeline, nodes);
   }
+  function renderProjects() {
+    const focused = document.activeElement;
+    const focusedGroup = focused?.closest('.project-group');
+    keyedItems(el('session-list'), [...model.projects.values()], (project) => project.workspace.id,
+      () => {
+        const group = make('details', null, 'project-group');
+        const summary = make('summary');
+        summary.append(make('span', '', 'project-label'), make('span', '', 'help project-id'), make('span', '', 'help project-state'));
+        const content = make('div', null, 'project-content');
+        const status = make('p', '', 'help project-status'); status.setAttribute('role', 'status');
+        content.append(status, make('div', null, 'session-list'), make('button', 'Refresh sessions', 'secondary'));
+        group.append(summary, content);
+        group.addEventListener('toggle', () => {
+          const project = model.projects.get(group.dataset.key);
+          if (group.open && project?.phase === 'idle') void model.loadProject(group.dataset.key);
+        });
+        return group;
+      }, (group, project) => {
+        const { workspace, phase, items } = project;
+        const set = (selector, value) => { const node = group.querySelector(selector); if (node.textContent !== value) node.textContent = value; };
+        set('.project-label', workspace.label);
+        set('.project-id', `Project ID: ${workspace.id}`);
+        set('.project-state', `${workspace.online && phase !== 'offline' ? 'Online' : 'Offline'}${model.workspace?.id === workspace.id && model.selected ? ' · Current session' : ''}`);
+        const messages = {
+          idle: 'Open this project to load shared sessions.', loading: 'Loading shared sessions…',
+          offline: 'This project is offline. Start LocalPilot on your PC, then refresh projects.',
+          throttled: 'Too many requests. Wait a moment, then try again.',
+          forbidden: 'Access to this project needs checking.',
+          error: 'Could not load shared sessions. Check your connection and try again.',
+          ready: items.length ? '' : 'No shared sessions. Open LocalPilot in this project on your PC and enable phone access.',
+        };
+        set('.project-status', messages[phase]);
+        const refresh = group.querySelector('.project-content > button');
+        refresh.hidden = phase === 'offline';
+        refresh.disabled = phase === 'loading' || !!model.inventoryBusy;
+        refresh.textContent = phase === 'idle' ? 'Load sessions' : phase === 'forbidden' ? 'Check access' : ['throttled', 'error'].includes(phase) ? 'Try again' : 'Refresh sessions';
+        refresh.onclick = () => phase === 'forbidden' ? el('check-connection').click() : void model.loadProject(workspace.id);
+        keyedItems(group.querySelector('.session-list'), items, (item) => item.id,
+          () => make('button', '', 'secondary session-choice'), (button, item) => {
+            const current = model.workspace?.id === workspace.id && model.selected?.id === item.id;
+            const name = item.name || 'Unnamed session';
+            const duplicate = items.some((other) => other.id !== item.id && (other.name || 'Unnamed session') === name);
+            const label = `${name}${duplicate ? ` · ${item.id}` : ''} · ${item.live ? 'Shared now' : 'No longer shared'}${current ? ' · Current session' : ''}`;
+            if (button.textContent !== label) button.textContent = label;
+            button.disabled = !item.live || phase !== 'ready' || !workspace.online;
+            button.setAttribute('aria-pressed', String(current));
+            button.onclick = () => {
+              model.openProjectSession(workspace.id, item.id);
+              if (model.workspace?.id !== workspace.id || model.selected?.id !== item.id) return;
+              render(); el('session-browser').open = false; el('session-name').focus();
+            };
+          });
+      });
+    if (focusedGroup && !focused?.isConnected) {
+      if (focusedGroup.isConnected) focusedGroup.querySelector('summary').focus();
+      else el('session-browser-title').focus();
+    }
+  }
   function render() {
     const paired = model.authorized;
     const viewing = paired && !!model.selected;
@@ -121,45 +177,17 @@ export function mountSessions(document, window) {
     for (const id of ['sessions-title', 'sessions-intro', 'sessions-eyebrow']) el(id).hidden = viewing;
     el('session-browser').hidden = !paired;
     el('session-view').hidden = !model.selected || !paired;
-    const nextWorkspaceKey = JSON.stringify([model.workspaces, model.workspace?.id]);
-    if (nextWorkspaceKey !== workspaceKey) {
-      workspaceKey = nextWorkspaceKey;
-      const selectedWorkspace = el('session-workspace').value;
-      const options = model.workspaces.map((item) => {
-        const option = make('option', `${item.label}${item.online ? '' : ' · offline'}`);
-        option.value = item.id;
-        return option;
-      });
-      const blank = make('option', 'Choose a project'); blank.value = '';
-      el('session-workspace').replaceChildren(blank, ...options);
-      el('session-workspace').value = model.workspace?.id || selectedWorkspace;
-    }
-    el('refresh-sessions').disabled = !el('session-workspace').value || model.phase === 'loading';
+    setText('session-browser-title', viewing ? 'Switch session' : 'Choose a shared session');
+    el('refresh-projects').disabled = !!model.inventoryBusy;
+    setText('projects-status', model.inventoryIssue || (!model.workspaces.length && paired ? 'No projects are available to this phone. Check LocalPilot and this device’s access on your PC.' : ''));
     const phaseMessage = model.phase === 'incompatible' ? compatibilityMessages[model.compatibility || 'invalid'] : phaseMessages[model.phase];
     setText('sessions-status', phaseMessage || 'Shared terminal connected.');
-    const nextListKey = JSON.stringify([model.items, model.selected?.id, model.phase === 'choose']);
-    if (nextListKey !== listKey) {
-      listKey = nextListKey;
-      keyedItems(el('session-list'), model.items, (item) => `${model.workspace?.id}/${item.id}`,
-        () => make('button', '', 'secondary session-choice'), (button, item) => {
-        if (button.textContent !== `${item.name || 'Unnamed session'} · ${item.live ? 'Shared now' : 'No longer shared'}`) button.textContent = `${item.name || 'Unnamed session'} · ${item.live ? 'Shared now' : 'No longer shared'}`;
-        button.disabled = !item.live;
-        button.setAttribute('aria-pressed', String(model.selected?.id === item.id));
-        button.onclick = () => {
-          model.attach(item.id); el('session-browser').open = false;
-          if (model.selected?.id !== item.id) return;
-          setText('session-name', item.name || 'Unnamed session');
-          el('session-view').hidden = false;
-          el('session-name').focus();
-        };
-      });
-      if (!model.items.length && model.phase === 'choose' && model.workspace) el('session-list').append(make('p', 'No shared sessions. Open LocalPilot in this project on your PC and enable phone access.', 'help'));
-    }
+    renderProjects();
     if (!model.selected) return;
     setText('session-name', model.selected.name || 'Unnamed session');
-    setText('session-project', model.workspace.label);
+    setText('session-project', model.projectLabel());
     setText('session-pc', `PC address: ${window.location.host}`);
-    setText('stop-project', `Stop in ${model.workspace.label}`);
+    setText('stop-project', `Stop in ${model.projectLabel()} / ${model.selected.name || 'Unnamed session'}`);
     const status = model.ready ? model.turn === 'unknown' ? 'Turn state unknown · controls locked' : model.busy ? 'Working' : 'Ready' : phaseMessage;
     el('timeline').classList.toggle('stale', model.viewStale || !model.ready);
     el('timeline').setAttribute('aria-busy', String(model.viewStale || !model.ready));
@@ -202,10 +230,9 @@ export function mountSessions(document, window) {
       };
     });
   }
-  el('session-workspace').addEventListener('change', () => void model.list(el('session-workspace').value));
-  el('refresh-sessions').addEventListener('click', () => void model.list(el('session-workspace').value));
+  el('refresh-projects').addEventListener('click', () => el('check-connection').click());
   el('reconnect-session').addEventListener('click', () => model.attach(model.selected.id));
-  el('back-to-sessions').addEventListener('click', () => { el('session-browser').open = true; void model.list(model.workspace.id); });
+  el('back-to-sessions').addEventListener('click', () => { el('session-browser').open = true; el('session-browser-title').focus(); });
   el('session-draft').addEventListener('input', () => { model.setDraft(el('session-draft').value); render(); });
   el('session-composer').addEventListener('submit', (event) => { event.preventDefault(); model.submit(el('session-draft').value); });
   el('stop-turn').addEventListener('click', () => model.stop());

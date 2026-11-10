@@ -50,9 +50,13 @@ if (typeof document !== 'undefined') {
       element('pair-retry').textContent = state === 'throttled' ? `Try after ${new Date(retryAt).toLocaleTimeString()}.` : '';
       element('pair-status').setAttribute('aria-busy', String(busy));
       const paired = state === 'paired';
+      sessions.inventoryBusy = busy;
+      sessions.inventoryIssue = paired ? '' : sessions.authorized ? state === 'checking' ? 'Checking projects…' :
+        `Previously loaded projects. ${messages[state].join('. ')}` : '';
       if (paired) sessions.access(scope, workspaces);
       else if (['revoked', 'unpaired'].includes(state)) sessions.revoke();
-      else if (sessions.ready) sessions.fail('disconnected');
+      else if (sessions.ready && state !== 'checking') sessions.fail('disconnected');
+      else sessions.emit();
       element('pair-connected').hidden = !paired;
       element('pair-scope').textContent = scope === 'control' ? 'Access granted: control.' : scope === 'observe' ? 'Access granted: observe only.' : 'Access confirmed by your computer.';
       element('connection').textContent = paired ? 'Paired' : state === 'revoked' ? 'Access ended' : 'Not connected';
