@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `select_guidance` chooses one procedure and up to two supplements from the
+  user's intent (English or Dutch), the component the work is about and its
+  facts, with every exclusion explained. Ambiguity falls back to metadata-only
+  suggestions; missing capabilities narrow claims without blocking work
+  (ADR-0276, LocalHub#273).
 - Skill packages can declare in an optional `[guidance]` section of `skill.toml`
   which intents, stacks, products, paths and capabilities their guidance is for,
   and which `SKILL.md` headings or package files can be loaded on their own.

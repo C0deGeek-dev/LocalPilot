@@ -239,6 +239,12 @@ impl ProjectFacts {
         }
     }
 
+    /// The workspace root these facts are about.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// The component `path` belongs to: the nearest directory at or above it,
     /// within the workspace, that holds a project marker, or `.` when none
     /// does. A path inside a dependency or build directory belongs to the

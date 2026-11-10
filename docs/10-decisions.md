@@ -2,6 +2,47 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0276: Guidance Is Selected Deterministically From Intent, Component And Facts
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#273. Builds on ADR-0272
+and ADR-0275.
+
+**Context.** The same language implies different work for a library, a service, a
+desktop app or a game, and the user's intent decides whether running or editing is
+appropriate at all. Text ranking over skill descriptions sees neither. A model
+call to classify each request would add latency, uncertainty and possibly egress.
+
+**Decision.** `select_guidance` in `localpilot-harness` reads typed inputs only:
+the user's instruction, an explicitly named package, the paths the work touches,
+the available capabilities, the component's facts and the eligible catalog.
+- Eligibility first: a user-only package is reachable only when the user names it;
+  explicit selection wins and may load its body.
+- Intent from the user's words in English or Dutch (including separable verbs such
+  as "voeg ... toe"), with code, quotes and quoted lines removed and "don't change
+  anything" honoured. Several intents become ordered phases; a fix is
+  investigation, then implementation. An explanation or review drops the acting
+  verbs it mentions as its subject. No intent word leaves the intent tentative.
+- Component from a path the user named, then the paths in play; several
+  components leave it tentative with the others listed; the root is a fallback,
+  confirmed only when it is the only component.
+- Stacks and products from the facts (ADR-0272); a project file beside an engine
+  project adds no .NET stack.
+- A procedure matches the primary intent; a supplement matches the component's
+  stacks or products, at most two, ranked by matches and then text relevance.
+  Explanation and review leave out product-only supplements.
+- Missing capabilities listed as required for a claim are reported on the
+  supplement as unsupported claims; the supplement stays and nothing is blocked.
+- Bodies may be loaded only with a clear intent, a clear component and one
+  procedure ahead of the rest; otherwise the decision is metadata, with the reason.
+- Packages without metadata, and all packages when the intent is unclear, are
+  offered as suggestions by text relevance. Every exclusion carries its reason.
+- Confidence is categorical (confirmed, declared, tentative), never a probability.
+
+**Consequences.** Selection is explainable and testable without a model. The word
+lists are fixtures, not a language parser: unknown phrasing stays tentative and
+falls back to suggestions. Nothing is wired into a session here; the mode that
+uses it is a separate decision.
+
 ## ADR-0275: Skill Packages Can Declare Which Tasks Their Guidance Is For
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#272. Builds on ADR-0027

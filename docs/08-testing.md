@@ -969,3 +969,17 @@ guidance_metadata` reads packages through ordinary discovery: a valid section
 beside an unchanged manifest, an unusable one whose package is still listed,
 loadable and ranked exactly as the same package without it, a `SKILL.md`-only
 package, and (on Unix) a section file that links outside its package.
+
+### Guidance selection
+
+`cargo test -p localpilot-harness --lib task_selection` reads the six intents and
+a defect fix from paired English and Dutch requests, and checks quoted material,
+negation, ordered phases, separable Dutch verbs and words inside other words.
+`cargo test -p localpilot-harness --test task_selection` selects from a synthetic
+catalog for synthetic projects: a CLI defect fix, an explanation that keeps the
+Rust supplement and leaves out the CLI one, every intent in both languages, a
+missing capability, a solution with an API and a web frontend scoped by a named
+path, work across two components left tentative, a Godot C# project where the
+engine outranks the generated project file, a user-only package reached only by
+name, an unclear request, a declared stack, tied procedures and an unusable
+section. These test the rules, not natural-language accuracy.

@@ -1771,6 +1771,7 @@ version = "6.0.0"
 dependencies = [
  "async-trait",
  "futures",
+ "globset",
  "indexmap",
  "insta",
  "localpilot-agents",
