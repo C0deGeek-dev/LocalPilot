@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/skills guidance` shows which task guidance is active, stale, suggested,
+  excluded or unable to support a claim, with the intent, component and reason
+  behind each. "Active" means the last provider request held it (ADR-0277,
+  LocalHub#274).
 - `select_guidance` chooses one procedure and up to two supplements from the
   user's intent (English or Dutch), the component the work is about and its
   facts, with every exclusion explained. Ambiguity falls back to metadata-only

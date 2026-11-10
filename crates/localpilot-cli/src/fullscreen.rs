@@ -3757,6 +3757,18 @@ async fn execute_fullscreen_slash_action(
             let out = crate::repl::command_output_from_buffer(output, result);
             present_command_report(app, command_report("agents", out));
         }
+        // `/skills guidance` reports this session's task guidance: read from the
+        // runtime, never from disk, and changing nothing.
+        SlashAction::Skills(raw) if raw.trim() == "guidance" => {
+            let report = runtime.guidance_report().render();
+            present_command_report(
+                app,
+                command_report(
+                    "skills",
+                    crate::repl::command_output_from_buffer(report.into_bytes(), Ok(())),
+                ),
+            );
+        }
         SlashAction::Skills(raw) => {
             let mut output = Vec::new();
             let result = crate::repl::run_skills_slash(cwd, &raw, &mut output).await;

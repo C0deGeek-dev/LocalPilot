@@ -2,6 +2,35 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0277: The Guidance Report Joins The Selection With What The Request Held
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#274. Builds on ADR-0271
+and ADR-0276.
+
+**Context.** A user should be able to see which guidance is active and why an
+expected package was not chosen. A selection alone can say a package was chosen
+when its text never reached the model; a request record alone cannot say why
+something was left out.
+
+**Decision.** `SessionRuntime::guidance_report()` joins the last selection the host
+recorded (`set_guidance_selection`) with the guidance record of the last provider
+request (ADR-0271).
+- Header: intent phases, component, the stacks and products behind them, each
+  with its confidence and reason, and the loading decision with its reason.
+- Rows: **active** (selected and held whole by the last request, with origin,
+  version and placement), **stale** (selected but not held whole: not sent yet,
+  cut, or removed), **unavailable** (a claim the guidance supports needs a missing
+  capability), **suggested** and **excluded**, each with its reason. Guidance the
+  request held by another route (project instructions, a skill the model loaded)
+  is listed as active from the record.
+- A one-line summary for a status bar. `/skills guidance` shows the report in the
+  full-screen terminal.
+- The report holds host decisions and observed facts only, never model output.
+  Building it is read-only and changes no selection, request or permission.
+
+**Consequences.** What the report calls active is what the provider received. The
+report covers the last request only; history is in `task_guidance()`.
+
 ## ADR-0276: Guidance Is Selected Deterministically From Intent, Component And Facts
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#273. Builds on ADR-0272

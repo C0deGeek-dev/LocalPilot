@@ -1583,6 +1583,8 @@ pub struct SessionRuntime {
     /// Which task guidance each assembled request held. In memory only; it
     /// changes nothing about a request.
     task_guidance: crate::task_guidance::TaskGuidanceLog,
+    /// The last task-guidance selection, for the guidance report.
+    guidance_selection: Option<crate::GuidanceSelection>,
     /// The handoff summarizing the most recently finished turn, built at the
     /// single exit (`stop`). Read by a non-interactive caller for a terminal
     /// state even when the turn timed out.
@@ -1735,6 +1737,7 @@ impl SessionRuntime {
             turn_stuck_tools: Vec::new(),
             turn_memories_used: Vec::new(),
             task_guidance: crate::task_guidance::TaskGuidanceLog::default(),
+            guidance_selection: None,
             last_handoff: None,
             turn_verification: None,
             turn_has_changes: false,
@@ -6519,6 +6522,26 @@ impl SessionRuntime {
     #[must_use]
     pub fn task_guidance(&self) -> Vec<crate::RequestGuidance> {
         self.task_guidance.requests()
+    }
+
+    /// Record the task-guidance selection the host made for this session, so
+    /// the guidance report can explain it. Recording it changes no request.
+    pub fn set_guidance_selection(&mut self, selection: Option<crate::GuidanceSelection>) {
+        self.guidance_selection = selection;
+    }
+
+    /// The last recorded task-guidance selection, if any.
+    #[must_use]
+    pub fn guidance_selection(&self) -> Option<&crate::GuidanceSelection> {
+        self.guidance_selection.as_ref()
+    }
+
+    /// Which guidance is active and why other guidance is not: the last
+    /// selection joined with what the last provider request held. Read-only.
+    #[must_use]
+    pub fn guidance_report(&self) -> crate::GuidanceReport {
+        let requests = self.task_guidance.requests();
+        crate::guidance_report(self.guidance_selection.as_ref(), requests.last())
     }
 
     /// The handoff for the most recently finished turn, if any — a bounded,

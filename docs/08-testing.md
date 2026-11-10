@@ -983,3 +983,13 @@ path, work across two components left tentative, a Godot C# project where the
 engine outranks the generated project file, a user-only package reached only by
 name, an unclear request, a declared stack, tied procedures and an unusable
 section. These test the rules, not natural-language accuracy.
+
+### Guidance report
+
+`cargo test -p localpilot-harness --test guidance_report` runs a session with a
+selection recorded and one selected body contributed by a hook. The report calls
+that body active only because the provider request holds it, calls a selected
+supplement that nothing sent stale, lists a missing capability, suggestions and
+exclusions with reasons, and the project instructions the request held. Without a
+selection it lists what the request held; reading it twice changes neither the
+record nor the next request.

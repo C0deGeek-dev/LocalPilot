@@ -19,6 +19,7 @@ mod error;
 mod evidence;
 pub mod granularity;
 mod guidance;
+mod guidance_report;
 mod handoff;
 mod hooks;
 mod incognito;
@@ -65,6 +66,7 @@ pub use evidence::{CallOutcome, CallRecord, EvidenceLedger, PermissionVerdict};
 pub use guidance::{
     assess_guidance, guidance_score, DecisionAxis, GuidanceAssessment, GUIDANCE_PROMPT,
 };
+pub use guidance_report::{guidance_report, GuidanceReport, GuidanceRow, GuidanceStatus};
 pub use handoff::{
     check_handoff, evaluate_resume, write_handoff, Handoff, HandoffHeader, HandoffSummary,
     ResumeEnv, ResumeFinding, ResumeReport, HANDOFF_SCHEMA,
