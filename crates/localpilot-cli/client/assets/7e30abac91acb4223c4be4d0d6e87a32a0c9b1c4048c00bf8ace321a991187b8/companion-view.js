@@ -35,7 +35,7 @@ export function mountCompanion(document, window, sessions, checkAccess) {
     const key = JSON.stringify([sessions.key, sessions.phase, sessions.asks, sessions.approval, sessions.canApprove]);
     if (key !== attentionKey) {
       attentionKey = key;
-      el('attention-status').textContent = !sessions.authorized ? 'Pair this phone in Sessions.' : !sessions.selected ? 'Choose a shared session in Sessions to see its requests.' : `${sessions.workspace.label} / ${sessions.selected.name || 'Unnamed session'} · ${sessions.ready ? 'Connected in app' : 'View may be stale; approval controls locked'}. Requests cover this attached session only.`;
+      el('attention-status').textContent = !sessions.authorized ? 'Pair this phone in Sessions.' : !sessions.selected ? 'Choose a shared session in Sessions to see its requests.' : `${sessions.workspace.label} / ${sessions.selected.name || 'Unnamed session'} · ${sessions.ready ? 'Connected in app' : 'View may be stale; approval controls locked. Answer waiting requests on the PC'}. Requests cover this attached session only.`;
       const items = sessions.asks.map((ask) => {
         const button = make('button', `${ask.tool || 'Request'} · ${ask.risk || 'Review required'}`);
         button.type = 'button';

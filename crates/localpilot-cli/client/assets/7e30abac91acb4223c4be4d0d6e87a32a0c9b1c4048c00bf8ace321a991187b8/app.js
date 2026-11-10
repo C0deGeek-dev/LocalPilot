@@ -1,6 +1,7 @@
 import { Pairing, PairingCamera, cameraMessages, messages, takePairingLink } from './pairing.js';
 import { mountSessions } from './session-view.js';
 import { mountCompanion } from './companion-view.js';
+import { prepareOffline } from './offline.js';
 
 // Navigation is local. A network connection alone never enables session controls.
 const destinations = new Set(['sessions', 'attention', 'devices']);
@@ -25,6 +26,7 @@ if (typeof document !== 'undefined') {
   let incoming = takePairingLink(window.location, window.history);
   const sessions = mountSessions(document, window);
   const element = (id) => document.getElementById(id);
+  void prepareOffline(window, (message) => { element('app-update').textContent = message; });
   const form = element('pair-form');
   const code = element('pair-code');
   const workspace = element('pair-workspace');

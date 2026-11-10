@@ -1,14 +1,15 @@
 import { Sessions } from './session.js';
+import { compatibilityMessages } from './compatibility.js';
 
 const phaseMessages = {
   unpaired: 'Pair this phone to see your sessions.', choose: 'Choose a shared terminal session.',
   loading: 'Looking for shared sessions…', 'list-error': 'Could not list sessions. Check your PC and refresh.',
   offline: 'This project is offline. Start LocalPilot on your PC, then refresh.',
-  connecting: 'Connecting to the terminal…', syncing: 'Synchronising the session. Controls are locked.',
+  connecting: 'Connecting to the terminal…', syncing: 'Waiting for the PC to report this session’s state. Controls are locked.',
   disconnected: 'Connection lost. The view may be out of date. Reconnect to fetch a fresh snapshot.',
   incompatible: 'This session uses an incompatible response. Update LocalPilot and LocalLink together.',
   refused: 'The PC refused this session. Check your access and whether the terminal is still sharing.',
-  closed: 'Session closed. Phone access ends when the shared terminal closes. Check the session on your PC.',
+  closed: 'Session closed. On your PC, resume this session to keep its history, or start a new one, then enable phone access.',
 };
 
 export function mountSessions(document, window) {
@@ -104,7 +105,8 @@ export function mountSessions(document, window) {
       el('session-workspace').value = model.workspace?.id || selectedWorkspace;
     }
     el('refresh-sessions').disabled = !el('session-workspace').value || model.phase === 'loading';
-    setText('sessions-status', phaseMessages[model.phase] || 'Shared terminal connected.');
+    const phaseMessage = model.phase === 'incompatible' ? compatibilityMessages[model.compatibility || 'invalid'] : phaseMessages[model.phase];
+    setText('sessions-status', phaseMessage || 'Shared terminal connected.');
     const nextListKey = JSON.stringify([model.items, model.selected?.id, model.phase === 'choose']);
     if (nextListKey !== listKey) {
       listKey = nextListKey;
@@ -123,17 +125,18 @@ export function mountSessions(document, window) {
     setText('session-project', model.workspace.label);
     setText('session-pc', `PC address: ${window.location.host}`);
     setText('stop-project', `Stop in ${model.workspace.label}`);
-    const status = model.ready ? model.turn === 'unknown' ? 'Turn state unknown · controls locked' : model.busy ? 'Working' : 'Ready' : phaseMessages[model.phase];
+    const status = model.ready ? model.turn === 'unknown' ? 'Turn state unknown · controls locked' : model.busy ? 'Working' : 'Ready' : phaseMessage;
     el('timeline').classList.toggle('stale', model.viewStale || !model.ready);
     el('timeline').setAttribute('aria-busy', String(model.viewStale || !model.ready));
     setText('session-state', status);
     setText('last-sync', model.synced ? `Last sync ${new Date(model.synced).toLocaleTimeString()}` : 'Waiting for first snapshot');
     setText('session-access', model.scope === 'control' ? 'Control access' : model.scope === 'observe' ? 'Observe only' : 'Access scope unconfirmed · controls locked');
     setText('session-notice', [...new Set([model.outcomeIssue, model.notice].filter(Boolean))].join(' '));
-    el('reconnect-session').hidden = !['disconnected', 'refused', 'incompatible'].includes(model.phase);
+    el('reconnect-session').hidden = !['disconnected', 'refused', 'incompatible', 'syncing'].includes(model.phase);
+    el('back-to-sessions').hidden = model.phase !== 'closed';
     el('pending-attention').hidden = !model.asks.length;
     setText('pending-attention', `${model.asks.length} request${model.asks.length === 1 ? '' : 's'} need attention. Open Attention to review.`);
-    setText('history-limit', model.truncated ? 'Only the most recent conversation text is available.' : '');
+    setText('history-limit', model.historyUnconfirmed ? 'Conversation may be incomplete. Waiting for a full snapshot from the PC.' : model.truncated ? 'Only the most recent conversation text is available.' : '');
     el('session-plan').hidden = !model.plan.length;
     const planStatus = { pending: 'Pending', in_progress: 'In progress', completed: 'Completed', done: 'Done', skipped: 'Skipped' };
     el('plan-steps').replaceChildren(...model.plan.map((step) => make('li', `${step.title} · ${planStatus[step.status] || 'Status unavailable'}`)));
@@ -163,6 +166,7 @@ export function mountSessions(document, window) {
   el('session-workspace').addEventListener('change', () => void model.list(el('session-workspace').value));
   el('refresh-sessions').addEventListener('click', () => void model.list(el('session-workspace').value));
   el('reconnect-session').addEventListener('click', () => model.attach(model.selected.id));
+  el('back-to-sessions').addEventListener('click', () => { el('session-browser').open = true; void model.list(model.workspace.id); });
   el('session-draft').addEventListener('input', () => { model.setDraft(el('session-draft').value); render(); });
   el('session-composer').addEventListener('submit', (event) => { event.preventDefault(); model.submit(el('session-draft').value); });
   el('stop-turn').addEventListener('click', () => model.stop());

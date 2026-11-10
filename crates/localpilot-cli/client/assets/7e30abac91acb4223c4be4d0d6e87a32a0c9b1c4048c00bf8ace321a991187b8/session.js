@@ -1,11 +1,12 @@
 // The gateway binds the socket. This client never sends attach, hello or status.
-const required = ['acks', 'resume'];
+import { compatibilityIssue, protocol } from './compatibility.js';
 const terminalReplies = new Set(['accepted', 'queued', 'command_result', 'rejected', 'error']);
 const unknownOutcome = 'Outcome unknown. Check the session on your PC before sending again. Nothing will be retried automatically.';
 
 export class Sessions {
-  constructor({ origin, fetch, socket, changed, schedule, unschedule, now = () => Date.now(), timeout = 15000 }) {
+  constructor({ origin, fetch, socket, changed, schedule, unschedule, now = () => Date.now(), timeout = 15000, supported = protocol }) {
     Object.assign(this, { origin, fetch, socket, changed, schedule, unschedule, now, timeout });
+    this.supported = supported;
     this.generation = 0;
     this.listGeneration = 0;
     this.nextId = 0;
@@ -42,6 +43,10 @@ export class Sessions {
     this.truncated = false;
     this.viewStale = false;
     this.baselineReceived = false;
+    this.historyUnconfirmed = false;
+    this.unknownAsksConfirmed = false;
+    this.compatibility = null;
+    this.serverVersion = null;
   }
   emit() { this.changed(this); }
   get key() { return this.selected && `${this.workspace.id}/${this.selected.id}`; }
@@ -126,9 +131,22 @@ export class Sessions {
   attach(id) {
     const selected = this.items.find((item) => item.id === id);
     if (!selected || !this.workspace?.online || !this.origin.startsWith('https://')) return;
+    const sameSession = this.selected?.id === id;
     this.close('connecting');
     this.selected = selected;
-    this.resetView();
+    if (!sameSession) this.resetView();
+    else {
+      this.viewStale = true;
+      this.baselineReceived = false;
+      this.historyUnconfirmed = true;
+      this.capabilities = [];
+      this.commands = [];
+      this.catalogueId = null;
+      this.compatibility = null;
+      this.serverVersion = null;
+      this.epoch = null;
+      this.seq = -1;
+    }
     // A fresh snapshot may restore controls, but the unknown-outcome notice stays.
     this.uncertain = false;
     const generation = this.generation;
@@ -158,16 +176,19 @@ export class Sessions {
     const generation = this.generation;
     const wait = ++this.snapshotWait;
     this.attachTimer = this.schedule(() => {
-      if (generation === this.generation && wait === this.snapshotWait && !this.ready) this.fail('disconnected');
+      if (generation === this.generation && wait === this.snapshotWait && !this.ready && !this.baselineReceived) this.fail('disconnected');
     }, this.timeout);
   }
   receive(record) {
-    if (record.v !== 1 || !record.event || typeof record.event.type !== 'string') throw new Error('protocol');
+    const issue = compatibilityIssue(record, this.supported);
+    if (issue) { this.compatibility = issue; this.fail('incompatible'); return; }
+    if (!record.event || typeof record.event.type !== 'string') throw new Error('protocol');
     const event = record.event;
     if (event.type === 'attached') {
       if (this.phase !== 'connecting' || event.session_id !== this.selected.id || !event.epoch ||
-        !Array.isArray(event.capabilities) || !required.every((cap) => event.capabilities.includes(cap))) throw new Error('attach');
+        !Array.isArray(event.capabilities)) throw new Error('attach');
       this.capabilities = event.capabilities;
+      this.serverVersion = typeof event.server_version === 'string' ? event.server_version : null;
       this.epoch = event.epoch;
       this.phase = 'syncing';
     } else if (event.type === 'snapshot') {
@@ -186,11 +207,18 @@ export class Sessions {
       this.turn = event.turn;
       this.busy = event.busy;
       this.queued = event.queued;
-      if (event.turn === 'unknown' && !event.history.length) {
+      if (event.turn === 'unknown') {
         this.viewStale = true;
+        this.historyUnconfirmed = !event.history.length;
+        if (event.history.length) this.history = event.history;
+        // Empty mirror rebuilds cannot prove a previously shown ask vanished.
+        this.unknownAsksConfirmed = event.asks.length > 0;
+        if (this.unknownAsksConfirmed) { this.asks = event.asks; this.reconcileApproval(); }
+        this.unschedule(this.attachTimer);
         this.emit(); return;
       }
       this.viewStale = false;
+      this.historyUnconfirmed = false;
       this.clearActionNotice();
       this.history = event.history;
       this.entries = event.turn === 'running' && event.turn_text ? [{ type: 'assistant', text: event.turn_text }] : [];
@@ -216,18 +244,23 @@ export class Sessions {
         !/^[a-z][a-z0-9_-]*$/.test(item.name) || typeof item.description !== 'string' ||
         !['none', 'optional', 'required'].includes(item.args) || item.scope !== 'control')) throw new Error('commands');
       this.commands = event.items;
-    } else if (!record.id && (this.ready || (this.phase === 'syncing' && this.baselineReceived && event.type === 'turn_started')) && record.seq !== undefined && record.seq !== null) {
+    } else if (!record.id && (this.ready || (this.phase === 'syncing' && this.baselineReceived && ['turn_started', 'stopped'].includes(event.type))) && record.seq !== undefined && record.seq !== null) {
       if (!Number.isSafeInteger(record.seq) || record.seq <= this.seq) return;
       // Intentional feed filtering leaves gaps; a numeric gap alone is not loss.
       this.seq = record.seq;
-      if (event.type === 'turn_started') {
-        this.phase = 'ready'; this.viewStale = false; this.unschedule(this.attachTimer);
+      if (this.phase === 'syncing') {
+        this.phase = 'ready'; this.viewStale = this.historyUnconfirmed; this.unschedule(this.attachTimer);
+        // A non-empty baseline carries actual registry asks; an empty mirror
+        // cannot authorise stale asks retained from before its interruption.
+        if (!this.unknownAsksConfirmed) this.asks = [];
+        this.reconcileApproval();
       }
       this.project(event);
+      if (this.ready && this.capabilities.includes('commands') && !this.catalogueId) this.readCommands();
     } else if ((event.type === 'error' || event.type === 'rejected') && !this.ready) {
       this.fail('refused'); return;
     }
-    this.synced = this.now();
+    if (this.ready) this.synced = this.now();
     this.emit();
   }
   readCommands() {

@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The embedded companion app opens while your computer is unreachable (only
+  its static files are kept; no session, device or pairing data), keeps the
+  last view, drafts and sync time when the connection drops, and reconnects
+  with a fresh snapshot without resending anything. App updates are announced
+  and take over once every LocalLink window is closed. A phone app that does
+  not match the computer's protocol says which side to update before any
+  action.
 - A shared session whose copy on the background server lost its order (a gap,
   or a snapshot that did not verify) now recovers by itself: the server asks
   the terminal for one fresh snapshot instead of waiting until the terminal

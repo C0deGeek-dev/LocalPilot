@@ -8,9 +8,9 @@
     <meta name="referrer" content="no-referrer">
     <title>LocalLink</title>
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="icon" href="/assets/15b914ac4ddb8a7a568dcbd7773f6811ef83629f95f5244d80e5fe9486d4d6dd/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/15b914ac4ddb8a7a568dcbd7773f6811ef83629f95f5244d80e5fe9486d4d6dd/style.css">
-    <script type="module" src="/assets/15b914ac4ddb8a7a568dcbd7773f6811ef83629f95f5244d80e5fe9486d4d6dd/app.js"></script>
+    <link rel="icon" href="/assets/7e30abac91acb4223c4be4d0d6e87a32a0c9b1c4048c00bf8ace321a991187b8/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/7e30abac91acb4223c4be4d0d6e87a32a0c9b1c4048c00bf8ace321a991187b8/style.css">
+    <script type="module" src="/assets/7e30abac91acb4223c4be4d0d6e87a32a0c9b1c4048c00bf8ace321a991187b8/app.js"></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -20,6 +20,7 @@
         <span class="connection" id="connection">Not connected</span>
       </header>
       <main id="main" tabindex="-1">
+        <p id="app-update" class="help" role="status"></p>
         <section data-panel="sessions" aria-labelledby="sessions-title">
           <p class="eyebrow" id="sessions-eyebrow">Sessions</p>
           <h1 id="sessions-title">Your work stays<br>on your computer.</h1>
@@ -71,6 +72,7 @@
               <p id="last-sync" class="help"></p>
               <details class="connection-details"><summary id="session-access">Access scope unconfirmed</summary><p id="session-pc" class="help"></p><button id="session-check-access" type="button" class="secondary">Check access</button></details>
               <button id="reconnect-session" type="button" class="secondary" hidden>Reconnect</button>
+              <button id="back-to-sessions" type="button" class="secondary" hidden>Back to sessions</button>
             </header>
             <p id="pending-attention" class="attention-banner" role="status" hidden></p>
             <details id="session-plan" class="plan-panel" hidden><summary>Session plan</summary><ol id="plan-steps"></ol></details>

@@ -41,6 +41,14 @@ gateway's security headers (a same-origin-only content security policy and
 `nosniff`). `localpilot remote status` shows the embedded app's version and
 revision.
 
+The app's worker (`/push-worker.js`, also `no-cache`) keeps one complete copy
+of these static files in the browser, checked against the hashes it was built
+with, so the app opens while the computer is unreachable. It never keeps
+pairing, device, session or other `/api` responses, and it queues nothing to
+send later. A new build is installed beside the old one and announced; it
+takes over only when every LocalLink window has been closed, so a page never
+mixes two builds.
+
 ## Updating the app
 
 1. In a clean LocalLink checkout at the commit to ship, with the Node version
