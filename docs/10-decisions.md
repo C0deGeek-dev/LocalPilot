@@ -2,6 +2,47 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0278: An Opt-In Mode Lets The Host Suggest Or Load Task Guidance
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#275. Builds on ADR-0027,
+ADR-0217, ADR-0276 and ADR-0277.
+
+**Context.** With discovery tools registered, using a skill still depends on the
+model deciding to search and load it; smaller models often do not. ADR-0027 made
+discovery pull-only and off by default, and `autonomous_discovery` already means
+"register the tools". Reinterpreting that key would change sessions that set it.
+
+**Decision.** A new key, `[skills.guidance] mode = "off" | "suggest" | "assisted"`,
+default `off`.
+- `off` registers nothing and leaves discovery as configured.
+- `suggest`: a context hook runs the selection of ADR-0276 before each turn and
+  puts the chosen procedure, supplements and suggestions beside the question as
+  names, summaries and reasons (about 2,048 characters at most). Loading stays
+  with the model through `skill_load`.
+- `assisted`: when the selection may load bodies, the procedure's and
+  supplements' text (their declared sections, or the whole body) goes beside the
+  question, about 6,144 characters at most; a body that does not fit is offered by
+  name with the reason. Otherwise it behaves as `suggest`.
+- Any mode other than `off` registers the package tools whatever
+  `autonomous_discovery` says; `localpilot doctor` reports the mode.
+- Each part is reported as a guidance source, so the request record (ADR-0271)
+  and the report (ADR-0277) show what the request held. The hook records its
+  selection for `/skills guidance`.
+- Guidance goes beside the question (ADR-0217), never into the system prompt. It
+  is text: it changes no permission, check, work limit or network access, and
+  user-only packages are never chosen. Capabilities come from the registered
+  tools (`run_shell`, `run_background`); others are not claimed.
+
+**Alternatives.** Setting the mode through `autonomous_discovery` was rejected
+for the reason above. Placing bodies in the system prompt was not chosen without
+a held-constant comparison; ADR-0217 measured retrieved context beside the
+question as better attended.
+
+**Consequences.** Suggestion and assisted loading can be compared as separate
+arms against `off`. Whether either helps a given model is not measured here. The
+selection sees the trust of the session at launch; an explicitly named package
+still goes through `skill_load`.
+
 ## ADR-0277: The Guidance Report Joins The Selection With What The Request Held
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#274. Builds on ADR-0271

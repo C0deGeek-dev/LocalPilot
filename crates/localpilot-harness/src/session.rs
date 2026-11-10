@@ -1583,8 +1583,9 @@ pub struct SessionRuntime {
     /// Which task guidance each assembled request held. In memory only; it
     /// changes nothing about a request.
     task_guidance: crate::task_guidance::TaskGuidanceLog,
-    /// The last task-guidance selection, for the guidance report.
-    guidance_selection: Option<crate::GuidanceSelection>,
+    /// The last task-guidance selection, for the guidance report. Shared with
+    /// the task-guidance hook that makes it.
+    guidance_selection: crate::SelectionSlot,
     /// The handoff summarizing the most recently finished turn, built at the
     /// single exit (`stop`). Read by a non-interactive caller for a terminal
     /// state even when the turn timed out.
@@ -1737,7 +1738,7 @@ impl SessionRuntime {
             turn_stuck_tools: Vec::new(),
             turn_memories_used: Vec::new(),
             task_guidance: crate::task_guidance::TaskGuidanceLog::default(),
-            guidance_selection: None,
+            guidance_selection: crate::SelectionSlot::default(),
             last_handoff: None,
             turn_verification: None,
             turn_has_changes: false,
@@ -6527,13 +6528,30 @@ impl SessionRuntime {
     /// Record the task-guidance selection the host made for this session, so
     /// the guidance report can explain it. Recording it changes no request.
     pub fn set_guidance_selection(&mut self, selection: Option<crate::GuidanceSelection>) {
-        self.guidance_selection = selection;
+        if let Ok(mut slot) = self.guidance_selection.lock() {
+            *slot = selection;
+        }
     }
 
     /// The last recorded task-guidance selection, if any.
     #[must_use]
-    pub fn guidance_selection(&self) -> Option<&crate::GuidanceSelection> {
-        self.guidance_selection.as_ref()
+    pub fn guidance_selection(&self) -> Option<crate::GuidanceSelection> {
+        self.guidance_selection
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    /// The names of the tools registered on this session.
+    #[must_use]
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.names().into_iter().map(str::to_string).collect()
+    }
+
+    /// The slot a task-guidance hook records its selection in.
+    #[must_use]
+    pub fn guidance_selection_slot(&self) -> crate::SelectionSlot {
+        Arc::clone(&self.guidance_selection)
     }
 
     /// Which guidance is active and why other guidance is not: the last
@@ -6541,7 +6559,7 @@ impl SessionRuntime {
     #[must_use]
     pub fn guidance_report(&self) -> crate::GuidanceReport {
         let requests = self.task_guidance.requests();
-        crate::guidance_report(self.guidance_selection.as_ref(), requests.last())
+        crate::guidance_report(self.guidance_selection().as_ref(), requests.last())
     }
 
     /// The handoff for the most recently finished turn, if any — a bounded,

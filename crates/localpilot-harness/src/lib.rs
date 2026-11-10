@@ -49,6 +49,7 @@ mod step_sessions;
 mod summarizer;
 mod system_prompt;
 mod task_guidance;
+mod task_guidance_hook;
 mod task_selection;
 mod verify_target;
 mod worker;
@@ -119,6 +120,10 @@ pub use scorecard::{
 pub use step_sessions::STEP_SESSIONS_KEY;
 pub use task_guidance::{
     GuidanceDelivery, GuidanceEntry, GuidancePlacement, GuidanceSegment, RequestGuidance,
+};
+pub use task_guidance_hook::{
+    capabilities_from_tools, register_task_guidance_context, GuidanceCatalog, GuidanceHookMode,
+    SelectionSlot, TaskGuidanceContext, BODY_CHAR_BUDGET, METADATA_CHAR_BUDGET,
 };
 pub use task_selection::{
     products_of, read_intent, select_guidance, stacks_of, ComponentReading, ExcludedGuidance,

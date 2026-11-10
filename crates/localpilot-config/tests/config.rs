@@ -1032,3 +1032,30 @@ fn guidance_gate_defaults_off_and_parses_from_toml() -> TestResult {
         Ok(())
     })
 }
+
+#[test]
+fn the_task_guidance_mode_is_off_unless_chosen_and_registers_the_package_tools() {
+    use localpilot_config::{SkillsConfig, TaskGuidanceMode};
+
+    let absent: SkillsConfig = toml::from_str("").unwrap();
+    assert_eq!(absent.guidance.mode, TaskGuidanceMode::Off);
+    assert!(!absent.package_tools_registered());
+
+    for (text, mode) in [
+        ("suggest", TaskGuidanceMode::Suggest),
+        ("assisted", TaskGuidanceMode::Assisted),
+    ] {
+        let chosen: SkillsConfig =
+            toml::from_str(&format!("[guidance]\nmode = \"{text}\"\n")).unwrap();
+        assert_eq!(chosen.guidance.mode, mode);
+        // The legacy switch keeps its own value; the tools are still there.
+        assert!(!chosen.autonomous_discovery);
+        assert!(chosen.package_tools_registered());
+    }
+
+    let legacy: SkillsConfig = toml::from_str("autonomous_discovery = true\n").unwrap();
+    assert_eq!(legacy.guidance.mode, TaskGuidanceMode::Off);
+    assert!(legacy.package_tools_registered());
+
+    assert!(toml::from_str::<SkillsConfig>("[guidance]\nmode = \"always\"\n").is_err());
+}

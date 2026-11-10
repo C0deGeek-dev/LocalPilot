@@ -641,6 +641,7 @@ impl InteractiveSessionSetup {
             self.config.context.instruction_char_budget,
             &mut runtime,
         );
+        crate::skills_cmd::register_task_guidance(&self.config, &self.cwd, &mut runtime);
         runtime.set_retrieved_beside_question(self.config.context.retrieved_beside_question);
         localpilot_localmind::register_context_hook(&self.cwd, &mut runtime);
 
@@ -893,9 +894,9 @@ pub(crate) fn initial_package_discovery_hint_with(
     home: Option<&Path>,
     trusted: bool,
 ) -> bool {
-    if config.skills.autonomous_discovery {
-        // Discovery is on: the package tools are registered, so the model has a
-        // real way in and needs no "disabled, not empty" cue.
+    if config.skills.package_tools_registered() {
+        // Discovery or a guidance mode is on: the package tools are registered,
+        // so the model has a real way in and needs no "disabled, not empty" cue.
         return false;
     }
     localpilot_skills::discover(cwd, home, trusted)

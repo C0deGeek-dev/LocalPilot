@@ -698,6 +698,39 @@ pub struct SkillsConfig {
     /// Register `skill_search`/`skill_load` so the model can discover and read
     /// project skills on its own. Default `false`.
     pub autonomous_discovery: bool,
+    /// Task guidance chosen by the host before each turn (ADR-0278).
+    pub guidance: SkillGuidanceConfig,
+}
+
+impl SkillsConfig {
+    /// Whether the package tools (`skill_list`, `skill_search`, `skill_load`)
+    /// are registered: autonomous discovery is on, or a guidance mode other
+    /// than off needs them to load what it names.
+    #[must_use]
+    pub fn package_tools_registered(&self) -> bool {
+        self.autonomous_discovery || self.guidance.mode != TaskGuidanceMode::Off
+    }
+}
+
+/// `[skills.guidance]`: whether the host chooses task guidance before a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SkillGuidanceConfig {
+    pub mode: TaskGuidanceMode,
+}
+
+/// How much task guidance the host adds before a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskGuidanceMode {
+    /// Nothing is added; skill discovery behaves as configured before.
+    #[default]
+    Off,
+    /// A short list of matching packages with reasons, loadable on demand.
+    Suggest,
+    /// For a clear, unambiguous match, the selected procedure's text itself;
+    /// otherwise the same list as `suggest`.
+    Assisted,
 }
 
 /// Retention for the project-local `.localpilot/` state. A conservative cap is on

@@ -316,6 +316,7 @@ fn report() -> DoctorReport {
         ),
         skills: SkillsDoctor {
             autonomous_discovery: false,
+            guidance_mode: localpilot_config::TaskGuidanceMode::Off,
             readable: Some(SkillsCounts {
                 discoverable: 3,
                 user_only: 0,

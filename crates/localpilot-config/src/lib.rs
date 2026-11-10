@@ -33,8 +33,8 @@ pub use schema::{
     ProviderAuth, ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig, RemoteConfig,
     RemotePushConfig, RenderMode, RepairMode, ResearchConfig, ResearchMcpConfig, ResearchMcpTool,
     ResearchRenderConfig, ResearchWebConfig, ResolvedRails, RuleSeverity, ScratchRootConfig,
-    SelfImprovementConfig, SensitiveLiteral, SkillsConfig, StorageConfig, TerminalConfig,
-    TimelineDensity, ToolsConfig, VerificationPolicy, WorkLimitMode,
-    DEFAULT_HEADLESS_TOOL_BUDGET_MAX, DEFAULT_HEADLESS_TURN_TIMEOUT_SECS,
+    SelfImprovementConfig, SensitiveLiteral, SkillGuidanceConfig, SkillsConfig, StorageConfig,
+    TaskGuidanceMode, TerminalConfig, TimelineDensity, ToolsConfig, VerificationPolicy,
+    WorkLimitMode, DEFAULT_HEADLESS_TOOL_BUDGET_MAX, DEFAULT_HEADLESS_TURN_TIMEOUT_SECS,
     DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX, MAX_HEADLESS_UNITS,
 };

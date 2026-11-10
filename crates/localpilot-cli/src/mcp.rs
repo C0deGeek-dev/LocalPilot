@@ -57,7 +57,7 @@ impl McpTools {
         Self {
             entries,
             resource_servers,
-            skills_autonomous: config.skills.autonomous_discovery,
+            skills_autonomous: config.skills.package_tools_registered(),
         }
     }
 
@@ -67,7 +67,7 @@ impl McpTools {
     #[must_use]
     pub fn without_servers(config: &Config) -> Self {
         Self {
-            skills_autonomous: config.skills.autonomous_discovery,
+            skills_autonomous: config.skills.package_tools_registered(),
             ..Self::default()
         }
     }

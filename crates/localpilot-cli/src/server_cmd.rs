@@ -373,6 +373,7 @@ impl SessionSetup {
             self.config.context.instruction_char_budget,
             &mut runtime,
         );
+        crate::skills_cmd::register_task_guidance(&self.config, &self.cwd, &mut runtime);
         runtime.set_retrieved_beside_question(self.config.context.retrieved_beside_question);
         Ok(runtime)
     }

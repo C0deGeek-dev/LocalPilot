@@ -993,3 +993,16 @@ supplement that nothing sent stale, lists a missing capability, suggestions and
 exclusions with reasons, and the project instructions the request held. Without a
 selection it lists what the request held; reading it twice changes neither the
 record nor the next request.
+
+### Task guidance modes
+
+`cargo test -p localpilot-harness --test task_guidance_modes` runs sessions with
+the guidance hook over a synthetic catalog. Assisted mode puts the procedure and
+supplement bodies (only a declared section where one is named) beside the
+question, records them as delivered bodies and reports them active; suggest mode
+puts names and reasons and no body text; an unclear request gets names only; a
+body over the budget is offered by name with the reason. With the mode off the
+request carries no guidance; across off and assisted the tools, the system prompt
+(apart from the per-session scratch path), trust and work limits are equal, even
+though a body asks for network access. `cargo test -p localpilot-config --test
+config task_guidance_mode` covers the key, its default and the tool registration.

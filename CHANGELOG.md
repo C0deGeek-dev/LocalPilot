@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `[skills.guidance] mode = "suggest" | "assisted"` (default `"off"`): before each
+  turn the host chooses task guidance and puts matching packages beside the
+  question, by name and reason, or, in assisted mode and for a clear match, the
+  procedure's own text. It registers the skill tools, changes no permission,
+  check or limit, and never picks a user-only package (ADR-0278, LocalHub#275).
 - `/skills guidance` shows which task guidance is active, stale, suggested,
   excluded or unable to support a claim, with the intent, component and reason
   behind each. "Active" means the last provider request held it (ADR-0277,

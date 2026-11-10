@@ -439,6 +439,34 @@ pub fn show(root: &Path, name: &str, global: bool, out: &mut dyn Write) -> anyho
     }
 }
 
+/// Register the task-guidance hook on `runtime` when `[skills.guidance] mode`
+/// is not off (ADR-0278). The catalog is the effective one for this workspace:
+/// the global baseline, plus the project overlay when the runtime is trusted.
+pub(crate) fn register_task_guidance(
+    config: &localpilot_config::Config,
+    cwd: &Path,
+    runtime: &mut localpilot_harness::SessionRuntime,
+) {
+    let mode = match config.skills.guidance.mode {
+        localpilot_config::TaskGuidanceMode::Off => None,
+        localpilot_config::TaskGuidanceMode::Suggest => {
+            Some(localpilot_harness::GuidanceHookMode::Suggest)
+        }
+        localpilot_config::TaskGuidanceMode::Assisted => {
+            Some(localpilot_harness::GuidanceHookMode::Assisted)
+        }
+    };
+    let names = runtime.tool_names();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let capabilities = localpilot_harness::capabilities_from_tools(&names);
+    let catalog = localpilot_harness::GuidanceCatalog {
+        root: cwd.to_path_buf(),
+        home: localpilot_skills::user_home(),
+        trusted: runtime.trusted(),
+    };
+    localpilot_harness::register_task_guidance_context(mode, catalog, capabilities, runtime);
+}
+
 /// Render one effective skill's body by name (the testable core of [`show`]).
 ///
 /// # Errors

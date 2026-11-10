@@ -98,6 +98,7 @@ expression: render_json(&fixture())
   "workspace_trust_store": "/home/user/.config/localpilot/trusted-folders.txt",
   "skills": {
     "autonomous_discovery": false,
+    "guidance_mode": "off",
     "readable": {
       "discoverable": 2,
       "user_only": 1,

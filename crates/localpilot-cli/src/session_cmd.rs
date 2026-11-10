@@ -634,6 +634,7 @@ async fn build_runtime_with_provider(
         config.context.instruction_char_budget,
         &mut runtime,
     );
+    crate::skills_cmd::register_task_guidance(config, cwd, &mut runtime);
     runtime.set_retrieved_beside_question(config.context.retrieved_beside_question);
     localpilot_localmind::register_context_hook(cwd, &mut runtime);
     Ok(runtime)

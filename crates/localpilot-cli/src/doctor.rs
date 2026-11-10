@@ -536,6 +536,9 @@ pub struct SkillsDoctor {
     /// The `[skills] autonomous_discovery` flag — whether the model-callable
     /// discovery tools are registered. A config-only value.
     pub autonomous_discovery: bool,
+    /// The `[skills.guidance] mode`. Any mode other than off also registers the
+    /// package tools, whatever `autonomous_discovery` says.
+    pub guidance_mode: localpilot_config::TaskGuidanceMode,
     /// The readable catalog counts, or `None` when the catalog could not be
     /// scanned at all (unreadable/unknown — never a confident zero). Under an
     /// untrusted or unknown-trust workspace this reflects the user-global baseline
@@ -566,6 +569,7 @@ fn gather_skills(
     };
     SkillsDoctor {
         autonomous_discovery: config.skills.autonomous_discovery,
+        guidance_mode: config.skills.guidance.mode,
         readable,
     }
 }
@@ -1104,6 +1108,19 @@ pub fn render(report: &DoctorReport) -> String {
     // Installed skill packages — a read of stored values only; no scan here.
     let _ = writeln!(s);
     let _ = writeln!(s, "skills:");
+    match report.skills.guidance_mode {
+        localpilot_config::TaskGuidanceMode::Off => {}
+        mode => {
+            let _ = writeln!(
+                s,
+                "  task guidance: {} (package tools registered for it)",
+                match mode {
+                    localpilot_config::TaskGuidanceMode::Assisted => "assisted",
+                    _ => "suggest",
+                }
+            );
+        }
+    }
     if report.skills.autonomous_discovery {
         let _ = writeln!(s, "  autonomous discovery: on");
     } else {
@@ -1790,6 +1807,7 @@ mod tests {
             ),
             skills: SkillsDoctor {
                 autonomous_discovery: false,
+                guidance_mode: localpilot_config::TaskGuidanceMode::Off,
                 readable: Some(SkillsCounts {
                     discoverable: 2,
                     user_only: 1,
@@ -2288,6 +2306,7 @@ added_at = \"1\"
         let mut unreadable = fixture();
         unreadable.skills = SkillsDoctor {
             autonomous_discovery: false,
+            guidance_mode: localpilot_config::TaskGuidanceMode::Off,
             readable: None,
         };
         let out = render(&unreadable);
@@ -2304,6 +2323,7 @@ added_at = \"1\"
         let mut empty = fixture();
         empty.skills = SkillsDoctor {
             autonomous_discovery: false,
+            guidance_mode: localpilot_config::TaskGuidanceMode::Off,
             readable: Some(SkillsCounts::default()),
         };
         let out = render(&empty);
@@ -2325,6 +2345,7 @@ added_at = \"1\"
         let mut malformed = fixture();
         malformed.skills = SkillsDoctor {
             autonomous_discovery: false,
+            guidance_mode: localpilot_config::TaskGuidanceMode::Off,
             readable: Some(SkillsCounts {
                 discoverable: 0,
                 user_only: 0,
@@ -2349,6 +2370,7 @@ added_at = \"1\"
         untrusted.workspace_trust = TrustState::Untrusted;
         untrusted.skills = SkillsDoctor {
             autonomous_discovery: false,
+            guidance_mode: localpilot_config::TaskGuidanceMode::Off,
             readable: counts,
         };
         assert!(
@@ -2360,6 +2382,7 @@ added_at = \"1\"
         unknown.workspace_trust = TrustState::Unknown;
         unknown.skills = SkillsDoctor {
             autonomous_discovery: false,
+            guidance_mode: localpilot_config::TaskGuidanceMode::Off,
             readable: counts,
         };
         let out = render(&unknown);
@@ -2376,6 +2399,7 @@ added_at = \"1\"
         trusted.workspace_trust = TrustState::Trusted;
         trusted.skills = SkillsDoctor {
             autonomous_discovery: false,
+            guidance_mode: localpilot_config::TaskGuidanceMode::Off,
             readable: counts,
         };
         assert!(

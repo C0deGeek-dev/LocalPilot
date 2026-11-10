@@ -1568,6 +1568,18 @@ There is deliberately no command to reveal, export, or copy a stored value.
 | --- | --- | --- | --- |
 | `autonomous_discovery` | bool | `false` | Register the `skill_list`/`skill_search`/`skill_load` tools so the model may list, discover, and read the installed SKILL.md package catalog on its own (the user-global baseline plus this workspace's trusted project overlay), **and** allow the skill-discovery lane to load a relevant, model-discoverable *installed* skill into a `/research` run (ADR-0099). Off by default, so a small local model never auto-injects a skill; an available/discovered match or a user-only skill stays report-only regardless. The deterministic `localpilot skills list \| show \| research` surface works regardless. |
 
+### `[skills.guidance]`
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `mode` | `"off"` \| `"suggest"` \| `"assisted"` | `"off"` | Whether the host chooses task guidance before each turn (ADR-0278). `suggest` puts a short list of matching packages, with the reason each fits, beside the question; the model loads one with `skill_load` if it helps. `assisted` also puts the selected procedure's text and its supplements' beside the question when the intent and component are clear and one procedure leads, and falls back to the list otherwise. Selection follows ADR-0276: user-only packages are never chosen. Any mode other than `off` registers `skill_list`/`skill_search`/`skill_load` whatever `autonomous_discovery` says; `autonomous_discovery` keeps its own meaning. |
+
+Guidance is advisory text and changes no permission, check, work limit or network
+access. Per turn it is bounded to about 2,048 characters of names and summaries and
+6,144 characters of instruction text; a body that does not fit is offered by name
+instead, with the reason. `/skills guidance` shows what was chosen and what the
+last request held, and `localpilot doctor` reports the mode.
+
 Installed skill packages are advisory prompt modules under `.localpilot/skills/`
 or `.agents/skills/`. The effective catalog is the user-global baseline
 (`~/.localpilot/skills`, `~/.agents/skills`) — always present — overlaid by this
