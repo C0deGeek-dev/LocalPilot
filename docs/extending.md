@@ -114,7 +114,9 @@ extension surfaces:
   puts every hook's text in the system prompt. A hook whose text is task guidance
   can name the source of each part (`ContextContribution::guidance`); the session
   then records whether that part was in the request it assembled (ADR-0271).
-  Naming a source never changes the text.
+  Naming a source never changes the text. A hook may also implement `refresh`,
+  asked before each later provider request of a turn, to replace its part when
+  what it would say has changed (ADR-0279).
 - **Tool gates** — tighten-only checks consulted *after* the permission
   engine on every dispatch. A gate can block a call with a model-visible
   reason; it can never grant what the engine refused. The permission engine

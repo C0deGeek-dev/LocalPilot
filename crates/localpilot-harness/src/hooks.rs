@@ -84,6 +84,15 @@ pub trait ContextHook: Send + Sync {
     /// hook backed by a store overrides it to bump per-memory hit counts
     /// best-effort. A failure here must never fail the turn.
     fn record_usage(&self, _memories: &[localpilot_store::MemoryUsed]) {}
+    /// A replacement for this hook's contribution, asked before each later
+    /// provider request of the same turn: `Some` when what it would say has
+    /// changed since its last contribution (the work moved to another
+    /// component, say), `None` to keep it. Default `None`: a hook that only
+    /// depends on the prompt never changes within a turn. A replacement never
+    /// carries memories; usage was recorded for the turn's first contribution.
+    fn refresh(&self, _prompt: &str) -> Option<ContextContribution> {
+        None
+    }
 }
 
 /// Every hook's contribution for one turn: the text segments in registration
@@ -92,11 +101,42 @@ pub trait ContextHook: Send + Sync {
 /// Segments stay in order, rather than being split by placement up front, so
 /// that placing everything in the system prompt reproduces the request exactly
 /// as it was before placement existed.
+#[derive(Clone)]
 pub(crate) struct TurnContribution {
     pub(crate) segments: Vec<(ContextPlacement, String)>,
     pub(crate) memories: Vec<localpilot_store::MemoryUsed>,
     /// The guidance parts of those segments, each with its hook's placement.
     pub(crate) guidance: Vec<(ContextPlacement, crate::GuidanceSegment)>,
+    /// Each hook's own part, by registration index, so one hook's part can be
+    /// replaced before a later request without asking the others again.
+    parts: Vec<Option<HookPart>>,
+}
+
+#[derive(Clone)]
+struct HookPart {
+    placement: ContextPlacement,
+    text: String,
+    guidance: Vec<crate::GuidanceSegment>,
+}
+
+impl TurnContribution {
+    fn from_parts(
+        parts: Vec<Option<HookPart>>,
+        memories: Vec<localpilot_store::MemoryUsed>,
+    ) -> Self {
+        let mut segments = Vec::new();
+        let mut guidance = Vec::new();
+        for part in parts.iter().flatten() {
+            segments.push((part.placement, part.text.clone()));
+            guidance.extend(part.guidance.iter().cloned().map(|g| (part.placement, g)));
+        }
+        Self {
+            segments,
+            memories,
+            guidance,
+            parts,
+        }
+    }
 }
 
 impl TurnContribution {
@@ -136,28 +176,47 @@ impl HookFabric {
     /// injected text and the exact memories that text represents — in a single
     /// pass, so the audit and the injection are derived from the same retrieval.
     pub(crate) fn contribute(&self, prompt: &str) -> TurnContribution {
-        let mut segments = Vec::new();
+        let mut parts = Vec::new();
         let mut memories = Vec::new();
-        let mut guidance = Vec::new();
         for hook in &self.context_hooks {
             let contribution = hook.contribute(prompt);
-            if let Some(text) = contribution.text {
-                segments.push((hook.placement(), text));
-                // Guidance is a part of the text; without text there is none.
-                guidance.extend(
-                    contribution
-                        .guidance
-                        .into_iter()
-                        .map(|segment| (hook.placement(), segment)),
-                );
-            }
+            // Guidance is a part of the text; without text there is none.
+            parts.push(contribution.text.map(|text| HookPart {
+                placement: hook.placement(),
+                text,
+                guidance: contribution.guidance,
+            }));
             memories.extend(contribution.memories);
         }
-        TurnContribution {
-            segments,
-            memories,
-            guidance,
+        TurnContribution::from_parts(parts, memories)
+    }
+
+    /// The turn's contribution with every changed hook's part replaced, or
+    /// `None` when no hook has anything new to say. Asked before each later
+    /// provider request of a turn. Memories stay those of `previous`.
+    pub(crate) fn refresh(
+        &self,
+        prompt: &str,
+        previous: &TurnContribution,
+    ) -> Option<TurnContribution> {
+        let mut parts = previous.parts.clone();
+        let mut changed = false;
+        for (index, hook) in self.context_hooks.iter().enumerate() {
+            let Some(replacement) = hook.refresh(prompt) else {
+                continue;
+            };
+            changed = true;
+            let part = replacement.text.map(|text| HookPart {
+                placement: hook.placement(),
+                text,
+                guidance: replacement.guidance,
+            });
+            match parts.get_mut(index) {
+                Some(slot) => *slot = part,
+                None => parts.push(part),
+            }
         }
+        changed.then(|| TurnContribution::from_parts(parts, previous.memories.clone()))
     }
 
     /// Deliver this turn's injected-memory set to every context hook for usage

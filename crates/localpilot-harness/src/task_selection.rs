@@ -179,6 +179,10 @@ pub struct SelectionInput<'a> {
     pub paths: &'a [String],
     /// Observation capabilities available in this session.
     pub capabilities: &'a BTreeSet<String>,
+    /// The user's earlier instructions in this session, oldest first. When the
+    /// request itself names no intent ("go on", "ga door"), the most recent of
+    /// these that does supplies it: the task in progress continues.
+    pub earlier: &'a [String],
 }
 
 /// Select guidance for `input` from `catalog`, reading component facts from
@@ -188,7 +192,24 @@ pub fn select_guidance(
     facts: &mut ProjectFacts,
     catalog: &SkillSet,
 ) -> GuidanceSelection {
-    let intent = read_intent(input.request);
+    let mut intent = read_intent(input.request);
+    if intent.confidence == SelectionConfidence::Tentative {
+        if let Some((earlier, reading)) = input
+            .earlier
+            .iter()
+            .rev()
+            .map(|earlier| (earlier, read_intent(earlier)))
+            .find(|(_, reading)| reading.confidence != SelectionConfidence::Tentative)
+        {
+            intent = IntentReading {
+                reason: format!(
+                    "this request names no intent; it continues the earlier request \"{}\"",
+                    localpilot_core::one_line(earlier, 80)
+                ),
+                ..reading
+            };
+        }
+    }
     let component = read_component(input, facts);
     let component_facts = facts.facts_for(&component.component);
     let stacks = stacks_of(&component_facts);

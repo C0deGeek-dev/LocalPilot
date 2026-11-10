@@ -462,7 +462,7 @@ pub(crate) fn register_task_guidance(
     let catalog = localpilot_harness::GuidanceCatalog {
         root: cwd.to_path_buf(),
         home: localpilot_skills::user_home(),
-        trusted: runtime.trusted(),
+        trusted: runtime.trust_flag(),
     };
     localpilot_harness::register_task_guidance_context(mode, catalog, capabilities, runtime);
 }

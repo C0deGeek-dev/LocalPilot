@@ -51,6 +51,7 @@ mod system_prompt;
 mod task_guidance;
 mod task_guidance_hook;
 mod task_selection;
+mod user_requests;
 mod verify_target;
 mod worker;
 mod workspace_state;
@@ -130,6 +131,7 @@ pub use task_selection::{
     GuidanceSelection, IntentReading, LoadDecision, SelectedGuidance, SelectionConfidence,
     SelectionInput, TaskIntent, MAX_SUGGESTIONS, MAX_SUPPLEMENTS,
 };
+pub use user_requests::{TrustFlag, UserRequests};
 // The shared eval surface (scorecard contract, discipline metrics, blinded
 // judge, ablation) re-exported so consumers keep one import path.
 pub use localx_eval_core::{

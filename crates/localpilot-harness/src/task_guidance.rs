@@ -118,6 +118,8 @@ pub(crate) struct TaskGuidanceLog {
     tools: VecDeque<ToolSource>,
     requests: VecDeque<RequestGuidance>,
     next_request: u64,
+    /// Requests captured since the current turn started.
+    turn_requests: u64,
 }
 
 impl TaskGuidanceLog {
@@ -130,6 +132,16 @@ impl TaskGuidanceLog {
             placement: GuidancePlacement::System,
             text,
         });
+    }
+
+    /// Mark the start of a turn: the next capture is its first request.
+    pub(crate) fn start_turn(&mut self) {
+        self.turn_requests = 0;
+    }
+
+    /// Whether a request of the current turn has been captured.
+    pub(crate) fn has_requests_this_turn(&self) -> bool {
+        self.turn_requests > 0
     }
 
     /// Replace this turn's hook-contributed guidance.
@@ -208,6 +220,7 @@ impl TaskGuidanceLog {
             entries,
         });
         self.next_request += 1;
+        self.turn_requests += 1;
     }
 
     /// The kept records, oldest first.

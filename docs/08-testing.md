@@ -1006,3 +1006,13 @@ request carries no guidance; across off and assisted the tools, the system promp
 (apart from the per-session scratch path), trust and work limits are equal, even
 though a body asks for network access. `cargo test -p localpilot-config --test
 config task_guidance_mode` covers the key, its default and the tool registration.
+
+### Task guidance lifecycle
+
+`cargo test -p localpilot-harness --test task_guidance_lifecycle` runs sessions in
+assisted mode: a turn that reads a web file gets the web guidance in its second
+request and not its first; guidance appears exactly once per request over several
+turns and after a forced compaction; a session resumed from its log continues the
+earlier request on "ga door" while a new session does not; and a package whose
+text changes, one that is removed, and a project package after trust is revoked
+are never reused.

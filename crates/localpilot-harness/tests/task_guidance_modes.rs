@@ -105,7 +105,7 @@ impl Fixture {
             GuidanceCatalog {
                 root: self.project(),
                 home: Some(self.dir.path().join("home")),
-                trusted: true,
+                trusted: runtime.trust_flag(),
             },
             capabilities,
             &mut runtime,

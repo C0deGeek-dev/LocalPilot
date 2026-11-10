@@ -145,6 +145,7 @@ impl Fixture {
                 explicit: None,
                 paths: &[],
                 capabilities: &BTreeSet::new(),
+                earlier: &[],
             },
             &mut facts,
             &set,

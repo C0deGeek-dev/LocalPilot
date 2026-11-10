@@ -159,6 +159,7 @@ impl Fixture {
                 explicit,
                 paths: &paths,
                 capabilities: &capabilities,
+                earlier: &[],
             },
             facts,
             &self.set(),

@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Task guidance follows the work: when a turn moves to another component, the
+  next provider request gets that component's guidance; a follow-up such as "go
+  on" keeps the task in progress, also after a resume; changed, removed or no
+  longer trusted packages are never reused. Guidance appears once per request and
+  survives compaction (ADR-0279, LocalHub#276).
 - `[skills.guidance] mode = "suggest" | "assisted"` (default `"off"`): before each
   turn the host chooses task guidance and puts matching packages beside the
   question, by name and reason, or, in assisted mode and for a clear match, the

@@ -2,6 +2,42 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0279: Task Guidance Is Refreshed Before Each Request And Restored From The User's Own Requests
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#276. Builds on ADR-0217,
+ADR-0271 and ADR-0278.
+
+**Context.** Context hooks contribute once, before a turn. When the work moves to
+another component during a turn, the guidance chosen at its start no longer fits.
+A follow-up such as "go on" names no intent, so selecting from it alone drops the
+task in progress, and after a resume nothing remembers it. A persisted activation
+event would need a new event format version that older builds reject.
+
+**Decision.**
+- `ContextHook::refresh` (default: no change) is asked before every later provider
+  request of a turn. The hook fabric replaces only the parts of hooks that return a
+  new contribution and keeps the turn's memories. The session rebuilds the system
+  and beside-question context from it and follows the new guidance in the request
+  record. The first request of a turn is unchanged.
+- The task-guidance hook refreshes only when the paths in play changed since its
+  last contribution, and replaces its part only when the result differs.
+- Guidance is injected into each request, never appended to history, so unchanged
+  guidance appears once per request and is still there after a compaction.
+- `SelectionInput::earlier` carries the user's earlier instructions. A request with
+  no intent of its own takes the intent of the most recent one that has one, and
+  says so in the reason. The session keeps the last 16 user instructions and
+  rebuilds them from the `UserInput` messages of the log on resume, so the task in
+  progress is restored from what the user wrote, with no new event kind.
+- Packages are discovered for every selection and trust is read from the live
+  session state (`TrustFlag`), so changed text replaces the old, a removed package
+  disappears, and a workspace that stops being trusted loses its project packages
+  on the next request.
+- Delegated agents do not inherit task guidance; nothing spawns an agent.
+
+**Consequences.** Guidance follows the work within a turn and across a resume
+without changing what the log stores. A refresh costs a catalog read and a fact
+lookup only when the paths changed.
+
 ## ADR-0278: An Opt-In Mode Lets The Host Suggest Or Load Task Guidance
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#275. Builds on ADR-0027,

@@ -49,8 +49,10 @@ pub struct GuidanceCatalog {
     pub root: PathBuf,
     /// The per-user home for the global baseline; `None` omits it.
     pub home: Option<PathBuf>,
-    /// Whether the project overlay may be read.
-    pub trusted: bool,
+    /// Whether the project overlay may be read, read again for every
+    /// selection, so a workspace that stops being trusted loses its packages
+    /// on the next request.
+    pub trusted: crate::TrustFlag,
 }
 
 /// The context hook that selects and contributes task guidance.
@@ -59,8 +61,12 @@ pub struct TaskGuidanceContext {
     catalog: GuidanceCatalog,
     capabilities: BTreeSet<String>,
     paths_in_play: PathsInPlay,
+    earlier: crate::UserRequests,
     facts: Mutex<ProjectFacts>,
     slot: SelectionSlot,
+    /// The paths in play and the text of the last contribution, so a refresh
+    /// knows whether anything it depends on changed.
+    last: Mutex<Option<(Vec<String>, Option<String>)>>,
 }
 
 impl TaskGuidanceContext {
@@ -72,6 +78,7 @@ impl TaskGuidanceContext {
         catalog: GuidanceCatalog,
         capabilities: BTreeSet<String>,
         paths_in_play: PathsInPlay,
+        earlier: crate::UserRequests,
         facts: ProjectFacts,
         slot: SelectionSlot,
     ) -> Self {
@@ -80,31 +87,52 @@ impl TaskGuidanceContext {
             catalog,
             capabilities,
             paths_in_play,
+            earlier,
             facts: Mutex::new(facts),
             slot,
+            last: Mutex::new(None),
         }
     }
 
-    fn select(&self, prompt: &str) -> Option<(GuidanceSelection, SkillSet)> {
+    fn select(&self, prompt: &str, paths: &[String]) -> Option<(GuidanceSelection, SkillSet)> {
+        // Discovered for every selection: a package changed, removed or no
+        // longer trusted is never carried over from an earlier request.
         let set = localpilot_skills::discover(
             &self.catalog.root,
             self.catalog.home.as_deref(),
-            self.catalog.trusted,
+            self.catalog.trusted.get(),
         )
         .ok()?;
-        let paths = self.paths_in_play.snapshot();
+        let earlier = self.earlier.snapshot();
         let mut facts = self.facts.lock().ok()?;
         let selection = select_guidance(
             &SelectionInput {
                 request: prompt,
                 explicit: None,
-                paths: &paths,
+                paths,
                 capabilities: &self.capabilities,
+                earlier: &earlier,
             },
             &mut facts,
             &set,
         );
         Some((selection, set))
+    }
+
+    /// Select and render for `prompt`, remembering what this depended on.
+    fn produce(&self, prompt: &str) -> ContextContribution {
+        let paths = self.paths_in_play.snapshot();
+        let Some((mut selection, set)) = self.select(prompt, &paths) else {
+            return ContextContribution::default();
+        };
+        let contribution = render(self.mode, &mut selection, &set);
+        if let Ok(mut slot) = self.slot.lock() {
+            *slot = Some(selection);
+        }
+        if let Ok(mut last) = self.last.lock() {
+            *last = Some((paths, contribution.text.clone()));
+        }
+        contribution
     }
 }
 
@@ -123,14 +151,21 @@ impl ContextHook for TaskGuidanceContext {
     }
 
     fn contribute(&self, prompt: &str) -> ContextContribution {
-        let Some((mut selection, set)) = self.select(prompt) else {
-            return ContextContribution::default();
-        };
-        let contribution = render(self.mode, &mut selection, &set);
-        if let Ok(mut slot) = self.slot.lock() {
-            *slot = Some(selection);
+        self.produce(prompt)
+    }
+
+    /// Asked before each later request of a turn. Only a change in the paths
+    /// the work touches can move the task to another component within a turn;
+    /// when they changed and the guidance comes out different, it is replaced.
+    fn refresh(&self, prompt: &str) -> Option<ContextContribution> {
+        let paths = self.paths_in_play.snapshot();
+        let previous = self.last.lock().ok()?.clone();
+        let (last_paths, last_text) = previous?;
+        if last_paths == paths {
+            return None;
         }
-        contribution
+        let contribution = self.produce(prompt);
+        (contribution.text != last_text).then_some(contribution)
     }
 }
 
@@ -354,6 +389,7 @@ pub fn register_task_guidance_context(
         catalog,
         capabilities,
         runtime.paths_in_play(),
+        runtime.user_requests(),
         facts,
         runtime.guidance_selection_slot(),
     );
