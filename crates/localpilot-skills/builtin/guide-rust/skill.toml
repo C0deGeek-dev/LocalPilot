@@ -1,0 +1,9 @@
+name = "guide-rust"
+description = "Rust and Cargo specifics for work in a Cargo package or workspace"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+stacks = ["rust"]
+body_sections = ["#Rust and Cargo"]

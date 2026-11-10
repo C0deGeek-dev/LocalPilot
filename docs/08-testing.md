@@ -1016,3 +1016,15 @@ turns and after a forced compaction; a session resumed from its log continues th
 earlier request on "ga door" while a new session does not; and a package whose
 text changes, one that is removed, and a project package after trust is revoked
 are never reused.
+
+### Built-in guidance
+
+`cargo test -p localpilot-skills --lib builtin` parses every built-in package,
+requires usable metadata and declared sections, one procedure per intent, no edit
+or launch in explanation and review, and evidence plus a claim capability in each
+runtime supplement. `cargo test -p localpilot-harness --test builtin_guidance`
+selects them for a Rust CLI defect and explanation, an ASP.NET Core service, a WPF
+app, a Godot game and a Three.js browser game, a Python project outside the set, a
+missing capability, a project package that replaces a built-in one, an installed
+procedure that outranks the built-in one, and a catalog without guidance. These
+check selection and content shape, not model behaviour.

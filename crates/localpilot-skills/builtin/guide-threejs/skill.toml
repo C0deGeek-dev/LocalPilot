@@ -1,0 +1,10 @@
+name = "guide-threejs"
+description = "Three.js scene specifics for browser games and visualisations"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+stacks = ["threejs"]
+capabilities_required_for_claim = ["browser.interact", "image.inspect"]
+body_sections = ["#Three.js scenes"]

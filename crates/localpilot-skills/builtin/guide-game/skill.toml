@@ -1,0 +1,10 @@
+name = "guide-game"
+description = "Game behaviour: scenes, input and observable state"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+products = ["game"]
+capabilities_required_for_claim = ["engine.run"]
+body_sections = ["#Games"]

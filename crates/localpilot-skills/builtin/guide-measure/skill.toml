@@ -1,0 +1,9 @@
+name = "guide-measure"
+description = "Measure performance or resource use and compare fairly"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "procedure"
+intents = ["measure"]
+body_sections = ["#Procedure"]

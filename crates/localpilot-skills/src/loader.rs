@@ -30,8 +30,11 @@ pub enum SkillScope {
     ProjectAgents,
     /// `~/.localpilot/skills`.
     GlobalLocalPilot,
-    /// `~/.agents/skills` — lowest precedence.
+    /// `~/.agents/skills`.
     GlobalAgents,
+    /// A task-guidance package compiled into LocalPilot — lowest precedence,
+    /// present only when task guidance is switched on (ADR-0280).
+    Builtin,
 }
 
 impl SkillScope {
@@ -40,10 +43,11 @@ impl SkillScope {
     /// cross-harness `.agents/skills` within a scope.
     fn precedence(self) -> u8 {
         match self {
-            SkillScope::ProjectLocalPilot => 3,
-            SkillScope::ProjectAgents => 2,
-            SkillScope::GlobalLocalPilot => 1,
-            SkillScope::GlobalAgents => 0,
+            SkillScope::ProjectLocalPilot => 4,
+            SkillScope::ProjectAgents => 3,
+            SkillScope::GlobalLocalPilot => 2,
+            SkillScope::GlobalAgents => 1,
+            SkillScope::Builtin => 0,
         }
     }
 
@@ -67,6 +71,7 @@ impl SkillScope {
             SkillScope::ProjectAgents => "project (.agents)",
             SkillScope::GlobalLocalPilot => "global (.localpilot)",
             SkillScope::GlobalAgents => "global (.agents)",
+            SkillScope::Builtin => "built-in",
         }
     }
 }
@@ -209,6 +214,30 @@ impl SkillSet {
             shadowed,
             skipped,
         })
+    }
+
+    /// Add `skill` beneath every skill already in the set: it joins only when
+    /// no skill of that name is present, and otherwise is recorded as shadowed.
+    pub(crate) fn add_lowest(&mut self, skill: Skill) {
+        match self
+            .skills
+            .iter()
+            .find(|s| s.manifest.name == skill.manifest.name)
+        {
+            Some(winner) => self.shadowed.push(Shadowed {
+                name: skill.manifest.name.clone(),
+                winner_scope: winner.scope,
+                winner_dir: winner.dir.clone(),
+                loser_scope: skill.scope,
+                loser_dir: skill.dir,
+            }),
+            None => {
+                let at = self
+                    .skills
+                    .partition_point(|s| s.manifest.name < skill.manifest.name);
+                self.skills.insert(at, skill);
+            }
+        }
     }
 
     /// Every definition that lost a name collision, each with the winner.

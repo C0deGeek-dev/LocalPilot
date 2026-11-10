@@ -102,7 +102,8 @@ impl TaskGuidanceContext {
             self.catalog.home.as_deref(),
             self.catalog.trusted.get(),
         )
-        .ok()?;
+        .ok()?
+        .with_builtin_guidance();
         let earlier = self.earlier.snapshot();
         let mut facts = self.facts.lock().ok()?;
         let selection = select_guidance(

@@ -8,6 +8,8 @@
 //! is never a permission side channel.
 #![forbid(unsafe_code)]
 
+mod builtin;
+mod builtin_packs;
 mod catalog;
 mod discovery;
 mod error;
@@ -23,6 +25,7 @@ mod templates;
 mod tools;
 mod update;
 
+pub use builtin::builtin_guidance;
 pub use catalog::{read_catalog, Catalog, CatalogPackage, CATALOG_ROOTS};
 pub use discovery::{
     rank, validate_repo, DiscoveredSkill, MatchState, ProposalState, ProposalStore, Ranked,

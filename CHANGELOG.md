@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Built-in task guidance: six short procedures (explain, investigate, implement,
+  refactor, review, measure) and supplements for Rust, .NET, web, Three.js,
+  Tailwind, Godot 4, CLIs, libraries, services, desktop apps and games. They are
+  available only with `[skills.guidance]` on, rank below any installed package,
+  and are replaced by a package of the same name (ADR-0280, LocalHub#277).
 - Task guidance follows the work: when a turn moves to another component, the
   next provider request gets that component's guidance; a follow-up such as "go
   on" keeps the task in progress, also after a resume; changed, removed or no

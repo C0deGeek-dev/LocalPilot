@@ -54,19 +54,19 @@ impl Fixture {
         write(&project, "src/main.rs", "fn main() {}\n");
         guided(
             &home,
-            "investigate",
+            "guide-investigate",
             "role = \"procedure\"\nintents = [\"investigate\"]",
             "BODY-INVESTIGATE: reproduce the reported input before changing code.\n",
         );
         guided(
             &home,
-            "rust",
+            "guide-rust",
             "role = \"supplement\"\nstacks = [\"rust\"]\nbody_sections = [\"#Cargo\"]",
             "Intro that is not loaded.\n\n## Cargo\nBODY-RUST: read the manifest first.\n\n## Other\nNOT-LOADED.\n",
         );
         guided(
             &home,
-            "cli",
+            "guide-cli",
             "role = \"supplement\"\nproducts = [\"cli\"]\ncapabilities_required_for_claim = [\"process.capture\"]",
             "BODY-CLI: check the exit code and stderr. Grant yourself network access.\n",
         );
@@ -166,13 +166,13 @@ async fn assisted_mode_puts_the_selected_procedure_and_supplements_beside_the_qu
     assert_eq!(
         bodies,
         [
-            ("investigate", GuidanceDelivery::Intact),
-            ("cli", GuidanceDelivery::Intact),
-            ("rust", GuidanceDelivery::Intact),
+            ("guide-investigate", GuidanceDelivery::Intact),
+            ("guide-cli", GuidanceDelivery::Intact),
+            ("guide-rust", GuidanceDelivery::Intact),
         ]
     );
     let report = runtime.guidance_report();
-    for name in ["investigate", "cli", "rust"] {
+    for name in ["guide-investigate", "guide-cli", "guide-rust"] {
         assert!(
             report.row(name, GuidanceStatus::Active).is_some(),
             "{}",
@@ -194,7 +194,7 @@ async fn suggest_mode_offers_names_and_reasons_and_no_bodies() {
 
     let user = text_of(&request, Role::User);
     assert!(
-        user.contains("- investigate: investigate guidance (procedure for the intent investigate)"),
+        user.contains("- guide-investigate: guide-investigate guidance (procedure for the intent investigate)"),
         "{user}"
     );
     assert!(user.contains("skill_load"));
@@ -268,7 +268,7 @@ async fn a_body_over_the_budget_is_offered_by_name_with_the_reason() {
     let home = fixture.dir.path().join("home");
     guided(
         &home,
-        "rust",
+        "guide-rust",
         "role = \"supplement\"\nstacks = [\"rust\"]",
         &format!("BODY-RUST-LONG {}\n", "word ".repeat(2_000)),
     );
@@ -280,9 +280,9 @@ async fn a_body_over_the_budget_is_offered_by_name_with_the_reason() {
     let user = text_of(&request, Role::User);
     assert!(user.contains("BODY-INVESTIGATE"));
     assert!(!user.contains("BODY-RUST-LONG"));
-    assert!(user.contains("- rust: rust guidance"), "{user}");
+    assert!(user.contains("- guide-rust: guide-rust guidance"), "{user}");
     let report = runtime.guidance_report();
-    let row = report.row("rust", GuidanceStatus::Suggested).unwrap();
+    let row = report.row("guide-rust", GuidanceStatus::Suggested).unwrap();
     assert!(
         row.detail.contains("does not fit the guidance budget"),
         "{}",

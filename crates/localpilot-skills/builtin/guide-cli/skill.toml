@@ -1,0 +1,10 @@
+name = "guide-cli"
+description = "Command-line program behaviour: arguments, exit codes, output"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+products = ["cli"]
+capabilities_required_for_claim = ["process.capture"]
+body_sections = ["#Command-line programs"]

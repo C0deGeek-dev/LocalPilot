@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0280: Built-In Task Procedures And Initial Stack Supplements, Present Only With Guidance On
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#277. Builds on ADR-0275,
+ADR-0276 and ADR-0278.
+
+**Context.** Selection and the guidance modes need content to select. A project
+with no skill packages would otherwise get nothing, and one large language
+persona in every request is what the research advised against. Packages already
+installed by a user must keep working, and with guidance off nothing may change.
+
+**Decision.** Seventeen original packages in the ordinary format, compiled into
+`localpilot-skills` (`crates/localpilot-skills/builtin/`), each with a `[guidance]`
+section and a short `SKILL.md` whose declared section is what gets loaded.
+- Procedures: `guide-explain`, `guide-investigate`, `guide-implement`,
+  `guide-refactor`, `guide-review`, `guide-measure`. Explanation and review say not
+  to edit or launch; the others say what evidence fits and what does not count.
+- Stack supplements: `guide-rust`, `guide-dotnet`, `guide-web`, `guide-threejs`,
+  `guide-tailwind`, `guide-godot4`. Product supplements: `guide-cli`,
+  `guide-library`, `guide-service`, `guide-desktop` (WPF and Avalonia notes),
+  `guide-game`. Runtime supplements name the capability their claims need, so a
+  missing one narrows claims instead of blocking.
+- A new lowest-precedence scope, `SkillScope::Builtin` ("built-in"). Any user or
+  project package with the same name replaces one, and on an otherwise equal match
+  an installed package outranks a built-in one.
+- The built-in packages are in the catalog only when `[skills.guidance]` is not
+  off: the guidance hook adds them, and the skill tools see them in that case so a
+  suggested name can be loaded. With guidance off, discovery and the skill tools
+  are exactly as before. `localpilot skills list` does not show them.
+- Projects outside the initial set get the procedure and no supplement.
+
+**Consequences.** Guidance works out of the box in the initial domains and can be
+overridden per name. The content is unevaluated with models; whether it improves
+results is a question for the evaluation work, not this decision.
+
 ## ADR-0279: Task Guidance Is Refreshed Before Each Request And Restored From The User's Own Requests
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#276. Builds on ADR-0217,

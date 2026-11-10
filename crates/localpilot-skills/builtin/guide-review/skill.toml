@@ -1,0 +1,9 @@
+name = "guide-review"
+description = "Review a change or a piece of code for problems, without fixing it"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "procedure"
+intents = ["review"]
+body_sections = ["#Procedure"]

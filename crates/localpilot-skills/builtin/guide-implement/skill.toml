@@ -1,0 +1,9 @@
+name = "guide-implement"
+description = "Add or change behaviour in an existing component"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "procedure"
+intents = ["implement"]
+body_sections = ["#Procedure"]

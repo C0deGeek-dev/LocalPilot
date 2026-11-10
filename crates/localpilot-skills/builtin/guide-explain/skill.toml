@@ -1,0 +1,9 @@
+name = "guide-explain"
+description = "Answer a question about how code works, without changing it"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "procedure"
+intents = ["explain"]
+body_sections = ["#Procedure"]

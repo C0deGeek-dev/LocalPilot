@@ -1,0 +1,9 @@
+name = "guide-refactor"
+description = "Change structure while keeping behaviour the same"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "procedure"
+intents = ["refactor"]
+body_sections = ["#Procedure"]

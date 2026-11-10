@@ -116,6 +116,8 @@ pub struct SkillSearch {
     /// The per-user home directory for the global skill baseline, resolved once
     /// at construction. `None` omits the global layer (e.g. no resolvable home).
     home: Option<PathBuf>,
+    /// Whether the built-in task-guidance packages are part of the catalog.
+    builtin_guidance: bool,
 }
 
 impl SkillSearch {
@@ -123,7 +125,10 @@ impl SkillSearch {
     /// environment for the global skill baseline.
     #[must_use]
     pub fn new() -> Self {
-        Self { home: home_dir() }
+        Self {
+            home: home_dir(),
+            builtin_guidance: false,
+        }
     }
 
     /// Construct the tool with a given home directory for the global skill
@@ -131,7 +136,18 @@ impl SkillSearch {
     /// home, such as a fixture.
     #[must_use]
     pub fn with_home(home: Option<PathBuf>) -> Self {
-        Self { home }
+        Self {
+            home,
+            builtin_guidance: false,
+        }
+    }
+
+    /// Include the built-in task-guidance packages, as task guidance does
+    /// when it is switched on, so a package it names can be loaded.
+    #[must_use]
+    pub fn with_builtin_guidance(mut self, enabled: bool) -> Self {
+        self.builtin_guidance = enabled;
+        self
     }
 }
 
@@ -185,6 +201,7 @@ impl Tool for SkillSearch {
         // The user-global baseline is always available; the project overlay is
         // included only when the workspace is trusted (LocalHub#39).
         let set = match discover(ctx.workspace.root(), self.home.as_deref(), ctx.trusted) {
+            Ok(set) if self.builtin_guidance => set.with_builtin_guidance(),
             Ok(set) => set,
             Err(_) => return Ok(ToolOutput::ok("skills are unreadable")),
         };
@@ -267,6 +284,8 @@ pub struct SkillLoad {
     /// The per-user home directory for the global skill baseline, resolved once
     /// at construction. `None` omits the global layer (e.g. no resolvable home).
     home: Option<PathBuf>,
+    /// Whether the built-in task-guidance packages are part of the catalog.
+    builtin_guidance: bool,
 }
 
 impl SkillLoad {
@@ -274,7 +293,10 @@ impl SkillLoad {
     /// environment for the global skill baseline.
     #[must_use]
     pub fn new() -> Self {
-        Self { home: home_dir() }
+        Self {
+            home: home_dir(),
+            builtin_guidance: false,
+        }
     }
 
     /// Construct the tool with a given home directory for the global skill
@@ -282,7 +304,18 @@ impl SkillLoad {
     /// home, such as a fixture.
     #[must_use]
     pub fn with_home(home: Option<PathBuf>) -> Self {
-        Self { home }
+        Self {
+            home,
+            builtin_guidance: false,
+        }
+    }
+
+    /// Include the built-in task-guidance packages, as task guidance does
+    /// when it is switched on, so a package it names can be loaded.
+    #[must_use]
+    pub fn with_builtin_guidance(mut self, enabled: bool) -> Self {
+        self.builtin_guidance = enabled;
+        self
     }
 }
 
@@ -338,6 +371,7 @@ impl Tool for SkillLoad {
         // The user-global baseline is always available; the project overlay is
         // included only when the workspace is trusted (LocalHub#39).
         let set = match discover(ctx.workspace.root(), self.home.as_deref(), ctx.trusted) {
+            Ok(set) if self.builtin_guidance => set.with_builtin_guidance(),
             Ok(set) => set,
             Err(_) => return Ok(ToolOutput::ok("skills are unreadable")),
         };
@@ -418,6 +452,8 @@ pub struct SkillList {
     /// The per-user home directory for the global skill baseline, resolved once
     /// at construction. `None` omits the global layer (e.g. no resolvable home).
     home: Option<PathBuf>,
+    /// Whether the built-in task-guidance packages are part of the catalog.
+    builtin_guidance: bool,
 }
 
 impl SkillList {
@@ -425,7 +461,10 @@ impl SkillList {
     /// environment for the global skill baseline.
     #[must_use]
     pub fn new() -> Self {
-        Self { home: home_dir() }
+        Self {
+            home: home_dir(),
+            builtin_guidance: false,
+        }
     }
 
     /// Construct the tool with a given home directory for the global skill
@@ -433,7 +472,18 @@ impl SkillList {
     /// home, such as a fixture.
     #[must_use]
     pub fn with_home(home: Option<PathBuf>) -> Self {
-        Self { home }
+        Self {
+            home,
+            builtin_guidance: false,
+        }
+    }
+
+    /// Include the built-in task-guidance packages, as task guidance does
+    /// when it is switched on, so a package it names can be loaded.
+    #[must_use]
+    pub fn with_builtin_guidance(mut self, enabled: bool) -> Self {
+        self.builtin_guidance = enabled;
+        self
     }
 }
 
@@ -483,6 +533,7 @@ impl Tool for SkillList {
         // included only when the workspace is trusted (LocalHub#39) — an untrusted
         // workspace never has its project manifests read here.
         let set = match discover(ctx.workspace.root(), self.home.as_deref(), ctx.trusted) {
+            Ok(set) if self.builtin_guidance => set.with_builtin_guidance(),
             Ok(set) => set,
             Err(_) => return Ok(ToolOutput::ok("skills are unreadable")),
         };
@@ -602,6 +653,7 @@ mod tests {
     fn search(home: Option<&Path>) -> SkillSearch {
         SkillSearch {
             home: home.map(Path::to_path_buf),
+            builtin_guidance: false,
         }
     }
 
@@ -609,6 +661,7 @@ mod tests {
     fn load(home: Option<&Path>) -> SkillLoad {
         SkillLoad {
             home: home.map(Path::to_path_buf),
+            builtin_guidance: false,
         }
     }
 
@@ -616,6 +669,7 @@ mod tests {
     fn list(home: Option<&Path>) -> SkillList {
         SkillList {
             home: home.map(Path::to_path_buf),
+            builtin_guidance: false,
         }
     }
 

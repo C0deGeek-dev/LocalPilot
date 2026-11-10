@@ -49,31 +49,31 @@ impl Fixture {
         let home = dir.path().join("home");
         guided(
             &home,
-            "investigate",
+            "guide-investigate",
             "role = \"procedure\"\nintents = [\"investigate\"]",
             "BODY-INVESTIGATE\n",
         );
         guided(
             &home,
-            "implement",
+            "guide-implement",
             "role = \"procedure\"\nintents = [\"implement\"]",
             "BODY-IMPLEMENT\n",
         );
         guided(
             &home,
-            "web",
+            "guide-web",
             "role = \"supplement\"\nstacks = [\"web\"]",
             "BODY-WEB\n",
         );
         guided(
             &home,
-            "dotnet",
+            "guide-dotnet",
             "role = \"supplement\"\nstacks = [\"dotnet\"]",
             "BODY-DOTNET\n",
         );
         guided(
             &home,
-            "rust",
+            "guide-rust",
             "role = \"supplement\"\nstacks = [\"rust\"]",
             "BODY-RUST v1\n",
         );
@@ -173,8 +173,8 @@ async fn work_that_moves_to_another_component_updates_the_next_request() {
     assert_eq!(selection.component.component, "web");
     // The record follows the same request.
     let record = runtime.task_guidance();
-    assert!(record[1].entries.iter().any(|e| e.source.id == "web"));
-    assert!(record[0].entries.iter().all(|e| e.source.id != "web"));
+    assert!(record[1].entries.iter().any(|e| e.source.id == "guide-web"));
+    assert!(record[0].entries.iter().all(|e| e.source.id != "guide-web"));
 }
 
 #[tokio::test]
@@ -275,7 +275,7 @@ async fn changed_removed_and_untrusted_packages_are_not_reused() {
     // Changed content: the new text, never the old.
     write(
         &fixture.home(),
-        ".localpilot/skills/rust/SKILL.md",
+        ".localpilot/skills/guide-rust/SKILL.md",
         "BODY-RUST v2\n",
     );
     turn(&mut runtime, "Fix the wrong exit code.").await;
@@ -286,7 +286,7 @@ async fn changed_removed_and_untrusted_packages_are_not_reused() {
     );
 
     // Removed package: gone.
-    std::fs::remove_dir_all(fixture.home().join(".localpilot/skills/rust")).unwrap();
+    std::fs::remove_dir_all(fixture.home().join(".localpilot/skills/guide-rust")).unwrap();
     turn(&mut runtime, "Fix the wrong exit code.").await;
     assert!(!prose(&provider.requests()[2]).contains("BODY-RUST"));
 

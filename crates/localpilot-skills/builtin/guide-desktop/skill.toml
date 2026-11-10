@@ -1,0 +1,10 @@
+name = "guide-desktop"
+description = "Desktop application behaviour (WPF, Avalonia and similar)"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+products = ["desktop"]
+capabilities_required_for_claim = ["desktop.interact"]
+body_sections = ["#Desktop apps"]

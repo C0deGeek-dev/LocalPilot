@@ -1,0 +1,9 @@
+name = "guide-library"
+description = "Library behaviour: public API, compatibility and tests"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+products = ["library"]
+body_sections = ["#Libraries"]

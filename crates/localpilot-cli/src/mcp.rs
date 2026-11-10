@@ -33,6 +33,9 @@ pub struct McpTools {
     /// own. Off by default — the deterministic `localpilot skills` surface and the
     /// host-injected user load do not depend on it.
     skills_autonomous: bool,
+    /// When set, the skill tools also see the built-in task-guidance packages:
+    /// `[skills.guidance]` is on and may name one of them (ADR-0280).
+    skills_builtin_guidance: bool,
 }
 
 impl McpTools {
@@ -58,6 +61,8 @@ impl McpTools {
             entries,
             resource_servers,
             skills_autonomous: config.skills.package_tools_registered(),
+            skills_builtin_guidance: config.skills.guidance.mode
+                != localpilot_config::TaskGuidanceMode::Off,
         }
     }
 
@@ -68,6 +73,8 @@ impl McpTools {
     pub fn without_servers(config: &Config) -> Self {
         Self {
             skills_autonomous: config.skills.package_tools_registered(),
+            skills_builtin_guidance: config.skills.guidance.mode
+                != localpilot_config::TaskGuidanceMode::Off,
             ..Self::default()
         }
     }
@@ -120,9 +127,16 @@ impl McpTools {
         // so a small local model never reaches for a skill on its own by default;
         // all three tools are read-only and trust-gated regardless.
         if self.skills_autonomous {
-            registry.register(Box::new(localpilot_skills::SkillList::new()));
-            registry.register(Box::new(localpilot_skills::SkillSearch::new()));
-            registry.register(Box::new(localpilot_skills::SkillLoad::new()));
+            let builtin = self.skills_builtin_guidance;
+            registry.register(Box::new(
+                localpilot_skills::SkillList::new().with_builtin_guidance(builtin),
+            ));
+            registry.register(Box::new(
+                localpilot_skills::SkillSearch::new().with_builtin_guidance(builtin),
+            ));
+            registry.register(Box::new(
+                localpilot_skills::SkillLoad::new().with_builtin_guidance(builtin),
+            ));
         }
         for (server, transport) in &self.resource_servers {
             let server_prefix = sanitize_server_name(server);
@@ -305,6 +319,7 @@ mod tests {
             entries: Vec::new(),
             resource_servers: Vec::new(),
             skills_autonomous: true,
+            skills_builtin_guidance: false,
         }
         .registry();
         let on_names = on.names();
@@ -349,6 +364,7 @@ mod tests {
             entries: vec![mcp_entry("duckduckgo", "fetch")],
             resource_servers: Vec::new(),
             skills_autonomous: false,
+            skills_builtin_guidance: false,
         }
         .registry();
 
@@ -365,6 +381,7 @@ mod tests {
             entries: vec![mcp_entry("remote", "ask_user")],
             resource_servers: Vec::new(),
             skills_autonomous: false,
+            skills_builtin_guidance: false,
         }
         .registry();
 
@@ -384,6 +401,7 @@ mod tests {
             ],
             resource_servers: Vec::new(),
             skills_autonomous: false,
+            skills_builtin_guidance: false,
         }
         .registry();
 
@@ -405,6 +423,7 @@ mod tests {
             entries: vec![mcp_entry("search", "lookup")],
             resource_servers: Vec::new(),
             skills_autonomous: false,
+            skills_builtin_guidance: false,
         }
         .registry();
 
@@ -431,6 +450,7 @@ mod tests {
             entries: Vec::new(),
             resource_servers: vec![("files".to_string(), transport.clone())],
             skills_autonomous: false,
+            skills_builtin_guidance: false,
         }
         .registry();
 
@@ -496,6 +516,7 @@ mod tests {
             )],
             resource_servers: Vec::new(),
             skills_autonomous: false,
+            skills_builtin_guidance: false,
         };
 
         // External handle + the one held by `McpTools`, before any projection.

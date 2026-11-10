@@ -1,0 +1,9 @@
+name = "guide-investigate"
+description = "Find out why something behaves wrongly, before or instead of fixing it"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "procedure"
+intents = ["investigate"]
+body_sections = ["#Procedure"]

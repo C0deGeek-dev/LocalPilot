@@ -1,0 +1,10 @@
+name = "guide-godot4"
+description = "Godot 4 specifics: project, scenes, scripts and input"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+stacks = ["godot4"]
+capabilities_required_for_claim = ["engine.run"]
+body_sections = ["#Godot 4"]

@@ -1,0 +1,9 @@
+name = "guide-tailwind"
+description = "Tailwind CSS conventions as the project has them"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+stacks = ["tailwind"]
+body_sections = ["#Tailwind"]

@@ -1580,6 +1580,11 @@ access. Per turn it is bounded to about 2,048 characters of names and summaries 
 instead, with the reason. `/skills guidance` shows what was chosen and what the
 last request held, and `localpilot doctor` reports the mode.
 
+With a mode on, the catalog also holds LocalPilot's built-in `guide-*` packages
+(ADR-0280): procedures for the six intents and supplements for the first stacks
+and products. They rank below every installed package; install a package with
+the same name to replace one.
+
 Installed skill packages are advisory prompt modules under `.localpilot/skills/`
 or `.agents/skills/`. The effective catalog is the user-global baseline
 (`~/.localpilot/skills`, `~/.agents/skills`) — always present — overlaid by this

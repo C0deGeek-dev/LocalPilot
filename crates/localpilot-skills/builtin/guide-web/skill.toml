@@ -1,0 +1,11 @@
+name = "guide-web"
+description = "Browser app specifics: dev server, framework conventions, DOM state"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+stacks = ["web"]
+capabilities_optional = ["browser.interact", "image.inspect"]
+capabilities_required_for_claim = ["browser.interact"]
+body_sections = ["#Browser apps"]

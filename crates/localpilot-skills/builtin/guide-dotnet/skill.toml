@@ -1,0 +1,9 @@
+name = "guide-dotnet"
+description = ".NET specifics for SDK-style C# projects"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+stacks = ["dotnet"]
+body_sections = ["#.NET"]

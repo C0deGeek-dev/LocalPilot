@@ -1,0 +1,10 @@
+name = "guide-service"
+description = "Service and API behaviour: requests, responses and state"
+version = "1.0.0"
+
+[guidance]
+schema_version = 1
+role = "supplement"
+products = ["service"]
+capabilities_required_for_claim = ["http.observe"]
+body_sections = ["#Services"]

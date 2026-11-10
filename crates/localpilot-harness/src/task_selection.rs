@@ -285,7 +285,7 @@ pub fn select_guidance(
             GuidanceRole::Procedure => {
                 if metadata.intents.iter().any(|i| i == primary.as_str()) {
                     procedures.push((
-                        1000 + text_score(skill),
+                        1000 + text_score(skill) * 2 + own(skill),
                         skill,
                         format!("procedure for the intent {}", primary.as_str()),
                     ));
@@ -358,7 +358,9 @@ pub fn select_guidance(
                     .cloned()
                     .collect();
                 let hits: Vec<&str> = stack_hits.iter().chain(&product_hits).copied().collect();
-                let score = u32::try_from(hits.len()).unwrap_or(u32::MAX) * 100 + text_score(skill);
+                let score = u32::try_from(hits.len()).unwrap_or(u32::MAX) * 1000
+                    + text_score(skill) * 2
+                    + own(skill);
                 supplements.push((
                     score,
                     skill,
@@ -480,6 +482,12 @@ pub fn select_guidance(
         loading,
         loading_reason,
     }
+}
+
+/// One point for a package the user or the project installed, so on an
+/// otherwise equal match it outranks a built-in one.
+fn own(skill: &Skill) -> u32 {
+    u32::from(skill.scope != localpilot_skills::SkillScope::Builtin)
 }
 
 fn describe_needs(stacks: &[String], products: &[String]) -> String {
