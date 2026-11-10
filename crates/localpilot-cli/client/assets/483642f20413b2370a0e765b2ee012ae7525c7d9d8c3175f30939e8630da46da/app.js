@@ -2,6 +2,7 @@ import { Pairing, PairingCamera, cameraMessages, messages, takePairingLink } fro
 import { mountSessions } from './session-view.js';
 import { mountCompanion } from './companion-view.js';
 import { prepareOffline } from './offline.js';
+import { mountTheme } from './theme.js';
 
 // Navigation is local. A network connection alone never enables session controls.
 const destinations = new Set(['sessions', 'attention', 'devices']);
@@ -11,7 +12,7 @@ export function destinationFromHash(hash) {
   return destinations.has(destination) ? destination : 'sessions';
 }
 
-export function showDestination(document, hash) {
+export function showDestination(document, hash, focus = false) {
   const destination = destinationFromHash(hash);
   for (const panel of document.querySelectorAll('[data-panel]')) {
     panel.hidden = panel.dataset.panel !== destination;
@@ -20,10 +21,12 @@ export function showDestination(document, hash) {
     if (link.dataset.destination === destination) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
+  if (focus) document.querySelector(`[data-panel="${destination}"] h1:not([hidden]), [data-panel="${destination}"] h2:not([hidden])`)?.focus();
 }
 
 if (typeof document !== 'undefined') {
   let incoming = takePairingLink(window.location, window.history);
+  mountTheme(document, window);
   const sessions = mountSessions(document, window);
   const element = (id) => document.getElementById(id);
   void prepareOffline(window, (message) => { element('app-update').textContent = message; });
@@ -109,9 +112,10 @@ if (typeof document !== 'undefined') {
   function leaveCamera() { incoming = null; camera.stop(); cameraPanel.hidden = true; cameraStatus.textContent = ''; clearInputs(); pairing.cancel(); }
   showDestination(document, window.location.hash);
   window.addEventListener('hashchange', () => {
+    if (window.location.hash === '#main') { element('main').focus(); return; }
     const link = takePairingLink(window.location, window.history);
     leaveCamera();
-    showDestination(document, window.location.hash);
+    showDestination(document, window.location.hash, true);
     if (link) { pairing.prepare(link); focusPairing(); }
   });
   window.addEventListener('pagehide', leaveCamera);

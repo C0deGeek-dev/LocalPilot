@@ -1,5 +1,6 @@
 import { Sessions } from './session.js';
 import { compatibilityMessages } from './compatibility.js';
+import { reconcile, replyAnnouncer, keyedItems } from './accessibility.js';
 
 const phaseMessages = {
   unpaired: 'Pair this phone to see your sessions.', choose: 'Choose a shared terminal session.',
@@ -25,10 +26,16 @@ export function mountSessions(document, window) {
   let commandsKey;
   let listKey;
   let workspaceKey;
+  let historyKeys = new Map();
+  let nextHistoryKey = 0;
+  const announceReply = replyAnnouncer(el('reply-announcement'));
   const model = new Sessions({
     origin: window.location.origin, fetch: window.fetch.bind(window), socket: (url) => new window.WebSocket(url),
     schedule: window.setTimeout.bind(window), unschedule: window.clearTimeout.bind(window),
-    changed() { if (!frame) frame = window.requestAnimationFrame(() => { frame = null; render(); }); },
+    changed(state) {
+      announceReply(state);
+      if (!frame) frame = window.requestAnimationFrame(() => { frame = null; render(); });
+    },
   });
   function setText(id, text) { if (el(id).textContent !== text) el(id).textContent = text; }
   function messageBody(text) {
@@ -39,6 +46,7 @@ export function mountSessions(document, window) {
       if (match.index > start) nodes.push(make('pre', text.slice(start, match.index), 'message-text'));
       const code = make('pre', null, 'code-block');
       code.tabIndex = 0;
+      code.setAttribute('role', 'group');
       code.setAttribute('aria-label', 'Code');
       code.append(make('code', match[1])); nodes.push(code);
       start = match.index + match[0].length;
@@ -47,23 +55,34 @@ export function mountSessions(document, window) {
     return nodes;
   }
   function renderTimeline() {
-    const key = JSON.stringify([model.history, model.entries]);
+    const key = JSON.stringify([model.key, model.history, model.entries]);
     if (key === timelineKey) return;
     timelineKey = key;
     const timeline = el('timeline');
     const open = new Set([...timeline.querySelectorAll('details[open]')].map((node) => node.dataset.activity));
     const nodes = [];
+    const occurrences = new Map();
+    const nextKeys = new Map();
     for (const message of model.history) {
+      const content = JSON.stringify([model.key, message.role, message.text]);
+      const occurrence = occurrences.get(content) || 0;
+      occurrences.set(content, occurrence + 1);
+      const identity = JSON.stringify([content, occurrence]);
+      const messageKey = historyKeys.get(identity) ?? ++nextHistoryKey;
+      nextKeys.set(identity, messageKey);
       const article = make('article', null, 'message');
+      article.dataset.key = `${model.key}/history/${messageKey}`;
       article.append(make('h3', message.role === 'assistant' ? 'LocalPilot' : message.role === 'user' ? 'You' : message.role), ...messageBody(message.text));
       nodes.push(article);
     }
+    historyKeys = nextKeys;
     let group;
     model.entries.forEach((entry, index) => {
       if (entry.type !== 'tool') {
         group = null;
         if (!entry.text) return;
         const article = make('article', null, `message ${entry.type}`);
+        article.dataset.key = `${model.key}/entry/${index}`;
         article.append(make('h3', entry.type === 'assistant' ? 'LocalPilot' : entry.queued ? 'Sent from this phone · follow-up' : 'Sent from this phone'), ...messageBody(entry.text));
         nodes.push(article);
         return;
@@ -71,21 +90,32 @@ export function mountSessions(document, window) {
       if (!group) {
         group = make('details', null, 'activity-group');
         group.dataset.activity = String(index);
+        group.dataset.key = `${model.key}/entry/${index}`;
         group.open = open.has(String(index));
         group.append(make('summary', 'Tool activity'));
         nodes.push(group);
       }
       const tool = make('section', null, 'tool');
       tool.append(make('h3', `${entry.name} · ${entry.running ? 'Running' : entry.error ? 'Failed' : 'Finished'}`));
-      if (entry.output) tool.append(make('pre', entry.output, 'tool-output'));
+      if (entry.output) {
+        const output = make('pre', entry.output, 'tool-output');
+        output.tabIndex = 0;
+        output.setAttribute('role', 'group');
+        output.setAttribute('aria-label', `${entry.name} output`);
+        tool.append(output);
+      }
       group.append(tool);
     });
-    if (!nodes.length) nodes.push(make('p', 'No conversation text has been shared yet.', 'help'));
-    timeline.replaceChildren(...nodes);
+    if (!nodes.length) {
+      const empty = make('p', 'No conversation text has been shared yet.', 'help');
+      empty.dataset.key = 'empty'; nodes.push(empty);
+    }
+    reconcile(timeline, nodes);
   }
   function render() {
     const paired = model.authorized;
     const viewing = paired && !!model.selected;
+    el('sessions-title').closest('section').setAttribute('aria-labelledby', viewing ? 'session-name' : 'sessions-title');
     el('main').classList.toggle('viewing-session', viewing);
     el('pair-card').hidden = viewing;
     for (const id of ['sessions-title', 'sessions-intro', 'sessions-eyebrow']) el(id).hidden = viewing;
@@ -110,15 +140,20 @@ export function mountSessions(document, window) {
     const nextListKey = JSON.stringify([model.items, model.selected?.id, model.phase === 'choose']);
     if (nextListKey !== listKey) {
       listKey = nextListKey;
-      const list = model.items.map((item) => {
-        const button = make('button', `${item.name || 'Unnamed session'} · ${item.live ? 'Shared now' : 'No longer shared'}`, 'secondary session-choice');
+      keyedItems(el('session-list'), model.items, (item) => `${model.workspace?.id}/${item.id}`,
+        () => make('button', '', 'secondary session-choice'), (button, item) => {
+        if (button.textContent !== `${item.name || 'Unnamed session'} · ${item.live ? 'Shared now' : 'No longer shared'}`) button.textContent = `${item.name || 'Unnamed session'} · ${item.live ? 'Shared now' : 'No longer shared'}`;
         button.disabled = !item.live;
         button.setAttribute('aria-pressed', String(model.selected?.id === item.id));
-        button.addEventListener('click', () => { model.attach(item.id); el('session-browser').open = false; });
-        return button;
+        button.onclick = () => {
+          model.attach(item.id); el('session-browser').open = false;
+          if (model.selected?.id !== item.id) return;
+          setText('session-name', item.name || 'Unnamed session');
+          el('session-view').hidden = false;
+          el('session-name').focus();
+        };
       });
-      if (!list.length && model.phase === 'choose' && model.workspace) list.push(make('p', 'No shared sessions. Open LocalPilot in this project on your PC and enable phone access.', 'help'));
-      el('session-list').replaceChildren(...list);
+      if (!model.items.length && model.phase === 'choose' && model.workspace) el('session-list').append(make('p', 'No shared sessions. Open LocalPilot in this project on your PC and enable phone access.', 'help'));
     }
     if (!model.selected) return;
     setText('session-name', model.selected.name || 'Unnamed session');
@@ -151,17 +186,21 @@ export function mountSessions(document, window) {
     const nextCommandsKey = JSON.stringify([commands, model.canSubmit, model.busy]);
     if (nextCommandsKey === commandsKey) return;
     commandsKey = nextCommandsKey;
-    el('command-list').replaceChildren(...commands.map((command) => {
-      const button = make('button', null, 'secondary command-choice');
-      button.append(make('strong', `/${command.name}${command.args === 'required' ? ' …' : ''}`), make('span', command.description));
+    keyedItems(el('command-list'), commands, (command) => command.name, () => {
+      const button = make('button', '', 'secondary command-choice');
+      button.append(make('strong'), make('span'));
+      return button;
+    }, (button, command) => {
+      const label = `/${command.name}${command.args === 'required' ? ' …' : ''}`;
+      if (button.children[0].textContent !== label) button.children[0].textContent = label;
+      if (button.children[1].textContent !== command.description) button.children[1].textContent = command.description;
       button.disabled = !model.canSubmit || (model.busy && command.name !== 'effort');
-      button.addEventListener('click', () => {
+      button.onclick = () => {
         model.setDraft(`/${command.name}${command.args === 'none' ? '' : ' '}`);
         el('command-picker').open = false;
         render(); el('session-draft').focus();
-      });
-      return button;
-    }));
+      };
+    });
   }
   el('session-workspace').addEventListener('change', () => void model.list(el('session-workspace').value));
   el('refresh-sessions').addEventListener('click', () => void model.list(el('session-workspace').value));

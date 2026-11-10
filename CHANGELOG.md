@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The embedded companion app is easier to use with a screen reader, keyboard
+  and large text: replies update in place without moving your reading
+  position, a finished reply is announced once (never word by word), the
+  approval sheet opens on the request and returns focus where you were, and
+  controls meet the 48px touch size. Appearance follows the system light or
+  dark setting, with a System/Light/Dark choice under Devices.
 - The embedded companion app opens while your computer is unreachable (only
   its static files are kept; no session, device or pairing data), keeps the
   last view, drafts and sync time when the connection drops, and reconnects

@@ -1,13 +1,18 @@
 import { Device } from './device.js';
 import { Notifications } from './notifications.js';
+import { keyedItems, setText } from './accessibility.js';
 
 export function mountCompanion(document, window, sessions, checkAccess) {
   const el = (id) => document.getElementById(id);
   const make = (tag, text) => { const node = document.createElement(tag); node.textContent = text; return node; };
+  const text = (id, value) => setText(el(id), value);
+  let approvalInvoker;
+  let notificationProjectsKey;
+  const sheet = el('approval-sheet');
   const notifications = new Notifications({ browser: window, fetch: window.fetch.bind(window), changed: renderNotifications });
   const device = new Device({ fetch: window.fetch.bind(window), changed: renderDevice, revoked() { sessions.revoke(); device.access(false); notifications.access(false); void checkAccess(); } });
   function renderDevice() {
-    el('device-status').textContent = device.authorized ? device.message || 'This phone’s access. Manage other devices on your PC with /remote devices.' : 'Pair this phone in Sessions to see its access.';
+    text('device-status', device.authorized ? device.message || 'This phone’s access. Manage other devices on your PC with /remote devices.' : 'Pair this phone in Sessions to see its access.');
     el('device-list').replaceChildren();
     if (device.record) {
       const record = device.record;
@@ -20,14 +25,18 @@ export function mountCompanion(document, window, sessions, checkAccess) {
   }
   function renderNotifications() {
     el('notification-settings').hidden = !notifications.authorized;
-    el('notification-status').textContent = notifications.supported ? notifications.message : 'Push notifications are unavailable in this browser. Use a supported browser over HTTPS; on iPhone, install the app to the Home Screen.';
+    text('notification-status', notifications.supported ? notifications.message : 'Push notifications are unavailable in this browser. Use a supported browser over HTTPS; on iPhone, install the app to the Home Screen.');
     for (const id of ['enable-notifications', 'off-notifications', 'test-notification']) el(id).disabled = notifications.busy || !notifications.workspace || !notifications.supported;
     el('test-notification').disabled ||= !notifications.enabled;
     el('enable-notifications').textContent = notifications.enabled ? 'Re-enable notifications' : 'Enable notifications';
     const selected = el('notification-workspace').value;
-    const options = sessions.workspaces.map((workspace) => { const option = make('option', workspace.label); option.value = workspace.id; return option; });
-    const blank = make('option', 'Choose a project'); blank.value = '';
-    el('notification-workspace').replaceChildren(blank, ...options);
+    const projectsKey = JSON.stringify(sessions.workspaces);
+    if (projectsKey !== notificationProjectsKey) {
+      notificationProjectsKey = projectsKey;
+      const options = sessions.workspaces.map((workspace) => { const option = make('option', workspace.label); option.value = workspace.id; return option; });
+      const blank = make('option', 'Choose a project'); blank.value = '';
+      el('notification-workspace').replaceChildren(blank, ...options);
+    }
     el('notification-workspace').value = notifications.workspace || selected;
   }
   let attentionKey;
@@ -35,24 +44,28 @@ export function mountCompanion(document, window, sessions, checkAccess) {
     const key = JSON.stringify([sessions.key, sessions.phase, sessions.asks, sessions.approval, sessions.canApprove]);
     if (key !== attentionKey) {
       attentionKey = key;
-      el('attention-status').textContent = !sessions.authorized ? 'Pair this phone in Sessions.' : !sessions.selected ? 'Choose a shared session in Sessions to see its requests.' : `${sessions.workspace.label} / ${sessions.selected.name || 'Unnamed session'} · ${sessions.ready ? 'Connected in app' : 'View may be stale; approval controls locked. Answer waiting requests on the PC'}. Requests cover this attached session only.`;
-      const items = sessions.asks.map((ask) => {
-        const button = make('button', `${ask.tool || 'Request'} · ${ask.risk || 'Review required'}`);
+      text('attention-status', !sessions.authorized ? 'Pair this phone in Sessions.' : !sessions.selected ? 'Choose a shared session in Sessions to see its requests.' : `${sessions.workspace.label} / ${sessions.selected.name || 'Unnamed session'} · ${sessions.ready ? 'Connected in app' : 'View may be stale; approval controls locked. Answer waiting requests on the PC'}. Requests cover this attached session only.`);
+      keyedItems(el('attention-list'), sessions.asks, (ask) => `${sessions.key}/${ask.ask_id}`, () => make('button', ''), (button, ask) => {
+        setText(button, `${ask.tool || 'Request'} · ${ask.risk || 'Review required'}`);
         button.type = 'button';
-        button.addEventListener('click', () => { sessions.openApproval(ask.ask_id); renderAttention(); el('approval-sheet').showModal(); });
-        return button;
+        button.onclick = () => {
+          approvalInvoker = button;
+          sessions.openApproval(ask.ask_id); renderAttention();
+          if (!sessions.approval) return;
+          sheet.showModal(); el('approval-tool').focus();
+        };
       });
-      el('attention-list').replaceChildren(...(items.length ? items : [make('p', sessions.ready ? 'No pending requests in this session.' : 'Connect to fetch current requests.')]));
+      if (!sessions.asks.length) el('attention-list').append(make('p', sessions.ready ? 'No pending requests in this session.' : 'Connect to fetch current requests.'));
     }
     const ask = sessions.approval;
     if (!ask) { if (el('approval-sheet').open) el('approval-sheet').close(); return; }
-    el('approval-project').textContent = `${sessions.workspace.label} / ${sessions.selected.name || 'Unnamed session'}`;
-    el('approval-tool').textContent = ask.tool || 'Permission request';
-    el('approval-detail').textContent = ask.detail || 'Details unavailable. Check the request on your PC.';
-    el('approval-risk').textContent = `Risk: ${ask.risk || 'Not supplied'}`;
-    el('approval-expiry').textContent = ask.expires_at_ms ? `Deadline: ${new Date(ask.expires_at_ms).toLocaleString()}${ask.expires_at_ms <= Date.now() ? ' · deadline passed; waiting for PC confirmation' : ''}` : 'Deadline not supplied by the PC.';
+    text('approval-project', `${sessions.workspace.label} / ${sessions.selected.name || 'Unnamed session'}`);
+    text('approval-tool', ask.tool || 'Permission request');
+    text('approval-detail', ask.detail || 'Details unavailable. Check the request on your PC.');
+    text('approval-risk', `Risk: ${ask.risk || 'Not supplied'}`);
+    text('approval-expiry', ask.expires_at_ms ? `Deadline: ${new Date(ask.expires_at_ms).toLocaleString()}${ask.expires_at_ms <= Date.now() ? ' · deadline passed; waiting for PC confirmation' : ''}` : 'Deadline not supplied by the PC.');
     const states = { pending: sessions.canApprove ? 'Review the exact request before answering.' : 'Controls locked. Reconnect and reconcile, or answer on your PC.', submitting: 'Submitting… Waiting for the PC acknowledgement.', resolved: ask.allow ? 'Resolved: allowed once by your PC.' : 'Resolved: denied by your PC.', elsewhere: 'Answered on another device or on the PC.', expired: 'Expired. This request can no longer be answered.', cancelled: 'Cancelled by the PC.', unavailable: 'This request is no longer available. Fetch current requests.', unknown: 'Outcome unknown. Check the PC before answering again. Nothing will be retried.', refused: 'The PC refused this answer.' };
-    el('approval-status').textContent = `${states[ask.state]}${ask.message ? ` ${ask.message}` : ''}`;
+    text('approval-status', `${states[ask.state]}${ask.message ? ` ${ask.message}` : ''}`);
     el('allow-approval').disabled = el('deny-approval').disabled = !sessions.canApprove || !ask.detail;
   }
   el('refresh-device').addEventListener('click', () => void device.load());
@@ -66,6 +79,10 @@ export function mountCompanion(document, window, sessions, checkAccess) {
   el('allow-approval').addEventListener('click', () => sessions.answerApproval(true));
   el('deny-approval').addEventListener('click', () => sessions.answerApproval(false));
   el('close-approval').addEventListener('click', () => el('approval-sheet').close());
+  sheet.addEventListener('close', () => {
+    if (approvalInvoker?.isConnected && !approvalInvoker.closest('[hidden]')) approvalInvoker.focus();
+    else if (!el('attention-title').closest('section').hidden) el('attention-title').focus();
+  });
   const previousChanged = sessions.changed;
   sessions.changed = (model) => { previousChanged(model); device.access(model.authorized); notifications.access(model.authorized); renderAttention(); renderNotifications(); };
   const refetch = async () => {

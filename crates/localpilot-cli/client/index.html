@@ -3,27 +3,28 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#f5f3ec">
+    <meta name="theme-color" content="#f5f3ec" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#1c2422" media="(prefers-color-scheme: dark)">
     <meta name="color-scheme" content="light dark">
     <meta name="referrer" content="no-referrer">
     <title>LocalLink</title>
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="icon" href="/assets/7e30abac91acb4223c4be4d0d6e87a32a0c9b1c4048c00bf8ace321a991187b8/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/7e30abac91acb4223c4be4d0d6e87a32a0c9b1c4048c00bf8ace321a991187b8/style.css">
-    <script type="module" src="/assets/7e30abac91acb4223c4be4d0d6e87a32a0c9b1c4048c00bf8ace321a991187b8/app.js"></script>
+    <link rel="icon" href="/assets/483642f20413b2370a0e765b2ee012ae7525c7d9d8c3175f30939e8630da46da/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/483642f20413b2370a0e765b2ee012ae7525c7d9d8c3175f30939e8630da46da/style.css">
+    <script type="module" src="/assets/483642f20413b2370a0e765b2ee012ae7525c7d9d8c3175f30939e8630da46da/app.js"></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
     <div class="shell">
       <header class="masthead">
-        <a class="brand" href="#sessions" aria-label="LocalLink sessions">LocalLink<span>YOUR PC, WITH YOU</span></a>
+        <a class="brand" href="#sessions">LocalLink<span>YOUR PC, WITH YOU</span></a>
         <span class="connection" id="connection">Not connected</span>
       </header>
       <main id="main" tabindex="-1">
         <p id="app-update" class="help" role="status"></p>
         <section data-panel="sessions" aria-labelledby="sessions-title">
           <p class="eyebrow" id="sessions-eyebrow">Sessions</p>
-          <h1 id="sessions-title">Your work stays<br>on your computer.</h1>
+          <h1 id="sessions-title" tabindex="-1">Your work stays<br>on your computer.</h1>
           <p class="intro" id="sessions-intro">A quiet place to follow your LocalPilot sessions from your phone.</p>
           <div class="empty-state pairing" id="pair-card">
             <div id="pair-status" role="status" aria-live="polite" aria-atomic="true">
@@ -67,7 +68,7 @@
           <div id="session-view" hidden>
             <header class="session-heading">
               <p id="session-project" class="eyebrow"></p>
-              <h2 id="session-name"></h2>
+              <h1 id="session-name" tabindex="-1"></h1>
               <p id="session-state" role="status"></p>
               <p id="last-sync" class="help"></p>
               <details class="connection-details"><summary id="session-access">Access scope unconfirmed</summary><p id="session-pc" class="help"></p><button id="session-check-access" type="button" class="secondary">Check access</button></details>
@@ -77,7 +78,9 @@
             <p id="pending-attention" class="attention-banner" role="status" hidden></p>
             <details id="session-plan" class="plan-panel" hidden><summary>Session plan</summary><ol id="plan-steps"></ol></details>
             <p id="history-limit" class="help"></p>
-            <div id="timeline" aria-label="Conversation"></div>
+            <h2 id="conversation-title" class="visually-hidden">Conversation</h2>
+            <div id="timeline" role="region" aria-labelledby="conversation-title"></div>
+            <p id="reply-announcement" class="visually-hidden" role="status" aria-atomic="true"></p>
             <p class="help">Tool activity shows only the turn in progress. Messages typed on your PC appear when the next snapshot arrives.</p>
             <details id="command-picker" hidden><summary>Slash commands</summary><div id="command-list"></div></details>
             <p id="session-notice" role="status" aria-atomic="true"></p>
@@ -94,18 +97,19 @@
         </section>
         <section data-panel="attention" aria-labelledby="attention-title" hidden>
           <p class="eyebrow">Attention</p>
-          <h1 id="attention-title">Stay close to<br>the next decision.</h1>
-          <p id="attention-status" role="status"></p><a href="#sessions">Choose or reconnect a session</a><div id="attention-list" class="session-list"></div>
+          <h1 id="attention-title" tabindex="-1">Stay close to<br>the next decision.</h1>
+          <p id="attention-status" role="status"></p><a class="standalone-link" href="#sessions">Choose or reconnect a session</a><div id="attention-list" class="session-list"></div>
         </section>
         <section data-panel="devices" aria-labelledby="devices-title" hidden>
           <p class="eyebrow">Devices</p>
-          <h1 id="devices-title">Your connection.<br>Your choice.</h1>
+          <h1 id="devices-title" tabindex="-1">Your connection.<br>Your choice.</h1>
+          <div class="empty-state"><h2>Appearance</h2><label for="theme-preference">Theme</label><select id="theme-preference" aria-describedby="theme-help"><option value="system">Follow system</option><option value="light">Light</option><option value="dark">Dark</option></select><p id="theme-help" class="help">Follow system uses your device’s light or dark appearance. Your choice is saved on this browser when available.</p></div>
           <div class="empty-state"><h2>This device</h2><p id="device-status" role="status"></p><ul id="device-list"></ul><div class="actions"><button id="refresh-device" class="secondary">Refresh access</button><button id="revoke-device" class="secondary">Revoke this device</button></div>
             <div id="revoke-confirm" hidden><p>End this phone’s access to all projects on this PC? Pair again on your PC to reconnect.</p><div class="actions"><button id="confirm-revoke">Revoke access</button><button id="cancel-revoke" class="secondary">Keep access</button></div></div>
           </div>
           <div id="notification-settings" class="empty-state" hidden><h2>Notifications</h2><p>Connected in app and notifications enabled are separate. Lock-screen notifications contain generic text. Opening one fetches current state and never approves a request.</p><label for="notification-workspace">Project for notifications</label><select id="notification-workspace"></select><p id="notification-status" role="status"></p><div class="actions"><button id="enable-notifications">Enable notifications</button><button id="test-notification" class="secondary">Test notification</button><button id="off-notifications" class="secondary">Turn notifications off</button></div></div>
         </section>
-        <dialog id="approval-sheet" aria-labelledby="approval-tool" aria-describedby="approval-status"><div class="approval-content"><p id="approval-project" class="eyebrow"></p><h2 id="approval-tool"></h2><pre id="approval-detail" tabindex="0"></pre><p id="approval-risk"></p><p id="approval-expiry"></p><p id="approval-status" role="status" aria-atomic="true"></p><div class="actions"><button id="deny-approval" class="secondary">Deny</button><button id="allow-approval">Allow once</button><button id="close-approval" class="secondary">Close</button></div></div></dialog>
+        <dialog id="approval-sheet" aria-labelledby="approval-tool" aria-describedby="approval-status"><div class="approval-content"><p id="approval-project" class="eyebrow"></p><h2 id="approval-tool" tabindex="-1" autofocus></h2><pre id="approval-detail" tabindex="0"></pre><p id="approval-risk"></p><p id="approval-expiry"></p><p id="approval-status" role="status" aria-atomic="true"></p><div class="actions"><button id="deny-approval" class="secondary">Deny</button><button id="allow-approval">Allow once</button><button id="close-approval" class="secondary">Close</button></div></div></dialog>
         <noscript><p>Enable JavaScript to switch between Sessions, Attention and Devices.</p></noscript>
       </main>
       <nav aria-label="Main navigation">
