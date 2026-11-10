@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The 30 task-guidance routing and lifecycle cases from the research corpus run
+  end to end against real sessions and fail the suite on any miss; a separate
+  held-out paraphrase set reports its misses. Selection now keeps a refactor's
+  intent when it says what must not change, treats "do not fix" and "los ... niet
+  op" as no fix, reads the declared stack of a project that does not exist yet,
+  and adds no stack guidance at a mixed root without a path (ADR-0283,
+  LocalHub#280).
 - Sessions record the evidence task guidance asks for against what tools observed:
   command exit codes, refusals, fetches, and images as captured, delivered or
   inspected by an image-capable model. `/skills guidance` shows each requested

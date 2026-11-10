@@ -235,10 +235,31 @@ pub fn select_guidance(
         }
     }
     let component = read_component(input, facts);
-    let component_facts = facts.facts_for(&component.component);
-    let stacks = stacks_of(&component_facts);
+    let mut component_facts = facts.facts_for(&component.component);
+    // A project that does not exist yet has no evidence; what the user says
+    // it will be is recorded as declared, never as confirmed.
+    if component_facts.has("project.empty") {
+        for (id, value) in declared_from_request(input.request) {
+            component_facts.facts.push(crate::ProjectFact {
+                id: format!("declared.{id}"),
+                value,
+                confidence: FactConfidence::Declared,
+                source: None,
+            });
+        }
+    }
+    let mut stacks = stacks_of(&component_facts);
     let products = products_of(&component_facts);
     let mut excluded = Vec::new();
+    // Several unrelated stacks at the root, and no path saying which one the
+    // task is about: root inventory is not a reason to add each stack's
+    // guidance (rule 3).
+    let families = stack_families(&stacks);
+    let root_fallback = component.component == "." && component.reason.starts_with("no path");
+    let avalanche = root_fallback && families > 1;
+    if avalanche {
+        stacks.clear();
+    }
 
     // Explicit selection wins, and is the only way to reach a user-only package.
     let explicit = input.explicit.and_then(|name| {
@@ -364,6 +385,15 @@ pub fn select_guidance(
                             || !product_hits.is_empty()
                             || !primary.acts())
                 };
+                if avalanche && !metadata.stacks.is_empty() {
+                    excluded.push(ExcludedGuidance {
+                        name,
+                        reason: format!(
+                            "the workspace root holds {families} different stacks and no path names one"
+                        ),
+                    });
+                    continue;
+                }
                 if !matches {
                     excluded.push(ExcludedGuidance {
                         name,
@@ -590,6 +620,66 @@ fn own(skill: &Skill) -> u32 {
     u32::from(skill.scope != localpilot_skills::SkillScope::Builtin)
 }
 
+/// How many unrelated stack families `stacks` spans: frameworks of one
+/// language count once.
+fn stack_families(stacks: &[(String, SelectionConfidence)]) -> usize {
+    let mut families: BTreeSet<&str> = BTreeSet::new();
+    for (stack, _) in stacks {
+        let family = match stack.as_str() {
+            "rust" => "rust",
+            "dotnet" | "aspnet" | "wpf" | "avalonia" | "csharp" => "dotnet",
+            "node" | "web" | "react" | "threejs" | "tailwind" => "web",
+            "godot" | "godot4" => "godot",
+            "unity" => "unity",
+            "unreal" => "unreal",
+            "python" => "python",
+            "go" => "go",
+            _ => continue,
+        };
+        families.insert(family);
+    }
+    families.len()
+}
+
+/// Stacks and products a request names for a project that does not exist
+/// yet, as declared-fact ids.
+fn declared_from_request(request: &str) -> Vec<(&'static str, Option<String>)> {
+    let text = format!(" {} ", strip_quoted(request).to_lowercase());
+    let mut out = Vec::new();
+    for (words, ids) in [
+        (&["rust", "cargo"][..], &["rust"][..]),
+        (&["c#", ".net", "dotnet", "csharp"][..], &["dotnet"][..]),
+        (&["wpf"][..], &["wpf", "desktop"][..]),
+        (&["avalonia"][..], &["avalonia", "desktop"][..]),
+        (
+            &["asp.net", "web api", "rest api"][..],
+            &["aspnet", "service"][..],
+        ),
+        (&["godot"][..], &["godot", "game"][..]),
+        (&["three.js", "threejs"][..], &["threejs", "web"][..]),
+        (&["react"][..], &["react"][..]),
+        (&["python"][..], &["python"][..]),
+        (
+            &["cli", "command-line", "command line", "commandline"][..],
+            &["cli"][..],
+        ),
+        (&["library", "bibliotheek", "crate"][..], &["library"][..]),
+        (&["service", "api"][..], &["service"][..]),
+        (&["game", "spel"][..], &["game"][..]),
+        (&["desktop app", "desktop-app"][..], &["desktop"][..]),
+        (&["website", "web app", "webapp"][..], &["web"][..]),
+    ] {
+        if words.iter().any(|word| find_phrase(&text, word).is_some()) {
+            for id in ids {
+                if !out.iter().any(|(have, _)| have == id) {
+                    out.push((*id, None));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn describe_needs(stacks: &[String], products: &[String]) -> String {
     match (stacks.is_empty(), products.is_empty()) {
         (false, true) => format!("stack {}", stacks.join("/")),
@@ -662,6 +752,11 @@ const INTENT_WORDS: &[(TaskIntent, &[&str])] = &[
             "make a",
             "make an",
             "support",
+            "improve",
+            "change the",
+            "update the",
+            "verbeter",
+            "wijzig",
             "voeg toe",
             "toevoegen",
             "bouw",
@@ -696,6 +791,7 @@ const INTENT_WORDS: &[(TaskIntent, &[&str])] = &[
             "audit",
             "controleer deze wijziging",
             "controleer de wijziging",
+            "controleer",
             "beoordeel",
             "nakijken",
             "kijk na",
@@ -731,8 +827,7 @@ const INTENT_WORDS: &[(TaskIntent, &[&str])] = &[
 
 /// Words for a defect fix: investigation first, then implementation.
 const FIX_WORDS: &[&str] = &[
-    "fix", "repair", "resolve", "solve", "los op", "los de", "los het", "repareer", "herstel",
-    "oplossen",
+    "fix", "repair", "resolve", "solve", "repareer", "herstel", "oplossen",
 ];
 
 /// Dutch separable verbs: the verb, its particle later in the same sentence,
@@ -755,7 +850,28 @@ fn separable(text: &str, verb: &str, particle: &str) -> Option<usize> {
         .split(['.', '!', '?', ';', '\n'])
         .next()
         .unwrap_or_default();
-    find_phrase(sentence, particle).map(|_| at)
+    let particle_at = find_phrase(sentence, particle)?;
+    // "los de test niet op": the user says not to.
+    if find_phrase(&sentence[..particle_at], "niet").is_some() {
+        return None;
+    }
+    Some(at)
+}
+
+/// Whether the words just before `at` negate what follows ("don't fix").
+fn negated_before(text: &str, at: usize) -> bool {
+    let before = &text[..at];
+    let tail: String = before
+        .chars()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    ["don't ", "do not ", "not ", "niet ", "never ", "nooit "]
+        .iter()
+        .any(|negation| tail.ends_with(negation))
 }
 
 /// Phrases that forbid changing anything.
@@ -808,6 +924,7 @@ pub fn read_intent(request: &str) -> IntentReading {
     if let Some(at) = FIX_WORDS
         .iter()
         .filter_map(|word| find_phrase(&text, word))
+        .filter(|at| !negated_before(&text, *at))
         .min()
     {
         found.push((at, TaskIntent::Investigate));
@@ -816,7 +933,9 @@ pub fn read_intent(request: &str) -> IntentReading {
     found.sort();
     let mut phases: Vec<TaskIntent> = Vec::new();
     for (_, intent) in found {
-        if no_change && matches!(intent, TaskIntent::Implement | TaskIntent::Refactor) {
+        // "Without changing" forbids new behaviour; a refactor keeps behaviour by
+        // definition, so it stays.
+        if no_change && intent == TaskIntent::Implement {
             continue;
         }
         if !phases.contains(&intent) {
@@ -1156,6 +1275,42 @@ mod tests {
         let reading = read_intent("the settings page");
         assert!(reading.phases.is_empty());
         assert_eq!(reading.confidence, SelectionConfidence::Tentative);
+    }
+
+    #[test]
+    fn negation_and_constraints_keep_the_intent_the_user_meant() {
+        // A refactor keeps behaviour; saying so does not cancel it.
+        assert_eq!(
+            phases("Refactor crates/math without changing its public behavior."),
+            ["refactor"]
+        );
+        // "Do not fix" and "los ... niet op" are not fixes.
+        assert_eq!(
+            phases("Controleer alleen de diff; los de falende test niet op."),
+            ["review"]
+        );
+        assert_eq!(
+            phases("Review the change, do not fix the failing test."),
+            ["review"]
+        );
+        assert_eq!(phases("Improve the camera drag."), ["implement"]);
+        assert_eq!(phases("Verbeter de foutmelding."), ["implement"]);
+    }
+
+    #[test]
+    fn an_empty_project_takes_its_stack_from_the_request() {
+        let declared: Vec<&str> = declared_from_request("Maak een nieuwe Rust CLI voor tellen.")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(declared, ["rust", "cli"]);
+        let wpf: Vec<&str> = declared_from_request("Build a new WPF editor.")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(wpf, ["wpf", "desktop"]);
+        // Quoted text declares nothing.
+        assert!(declared_from_request("Explain \"rust cli\" in the log.").is_empty());
     }
 
     #[test]

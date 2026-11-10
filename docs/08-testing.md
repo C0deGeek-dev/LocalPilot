@@ -1052,3 +1052,12 @@ task_evidence` runs real shell commands under assisted guidance: exit 3 then exi
 leaves it planned, a read-only profile makes it denied, a Godot project's engine
 evidence stays unavailable after an unrelated command, and the recorded session
 events and completion check are identical with guidance off and on.
+
+### Routing corpus
+
+`cargo test -p localpilot-harness --test routing_corpus -- --nocapture` checks the
+frozen corpus digest, runs all 30 cases as real sessions in temporary projects
+(see ADR-0283 for what each assertion reads), and runs ten held-out paraphrases
+whose misses are printed. A miss in the frozen cases fails; a held-out miss only
+fails when it breaks a hard invariant (a tool-set change, user-only or untrusted
+text in a request).

@@ -2,6 +2,49 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0283: The Routing Corpus Runs End To End Against Real Sessions
+
+**Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#280. Builds on ADR-0271
+and ADR-0276 to ADR-0282.
+
+**Context.** The research corpus (30 Dutch and English routing and lifecycle cases)
+froze the intended behaviour but was only a specification. Asserting a selector
+label would not show what the model receives, and tuning rules until the same
+cases pass says nothing about other phrasings.
+
+**Decision.** `crates/localpilot-harness/tests/routing_corpus.rs` runs the corpus,
+copied unchanged into `tests/fixtures/routing-cases.json` and checked against the
+digest the research recorded.
+- Each case's synthetic facts become files in a temporary project and home: Cargo,
+  .NET, WPF, Avalonia, web, Godot, Unity and Unreal markers, sibling components,
+  a global package, a user-only package and an untrusted overlay package. Host
+  facts and a pre-existing failing test are recorded, not simulated; they do not
+  change selection.
+- A real session runs with the guidance hook in the case's mode and a scripted
+  provider. Lifecycle events are driven: a tool call that moves the work to
+  another component, a compaction and a resume, bodies too large for the budget,
+  and a tool result that tries to redirect the task.
+- Assertions read the final provider request, the guidance record and the
+  selection: intent, component, the exact supplement set (corpus ids mapped to the
+  built-in packages), forbidden guidance absent, bodies or names as the loading
+  requires, no user-only or untrusted text, guidance off adding nothing, the
+  explicit path reaching a user-only package, and the tool set equal to a session
+  without guidance.
+- Running the corpus found three rule gaps, fixed in selection rather than in the
+  cases: a request that says how a refactor must not change behaviour kept its
+  refactor intent; "los ... niet op" and "do not fix" are not fixes; a project that
+  does not exist yet takes the stack and product the user names as declared facts;
+  and a root holding several stacks with no path naming one gets no stack
+  supplements. "Improve", "verbeter" and a bare "controleer" were added.
+- Ten paraphrases written separately are run as a held-out set. Their misses are
+  printed, not fixed; only hard invariants fail that test. At this decision nine
+  of ten match; "Make the orbit controls smoother." names no intent the word lists
+  know.
+
+**Consequences.** The frozen cases are a regression gate for selection, loading
+and lifecycle. The held-out result is a measurement of the word lists, not of a
+model. Model-quality comparisons remain separate work.
+
 ## ADR-0282: Guidance Names The Evidence It Needs; The Session Records What Was Observed
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#279. Builds on ADR-0276,
