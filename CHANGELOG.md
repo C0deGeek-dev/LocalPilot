@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A shared session whose copy on the background server lost its order (a gap,
+  or a snapshot that did not verify) now recovers by itself: the server asks
+  the terminal for one fresh snapshot instead of waiting until the terminal
+  happens to send one. A terminal that keeps losing it still ends sharing.
+  Phones see the usual resynchronisation.
 - `ProjectFacts` reads bounded, read-only facts about the component a path
   belongs to: Cargo, .NET, Node, Godot, Unity, Unreal, Python and Go manifests,
   versions and toolchain pins, existing test targets and scripts, and tools on

@@ -308,8 +308,11 @@ use a new correlation id but must repeat the same command. Commands without
   `relay_command {relay, share, device, n, command}` for each device command
   the server admitted, and `relay_devices {relay, share, version, baseline,
   attaches, detaches, devices}` saying who is attached (a baseline first, then
-  strictly newer versions; `devices` is `null` when unknown; ADR-0251). The
-  gateway refuses it from browsers.
+  strictly newer versions; `devices` is `null` when unknown; ADR-0251), and
+  `relay_snapshot_wanted {relay, share}` when the server's copy lost the
+  session's order (a gap, or a snapshot that did not verify): once per loss,
+  answered with a fresh snapshot that counts toward the source's loss limit.
+  The gateway refuses it from browsers.
 
 A device attaches only to a shared session (`device_attach` with a `resume_id`
 target); opening a session or attaching to any other is refused.

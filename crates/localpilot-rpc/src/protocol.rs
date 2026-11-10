@@ -653,6 +653,14 @@ pub enum ServerEvent {
         n: u64,
         command: Box<ClientCommand>,
     },
+    /// To a relay's source only: the server's mirror of the shared session
+    /// lost its order (a gap, or a snapshot that did not verify) and knows
+    /// nothing until the source sends a fresh snapshot. Sent once per loss.
+    /// A source that does not know this record ignores it.
+    RelaySnapshotWanted {
+        relay: String,
+        share: String,
+    },
     /// Reply to `gateway_register`: the capability the gateway presents on
     /// each device connection. Valid while the registering connection stays
     /// open.

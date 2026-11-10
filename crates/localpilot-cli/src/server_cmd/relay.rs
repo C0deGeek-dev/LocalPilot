@@ -585,6 +585,32 @@ where
     outcome
 }
 
+/// Ask the source for a fresh snapshot, once per loss. Best effort: a full
+/// queue drops the request (the source's next snapshot still recovers), and a
+/// source that does not know the record ignores it.
+fn want_snapshot(
+    outgoing: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    relayed: &RelayedSession,
+    wanted: &mut bool,
+) {
+    if *wanted {
+        return;
+    }
+    let record = ServerRecord {
+        v: RPC_PROTOCOL_VERSION,
+        id: None,
+        seq: None,
+        event: ServerEvent::RelaySnapshotWanted {
+            relay: relayed.relay.clone(),
+            share: relayed.share.clone(),
+        },
+    };
+    if let Ok(mut bytes) = serde_json::to_vec(&record) {
+        bytes.push(b'\n');
+        *wanted = outgoing.try_send(bytes).is_ok();
+    }
+}
+
 /// The relay ended: nothing more may be queued, and every command still
 /// queued for the source or waiting for its decision is settled as unknown,
 /// so none is left "still being handled" by a relay that is gone. Nothing is
@@ -626,6 +652,9 @@ where
     let mut assembly: Option<SnapshotAssembly> = None;
     // The source position the mirror follows: its epoch and last record.
     let mut position: Option<(String, u64)> = None;
+    // Whether a fresh snapshot was asked for since the mirror lost its order:
+    // asked once per loss, never again until a snapshot installs.
+    let mut wanted = false;
     let mut next_n: u64 = 0;
     loop {
         let read = tokio::select! {
@@ -693,6 +722,8 @@ where
                 // is complete; until then it is unknown.
                 relayed.feed.forget();
                 position = None;
+                // A snapshot is coming: if it fails, the source is asked again.
+                wanted = false;
                 if let Some(push) = &relayed.push {
                     push.observe(relayed.session, crate::remote_push_send::Mirror::Gap);
                 }
@@ -711,14 +742,18 @@ where
                 }
             }
             RelayRecord::RelaySnapshotCommit { digest } => {
-                let Some(complete) = assembly.take() else {
+                // Unknown until a snapshot verifies; the source is asked for
+                // another.
+                let Some(received) = assembly
+                    .take()
+                    .and_then(|complete| complete.commit(&digest).ok())
+                else {
+                    want_snapshot(&outgoing, relayed, &mut wanted);
                     continue;
-                };
-                let Ok(received) = complete.commit(&digest) else {
-                    continue; // stays unknown until a snapshot verifies
                 };
                 if relayed.feed.install(&received.snapshot) {
                     position = Some((received.epoch, received.seq));
+                    wanted = false;
                     if let (Some(push), ServerEvent::Snapshot { asks, .. }) =
                         (&relayed.push, &received.snapshot)
                     {
@@ -745,6 +780,11 @@ where
                         if let Some(push) = &relayed.push {
                             push.observe(relayed.session, crate::remote_push_send::Mirror::Gap);
                         }
+                    }
+                    // Unless a snapshot is on its way, the source is asked for
+                    // one: it cannot see the gap.
+                    if assembly.is_none() {
+                        want_snapshot(&outgoing, relayed, &mut wanted);
                     }
                     continue;
                 }

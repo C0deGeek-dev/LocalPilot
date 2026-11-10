@@ -935,7 +935,11 @@ at most 64 parts and 2 MiB; the snapshot's own position must match its
 announcement), then every later record in order, and a fresh snapshot whenever the feed
 starts a new epoch or its host publishes new history or admission (ADR-0251). The server installs a snapshot into a mirror atomically (projection,
 history and admission together) and keeps the mirror unknown after any gap until
-the next verified snapshot. Paired devices discover and attach only relayed
+the next verified snapshot. It asks the source for that snapshot
+(`relay_snapshot_wanted`, once per loss, re-armed when a snapshot begins); the
+source answers with a fresh one and counts the request as a loss, so a server
+that keeps losing the order ends sharing rather than loop (amended 2026-11-10).
+Paired devices discover and attach only relayed
 sessions; hosted and stored sessions stay local, and devices cannot open new
 ones.
 

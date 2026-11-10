@@ -205,7 +205,8 @@ where
     let mut attendance_version: Option<u64> = None;
     loop {
         // Why the next snapshot is sent: `Some(true)` after a loss seen here
-        // (rate limited), `Some(false)` when the feed moved to a new epoch or
+        // or reported by the server (rate limited), `Some(false)` when the feed
+        // moved to a new epoch or
         // the host published new history or admission (a loss there is
         // recognised from the feed's own loss count).
         let mut resnapshot: Option<bool> = None;
@@ -253,7 +254,17 @@ where
                         }
                         continue;
                     }
-                    if let Ok(ServerEvent::RelayCommand {
+                    // The server's mirror lost this relay's order: a fresh
+                    // snapshot, counted as a loss so a server that keeps
+                    // losing it ends sharing instead of looping.
+                    let wanted_here = matches!(
+                        &event,
+                        Ok(ServerEvent::RelaySnapshotWanted { relay: to, share })
+                            if *to == relay && *share == identity.share
+                    );
+                    if wanted_here {
+                        resnapshot = Some(true);
+                    } else if let Ok(ServerEvent::RelayCommand {
                         relay: to,
                         share,
                         device,
@@ -273,7 +284,9 @@ where
                             write_or_end!(&result);
                         }
                     }
-                    continue;
+                    if !wanted_here {
+                        continue;
+                    }
                 }
                 Ok(None) | Err(_) => return Ok(RelayEnd::ServerGone),
             },
@@ -586,6 +599,90 @@ mod tests {
         assert!(incoming.try_recv().is_err(), "nothing reached the host");
         stop.cancel();
         let _ = tokio::time::timeout(QUICK, relay).await;
+    }
+
+    #[tokio::test]
+    async fn a_server_that_lost_the_mirror_gets_a_fresh_snapshot_until_it_keeps_losing_it() {
+        let source = SessionSource::start(AskRegistry::default());
+        let stop = CancellationToken::new();
+        let (client, peer) = tokio::io::duplex(1 << 20);
+        let relay = tokio::spawn({
+            let feed = source.feed();
+            let stop = stop.clone();
+            async move { run_relay(client, feed, &identity(), &stop, None, None).await }
+        });
+        let (read, mut write) = tokio::io::split(peer);
+        let mut read = BufReader::new(read);
+        let mut line = String::new();
+        read.read_line(&mut line).await.unwrap(); // relay_host
+        let send = |event: ServerEvent| {
+            let mut bytes = serde_json::to_vec(&ServerRecord {
+                v: RPC_PROTOCOL_VERSION,
+                id: None,
+                seq: None,
+                event,
+            })
+            .unwrap();
+            bytes.push(b'\n');
+            bytes
+        };
+        write
+            .write_all(&send(ServerEvent::RelayReady {
+                relay: "r1".to_string(),
+            }))
+            .await
+            .unwrap();
+        let wanted = |relay: &str, share: &str| ServerEvent::RelaySnapshotWanted {
+            relay: relay.to_string(),
+            share: share.to_string(),
+        };
+        /// How many snapshots begin before the source goes quiet for `wait`.
+        async fn begins_within(
+            read: &mut BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+            wait: Duration,
+        ) -> usize {
+            let mut count = 0;
+            let mut line = String::new();
+            while let Ok(Ok(n)) = tokio::time::timeout(wait, read.read_line(&mut line)).await {
+                if n == 0 {
+                    break;
+                }
+                if line.contains("relay_snapshot_begin") {
+                    count += 1;
+                }
+                line.clear();
+            }
+            count
+        }
+        assert_eq!(
+            begins_within(&mut read, Duration::from_millis(200)).await,
+            1,
+            "the first snapshot"
+        );
+
+        // Another relay's or an earlier share's request is ignored.
+        write.write_all(&send(wanted("r0", "s"))).await.unwrap();
+        write.write_all(&send(wanted("r1", "old"))).await.unwrap();
+        assert_eq!(
+            begins_within(&mut read, Duration::from_millis(200)).await,
+            0
+        );
+
+        // This relay's request is answered with a fresh snapshot.
+        write.write_all(&send(wanted("r1", "s"))).await.unwrap();
+        assert_eq!(
+            begins_within(&mut read, Duration::from_millis(200)).await,
+            1
+        );
+
+        // Each request counts as a loss: a server that keeps losing the
+        // mirror ends sharing rather than loop.
+        for _ in 0..3 {
+            write.write_all(&send(wanted("r1", "s"))).await.unwrap();
+        }
+        let _ = begins_within(&mut read, Duration::from_millis(200)).await;
+        let end = tokio::time::timeout(QUICK, relay).await.unwrap().unwrap();
+        assert_eq!(end.unwrap(), RelayEnd::Unstable);
     }
 
     fn shown(text: &str) -> crate::relay_source::History {

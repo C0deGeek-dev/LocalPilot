@@ -10793,6 +10793,85 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mirror_that_loses_order_asks_its_source_for_one_fresh_snapshot() {
+        use localpilot_rpc::{snapshot_records, RelayRecord, TurnState};
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 1, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        let (mut reader, mut write) = hand_relay(&endpoint, &source).await;
+        async fn send(write: &mut (impl AsyncWrite + Unpin), record: &RelayRecord) {
+            let mut line = serde_json::to_vec(record).unwrap();
+            line.push(b'\n');
+            write.write_all(&line).await.unwrap();
+            write.flush().await.unwrap();
+        }
+        async fn wanted(reader: &mut JsonRecordReader<impl AsyncRead + Unpin>) -> bool {
+            timeout(Duration::from_millis(500), async {
+                loop {
+                    match read_event(reader).await {
+                        ServerEvent::RelaySnapshotWanted { share, .. } => {
+                            assert_eq!(share, "share-1");
+                            return;
+                        }
+                        ServerEvent::RelayDevices { .. } => {}
+                        other => panic!("{other:?}"),
+                    }
+                }
+            })
+            .await
+            .is_ok()
+        }
+        let warning = |seq: u64| RelayRecord::RelayEvent {
+            epoch: "e".to_string(),
+            seq,
+            event: ServerEvent::Warning {
+                message: "w".to_string(),
+            },
+        };
+        let snapshot = mirror_snapshot(TurnState::Idle, false, 0, "h");
+        for record in snapshot_records(&snapshot).unwrap() {
+            send(&mut write, &record).await;
+        }
+        send(&mut write, &warning(4)).await;
+        assert!(!wanted(&mut reader).await, "in order: nothing asked");
+
+        // A gap: one request, however many records follow out of order.
+        send(&mut write, &warning(9)).await;
+        assert!(wanted(&mut reader).await, "a gap asks for a snapshot");
+        send(&mut write, &warning(10)).await;
+        assert!(!wanted(&mut reader).await, "asked once per loss");
+
+        // The answer fails to verify: asked again.
+        let mut answer = snapshot_records(&snapshot).unwrap();
+        if let Some(RelayRecord::RelaySnapshotCommit { digest }) = answer.last_mut() {
+            *digest = "0".repeat(64);
+        }
+        for record in &answer {
+            send(&mut write, record).await;
+        }
+        assert!(wanted(&mut reader).await, "a failed snapshot asks again");
+
+        // A verified snapshot restores the mirror and re-arms the request.
+        for record in snapshot_records(&snapshot).unwrap() {
+            send(&mut write, &record).await;
+        }
+        send(&mut write, &warning(4)).await;
+        assert!(!wanted(&mut reader).await);
+        let mirror = hosts
+            .relayed(&AttachTarget::ResumeId {
+                session_id: source.identity.session,
+            })
+            .expect("relayed");
+        let ServerEvent::Snapshot { turn, .. } = mirror_view(&mirror.feed) else {
+            panic!("a snapshot")
+        };
+        assert_eq!(turn, TurnState::Idle, "known again");
+        send(&mut write, &warning(7)).await;
+        assert!(wanted(&mut reader).await, "a later loss asks again");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_retried_phone_prompt_runs_once_and_gets_its_recorded_reply() {
         let factory = Arc::new(FakeFactory::new(
             FakeProvider::new().text("only once").text("never"),
