@@ -21,6 +21,7 @@
 pub mod dev;
 pub mod doctor;
 pub mod installed;
+mod running;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -293,6 +294,10 @@ pub async fn install(
                 workspace.display()
             )?;
         }
+    }
+
+    if let Some(bin) = shared_bin_dir() {
+        running::offer_to_stop(&tools, &bin, out)?;
     }
 
     let mut failed = Vec::new();

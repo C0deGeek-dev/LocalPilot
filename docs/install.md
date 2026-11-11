@@ -252,6 +252,13 @@ of the newest published release — the way to test work that is pushed but not 
 cut. It needs a Rust toolchain and covers the app tools only; the engine always
 uses its released binaries.
 
+Before it installs, an update lists any stack tool still running from the
+managed directory — a `localpilot` server, or `localpilot`/`localmind` MCP
+servers an editor keeps alive — and, at a terminal, asks whether to stop them.
+Declining is safe: the new executables are swapped in beside the running ones,
+which keep their old build until they restart. Without a terminal (a script, a
+pipe) the list is printed and nothing is stopped.
+
 ### Developing the stack
 
 With the LocalX repositories checked out side by side, pin that workspace once

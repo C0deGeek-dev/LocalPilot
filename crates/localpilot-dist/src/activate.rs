@@ -69,8 +69,7 @@ pub fn place(bin_dir: &Path, tool: &str, source: &Path) -> Result<PathBuf, DistE
     // be executing right now, and rename is the one operation that is still
     // permitted in that state.
     let displaced = if dest.exists() {
-        let displaced = bin_dir.join(format!("{}{DISPLACED_SUFFIX}", executable_name(tool)));
-        let _ = std::fs::remove_file(&displaced);
+        let displaced = free_displaced_slot(bin_dir, tool);
         match std::fs::rename(&dest, &displaced) {
             Ok(()) => Some(displaced),
             Err(error) => {
@@ -134,6 +133,31 @@ pub fn activate(
         },
     };
     place(bin_dir, tool, &executable).map(Some)
+}
+
+/// Upper bound on numbered displaced slots tried before giving up and reusing
+/// the plain name (whose rename then reports the real error).
+const MAX_DISPLACED_SLOTS: u32 = 64;
+
+/// A path the active executable can be renamed to.
+///
+/// The plain `<exe>.displaced` name is preferred, but a copy displaced by an
+/// earlier swap can still be running — a long-lived server, or an MCP child of
+/// an editor — and then the sweep cannot unlink it, and renaming onto it is
+/// refused. Every swap after the first would fail until that process exited.
+/// A numbered `<exe>.<n>.displaced` slot sidesteps the held file; the suffix is
+/// unchanged, so the sweep and `localx doctor` still recognise it.
+fn free_displaced_slot(bin_dir: &Path, tool: &str) -> PathBuf {
+    let exe = executable_name(tool);
+    let plain = bin_dir.join(format!("{exe}{DISPLACED_SUFFIX}"));
+    let _ = std::fs::remove_file(&plain);
+    if !plain.exists() {
+        return plain;
+    }
+    (1..=MAX_DISPLACED_SLOTS)
+        .map(|n| bin_dir.join(format!("{exe}.{n}{DISPLACED_SUFFIX}")))
+        .find(|slot| !slot.exists())
+        .unwrap_or(plain)
 }
 
 /// Remove executables displaced by an earlier activation. Failure is ignored:
@@ -210,6 +234,29 @@ mod tests {
         place(&bin, "tool", &source).expect("place");
 
         assert!(!stale.exists(), "the displaced file should have been swept");
+    }
+
+    #[test]
+    fn a_displaced_copy_that_cannot_be_swept_does_not_block_the_next_swap() {
+        let temp = tempfile::tempdir().expect("temp");
+        let bin = temp.path().join("bin");
+
+        let first = temp.path().join("first");
+        write(&first, "v1");
+        place(&bin, "tool", &first).expect("first");
+
+        // A displaced copy still held by a running process cannot be unlinked.
+        // A non-empty directory under that name stands in for it portably:
+        // neither the sweep nor a rename can replace it.
+        let held = bin.join(format!("{}{DISPLACED_SUFFIX}", executable_name("tool")));
+        write(&held.join("in-use"), "held");
+
+        let second = temp.path().join("second");
+        write(&second, "v2");
+        let placed = place(&bin, "tool", &second).expect("swap past the held copy");
+
+        assert_eq!(std::fs::read_to_string(&placed).expect("read"), "v2");
+        assert!(held.join("in-use").exists(), "the held copy is left alone");
     }
 
     #[test]
