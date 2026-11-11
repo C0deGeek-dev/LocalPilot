@@ -929,6 +929,12 @@ enum PumpedSlash {
     },
     /// Read and present the LocalBox-owned catalog without side effects.
     LocalBoxModels,
+    /// Read the catalog and open the model picker.
+    LocalBoxPick,
+    /// Tune one model with LocalBench.
+    LocalBoxBenchmark {
+        model: String,
+    },
     SelfImprove(localpilot_slash::SelfImproveAction),
     Compact {
         force: bool,
@@ -1057,6 +1063,10 @@ fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
             allow_untuned,
         }),
         SlashAction::LocalBoxModels => SlashRoute::Pumped(PumpedSlash::LocalBoxModels),
+        SlashAction::LocalBoxPick => SlashRoute::Pumped(PumpedSlash::LocalBoxPick),
+        SlashAction::LocalBoxBenchmark { model } => {
+            SlashRoute::Pumped(PumpedSlash::LocalBoxBenchmark { model })
+        }
         SlashAction::SelfImprove(action) => SlashRoute::Pumped(PumpedSlash::SelfImprove(action)),
         SlashAction::Compact { force } => SlashRoute::Pumped(PumpedSlash::Compact { force }),
         SlashAction::Ingest(localpilot_slash::IngestAction::Run) => {
@@ -3660,6 +3670,8 @@ async fn execute_fullscreen_slash_action(
         // explicit defensive arm makes a future routing regression visible.
         SlashAction::LocalBoxAdopt { .. }
         | SlashAction::LocalBoxModels
+        | SlashAction::LocalBoxPick
+        | SlashAction::LocalBoxBenchmark { .. }
         | SlashAction::LocalBoxServe { .. } => app.apply_runtime(RuntimeUpdate::Warning(
             "/localbox could not enter the operation pump".to_string(),
         )),
@@ -5318,6 +5330,11 @@ async fn drive_slash_command(
             .await
         }
         PumpedSlash::LocalBoxModels => drive_localbox_models(terminal, app, ctx, queue).await,
+        PumpedSlash::LocalBoxPick => drive_localbox_pick(terminal, app, ctx, queue).await,
+        PumpedSlash::LocalBoxBenchmark { model } => {
+            drive_localbox_benchmark(terminal, app, runtime, authority.config, ctx, model, queue)
+                .await
+        }
         PumpedSlash::SelfImprove(action) => {
             drive_selfimprove(
                 terminal,
@@ -5388,6 +5405,12 @@ enum LocalBoxPumpResult {
     Cancelled,
     Models(String),
     ModelsFailed(String),
+    Picker(Vec<crate::localbox::PickerModel>),
+    Benchmark {
+        model: String,
+        outcome: crate::localbox::BenchmarkOutcome,
+    },
+    BenchmarkFailed(String),
     Failed(String),
 }
 
@@ -5847,6 +5870,122 @@ async fn drive_localbox_models(
     .await
 }
 
+async fn drive_localbox_pick(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+) -> Result<bool> {
+    let cancel = CancellationToken::new();
+    app.begin_work();
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    let operation = async {
+        match crate::localbox::picker_models().await {
+            Ok(models) => LocalBoxPumpResult::Picker(models),
+            Err(error) => LocalBoxPumpResult::ModelsFailed(error.to_string()),
+        }
+    };
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: String::new(),
+        vision_capable: false,
+    };
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+            stages: &mut *ctx.stages,
+            guidance: ctx.guidance,
+            execution: ctx.execution.clone(),
+            source: ctx.source,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        apply_localbox_pump_result,
+    )
+    .await
+}
+
+async fn drive_localbox_benchmark(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    config: &localpilot_config::Config,
+    ctx: &mut SlashContext<'_>,
+    model: String,
+    queue: &mut VecDeque<QueuedOperation>,
+) -> Result<bool> {
+    let cancel = CancellationToken::new();
+    let operation_cancel = cancel.clone();
+    let profile = crate::models_cmd::profile(config);
+    let trusted = runtime.trusted();
+    app.apply_runtime(RuntimeUpdate::Notice(format!(
+        "benchmarking {model} with LocalBench, which can take a long time; Ctrl+C stops waiting. Log: {}",
+        crate::localbox::benchmark_log_path(&model).display()
+    )));
+    app.begin_work();
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    let operation = async move {
+        match crate::localbox::run_benchmark(&model, profile, trusted, &operation_cancel).await {
+            Ok(outcome) => LocalBoxPumpResult::Benchmark { model, outcome },
+            Err(error) => LocalBoxPumpResult::BenchmarkFailed(error.to_string()),
+        }
+    };
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: String::new(),
+        vision_capable: false,
+    };
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+            stages: &mut *ctx.stages,
+            guidance: ctx.guidance,
+            execution: ctx.execution.clone(),
+            source: ctx.source,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        apply_localbox_pump_result,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_selfimprove(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -6116,6 +6255,60 @@ async fn drive_localbox(
     .await
 }
 
+/// Install the `/localbox` model list and each model's action list, then open
+/// the model list in the composer.
+fn open_localbox_picker(app: &mut AppModel, models: &[crate::localbox::PickerModel]) {
+    if models.is_empty() {
+        app.apply_runtime(RuntimeUpdate::Notice(
+            "LocalBox has no models to launch; add one with `localbox download <model>`"
+                .to_string(),
+        ));
+        return;
+    }
+    let value = |name: &str, description: &str| CompletionCommand {
+        name: name.to_string(),
+        description: description.to_string(),
+    };
+    let mut model_rows: Vec<CompletionCommand> = models
+        .iter()
+        .map(|model| value(&model.name, &model.summary))
+        .collect();
+    // The keywords stay valid values so `/localbox models` and `/localbox
+    // adopt` still run directly instead of filtering the list.
+    model_rows.push(value("models", "Show the full LocalBox catalog"));
+    model_rows.push(value(
+        "adopt",
+        "Use the LocalBox server that is already running",
+    ));
+    app.set_command_values("localbox", model_rows);
+    app.set_command_values(
+        "localbox serve",
+        models
+            .iter()
+            .map(|model| value(&model.name, &model.summary)),
+    );
+    for model in models {
+        let mut actions = Vec::new();
+        if model.tuned {
+            actions.push(value(
+                "serve",
+                "Start this model with its tuned profile and switch to it",
+            ));
+        } else {
+            actions.push(value(
+                "serve --allow-untuned",
+                "Start with LocalBox defaults (not tuned) and switch to it",
+            ));
+        }
+        actions.push(value(
+            "benchmark",
+            "Tune with LocalBench and save the best profile (slow)",
+        ));
+        app.set_command_values(format!("localbox {}", model.name), actions);
+    }
+    let _ = app.open_command_value_picker("localbox");
+}
+
 fn apply_localbox_pump_result(app: &mut AppModel, result: LocalBoxPumpResult) {
     match result {
         LocalBoxPumpResult::Adopted {
@@ -6154,6 +6347,26 @@ fn apply_localbox_pump_result(app: &mut AppModel, result: LocalBoxPumpResult) {
                 "LocalBox model listing failed: {error}"
             )))
         }
+        LocalBoxPumpResult::Picker(models) => open_localbox_picker(app, &models),
+        LocalBoxPumpResult::Benchmark { model, outcome } => {
+            use crate::localbox::BenchmarkOutcome;
+            app.apply_runtime(RuntimeUpdate::Notice(match outcome {
+                BenchmarkOutcome::Finished { log } => format!(
+                    "LocalBench saved a tuned profile for {model}; `/localbox {model} serve` uses it. Log: {}",
+                    log.display()
+                ),
+                BenchmarkOutcome::Declined => {
+                    "LocalBench run declined; nothing started".to_string()
+                }
+                BenchmarkOutcome::Detached { log } => format!(
+                    "stopped waiting; LocalBench keeps tuning {model} in the background. Log: {}",
+                    log.display()
+                ),
+            }));
+        }
+        LocalBoxPumpResult::BenchmarkFailed(error) => app.apply_runtime(RuntimeUpdate::Warning(
+            format!("LocalBench benchmark failed: {error}"),
+        )),
         LocalBoxPumpResult::Failed(error) => app.apply_runtime(RuntimeUpdate::Warning(format!(
             "LocalBox launch/adopt failed: {error}"
         ))),

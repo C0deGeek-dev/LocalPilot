@@ -73,6 +73,13 @@ block.
   row starts with the exact copy-pasteable model key and includes aliases,
   model/quant identity, required engine, tuned/default run-profile state, and
   the active model when it can be detected.
+- Bare `/localbox` reads the same catalog and opens it as a list. Choosing a
+  model opens its actions: `serve` (or `serve --allow-untuned` when it has no
+  tuned profile) runs the serve flow below, and `benchmark` runs
+  `localbench findbest --model <model>` to tune it and save the best run
+  profile. The benchmark writes its output to a log file named in the
+  session, and `Ctrl-C` stops only LocalPilot's wait. `/localbox <model>`
+  and `/localbox <model> serve` are the typed forms of the serve choice.
 - Use `/localbox serve <model>` to start that exact catalog model, wait for
   readiness, adopt the resulting provider, rebuild the registry, and switch the
   current idle conversation immediately without losing the transcript. A

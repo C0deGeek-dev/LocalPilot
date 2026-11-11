@@ -238,7 +238,9 @@ unchanged. Run `localpilot --help` for the complete command tree.
   quits.
 - `/` opens slash-command completion; `@` mentions a workspace file.
 - `/model` changes provider or model without losing the conversation.
-- `/localbox serve <model>` starts that exact LocalBox catalog model, adopts its
+- `/localbox` opens a list of LocalBox models; pick one, then pick `serve` or
+  `benchmark`. `/localbox <model>` or `/localbox serve <model>` starts that
+  exact LocalBox catalog model, adopts its
   provider, and switches the current idle conversation; the older
   `/localbox adopt --serve <model>` spelling remains compatible.
 - `/selfimprove` shows the persisted self-improvement stage. Use

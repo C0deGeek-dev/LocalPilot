@@ -221,18 +221,24 @@ pub enum SlashAction {
     },
     /// Adopt a LocalBox server into `.localpilot.toml` from inside the session.
     /// `serve` starts that model first when no server is already running
-    /// (`/localbox adopt --serve <model>`); bare `/localbox` and
-    /// `/localbox adopt` retain their running-server behavior.
+    /// (`/localbox adopt --serve <model>`); `/localbox adopt` retains
+    /// its running-server behavior.
     LocalBoxAdopt {
         serve: Option<String>,
     },
     /// List the LocalBox-owned launch catalog and run-profile state.
     LocalBoxModels,
+    /// Bare `/localbox`: open the model picker, then the per-model action list.
+    LocalBoxPick,
     /// Start a named LocalBox model, then adopt and switch this session.
     LocalBoxServe {
         model: String,
         /// Explicit one-shot approval to use defaults when no tuned profile exists.
         allow_untuned: bool,
+    },
+    /// Tune a LocalBox model with LocalBench and save its best run profile.
+    LocalBoxBenchmark {
+        model: String,
     },
     /// Inspect or advance the persisted, human-gated self-improvement loop.
     SelfImprove(SelfImproveAction),
@@ -381,6 +387,9 @@ pub enum Host {
     Remote,
 }
 
+const LOCALBOX_USAGE: &str =
+    "usage: /localbox [<model> [serve|benchmark] [--allow-untuned]] | models | serve <model> [--allow-untuned] | adopt";
+
 /// The description a remote client is shown for `command`, or `None` when the
 /// command is not available remotely. The set is deliberately small: commands
 /// that change what the agent may do (permission profiles), which provider it
@@ -476,6 +485,7 @@ impl SlashAction {
             | Self::Agents(_)
             | Self::Background(_)
             | Self::LocalBoxModels
+            | Self::LocalBoxPick
             | Self::Exit { .. }
             | Self::Help
             | Self::Theme(_)
@@ -547,6 +557,9 @@ impl SlashAction {
             Self::LocalBoxServe { .. } => Persistence::Persistent(
                 "start a durable LocalBox server and write it into `.localpilot.toml`",
             ),
+            Self::LocalBoxBenchmark { .. } => {
+                Persistence::Persistent("save a tuned LocalBox run profile on disk")
+            }
             Self::SelfImprove(action) => match action {
                 SelfImproveAction::Status => Persistence::ReadOnly,
                 SelfImproveAction::Preflight | SelfImproveAction::Evidence | SelfImproveAction::Start { .. }
@@ -832,7 +845,7 @@ slash_commands! {
             "localbox",
             Optional,
             Fall,
-            "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)"
+            "Pick a LocalBox model to serve or benchmark (/localbox [<model> [serve|benchmark]]|models|adopt)"
         ),
         Selfimprove => fullscreen_only(
             "selfimprove",
@@ -1033,7 +1046,10 @@ impl SlashAction {
             SlashAction::SetEffort(_) => C::Effort,
             SlashAction::Model { .. } => C::Model,
             SlashAction::LocalBoxAdopt { .. } => C::Localbox,
-            SlashAction::LocalBoxModels | SlashAction::LocalBoxServe { .. } => C::Localbox,
+            SlashAction::LocalBoxModels
+            | SlashAction::LocalBoxPick
+            | SlashAction::LocalBoxServe { .. }
+            | SlashAction::LocalBoxBenchmark { .. } => C::Localbox,
             SlashAction::SelfImprove(_) => C::Selfimprove,
             SlashAction::NewSession => C::New,
             SlashAction::Fork => C::Fork,
@@ -1276,7 +1292,9 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
                 (!model.is_empty()).then(|| (model.to_string(), allow_untuned))
             }
 
-            if args.is_empty() || args == "adopt" {
+            if args.is_empty() {
+                SlashAction::LocalBoxPick
+            } else if args == "adopt" {
                 SlashAction::LocalBoxAdopt { serve: None }
             } else if args == "models" {
                 SlashAction::LocalBoxModels
@@ -1287,8 +1305,7 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
                 serve_target(rest).map_or_else(
                     || SlashAction::Invalid {
                         command: name.to_string(),
-                        reason: "usage: /localbox models | serve <model> [--allow-untuned] | adopt"
-                            .to_string(),
+                        reason: LOCALBOX_USAGE.to_string(),
                     },
                     |(model, allow_untuned)| SlashAction::LocalBoxServe {
                         model,
@@ -1304,19 +1321,51 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
                 serve_target(rest).map_or_else(
                     || SlashAction::Invalid {
                         command: name.to_string(),
-                        reason: "usage: /localbox models | serve <model> [--allow-untuned] | adopt"
-                            .to_string(),
+                        reason: LOCALBOX_USAGE.to_string(),
                     },
                     |(model, allow_untuned)| SlashAction::LocalBoxServe {
                         model,
                         allow_untuned,
                     },
                 )
-            } else {
+            } else if args.starts_with('-')
+                || matches!(
+                    args.split_whitespace().next(),
+                    Some("adopt" | "models" | "serve" | "benchmark")
+                )
+            {
+                // A keyword that did not match its own form above is malformed,
+                // never a model name.
+
                 SlashAction::Invalid {
                     command: name.to_string(),
-                    reason: "usage: /localbox models | serve <model> [--allow-untuned] | adopt"
-                        .to_string(),
+                    reason: LOCALBOX_USAGE.to_string(),
+                }
+            } else if let Some(model) = args
+                .strip_suffix(" benchmark")
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            {
+                SlashAction::LocalBoxBenchmark {
+                    model: model.to_string(),
+                }
+            } else {
+                // `/localbox <model> [serve] [--allow-untuned]`: the model-first
+                // form the picker submits. A bare model serves it.
+                let (rest, allow_untuned) = args
+                    .strip_suffix(" --allow-untuned")
+                    .map_or((args, false), |rest| (rest.trim(), true));
+                let model = rest.strip_suffix(" serve").map_or(rest, str::trim);
+                if model.is_empty() {
+                    SlashAction::Invalid {
+                        command: name.to_string(),
+                        reason: LOCALBOX_USAGE.to_string(),
+                    }
+                } else {
+                    SlashAction::LocalBoxServe {
+                        model: model.to_string(),
+                        allow_untuned,
+                    }
                 }
             }
         }
@@ -2350,10 +2399,7 @@ mod tests {
 
     #[test]
     fn localbox_teaches_models_and_direct_serve_while_retaining_adopt_compatibility() {
-        assert_eq!(
-            parse("/localbox"),
-            Some(SlashAction::LocalBoxAdopt { serve: None })
-        );
+        assert_eq!(parse("/localbox"), Some(SlashAction::LocalBoxPick));
         assert_eq!(
             parse("/localbox adopt"),
             Some(SlashAction::LocalBoxAdopt { serve: None })
@@ -2380,10 +2426,33 @@ mod tests {
                 allow_untuned: true,
             })
         );
+        // The model-first form the picker submits: a bare model serves it.
+        for (line, allow_untuned) in [
+            ("/localbox apex", false),
+            ("/localbox apex serve", false),
+            ("/localbox apex serve --allow-untuned", true),
+        ] {
+            assert_eq!(
+                parse(line),
+                Some(SlashAction::LocalBoxServe {
+                    model: "apex".to_string(),
+                    allow_untuned,
+                }),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            parse("/localbox apex benchmark"),
+            Some(SlashAction::LocalBoxBenchmark {
+                model: "apex".to_string()
+            })
+        );
         for malformed in [
             "/localbox --serve model",
             "/localbox adopt --serve",
             "/localbox adopt --server model",
+            "/localbox benchmark",
+            "/localbox serve",
         ] {
             assert!(matches!(
                 parse(malformed),

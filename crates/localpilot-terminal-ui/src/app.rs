@@ -4802,6 +4802,13 @@ impl AppModel {
         self.command_values.insert(command, values);
     }
 
+    /// Open the value list installed for `command` in the composer, as if the
+    /// user had submitted the bare command. Returns `false` (and changes
+    /// nothing) when no values are installed for it.
+    pub fn open_command_value_picker(&mut self, command: &str) -> bool {
+        self.open_command_values(command)
+    }
+
     pub fn set_workspace_files(&mut self, files: impl IntoIterator<Item = String>) {
         self.workspace_files = files
             .into_iter()
@@ -6539,6 +6546,11 @@ impl AppModel {
         self.editor.replace_range(range, &replacement);
         match kind {
             CompletionKind::Command if self.open_command_values(&item.name) => AppCommand::None,
+            // A value that is itself a command with values (`/localbox <model>`)
+            // opens its own list instead of running.
+            CompletionKind::CommandValue if self.open_command_values_for_draft() => {
+                AppCommand::None
+            }
             CompletionKind::CommandValue => self
                 .editor
                 .submit_command()
@@ -8233,6 +8245,35 @@ mod tests {
             app.completion().expect("space boundary value picker").kind,
             CompletionKind::CommandValue
         );
+    }
+
+    #[test]
+    fn a_command_value_with_its_own_values_opens_a_nested_list() {
+        let mut app = model();
+        app.set_command_catalog([command("localbox", "LocalBox")]);
+        app.set_command_values("localbox", [command("apex", "Qwen APEX")]);
+        app.set_command_values(
+            "localbox apex",
+            [command("serve", "Start"), command("benchmark", "Tune")],
+        );
+
+        assert!(app.open_command_value_picker("localbox"));
+        assert_eq!(app.editor.text(), "/localbox ");
+        assert_eq!(app.completion().expect("model list").items.len(), 1);
+
+        // Choosing the model opens its action list instead of running.
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert_eq!(app.editor.text(), "/localbox apex ");
+        let actions = app.completion().expect("action list");
+        assert_eq!(actions.kind, CompletionKind::CommandValue);
+        assert_eq!(actions.items.len(), 2);
+
+        let AppCommand::RunSlash(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("choosing an action should run it");
+        };
+        assert_eq!(submitted.prompt, "/localbox apex serve");
+        assert!(app.completion().is_none());
+        assert!(!app.open_command_value_picker("unknown"));
     }
 
     #[test]

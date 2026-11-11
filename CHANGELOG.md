@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/localbox` with no arguments now opens a list of LocalBox models. Choosing a
+  model asks what to do with it: serve it (start, adopt and switch to it) or
+  benchmark it with LocalBench. To adopt a server that is already running,
+  use `/localbox adopt`; bare `/localbox` no longer does this.
 - The embedded companion app groups shared sessions by project. Every project
   this phone may reach is listed with its online or offline state, and a
   project's sessions load only when you open it; browsing another project

@@ -226,6 +226,170 @@ fn render_models_catalog(catalog: &LocalBoxModelsCatalog, active_model: Option<&
     out
 }
 
+/// One row of the `/localbox` model picker: the canonical catalog name, a
+/// one-line summary, and whether a tuned run profile will be used.
+#[cfg(any(test, feature = "tui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PickerModel {
+    pub(crate) name: String,
+    pub(crate) summary: String,
+    pub(crate) tuned: bool,
+}
+
+/// Read the LocalBox catalog for the interactive picker. No server is started
+/// and no file is written.
+#[cfg(feature = "tui")]
+pub(crate) async fn picker_models() -> anyhow::Result<Vec<PickerModel>> {
+    let catalog = read_models_catalog().await?;
+    let active_model = match detect().await {
+        LocalBoxState::Running { model, .. } => model,
+        LocalBoxState::NotInstalled | LocalBoxState::InstalledNotRunning => None,
+    };
+    Ok(picker_rows(&catalog, active_model.as_deref()))
+}
+
+#[cfg(any(test, feature = "tui"))]
+fn picker_rows(catalog: &LocalBoxModelsCatalog, active_model: Option<&str>) -> Vec<PickerModel> {
+    catalog
+        .models
+        .iter()
+        // A name with whitespace cannot be a single picker token.
+        .filter(|model| !model.name.is_empty() && !model.name.contains(char::is_whitespace))
+        .map(|model| {
+            let tuned = model.run_profile.source == "tuned";
+            let display = safe_catalog_field(
+                model.display_name.as_deref().unwrap_or(&model.repository),
+                80,
+            );
+            let profile = if tuned {
+                format!(
+                    "tuned {} · {}",
+                    safe_catalog_field(
+                        model
+                            .run_profile
+                            .quant
+                            .as_deref()
+                            .unwrap_or("default quant"),
+                        40
+                    ),
+                    safe_catalog_field(
+                        model
+                            .run_profile
+                            .context
+                            .as_deref()
+                            .unwrap_or("default context"),
+                        20
+                    ),
+                )
+            } else {
+                "not tuned".to_string()
+            };
+            let active = active_model.is_some_and(|active| {
+                active == model.name || model.aliases.iter().any(|alias| alias == active)
+            }) || model.active == Some(true);
+            PickerModel {
+                name: safe_catalog_field(&model.name, 100),
+                summary: format!(
+                    "{display} · {profile}{}",
+                    if active { " · running" } else { "" }
+                ),
+                tuned,
+            }
+        })
+        .collect()
+}
+
+/// How a `/localbox <model> benchmark` run ended.
+#[cfg(feature = "tui")]
+#[derive(Debug)]
+pub(crate) enum BenchmarkOutcome {
+    Finished {
+        log: PathBuf,
+    },
+    Declined,
+    /// LocalPilot stopped waiting; LocalBench keeps running and logging.
+    Detached {
+        log: PathBuf,
+    },
+}
+
+/// Where a benchmark run for `model` writes its output.
+#[cfg(feature = "tui")]
+pub(crate) fn benchmark_log_path(model: &str) -> PathBuf {
+    let name: String = model
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    std::env::temp_dir().join(format!("localpilot-localbench-{name}.log"))
+}
+
+/// Tune `model` with `localbench findbest`, which measures it live and saves
+/// the best run profile LocalBox then serves with. Output goes to a log file
+/// so the terminal host's screen stays intact; cancelling stops only
+/// LocalPilot's wait.
+#[cfg(feature = "tui")]
+pub(crate) async fn run_benchmark(
+    model: &str,
+    profile: Profile,
+    trusted: bool,
+    cancel: &CancellationToken,
+) -> anyhow::Result<BenchmarkOutcome> {
+    use localpilot_sandbox::{
+        CommandClass, Effect, Interactivity, PermissionEngine, PermissionRequest,
+    };
+
+    let entry = preflight_serve(model).await?;
+    let program = std::env::var_os("PATH")
+        .and_then(|path| {
+            std::env::split_paths(&path).find_map(|dir| {
+                let candidate = dir.join(format!("localbench{}", std::env::consts::EXE_SUFFIX));
+                candidate.is_file().then_some(candidate)
+            })
+        })
+        .ok_or_else(|| anyhow::anyhow!("LocalBench is not installed (no `localbench` on PATH)"))?;
+    let engine = PermissionEngine::new(profile, Vec::new());
+    let permission = PermissionRequest {
+        tool: "localbench findbest".to_string(),
+        effect: Effect::RunCommand(CommandClass::ExternalWrite),
+        interactivity: Interactivity::Interactive,
+        trusted,
+        detail: format!("localbench findbest --model {}", entry.name),
+    };
+    if !terminal_effect_allowed(&engine, &permission) {
+        return Ok(BenchmarkOutcome::Declined);
+    }
+    let log = benchmark_log_path(&entry.name);
+    let file = std::fs::File::create(&log)
+        .map_err(|error| anyhow::anyhow!("could not create {}: {error}", log.display()))?;
+    let err_file = file.try_clone()?;
+    let mut child = tokio::process::Command::new(program)
+        .args(["findbest", "--model", entry.name.as_str()])
+        .stdin(Stdio::null())
+        .stdout(file)
+        .stderr(err_file)
+        .kill_on_drop(false)
+        .spawn()
+        .map_err(|error| anyhow::anyhow!("could not run `localbench findbest`: {error}"))?;
+    let Some(status) = wait_or_cancel(child.wait(), Some(cancel)).await else {
+        return Ok(BenchmarkOutcome::Detached { log });
+    };
+    let status = status?;
+    if !status.success() {
+        anyhow::bail!(
+            "`localbench findbest --model {}` exited with {status}; see {}",
+            entry.name,
+            log.display()
+        );
+    }
+    Ok(BenchmarkOutcome::Finished { log })
+}
+
 async fn preflight_serve(name: &str) -> anyhow::Result<LocalBoxModelEntry> {
     let catalog = read_models_catalog().await?;
     catalog_entry(&catalog, name).cloned().ok_or_else(|| {
@@ -938,6 +1102,28 @@ command = \"npx\"
             "q36apex (aliases: apex) [active] — Qwen APEX · owner/apex · quant iq4 · mode native · tuned iq3 / 64k / native"
         ));
         assert!(rendered.ends_with("/localbox serve <name>\n"));
+    }
+
+    #[test]
+    fn picker_rows_summarize_profile_and_skip_names_with_whitespace() {
+        let catalog = parse_models_catalog(
+            br#"{"schema":1,"models":[
+                {"name":"q36apex","aliases":["apex"],"display_name":"Qwen APEX","repository":"o/a",
+                 "run_profile":{"source":"tuned","source_path":"p","quant":"iq4","context":"128k"}},
+                {"name":"plain","repository":"o/p",
+                 "run_profile":{"source":"defaults","source_path":"p","reason":"missing"}},
+                {"name":"has space","repository":"o/s",
+                 "run_profile":{"source":"defaults","source_path":"p"}}
+            ]}"#,
+        )
+        .unwrap();
+        let rows = picker_rows(&catalog, Some("apex"));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "q36apex");
+        assert_eq!(rows[0].summary, "Qwen APEX · tuned iq4 · 128k · running");
+        assert!(rows[0].tuned);
+        assert_eq!(rows[1].summary, "o/p · not tuned");
+        assert!(!rows[1].tuned);
     }
 
     #[test]
