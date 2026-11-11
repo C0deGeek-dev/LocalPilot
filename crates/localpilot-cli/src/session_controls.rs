@@ -15,6 +15,7 @@ use localpilot_terminal_ui::{AppModel, SessionControl};
 pub(crate) const fn limit_mode(setting: WorkLimitSetting) -> WorkLimitMode {
     match setting {
         WorkLimitSetting::Automatic => WorkLimitMode::Automatic,
+        WorkLimitSetting::Strict => WorkLimitMode::Strict,
         WorkLimitSetting::Wide => WorkLimitMode::Wide,
         WorkLimitSetting::VeryWide => WorkLimitMode::VeryWide,
         WorkLimitSetting::Off => WorkLimitMode::Off,
@@ -25,6 +26,7 @@ pub(crate) const fn limit_mode(setting: WorkLimitSetting) -> WorkLimitMode {
 pub(crate) const fn limit_label(mode: WorkLimitMode) -> &'static str {
     match mode {
         WorkLimitMode::Automatic => "automatic",
+        WorkLimitMode::Strict => "strict",
         WorkLimitMode::Wide => "wide",
         WorkLimitMode::VeryWide => "very-wide",
         WorkLimitMode::Off => "off",
@@ -46,7 +48,7 @@ pub(crate) fn describe_limits(
         "from configuration".to_string()
     };
     format!(
-        "work limits: {} ({source}). /limits automatic|wide|very-wide|off changes it for this session only",
+        "work limits: {} ({source}). /limits automatic|strict|wide|very-wide|off changes it for this session only",
         limit_label(effective)
     )
 }

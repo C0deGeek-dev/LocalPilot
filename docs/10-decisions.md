@@ -2,6 +2,48 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0273: Work Starts Wide And Narrows On Observed Trouble
+
+**Status:** accepted · **Date:** 2026-11-11. Revises ADR-0199's starting
+profile; ADR-0254's fixed modes are unchanged.
+
+**Context.** Under ADR-0199 a session started at one file, one region and one
+decision, and widened only after eight clean calls and two verified units with
+no failure at all. One failed call made that permanent. In practice a local
+model working on an ordinary two-file task (a configuration file and a script)
+wrote the first file, then had every later write refused for the rest of the
+turn. The refusal said to "checkpoint", which an interactive session cannot do,
+did not say that nothing was written, and blocked read-only shell commands too.
+The model retried the same work in about twenty-five shapes before a stuck
+detector stopped it.
+
+**Decision.** Automatic sizing starts wide and narrows on evidence.
+
+- No evidence, or the existing Strong evidence: 10 files, 40 regions,
+  4 decisions, 2,000 changed-line and new-file equivalents (300 and 600 under
+  small context).
+- Weak (two strikes; a failed call or a malformed call is one strike each):
+  ADR-0199's former Strong ceilings, and the harness stops after a checkpoint.
+- Malformed (two malformed strikes): ADR-0199's former conservative ceilings.
+- Every four clean calls in a row, and every verified unit, pay back one
+  strike. Strikes saturate at six. Host refusals stay neutral.
+- An active unit still only narrows within a turn, and context still bounds
+  reads, material and output on every tier.
+
+A bounds refusal says the call was not executed and nothing was written, names
+the files the unit already holds, and says the limit holds until the turn ends.
+After a refused write, read-only shell commands still run. Four work-envelope
+refusals in one turn stop it (`signal=work_envelope_refused`). Harness stop
+notices reach the model as system notices marked as not user input.
+
+`[harness.granularity] mode = "strict"` (and `/limits strict`) keeps the
+former conservative start for users who want it.
+
+**Consequences.** A capable model is no longer throttled by one early
+mistake; a model that keeps failing is narrowed as before, and recovers when it
+stops failing. Configured caps, reviewed step scopes, fixed modes and
+`/disable-envelope` behave as before.
+
 ## ADR-0272: Project Facts Belong To A Component And Say How Sure They Are
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#271. Builds on ADR-0271.

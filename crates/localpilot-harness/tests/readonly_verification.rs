@@ -39,7 +39,10 @@ fn runtime(
         SessionConfig {
             trusted: true,
             interactivity: Interactivity::NonInteractive,
-            granularity: Some(GranularityConfig::default()),
+            granularity: Some(GranularityConfig {
+                mode: localpilot_config::WorkLimitMode::Strict,
+                ..GranularityConfig::default()
+            }),
             verify_command: Some("readonly-verification-unavailable-command".into()),
             verify_before_done: optional,
             ..SessionConfig::default()

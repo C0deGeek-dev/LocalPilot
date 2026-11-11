@@ -15208,7 +15208,7 @@ mod tests {
             ),
             (
                 "limits",
-                "Show or set the work-limit mode for this session: automatic|wide|very-wide|off",
+                "Show or set the work-limit mode for this session: automatic|strict|wide|very-wide|off",
             ),
             (
                 "actions",
@@ -26636,7 +26636,7 @@ last_seen = "2026-08-10"
         .await;
         assert!(timeline_has_notice(
             &app,
-            "usage: /limits [automatic|wide|very-wide|off]"
+            "usage: /limits [automatic|strict|wide|very-wide|off]"
         ));
         assert!(
             !bundle.runtime.envelope_enabled(),

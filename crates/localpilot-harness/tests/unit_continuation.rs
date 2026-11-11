@@ -68,7 +68,10 @@ fn runtime(
         SessionConfig {
             granularity: Some(GranularityConfig {
                 headless_units: 2,
-                ..GranularityConfig::default()
+                ..GranularityConfig {
+                    mode: localpilot_config::WorkLimitMode::Strict,
+                    ..GranularityConfig::default()
+                }
             }),
             verify_before_done,
             verify_command: Some("python verify.py".to_string()),
@@ -133,7 +136,10 @@ async fn rename_admission_requires_read_authority_and_an_attested_clean_base() {
             SessionConfig {
                 granularity: Some(GranularityConfig {
                     headless_rename_units: 2,
-                    ..GranularityConfig::default()
+                    ..GranularityConfig {
+                        mode: localpilot_config::WorkLimitMode::Strict,
+                        ..GranularityConfig::default()
+                    }
                 }),
                 ..SessionConfig::default()
             },
@@ -218,7 +224,10 @@ async fn selective_evidence_requires_read_authority_and_stable_checks() {
             SessionConfig {
                 granularity: Some(GranularityConfig {
                     headless_rename_units: 2,
-                    ..GranularityConfig::default()
+                    ..GranularityConfig {
+                        mode: localpilot_config::WorkLimitMode::Strict,
+                        ..GranularityConfig::default()
+                    }
                 }),
                 verify_before_done: true,
                 verify_command: Some("python verify.py".into()),
@@ -403,7 +412,10 @@ sys.exit(0 if 'x = 2' in open('money.py').read() else 1)
         SessionConfig {
             granularity: Some(GranularityConfig {
                 headless_units: 2,
-                ..GranularityConfig::default()
+                ..GranularityConfig {
+                    mode: localpilot_config::WorkLimitMode::Strict,
+                    ..GranularityConfig::default()
+                }
             }),
             verify_before_done: true,
             verify_command: Some("python verify.py".to_string()),
@@ -530,7 +542,10 @@ async fn a_passing_full_check_at_a_refused_edit_opens_no_further_unit() {
         SessionConfig {
             granularity: Some(GranularityConfig {
                 headless_units: 2,
-                ..GranularityConfig::default()
+                ..GranularityConfig {
+                    mode: localpilot_config::WorkLimitMode::Strict,
+                    ..GranularityConfig::default()
+                }
             }),
             verify_before_done: true,
             verify_command: Some("python verify.py".to_string()),
@@ -565,7 +580,7 @@ async fn a_passing_full_check_at_a_refused_edit_opens_no_further_unit() {
         1,
         "{seen}"
     );
-    assert!(seen.contains("checkpoint before continuing"), "{seen}");
+    assert!(seen.contains("until this turn ends"), "{seen}");
 }
 
 #[tokio::test]
@@ -603,7 +618,10 @@ async fn selective_units_open_no_unit_after_a_passing_check() {
         SessionConfig {
             granularity: Some(GranularityConfig {
                 headless_rename_units: 2,
-                ..GranularityConfig::default()
+                ..GranularityConfig {
+                    mode: localpilot_config::WorkLimitMode::Strict,
+                    ..GranularityConfig::default()
+                }
             }),
             verify_before_done: true,
             verify_command: Some("python verify.py".to_string()),
@@ -676,7 +694,10 @@ async fn the_provider_receives_current_checkpoint_review_under_context_pressure(
             context_token_limit: 16_384,
             granularity: Some(GranularityConfig {
                 headless_units: 2,
-                ..GranularityConfig::default()
+                ..GranularityConfig {
+                    mode: localpilot_config::WorkLimitMode::Strict,
+                    ..GranularityConfig::default()
+                }
             }),
             verify_before_done: true,
             verify_command: Some("python verify.py".to_string()),
@@ -780,7 +801,10 @@ async fn calls_queued_after_a_refused_edit_do_not_run() {
         SessionConfig {
             granularity: Some(GranularityConfig {
                 headless_units: 2,
-                ..GranularityConfig::default()
+                ..GranularityConfig {
+                    mode: localpilot_config::WorkLimitMode::Strict,
+                    ..GranularityConfig::default()
+                }
             }),
             verify_before_done: true,
             verify_command: Some("python verify.py".to_string()),
@@ -826,7 +850,10 @@ async fn host_ended_units_respect_the_cap_and_the_off_setting() {
             SessionConfig {
                 granularity: Some(GranularityConfig {
                     headless_units: units_setting,
-                    ..GranularityConfig::default()
+                    ..GranularityConfig {
+                        mode: localpilot_config::WorkLimitMode::Strict,
+                        ..GranularityConfig::default()
+                    }
                 }),
                 verify_before_done: true,
                 verify_command: Some("python verify.py".to_string()),
@@ -957,7 +984,10 @@ async fn signals_at_a_host_unit_boundary_are_handled_before_any_settlement() {
             SessionConfig {
                 granularity: Some(GranularityConfig {
                     headless_units: 2,
-                    ..GranularityConfig::default()
+                    ..GranularityConfig {
+                        mode: localpilot_config::WorkLimitMode::Strict,
+                        ..GranularityConfig::default()
+                    }
                 }),
                 verify_before_done: true,
                 verify_command: Some("python verify.py".to_string()),
@@ -1024,7 +1054,10 @@ async fn refusal_with_units(dir: &Path, units_setting: u8, provider: FakeProvide
         SessionConfig {
             granularity: Some(GranularityConfig {
                 headless_units: units_setting,
-                ..GranularityConfig::default()
+                ..GranularityConfig {
+                    mode: localpilot_config::WorkLimitMode::Strict,
+                    ..GranularityConfig::default()
+                }
             }),
             verify_before_done: true,
             verify_command: Some("python verify.py".to_string()),
@@ -1061,7 +1094,7 @@ async fn a_refusal_that_ends_no_unit_keeps_the_default_text() {
     };
     let off = refusal_with_units(two_site_repository(BOTH).path(), 0, script()).await;
     let on = refusal_with_units(two_site_repository(BOTH).path(), 2, script()).await;
-    assert!(!on.contains("this call was not executed"), "{on}");
+    assert!(!on.contains("the harness now checks"), "{on}");
     assert_eq!(on, off);
 }
 
@@ -1072,9 +1105,9 @@ async fn a_refusal_that_ends_the_unit_says_so() {
     }
     let edits = [edit("x", "x = 1", "x = 2"), edit("y", "y = 1", "y = 2")];
     let on = refusal_with_units(two_site_repository(BOTH).path(), 2, stubborn(&edits, 3)).await;
-    assert!(on.contains("this call was not executed"), "{on}");
+    assert!(on.contains("the harness now checks"), "{on}");
     let off = refusal_with_units(two_site_repository(BOTH).path(), 0, stubborn(&edits, 3)).await;
-    assert!(!off.contains("this call was not executed"), "{off}");
+    assert!(!off.contains("the harness now checks"), "{off}");
 }
 
 /// Every request the model saw, rendered for byte comparison.
@@ -1092,7 +1125,10 @@ async fn requests_with_units(units_setting: u8, verifier: &str, provider: FakePr
         SessionConfig {
             granularity: Some(GranularityConfig {
                 headless_units: units_setting,
-                ..GranularityConfig::default()
+                ..GranularityConfig {
+                    mode: localpilot_config::WorkLimitMode::Strict,
+                    ..GranularityConfig::default()
+                }
             }),
             verify_before_done: true,
             verify_command: Some("python verify.py".to_string()),

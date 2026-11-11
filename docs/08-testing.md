@@ -56,7 +56,8 @@ denials, a completed nonzero Git command, missing-file I/O and typed backend
 absence. These controls keep host refusals neutral without hiding their error
 results; policy-looking text from an ordinary failed tool still weakens
 reliability. Evidence-counter controls prove neutral observations cannot earn
-Strong, do not poison Strong, and do not forgive malformed input. Existing
+Strong and do not poison it, and that failure and malformed strikes narrow work
+and decay with clean calls and verified units. Existing
 failed changed-unit verification and active-unit monotonicity tests remain the
 regression boundaries. All fixtures use disposable repositories and fake models.
 

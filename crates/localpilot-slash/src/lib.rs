@@ -120,6 +120,7 @@ impl Profile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkLimitSetting {
     Automatic,
+    Strict,
     Wide,
     VeryWide,
     Off,
@@ -131,6 +132,7 @@ impl WorkLimitSetting {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Automatic => "automatic",
+            Self::Strict => "strict",
             Self::Wide => "wide",
             Self::VeryWide => "very-wide",
             Self::Off => "off",
@@ -872,7 +874,7 @@ slash_commands! {
         HarnessStop => fullscreen_only("harness-stop", NoArg, Reject, "Stop harness work and discard its unapproved draft"),
         DisableEnvelope => fullscreen_only("disable-envelope", NoArg, Reject, "Turn the work envelope's size limits off (not advised without a reason)"),
         EnableEnvelope => fullscreen_only("enable-envelope", NoArg, Reject, "Turn the work envelope's size limits back on"),
-        Limits => fullscreen_only("limits", Optional, Fall, "Show or set the work-limit mode for this session: automatic|wide|very-wide|off"),
+        Limits => fullscreen_only("limits", Optional, Fall, "Show or set the work-limit mode for this session: automatic|strict|wide|very-wide|off"),
         Actions => fullscreen_only("actions", Optional, Fall, "Show or set the action mode for this session: normal|accept-all"),
         WaitResume => fullscreen_only("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
         HarnessIntake => fullscreen_only(
@@ -1429,6 +1431,7 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
             let setting = match args.trim().to_ascii_lowercase().as_str() {
                 "" => Ok(None),
                 "automatic" | "auto" => Ok(Some(WorkLimitSetting::Automatic)),
+                "strict" => Ok(Some(WorkLimitSetting::Strict)),
                 "wide" => Ok(Some(WorkLimitSetting::Wide)),
                 "very-wide" | "very_wide" | "verywide" => Ok(Some(WorkLimitSetting::VeryWide)),
                 "off" => Ok(Some(WorkLimitSetting::Off)),
@@ -1438,7 +1441,7 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
                 Ok(setting) => SlashAction::Limits(setting),
                 Err(()) => SlashAction::Invalid {
                     command: name.to_string(),
-                    reason: "usage: /limits [automatic|wide|very-wide|off]".to_string(),
+                    reason: "usage: /limits [automatic|strict|wide|very-wide|off]".to_string(),
                 },
             }
         }

@@ -47,17 +47,18 @@ precondition before constructing an agent runtime.
 
 Ordinary agent and harness runtimes share `granularity::WorkProfile`. Context
 capacity/pressure controls read, patch and retained-output material; session-local
-structured reliability controls decisions and simultaneous regions. Unknown and
-malformed evidence start conservatively. Model names, parameter counts and large
-context windows never establish capability. See ADR-0199 for thresholds and
+structured reliability controls decisions and simultaneous regions. Work starts
+wide; failed and malformed calls narrow it, and clean calls or verified units pay
+that back. Model names and parameter counts never change the profile. See
+ADR-0273 (which revises ADR-0199's starting point) for thresholds and
 [configuration](configuration.md#harnessgranularity) for stricter caps.
 
 Capability observations distinguish host policy from execution. Work-envelope
 refusals, permission denials and typed backend absence remain model-visible
 errors but neither earn successes nor weaken reliability. A completed command
 reporting failure is also neutral. Actual unusable invocations and failed
-verification of changed work still weaken reliability; malformed input remains
-malformed. The host uses typed dispatch evidence, never tool-output wording,
+verification of changed work add a strike; malformed input adds a malformed
+strike. Strikes decay with clean calls and verified units. The host uses typed dispatch evidence, never tool-output wording,
 for these exclusions. No active-unit bounds or continuation defaults are widened.
 
 Reads without an explicit last line pass through permission before the builtin
@@ -83,8 +84,8 @@ replanning an existing explicitly sized future step.
 
 One unit reads relevant explicit ranges, applies one coherent bounded region,
 runs its smallest planned check, then uses the existing rule/gate/commit/progress
-and session-link path. The ratified quality gate still runs. Small context or
-conservative reliability stops after that durable checkpoint; the next invocation
+and session-link path. The ratified quality gate still runs. A narrowed
+profile stops after that durable checkpoint; the next invocation
 starts fresh context at the persisted next incomplete step. A blocked oversized
 unit keeps its work and records the reason/next action instead of silently
 resetting it. Owned `.localpilot/` and `.localmind/` runtime state is excluded

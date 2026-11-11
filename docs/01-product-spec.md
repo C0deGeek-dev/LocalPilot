@@ -12,7 +12,8 @@ The product is not a general chatbot. It is an engineering workflow controller.
 
 Production agent sessions automatically receive the same work-sizing policy as
 harness steps. Small/pressured context narrows reading and patch material;
-unknown or weaker structured reliability narrows decisions and coherent scope.
+observed failed or malformed calls narrow decisions and coherent scope, and clean
+work widens it again.
 Large context alone cannot authorize a larger multi-concern change. New harness
 plans declare and validate scope before approval, and constrained execution stops
 at a verified durable checkpoint with the next action retained. Users can inspect

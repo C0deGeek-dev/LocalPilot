@@ -201,21 +201,23 @@ fn assert_exact_surface(
         .count();
     assert_eq!(stop_warnings, 1, "exactly one stop Warning == the notice");
 
-    // Sink 2: exactly one persisted message with that exact text that is BOTH a
-    // `Role::User` message AND synthetic (metadata "no tool-call progress").
+    // Sink 2: exactly one persisted message carrying that exact text that is
+    // BOTH a `Role::System` notice marked as not user input AND synthetic
+    // (metadata "no tool-call progress").
     let synthetic_notices = r
         .messages
         .iter()
         .filter(|m| {
-            m.role == Role::User
+            m.role == Role::System
                 && m.is_synthetic()
                 && m.metadata.synthetic.as_deref() == Some("no tool-call progress")
-                && message_text(m) == notice
+                && message_text(m)
+                    == format!("System notice from LocalPilot, not user input: {notice}")
         })
         .count();
     assert_eq!(
         synthetic_notices, 1,
-        "exactly one synthetic User stop notice == the notice"
+        "exactly one synthetic System stop notice carrying the notice"
     );
 
     // Execution / nudge boundaries.

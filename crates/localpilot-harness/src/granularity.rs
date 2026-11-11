@@ -9,6 +9,11 @@ use localpilot_sandbox::Workspace;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// What every bounds refusal tells the model to do next. A refused call never
+/// runs, and the budget is not refunded until the turn ends, so retrying the
+/// same work in another shape cannot succeed.
+pub(crate) const REFUSAL_STEP: &str = "this call was not executed and nothing was written. The limit holds until this turn ends: keep the work already done, verify it, then stop and report what remains, or make a smaller exact edit that fits";
+
 /// Aggregate old + new material in a binary work unit, independent of text lines.
 pub(crate) const MAX_BINARY_CHANGE_BYTES: u64 = 64 * 1024;
 
@@ -43,15 +48,41 @@ pub enum Reliability {
     Malformed,
 }
 
+impl Reliability {
+    /// Wider work ranks higher; an active unit only moves down this order.
+    fn rank(self) -> u8 {
+        match self {
+            Reliability::Malformed => 0,
+            Reliability::Weak => 1,
+            Reliability::Unknown => 2,
+            Reliability::Strong => 3,
+        }
+    }
+}
+
 /// Counts only; never raw tool arguments, output, names or persisted scores.
+///
+/// Work starts wide and narrows on observed trouble. Failures and malformed
+/// calls are strikes; a run of clean calls or a verified unit pays one back,
+/// so one bad path early in a session does not narrow the rest of it.
 #[derive(Debug, Clone, Default)]
 pub struct CapabilityEvidence {
     valid_successes: usize,
     verified_units: usize,
-    malformed: bool,
-    failures: usize,
+    failure_strikes: usize,
+    malformed_strikes: usize,
+    clean_streak: usize,
     last_input_valid: bool,
 }
+
+/// Clean consecutive calls that pay back one strike.
+const RECOVERY_STREAK: usize = 4;
+/// Strikes (failures plus malformed calls) that narrow work to the weak profile.
+const WEAK_STRIKES: usize = 2;
+/// Malformed calls that narrow work to one file and one region.
+const MALFORMED_STRIKES: usize = 2;
+/// Strikes saturate here so recovery stays reachable.
+const MAX_STRIKES: usize = 6;
 
 impl CapabilityEvidence {
     /// Host refusals and completed negative observations supply no execution
@@ -72,26 +103,44 @@ impl CapabilityEvidence {
 
     pub fn observe_input(&mut self, valid: bool) {
         self.last_input_valid = valid;
-        self.malformed |= !valid;
+        if !valid {
+            self.malformed_strikes = (self.malformed_strikes + 1).min(MAX_STRIKES);
+            self.clean_streak = 0;
+        }
     }
 
     pub fn observe_outcome(&mut self, success: bool) {
         if success && self.last_input_valid {
             self.valid_successes = self.valid_successes.saturating_add(1);
+            self.clean_streak += 1;
+            if self.clean_streak >= RECOVERY_STREAK {
+                self.clean_streak = 0;
+                self.pay_back_strike();
+            }
         } else if !success {
-            self.failures = self.failures.saturating_add(1);
+            self.failure_strikes = (self.failure_strikes + 1).min(MAX_STRIKES);
+            self.clean_streak = 0;
         }
     }
 
     pub fn observe_verification(&mut self) {
         self.verified_units = self.verified_units.saturating_add(1);
+        self.pay_back_strike();
+    }
+
+    fn pay_back_strike(&mut self) {
+        if self.malformed_strikes > 0 {
+            self.malformed_strikes -= 1;
+        } else if self.failure_strikes > 0 {
+            self.failure_strikes -= 1;
+        }
     }
 
     #[must_use]
     pub fn reliability(&self) -> Reliability {
-        if self.malformed {
+        if self.malformed_strikes >= MALFORMED_STRIKES {
             Reliability::Malformed
-        } else if self.failures != 0 {
+        } else if self.failure_strikes + self.malformed_strikes >= WEAK_STRIKES {
             Reliability::Weak
         } else if self.valid_successes >= 8 && self.verified_units >= 2 {
             Reliability::Strong
@@ -141,7 +190,42 @@ impl WorkProfile {
         let small = context.provenance == ContextProvenance::Unknown
             || context.limit < 32_000
             || context.used >= context.limit.saturating_mul(7) / 10;
-        let strong = reliability == Reliability::Strong;
+        // Work starts wide: no evidence, or good evidence, gets the trusted
+        // ceilings. Observed failures narrow it, malformed calls most of all.
+        // Context still bounds material size on every tier. Strict mode keeps
+        // the conservative start: only Strong evidence leaves the narrowest tier.
+        let strict = caps.mode == localpilot_config::WorkLimitMode::Strict;
+        let tier = match (strict, reliability) {
+            (true, Reliability::Strong) => Reliability::Weak,
+            (true, _) => Reliability::Malformed,
+            (false, reliability) => reliability,
+        };
+        let (files, regions, decisions, changed, new_file, stop) = match tier {
+            Reliability::Unknown | Reliability::Strong => (
+                10,
+                40,
+                4,
+                if small { 300 } else { 2_000 },
+                if small { 600 } else { 2_000 },
+                false,
+            ),
+            Reliability::Weak => (
+                if small { 1 } else { 3 },
+                if small { 2 } else { 4 },
+                2,
+                if small { 80 } else { 200 },
+                if small { 200 } else { 600 },
+                true,
+            ),
+            Reliability::Malformed => (
+                1,
+                1,
+                1,
+                if small { 80 } else { 200 },
+                if small { 200 } else { 600 },
+                true,
+            ),
+        };
         let mut profile = Self {
             context_provenance: if context.limit == 0 {
                 ContextProvenance::Unknown
@@ -155,22 +239,18 @@ impl WorkProfile {
                     CapabilityProvenance::SessionObservations
                 }
             },
-            max_files: if small || !strong { 1 } else { 3 },
-            max_regions: if strong {
-                if small {
-                    2
-                } else {
-                    4
-                }
-            } else {
-                1
-            },
+            max_files: files,
+            max_regions: regions,
             max_read_lines: if small { 80 } else { 200 },
-            max_changed_lines: if small { 80 } else { 200 },
-            max_new_file_lines: if small { 200 } else { 600 },
-            max_decisions: if strong { 2 } else { 1 },
+            max_changed_lines: changed,
+            max_new_file_lines: new_file,
+            max_decisions: decisions,
             max_output_bytes: if small { 4 * 1024 } else { 12 * 1024 },
-            stop_after_checkpoint: small || !strong,
+            stop_after_checkpoint: if strict {
+                small || reliability != Reliability::Strong
+            } else {
+                stop
+            },
             reliability,
             constrained_context: small,
         };
@@ -178,7 +258,7 @@ impl WorkProfile {
         let fixed = match caps.mode {
             WorkLimitMode::Wide => Some((10, 40, 2_000)),
             WorkLimitMode::VeryWide => Some((50, 200, 10_000)),
-            WorkLimitMode::Automatic | WorkLimitMode::Off => None,
+            WorkLimitMode::Automatic | WorkLimitMode::Strict | WorkLimitMode::Off => None,
         };
         if let Some((files, regions, lines)) = fixed {
             profile.max_files = files;
@@ -230,7 +310,7 @@ impl WorkProfile {
         self.max_output_bytes = self.max_output_bytes.min(next.max_output_bytes);
         self.stop_after_checkpoint |= next.stop_after_checkpoint;
         self.constrained_context |= next.constrained_context;
-        if next.reliability != Reliability::Strong {
+        if next.reliability.rank() < self.reliability.rank() {
             self.reliability = next.reliability;
             self.capability_provenance = next.capability_provenance;
         }
@@ -303,9 +383,28 @@ impl WorkUnit {
         self.created.values().sum()
     }
 
+    /// The files this unit already holds, named so a refusal is not read as a
+    /// phantom entry.
+    fn already_changed(&self) -> String {
+        if self.files.is_empty() {
+            return String::new();
+        }
+        let names: Vec<String> = self
+            .files
+            .iter()
+            .map(|path| {
+                path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        format!("; this unit already changed {}", names.join(", "))
+    }
+
     fn usage(&self, profile: WorkProfile) -> String {
         format!(
-            "files {}/{}, regions {}/{}, changed lines {}/{}, new-file lines {}/{}",
+            "counting this call: files {}/{}, regions {}/{}, changed lines {}/{}, new-file lines {}/{}",
             self.files.len(),
             profile.max_files,
             self.regions,
@@ -325,7 +424,7 @@ impl WorkUnit {
     ) -> Option<WorkRefusal> {
         let reject = |reason: &str| {
             Some(WorkRefusal {
-                message: format!("work envelope: {reason}; split into a smaller coherent unit, verify it, and checkpoint before continuing"),
+                message: format!("work envelope: {reason}; {REFUSAL_STEP}"),
                 blocks_opaque_retry: true,
             })
         };
@@ -341,14 +440,12 @@ impl WorkUnit {
         }
         if matches!(name, "read_file" | "read_tool_output") {
             let start = input.get("start_line").and_then(Value::as_u64).unwrap_or(1);
-            let end = input.get("end_line").and_then(Value::as_u64);
-            // The builtin serves an implicit bounded page only after permission.
-            // Leave missing-path and content errors to that authorized read too.
-            if name == "read_file" && end.is_none() {
-                return None;
-            }
-            let bounded =
-                end.is_some_and(|end| end >= start && end - start < profile.max_read_lines as u64);
+            // Without an end line the read is served as one bounded page: the
+            // file read is paged by the builtin after permission, and retained
+            // output is cut to the unit's output budget. Missing-path and content
+            // errors are left to that authorized read too.
+            let end = input.get("end_line").and_then(Value::as_u64)?;
+            let bounded = end >= start && end - start < profile.max_read_lines as u64;
             if !bounded {
                 return Some(WorkRefusal { message: format!(
                     "work envelope: request an explicit start_line/end_line page within the read limit. {}",
@@ -376,7 +473,7 @@ impl WorkUnit {
                 return self.check_and_reserve(profile, "edit_file", &edit, workspace);
             }
             return Some(WorkRefusal {
-                message: "work envelope: use bounded exact edit_file hunks instead of global/regex replacement (replace_in_file is admitted only as one exact block: regex false and all false); split into a smaller coherent unit, verify it, and checkpoint before continuing".to_string(),
+                message: format!("work envelope: use bounded exact edit_file hunks instead of global/regex replacement (replace_in_file is admitted only as one exact block: regex false and all false); {REFUSAL_STEP}"),
                 blocks_opaque_retry: false,
             });
         }
@@ -465,8 +562,9 @@ impl WorkUnit {
                     || proposed.new_lines() > profile.max_new_file_lines
                 {
                     return reject(&format!(
-                        "cumulative files, regions or patch size exceeds the active profile ({})",
-                        proposed.usage(profile)
+                        "cumulative files, regions or patch size exceeds the active profile ({}){}",
+                        proposed.usage(profile),
+                        self.already_changed()
                     ));
                 }
                 let regions = match (
@@ -495,8 +593,9 @@ impl WorkUnit {
             || proposed.new_lines() > profile.max_new_file_lines
         {
             return reject(&format!(
-                "cumulative files, regions or patch size exceeds the active profile ({})",
-                proposed.usage(profile)
+                "cumulative files, regions or patch size exceeds the active profile ({}){}",
+                proposed.usage(profile),
+                self.already_changed()
             ));
         }
         *self = proposed;
@@ -596,7 +695,7 @@ mod tests {
                 limit: 8_000,
                 provenance: ContextProvenance::CallerSupplied,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &GranularityConfig::default(),
         );
         // An external path still spends the budget.
@@ -644,7 +743,7 @@ mod tests {
                 limit: 64_000,
                 provenance: ContextProvenance::ResolvedBudget,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &GranularityConfig::default(),
         );
         let once = serde_json::json!({
@@ -694,7 +793,7 @@ mod tests {
                 limit: 8_000,
                 provenance: ContextProvenance::CallerSupplied,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &GranularityConfig::default(),
         );
         for external_first in [true, false] {
@@ -735,7 +834,7 @@ mod tests {
                 limit: 8_000,
                 provenance: ContextProvenance::CallerSupplied,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &GranularityConfig::default(),
         );
         let input = serde_json::json!({"path":"missing.py", "old_text":"same", "new_text":"same"});
@@ -759,7 +858,7 @@ mod tests {
                 limit: 8_000,
                 provenance: ContextProvenance::CallerSupplied,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &GranularityConfig::default(),
         );
         let old = "def round_cents(amount):\n    \"\"\"Round to cents.\"\"\"\n    return int(amount * 100) / 100";
@@ -823,22 +922,13 @@ mod tests {
             );
             assert!(small.max_read_lines < large.max_read_lines);
             assert!(small.max_changed_lines < large.max_changed_lines);
-            assert_eq!(
-                large.max_decisions,
-                if reliability == Reliability::Strong {
-                    2
-                } else {
-                    1
-                }
-            );
-            assert_eq!(
-                large.max_files,
-                if reliability == Reliability::Strong {
-                    3
-                } else {
-                    1
-                }
-            );
+            let (decisions, files) = match reliability {
+                Reliability::Unknown | Reliability::Strong => (4, 10),
+                Reliability::Weak => (2, 3),
+                Reliability::Malformed => (1, 1),
+            };
+            assert_eq!(large.max_decisions, decisions);
+            assert_eq!(large.max_files, files);
             let capped = WorkProfile::resolve(
                 ContextCapacity {
                     used: 0,
@@ -865,7 +955,7 @@ mod tests {
                 limit: 128_000,
                 provenance: crate::granularity::ContextProvenance::CallerSupplied,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &GranularityConfig::default(),
         );
         let original = active;
@@ -892,8 +982,9 @@ mod tests {
             Reliability::Strong,
             &GranularityConfig::default(),
         );
+        // Unknown capacity bounds material, not the number of files.
         assert_eq!(profile.max_read_lines, 80);
-        assert_eq!(profile.max_files, 1);
+        assert_eq!(profile.max_changed_lines, 300);
         profile.bound_to_scope(WorkScope {
             files: 0,
             regions: 0,
@@ -906,12 +997,34 @@ mod tests {
     }
 
     #[test]
-    fn observations_need_repeated_valid_success_and_verification() {
+    fn work_starts_wide_and_narrows_on_strikes_that_decay() {
         let mut evidence = CapabilityEvidence::default();
-        evidence.observe_input(true);
-        evidence.observe_outcome(true);
         assert_eq!(evidence.reliability(), Reliability::Unknown);
-        for _ in 0..7 {
+        // One failed call alone does not narrow the session.
+        evidence.observe_input(true);
+        evidence.observe_outcome(false);
+        assert_eq!(evidence.reliability(), Reliability::Unknown);
+        evidence.observe_input(true);
+        evidence.observe_outcome(false);
+        assert_eq!(evidence.reliability(), Reliability::Weak);
+        // A run of clean calls pays a strike back.
+        for _ in 0..RECOVERY_STREAK {
+            evidence.observe_input(true);
+            evidence.observe_outcome(true);
+        }
+        assert_eq!(evidence.reliability(), Reliability::Unknown);
+        // Repeated malformed calls narrow most; verification pays back too.
+        evidence.observe_input(false);
+        evidence.observe_input(false);
+        assert_eq!(evidence.reliability(), Reliability::Malformed);
+        evidence.observe_verification();
+        assert_eq!(evidence.reliability(), Reliability::Weak);
+    }
+
+    #[test]
+    fn strong_needs_repeated_valid_success_and_verification() {
+        let mut evidence = CapabilityEvidence::default();
+        for _ in 0..8 {
             evidence.observe_input(true);
             evidence.observe_outcome(true);
         }
@@ -919,17 +1032,12 @@ mod tests {
         assert_eq!(evidence.reliability(), Reliability::Unknown);
         evidence.observe_verification();
         assert_eq!(evidence.reliability(), Reliability::Strong);
-        evidence.observe_input(false);
-        evidence.observe_outcome(true);
-        assert_eq!(evidence.reliability(), Reliability::Malformed);
     }
 
     #[test]
     fn neutral_outcomes_neither_poison_nor_establish_reliability() {
         use localpilot_core::ToolOutcome;
         let mut evidence = CapabilityEvidence::default();
-        evidence.observe_verification();
-        evidence.observe_verification();
         for _ in 0..10 {
             evidence.observe_input(true);
             evidence.observe_tool_outcome(ToolOutcome::Unusable, false);
@@ -937,29 +1045,77 @@ mod tests {
             evidence.observe_tool_outcome(ToolOutcome::ReportedFailure, true);
         }
         assert_eq!(evidence.reliability(), Reliability::Unknown);
-        for _ in 0..8 {
-            evidence.observe_input(true);
-            evidence.observe_tool_outcome(ToolOutcome::Ok, true);
-        }
-        assert_eq!(evidence.reliability(), Reliability::Strong);
-        evidence.observe_tool_outcome(ToolOutcome::Unusable, false);
-        evidence.observe_tool_outcome(ToolOutcome::ReportedFailure, true);
-        assert_eq!(evidence.reliability(), Reliability::Strong);
+        evidence.observe_tool_outcome(ToolOutcome::Unusable, true);
         evidence.observe_tool_outcome(ToolOutcome::Unusable, true);
         assert_eq!(evidence.reliability(), Reliability::Weak);
-        evidence.observe_input(false);
-        evidence.observe_tool_outcome(ToolOutcome::Unusable, false);
-        assert_eq!(evidence.reliability(), Reliability::Malformed);
     }
 
-    fn unknown_profile(limit: usize) -> WorkProfile {
+    #[test]
+    fn the_default_profile_fits_an_ordinary_multi_file_task() {
+        let profile = WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 64_000,
+                provenance: ContextProvenance::RuntimeUsage,
+            },
+            Reliability::Unknown,
+            &GranularityConfig::default(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let mut unit = WorkUnit::default();
+        for (path, lines) in [("config.json", 25), ("update.ps1", 250), ("README.md", 60)] {
+            let input = serde_json::json!({"path": path, "content": "line
+".repeat(lines)});
+            assert!(
+                unit.check_and_reserve(profile, "write_file", &input, &workspace)
+                    .is_none(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_says_nothing_was_written_and_names_what_the_unit_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let profile = tight_profile(64_000);
+        let mut unit = WorkUnit::default();
+        let first = serde_json::json!({"path":"config.json","content":"{}
+"});
+        assert!(unit
+            .check_and_reserve(profile, "write_file", &first, &workspace)
+            .is_none());
+        let second = serde_json::json!({"path":"update.ps1","content":"x
+"});
+        let refusal = unit
+            .check_and_reserve(profile, "write_file", &second, &workspace)
+            .expect("a second file exceeds the tight profile");
+        assert!(
+            refusal.message.contains("nothing was written"),
+            "{}",
+            refusal.message
+        );
+        assert!(
+            refusal.message.contains("already changed config.json"),
+            "{}",
+            refusal.message
+        );
+        assert!(
+            refusal.message.contains("until this turn ends"),
+            "{}",
+            refusal.message
+        );
+    }
+
+    fn tight_profile(limit: usize) -> WorkProfile {
         WorkProfile::resolve(
             ContextCapacity {
                 used: 0,
                 limit,
                 provenance: ContextProvenance::ResolvedBudget,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &GranularityConfig::default(),
         )
     }
@@ -975,7 +1131,7 @@ mod tests {
         for limit in [64_000, 16_000] {
             let dir = tempfile::tempdir().unwrap();
             let workspace = Workspace::new(dir.path()).unwrap();
-            let profile = unknown_profile(limit);
+            let profile = tight_profile(limit);
             let mut unit = WorkUnit::default();
             // Far above the 80/200 line edit budget, inside the file allowance.
             let write = serde_json::json!({"path":"index.html","content":page(110)});
@@ -1002,7 +1158,7 @@ mod tests {
     fn a_file_above_the_allowance_names_the_limit_it_hit() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = Workspace::new(dir.path()).unwrap();
-        let profile = unknown_profile(16_000);
+        let profile = tight_profile(16_000);
         let write = serde_json::json!({"path":"index.html","content":page(201)});
         let refusal = WorkUnit::default()
             .check_and_reserve(profile, "write_file", &write, &workspace)
@@ -1015,7 +1171,7 @@ mod tests {
     fn rewriting_a_created_file_replaces_its_cost() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = Workspace::new(dir.path()).unwrap();
-        let profile = unknown_profile(16_000);
+        let profile = tight_profile(16_000);
         let mut unit = WorkUnit::default();
         for _ in 0..3 {
             let write = serde_json::json!({"path":"index.html","content":page(100)});
@@ -1036,7 +1192,7 @@ mod tests {
         )
         .unwrap();
         let workspace = Workspace::new(dir.path()).unwrap();
-        let profile = unknown_profile(64_000);
+        let profile = tight_profile(64_000);
         let mut unit = WorkUnit::default();
         let first = serde_json::json!({"path":"a.html","old_text":"a","new_text":"b"});
         assert!(unit
@@ -1065,7 +1221,7 @@ c
                 limit: 64_000,
                 provenance: ContextProvenance::ResolvedBudget,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &caps,
         );
         assert_eq!(profile.max_new_file_lines, 40);

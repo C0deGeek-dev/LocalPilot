@@ -712,6 +712,7 @@ profile = \"bypass\"
         );
         for (value, mode) in [
             ("automatic", WorkLimitMode::Automatic),
+            ("strict", WorkLimitMode::Strict),
             ("wide", WorkLimitMode::Wide),
             ("very_wide", WorkLimitMode::VeryWide),
             ("off", WorkLimitMode::Off),

@@ -1327,9 +1327,11 @@ impl VerificationPolicy {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkLimitMode {
-    /// Adapt size to context and demonstrated reliability.
+    /// Start wide and narrow on observed failed or malformed calls.
     #[default]
     Automatic,
+    /// Start narrow and widen only after repeated clean, verified work.
+    Strict,
     /// Fixed ceilings for a larger coherent edit.
     Wide,
     /// Fixed ceilings for a substantially larger coherent edit.

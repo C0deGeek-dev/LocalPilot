@@ -75,18 +75,42 @@ fn is_pipe_sink(text: &str) -> bool {
         return false;
     };
     let stem = program_stem(program);
+    is_output_filter(&stem)
+        || stem == "select-string"
+        || classify(program, args) == CommandClass::ReadOnly
+}
+
+/// PowerShell cmdlets that only shape the objects handed to them. Their
+/// arguments name properties, counts and formats, never files, so they have
+/// no file targets. A script block (`Where-Object { … }`) is code and stays
+/// opaque through the lexer, which refuses braces.
+fn is_output_filter(stem: &str) -> bool {
     matches!(
-        stem.as_str(),
+        stem,
         "out-null"
             | "out-string"
+            | "out-host"
             | "select-object"
-            | "select-string"
             | "where-object"
             | "sort-object"
+            | "group-object"
             | "measure-object"
             | "format-table"
             | "format-list"
-    ) || classify(program, args) == CommandClass::ReadOnly
+            | "format-wide"
+    )
+}
+
+/// A plain output filter with only literal arguments and no redirection.
+fn is_plain_output_filter(command: &str) -> bool {
+    let (tokens, opaque) = literal_tokens(command);
+    !opaque
+        && !tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), ">" | ">>" | "<"))
+        && tokens
+            .first()
+            .is_some_and(|program| is_output_filter(&program_stem(program)))
 }
 
 fn program_stem(program: &str) -> String {
@@ -158,6 +182,9 @@ pub(crate) fn is_read_only_execution(execution: &RunShellExecution) -> bool {
 
 fn is_read_only_command(program: &str, args: &[String]) -> bool {
     let stem = program_stem(program);
+    if is_output_filter(&stem) {
+        return true;
+    }
     if opaque_arguments(&stem, args)
         || args
             .iter()
@@ -190,8 +217,18 @@ pub(crate) fn effects(
         if let Some(parts) = split_chain(command) {
             return chain_effects(&parts, ctx);
         }
+        // `Select-Object Name` names a property, not a file to write.
+        if is_plain_output_filter(command) {
+            return Ok(vec![Effect::RunCommand(CommandClass::ReadOnly)]);
+        }
     }
-    let class = execution_class(execution)?;
+    let mut class = execution_class(execution)?;
+    // A read-only cmdlet (`Get-ChildItem`, `Select-String`, …) with literal
+    // arguments and no redirection only reads; its path arguments are still
+    // gated below as reads.
+    if class == CommandClass::Unknown && is_read_only_execution(execution) {
+        class = CommandClass::ReadOnly;
+    }
     // One read-only cmdlet in a `powershell -Command` string is a command whose
     // reads are known, not code with unknown targets.
     if let Some(paths) = crate::inline_powershell::read_only_paths(execution) {
@@ -556,8 +593,12 @@ fn inspect_powershell_writer(
     true
 }
 
+/// Balanced parentheses inside a name are text (`Program Files (x86)`); a
+/// leading one is a PowerShell subexpression (`(Join-Path …)`).
 pub(crate) fn literal_target(target: &str) -> bool {
     !target.is_empty()
+        && !target.starts_with('(')
+        && target.matches('(').count() == target.matches(')').count()
         && !target.starts_with('~')
         && (!target.contains(':') || Path::new(target).is_absolute())
         && !target.chars().any(|c| {
@@ -580,8 +621,6 @@ pub(crate) fn literal_target(target: &str) -> bool {
                     | '\r'
                     | '<'
                     | '>'
-                    | '('
-                    | ')'
             )
         })
 }
@@ -639,7 +678,10 @@ fn literal_tokens(command: &str) -> (Vec<String>, bool) {
                 }
             }
             (_, c) => {
-                if matches!(c, '|' | '&' | ';' | '`' | '(' | ')' | '\n' | '\r')
+                // Parentheses inside quotes are text (`"Program Files (x86)"`);
+                // a quoted `$(…)` is still caught by its `$`.
+                if matches!(c, '|' | '&' | ';' | '`' | '\n' | '\r')
+                    || (quote.is_none() && matches!(c, '(' | ')'))
                     || (quote.is_none() && c == '~' && word.is_empty())
                     || (quote != Some('\'') && matches!(c, '$' | '%' | '!'))
                     || (quote.is_none() && matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
@@ -880,6 +922,55 @@ mod chain_tests {
         RunShellExecution::Shell {
             command: command.to_string(),
         }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn output_filters_name_properties_not_files() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(root.path()).unwrap();
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        for command in [
+            r#"Get-ChildItem -Path "C:\Games\Some Game (x86)" -Directory | Select-Object Name"#,
+            r#"Select-String -Path "src\Guide.lua" -Pattern http -List | Select-Object Path"#,
+            "Get-ChildItem -Recurse -File | Select-Object FullName | Select-Object -First 30",
+            "Get-ChildItem | Sort-Object Length | Format-Table Name, Length",
+        ] {
+            let found = effects(&shell(command), &ctx).unwrap();
+            assert!(
+                !found.iter().any(|effect| effect.may_create_files()
+                    || matches!(effect, Effect::WritePath { .. })),
+                "{command}: {found:?}"
+            );
+            assert!(is_read_only_execution(&shell(command)), "{command}");
+        }
+        // A script block is code, and a redirection still writes.
+        assert!(!is_read_only_execution(&shell(
+            "Get-ChildItem | Where-Object { Remove-Item $_ }"
+        )));
+        assert!(!is_read_only_execution(&shell(
+            "Get-ChildItem | Select-Object Name > names.txt"
+        )));
+        let written = effects(
+            &shell("Get-ChildItem | Select-Object Name > names.txt"),
+            &ctx,
+        )
+        .unwrap();
+        assert!(
+            written
+                .iter()
+                .any(|effect| matches!(effect, Effect::WritePath { .. })),
+            "{written:?}"
+        );
     }
 
     #[test]

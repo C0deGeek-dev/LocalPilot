@@ -2136,7 +2136,7 @@ mod artifact_tests {
                 limit: 64_000,
                 provenance: ContextProvenance::CallerSupplied,
             },
-            Reliability::Strong,
+            Reliability::Weak,
             &localpilot_config::GranularityConfig::default(),
         )
     }
@@ -2370,7 +2370,7 @@ mod artifact_tests {
                 limit: 64_000,
                 provenance: ContextProvenance::ResolvedBudget,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &localpilot_config::GranularityConfig::default(),
         );
         let row = "<p class=\"row\">item one two three four five</p>
@@ -2565,7 +2565,7 @@ mod snapshot_tests {
                 limit: 16_384,
                 provenance: ContextProvenance::CallerSupplied,
             },
-            Reliability::Unknown,
+            Reliability::Malformed,
             &localpilot_config::GranularityConfig::default(),
         )
     }

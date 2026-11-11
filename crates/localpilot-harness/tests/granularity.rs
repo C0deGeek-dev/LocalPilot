@@ -68,7 +68,10 @@ fn runtime_with_tools(
             interactivity: Interactivity::NonInteractive,
             trusted: true,
             context_token_limit: 8_000,
-            granularity: Some(GranularityConfig::default()),
+            granularity: Some(GranularityConfig {
+                mode: localpilot_config::WorkLimitMode::Strict,
+                ..GranularityConfig::default()
+            }),
             verify_command: verify,
             ..SessionConfig::default()
         },
@@ -158,9 +161,12 @@ async fn host_refusals_and_reported_failures_do_not_poison_reliability() {
         if case == "reported" {
             std::fs::write(dir.path().join("brief.md"), "changed\n").unwrap();
         }
+        // Twice: one failure alone is a single strike and narrows nothing, so
+        // only a repeated real failure separates it from a neutral refusal.
         let provider = Arc::new(
             FakeProvider::new()
-                .tool_call("observed", name, input)
+                .tool_call("observed", name, input.clone())
+                .tool_call("observed-again", name, input)
                 .text("stopped")
                 .text("next turn"),
         );
@@ -243,6 +249,7 @@ async fn only_typed_host_evidence_exempts_an_execution_failure() {
         let provider = Arc::new(
             FakeProvider::new()
                 .tool_call("observed", "reliability_fixture", json!({}))
+                .tool_call("observed-again", "reliability_fixture", json!({}))
                 .text("stopped")
                 .text("next turn"),
         );
@@ -303,7 +310,10 @@ async fn whole_file_exception_keeps_byte_and_tightened_line_bounds() {
     let mut agent = runtime(dir.path(), provider, Profile::ReadOnly, None);
     agent.set_granularity(GranularityConfig {
         max_read_lines: Some(2),
-        ..GranularityConfig::default()
+        ..GranularityConfig {
+            mode: localpilot_config::WorkLimitMode::Strict,
+            ..GranularityConfig::default()
+        }
     });
     let (_, events) = turn(&mut agent).await;
     assert!(events.iter().any(
@@ -641,7 +651,8 @@ async fn smaller_bounded_repair_restores_opaque_checks_after_bounds_refusal() {
             .tool_call(
                 "blocked",
                 "run_shell",
-                json!({"command":"git status --short"}),
+                // A command that could write; read-only commands still run.
+                json!({"command":"git add a.txt"}),
             )
             .tool_call(
                 "repair",
@@ -733,7 +744,8 @@ async fn failed_bounded_repair_does_not_restore_opaque_dispatch() {
             .tool_call(
                 "opaque",
                 "run_shell",
-                json!({"command":"git status --short"}),
+                // A command that could write; read-only commands still run.
+                json!({"command":"git add a.txt"}),
             )
             .text("blocked"),
     );
@@ -820,7 +832,10 @@ async fn oversized_plan_is_visible_but_cannot_replace_saved_work() {
             provenance: localpilot_harness::granularity::ContextProvenance::CallerSupplied,
         },
         Reliability::Unknown,
-        &GranularityConfig::default(),
+        &GranularityConfig {
+            mode: localpilot_config::WorkLimitMode::Strict,
+            ..GranularityConfig::default()
+        },
     );
     let oversized = PLAN.replace("scope: 1, 1, 1, 4", "scope: 3, 5, 4, 800");
     let draft = draft_plan_with_profile(
@@ -1009,6 +1024,7 @@ async fn malformed_input_and_stream_recovery_cannot_upgrade_capability() {
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call("malformed", "read_file", json!({"path":42}))
+            .tool_call("malformed-again", "read_file", json!({"path":43}))
             .tool_call(
                 "valid",
                 "write_file",
@@ -1155,7 +1171,10 @@ async fn contract_refusal_does_not_spend_a_mutation_that_never_dispatched() {
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             enforce_prior_read: true,
-            granularity: Some(GranularityConfig::default()),
+            granularity: Some(GranularityConfig {
+                mode: localpilot_config::WorkLimitMode::Strict,
+                ..GranularityConfig::default()
+            }),
             trusted: true,
             ..SessionConfig::default()
         },
@@ -1661,8 +1680,10 @@ async fn configured_modes_enforce_their_actual_file_boundaries() {
     use localpilot_config::WorkLimitMode;
 
     for (mode, count, allowed) in [
-        (WorkLimitMode::Automatic, 1, true),
-        (WorkLimitMode::Automatic, 2, false),
+        (WorkLimitMode::Strict, 1, true),
+        (WorkLimitMode::Strict, 2, false),
+        (WorkLimitMode::Automatic, 10, true),
+        (WorkLimitMode::Automatic, 11, false),
         (WorkLimitMode::Wide, 9, true),
         (WorkLimitMode::Wide, 10, true),
         (WorkLimitMode::Wide, 11, false),
@@ -1689,7 +1710,10 @@ async fn configured_modes_enforce_their_actual_file_boundaries() {
         );
         agent.set_granularity(GranularityConfig {
             mode,
-            ..GranularityConfig::default()
+            ..GranularityConfig {
+                mode: localpilot_config::WorkLimitMode::Strict,
+                ..GranularityConfig::default()
+            }
         });
         let (stop, events) = turn(&mut agent).await;
         assert_eq!(
@@ -1728,7 +1752,10 @@ async fn off_admits_no_baseline_commands_only_with_independent_permission() {
         let mut agent = runtime(dir.path(), provider, profile, None);
         agent.set_granularity(GranularityConfig {
             mode: WorkLimitMode::Off,
-            ..GranularityConfig::default()
+            ..GranularityConfig {
+                mode: localpilot_config::WorkLimitMode::Strict,
+                ..GranularityConfig::default()
+            }
         });
         let (stop, events) = turn(&mut agent).await;
         assert_eq!(dir.path().join("b.txt").exists(), allowed, "{events:?}");
@@ -1771,7 +1798,10 @@ async fn fixed_profile_counts_long_diff_payload_across_files() {
     agent.set_granularity(GranularityConfig {
         mode: localpilot_config::WorkLimitMode::Wide,
         max_changed_lines: Some(8),
-        ..GranularityConfig::default()
+        ..GranularityConfig {
+            mode: localpilot_config::WorkLimitMode::Strict,
+            ..GranularityConfig::default()
+        }
     });
     let (stop, events) = turn(&mut agent).await;
     assert_eq!(stop, StopReason::NoProgress);
@@ -1828,7 +1858,7 @@ async fn a_session_work_limit_change_lets_a_refused_write_be_retried() {
             .text("written"),
     );
     let mut agent = runtime(dir.path(), provider, Profile::Bypass, None);
-    assert_eq!(agent.work_limit_mode(), WorkLimitMode::Automatic);
+    assert_eq!(agent.work_limit_mode(), WorkLimitMode::Strict);
     let policy = agent.verification_policy();
     let (_, events) = turn(&mut agent).await;
     assert!(events.iter().any(|e| matches!(
@@ -1875,4 +1905,67 @@ async fn off_is_the_envelope_switch_and_a_mode_turns_the_envelope_back_on() {
         WorkLimitMode::Off,
         "/disable-envelope reads as off"
     );
+}
+
+#[tokio::test]
+async fn read_only_commands_still_run_after_a_refused_write() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+    project(dir.path());
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "large",
+                "edit_file",
+                json!({"path":"a.txt", "old_text":"before", "new_text":"x".repeat(20_000)}),
+            )
+            .tool_call("look", "run_shell", json!({"command":"git status --short"}))
+            .text("reported"),
+    );
+    let mut agent = runtime(
+        dir.path(),
+        provider,
+        Profile::Unrestricted,
+        Some("git status --short".to_string()),
+    );
+    agent.set_granularity(GranularityConfig {
+        mode: localpilot_config::WorkLimitMode::Strict,
+        ..GranularityConfig::default()
+    });
+    let (_, events) = turn(&mut agent).await;
+    assert!(events.iter().any(|e| matches!(e,
+        RuntimeEvent::ToolFinished { id, is_error: true, output, .. }
+            if id == "large" && output.contains("nothing was written"))));
+    assert!(
+        events.iter().any(|e| matches!(e,
+            RuntimeEvent::ToolFinished { id, is_error: false, .. } if id == "look")),
+        "a read-only command runs after a refused write: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn repeated_envelope_refusals_end_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "before\n").unwrap();
+    project(dir.path());
+    let mut provider = FakeProvider::new();
+    for attempt in 0..6 {
+        provider = provider.tool_call(
+            &format!("large-{attempt}"),
+            "edit_file",
+            json!({"path":"a.txt", "old_text":"before", "new_text":format!("{attempt}").repeat(20_000)}),
+        );
+    }
+    let provider = Arc::new(provider.text("never reached"));
+    let mut agent = runtime(dir.path(), provider, Profile::Unrestricted, None);
+    agent.set_granularity(GranularityConfig {
+        mode: localpilot_config::WorkLimitMode::Strict,
+        ..GranularityConfig::default()
+    });
+    let (stop, events) = turn(&mut agent).await;
+    assert_eq!(stop, StopReason::NoProgress, "{events:?}");
+    assert!(events.iter().any(|e| matches!(e,
+        RuntimeEvent::Warning(text) if text.contains("signal=work_envelope_refused"))));
+    assert!(!events.iter().any(|e| matches!(e,
+        RuntimeEvent::ToolStarted { id, .. } if id == "large-4")));
 }

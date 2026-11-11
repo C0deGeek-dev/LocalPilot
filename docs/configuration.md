@@ -1170,12 +1170,13 @@ Notable rule key:
 ### `[harness.granularity]`
 
 The `mode` key is available from LocalPilot 6.0.0 (currently Unreleased).
-Omitting it selects `automatic`. Other supported values are `wide`,
+Omitting it selects `automatic`. Other supported values are `strict`, `wide`,
 `very_wide`, and `off`.
 
 | Mode | Files | Regions | Edited material | New-file material |
 |---|---:|---:|---:|---:|
-| `automatic` | Adaptive | Adaptive | Adaptive | Adaptive |
+| `automatic` | Starts wide, narrows on failures | Adaptive | Adaptive | Adaptive |
+| `strict` | Starts at 1, widens on verified work | Adaptive | Adaptive | Adaptive |
 | `wide` | 10 | 40 | 2,000 equivalents | 2,000 equivalents |
 | `very_wide` | 50 | 200 | 10,000 equivalents | 10,000 equivalents |
 | `off` | No sizing ceiling | No sizing ceiling | No sizing ceiling | No sizing ceiling |
@@ -1192,13 +1193,19 @@ mode = "wide"
 max_read_lines = 40
 ```
 
-Context below 32,000 usable prompt tokens or at 70% pressure gets 80-line reads,
-80 changed-line equivalents and 4 KiB output projections; sufficient context gets
-200, 200 and 12 KiB. Unknown/weak/malformed reliability permits one file, one
-region and one decision. Repeated valid tool successes plus verified changed
-units permit at most three files, four regions and two decisions with sufficient
-context (two regions with small context). Small context or conservative reliability
-stops harness execution after a durable checkpoint. The read, output, decision
+Work starts wide and narrows on observed trouble. With no evidence yet, or good
+evidence, a unit may change ten files, forty regions and four decisions, with
+2,000 changed-line and new-file equivalents (300 and 600 under small context).
+Two strikes, counting failed calls and malformed calls together, narrow it to
+three files, four regions and two decisions with 200/600 equivalents (one file,
+two regions and 80/200 under small context). Two malformed calls narrow it to one
+file, one region and one decision. Every four clean calls in a row, and every
+verified unit, pay one strike back. `strict` keeps the earlier conservative
+start: one file, one region and one decision until eight clean calls and two
+verified units, then at most three files and four regions. Context below 32,000 usable prompt tokens or
+at 70% pressure also gets 80-line reads and 4 KiB output projections; sufficient
+context gets 200 lines and 12 KiB. A narrowed profile stops harness execution
+after a durable checkpoint. The read, output, decision
 and continuation rules also apply to fixed profiles. Reviewed step scopes
 cap files, regions, existing edits and decisions. New-file material has its
 separate allowance. Enabled profiles retain a 64 KiB aggregate binary budget

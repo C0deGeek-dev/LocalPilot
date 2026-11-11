@@ -1193,7 +1193,17 @@ enum NoProgressDiagnostic {
         reason: String,
         count: usize,
     },
+    /// The work envelope refused `count` calls this turn: the model kept
+    /// reshaping work that cannot fit until the turn ends.
+    WorkEnvelopeRefused {
+        tool: String,
+        count: usize,
+    },
 }
+
+/// Envelope refusals in one turn that end it. The first refusal says the limit
+/// holds until the turn ends; a few more mean the model is not adapting.
+const ENVELOPE_REFUSAL_STOP: usize = 4;
 
 /// Map the detector's typed signal (plus the tool that produced it) to a
 /// diagnostic, so both the dynamic (default-rail) and monotone (explicit-budget)
@@ -1249,6 +1259,10 @@ fn no_progress_notice(diagnostic: &NoProgressDiagnostic) -> (String, String) {
         }
         NoProgressDiagnostic::ConsecutiveFailures { count } => {
             format!("signal=consecutive_failures count={count}")
+        }
+        NoProgressDiagnostic::WorkEnvelopeRefused { tool, count } => {
+            let tool = serde_json::Value::String(tool.clone()).to_string();
+            format!("signal=work_envelope_refused tool={tool} count={count}")
         }
         NoProgressDiagnostic::RepeatedObservation {
             tool,
@@ -1383,6 +1397,8 @@ pub struct SessionRuntime {
     /// A bounds-denied write cannot be retried through an opaque process.
     /// Successful bounded recovery or a fresh unit clears this dispatch latch.
     work_opaque_retry_blocked: bool,
+    /// Work-envelope refusals so far this turn; enough of them end the turn.
+    turn_envelope_refusals: usize,
     /// Authorized write-capable invocation, including errors/partial writes.
     /// Separate from the conservative attempted-operation budget.
     work_mutation_may_have_run: bool,
@@ -1647,6 +1663,7 @@ impl SessionRuntime {
             unit_verify_command: None,
             work_mutation_refusal: None,
             work_opaque_retry_blocked: false,
+            turn_envelope_refusals: 0,
             work_mutation_may_have_run: false,
             work_edit_may_have_run: false,
             work_mcp_call_attempted: false,
@@ -1815,8 +1832,11 @@ impl SessionRuntime {
                 return Some(Self::unit_refusal_guidance(refusal.message, unit_ended));
             }
         }
-        if self.work_opaque_retry_blocked && is_opaque_launch(name, input) {
-            return Some("work envelope: a bounded write was refused; opaque shell/background retries cannot preserve its limits. Use bounded reads and a smaller exact edit, or checkpoint the unit; automatic verification remains available".to_string());
+        if self.work_opaque_retry_blocked
+            && is_opaque_launch(name, input)
+            && !(name == "run_shell" && localpilot_tools::shell_call_is_read_only(input))
+        {
+            return Some("work envelope: a bounded write was refused, so opaque shell/background commands that could write are blocked until this turn ends; nothing was run. Read-only commands (listing, reading, searching) still run. Keep the work already done, verify it, then stop and report what remains".to_string());
         }
         if self.sizing_caps().is_some()
             && self.work_diff_baseline.is_none()
@@ -4624,6 +4644,7 @@ impl SessionRuntime {
         self.turn_verification = None;
         self.turn_has_changes = false;
         self.turn_files_changed.clear();
+        self.turn_envelope_refusals = 0;
         self.work_unit = crate::granularity::WorkUnit::default();
         self.work_mutation_refusal = None;
         self.work_opaque_retry_blocked = false;
@@ -6377,7 +6398,17 @@ impl SessionRuntime {
                         }
                     }
                 } // A preflight refusal is not an executed tool observation.
-                let repeated_stop = unavailable_attempt_stop.or_else(|| match repeat {
+                if work_envelope_refusal {
+                    self.turn_envelope_refusals += 1;
+                }
+                let envelope_stop =
+                    (self.turn_envelope_refusals >= ENVELOPE_REFUSAL_STOP).then(|| {
+                        NoProgressDiagnostic::WorkEnvelopeRefused {
+                            tool: name.clone(),
+                            count: self.turn_envelope_refusals,
+                        }
+                    });
+                let repeated_stop = unavailable_attempt_stop.or(envelope_stop).or_else(|| match repeat {
                     RepeatedObservation::Fresh => None,
                     RepeatedObservation::Nudge { count } => {
                         let hint = if let Some(denial) = &permission_denial {
@@ -6460,6 +6491,7 @@ impl SessionRuntime {
                     let skipped_reason = match diagnostic {
                         NoProgressDiagnostic::PermissionDenied { .. } => "skipped: the turn stopped after repeated equivalent permission denials; this call was not executed",
                         NoProgressDiagnostic::BackendUnavailableAttempt { .. } => "skipped: the turn stopped after repeated attempts to use an unavailable backend",
+                        NoProgressDiagnostic::WorkEnvelopeRefused { .. } => "skipped: the turn stopped after repeated work-envelope refusals; this call was not executed",
                         _ => "skipped: the turn stopped because the same call kept returning the same result",
                     };
                     for (skip_id, _, _, _) in &calls[call_index + 1..] {
@@ -6529,7 +6561,13 @@ impl SessionRuntime {
     ) -> StopReason {
         let (notice, detail) = no_progress_notice(diagnostic);
         let _ = events.send(RuntimeEvent::Warning(notice.clone()));
-        self.append(Message::text(Role::User, notice).into_synthetic("no tool-call progress"));
+        self.append(
+            Message::text(
+                Role::System,
+                format!("System notice from LocalPilot, not user input: {notice}"),
+            )
+            .into_synthetic("no tool-call progress"),
+        );
         self.stop_with_detail(events, StopReason::NoProgress, Some(detail))
     }
 

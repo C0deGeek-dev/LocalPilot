@@ -217,7 +217,9 @@ impl Fixture {
             .env_remove("PAIR_REPO")
             .env("APPDATA", &self.config)
             .env("XDG_CONFIG_HOME", &self.config)
-            .env("LOCALPILOT_MESH__WRITER", "native");
+            .env("LOCALPILOT_MESH__WRITER", "native")
+            // Owner units here exercise the narrow start and its checkpoints.
+            .env("LOCALPILOT_HARNESS__GRANULARITY__MODE", "strict");
         tokio::task::spawn_blocking(move || cmd.output().unwrap())
             .await
             .unwrap()
@@ -245,7 +247,9 @@ impl Fixture {
             .env_remove("PAIR_ENDPOINT_TOKEN")
             .env("APPDATA", &self.config)
             .env("XDG_CONFIG_HOME", &self.config)
-            .env("LOCALPILOT_MESH__WRITER", "native");
+            .env("LOCALPILOT_MESH__WRITER", "native")
+            // Owner units here exercise the narrow start and its checkpoints.
+            .env("LOCALPILOT_HARNESS__GRANULARITY__MODE", "strict");
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -265,7 +269,9 @@ impl Fixture {
             .env_remove("PAIR_ENDPOINT_TOKEN")
             .env("APPDATA", &self.config)
             .env("XDG_CONFIG_HOME", &self.config)
-            .env("LOCALPILOT_MESH__WRITER", "native");
+            .env("LOCALPILOT_MESH__WRITER", "native")
+            // Owner units here exercise the narrow start and its checkpoints.
+            .env("LOCALPILOT_HARNESS__GRANULARITY__MODE", "strict");
         cmd
     }
 
@@ -830,7 +836,9 @@ async fn a_schema_one_session_is_refused() {
         .env_remove("PAIR_REPO")
         .env("APPDATA", &f.config)
         .env("XDG_CONFIG_HOME", &f.config)
-        .env("LOCALPILOT_MESH__WRITER", "native");
+        .env("LOCALPILOT_MESH__WRITER", "native")
+        // Owner units here exercise the narrow start and its checkpoints.
+        .env("LOCALPILOT_HARNESS__GRANULARITY__MODE", "strict");
     let out = tokio::task::spawn_blocking(move || cmd.output().unwrap())
         .await
         .unwrap();
@@ -2243,7 +2251,9 @@ async fn own_is_refused_in_a_session_without_version_control() {
             "30",
         ])
         .env_remove("PAIR_REPO")
-        .env("LOCALPILOT_MESH__WRITER", "native");
+        .env("LOCALPILOT_MESH__WRITER", "native")
+        // Owner units here exercise the narrow start and its checkpoints.
+        .env("LOCALPILOT_HARNESS__GRANULARITY__MODE", "strict");
     let out = tokio::task::spawn_blocking(move || cmd.output().unwrap())
         .await
         .unwrap();
@@ -3579,7 +3589,9 @@ fn native_post(f: &Fixture, body: &str, env: &[(&str, &str)]) -> Output {
         .env_remove("PAIR_REPO")
         .env("APPDATA", &f.config)
         .env("XDG_CONFIG_HOME", &f.config)
-        .env("LOCALPILOT_MESH__WRITER", "native");
+        .env("LOCALPILOT_MESH__WRITER", "native")
+        // Owner units here exercise the narrow start and its checkpoints.
+        .env("LOCALPILOT_HARNESS__GRANULARITY__MODE", "strict");
     for (k, v) in env {
         cmd.env(k, v);
     }

@@ -18,8 +18,7 @@ use crate::quality::CheckStatus;
 use crate::rules::Trigger;
 
 const MOVED: &str = "unit checkpoint refused: a verification command changed the workspace; the work is preserved for review";
-const REFUSAL_STEP: &str =
-    "split into a smaller coherent unit, verify it, and checkpoint before continuing";
+use crate::granularity::REFUSAL_STEP;
 const UNIT_STEP: &str = "this call was not executed; the harness now checks earlier successful \
      changes and, when the check allows, opens the next unit with the same task. Retry this \
      refused edit in that unit if it is still needed";
@@ -411,7 +410,11 @@ impl SessionRuntime {
                     );
                 } else {
                     self.append(
-                        Message::text(Role::User, &detail).into_synthetic("bounded unit stop"),
+                        Message::text(
+                            Role::System,
+                            format!("System notice from LocalPilot, not user input: the turn stopped. Diagnostic: {detail}"),
+                        )
+                        .into_synthetic("bounded unit stop"),
                     );
                 }
                 Some(self.stop_with_detail(events, StopReason::NoProgress, Some(detail)))

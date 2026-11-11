@@ -693,7 +693,12 @@ impl SessionControl {
                 ControlOption {
                     label: "Automatic",
                     argument: "automatic",
-                    hint: "adapts to the context and how reliable the model has been",
+                    hint: "starts wide and narrows when the model's calls fail",
+                },
+                ControlOption {
+                    label: "Strict",
+                    argument: "strict",
+                    hint: "starts narrow and widens only after clean, verified work",
                 },
                 ControlOption {
                     label: "Wide",
@@ -8619,12 +8624,13 @@ mod tests {
         assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
         let view = app.value_picker().expect("the list is open");
         assert_eq!(view.title, "Work limits");
-        assert_eq!(view.rows.len(), 4);
+        assert_eq!(view.rows.len(), 5);
         assert!(
             view.rows[0].1 && view.rows[0].2,
             "starts on the value in force"
         );
 
+        let _ = app.handle_input(InputAction::MoveDown, 80);
         let _ = app.handle_input(InputAction::MoveDown, 80);
         let _ = app.handle_input(InputAction::MoveDown, 80);
         let command = app.handle_input(InputAction::Submit, 80);

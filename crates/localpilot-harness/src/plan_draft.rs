@@ -774,7 +774,8 @@ mod tests {
                 limit: 262_144,
                 provenance: ContextProvenance::RuntimeUsage,
             },
-            Reliability::Unknown,
+            // The narrowest tier, so a modest declared scope is already over.
+            Reliability::Malformed,
             caps,
         )
     }

@@ -686,6 +686,9 @@ async fn run_eval_mode(
             .env("APPDATA", &user_config)
             .env("XDG_CONFIG_HOME", &user_config)
             .env("PYTHONDONTWRITEBYTECODE", "1")
+            // These runs exercise narrow units and their continuation, which
+            // the default wide start would not reach.
+            .env("LOCALPILOT_HARNESS__GRANULARITY__MODE", "strict")
             .env_remove("LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_UNITS")
             .env_remove("LOCALPILOT_HARNESS__GRANULARITY__HEADLESS_RENAME_UNITS")
             .args(args);
@@ -793,8 +796,8 @@ async fn with_both_settings_off_the_task_stops_as_before() {
         assert_eq!(run.exit_reason(), "NoProgress", "{}", text(&run));
         assert!(!run.turn_stops().iter().any(|s| s == "UnitCheckpoint"));
         let all = all_messages(&run);
-        assert!(all.contains("verify it, and checkpoint before continuing"));
-        assert!(!all.contains("this call was not executed"));
+        assert!(all.contains("nothing was written"));
+        assert!(!all.contains("the harness now checks"));
         assert!(!all.contains("next bounded unit"));
     }
 }
