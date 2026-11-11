@@ -12,7 +12,7 @@ use serde_json::Value;
 /// What every bounds refusal tells the model to do next. A refused call never
 /// runs, and the budget is not refunded until the turn ends, so retrying the
 /// same work in another shape cannot succeed.
-pub(crate) const REFUSAL_STEP: &str = "this call was not executed and nothing was written. The limit holds until this turn ends: keep the work already done, verify it, then stop and report what remains, or make a smaller exact edit that fits";
+pub(crate) const REFUSAL_STEP: &str = "this call was not executed and nothing was written. The limit holds until this turn ends: keep the work already done, check it with read-only tools (read_file, search_text, read-only shell commands), then stop and report what remains, or make a smaller exact edit that fits";
 
 /// Aggregate old + new material in a binary work unit, independent of text lines.
 pub(crate) const MAX_BINARY_CHANGE_BYTES: u64 = 64 * 1024;
@@ -513,16 +513,20 @@ impl WorkUnit {
             if matches!(action, "delete" | "write_file") && !ours {
                 // Bounds deletion/overwrite of existing material, not just its replacement.
                 if let Ok(meta) = &on_disk {
-                    if meta.len() > profile.max_changed_lines as u64 {
+                    let removed = removed_material_cost(
+                        &path,
+                        meta.len(),
+                        workspace.contains(&path),
+                        profile.max_changed_lines,
+                    );
+                    if removed > profile.max_changed_lines {
                         return reject(&format!(
-                            "whole-file overwrite/deletion is unbounded ({} bytes against {} changed lines); use exact region edits",
-                            meta.len(),
+                            "{} would remove about {removed} changed lines of existing content, more than the {} this unit allows; use exact edit_file regions instead of rewriting or deleting the whole file",
+                            if action == "delete" { "deleting this file" } else { "overwriting this file" },
                             profile.max_changed_lines
                         ));
                     }
-                    // Byte length is a conservative upper bound on removed
-                    // lines, without reading content before permission.
-                    proposed.lines = proposed.lines.saturating_add(meta.len() as usize);
+                    proposed.lines = proposed.lines.saturating_add(removed);
                 }
             }
             if action == "write_file" && ours && !creates {
@@ -601,6 +605,58 @@ impl WorkUnit {
         *self = proposed;
         None
     }
+}
+
+/// The changed-line cost of removing an existing file, in the same unit hunks
+/// are sized in: its line count, or one line per 80 bytes when that is larger.
+///
+/// A workspace file is counted by reading it, stopping once the count passes
+/// `cap`; nothing of its content is returned. A file outside the workspace is
+/// not read before permission, so its byte length stands in as a conservative
+/// upper bound on its lines.
+fn removed_material_cost(
+    path: &std::path::Path,
+    bytes: u64,
+    in_workspace: bool,
+    cap: usize,
+) -> usize {
+    let bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
+    if !in_workspace {
+        return bytes;
+    }
+    let byte_equivalent = bytes.div_ceil(80);
+    if byte_equivalent > cap {
+        return byte_equivalent;
+    }
+    match count_lines_up_to(path, cap) {
+        Some(lines) => lines.max(byte_equivalent),
+        None => bytes,
+    }
+}
+
+/// Count the lines of a file, stopping early once the count exceeds `cap`.
+/// A final line without a trailing newline still counts.
+fn count_lines_up_to(path: &std::path::Path, cap: usize) -> Option<usize> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buffer = [0u8; 8192];
+    let (mut lines, mut last) = (0usize, b'\n');
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        lines = lines.saturating_add(buffer[..read].iter().filter(|&&b| b == b'\n').count());
+        last = buffer[read - 1];
+        if lines > cap {
+            return Some(lines);
+        }
+    }
+    Some(if last == b'\n' {
+        lines
+    } else {
+        lines.saturating_add(1)
+    })
 }
 
 /// Preview separated changes using only supplied text, never workspace content.
@@ -822,6 +878,58 @@ mod tests {
                 .check_and_reserve(profile, "apply_patch", &bounded, &workspace)
                 .is_none());
         }
+    }
+
+    #[test]
+    fn overwriting_a_small_existing_file_is_sized_by_its_lines_not_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let profile = WorkProfile::resolve(
+            ContextCapacity {
+                used: 0,
+                limit: 8_000,
+                provenance: ContextProvenance::CallerSupplied,
+            },
+            Reliability::Unknown,
+            &GranularityConfig::default(),
+        );
+        let max = profile.max_changed_lines;
+        // More bytes than the changed-line limit, but only a handful of lines.
+        let line = "x".repeat(60);
+        let small = format!("{line}\n").repeat(max / 20 + 1);
+        assert!(small.len() > max, "fixture must exceed the limit in bytes");
+        std::fs::write(dir.path().join("config.json"), &small).unwrap();
+        let rewrite = serde_json::json!({"path":"config.json", "content":"{\"a\": 1}\n"});
+        assert!(WorkUnit::default()
+            .check_and_reserve(profile, "write_file", &rewrite, &workspace)
+            .is_none());
+        let delete = serde_json::json!({"operations":[{"action":"delete", "path":"config.json"}]});
+        assert!(WorkUnit::default()
+            .check_and_reserve(profile, "apply_patch", &delete, &workspace)
+            .is_none());
+
+        let big = "line\n".repeat(max + 1);
+        std::fs::write(dir.path().join("big.txt"), big).unwrap();
+        let rewrite = serde_json::json!({"path":"big.txt", "content":"short\n"});
+        let refusal = WorkUnit::default()
+            .check_and_reserve(profile, "write_file", &rewrite, &workspace)
+            .expect("a whole-file rewrite above the limit is refused");
+        assert!(refusal.message.contains("use exact edit_file regions"));
+        assert!(!refusal.message.contains("bytes"));
+    }
+
+    #[test]
+    fn removed_material_counts_a_final_line_without_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\nb\nc").unwrap();
+        assert_eq!(count_lines_up_to(&path, 100), Some(3));
+        std::fs::write(&path, "a\nb\n").unwrap();
+        assert_eq!(count_lines_up_to(&path, 100), Some(2));
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(count_lines_up_to(&path, 100), Some(0));
+        // Outside the workspace the byte length stays the bound.
+        assert_eq!(removed_material_cost(&path, 896, false, 300), 896);
     }
 
     #[test]

@@ -159,6 +159,8 @@ impl BackgroundProcesses {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            // Captured output is read by the model, not a terminal.
+            .env("NO_COLOR", "1")
             .kill_on_drop(true);
         // On Unix, lead a new process group: never the terminal's foreground
         // group, so a child that opens `/dev/tty` directly gets SIGTTIN/SIGTTOU

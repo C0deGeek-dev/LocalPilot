@@ -248,7 +248,8 @@ async fn stale_knowledge_queries_interleaved_with_empty_searches_do_not_stop_the
     assert_eq!(
         r.results
             .iter()
-            .filter(|(_, text)| text == "tool: search_text\nstatus: success\noutput:\n")
+            .filter(|(_, text)| text
+                .starts_with("tool: search_text\nstatus: success\noutput:\n[search] no matches"))
             .count(),
         123
     );

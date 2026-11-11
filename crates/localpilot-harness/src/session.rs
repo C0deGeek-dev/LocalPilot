@@ -1836,7 +1836,7 @@ impl SessionRuntime {
             && is_opaque_launch(name, input)
             && !(name == "run_shell" && localpilot_tools::shell_call_is_read_only(input))
         {
-            return Some("work envelope: a bounded write was refused, so opaque shell/background commands that could write are blocked until this turn ends; nothing was run. Read-only commands (listing, reading, searching) still run. Keep the work already done, verify it, then stop and report what remains".to_string());
+            return Some("work envelope: a bounded write was refused, so opaque shell/background commands that could write are blocked until this turn ends; nothing was run. Read-only commands (listing, reading, searching) still run; a command that runs a script or interpreter, such as a syntax check through pwsh -Command or python -c, cannot be proven read-only and stays blocked, so do not retry it in another shape. Keep the work already done, check it with read_file or search_text, then stop and report what remains and which check the user should run".to_string());
         }
         if self.sizing_caps().is_some()
             && self.work_diff_baseline.is_none()

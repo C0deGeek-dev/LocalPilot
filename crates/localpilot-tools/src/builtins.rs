@@ -1327,6 +1327,7 @@ impl Tool for SearchText {
 
         let mut hits = Vec::new();
         let mut protected_skipped = false;
+        let mut files_searched = 0usize;
         'walk: for result in ignore::WalkBuilder::new(&dir)
             .hidden(true)
             .require_git(false)
@@ -1351,6 +1352,7 @@ impl Tool for SearchText {
             let Ok(content) = std::fs::read_to_string(entry.path()) else {
                 continue; // skip binary / unreadable files
             };
+            files_searched += 1;
             let rel = entry.path().strip_prefix(&root).unwrap_or(entry.path());
             for (line_no, line) in content.lines().enumerate() {
                 let matched = match &regex {
@@ -1371,11 +1373,43 @@ impl Tool for SearchText {
             }
         }
         let mut output = hits.join("\n");
+        if hits.is_empty() {
+            output = no_match_notice(&input.query, input.is_regex, files_searched);
+        }
         if protected_skipped {
             output.push_str("\n[search] Protected descendant content was excluded; explicitly read an authorized file to inspect it.");
         }
         Ok(cap(output))
     }
+}
+
+/// Say why a search came back empty instead of returning nothing, so an empty
+/// result is not mistaken for a failed or blocked search. A literal query that
+/// looks like a pattern (`a|b`, `x.*y`) is the usual cause.
+fn no_match_notice(query: &str, is_regex: bool, files_searched: usize) -> String {
+    let kind = if is_regex {
+        "regular expression"
+    } else {
+        "literal text"
+    };
+    let plural = if files_searched == 1 { "" } else { "s" };
+    let mut notice = format!(
+        "[search] no matches for {kind} {query:?} in {files_searched} readable text file{plural}"
+    );
+    let looks_like_pattern = ["|", ".*", ".+", "\\d", "\\w", "\\s", "^", "$"]
+        .iter()
+        .any(|token| query.contains(token));
+    if !is_regex && looks_like_pattern {
+        notice.push_str(
+            "; the query was matched as literal text, so set is_regex=true to use it as a pattern",
+        );
+    }
+    if files_searched == 0 {
+        notice.push_str(
+            "; no readable text file was found under this path (all ignored, hidden or binary)",
+        );
+    }
+    notice
 }
 
 // --- apply_patch ------------------------------------------------------------
@@ -2611,7 +2645,7 @@ mod bounded_run_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{binary_placeholder, locate_edit, looks_binary, EditMiss};
+    use super::{binary_placeholder, locate_edit, looks_binary, no_match_notice, EditMiss};
 
     #[test]
     fn locate_edit_prefers_an_exact_unique_match() {
@@ -2657,6 +2691,18 @@ mod tests {
         // A NUL byte alone is decisive, even amid otherwise-printable text.
         assert!(looks_binary(b"glTF\x02\x00\x00\x00\x10rest"));
         assert!(looks_binary(&[0x01, 0x02, 0x03, 0x04, 0x05]));
+    }
+
+    #[test]
+    fn empty_search_explains_a_literal_query_that_looks_like_a_pattern() {
+        let notice = no_match_notice("UpdateServerURL|downloadUrl", false, 829);
+        assert!(notice.contains("no matches for literal text"));
+        assert!(notice.contains("829 readable text files"));
+        assert!(notice.contains("set is_regex=true"));
+        let regex = no_match_notice("a|b", true, 1);
+        assert!(!regex.contains("is_regex=true"));
+        assert!(regex.contains("1 readable text file"));
+        assert!(no_match_notice("plain", false, 0).contains("no readable text file"));
     }
 
     #[test]

@@ -267,6 +267,23 @@ pub(crate) fn normalize_execution(
                 "command must not be empty".to_string(),
             ));
         }
+        // `command` runs through the platform shell. Silently dropping a
+        // `program` or `args` sent with it would run something other than the
+        // caller meant, so only a `program` that names that same shell is
+        // accepted alongside it.
+        if !args.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "pass either `command` (one shell command line) or `program` with `args`, not both; `args` would be ignored next to `command`".to_string(),
+            ));
+        }
+        if let Some(program) = program.as_deref().map(str::trim) {
+            if !program.is_empty() && !names_platform_shell(program) {
+                return Err(ToolError::InvalidInput(format!(
+                    "`command` runs through {}, not `{program}`; to run `{program}`, put it inside `command` or pass `program` with `args` and no `command`",
+                    platform_shell_label()
+                )));
+            }
+        }
         return Ok(RunShellExecution::Shell { command });
     }
 
@@ -287,6 +304,40 @@ pub(crate) fn normalize_execution(
     }
 
     Ok(RunShellExecution::Direct { program, args })
+}
+
+/// Whether `program` names the shell that `command` lines run through, so it
+/// is redundant rather than conflicting next to `command`.
+fn names_platform_shell(program: &str) -> bool {
+    let base = std::path::Path::new(program)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    #[cfg(windows)]
+    {
+        matches!(base, "pwsh" | "powershell")
+    }
+    #[cfg(not(windows))]
+    {
+        let configured = std::env::var("SHELL").ok().and_then(|shell| {
+            std::path::Path::new(&shell)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        });
+        base == "sh" || configured.as_deref() == Some(base)
+    }
+}
+
+fn platform_shell_label() -> &'static str {
+    #[cfg(windows)]
+    {
+        "PowerShell"
+    }
+    #[cfg(not(windows))]
+    {
+        "the login shell"
+    }
 }
 
 fn normalize_run_shell_input(input: RunShellInput) -> Result<NormalizedRunShellInput, ToolError> {
@@ -435,8 +486,67 @@ pub(crate) fn render_stream(bytes: &[u8]) -> String {
     if looks_binary(bytes) {
         binary_placeholder(bytes.len())
     } else {
-        String::from_utf8_lossy(bytes).into_owned()
+        strip_terminal_escapes(&String::from_utf8_lossy(bytes))
     }
+}
+
+/// Remove terminal escape sequences (colours, cursor movement, window titles)
+/// from captured output. Children are asked for plain output through
+/// `NO_COLOR`, but not every program honours it, and the sequences carry no
+/// meaning for the model while costing tokens and splitting words.
+pub(crate) fn strip_terminal_escapes(text: &str) -> String {
+    const ESC: char = '\u{1b}';
+    const CSI: char = '\u{9b}';
+    const BEL: char = '\u{7}';
+    if !text.contains(ESC) && !text.contains(CSI) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let csi = match ch {
+            CSI => true,
+            ESC => match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    true
+                }
+                Some(']') => {
+                    // OSC: runs to BEL or ST (ESC backslash).
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if next == BEL {
+                            break;
+                        }
+                        if next == ESC && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                    false
+                }
+                Some(_) => {
+                    // A two-character escape such as ESC = or ESC 7.
+                    chars.next();
+                    false
+                }
+                None => false,
+            },
+            _ => {
+                out.push(ch);
+                continue;
+            }
+        };
+        if csi {
+            // Parameter and intermediate characters, then one final in @..~.
+            for next in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&next) {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn shell_program_and_args(command: &str) -> (String, Vec<String>) {
@@ -691,6 +801,9 @@ impl Tool for RunShell {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            // Captured output is read by the model, not a terminal: ask for
+            // plain text (PowerShell 7.4+ and most CLIs honour NO_COLOR).
+            .env("NO_COLOR", "1")
             // We reap the whole process tree explicitly on timeout (below). Do not
             // let a dropped future kill only the immediate child: on Windows that
             // kills the shell wrapper first and orphans the grandchild that is the
@@ -1153,5 +1266,48 @@ mod tests {
             program: "C:\\tools\\bun.exe".to_string(),
             args: vec!["serve".to_string()],
         }));
+    }
+
+    #[test]
+    fn command_with_args_is_refused_instead_of_dropping_the_args() {
+        let result = normalize_execution(
+            Some("cmd /c dir".to_string()),
+            None,
+            vec!["Test-Path x".to_string()],
+        );
+        assert!(
+            matches!(result, Err(ToolError::InvalidInput(message)) if message.contains("not both"))
+        );
+    }
+
+    #[test]
+    fn command_with_a_foreign_program_is_refused() {
+        let result =
+            normalize_execution(Some("dir".to_string()), Some("cmd".to_string()), Vec::new());
+        assert!(
+            matches!(result, Err(ToolError::InvalidInput(message)) if message.contains("`cmd`"))
+        );
+    }
+
+    #[test]
+    fn command_with_the_platform_shell_named_as_program_still_runs() {
+        let shell = if cfg!(windows) { "pwsh" } else { "sh" };
+        let result = normalize_execution(
+            Some("echo hi".to_string()),
+            Some(shell.to_string()),
+            Vec::new(),
+        );
+        assert!(matches!(result, Ok(RunShellExecution::Shell { command }) if command == "echo hi"));
+    }
+
+    #[test]
+    fn terminal_escapes_are_stripped_from_captured_output() {
+        let raw = "\u{1b}[32;1mName\u{1b}[0m\r\n\u{1b}[32;1m----\u{1b}[0m\r\nfile\u{1b}]0;title\u{7}\n\u{1b}=done";
+        assert_eq!(strip_terminal_escapes(raw), "Name\r\n----\r\nfile\ndone");
+        assert_eq!(render_stream(b"\x1b[31mred\x1b[0m"), "red");
+        assert_eq!(
+            strip_terminal_escapes("plain [text] stays"),
+            "plain [text] stays"
+        );
     }
 }

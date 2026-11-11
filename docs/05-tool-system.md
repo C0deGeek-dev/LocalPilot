@@ -15,7 +15,10 @@ Exact edits, multi-edit hunks and structured
 patch operations spend cumulative file/region/changed-material budgets. Large
 whole-file overwrite/deletion and global/regex replacement return an actionable
 refusal; use bounded exact hunks. Giant single lines also spend byte-equivalent
-material, so line count alone cannot permit a large rewrite.
+material, so line count alone cannot permit a large rewrite. Removing an existing
+workspace file (overwrite or delete) costs its line count, or one line per 80
+bytes when that is larger, so rewriting a small configuration file fits; a file
+outside the workspace is not read before permission and costs its byte length.
 
 Every successful or failed output uses the existing redacted retention store and
 bounded head/tail projection, with a visible truncation/recovery notice. Long
@@ -261,6 +264,9 @@ Rules:
 - directory approval does not authorize protected descendant content: secret-like
   descendants are excluded before opening, with a visible exclusion notice
 - explicitly naming a file uses its own read gate, including secret-path approval
+- an empty result says so: it names the query, whether it was literal or a
+  regular expression, and how many files were searched, and a literal query that
+  looks like a pattern (`a|b`, `x.*y`) gets a hint to set `is_regex`
 
 ### `multi_edit`
 
@@ -553,6 +559,13 @@ Shell and process behaviour:
   chained command (`cargo build && cargo test`) runs as written instead of
   erroring. The selection is detected once and cached. It is *prefer*, not
   *require*: a host without `pwsh` still works, with `;` as the separator.
+- **One way to say what runs.** Send either `command` (one shell command line)
+  or `program` with `args`. `args` next to `command`, or a `program` that is not
+  the platform shell, is refused as invalid input instead of being silently
+  dropped; a redundant `program` naming the platform shell is accepted.
+- **Plain output.** Children run with `NO_COLOR=1`, and terminal escape
+  sequences (colours, cursor movement, titles) are stripped from captured
+  output, since they mean nothing to the model and split words.
 - **Working directory.** The command runs in the workspace, in the de-verbatim
   form a launched shell can use (see [harness spec](06-harness-spec.md) and
   [security & privacy](07-security-and-privacy.md)) — never a fallback like
