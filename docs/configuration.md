@@ -1031,10 +1031,8 @@ to let Tailscale take changes from them. On macOS, setup supports the
 open-source `tailscaled` (for example from Homebrew) and the Tailscale app
 downloaded from tailscale.com. With the app, your macOS user must be an
 administrator, because the app keeps the key to its settings readable only
-by administrators. With the app, `--check` works, but setup and `--undo`
-do not change anything yet: they stop and point you here. Use the manual
-`tailscale serve` command until then. The App Store version of the app is
-not supported yet. The app's CLI is
+by administrators. The App Store version of the app is not supported
+yet; use the manual `tailscale serve` command there. The app's CLI is
 `/Applications/Tailscale.app/Contents/MacOS/Tailscale`.
 
 ### `[terminal]`

@@ -109,29 +109,6 @@ pub(crate) async fn get(path: &str) -> Result<Reply, ApiFailure> {
     send(Method::GET, path, Payload::default()).await
 }
 
-/// Whether setup may change Tailscale through this computer's endpoint. The
-/// Tailscale app for macOS is read for `--check`; changes through it stay
-/// off until one real run on a Mac has shown the whole write path working
-/// there (the stale-tag test save refused, the rename settled, the Serve
-/// write confirmed, undo working).
-pub(crate) fn changes_allowed() -> Result<(), String> {
-    match locate() {
-        Ok(Endpoint::App { .. }) if !APP_CHANGES => Err(
-            "setup cannot change Tailscale through the Tailscale app for macOS yet; \
-             `localpilot remote setup --check` works with it. Until then, add the phone \
-             address by hand with `tailscale serve` (see Phone setup with Tailscale in \
-             docs/configuration.md). Nothing was changed."
-                .to_string(),
-        ),
-        // Reaching the daemon is reported by the first read, as before.
-        _ => Ok(()),
-    }
-}
-
-/// Changes through the Tailscale app for macOS. Off until the real end-to-end
-/// run on a Mac has passed.
-const APP_CHANGES: bool = false;
-
 /// Locate the endpoint, connect and run one request under one budget. The
 /// app's endpoint answers 401 when the token is missing or not accepted; it
 /// refuses before acting, so that is reported as unreachable, never as a

@@ -35,17 +35,17 @@ This was read from the published source and confirmed on a real install
    handed to another process; its debug form is hidden and the header is
    marked sensitive. It is read again for every request, so a restarted app
    is picked up.
-4. `--check` works with the app now. Changes through the app (`setup` and
-   `--undo`) stay refused with a pointer to the manual `tailscale serve`
-   command until one real run on a Mac shows the whole write path working
-   there: the stale-tag test save refused with 412, the rename settled, the
-   Serve write confirmed and undo working. Turning them on is a one-line
-   change recorded with that run.
+4. Changes through the app (`setup` and `--undo`) were held back until one
+   real run on a Mac showed the whole write path working there. That run
+   passed on 2026-11-12 with the standalone app 1.104.6: the stale-tag test
+   save was refused with 412, the random rename settled, the Serve write was
+   confirmed and verified from the computer, and undo removed it. Changes
+   through the app are on.
 5. The App Store build keeps its token inside its sandbox and is found only
    by listing open files. It is not supported yet and is refused with a
    plain reason.
 
-**Consequences.** A Mac user with the standalone app can check phone setup
+**Consequences.** A Mac user with the standalone app can set up phone access
 without installing a second Tailscale daemon. The residual risk is the one
 the app's own command-line client accepts: while the app is not running,
 another local process could listen on the recorded port and receive the
