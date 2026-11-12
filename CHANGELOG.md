@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `localpilot remote setup` says when it starts checking the new address from
+  this computer, and gives that check up to 90 seconds per request instead
+  of 15. Right after a new machine name, Tailscale first gets the HTTPS
+  certificate, so the step could look stuck or fail.
 - `localpilot remote setup` (including `--check` and `--undo`) works on a Mac
   with the Tailscale app downloaded from tailscale.com, not only with the
   open-source `tailscaled`. It needs an administrator account. The App Store

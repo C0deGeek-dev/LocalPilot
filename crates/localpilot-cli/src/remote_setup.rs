@@ -39,6 +39,9 @@ const PREFS: &str = "/localapi/v0/prefs";
 pub(crate) const SETTLE_WITHIN: Duration = Duration::from_secs(30);
 const SETTLE_EVERY: Duration = Duration::from_secs(1);
 const JOURNAL_VERSION: u32 = 2;
+/// How long one request of the address check may take. The first HTTPS
+/// connection to a new name waits while Tailscale gets its certificate.
+const TLS_CHECK_WITHIN: Duration = Duration::from_secs(90);
 
 /// The daemon's local API, as setup uses it.
 #[async_trait::async_trait]
@@ -993,6 +996,13 @@ async fn setup(run: &mut Run<'_, '_>, flag: NameFlag, yes: bool) -> Step<()> {
     {
         return halt("Tailscale's Serve settings changed before the check; it was not run.");
     }
+    // The first HTTPS connection to a name Tailscale has no certificate for
+    // yet waits while Tailscale gets one, which can take up to a minute; say
+    // so, or the command looks stuck.
+    s.console.say(&format!(
+        "Checking {origin} from this computer. Right after a new name, Tailscale first gets \
+         its HTTPS certificate, which can take up to a minute."
+    ));
     if let Err(why) = s.probes.tls(&origin).await {
         return halt(format!(
             "The check of {origin} from this computer failed: {why}."
@@ -1702,7 +1712,7 @@ async fn tls_check(origin: &str) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .http1_only()
-        .timeout(Duration::from_secs(15))
+        .timeout(TLS_CHECK_WITHIN)
         .build()
         .map_err(|error| error.to_string())?;
     let health = client
@@ -2216,10 +2226,14 @@ mod tests {
         assert_eq!(journal.rename, None);
         let config = std::fs::read_to_string(world.config_path()).unwrap();
         assert!(config.contains("advertised_url = \"https://davids-desktop.tail1234.ts.net\""));
-        assert!(world
-            .console
-            .text()
-            .contains("Verified from this computer; the phone is not checked yet"));
+        let said = world.console.text();
+        let checking = said
+            .find("Checking https://davids-desktop.tail1234.ts.net from this computer")
+            .expect("the address check is announced before it runs");
+        let verified = said
+            .find("Verified from this computer; the phone is not checked yet")
+            .expect("verified");
+        assert!(checking < verified, "{said}");
 
         // A second run changes nothing and keeps the record.
         world.go(NameFlag::Keep, true).await.expect("again");

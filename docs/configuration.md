@@ -1006,6 +1006,8 @@ first thing it cannot confirm:
 8. **A check from this computer.** Only with the gateway running on the new
    address, setup fetches the address over normal HTTPS and makes a
    WebSocket request without a credential, which must be refused as unpaired.
+   Right after a new name, Tailscale first gets the HTTPS certificate, so
+   this check can take up to a minute; setup says so while it waits.
    Success reads "Verified from this computer; the phone is not checked yet."
 
 Setup records what it confirmed in `~/.localpilot/remote/setup.json`,
