@@ -1788,6 +1788,9 @@ pub(crate) async fn command(mode: Mode, yes: bool) -> anyhow::Result<()> {
             .await
             .map_err(|error| anyhow::anyhow!("{error}"));
     }
+    if matches!(mode, Mode::Setup(_) | Mode::Undo) {
+        crate::remote_tailscale::changes_allowed().map_err(|why| anyhow::anyhow!("{why}"))?;
+    }
     let devices = paired_devices;
     let setup = Setup {
         daemon: &LocalDaemon,

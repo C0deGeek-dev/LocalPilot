@@ -77,18 +77,91 @@ struct Payload {
     body: Option<Vec<u8>>,
     /// The version tag a write is conditional on.
     if_match: Option<String>,
+    /// The access token the endpoint asks for, when it asks for one.
+    token: Option<Token>,
+}
+
+/// The Tailscale app's access token for its local API. A credential: it is
+/// never printed, logged, journaled or passed to another process, and its
+/// `Debug` form hides it.
+#[derive(Clone, PartialEq, Eq)]
+struct Token(String);
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(hidden)")
+    }
+}
+
+/// Where this computer's daemon answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Endpoint {
+    /// The daemon's own pipe or socket, admitted by who the caller is.
+    Daemon,
+    /// The Tailscale app for macOS (the standalone build): a loopback port,
+    /// admitted by an access token only administrators can read.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    App { port: u16, token: Token },
 }
 
 /// Send one GET to the daemon's local API.
 pub(crate) async fn get(path: &str) -> Result<Reply, ApiFailure> {
-    request(
-        connect(),
-        Method::GET,
-        path,
-        Payload::default(),
-        EXCHANGE_WITHIN,
-    )
-    .await
+    send(Method::GET, path, Payload::default()).await
+}
+
+/// Whether setup may change Tailscale through this computer's endpoint. The
+/// Tailscale app for macOS is read for `--check`; changes through it stay
+/// off until one real run on a Mac has shown the whole write path working
+/// there (the stale-tag test save refused, the rename settled, the Serve
+/// write confirmed, undo working).
+pub(crate) fn changes_allowed() -> Result<(), String> {
+    match locate() {
+        Ok(Endpoint::App { .. }) if !APP_CHANGES => Err(
+            "setup cannot change Tailscale through the Tailscale app for macOS yet; \
+             `localpilot remote setup --check` works with it. Until then, add the phone \
+             address by hand with `tailscale serve` (see Phone setup with Tailscale in \
+             docs/configuration.md). Nothing was changed."
+                .to_string(),
+        ),
+        // Reaching the daemon is reported by the first read, as before.
+        _ => Ok(()),
+    }
+}
+
+/// Changes through the Tailscale app for macOS. Off until the real end-to-end
+/// run on a Mac has passed.
+const APP_CHANGES: bool = false;
+
+/// Locate the endpoint, connect and run one request under one budget. The
+/// app's endpoint answers 401 when the token is missing or not accepted; it
+/// refuses before acting, so that is reported as unreachable, never as a
+/// reply.
+async fn send(method: Method, path: &str, mut payload: Payload) -> Result<Reply, ApiFailure> {
+    let endpoint = locate()?;
+    if let Endpoint::App { token, .. } = &endpoint {
+        payload.token = Some(token.clone());
+    }
+    let read = method == Method::GET;
+    let reply = request(connect(&endpoint), method, path, payload, EXCHANGE_WITHIN).await?;
+    app_admitted(&endpoint, &reply, read)?;
+    Ok(reply)
+}
+
+/// The app's endpoint refuses a missing or wrong token with 401 or 403
+/// before acting on the request. A 401 is always that; a 403 is that for a
+/// read (a write's 403 is the caller's to report, as on every platform).
+fn app_admitted(endpoint: &Endpoint, reply: &Reply, read: bool) -> Result<(), ApiFailure> {
+    if !matches!(endpoint, Endpoint::App { .. }) {
+        return Ok(());
+    }
+    if reply.status == 401 || (read && reply.status == 403) {
+        return Err(ApiFailure::Unreachable(
+            "the Tailscale app did not accept LocalPilot's access token; it may have just \
+             restarted. Try again; if it keeps happening, quit and reopen the Tailscale app"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Send one conditional POST of a JSON document. An empty `if_match` is
@@ -106,8 +179,9 @@ pub(crate) async fn post_json(
     let payload = Payload {
         body: Some(json_bytes(body)?),
         if_match: Some(if_match.to_string()),
+        token: None,
     };
-    request(connect(), Method::POST, path, payload, EXCHANGE_WITHIN).await
+    send(Method::POST, path, payload).await
 }
 
 /// Send one PATCH of a JSON document (the daemon has no conditional form).
@@ -115,8 +189,9 @@ pub(crate) async fn patch_json(path: &str, body: &Value) -> Result<Reply, ApiFai
     let payload = Payload {
         body: Some(json_bytes(body)?),
         if_match: None,
+        token: None,
     };
-    request(connect(), Method::PATCH, path, payload, EXCHANGE_WITHIN).await
+    send(Method::PATCH, path, payload).await
 }
 
 fn json_bytes(body: &Value) -> Result<Vec<u8>, ApiFailure> {
@@ -145,37 +220,72 @@ where
     exchange(stream, method, path, payload, deadline).await
 }
 
+/// A connected stream to whichever endpoint answers.
+trait Stream: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> Stream for T {}
+
+/// The open-source daemon's socket on macOS.
+#[cfg_attr(windows, allow(dead_code))]
+const MACOS_SOCKET: &str = "/var/run/tailscaled.socket";
+/// Where the Tailscale app for macOS (the standalone build) records its port
+/// and access token.
+#[cfg_attr(windows, allow(dead_code))]
+const APP_DIR: &str = "/Library/Tailscale";
+/// An access token longer than this is not one the app wrote.
+#[cfg_attr(windows, allow(dead_code))]
+const TOKEN_MAX: u64 = 256;
+
 #[cfg(windows)]
-async fn connect() -> Result<tokio::net::windows::named_pipe::NamedPipeClient, ApiFailure> {
+fn locate() -> Result<Endpoint, ApiFailure> {
+    Ok(Endpoint::Daemon)
+}
+
+#[cfg(windows)]
+async fn connect(_endpoint: &Endpoint) -> Result<Box<dyn Stream>, ApiFailure> {
     // The pipe sits under the administrators-only prefix, so whatever answers
     // there was created by the service (or an administrator), not another user.
     const PIPE: &str = r"\\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled";
-    tokio::net::windows::named_pipe::ClientOptions::new()
+    let pipe = tokio::net::windows::named_pipe::ClientOptions::new()
         .open(PIPE)
-        .map_err(|error| ApiFailure::Unreachable(unreachable_reason(&error)))
+        .map_err(|error| ApiFailure::Unreachable(unreachable_reason(&error)))?;
+    Ok(Box::new(pipe))
+}
+
+/// On macOS the open-source daemon's socket comes first; without it, the
+/// Tailscale app's recorded port and token. Every other Unix system has the
+/// daemon's socket only.
+#[cfg(unix)]
+fn locate() -> Result<Endpoint, ApiFailure> {
+    if cfg!(target_os = "macos") && !std::path::Path::new(MACOS_SOCKET).exists() {
+        return app_endpoint(std::path::Path::new(APP_DIR), 0);
+    }
+    Ok(Endpoint::Daemon)
 }
 
 #[cfg(unix)]
-async fn connect() -> Result<tokio::net::UnixStream, ApiFailure> {
-    let path = socket_path()?;
-    // Bounded by the caller's one budget.
-    tokio::net::UnixStream::connect(&path)
-        .await
-        .map_err(|error| ApiFailure::Unreachable(unreachable_reason(&error)))
+async fn connect(endpoint: &Endpoint) -> Result<Box<dyn Stream>, ApiFailure> {
+    // Both are bounded by the caller's one budget.
+    match endpoint {
+        Endpoint::Daemon => {
+            let path = socket_path()?;
+            let stream = tokio::net::UnixStream::connect(&path)
+                .await
+                .map_err(|error| ApiFailure::Unreachable(unreachable_reason(&error)))?;
+            Ok(Box::new(stream))
+        }
+        Endpoint::App { port, .. } => {
+            let stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, *port))
+                .await
+                .map_err(|error| ApiFailure::Unreachable(app_unreachable_reason(&error)))?;
+            Ok(Box::new(stream))
+        }
+    }
 }
 
 #[cfg(unix)]
 fn socket_path() -> Result<std::path::PathBuf, ApiFailure> {
     if cfg!(target_os = "macos") {
-        let path = std::path::PathBuf::from("/var/run/tailscaled.socket");
-        if !path.exists() {
-            return Err(ApiFailure::Unreachable(
-                "no Tailscale daemon socket; the Tailscale app builds for macOS are not \
-                 supported by setup yet, only the open-source tailscaled"
-                    .to_string(),
-            ));
-        }
-        return Ok(path);
+        return Ok(std::path::PathBuf::from(MACOS_SOCKET));
     }
     if std::path::Path::new("/var/run").is_dir() {
         Ok(std::path::PathBuf::from(
@@ -189,10 +299,137 @@ fn socket_path() -> Result<std::path::PathBuf, ApiFailure> {
 }
 
 #[cfg(not(any(windows, unix)))]
-async fn connect() -> Result<tokio::io::DuplexStream, ApiFailure> {
+fn locate() -> Result<Endpoint, ApiFailure> {
+    Ok(Endpoint::Daemon)
+}
+
+#[cfg(not(any(windows, unix)))]
+async fn connect(_endpoint: &Endpoint) -> Result<Box<dyn Stream>, ApiFailure> {
     Err(ApiFailure::Unreachable(
         "setup does not support this operating system".to_string(),
     ))
+}
+
+/// The Tailscale app's endpoint from the records in `dir`: a link whose
+/// target is the port, and the access token for that port. Both must belong
+/// to `owner` (root for the real app), so another local user cannot point
+/// LocalPilot at a port of their own. The records can outlive the app; a
+/// port nothing answers on is reported when connecting.
+#[cfg(unix)]
+fn app_endpoint(dir: &std::path::Path, owner: u32) -> Result<Endpoint, ApiFailure> {
+    use std::os::unix::fs::MetadataExt as _;
+    let link = dir.join("ipnport");
+    let record = match std::fs::symlink_metadata(&link) {
+        Ok(record) => record,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiFailure::Unreachable(
+                "Tailscale is not running: this Mac has no Tailscale daemon socket and no \
+                 Tailscale app port. The App Store build of the Tailscale app is not \
+                 supported by setup yet; the standalone build from tailscale.com and the \
+                 open-source tailscaled are"
+                    .to_string(),
+            ));
+        }
+        Err(error) => {
+            return Err(ApiFailure::Unreachable(format!(
+                "the Tailscale app's port record could not be read ({})",
+                error.kind()
+            )));
+        }
+    };
+    if !record.file_type().is_symlink() || record.uid() != owner {
+        return Err(ApiFailure::Unreachable(
+            "the Tailscale app's port record is not the root-owned link the app writes".to_string(),
+        ));
+    }
+    let port = std::fs::read_link(&link)
+        .ok()
+        .as_deref()
+        .and_then(port_from_link)
+        .ok_or_else(|| {
+            ApiFailure::Unreachable(
+                "the Tailscale app's port record does not name a port".to_string(),
+            )
+        })?;
+    let token = read_token(&dir.join(format!("sameuserproof-{port}")), owner)?;
+    Ok(Endpoint::App { port, token })
+}
+
+#[cfg(unix)]
+fn read_token(path: &std::path::Path, owner: u32) -> Result<Token, ApiFailure> {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let file = std::fs::File::open(path).map_err(|error| {
+        ApiFailure::Unreachable(match error.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                "this user is not an administrator on this Mac, so it may not read the \
+                 Tailscale app's access token"
+                    .to_string()
+            }
+            std::io::ErrorKind::NotFound => {
+                "the Tailscale app's access token for its recorded port is missing; the app \
+                 may be restarting. Try again in a moment"
+                    .to_string()
+            }
+            kind => format!("the Tailscale app's access token could not be read ({kind})"),
+        })
+    })?;
+    let malformed = || {
+        ApiFailure::Unreachable(
+            "the Tailscale app's access token is not one the app writes".to_string(),
+        )
+    };
+    let record = file.metadata().map_err(|_| malformed())?;
+    if !record.is_file() || record.uid() != owner || record.len() > TOKEN_MAX {
+        return Err(malformed());
+    }
+    let mut bytes = Vec::new();
+    file.take(TOKEN_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| malformed())?;
+    token_from_bytes(&bytes).ok_or_else(malformed)
+}
+
+/// The port a port record's link points at: decimal digits only, 1 to 65535.
+#[cfg_attr(windows, allow(dead_code))]
+fn port_from_link(target: &std::path::Path) -> Option<u16> {
+    let text = target.to_str()?;
+    if text.is_empty() || text.len() > 5 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<u16>().ok().filter(|port| *port != 0)
+}
+
+/// A token as the app writes it: printable ASCII without spaces, surrounding
+/// line breaks allowed, bounded in length.
+#[cfg_attr(windows, allow(dead_code))]
+fn token_from_bytes(bytes: &[u8]) -> Option<Token> {
+    let text = std::str::from_utf8(bytes).ok()?.trim_ascii();
+    let fits = u64::try_from(text.len()).is_ok_and(|len| len <= TOKEN_MAX);
+    (fits && !text.is_empty() && text.bytes().all(|b| b.is_ascii_graphic()))
+        .then(|| Token(text.to_string()))
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn app_unreachable_reason(error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::ConnectionRefused => {
+            "the Tailscale app is not running (nothing answers on the port it recorded)".to_string()
+        }
+        _ => unreachable_reason(error),
+    }
+}
+
+/// HTTP Basic credentials with an empty user name and the token as the
+/// password, marked sensitive so it is kept out of any header dump.
+fn basic_auth(token: &Token) -> Result<header::HeaderValue, ApiFailure> {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!(":{}", token.0));
+    let mut value = header::HeaderValue::from_str(&format!("Basic {encoded}")).map_err(|_| {
+        ApiFailure::Unreachable("the Tailscale app's access token could not be sent".to_string())
+    })?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 fn unreachable_reason(error: &std::io::Error) -> String {
@@ -232,6 +469,9 @@ where
     }
     if let Some(tag) = &payload.if_match {
         builder = builder.header(header::IF_MATCH, tag.as_str());
+    }
+    if let Some(token) = &payload.token {
+        builder = builder.header(header::AUTHORIZATION, basic_auth(token)?);
     }
     let request = builder
         .body(Full::new(Bytes::from(payload.body.unwrap_or_default())))
@@ -1051,9 +1291,11 @@ mod tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    // Fixtures are source-derived: shaped from the published Tailscale status
-    // and Serve config types of the supported releases, not captured from a
-    // real install.
+    // Fixtures are shaped from the published Tailscale status and Serve config
+    // types of the supported releases. Their shape (the fields read here and
+    // their types, and a Serve config holding the phone origin) matches what
+    // the Tailscale app for macOS 1.104.6 returned on a real install; the
+    // values are placeholders, never captured ones.
     const NAME: &str = "pc.tail1234.ts.net";
     const HP: &str = "pc.tail1234.ts.net:443";
     const PORT: u16 = 47610;
@@ -1464,6 +1706,7 @@ mod tests {
         let payload = Payload {
             body: Some(br#"{"TCP":{}}"#.to_vec()),
             if_match: Some("tag-9".to_string()),
+            token: None,
         };
         let reply = exchange(
             client,
@@ -1744,5 +1987,324 @@ mod tests {
             .await,
             Err(ApiFailure::Interrupted(_))
         ));
+    }
+
+    // ---- The Tailscale app for macOS (standalone build) ----
+    // Record and token shapes are source-derived and were seen on one real
+    // install (1.104.6): a root-owned `ipnport` link whose target is the port,
+    // and a `sameuserproof-<port>` file holding the token. The values here are
+    // placeholders.
+
+    #[test]
+    fn a_port_record_names_one_port() {
+        use std::path::Path;
+        assert_eq!(port_from_link(Path::new("63605")), Some(63605));
+        assert_eq!(port_from_link(Path::new("1")), Some(1));
+        assert_eq!(port_from_link(Path::new("65535")), Some(65535));
+        for bad in [
+            "", "0", "65536", "123456", "-1", "+80", " 80", "80\n", "/80", "8o",
+        ] {
+            assert_eq!(port_from_link(Path::new(bad)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_token_is_bounded_printable_text_and_never_shown() {
+        assert_eq!(
+            token_from_bytes(b"placeholder-token\n"),
+            Some(Token("placeholder-token".to_string()))
+        );
+        for bad in [
+            &b""[..],
+            b"\n",
+            b"two words",
+            b"tab\there",
+            b"\xff\xfe",
+            b"bell\x07",
+        ] {
+            assert_eq!(token_from_bytes(bad), None, "{bad:?}");
+        }
+        let long = vec![b'a'; usize::try_from(TOKEN_MAX).unwrap_or(256) + 1];
+        assert_eq!(token_from_bytes(&long), None);
+
+        let token = Token("placeholder-token".to_string());
+        let endpoint = Endpoint::App {
+            port: 63605,
+            token: token.clone(),
+        };
+        let payload = Payload {
+            token: Some(token),
+            ..Payload::default()
+        };
+        for shown in [format!("{endpoint:?}"), format!("{payload:?}")] {
+            assert!(!shown.contains("placeholder-token"), "{shown}");
+            assert!(shown.contains("hidden"), "{shown}");
+        }
+    }
+
+    #[cfg(unix)]
+    fn app_records(port: &str, token: Option<&[u8]>) -> (tempfile::TempDir, u32) {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::os::unix::fs::symlink(port, dir.path().join("ipnport")).expect("link");
+        if let Some(token) = token {
+            std::fs::write(dir.path().join(format!("sameuserproof-{port}")), token).expect("token");
+        }
+        let owner = std::fs::metadata(dir.path()).expect("meta").uid();
+        (dir, owner)
+    }
+
+    #[cfg(unix)]
+    fn unreachable_text(result: Result<Endpoint, ApiFailure>) -> String {
+        match result {
+            Err(ApiFailure::Unreachable(why)) => why,
+            other => panic!("expected unreachable, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_app_endpoint_comes_from_its_port_record_and_token() {
+        let (dir, owner) = app_records("54321", Some(b"placeholder-token\n"));
+        assert_eq!(
+            app_endpoint(dir.path(), owner),
+            Ok(Endpoint::App {
+                port: 54321,
+                token: Token("placeholder-token".to_string()),
+            })
+        );
+
+        // Records another user owns are not the app's.
+        let why = unreachable_text(app_endpoint(dir.path(), owner.wrapping_add(1)));
+        assert!(why.contains("root-owned link"), "{why}");
+
+        // No record: not running, or the App Store build.
+        let empty = tempfile::tempdir().expect("temp dir");
+        let why = unreachable_text(app_endpoint(empty.path(), owner));
+        assert!(why.contains("App Store build"), "{why}");
+
+        // A plain file is not the link the app writes.
+        std::fs::write(empty.path().join("ipnport"), "54321").expect("file");
+        let why = unreachable_text(app_endpoint(empty.path(), owner));
+        assert!(why.contains("root-owned link"), "{why}");
+
+        // A link that names no port.
+        let (dir, owner) = app_records("not-a-port", None);
+        let why = unreachable_text(app_endpoint(dir.path(), owner));
+        assert!(why.contains("does not name a port"), "{why}");
+
+        // A port whose token is gone: the app may be restarting.
+        let (dir, owner) = app_records("54321", None);
+        let why = unreachable_text(app_endpoint(dir.path(), owner));
+        assert!(why.contains("missing"), "{why}");
+
+        // A token file that is not one the app writes.
+        let (dir, owner) = app_records("54321", Some(b"two words"));
+        let why = unreachable_text(app_endpoint(dir.path(), owner));
+        assert!(why.contains("not one the app writes"), "{why}");
+        assert!(!why.contains("two words"), "{why}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_token_says_the_user_is_not_an_administrator() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (dir, owner) = app_records("54321", Some(b"placeholder-token"));
+        if owner == 0 {
+            return; // root reads anything; the check needs a regular user
+        }
+        let token = dir.path().join("sameuserproof-54321");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let why = unreachable_text(app_endpoint(dir.path(), owner));
+        assert!(why.contains("not an administrator"), "{why}");
+        assert!(!why.contains("placeholder-token"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn the_app_request_carries_basic_credentials_and_the_daemon_host() {
+        let (client, server) =
+            fake_daemon(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec());
+        let payload = Payload {
+            token: Some(Token("placeholder-token".to_string())),
+            ..Payload::default()
+        };
+        let reply = exchange(client, Method::GET, "/localapi/v0/status", payload, soon())
+            .await
+            .expect("a reply");
+        assert_eq!(reply.status, 200);
+        let head = server.await.expect("server");
+        let lower = head.to_ascii_lowercase();
+        // base64(":placeholder-token")
+        assert!(
+            head.contains("\r\nauthorization: Basic OnBsYWNlaG9sZGVyLXRva2Vu\r\n"),
+            "{head}"
+        );
+        assert!(
+            lower.contains("\r\nhost: local-tailscaled.sock\r\n"),
+            "{head}"
+        );
+        assert!(
+            !lower.contains("origin:") && !lower.contains("referer:"),
+            "{head}"
+        );
+
+        // The daemon's own endpoint never gets credentials.
+        let (client, server) =
+            fake_daemon(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec());
+        exchange(
+            client,
+            Method::GET,
+            "/localapi/v0/status",
+            Payload::default(),
+            soon(),
+        )
+        .await
+        .expect("a reply");
+        let head = server.await.expect("server").to_ascii_lowercase();
+        assert!(!head.contains("authorization:"), "{head}");
+    }
+
+    #[test]
+    fn the_app_refusing_its_token_is_unreachable_never_a_reply() {
+        let app = Endpoint::App {
+            port: 54321,
+            token: Token("placeholder-token".to_string()),
+        };
+        let reply = |status| Reply {
+            status,
+            etag: None,
+            body: b"refused".to_vec(),
+            truncated: false,
+        };
+        // Missing or wrong credentials: refused before acting.
+        assert!(matches!(
+            app_admitted(&app, &reply(401), true),
+            Err(ApiFailure::Unreachable(_))
+        ));
+        assert!(matches!(
+            app_admitted(&app, &reply(401), false),
+            Err(ApiFailure::Unreachable(_))
+        ));
+        assert!(matches!(
+            app_admitted(&app, &reply(403), true),
+            Err(ApiFailure::Unreachable(_))
+        ));
+        // A write's 403 is the caller's to report, as on every platform.
+        assert_eq!(app_admitted(&app, &reply(403), false), Ok(()));
+        assert_eq!(app_admitted(&app, &reply(200), true), Ok(()));
+        // The daemon's own endpoint is never second-guessed.
+        assert_eq!(app_admitted(&Endpoint::Daemon, &reply(401), true), Ok(()));
+    }
+
+    /// A fake app endpoint on a loopback port: it answers one request with
+    /// 200 for the expected credentials, 401 without any and 403 otherwise.
+    #[cfg(unix)]
+    async fn fake_app(expected: &'static str) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if socket.read(&mut byte).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+            let status = match head
+                .lines()
+                .find_map(|line| line.strip_prefix("authorization: basic "))
+            {
+                None => "401 Unauthorized",
+                Some(given) if given == expected.to_ascii_lowercase() => "200 OK",
+                Some(_) => "403 Forbidden",
+            };
+            let _ = socket
+                .write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\n\r\n{{}}").as_bytes())
+                .await;
+            let _ = socket.shutdown().await;
+        });
+        (port, handle)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_app_endpoint_answers_only_its_own_token() {
+        // base64(":placeholder-token")
+        const EXPECTED: &str = "OnBsYWNlaG9sZGVyLXRva2Vu";
+        for (token, admitted) in [("placeholder-token", true), ("stale-token", false)] {
+            let (port, server) = fake_app(EXPECTED).await;
+            let endpoint = Endpoint::App {
+                port,
+                token: Token(token.to_string()),
+            };
+            let payload = Payload {
+                token: Some(Token(token.to_string())),
+                ..Payload::default()
+            };
+            let reply = request(
+                connect(&endpoint),
+                Method::GET,
+                "/localapi/v0/status",
+                payload,
+                EXCHANGE_WITHIN,
+            )
+            .await
+            .expect("a reply");
+            server.await.expect("server");
+            assert_eq!(
+                app_admitted(&endpoint, &reply, true).is_ok(),
+                admitted,
+                "{token}"
+            );
+        }
+
+        // No credentials at all: 401, refused before acting.
+        let (port, server) = fake_app(EXPECTED).await;
+        let endpoint = Endpoint::App {
+            port,
+            token: Token("placeholder-token".to_string()),
+        };
+        let reply = request(
+            connect(&endpoint),
+            Method::GET,
+            "/localapi/v0/status",
+            Payload::default(),
+            EXCHANGE_WITHIN,
+        )
+        .await
+        .expect("a reply");
+        server.await.expect("server");
+        assert_eq!(reply.status, 401);
+        assert!(app_admitted(&endpoint, &reply, true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_app_port_is_unreachable() {
+        // Take a free port and let it go: nothing listens there any more.
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let endpoint = Endpoint::App {
+            port,
+            token: Token("placeholder-token".to_string()),
+        };
+        match connect(&endpoint).await {
+            Err(ApiFailure::Unreachable(why)) => {
+                assert!(why.contains("not running"), "{why}");
+                assert!(!why.contains("placeholder-token"), "{why}");
+            }
+            Err(other) => panic!("expected unreachable, got {other:?}"),
+            Ok(_) => panic!("nothing should answer on a released port"),
+        }
     }
 }

@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `localpilot remote setup --check` works on a Mac with the Tailscale app
+  downloaded from tailscale.com, not only with the open-source `tailscaled`.
+  It needs an administrator account. Setup and `--undo` do not change
+  Tailscale through the app yet; until they do, they stop before any change
+  and point to the manual `tailscale serve` command. The App Store version of
+  the app is not supported yet.
 - `/localbox` with no arguments now opens a list of LocalBox models. Choosing a
   model asks what to do with it: serve it (start, adopt and switch to it) or
   benchmark it with LocalBench. To adopt a server that is already running,

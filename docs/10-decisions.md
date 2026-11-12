@@ -2,6 +2,57 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0274: Phone Setup Reaches The Tailscale App For macOS By Its Recorded Port And Token
+
+**Status:** accepted · **Date:** 2026-11-12. Refs LocalHub#283, LocalHub#255.
+Amends ADR-0259's transport list.
+
+**Context.** Most Mac users run the Tailscale app, not the open-source
+daemon, so `localpilot remote setup --check` refused them: the app has no
+daemon socket. The standalone build of the app (the download from
+tailscale.com) serves the same local API on a loopback port instead. It
+records the port as the target of a root-owned link,
+`/Library/Tailscale/ipnport`, and admits a request only with an access token
+kept in `/Library/Tailscale/sameuserproof-<port>`, which only administrators
+may read. The token goes as the password of HTTP Basic credentials with an
+empty user name; a request without it is answered 401 before it is acted on.
+This was read from the published source and confirmed on a real install
+(app 1.104.6).
+
+**Decision.**
+1. On macOS the open-source daemon's socket is used when it exists. Without
+   it, setup reads the app's port record and token. Both must be owned by
+   root, so another local user cannot point setup at a port of their own; the
+   record must name a port, and the token must be short printable text. Each
+   failure is a plain reason (not running, not an administrator, token
+   missing while the app restarts), never a guess.
+2. The transport is a TCP connection to `127.0.0.1:<port>` through the same
+   bounded request as the other platforms, with the same daemon `Host` and
+   no `Origin` or `Referer`, plus the Basic credentials. A port that nothing
+   answers on is unreachable. A 401, or a 403 to a read, means the token was
+   not accepted; it is reported as unreachable, never as a reply.
+3. The token is a credential. It is never printed, logged, journaled or
+   handed to another process; its debug form is hidden and the header is
+   marked sensitive. It is read again for every request, so a restarted app
+   is picked up.
+4. `--check` works with the app now. Changes through the app (`setup` and
+   `--undo`) stay refused with a pointer to the manual `tailscale serve`
+   command until one real run on a Mac shows the whole write path working
+   there: the stale-tag test save refused with 412, the rename settled, the
+   Serve write confirmed and undo working. Turning them on is a one-line
+   change recorded with that run.
+5. The App Store build keeps its token inside its sandbox and is found only
+   by listing open files. It is not supported yet and is refused with a
+   plain reason.
+
+**Consequences.** A Mac user with the standalone app can check phone setup
+without installing a second Tailscale daemon. The residual risk is the one
+the app's own command-line client accepts: while the app is not running,
+another local process could listen on the recorded port and receive the
+token; the token only admits a request while the app is running again with
+that same port. Nothing changes on Windows, Linux or with the open-source
+daemon on macOS.
+
 ## ADR-0273: Work Starts Wide And Narrows On Observed Trouble
 
 **Status:** accepted · **Date:** 2026-11-11. Revises ADR-0199's starting
@@ -554,8 +605,9 @@ empty tag overwrites unconditionally.
    settings and says what setup would do, changing nothing. Transport is the
    daemon's own endpoint only: the administrators-only named pipe on Windows,
    `/var/run/tailscale/tailscaled.sock` on Linux and other Unix systems,
-   `/var/run/tailscaled.socket` on macOS with the open-source daemon (the
-   macOS app builds are refused for now). Each request is bounded in time and
+   `/var/run/tailscaled.socket` on macOS with the open-source daemon, and the
+   standalone Tailscale app for macOS by its recorded loopback port and
+   token (ADR-0274; the App Store build is refused for now). Each request is bounded in time and
    size, and the status of a reply is kept even when its body is cut, so a
    definite refusal never turns into an unknown outcome.
 3. The phone origin is exclusive: port 443 of this computer's name with one
