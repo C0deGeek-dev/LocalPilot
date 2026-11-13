@@ -14,7 +14,9 @@ is SemVer-stable; the configuration schema stability policy is in
   shown as unavailable. A browser route whose tools are registered but not yet
   advertised is reported as hidden, with the tools to load. A real Playwright
   browser and a real WPF window are driven through the tools in tests that skip
-  loudly when their environment is missing (ADR-0285, LocalHub#282).
+  loudly when their environment is missing. A Godot 4 game is loaded, played
+  through the engine's input actions and rendered through the tools, with the
+  rendered pixels read independently (ADR-0285, LocalHub#282).
 - Reference projects qualify the Rust CLI and .NET service workflows: a session
   builds and fixes a defective CLI and a defective minimal API through the
   ordinary tools, and an independent grader checks exit codes, output, HTTP

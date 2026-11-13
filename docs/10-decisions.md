@@ -68,11 +68,23 @@ model claim a visual or interaction check that could not happen.
   tools can do for a desktop app. It does not make `desktop.interact` a qualified
   route: that needs an adapter and a decision of its own, and the route stays
   deferred.
-- *Game.* No Godot is installed here and none was downloaded, so engine runs stay
-  deferred; the issue scopes game checks to where an adapter exists.
+- *Game.* An installed Godot 4.7.2 (console build, `C:\Godot`) runs a GDScript
+  reference game with an equality-test collision defect, through `run_shell` and
+  `read_image`, at three levels kept apart: the project loads (`--headless --quit`,
+  true for the broken game too); gameplay (a headless run presses `move_right`
+  through the engine's input-action pipeline and prints the state after 60 fixed
+  frames: `y: 477.5` before the fix, so the player fell through the floor, `y: 108`
+  after, `x: 80` in both); and rendered state (a windowed run on the real GPU saves
+  the viewport, the session reads it with `read_image`, and the test reads the
+  pixels itself with GDI+: before the fix the player's spot shows the background,
+  after it that pixel is red, and the background and floor are drawn in both). The
+  game's guidance is chosen (`guide-godot4`, `guide-game`, not .NET). The input is
+  the engine's action pipeline, not operating-system key events, and `engine.run`
+  stays deferred: this shows what the existing tools can do with an installed
+  engine, not that LocalPilot has an engine adapter.
 
-Both real tests skip with a loud message when Node, the package, a browser, Windows
-or an interactive desktop is missing, and fail instead when
+The three real tests skip with a loud message when Node, the package, a browser,
+Godot, Windows or an interactive desktop is missing, and fail instead when
 `LOCALPILOT_REQUIRE_REAL_TESTS=1`, so a gate that must prove these routes cannot
 pass on a skip.
 
@@ -80,7 +92,8 @@ pass on a skip.
 browser server is connected, its tools are loaded and the provider reads images;
 "inspected" means a provider that accepts images answered the request holding the
 image, not that a model looked at it, since no real model took part. Desktop
-interaction, engine runs and terminal interaction remain unqualified routes.
+interaction, engine runs and terminal interaction remain unqualified routes, even
+though a game was run and rendered through the existing tools.
 
 ## ADR-0284: The Rust CLI And .NET Service Workflows Are Qualified Against Reference Projects
 

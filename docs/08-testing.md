@@ -1099,11 +1099,12 @@ and shell-syntax commands and redaction. `cargo test -p localpilot --features tu
 through the real dispatch, including a committed project where the build runs and
 is listed and drafted.
 
-### Real browser and desktop runs
+### Real browser, desktop and game runs
 
-Two tests use real programs instead of scripted ones and skip with a message when
+Three tests use real programs instead of scripted ones and skip with a message when
 their environment is missing (Node and a global `@playwright/mcp` with its browser;
-Windows, an interactive desktop and a .NET SDK). Set `LOCALPILOT_REQUIRE_REAL_TESTS=1`
+Windows, an interactive desktop and a .NET SDK; a Godot 4 console build in `C:\Godot`,
+`LOCALPILOT_GODOT` or on `PATH`, plus OpenGL). Set `LOCALPILOT_REQUIRE_REAL_TESTS=1`
 to make a skip a failure, as a gate that has to prove these routes should.
 
 `cargo test -p localpilot --features tui --bin localpilot -- --nocapture
@@ -1121,3 +1122,11 @@ WPF reference app, starts it with `run_background`, reads and presses its Save
 button through UI Automation with `run_shell`, stops it, and checks the window is
 gone. The window opens on the desktop for a few seconds. The `desktop.interact`
 route stays deferred.
+
+`cargo test -p localpilot-harness --test game_reference -- --nocapture` runs the
+reference Godot game through the tools: loading the project, a headless play
+(press `move_right` through the engine's input actions, print the state after 60
+fixed frames), a windowed run that saves the viewport and is read with
+`read_image`, the fix written with `write_file`, and the same again. The test reads
+the PNG pixels itself with GDI+. A window opens for a few seconds, twice. The
+`engine.run` route stays deferred.
