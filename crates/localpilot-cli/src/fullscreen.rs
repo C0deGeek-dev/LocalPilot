@@ -15271,7 +15271,7 @@ mod tests {
             ),
             (
                 "localbox",
-                "List, serve, or adopt LocalBox (/localbox models|serve <model>|adopt)",
+                "Pick a LocalBox model to serve or benchmark (/localbox [<model> [serve|benchmark]]|models|adopt)",
             ),
             (
                 "selfimprove",
@@ -27052,8 +27052,12 @@ last_seen = "2026-08-10"
             listed.len(),
         );
         assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
-        let _ = app.handle_input(InputAction::MoveDown, 80);
-        let _ = app.handle_input(InputAction::MoveDown, 80);
+        // The list is Automatic, Strict, Wide, Very wide, Off and opens on the
+        // value in force (Automatic), so Very wide is three rows down. The
+        // assertion below fails if the order changes again.
+        for _ in 0..3 {
+            let _ = app.handle_input(InputAction::MoveDown, 80);
+        }
         let AppCommand::RunSlash(submitted) = app.handle_input(InputAction::Submit, 80) else {
             panic!("choosing a value runs a slash command");
         };
