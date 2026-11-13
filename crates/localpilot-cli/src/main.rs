@@ -64,6 +64,8 @@ mod project_grants;
 mod proposal_fixture;
 mod proposal_validation;
 mod propose_patch;
+#[cfg(test)]
+mod real_browser_route;
 mod relay_client;
 mod relay_host;
 mod relay_source;

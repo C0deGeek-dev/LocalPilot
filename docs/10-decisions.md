@@ -29,17 +29,58 @@ model claim a visual or interaction check that could not happen.
 - Browser actions and screenshots from such tools are recorded as observations, and
   a screenshot counts as inspected only once an image-capable provider answered the
   request that held it.
-- Qualified with a controlled MCP browser server: tools registered from its
-  descriptors with the CLI's effects, authorized by the permission engine (a refused
-  call never reaches the server and is denied evidence), dispatched in order, and
-  delivered back. A WPF project's desktop claims and a Godot project's engine claims
-  are deferred while the work itself continues.
+- A route is **available** when the model is offered what it needs now: one tool,
+  or for a browser one advertised tool that navigates and one that clicks. It is
+  **hidden** when the tools are registered but the broker does not advertise them
+  yet (`tool_search` and `tool_load` reveal them, and a call before then does not
+  run); the report names the tools to load. Requested evidence stays possible for
+  a hidden route and unavailable for an unavailable or deferred one.
+- Reading the page back (`browser_snapshot`, `browser_console_messages`,
+  `browser_network_requests`, `browser_evaluate`) is recorded as a browser
+  observation, by whole-word match and only for tools named `browser_*`.
 
-**Consequences.** Browser interaction and screenshot inspection are supported where
-a browser server is connected and the model reads images. Desktop interaction,
-engine runs and terminal interaction remain unqualified, and claims that need them
-cannot be made; adding one is a separate decision with its own adapter and
-fixtures. No real browser, desktop session or engine was exercised.
+**Qualified for real, on this machine.**
+- *Browser.* A real `@playwright/mcp` server and its browser are started from an
+  `[mcp.servers.browser]` configuration through `McpTools::load` and
+  `install_broker`. The model is the real OpenAI-compatible adapter against a local
+  recording server, so what a provider is handed is read from request bodies on the
+  wire. A web server written for the test records the page's own requests. The run
+  showed: the broker advertises only the browser tools the request matched
+  (`browser_click`, `browser_take_screenshot`), so `browser_navigate` and the
+  others must be found with `tool_search` and loaded with `tool_load` first; the
+  page saw `GET /`, `GET /missing.png` (404) and exactly one `POST /clicked`; a
+  click with `ref` instead of the required `target` was answered by the real server
+  with an error and is kept as a failed observation, the corrected click passed; a
+  real 1280x720 PNG reached the provider on the wire (8,645 bytes before the
+  click, 8,887 after, so the two screenshots differ), and the console error text reached the
+  provider; the session ended with no `.playwright-mcp` directory and no browser
+  process left behind. The hermetic scripted-server test stays as the regression
+  test that runs everywhere and now uses the real tool names and result shapes.
+- *Desktop.* A WPF reference app is built with `run_shell`, started with
+  `run_background`, driven through a Windows UI Automation script run with
+  `run_shell` (status read, Save pressed twice through the Invoke pattern, status
+  read again: `Not saved`, then `Saved 2`, with the window's title and native
+  handle) and stopped with `run_background`; nothing named `Notes` runs afterwards.
+  The run found a trap: with empty `args`, `run_background` treats the program as a
+  shell command line, the shell does not wait for a GUI program, and the tool
+  reports "exited within 2s" while the window stays open untracked; with one
+  argument it runs directly and is tracked and stopped. This shows what the existing
+  tools can do for a desktop app. It does not make `desktop.interact` a qualified
+  route: that needs an adapter and a decision of its own, and the route stays
+  deferred.
+- *Game.* No Godot is installed here and none was downloaded, so engine runs stay
+  deferred; the issue scopes game checks to where an adapter exists.
+
+Both real tests skip with a loud message when Node, the package, a browser, Windows
+or an interactive desktop is missing, and fail instead when
+`LOCALPILOT_REQUIRE_REAL_TESTS=1`, so a gate that must prove these routes cannot
+pass on a skip.
+
+**Consequences.** Browser interaction and screenshot inspection work where a
+browser server is connected, its tools are loaded and the provider reads images;
+"inspected" means a provider that accepts images answered the request holding the
+image, not that a model looked at it, since no real model took part. Desktop
+interaction, engine runs and terminal interaction remain unqualified routes.
 
 ## ADR-0284: The Rust CLI And .NET Service Workflows Are Qualified Against Reference Projects
 

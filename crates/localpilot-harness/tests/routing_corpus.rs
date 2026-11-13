@@ -403,7 +403,11 @@ fn unsupported_passes(runtime: &SessionRuntime) -> Vec<String> {
         .filter(|requested| {
             let available = routes.iter().any(|route| {
                 route.capability == requested.capability
-                    && matches!(route.status, localpilot_harness::RouteStatus::Available(_))
+                    && matches!(
+                        route.status,
+                        localpilot_harness::RouteStatus::Available(_)
+                            | localpilot_harness::RouteStatus::Hidden(_)
+                    )
             });
             !available && requested.state != localpilot_harness::EvidenceState::Unavailable
         })

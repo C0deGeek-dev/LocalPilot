@@ -373,6 +373,15 @@ fn capability_of(tool: &str) -> Option<&'static str> {
         {
             Some("browser.interact")
         }
+        // Reading the page back (its structure, its console, its requests) is
+        // how state and errors are captured. Only for browser tools.
+        name if has_word(name, "browser")
+            && ["snapshot", "console", "network", "evaluate"]
+                .iter()
+                .any(|action| has_word(name, action)) =>
+        {
+            Some("browser.interact")
+        }
         _ => None,
     }
 }
@@ -386,8 +395,12 @@ pub(crate) fn has_word(name: &str, word: &str) -> bool {
 /// Whether a capability's route can be used in this session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteStatus {
-    /// These tools provide it.
+    /// These tools provide it, and the model is offered them now.
     Available(Vec<String>),
+    /// These tools provide it and are registered, but the broker does not
+    /// advertise them yet: the model reaches them with `tool_search` and
+    /// `tool_load`, and a call to one before then does not run.
+    Hidden(Vec<String>),
     /// LocalPilot has a route, but not in this session, for this reason.
     Unavailable(String),
     /// No route is qualified in LocalPilot yet; claims that need it cannot be
@@ -403,10 +416,14 @@ pub struct ObservationRoute {
 }
 
 /// Every observation capability guidance can ask for, and whether this
-/// session can provide it, given its tool names and whether its provider
-/// accepts images.
+/// session can provide it, given its tool names, whether its provider accepts
+/// images, and whether the broker currently advertises a tool.
 #[must_use]
-pub fn observation_routes(names: &[&str], accepts_images: bool) -> Vec<ObservationRoute> {
+pub fn observation_routes(
+    names: &[&str],
+    accepts_images: bool,
+    is_advertised: &dyn Fn(&str) -> bool,
+) -> Vec<ObservationRoute> {
     let tools = |pick: &dyn Fn(&str) -> bool| -> Vec<String> {
         names
             .iter()
@@ -414,17 +431,51 @@ pub fn observation_routes(names: &[&str], accepts_images: bool) -> Vec<Observati
             .map(|n| (*n).to_string())
             .collect()
     };
-    let available = |list: Vec<String>, missing: &str| {
+    // A route is available once the model is offered what it needs: any one
+    // tool, or for a route with essential actions (a browser must both
+    // navigate and click) one advertised tool for each. Otherwise it is hidden
+    // behind `tool_load`, and the tools that would complete it are named.
+    let route = |list: Vec<String>, missing: &str, essential: &[&str]| {
         if list.is_empty() {
-            RouteStatus::Unavailable(missing.to_string())
-        } else {
-            RouteStatus::Available(list)
+            return RouteStatus::Unavailable(missing.to_string());
         }
+        let advertised: Vec<String> = list.iter().filter(|t| is_advertised(t)).cloned().collect();
+        let needed: Vec<&str> = if essential.is_empty() {
+            vec![""]
+        } else {
+            essential.to_vec()
+        };
+        let lacking: Vec<&str> = needed
+            .iter()
+            .copied()
+            .filter(|word| {
+                !advertised
+                    .iter()
+                    .any(|tool| word.is_empty() || has_word(tool, word))
+            })
+            .collect();
+        if lacking.is_empty() {
+            return RouteStatus::Available(advertised);
+        }
+        let hidden: Vec<String> = list
+            .into_iter()
+            .filter(|tool| !is_advertised(tool))
+            .filter(|tool| {
+                lacking
+                    .iter()
+                    .any(|word| word.is_empty() || has_word(tool, word))
+            })
+            .collect();
+        RouteStatus::Hidden(hidden)
     };
     let browser = {
         let capabilities = crate::capabilities_from_tools(names);
         if capabilities.contains("browser.interact") {
-            RouteStatus::Available(tools(&|n| capability_of(n) == Some("browser.interact")))
+            route(
+                tools(&|n| capability_of(n) == Some("browser.interact")),
+                "no browser tools (navigate and click) are connected",
+                &["navigate", "click"],
+            )
         } else {
             RouteStatus::Unavailable(
                 "no browser tools (navigate and click) are connected".to_string(),
@@ -440,16 +491,16 @@ pub fn observation_routes(names: &[&str], accepts_images: bool) -> Vec<Observati
                 .to_string(),
         )
     } else {
-        RouteStatus::Available(image_tools)
+        route(image_tools, "no tool returns images", &[])
     };
     vec![
         ObservationRoute {
             capability: "process.capture",
-            status: available(tools(&|n| n == "run_shell"), "run_shell is not registered"),
+            status: route(tools(&|n| n == "run_shell"), "run_shell is not registered", &[]),
         },
         ObservationRoute {
             capability: "process.background",
-            status: available(tools(&|n| n == "run_background"), "run_background is not registered"),
+            status: route(tools(&|n| n == "run_background"), "run_background is not registered", &[]),
         },
         ObservationRoute {
             capability: "http.observe",
@@ -575,9 +626,61 @@ mod tests {
         );
         // A word inside another word is not that word.
         assert_eq!(capability_of("clickup_create_task"), None);
+        // State and errors are read back through browser tools only.
+        assert_eq!(capability_of("browser_snapshot"), Some("browser.interact"));
+        assert_eq!(
+            capability_of("browser_console_messages"),
+            Some("browser.interact")
+        );
+        assert_eq!(
+            capability_of("browser_network_requests"),
+            Some("browser.interact")
+        );
+        assert_eq!(capability_of("network_status"), None);
+        assert_eq!(capability_of("console_log"), None);
         assert_eq!(capability_of("refill_order"), None);
         let caps = crate::capabilities_from_tools(&["clickup_create_task", "navigate_page"]);
         assert!(!caps.contains("browser.interact"));
+    }
+
+    #[test]
+    fn a_route_is_available_only_when_its_essential_tools_are_advertised() {
+        let names = [
+            "browser_navigate",
+            "browser_click",
+            "browser_snapshot",
+            "run_shell",
+        ];
+        let route = |advertised: &[&str]| {
+            let advertised: Vec<String> = advertised.iter().map(|n| (*n).to_string()).collect();
+            observation_routes(&names, true, &move |name| {
+                advertised.iter().any(|a| a == name)
+            })
+            .into_iter()
+            .find(|r| r.capability == "browser.interact")
+            .unwrap()
+            .status
+        };
+        // Everything advertised.
+        assert!(matches!(route(&names), RouteStatus::Available(_)));
+        // Click is advertised, navigation is not: hidden, and navigation named.
+        assert_eq!(
+            route(&["browser_click"]),
+            RouteStatus::Hidden(vec!["browser_navigate".to_string()])
+        );
+        // Neither: both essentials named, the optional snapshot tool is not.
+        assert_eq!(
+            route(&[]),
+            RouteStatus::Hidden(vec![
+                "browser_navigate".to_string(),
+                "browser_click".to_string()
+            ])
+        );
+        // Both essentials: available even though snapshot is still hidden.
+        assert!(matches!(
+            route(&["browser_navigate", "browser_click"]),
+            RouteStatus::Available(_)
+        ));
     }
 
     #[test]

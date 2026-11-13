@@ -42,13 +42,24 @@ impl Transport for BrowserServer {
         let name = params["name"].as_str().unwrap_or_default().to_string();
         self.calls.lock().unwrap().push(format!("{method}:{name}"));
         Ok(match name.as_str() {
-            "browser_navigate" => {
-                json!({ "content": [{ "type": "text", "text": "loaded http://127.0.0.1:5173/" }] })
+            // The shapes the real Playwright MCP server returns: a text block
+            // with the page state, and for a screenshot a text block followed by
+            // an image block.
+            "browser_navigate" => json!({ "content": [{ "type": "text",
+                "text": "### Ran Playwright code
+### Page
+- Page URL: http://127.0.0.1:5173/" }] }),
+            "browser_click" if params["arguments"]["target"].is_string() => {
+                json!({ "content": [{ "type": "text", "text": "### Ran Playwright code
+await page.getByRole('button').click();" }] })
             }
-            "browser_click" => {
-                json!({ "content": [{ "type": "text", "text": "clicked #start; score shows 1" }] })
-            }
-            "browser_screenshot" => json!({ "content": [
+            // What the real server answers when the required `target` is missing.
+            "browser_click" => json!({ "isError": true, "content": [{ "type": "text",
+                "text": "### Error
+Invalid arguments for tool \"browser_click\"" }] }),
+            "browser_take_screenshot" => json!({ "content": [
+                { "type": "text", "text": "### Result
+- [Screenshot of viewport](page.png)" },
                 { "type": "image", "mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==" }
             ] }),
             _ => return Err(McpError::Protocol(format!("unknown tool {name}"))),
@@ -64,7 +75,11 @@ fn write(root: &Path, relative: &str, contents: &str) {
 
 fn registry(server: &Arc<BrowserServer>) -> ToolRegistry {
     let mut registry = ToolRegistry::with_builtins();
-    for name in ["browser_navigate", "browser_click", "browser_screenshot"] {
+    for name in [
+        "browser_navigate",
+        "browser_click",
+        "browser_take_screenshot",
+    ] {
         let descriptor = McpToolDescriptor {
             name: name.to_string(),
             description: format!("{name} on the controlled test page"),
@@ -132,8 +147,12 @@ fn browser_script() -> FakeProvider {
             "browser_navigate",
             json!({"url": "http://127.0.0.1:5173/"}),
         )
-        .tool_call("click-1", "browser_click", json!({"selector": "#start"}))
-        .tool_call("shot-1", "browser_screenshot", json!({}))
+        .tool_call(
+            "click-1",
+            "browser_click",
+            json!({"element": "Start button", "target": "e3"}),
+        )
+        .tool_call("shot-1", "browser_take_screenshot", json!({}))
         .text("The score shows 1 after the click.")
 }
 
@@ -175,14 +194,14 @@ async fn the_browser_route_is_registered_authorized_dispatched_and_delivered() {
         [
             "tools/call:browser_navigate",
             "tools/call:browser_click",
-            "tools/call:browser_screenshot"
+            "tools/call:browser_take_screenshot"
         ]
     );
     // Delivered back to the model.
     let last = provider.requests().pop().unwrap();
     assert!(tool_text(&last, "click-1")
         .unwrap()
-        .contains("score shows 1"));
+        .contains("getByRole('button').click()"));
     assert!(tool_text(&last, "shot-1")
         .unwrap()
         .contains("[image attached: image/png]"));

@@ -6818,7 +6818,14 @@ impl SessionRuntime {
         let available: std::collections::BTreeSet<String> = self
             .observation_routes()
             .into_iter()
-            .filter(|route| matches!(route.status, crate::RouteStatus::Available(_)))
+            // A registered tool the model has to load first still supports the
+            // claim once it does; whether it did is what the observations say.
+            .filter(|route| {
+                matches!(
+                    route.status,
+                    crate::RouteStatus::Available(_) | crate::RouteStatus::Hidden(_)
+                )
+            })
             .map(|route| route.capability.to_string())
             .collect();
         crate::requested_evidence(
@@ -6835,7 +6842,9 @@ impl SessionRuntime {
     pub fn observation_routes(&self) -> Vec<crate::ObservationRoute> {
         let names = self.tool_names();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        crate::observation_routes(&names, self.active_accepts_images())
+        let broker = self.broker.clone();
+        let advertised = move |name: &str| broker.as_ref().is_none_or(|b| b.is_advertised(name));
+        crate::observation_routes(&names, self.active_accepts_images(), &advertised)
     }
 
     /// The context window this session budgets against, in tokens.
@@ -6888,13 +6897,19 @@ impl SessionRuntime {
                 requested.capability,
                 requested.requested_by.join(", ")
             ));
-            if let Some(crate::RouteStatus::Unavailable(why) | crate::RouteStatus::Deferred(why)) =
-                routes
-                    .iter()
-                    .find(|route| route.capability == requested.capability)
-                    .map(|route| &route.status)
+            match routes
+                .iter()
+                .find(|route| route.capability == requested.capability)
+                .map(|route| &route.status)
             {
-                report.header.push(format!("  route: {why}"));
+                Some(crate::RouteStatus::Unavailable(why) | crate::RouteStatus::Deferred(why)) => {
+                    report.header.push(format!("  route: {why}"));
+                }
+                Some(crate::RouteStatus::Hidden(tools)) => report.header.push(format!(
+                    "  route: registered but not advertised yet; load with tool_search/tool_load: {}",
+                    tools.join(", ")
+                )),
+                _ => {}
             }
         }
         report
