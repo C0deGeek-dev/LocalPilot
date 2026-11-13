@@ -1084,3 +1084,17 @@ without browser tools the claim is unavailable; a call the approver refuses neve
 reaches the server and is denied; WPF desktop and Godot engine claims are deferred
 with their reasons while the turn still runs. No real browser, desktop session or
 engine is used.
+
+### Recipe drafts and the skills commands
+
+`cargo test -p localpilot-harness --test recipe_drafts` runs a session that builds
+a small crate and checks the draft: it reads back as a valid recipe with the
+directory the command ran in, a separate component, hashes taken when the command
+finished and the run it came from named; a version probe, a failed command and a
+command with `;` are not drafted and the reason lists them; a run can be picked by
+number; a file changed after the run is left out with a note; asking for a draft
+writes nothing. `cargo test -p localpilot-harness --lib argv_tests` covers plain
+and shell-syntax commands and redaction. `cargo test -p localpilot --features tui
+--bin localpilot skills_` drives `/skills guidance` and `/skills recipe-draft`
+through the real dispatch, including a committed project where the build runs and
+is listed and drafted.

@@ -122,7 +122,7 @@ pub use scorecard::{
 pub use step_sessions::STEP_SESSIONS_KEY;
 pub use task_evidence::{
     observation_routes, requested_evidence, EvidenceState, ImageState, Observation,
-    ObservationRoute, RequestedEvidence, RouteStatus,
+    ObservationRoute, RequestedEvidence, RouteStatus, RunRecord,
 };
 pub use task_guidance::{
     GuidanceDelivery, GuidanceEntry, GuidancePlacement, GuidanceSegment, RequestGuidance,
@@ -151,7 +151,7 @@ pub use localx_eval_core::{
 pub use session::{
     check_command_digest, effective_context_limit, profile_name, python_syntax_check, Admission,
     CompletionCheckResolver, FrozenTransfer, ManualCompaction, PlanStep, QuiesceSignal,
-    RuntimeEvent, SessionConfig, SessionRecovery, SessionRuntime, SoftInterrupt,
+    RecipeDraft, RuntimeEvent, SessionConfig, SessionRecovery, SessionRuntime, SoftInterrupt,
     SoftInterruptSource, SteerQueue, StopReason, SwitchError, SwitchOutcome, TransferManifest,
     TransferRefusal, TurnHandoff, CONTEXT_RESERVE_TOKENS, TRANSFER_MANIFEST_MAX_BYTES,
     TRANSFER_MANIFEST_VERSION,

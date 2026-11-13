@@ -49,7 +49,8 @@ pub use manager::{
 };
 pub use manifest::{Invocation, SkillManifest, SkillTriggers};
 pub use recipe::{
-    draft_recipe, read_recipes, Cleanup, Readiness, Recipe, RecipeSet, RecipeValidation,
+    draft_recipe, read_recipes, validation_hashes, Cleanup, Readiness, Recipe, RecipeSet,
+    RecipeValidation, VALIDATION_FILES,
 };
 pub use source::{normalize_url, source_id, SkillSource, SourceRegistry};
 pub use suggest::{SkillDraft, SuggestionEngine};

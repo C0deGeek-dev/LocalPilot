@@ -2206,6 +2206,65 @@ pub(crate) fn present(report: &CommandReport) -> Presentation {
 /// Present a command's output on the full-screen host: a short success is one
 /// multi-line Notice; a long success opens a Report takeover plus one breadcrumb
 /// Notice (the body never floods the timeline); a failure is one inline Warning.
+/// The arguments after `/skills <name>`, when the subcommand is `name`.
+fn skills_subcommand<'a>(raw: &'a str, name: &str) -> Option<&'a str> {
+    let raw = raw.trim();
+    let rest = raw.strip_prefix(name)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
+}
+
+/// The text of `/skills recipe-draft`: the candidates (`list`), or a draft from
+/// the latest successful command or from candidate `N`, for an optional
+/// component.
+fn recipe_draft_text(runtime: &localpilot_harness::SessionRuntime, args: &str) -> String {
+    let mut words = args.split_whitespace();
+    let first = words.next();
+    if first == Some("list") {
+        let candidates = runtime.recipe_candidates();
+        if candidates.is_empty() {
+            return format!("no draft is possible: {}\n", recipe_draft_reason(runtime));
+        }
+        let mut out = String::from("Commands that succeeded and can be drafted (oldest first):\n");
+        for (at, run) in candidates.iter().enumerate() {
+            out.push_str(&format!(
+                "{}. `{}` (run {})\n",
+                at + 1,
+                run.command,
+                run.call
+            ));
+        }
+        out.push_str("Draft one with `/skills recipe-draft <number> [component]`.\n");
+        return out;
+    }
+    let (index, component) = match first.map(str::parse::<usize>) {
+        Some(Ok(number)) => (Some(number), words.next()),
+        _ => (None, first),
+    };
+    match runtime.recipe_draft(index, component) {
+        Ok(draft) => {
+            let mut out = format!(
+                "Draft recipe from {}. Review it before adding it to a project skill.toml; \
+                 nothing was written, run or committed.\n",
+                draft.source
+            );
+            for note in &draft.notes {
+                out.push_str(&format!("note: {note}\n"));
+            }
+            out.push('\n');
+            out.push_str(&draft.text);
+            out
+        }
+        Err(reason) => format!("no draft: {reason}\n"),
+    }
+}
+
+fn recipe_draft_reason(runtime: &localpilot_harness::SessionRuntime) -> String {
+    runtime
+        .recipe_draft(None, None)
+        .err()
+        .unwrap_or_else(|| "no command can be drafted".to_string())
+}
+
 fn present_command_report(app: &mut AppModel, report: CommandReport) {
     match present(&report) {
         Presentation::Notice(text) => app.apply_runtime(RuntimeUpdate::Notice(text)),
@@ -2930,12 +2989,22 @@ fn fullscreen_settings(app: &AppModel, config: &localpilot_config::Config) -> Ve
         SettingEntry {
             section: "Session".to_string(),
             name: "Installed package discovery".to_string(),
-            value: if config.skills.autonomous_discovery {
+            value: if config.skills.package_tools_registered() {
                 "on".to_string()
             } else {
                 "off".to_string()
             },
-            description: if config.skills.autonomous_discovery {
+            description: if config.skills.guidance.mode != localpilot_config::TaskGuidanceMode::Off
+            {
+                format!(
+                    "Task guidance is {}: the host suggests skill packages before each turn \
+                     and the skill tools are registered. `/skills guidance` shows what it chose.",
+                    match config.skills.guidance.mode {
+                        localpilot_config::TaskGuidanceMode::Assisted => "assisted",
+                        _ => "suggest",
+                    }
+                )
+            } else if config.skills.autonomous_discovery {
                 "Model-callable skill discovery is on (`skill_list`/`skill_search`/`skill_load`)."
                     .to_string()
             } else {
@@ -3766,6 +3835,20 @@ async fn execute_fullscreen_slash_action(
                 command_report(
                     "skills",
                     crate::repl::command_output_from_buffer(report.into_bytes(), Ok(())),
+                ),
+            );
+        }
+        // `/skills recipe-draft [list | N] [component]` turns a command that
+        // succeeded in this session into a recipe draft to review. It prints
+        // text: nothing is written, run or committed.
+        SlashAction::Skills(raw) if skills_subcommand(&raw, "recipe-draft").is_some() => {
+            let args = skills_subcommand(&raw, "recipe-draft").unwrap_or_default();
+            let text = recipe_draft_text(runtime, args);
+            present_command_report(
+                app,
+                command_report(
+                    "skills",
+                    crate::repl::command_output_from_buffer(text.into_bytes(), Ok(())),
                 ),
             );
         }
@@ -15250,7 +15333,7 @@ mod tests {
             ),
             (
                 "skills",
-                "Manage skills: repos, install, list (/skills <subcommand>)",
+                "Manage skills: repos, install, list, guidance, recipe-draft (/skills <subcommand>)",
             ),
             ("bg", "List background processes (/bg stop <id>|all)"),
             ("exit", "Exit LocalPilot (/exit [print])"),
@@ -26743,6 +26826,185 @@ last_seen = "2026-08-10"
         .await;
         assert_eq!(profile(&bundle), localpilot_sandbox::Profile::ReadOnly);
         assert!(timeline_has_notice(&app, "this session is read-only"));
+        bundle.runtime.close();
+    }
+
+    /// Run `/skills <args>` through the real dispatch and return the report it
+    /// opened.
+    async fn skills_report(
+        app: &mut AppModel,
+        bundle: &mut InteractiveSessionBundle,
+        config: &localpilot_config::Config,
+        cwd: &Path,
+        args: &str,
+    ) -> String {
+        let action = parse_slash_for(Host::Fullscreen, &format!("/skills {args}")).unwrap();
+        execute_fullscreen_slash_action(
+            app,
+            &mut bundle.runtime,
+            config,
+            cwd,
+            &mut StageHost::new(),
+            &RefCell::new(None),
+            &localpilot_store::PromptHistory::with_store(None),
+            action,
+        )
+        .await;
+        // A short result is a notice, a long one an opened report.
+        match app.report() {
+            Some((_, lines)) => lines.join("\n"),
+            None => app
+                .last_notice()
+                .expect("the command produced a notice or a report")
+                .to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn skills_guidance_runs_through_the_dispatch_and_reports_without_a_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let mut bundle = brief_session(cwd, scripted(&[])).await;
+        let config = localpilot_config::Config::default();
+        let mut app = app();
+
+        let report = skills_report(&mut app, &mut bundle, &config, cwd, "guidance").await;
+
+        assert!(report.starts_with("guidance: 0 active"), "{report}");
+        assert!(report.contains("no task selection ran"), "{report}");
+        // The ordinary subcommands still reach the skills surface.
+        let listed = skills_report(&mut app, &mut bundle, &config, cwd, "list").await;
+        assert!(!listed.contains("no task selection ran"), "{listed}");
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn skills_recipe_draft_lists_and_drafts_a_command_that_succeeded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        std::fs::write(
+            cwd.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src/lib.rs"), "pub fn one() -> u8 { 1 }\n").unwrap();
+        // The work envelope wants a committed git baseline before it lets a
+        // command that may write run, so the project is a repository.
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "-A"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.test",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(cwd)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let mut declaration = FakeProvider::new().declaration().clone();
+        declaration.id = "first".to_string();
+        declaration.display_name = "first".to_string();
+        let provider = Arc::new(
+            FakeProvider::new()
+                .with_declaration(declaration)
+                .tool_call(
+                    "build-1",
+                    "run_shell",
+                    serde_json::json!({"program": "cargo", "args": ["build", "--offline", "--quiet", "--target-dir", "target"]}),
+                )
+                .text("built"),
+        );
+        let mut bundle = brief_session(cwd, provider).await;
+        bundle
+            .runtime
+            .set_permission_profile(localpilot_sandbox::Profile::Bypass, Vec::new());
+        let (events, _rx) = tokio::sync::broadcast::channel(256);
+        bundle
+            .runtime
+            .run_turn(
+                "Build it.",
+                &events,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+        let config = localpilot_config::Config::default();
+        let mut app = app();
+
+        let listed = skills_report(&mut app, &mut bundle, &config, cwd, "recipe-draft list").await;
+        assert!(listed.contains("1. `cargo build --offline"), "{listed}");
+        assert!(listed.contains("(run build-1)"), "{listed}");
+
+        let drafted = skills_report(
+            &mut app,
+            &mut bundle,
+            &config,
+            cwd,
+            "recipe-draft 1 crates/api",
+        )
+        .await;
+        assert!(
+            drafted.contains("Draft recipe from run build-1"),
+            "{drafted}"
+        );
+        assert!(
+            drafted.contains("nothing was written, run or committed"),
+            "{drafted}"
+        );
+        assert!(drafted.contains("[[recipe]]"), "{drafted}");
+        assert!(
+            drafted.contains("component = \"crates/api\"\nworking_directory = \".\""),
+            "{drafted}"
+        );
+        // The session keeps its own state under `.localpilot`; asking for a draft
+        // creates no skill package there.
+        assert!(
+            !cwd.join(".localpilot").join("skills").exists(),
+            "nothing is written"
+        );
+        bundle.runtime.close();
+    }
+
+    #[test]
+    fn a_skills_subcommand_is_matched_as_a_whole_word() {
+        assert_eq!(skills_subcommand("recipe-draft", "recipe-draft"), Some(""));
+        assert_eq!(
+            skills_subcommand("  recipe-draft 2 api", "recipe-draft"),
+            Some("2 api")
+        );
+        assert_eq!(skills_subcommand("recipe-drafts", "recipe-draft"), None);
+        assert_eq!(skills_subcommand("list", "recipe-draft"), None);
+    }
+
+    #[tokio::test]
+    async fn skills_recipe_draft_says_why_when_no_command_has_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let mut bundle = brief_session(cwd, scripted(&[])).await;
+        let config = localpilot_config::Config::default();
+        let mut app = app();
+
+        let report = skills_report(&mut app, &mut bundle, &config, cwd, "recipe-draft").await;
+
+        assert!(
+            report.contains("no draft: no shell command has run in this session"),
+            "{report}"
+        );
+        let listed = skills_report(&mut app, &mut bundle, &config, cwd, "recipe-draft list").await;
+        assert!(listed.contains("no draft is possible"), "{listed}");
+        assert!(
+            !cwd.join(".localpilot").join("skills").exists(),
+            "nothing is written"
+        );
         bundle.runtime.close();
     }
 

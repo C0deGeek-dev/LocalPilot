@@ -191,12 +191,23 @@ or a recipe that carries authority or secrets, would undo the permission model.
   with its state and a `ProjectRecipe` source. The host never runs a recipe: commands go through the
   ordinary tools and their permission checks, and nothing becomes standing
   execution authority.
-- `draft_recipe` turns a successful command into a draft for a person to review,
-  with any credential-like argument masked. It writes nothing and commits nothing.
+- `/skills recipe-draft [list | N] [component]` (full-screen) turns a command that
+  succeeded in this session into a draft to review, printed as text: nothing is
+  written, run or committed. Only `run_shell` commands that exited 0, are not
+  read-only (a version or help probe counts as read-only) and are plain argv
+  qualify; a command with shell syntax (pipes, `&&`, `;`, redirects, quotes,
+  `$`) or an environment prefix is refused with that reason instead of being
+  split on whitespace. The draft names the run it came from and can be picked by
+  number. The working directory is the one the command ran in (the workspace
+  root, since `run_shell` has no other) and is separate from the component. The
+  `validated_against` hashes are taken when the command finishes, and a file
+  changed since is left out with a note. Arguments are redacted when recorded
+  and credential-like ones are masked again in the draft.
 
 **Consequences.** Projects can record how they run once and have it offered where
-it fits. Whether a recipe still works is shown, not assumed. No UI writes drafts
-yet.
+it fits. Whether a recipe still works is shown, not assumed. A draft is only text
+to copy into a project `skill.toml`; the command never saves it. Long-running
+commands (a server) cannot be drafted from `run_shell`, whose commands finish.
 
 ## ADR-0280: Built-In Task Procedures And Initial Stack Supplements, Present Only With Guidance On
 
@@ -340,8 +351,10 @@ request (ADR-0271).
   capability), **suggested** and **excluded**, each with its reason. Guidance the
   request held by another route (project instructions, a skill the model loaded)
   is listed as active from the record.
-- A one-line summary for a status bar. `/skills guidance` shows the report in the
-  full-screen terminal.
+- A one-line summary leads the report. `/skills guidance` shows it in the
+  full-screen terminal, and the Settings row "Installed package discovery" names
+  the guidance mode and points to the command. There is no other status-bar
+  indication.
 - The report holds host decisions and observed facts only, never model output.
   Building it is read-only and changes no selection, request or permission.
 

@@ -1580,7 +1580,8 @@ access. Per turn it is bounded to about 2,048 characters of names and summaries 
 in all, so a model with a small window gets less; a body that does not fit is
 offered by name instead, with the reason. The text is redacted like other
 injected context. `/skills guidance` shows what was chosen and what the
-last request held, and `localpilot doctor` reports the mode.
+last request held, `localpilot doctor` reports the mode, and the Settings row
+"Installed package discovery" reads `on` with a guidance mode and names it.
 
 With a mode on, the catalog also holds LocalPilot's built-in `guide-*` packages
 (ADR-0280): procedures for the six intents and supplements for the first stacks

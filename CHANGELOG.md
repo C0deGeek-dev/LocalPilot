@@ -34,7 +34,9 @@ is SemVer-stable; the configuration schema stability policy is in
   variable and credential names, and the files they were validated against. With
   task guidance on, the recipe for the task's component is offered with whether
   it is still validated. Recipes hold no secrets, grant nothing and are never run
-  by the host (ADR-0281, LocalHub#278).
+  by the host. `/skills recipe-draft [list | N] [component]` turns a command that
+  succeeded in the session into a draft to review; nothing is written (ADR-0281,
+  LocalHub#278).
 - Built-in task guidance: six short procedures (explain, investigate, implement,
   refactor, review, measure) and supplements for Rust, .NET, web, Three.js,
   Tailwind, Godot 4, CLIs, libraries, services, desktop apps and games. They are
@@ -52,7 +54,8 @@ is SemVer-stable; the configuration schema stability policy is in
   check or limit, and never picks a user-only package (ADR-0278, LocalHub#275).
 - `/skills guidance` shows which task guidance is active, stale, suggested,
   excluded or unable to support a claim, with the intent, component and reason
-  behind each. "Active" means the last provider request held it (ADR-0277,
+  behind each. "Active" means the last provider request held it. The Settings
+  row for skill discovery now also reflects a guidance mode (ADR-0277,
   LocalHub#274).
 - `select_guidance` chooses one procedure and up to two supplements from the
   user's intent (English or Dutch), the component the work is about and its

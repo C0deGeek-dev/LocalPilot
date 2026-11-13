@@ -922,7 +922,7 @@ slash_commands! {
             "skills",
             Optional,
             Fall,
-            "Manage skills: repos, install, list, guidance (/skills <subcommand>)"
+            "Manage skills: repos, install, list, guidance, recipe-draft (/skills <subcommand>)"
         ),
         Bg => fullscreen_only("bg", Optional, Fall, "List background processes (/bg stop <id>|all)"),
         Exit => fullscreen_and_pair("exit", Optional, Reject, "Exit LocalPilot (/exit [print])"),

@@ -292,16 +292,57 @@ fn parse(entry: toml::Value) -> Result<Recipe, String> {
     })
 }
 
+/// The manifest and lock files a recipe's validity usually depends on,
+/// relative to the workspace root and to a component directory.
+pub const VALIDATION_FILES: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "package.json",
+    "package-lock.json",
+    "global.json",
+    "pyproject.toml",
+    "go.mod",
+    "go.sum",
+];
+
+/// The SHA-256 of each of [`VALIDATION_FILES`] that exists in the workspace
+/// root and, when it is not the root, in `component`. Paths are
+/// workspace-relative with `/`.
+#[must_use]
+pub fn validation_hashes(root: &Path, component: &str) -> Vec<(String, String)> {
+    let mut dirs = vec![String::new()];
+    if component != "." && !component.is_empty() {
+        dirs.push(format!("{}/", component.trim_end_matches('/')));
+    }
+    let mut out = Vec::new();
+    for dir in dirs {
+        for name in VALIDATION_FILES {
+            let relative = format!("{dir}{name}");
+            if let Some(hash) = file_sha256(&root.join(&relative)) {
+                out.push((relative, hash));
+            }
+        }
+    }
+    out
+}
+
 /// A recipe draft from a command that ran successfully, for a person to review
 /// and add to a project package. Nothing is written.
+///
+/// `working_directory` is where the command actually ran and `component` the
+/// part of the project it is about; they are separate. `validated_against`
+/// holds the file hashes taken when the command finished, so the draft never
+/// claims a validation that did not happen. Credential-like arguments are
+/// masked.
 #[must_use]
 pub fn draft_recipe(
     name: &str,
     component: &str,
+    working_directory: &str,
     program: &str,
     args: &[String],
-    root: &Path,
-    depends_on: &[&str],
+    validated_against: &[(String, String)],
 ) -> String {
     let quote = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
     let mut out = String::from(
@@ -309,7 +350,10 @@ pub fn draft_recipe(
     );
     out.push_str(&format!("name = {}\n", quote(name)));
     out.push_str(&format!("component = {}\n", quote(component)));
-    out.push_str(&format!("working_directory = {}\n", quote(component)));
+    out.push_str(&format!(
+        "working_directory = {}\n",
+        quote(working_directory)
+    ));
     out.push_str(&format!("program = {}\n", quote(program)));
     let args: Vec<String> = args
         .iter()
@@ -323,13 +367,11 @@ pub fn draft_recipe(
         .collect();
     out.push_str(&format!("args = [{}]\n", args.join(", ")));
     out.push_str("readiness = { kind = \"exit_zero\" }\ncleanup = \"nothing\"\n");
-    let hashes: Vec<String> = depends_on
-        .iter()
-        .filter_map(|file| {
-            file_sha256(&root.join(file)).map(|hash| format!("{} = {}", quote(file), quote(&hash)))
-        })
-        .collect();
-    if !hashes.is_empty() {
+    if !validated_against.is_empty() {
+        let hashes: Vec<String> = validated_against
+            .iter()
+            .map(|(file, hash)| format!("{} = {}", quote(file), quote(hash)))
+            .collect();
         out.push_str(&format!(
             "validated_against = {{ {} }}\n",
             hashes.join(", ")
@@ -494,14 +536,9 @@ cleanup = "stop_started_process"
     fn a_recipe_is_stale_once_a_file_it_was_validated_against_changes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Cargo.lock"), "v1").unwrap();
-        let draft = draft_recipe(
-            "run",
-            ".",
-            "cargo",
-            &["run".to_string()],
-            dir.path(),
-            &["Cargo.lock"],
-        );
+        let hashes = validation_hashes(dir.path(), ".");
+        assert_eq!(hashes.len(), 1);
+        let draft = draft_recipe("run", ".", ".", "cargo", &["run".to_string()], &hashes);
         let manifest = format!("name = \"x\"\ndescription = \"d\"\nversion = \"1\"\n{draft}");
         let recipe = read_recipes(&manifest).recipes.remove(0);
         assert_eq!(recipe.validation(dir.path()), RecipeValidation::Current);
@@ -524,11 +561,13 @@ cleanup = "stop_started_process"
         let draft = draft_recipe(
             "seed",
             "api",
+            ".",
             "tool",
             &["--password=hunter22".to_string()],
-            dir.path(),
             &[],
         );
+        // The directory the command ran in and the component are separate.
+        assert!(draft.contains("component = \"api\"\nworking_directory = \".\""));
         assert!(!draft.contains("hunter22"));
         assert!(draft.starts_with("# Draft"));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before.len());

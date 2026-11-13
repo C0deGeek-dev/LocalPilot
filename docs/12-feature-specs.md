@@ -151,7 +151,9 @@ validated_against = { "api/packages.lock.json" = "<sha256>" }
 A recipe is advice: the model runs it with the ordinary tools, which still check
 permission. A credential-like argument, a value in `env`, an unknown key or a path
 outside the workspace makes the recipe invalid; global and built-in packages'
-recipes are never offered.
+recipes are never offered. In the full-screen terminal `/skills recipe-draft
+[list | N] [component]` prints a draft recipe from a command that succeeded in
+the session (plain argv only, not read-only); it writes nothing.
 
 A package without `[guidance]` is discovered and ranked exactly as before, and a
 `SKILL.md`-only package has none. A section that cannot be used (a missing or

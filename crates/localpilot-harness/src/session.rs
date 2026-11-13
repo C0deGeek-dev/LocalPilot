@@ -1134,6 +1134,48 @@ fn canonical_json(value: &serde_json::Value) -> String {
 
 /// The first 16 hex digits of a string's SHA-256: a stable, value-free
 /// fingerprint for a persisted diagnostic.
+/// A reviewable recipe draft and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipeDraft {
+    /// The `[[recipe]]` text, to review and add to a project `skill.toml`.
+    pub text: String,
+    /// The run it came from.
+    pub source: String,
+    /// What was left out and why.
+    pub notes: Vec<String>,
+}
+
+/// A short, valid recipe name from a command: `cargo-build`, `dotnet-test`.
+fn recipe_name(program: &str, args: &[String]) -> String {
+    let base = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .trim_end_matches(".exe");
+    let verb = args.iter().find(|a| !a.starts_with('-'));
+    let mut name = base.to_string();
+    if let Some(verb) = verb {
+        name.push('-');
+        name.push_str(verb);
+    }
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned: String = cleaned.chars().take(40).collect();
+    if cleaned.is_empty() {
+        "run".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// What a turn's hook contribution puts in each request.
 struct TurnContext {
     turn_context: Option<Message>,
@@ -6591,6 +6633,8 @@ impl SessionRuntime {
                         denied: permission_denial.is_some(),
                         exit_code: tool_exit_code,
                         has_image: result.image.is_some(),
+                        input: Some(input),
+                        root: Some(self.workspace.root()),
                     },
                     selection.as_ref(),
                 );
@@ -6665,6 +6709,106 @@ impl SessionRuntime {
     #[must_use]
     pub fn task_observations(&self) -> Vec<crate::Observation> {
         self.task_evidence.observations()
+    }
+
+    /// The shell commands this session ran that could become a recipe draft:
+    /// they exited 0, are not read-only and are plain argv. Oldest first.
+    #[must_use]
+    pub fn recipe_candidates(&self) -> Vec<crate::RunRecord> {
+        self.task_evidence
+            .runs()
+            .into_iter()
+            .filter(|run| run.succeeded && !run.read_only && run.argv.is_some())
+            .collect()
+    }
+
+    /// A reviewable recipe draft from a command that succeeded in this session:
+    /// the `index`th candidate (1-based, as `recipe_candidates` lists them) or
+    /// the latest. The draft is text; nothing is written, run or committed.
+    ///
+    /// # Errors
+    /// Says why there is no draft: no successful run, a command that is not
+    /// plain argv, or an index out of range.
+    pub fn recipe_draft(
+        &self,
+        index: Option<usize>,
+        component: Option<&str>,
+    ) -> Result<crate::RecipeDraft, String> {
+        let candidates = self.recipe_candidates();
+        let run = match index {
+            Some(0) => return Err("runs are numbered from 1".to_string()),
+            Some(n) => candidates.get(n - 1).ok_or_else(|| {
+                format!("there is no run {n}; {} can be drafted", candidates.len())
+            })?,
+            None => match candidates.last() {
+                Some(run) => run,
+                None => return Err(self.no_candidate_reason()),
+            },
+        };
+        let (program, args) = run.argv.clone().ok_or("the run is not plain argv")?;
+        let component = component
+            .map(str::to_string)
+            .or_else(|| run.component.clone())
+            .unwrap_or_else(|| ".".to_string());
+        // The command ran in the workspace root: run_shell has no other
+        // directory. The component is what it is about.
+        let working_directory = ".";
+        let root = self.workspace.root();
+        let mut notes = Vec::new();
+        // Keep only the files that still have the hash they had when the run
+        // finished; a file changed since is not something the run validated.
+        let mut kept = Vec::new();
+        for (file, hash) in &run.file_hashes {
+            let now = localpilot_skills::validation_hashes(root, &component)
+                .into_iter()
+                .find(|(name, _)| name == file)
+                .map(|(_, hash)| hash);
+            if now.as_deref() == Some(hash.as_str()) {
+                kept.push((file.clone(), hash.clone()));
+            } else {
+                notes.push(format!(
+                    "{file} changed after the run, so it is not recorded as validated"
+                ));
+            }
+        }
+        let name = recipe_name(&program, &args);
+        let text = localpilot_skills::draft_recipe(
+            &name,
+            &component,
+            working_directory,
+            &program,
+            &args,
+            &kept,
+        );
+        Ok(crate::RecipeDraft {
+            text,
+            source: format!("run {} (`{}`)", run.call, run.command),
+            notes,
+        })
+    }
+
+    fn no_candidate_reason(&self) -> String {
+        let runs = self.task_evidence.runs();
+        if runs.is_empty() {
+            return "no shell command has run in this session".to_string();
+        }
+        let mut reasons: Vec<String> = Vec::new();
+        for run in runs.iter().rev().take(3) {
+            let why = if !run.succeeded {
+                "it did not exit 0".to_string()
+            } else if run.read_only {
+                "it only reads".to_string()
+            } else {
+                run.not_argv_reason
+                    .clone()
+                    .unwrap_or_else(|| "it is not plain argv".to_string())
+            };
+            reasons.push(format!("`{}`: {why}", run.command));
+        }
+        format!(
+            "no command can be drafted; the latest runs: {}",
+            reasons.join("; ")
+        )
     }
 
     /// How each capability the selected guidance asks for stands: planned,

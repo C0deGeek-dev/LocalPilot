@@ -23,6 +23,8 @@ use localpilot_core::{ContentBlock, Message, ToolUseId};
 
 /// The most observations kept.
 const MAX_OBSERVATIONS: usize = 256;
+/// The most shell runs kept for recipe drafts.
+const MAX_RUNS: usize = 64;
 
 /// The state of an observation or of a requested capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +82,106 @@ pub struct RequestedEvidence {
     pub calls: Vec<String>,
 }
 
+/// A shell command that ran, kept so a person can turn a successful one into
+/// a reviewable recipe draft. Holds nothing a secret could sit in: arguments
+/// are redacted when recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRecord {
+    /// The tool call that ran it.
+    pub call: String,
+    /// What it ran, for display, redacted.
+    pub command: String,
+    /// The program and arguments, when the command is plain argv. `None` when
+    /// it uses shell syntax, which a recipe cannot express.
+    pub argv: Option<(String, Vec<String>)>,
+    /// Why there is no argv.
+    pub not_argv_reason: Option<String>,
+    /// The command only reads (a listing, a status, a version probe).
+    pub read_only: bool,
+    /// Whether it exited 0.
+    pub succeeded: bool,
+    /// The component of the selection in force when it ran.
+    pub component: Option<String>,
+    /// File hashes taken when it finished, so a draft never claims a
+    /// validation that did not happen.
+    pub file_hashes: Vec<(String, String)>,
+}
+
+/// The program and arguments of a `run_shell` input, or why there are none.
+pub(crate) fn argv_of(input: &serde_json::Value) -> Result<(String, Vec<String>), String> {
+    let redact = |text: &str| localpilot_config::redact::redact(text);
+    if let Some(program) = input.get("program").and_then(|p| p.as_str()) {
+        let args: Vec<String> = input
+            .get("args")
+            .and_then(|a| a.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(redact))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Ok((redact(program), args));
+    }
+    let Some(command) = input.get("command").and_then(|c| c.as_str()) else {
+        return Err("the call has no command".to_string());
+    };
+    // A recipe is a program and an argument array. Only a command that is
+    // already plain words can be split without changing what it means.
+    if let Some(bad) = command.chars().find(|c| {
+        matches!(
+            c,
+            '|' | '&'
+                | ';'
+                | '<'
+                | '>'
+                | '`'
+                | '$'
+                | '('
+                | ')'
+                | '"'
+                | '\''
+                | '\\'
+                | '*'
+                | '?'
+                | '{'
+                | '}'
+                | '#'
+                | '~'
+                | '!'
+                | '\n'
+                | '\r'
+        )
+    }) {
+        return Err(format!(
+            "the command uses shell syntax ({}); a recipe is a program and an argument list",
+            if bad == '\n' {
+                "a line break".to_string()
+            } else {
+                format!("`{bad}`")
+            }
+        ));
+    }
+    let mut words = command.split_whitespace().map(str::to_string);
+    let Some(program) = words.next() else {
+        return Err("the command is empty".to_string());
+    };
+    if program.contains('=') {
+        return Err(
+            "the command starts with an environment assignment; name the variable in `env` instead"
+                .to_string(),
+        );
+    }
+    Ok((redact(&program), words.map(|w| redact(&w)).collect()))
+}
+
+/// A version or help probe: it reads and says nothing about how to run the
+/// project, so it is never worth a recipe.
+fn is_probe(program: &str, args: &[String]) -> bool {
+    !program.contains(['/', '\\'])
+        && matches!(args, [arg] if matches!(arg.as_str(), "--version" | "-V" | "--help" | "-h"))
+}
+
 /// What one tool call produced, as the session saw it.
 pub(crate) struct ToolFacts<'a> {
     pub(crate) tool: &'a str,
@@ -88,12 +190,17 @@ pub(crate) struct ToolFacts<'a> {
     pub(crate) denied: bool,
     pub(crate) exit_code: Option<i32>,
     pub(crate) has_image: bool,
+    /// The call's input, for a shell command's argv.
+    pub(crate) input: Option<&'a serde_json::Value>,
+    /// The workspace root, for the files a run's validity depends on.
+    pub(crate) root: Option<&'a std::path::Path>,
 }
 
 /// The session's evidence record.
 #[derive(Default)]
 pub(crate) struct TaskEvidence {
     observations: Vec<Observation>,
+    runs: Vec<RunRecord>,
     /// Image observations sent in the request now awaiting its answer.
     awaiting: Vec<String>,
 }
@@ -124,6 +231,9 @@ impl TaskEvidence {
         let image =
             (capability == "image.inspect" && facts.has_image && state == EvidenceState::Passed)
                 .then_some(ImageState::Captured);
+        if facts.tool == "run_shell" && !facts.denied {
+            self.record_run(facts, state, selection);
+        }
         if self.observations.len() == MAX_OBSERVATIONS {
             self.observations.remove(0);
         }
@@ -143,6 +253,64 @@ impl TaskEvidence {
                 result
             },
         });
+    }
+
+    fn record_run(
+        &mut self,
+        facts: &ToolFacts<'_>,
+        state: EvidenceState,
+        selection: Option<&crate::GuidanceSelection>,
+    ) {
+        let Some(input) = facts.input else {
+            return;
+        };
+        let (argv, reason) = match argv_of(input) {
+            Ok(argv) => (Some(argv), None),
+            Err(reason) => (None, Some(reason)),
+        };
+        let command = match &argv {
+            Some((program, args)) => std::iter::once(program.as_str())
+                .chain(args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" "),
+            None => localpilot_config::redact::redact(
+                input
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default(),
+            ),
+        };
+        let succeeded = state == EvidenceState::Passed && facts.exit_code == Some(0);
+        let component = selection.map(|s| s.component.component.clone());
+        // Hashed when the command finishes, and only for a run that could be
+        // turned into a draft.
+        let file_hashes = match (facts.root, succeeded) {
+            (Some(root), true) => {
+                localpilot_skills::validation_hashes(root, component.as_deref().unwrap_or("."))
+            }
+            _ => Vec::new(),
+        };
+        if self.runs.len() == MAX_RUNS {
+            self.runs.remove(0);
+        }
+        let read_only = localpilot_tools::shell_call_is_read_only(input)
+            || argv
+                .as_ref()
+                .is_some_and(|(program, args)| is_probe(program, args));
+        self.runs.push(RunRecord {
+            call: facts.call.to_string(),
+            command,
+            argv,
+            not_argv_reason: reason,
+            read_only,
+            succeeded,
+            component,
+            file_hashes,
+        });
+    }
+
+    pub(crate) fn runs(&self) -> Vec<RunRecord> {
+        self.runs.clone()
     }
 
     /// A request is being sent: images it holds reach the provider only when
@@ -381,6 +549,8 @@ mod tests {
             denied: false,
             exit_code: None,
             has_image: false,
+            input: None,
+            root: None,
         }
     }
 
@@ -492,5 +662,52 @@ mod tests {
         assert_eq!(vision.observations()[0].image, Some(ImageState::Delivered));
         vision.response_received();
         assert_eq!(vision.observations()[0].image, Some(ImageState::Inspected));
+    }
+}
+
+#[cfg(test)]
+mod argv_tests {
+    use super::argv_of;
+    use serde_json::json;
+
+    #[test]
+    fn plain_commands_split_and_shell_syntax_is_refused() {
+        let (program, args) = argv_of(&json!({"command": "cargo build --release -p app"})).unwrap();
+        assert_eq!((program.as_str(), args.len()), ("cargo", 4));
+        let (program, args) = argv_of(
+            &json!({"program": "dotnet", "args": ["run", "--urls", "http://127.0.0.1:5199"]}),
+        )
+        .unwrap();
+        assert_eq!((program.as_str(), args.len()), ("dotnet", 3));
+        for command in [
+            "cargo build && cargo test",
+            "cargo test | tee out.txt",
+            "cargo test > out.txt",
+            "echo $HOME",
+            "cargo build; cargo test",
+            "cargo test 'a b'",
+            "cargo build\ncargo test",
+        ] {
+            let reason = argv_of(&json!({ "command": command })).unwrap_err();
+            assert!(reason.contains("shell syntax"), "{command}: {reason}");
+        }
+        let env = argv_of(&json!({"command": "RUST_LOG=debug cargo run"})).unwrap_err();
+        assert!(env.contains("environment assignment"), "{env}");
+        assert!(argv_of(&json!({"command": "  "})).is_err());
+    }
+
+    #[test]
+    fn credential_shaped_arguments_are_redacted_when_recorded() {
+        let (_, args) = argv_of(&json!({
+            "program": "tool",
+            "args": ["--key", "sk-abcdefghijklmnopqrstuvwxyz0123456789"]
+        }))
+        .unwrap();
+        assert!(
+            !args
+                .join(" ")
+                .contains("sk-abcdefghijklmnopqrstuvwxyz0123456789"),
+            "{args:?}"
+        );
     }
 }
