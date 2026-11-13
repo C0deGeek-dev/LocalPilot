@@ -829,6 +829,11 @@ is searched for and chosen (the skill model is ADR-0027).
   (`SessionRuntime::task_guidance()`, ADR-0271). This is host accounting: it is
   not shown to the model and grants nothing.
 
+The same three tools are registered when `[skills.guidance] mode` is `suggest` or
+`assisted` (ADR-0278), whatever `autonomous_discovery` says, and then also see
+LocalPilot's built-in `guide-*` packages, so a package the host suggests can be
+loaded.
+
 All three tools are read-only (`Effect::ReadPath`) and trust-gated: project-local
 skills load only when the workspace is trusted. Loading a skill injects *content
 the agent reads* — it runs, installs, and enables nothing. A skill's declared

@@ -196,24 +196,23 @@ fn capability_of(tool: &str) -> Option<&'static str> {
         "run_background" => Some("process.background"),
         "fetch" => Some("http.observe"),
         "read_image" => Some("image.inspect"),
-        // Browser adapter tools, by what they do.
-        name if name.contains("screenshot") => Some("image.inspect"),
-        name if [
-            "navigate",
-            "click",
-            "fill",
-            "type_text",
-            "press_key",
-            "hover",
-            "select_option",
-        ]
-        .iter()
-        .any(|action| name.contains(action)) =>
+        // Browser adapter tools, by what they do. Whole words only: a tool
+        // named `clickup_create_task` is not a click.
+        name if has_word(name, "screenshot") => Some("image.inspect"),
+        name if ["navigate", "click", "fill", "hover"]
+            .iter()
+            .any(|action| has_word(name, action)) =>
         {
             Some("browser.interact")
         }
         _ => None,
     }
+}
+
+/// Whether `word` is one of the `_`-, `-`- or `.`-separated words of a tool name.
+pub(crate) fn has_word(name: &str, word: &str) -> bool {
+    name.split(['_', '-', '.'])
+        .any(|part| part.eq_ignore_ascii_case(word))
 }
 
 /// Whether a capability's route can be used in this session.
@@ -393,6 +392,22 @@ mod tests {
             record.tool_finished(&facts(tool, &call), None);
         }
         assert!(record.observations().is_empty());
+    }
+
+    #[test]
+    fn tool_names_are_classified_by_whole_words() {
+        assert_eq!(capability_of("browser_click"), Some("browser.interact"));
+        assert_eq!(capability_of("navigate_page"), Some("browser.interact"));
+        assert_eq!(capability_of("take_screenshot"), Some("image.inspect"));
+        assert_eq!(
+            capability_of("playwright_browser_take_screenshot"),
+            Some("image.inspect")
+        );
+        // A word inside another word is not that word.
+        assert_eq!(capability_of("clickup_create_task"), None);
+        assert_eq!(capability_of("refill_order"), None);
+        let caps = crate::capabilities_from_tools(&["clickup_create_task", "navigate_page"]);
+        assert!(!caps.contains("browser.interact"));
     }
 
     #[test]

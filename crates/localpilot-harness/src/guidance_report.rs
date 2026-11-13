@@ -162,6 +162,9 @@ pub fn guidance_report(
                 list(&selection.products)
             ));
         }
+        for note in &selection.notes {
+            report.header.push(format!("note: {note}"));
+        }
         report.header.push(format!(
             "loading: {} ({})",
             match selection.loading {

@@ -1576,8 +1576,10 @@ There is deliberately no command to reveal, export, or copy a stored value.
 
 Guidance is advisory text and changes no permission, check, work limit or network
 access. Per turn it is bounded to about 2,048 characters of names and summaries and
-6,144 characters of instruction text; a body that does not fit is offered by name
-instead, with the reason. `/skills guidance` shows what was chosen and what the
+6,144 characters of instruction text, and to 8% of the session's context window
+in all, so a model with a small window gets less; a body that does not fit is
+offered by name instead, with the reason. The text is redacted like other
+injected context. `/skills guidance` shows what was chosen and what the
 last request held, and `localpilot doctor` reports the mode.
 
 With a mode on, the catalog also holds LocalPilot's built-in `guide-*` packages

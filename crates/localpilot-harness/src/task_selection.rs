@@ -177,6 +177,10 @@ pub struct GuidanceSelection {
     pub excluded: Vec<ExcludedGuidance>,
     /// Reviewed run recipes from project packages for this component.
     pub recipes: Vec<SelectedRecipe>,
+    /// Things a reader should know that are neither a choice nor an exclusion:
+    /// a framework or engine the component uses for which no installed
+    /// guidance is specific, so only general guidance applies.
+    pub notes: Vec<String>,
     pub loading: LoadDecision,
     pub loading_reason: String,
 }
@@ -526,6 +530,7 @@ pub fn select_guidance(
         )
     };
 
+    let notes = unqualified_notes(catalog, &stacks);
     let recipes = select_recipes(
         catalog,
         &component.component,
@@ -546,9 +551,37 @@ pub fn select_guidance(
         suggestions,
         excluded,
         recipes,
+        notes,
         loading,
         loading_reason,
     }
+}
+
+/// Frameworks and engines worth naming when nothing installed is specific to
+/// them. Languages and umbrella stacks are left out: general guidance is the
+/// normal case there.
+const NAMED_WHEN_UNQUALIFIED: &[&str] = &["unity", "unreal", "godot", "avalonia", "python", "go"];
+
+/// A note for each such stack of the component that no package with usable
+/// metadata names.
+fn unqualified_notes(catalog: &SkillSet, stacks: &[(String, SelectionConfidence)]) -> Vec<String> {
+    let covered: BTreeSet<&str> = catalog
+        .discoverable()
+        .filter_map(|skill| skill.guidance.metadata())
+        .flat_map(|metadata| metadata.stacks.iter().map(String::as_str))
+        .collect();
+    // Godot 4 guidance covers a Godot 4 project.
+    let godot4 = stacks.iter().any(|(stack, _)| stack == "godot4") && covered.contains("godot4");
+    stacks
+        .iter()
+        .map(|(stack, _)| stack.as_str())
+        .filter(|stack| NAMED_WHEN_UNQUALIFIED.contains(stack))
+        .filter(|stack| !covered.contains(stack))
+        .filter(|stack| !(*stack == "godot" && godot4))
+        .map(|stack| {
+            format!("no installed guidance is specific to {stack}; general guidance applies and nothing is claimed for it")
+        })
+        .collect()
 }
 
 /// Recipes from trusted project packages whose component is `component`. A

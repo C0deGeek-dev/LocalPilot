@@ -3720,6 +3720,9 @@ impl SessionRuntime {
                 SoftInterruptSource::User => {
                     admission.user = true;
                     self.reveal_for_request(&interrupt.content);
+                    // A steer is the user's newest instruction: hooks that
+                    // follow the task see it before the next request.
+                    self.user_requests.push(&interrupt.content);
                     "user"
                 }
                 SoftInterruptSource::System => "system",
@@ -4975,8 +4978,9 @@ impl SessionRuntime {
 
             // A hook whose context depends on the work so far (task guidance
             // after the work moved to another component) may replace its part
-            // before this request; the first request uses the turn's own.
-            if self.task_guidance.has_requests_this_turn() {
+            // before this request. The first request uses the turn's own, unless
+            // the user steered before it was sent.
+            if self.task_guidance.has_requests_this_turn() || admission.user {
                 if let Some(refreshed) = self.hooks.refresh(user_input, &contribution) {
                     let next = self.turn_context(&refreshed, beside_question);
                     turn_context = next.turn_context;
@@ -6688,6 +6692,12 @@ impl SessionRuntime {
         let names = self.tool_names();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         crate::observation_routes(&names, self.active_accepts_images())
+    }
+
+    /// The context window this session budgets against, in tokens.
+    #[must_use]
+    pub fn context_token_limit(&self) -> usize {
+        self.config.context_token_limit
     }
 
     /// The user's recent instructions in this session, shared with hooks.

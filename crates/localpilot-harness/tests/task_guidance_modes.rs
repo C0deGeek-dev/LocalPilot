@@ -289,3 +289,62 @@ async fn a_body_over_the_budget_is_offered_by_name_with_the_reason() {
         row.detail
     );
 }
+
+#[tokio::test]
+async fn package_text_is_redacted_like_other_injected_context() {
+    let fixture = Fixture::new();
+    guided(
+        &fixture.dir.path().join("home"),
+        "guide-rust",
+        "role = \"supplement\"\nstacks = [\"rust\"]",
+        "BODY-RUST use the key sk-abcdefghijklmnopqrstuvwxyz0123456789 for the registry.\n",
+    );
+
+    let (_, request) = fixture
+        .run(Some(GuidanceHookMode::Assisted), "Fix the wrong exit code.")
+        .await;
+
+    let user = text_of(&request, Role::User);
+    assert!(user.contains("BODY-RUST"), "{user}");
+    assert!(
+        !user.contains("sk-abcdefghijklmnopqrstuvwxyz0123456789"),
+        "{user}"
+    );
+}
+
+#[tokio::test]
+async fn the_report_names_the_sections_that_were_loaded() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture
+        .run(Some(GuidanceHookMode::Assisted), "Fix the wrong exit code.")
+        .await;
+
+    let report = runtime.guidance_report();
+    let rust = report.row("guide-rust", GuidanceStatus::Active).unwrap();
+    assert!(rust.detail.contains("sections #Cargo"), "{}", rust.detail);
+    let procedure = report
+        .row("guide-investigate", GuidanceStatus::Active)
+        .unwrap();
+    assert!(
+        procedure.detail.contains("whole body"),
+        "{}",
+        procedure.detail
+    );
+}
+
+#[test]
+fn a_small_context_window_gets_a_smaller_guidance_budget() {
+    use localpilot_harness::{GuidanceBudget, BODY_CHAR_BUDGET, METADATA_CHAR_BUDGET};
+
+    // Unknown or large windows get the fixed caps.
+    assert_eq!(GuidanceBudget::for_context(0), GuidanceBudget::default());
+    let large = GuidanceBudget::for_context(200_000);
+    assert_eq!(
+        (large.metadata_chars, large.body_chars),
+        (METADATA_CHAR_BUDGET, BODY_CHAR_BUDGET)
+    );
+    // An 8k-token window: 8% of about 32,768 characters in all.
+    let small = GuidanceBudget::for_context(8_192);
+    assert_eq!(small.metadata_chars + small.body_chars, 2_621);
+    assert!(small.body_chars < BODY_CHAR_BUDGET);
+}

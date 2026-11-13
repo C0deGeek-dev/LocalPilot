@@ -311,6 +311,16 @@ impl ProjectFacts {
         facts
     }
 
+    /// Whether the cached facts of `component` still match the files and
+    /// directories they were read from. `true` when nothing is cached yet:
+    /// there is nothing to be out of date.
+    #[must_use]
+    pub fn is_current(&self, component: &str) -> bool {
+        self.cache
+            .get(component)
+            .is_none_or(|facts| facts.stamps.iter().all(Stamp::is_current))
+    }
+
     /// The facts of the component `path` belongs to; `None` outside the
     /// workspace.
     pub fn facts_for_path(&mut self, path: &Path) -> Option<ComponentFacts> {

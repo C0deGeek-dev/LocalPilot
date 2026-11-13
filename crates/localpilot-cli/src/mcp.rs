@@ -329,6 +329,24 @@ mod tests {
     }
 
     #[test]
+    fn a_guidance_mode_registers_the_skill_tools_without_autonomous_discovery() {
+        let mut config = Config::default();
+        assert!(!config.skills.autonomous_discovery);
+        let off = McpTools::without_servers(&config).registry();
+        assert!(!off.names().contains(&"skill_load"));
+
+        config.skills.guidance.mode = localpilot_config::TaskGuidanceMode::Suggest;
+        let suggest = McpTools::without_servers(&config);
+        assert!(suggest.skills_builtin_guidance);
+        let names = suggest.registry().names().join(",");
+        for tool in ["skill_list", "skill_search", "skill_load"] {
+            assert!(names.contains(tool), "{names}");
+        }
+        // The legacy switch keeps its own value.
+        assert!(!config.skills.autonomous_discovery);
+    }
+
+    #[test]
     fn the_default_config_installs_the_broker_and_narrows_the_tools() {
         let mut registry = McpTools::default().registry();
         let broker = install_broker(&ToolsConfig::default(), &mut registry)

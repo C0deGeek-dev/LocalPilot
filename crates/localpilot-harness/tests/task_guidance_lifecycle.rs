@@ -297,3 +297,78 @@ async fn changed_removed_and_untrusted_packages_are_not_reused() {
     assert!(!fourth.contains("BODY-PROJECT-LOCAL"), "{fourth}");
     assert!(fourth.contains("BODY-INVESTIGATE"));
 }
+
+#[tokio::test]
+async fn a_steer_from_the_user_changes_the_guidance_of_the_next_request() {
+    let fixture = Fixture::new();
+    write(
+        &fixture.project(),
+        "Cargo.toml",
+        "[package]\nname = \"c\"\nversion = \"0.1.0\"\n",
+    );
+    write(&fixture.project(), "src/lib.rs", "pub fn f() {}\n");
+    guided(
+        &fixture.home(),
+        "guide-explain",
+        "role = \"procedure\"\nintents = [\"explain\"]",
+        "BODY-EXPLAIN\n",
+    );
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("read-1", "read_file", json!({"path": "src/lib.rs"}))
+            .text("done"),
+    );
+    let mut runtime = fixture.runtime(Arc::clone(&provider), SessionConfig::default());
+    let steer = runtime.steer_queue();
+    let (events, _rx) = broadcast::channel::<RuntimeEvent>(64);
+    let cancel = CancellationToken::new();
+    // The steer arrives while the first tool call runs: queued now, admitted
+    // at the next safe boundary.
+    let run = async {
+        runtime
+            .run_turn("Fix the wrong exit code.", &events, &cancel)
+            .await;
+    };
+    steer.push_interrupt(localpilot_harness::SoftInterrupt {
+        content: "Explain it instead; do not change anything.".to_string(),
+        source: localpilot_harness::SoftInterruptSource::User,
+        urgent: false,
+    });
+    run.await;
+
+    let sent = provider.requests();
+    let last = prose(sent.last().unwrap());
+    assert!(last.contains("BODY-EXPLAIN"), "{last}");
+    assert!(!last.contains("BODY-INVESTIGATE"), "{last}");
+    let selection = runtime.guidance_selection().unwrap();
+    assert_eq!(selection.intent.primary().unwrap().as_str(), "explain");
+}
+
+#[tokio::test]
+async fn a_manifest_that_changes_during_a_turn_refreshes_the_guidance() {
+    let fixture = Fixture::new();
+    let project = fixture.project();
+    write(&project, "package.json", r#"{"name": "app"}"#);
+    // The turn adds a dependency that makes this a browser app.
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "write-1",
+                "write_file",
+                json!({"path": "package.json", "content": "{\"name\": \"app\", \"dependencies\": {\"react\": \"^18.3.1\", \"vite\": \"^5.4.0\"}}"}),
+            )
+            .text("done"),
+    );
+    let mut runtime = fixture.runtime(Arc::clone(&provider), SessionConfig::default());
+
+    turn(&mut runtime, "Add a settings page.").await;
+
+    let sent = provider.requests();
+    assert!(!prose(&sent[0]).contains("BODY-WEB"));
+    assert_eq!(
+        prose(&sent[1]).matches("BODY-WEB").count(),
+        1,
+        "{}",
+        prose(&sent[1])
+    );
+}

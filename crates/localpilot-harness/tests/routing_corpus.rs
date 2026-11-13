@@ -387,6 +387,28 @@ struct Run {
     record: RequestGuidance,
     request: ModelRequest,
     tools: Vec<String>,
+    /// Requested evidence whose state claims more than its route allows.
+    unsupported_passes: Vec<String>,
+    /// Whether a completion check ran in the last turn.
+    check_ran: bool,
+}
+
+/// Requested evidence that is not reported unavailable although the session
+/// has no route for it.
+fn unsupported_passes(runtime: &SessionRuntime) -> Vec<String> {
+    let routes = runtime.observation_routes();
+    runtime
+        .requested_evidence()
+        .into_iter()
+        .filter(|requested| {
+            let available = routes.iter().any(|route| {
+                route.capability == requested.capability
+                    && matches!(route.status, localpilot_harness::RouteStatus::Available(_))
+            });
+            !available && requested.state != localpilot_harness::EvidenceState::Unavailable
+        })
+        .map(|requested| requested.capability)
+        .collect()
 }
 
 /// Run `case` through a real session, driving its lifecycle events.
@@ -456,6 +478,8 @@ async fn run(case: &Value, built: &Built) -> Run {
             record,
             request: resumed_provider.requests().pop().unwrap(),
             tools: resumed.tool_names(),
+            unsupported_passes: unsupported_passes(&resumed),
+            check_ran: resumed.current_turn_verification().is_some(),
         };
     }
     let record = session.task_guidance().last().cloned().unwrap();
@@ -464,6 +488,8 @@ async fn run(case: &Value, built: &Built) -> Run {
         record,
         request: provider.requests().pop().unwrap(),
         tools: session.tool_names(),
+        unsupported_passes: unsupported_passes(&session),
+        check_ran: session.current_turn_verification().is_some(),
     }
 }
 
@@ -544,6 +570,23 @@ async fn check(case: &Value) -> Vec<String> {
     }
     let bodies = package_entries(&outcome.record, GuidanceForm::Body);
     let metadata = package_entries(&outcome.record, GuidanceForm::Metadata);
+    // No duplicate guidance: each loaded body is in the request exactly once.
+    for name in &bodies {
+        let copies = text.matches(&format!("### {name}\n")).count();
+        if copies != 1 {
+            fail(format!("{name} is in the request {copies} times"));
+        }
+    }
+    // No unsupported pass claim, and guidance adds no check.
+    if !outcome.unsupported_passes.is_empty() {
+        fail(format!(
+            "evidence without a route is not reported unavailable: {:?}",
+            outcome.unsupported_passes
+        ));
+    }
+    if outcome.check_ran {
+        fail("a completion check ran although nothing was changed".into());
+    }
 
     let intent = expected["intent"].as_str();
     match intent {

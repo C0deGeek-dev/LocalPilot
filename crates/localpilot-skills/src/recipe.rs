@@ -108,7 +108,14 @@ impl Recipe {
             Readiness::HttpGet(url) => format!("ready when GET {url} succeeds"),
             Readiness::ExitZero => "done when it exits with code 0".to_string(),
         };
-        let mut line = format!("run `{command}` in {}; {readiness}", self.working_directory);
+        let mut line = String::new();
+        if !self.prerequisites.is_empty() {
+            line.push_str(&format!("first: {}; ", self.prerequisites.join("; ")));
+        }
+        line.push_str(&format!(
+            "run `{command}` in {}; {readiness}",
+            self.working_directory
+        ));
         if !self.scenario.is_empty() {
             line.push_str(&format!("; then {}", self.scenario.join("; ")));
         }
@@ -449,6 +456,13 @@ cleanup = "stop_started_process"
         let summary = recipe.summary();
         assert!(summary.contains("dotnet run --urls"), "{summary}");
         assert!(summary.contains("needs ASPNETCORE_ENVIRONMENT, ORDERS_DB_PASSWORD from the user"));
+        let with_prerequisite = read_recipes(&GOOD.replace(
+            "program = \"dotnet\"",
+            "program = \"dotnet\"\nprerequisites = [\"the orders database container is running\"]",
+        ));
+        assert!(with_prerequisite.recipes[0]
+            .summary()
+            .starts_with("first: the orders database container is running; run `dotnet"));
     }
 
     fn reason(recipe: &str) -> String {

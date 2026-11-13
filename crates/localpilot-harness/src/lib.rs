@@ -128,8 +128,9 @@ pub use task_guidance::{
     GuidanceDelivery, GuidanceEntry, GuidancePlacement, GuidanceSegment, RequestGuidance,
 };
 pub use task_guidance_hook::{
-    capabilities_from_tools, register_task_guidance_context, GuidanceCatalog, GuidanceHookMode,
-    SelectionSlot, TaskGuidanceContext, BODY_CHAR_BUDGET, METADATA_CHAR_BUDGET,
+    capabilities_from_tools, register_task_guidance_context, GuidanceBudget, GuidanceCatalog,
+    GuidanceHookMode, SelectionSlot, TaskGuidanceContext, BODY_CHAR_BUDGET, CONTEXT_SHARE_PERCENT,
+    METADATA_CHAR_BUDGET,
 };
 pub use task_selection::{
     products_of, read_intent, select_guidance, stacks_of, ComponentReading, ExcludedGuidance,

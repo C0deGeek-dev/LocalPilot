@@ -33,6 +33,44 @@ pub const METADATA_CHAR_BUDGET: usize = 2_048;
 /// tokens).
 pub const BODY_CHAR_BUDGET: usize = 6_144;
 
+/// The share of a session's context window guidance may take, in percent.
+pub const CONTEXT_SHARE_PERCENT: usize = 8;
+
+/// How many characters of guidance one turn may add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuidanceBudget {
+    pub metadata_chars: usize,
+    pub body_chars: usize,
+}
+
+impl Default for GuidanceBudget {
+    fn default() -> Self {
+        Self {
+            metadata_chars: METADATA_CHAR_BUDGET,
+            body_chars: BODY_CHAR_BUDGET,
+        }
+    }
+}
+
+impl GuidanceBudget {
+    /// The budget for a context window of `context_tokens`: names and bodies
+    /// together take at most [`CONTEXT_SHARE_PERCENT`] of it (at about four
+    /// characters a token), and never more than the fixed caps. An unknown
+    /// window (`0`) gets the fixed caps.
+    #[must_use]
+    pub fn for_context(context_tokens: usize) -> Self {
+        if context_tokens == 0 {
+            return Self::default();
+        }
+        let total = context_tokens.saturating_mul(4) * CONTEXT_SHARE_PERCENT / 100;
+        let metadata_chars = METADATA_CHAR_BUDGET.min(total / 4);
+        Self {
+            metadata_chars,
+            body_chars: BODY_CHAR_BUDGET.min(total - metadata_chars),
+        }
+    }
+}
+
 /// How much guidance the hook adds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuidanceHookMode {
@@ -64,9 +102,20 @@ pub struct TaskGuidanceContext {
     earlier: crate::UserRequests,
     facts: Mutex<ProjectFacts>,
     slot: SelectionSlot,
-    /// The paths in play and the text of the last contribution, so a refresh
-    /// knows whether anything it depends on changed.
-    last: Mutex<Option<(Vec<String>, Option<String>)>>,
+    budget: GuidanceBudget,
+    /// What the last contribution depended on, so a refresh knows whether any
+    /// of it changed.
+    last: Mutex<Option<LastContribution>>,
+}
+
+/// The inputs and result of the last contribution.
+#[derive(Clone)]
+struct LastContribution {
+    paths: Vec<String>,
+    /// How many user instructions the session held once this one was recorded.
+    requests: usize,
+    component: String,
+    text: Option<String>,
 }
 
 impl TaskGuidanceContext {
@@ -90,11 +139,24 @@ impl TaskGuidanceContext {
             earlier,
             facts: Mutex::new(facts),
             slot,
+            budget: GuidanceBudget::default(),
             last: Mutex::new(None),
         }
     }
 
-    fn select(&self, prompt: &str, paths: &[String]) -> Option<(GuidanceSelection, SkillSet)> {
+    /// Use `budget` instead of the fixed caps.
+    #[must_use]
+    pub fn with_budget(mut self, budget: GuidanceBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    fn select(
+        &self,
+        prompt: &str,
+        paths: &[String],
+        earlier: &[String],
+    ) -> Option<(GuidanceSelection, SkillSet)> {
         // Discovered for every selection: a package changed, removed or no
         // longer trusted is never carried over from an earlier request.
         let set = localpilot_skills::discover(
@@ -104,7 +166,6 @@ impl TaskGuidanceContext {
         )
         .ok()?
         .with_builtin_guidance();
-        let earlier = self.earlier.snapshot();
         let mut facts = self.facts.lock().ok()?;
         let selection = select_guidance(
             &SelectionInput {
@@ -112,7 +173,7 @@ impl TaskGuidanceContext {
                 explicit: None,
                 paths,
                 capabilities: &self.capabilities,
-                earlier: &earlier,
+                earlier,
             },
             &mut facts,
             &set,
@@ -120,18 +181,26 @@ impl TaskGuidanceContext {
         Some((selection, set))
     }
 
-    /// Select and render for `prompt`, remembering what this depended on.
-    fn produce(&self, prompt: &str) -> ContextContribution {
+    /// Select and render for `request`, with `earlier` instructions before it,
+    /// remembering what this depended on. `requests` is how many instructions
+    /// the session holds once `request` is recorded.
+    fn produce(&self, request: &str, earlier: &[String], requests: usize) -> ContextContribution {
         let paths = self.paths_in_play.snapshot();
-        let Some((mut selection, set)) = self.select(prompt, &paths) else {
+        let Some((mut selection, set)) = self.select(request, &paths, earlier) else {
             return ContextContribution::default();
         };
-        let contribution = render(self.mode, &mut selection, &set);
+        let contribution = render(self.mode, self.budget, &mut selection, &set);
+        let component = selection.component.component.clone();
         if let Ok(mut slot) = self.slot.lock() {
             *slot = Some(selection);
         }
         if let Ok(mut last) = self.last.lock() {
-            *last = Some((paths, contribution.text.clone()));
+            *last = Some(LastContribution {
+                paths,
+                requests,
+                component,
+                text: contribution.text.clone(),
+            });
         }
         contribution
     }
@@ -152,21 +221,34 @@ impl ContextHook for TaskGuidanceContext {
     }
 
     fn contribute(&self, prompt: &str) -> ContextContribution {
-        self.produce(prompt)
+        // The session records `prompt` after the hooks ran.
+        let earlier = self.earlier.snapshot();
+        self.produce(prompt, &earlier, earlier.len() + 1)
     }
 
-    /// Asked before each later request of a turn. Only a change in the paths
-    /// the work touches can move the task to another component within a turn;
-    /// when they changed and the guidance comes out different, it is replaced.
+    /// Asked before each later request of a turn. Three things can change
+    /// what fits within a turn: the paths the work touches (another
+    /// component), a new instruction from the user (a steer), and the files
+    /// the component's facts were read from (a new dependency or target). When
+    /// one did and the guidance comes out different, it is replaced.
     fn refresh(&self, prompt: &str) -> Option<ContextContribution> {
+        let previous = self.last.lock().ok()?.clone()?;
         let paths = self.paths_in_play.snapshot();
-        let previous = self.last.lock().ok()?.clone();
-        let (last_paths, last_text) = previous?;
-        if last_paths == paths {
+        let requests = self.earlier.snapshot();
+        let facts_current = self
+            .facts
+            .lock()
+            .is_ok_and(|facts| facts.is_current(&previous.component));
+        if previous.paths == paths && previous.requests == requests.len() && facts_current {
             return None;
         }
-        let contribution = self.produce(prompt);
-        (contribution.text != last_text).then_some(contribution)
+        // The newest instruction is the request; a steer replaces the prompt.
+        let (request, earlier) = match requests.split_last() {
+            Some((latest, earlier)) => (latest.as_str(), earlier),
+            None => (prompt, &requests[..]),
+        };
+        let contribution = self.produce(request, earlier, requests.len());
+        (contribution.text != previous.text).then_some(contribution)
     }
 }
 
@@ -174,9 +256,12 @@ impl ContextHook for TaskGuidanceContext {
 /// budget to the suggestions with the reason.
 fn render(
     mode: GuidanceHookMode,
+    budget: GuidanceBudget,
     selection: &mut GuidanceSelection,
     set: &SkillSet,
 ) -> ContextContribution {
+    // Package and recipe text is redacted like every other injected context.
+    let redact = |text: String| localpilot_config::redact::redact(&text);
     let mut segments: Vec<GuidanceSegment> = Vec::new();
     let load_bodies = mode == GuidanceHookMode::Assisted && selection.loading == LoadDecision::Body;
 
@@ -193,8 +278,8 @@ fn render(
                 continue;
             };
             let body = body_of(skill);
-            let text = format!("### {}\n{}", selected.name, body.trim_end());
-            if used + text.len() > BODY_CHAR_BUDGET {
+            let text = redact(format!("### {}\n{}", selected.name, body.trim_end()));
+            if used + text.len() > budget.body_chars {
                 demote(
                     selection,
                     &selected.name,
@@ -239,7 +324,8 @@ fn render(
                 selected.unsupported_claims.join(", ")
             );
         }
-        if used + line.len() > METADATA_CHAR_BUDGET {
+        let line = redact(line);
+        if used + line.len() > budget.metadata_chars {
             break;
         }
         used += line.len();
@@ -262,8 +348,8 @@ fn render(
             ),
             localpilot_skills::RecipeValidation::Unvalidated => "not validated".to_string(),
         };
-        let line = format!("- {}: {} ({state})", recipe.id(), recipe.summary);
-        if used + line.len() > METADATA_CHAR_BUDGET {
+        let line = redact(format!("- {}: {} ({state})", recipe.id(), recipe.summary));
+        if used + line.len() > budget.metadata_chars {
             break;
         }
         used += line.len();
@@ -398,11 +484,31 @@ fn read_inside(dir: &Path, relative: &str) -> Option<String> {
 }
 
 fn source(skill: &Skill, form: GuidanceForm, reason: &str) -> GuidanceSource {
+    let mut origin = format!("{} v{}", skill.scope.label(), skill.manifest.version);
+    // For a loaded body, say which part of the package it is.
+    if form == GuidanceForm::Body {
+        let sections: Vec<String> = skill
+            .guidance
+            .metadata()
+            .map(|m| m.body_sections.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|section| match section {
+                BodySection::Heading(heading) => format!("#{heading}"),
+                BodySection::File(file) => file.clone(),
+            })
+            .collect();
+        if sections.is_empty() {
+            origin.push_str(", whole body");
+        } else {
+            let _ = write!(origin, ", sections {}", sections.join(", "));
+        }
+    }
     GuidanceSource::new(
         GuidanceKind::PackageSkill,
         form,
         skill.manifest.name.clone(),
-        format!("{} v{}", skill.scope.label(), skill.manifest.version),
+        origin,
         reason,
     )
 }
@@ -418,8 +524,14 @@ pub fn capabilities_from_tools(names: &[&str]) -> BTreeSet<String> {
         out.insert("process.background".to_string());
     }
     // A browser adapter (for example an MCP browser server) is recognized by
-    // having both a navigation and a click tool.
-    if names.iter().any(|n| n.contains("navigate")) && names.iter().any(|n| n.contains("click")) {
+    // having both a navigation and a click tool. Names are matched by whole
+    // word, so `clickup_create_task` is not a click.
+    let has = |word: &str| {
+        names
+            .iter()
+            .any(|n| crate::task_evidence::has_word(n, word))
+    };
+    if has("navigate") && has("click") {
         out.insert("browser.interact".to_string());
     }
     out
@@ -445,6 +557,7 @@ pub fn register_task_guidance_context(
         runtime.user_requests(),
         facts,
         runtime.guidance_selection_slot(),
-    );
+    )
+    .with_budget(GuidanceBudget::for_context(runtime.context_token_limit()));
     runtime.hooks_mut().register_context_hook(Arc::new(hook));
 }

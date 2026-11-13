@@ -19,7 +19,8 @@ model claim a visual or interaction check that could not happen.
   registry's redaction and the provider's own image handling still apply.
 - A session reports a route per observation capability (`observation_routes`):
   `process.capture` and `process.background` from the shell tools; `browser.interact`
-  when tools that navigate and click are connected; `image.inspect` when a tool
+  when tools that navigate and click are connected (tool names are matched by
+  whole word, so `clickup_create_task` is not a click); `image.inspect` when a tool
   returns images (`read_image`, a screenshot tool) and the provider accepts images;
   `http.observe` stays unavailable because `fetch` sends GET only;
   `terminal.interact`, `desktop.interact` and `engine.run` are deferred with the
@@ -56,8 +57,10 @@ with a known defect and a separate fix, and `tests/reference_projects.rs`.
   without a name or with a quantity below 1.
 - A real session with the built-in guidance in assisted mode and a scripted
   provider builds the project (`run_shell`), and in a second turn writes the fix
-  (`write_file`) and builds again, with the permission engine in force. The
-  session's evidence record shows each build's exit.
+  (`write_file`) and builds again, with the permission engine in force. For V1
+  it also runs the built program with an invalid value through `run_shell`. The
+  session's evidence record shows each exit: 0 for the defective program, 2 after
+  the fix (recorded as a failed command; the grader decides that 2 is correct).
 - A grader in the test, independent of the session, then exercises the result. For
   V1: valid output, exit 2 with the expected stderr for invalid values, and held-out
   inputs. For V2: the built service on a free local port, real readiness, valid
@@ -104,7 +107,9 @@ digest the research recorded.
   built-in packages), forbidden guidance absent, bodies or names as the loading
   requires, no user-only or untrusted text, guidance off adding nothing, the
   explicit path reaching a user-only package, and the tool set equal to a session
-  without guidance.
+  without guidance. Every case also fails on a body present more than once, on
+  requested evidence that is not reported unavailable without a route, and on a
+  completion check that ran although nothing changed.
 - Running the corpus found three rule gaps, fixed in selection rather than in the
   cases: a request that says how a refactor must not change behaviour kept its
   refactor intent; "los ... niet op" and "do not fix" are not fixes; a project that
@@ -182,8 +187,8 @@ or a recipe that carries authority or secrets, would undo the permission model.
   explanation or review.
 - A recipe whose recorded files changed is shown as not validated since those
   files changed; one without recorded files as not validated.
-- The guidance hook shows each chosen recipe as one line with its state and a
-  `ProjectRecipe` source. The host never runs a recipe: commands go through the
+- The guidance hook shows each chosen recipe as one line (prerequisites first)
+  with its state and a `ProjectRecipe` source. The host never runs a recipe: commands go through the
   ordinary tools and their permission checks, and nothing becomes standing
   execution authority.
 - `draft_recipe` turns a successful command into a draft for a person to review,
@@ -244,8 +249,11 @@ event would need a new event format version that older builds reject.
   new contribution and keeps the turn's memories. The session rebuilds the system
   and beside-question context from it and follows the new guidance in the request
   record. The first request of a turn is unchanged.
-- The task-guidance hook refreshes only when the paths in play changed since its
-  last contribution, and replaces its part only when the result differs.
+- The task-guidance hook refreshes when the paths in play changed, when the user
+  steered (a steer is recorded as the user's newest instruction and becomes the
+  request, also before the turn's first request), or when a file the component's
+  facts were read from changed. It replaces its part only when the result
+  differs.
 - Guidance is injected into each request, never appended to history, so unchanged
   guidance appears once per request and is still there after a compaction.
 - `SelectionInput::earlier` carries the user's earlier instructions. A request with
@@ -284,6 +292,10 @@ default `off`.
   supplements' text (their declared sections, or the whole body) goes beside the
   question, about 6,144 characters at most; a body that does not fit is offered by
   name with the reason. Otherwise it behaves as `suggest`.
+- Names and bodies together take at most 8% of the session's context window (at
+  about four characters a token), so a small local model gets less; the fixed
+  caps apply to large and unknown windows.
+- Package and recipe text is redacted like every other injected context.
 - Any mode other than `off` registers the package tools whatever
   `autonomous_discovery` says; `localpilot doctor` reports the mode.
 - Each part is reported as a guidance source, so the request record (ADR-0271)
@@ -319,8 +331,11 @@ recorded (`set_guidance_selection`) with the guidance record of the last provide
 request (ADR-0271).
 - Header: intent phases, component, the stacks and products behind them, each
   with its confidence and reason, and the loading decision with its reason.
+- A note for each framework or engine of the component that no installed package
+  names (Unity, Unreal, Avalonia, ...): general guidance applies and nothing is
+  claimed for it.
 - Rows: **active** (selected and held whole by the last request, with origin,
-  version and placement), **stale** (selected but not held whole: not sent yet,
+  version, the sections that were loaded and placement), **stale** (selected but not held whole: not sent yet,
   cut, or removed), **unavailable** (a claim the guidance supports needs a missing
   capability), **suggested** and **excluded**, each with its reason. Guidance the
   request held by another route (project instructions, a skill the model loaded)

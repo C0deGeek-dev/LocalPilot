@@ -194,9 +194,18 @@ async fn the_rust_cli_workflow_builds_fixes_and_passes_an_independent_grader() {
     let readme = sha256(&project.join("README.md"));
     let fixed = std::fs::read_to_string(reference("rust-cli.fix").join("src/main.rs")).unwrap();
     let build = json!({"program": "cargo", "args": ["build", "--offline", "--quiet", "--target-dir", "target"]});
+    let binary = project.join("target").join("debug").join(if cfg!(windows) {
+        "counter.exe"
+    } else {
+        "counter"
+    });
+    // The session also runs the built program itself, so the behaviour is
+    // observed through the tools and not only by the grader.
+    let invalid = json!({"program": binary.to_string_lossy(), "args": ["--count", "-1"]});
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call("build-1", "run_shell", build.clone())
+            .tool_call("run-1", "run_shell", invalid.clone())
             .text("Built; --count -1 exits 0.")
             .tool_call(
                 "fix-1",
@@ -204,14 +213,10 @@ async fn the_rust_cli_workflow_builds_fixes_and_passes_an_independent_grader() {
                 json!({"path": "src/main.rs", "content": fixed}),
             )
             .tool_call("build-2", "run_shell", build)
+            .tool_call("run-2", "run_shell", invalid)
             .text("Fixed."),
     );
     let mut runtime = session(dir.path(), provider);
-    let binary = project.join("target").join("debug").join(if cfg!(windows) {
-        "counter.exe"
-    } else {
-        "counter"
-    });
 
     turn(
         &mut runtime,
@@ -219,12 +224,14 @@ async fn the_rust_cli_workflow_builds_fixes_and_passes_an_independent_grader() {
     )
     .await;
     let runs = process_runs(&runtime);
-    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs.len(), 2, "{runs:?}");
     assert_eq!(
         runs[0].1,
         EvidenceState::Passed,
         "the defective project must build: {runs:?}"
     );
+    // Observed through the tools: the invalid value exits 0, which is the defect.
+    assert_eq!(runs[1].2, "exit 0", "{runs:?}");
     let before = grade_counter(&binary);
     eprintln!("V1 before the fix (build passed):\n{}", summarize(&before));
     // Build success is not behaviour success, and the failures are kept.
@@ -243,8 +250,16 @@ async fn the_rust_cli_workflow_builds_fixes_and_passes_an_independent_grader() {
     )
     .await;
     let runs = process_runs(&runtime);
-    assert_eq!(runs.len(), 2, "{runs:?}");
-    assert_eq!(runs[1].1, EvidenceState::Passed, "{runs:?}");
+    assert_eq!(runs.len(), 4, "{runs:?}");
+    assert_eq!(runs[2].1, EvidenceState::Passed, "{runs:?}");
+    // After the fix the same call exits 2. The record reports that as a
+    // failed command: it says what the tool observed, and the grader below
+    // decides that exit 2 is the correct behaviour.
+    assert_eq!(
+        (runs[3].1, runs[3].2.as_str()),
+        (EvidenceState::Failed, "exit 2"),
+        "{runs:?}"
+    );
     let after = grade_counter(&binary);
     eprintln!("V1 after the fix:\n{}", summarize(&after));
     assert!(after.iter().all(|c| c.passed), "{}", summarize(&after));

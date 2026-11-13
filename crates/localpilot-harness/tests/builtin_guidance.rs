@@ -234,3 +234,39 @@ fn an_installed_procedure_outranks_the_built_in_one_on_an_equal_match() {
         .iter()
         .any(|e| e.name == "guide-investigate" && e.reason.contains("ranked higher")));
 }
+
+#[test]
+fn an_engine_without_specific_guidance_is_named_and_gets_general_guidance() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "ProjectSettings/ProjectVersion.txt",
+        "m_EditorVersion: 2022.3.42f1\n",
+    );
+    write(
+        dir.path(),
+        "Assembly-CSharp.csproj",
+        r#"<Project ToolsVersion="4.0"></Project>"#,
+    );
+
+    let (selection, _) = select(dir.path(), "Fix the player movement.", &[]);
+
+    assert_eq!(names(&selection), ["guide-investigate", "guide-game"]);
+    assert!(
+        selection
+            .notes
+            .iter()
+            .any(|note| note.contains("specific to unity")),
+        "{:?}",
+        selection.notes
+    );
+    // A Godot 4 project is covered by its own package: no note.
+    let godot = tempfile::tempdir().unwrap();
+    write(
+        godot.path(),
+        "project.godot",
+        "config_version=5\n[application]\nconfig/features=PackedStringArray(\"4.3\")\n",
+    );
+    let (selection, _) = select(godot.path(), "Fix the double jump.", &[]);
+    assert!(selection.notes.is_empty(), "{:?}", selection.notes);
+}
