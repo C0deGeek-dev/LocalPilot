@@ -939,9 +939,14 @@ mod chain_tests {
             prompter: None,
             peers: None,
         };
+        let listing = if cfg!(windows) {
+            r#"Get-ChildItem -Path "C:\Games\Some Game (x86)" -Directory | Select-Object Name"#
+        } else {
+            r#"Get-ChildItem -Path "/games/Some Game (x86)" -Directory | Select-Object Name"#
+        };
         for command in [
-            r#"Get-ChildItem -Path "C:\Games\Some Game (x86)" -Directory | Select-Object Name"#,
-            r#"Select-String -Path "src\Guide.lua" -Pattern http -List | Select-Object Path"#,
+            listing,
+            r#"Select-String -Path "src/Guide.lua" -Pattern http -List | Select-Object Path"#,
             "Get-ChildItem -Recurse -File | Select-Object FullName | Select-Object -First 30",
             "Get-ChildItem | Sort-Object Length | Format-Table Name, Length",
         ] {

@@ -1,5 +1,10 @@
 # Test Plan
 
+CI portability controls use native path spellings for shell inspection. The
+incognito delegation ledger fixture starts with existing project material and
+asserts that its bytes and directory entries survive unchanged, avoiding
+empty-project Git setup and any dependency on a personal commit identity.
+
 The verification limits controls execute the existing completion check with
 different sizing caps, after disabling sizing, and with sizing absent at startup.
 They compare durable check results and turn completion for passing, failing,

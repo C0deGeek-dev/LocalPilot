@@ -562,6 +562,9 @@ mod tests {
         // outcome so the parent's end report is complete.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        // Existing project material keeps this ledger test independent of Git
+        // initialization, the user's identity and their commit hooks.
+        std::fs::write(root.join("fixture.txt"), "existing project\n").unwrap();
         let workspace = Workspace::new(root).unwrap();
         let registry = localpilot_tools::ToolRegistry::with_builtins();
         // Parent engine carries the incognito floor; the child rebuilds from it.
@@ -613,6 +616,11 @@ mod tests {
             "the child's approved command is carried back: {:?}",
             outcome.incognito_ledger.commands()
         );
+        assert_eq!(
+            std::fs::read_to_string(root.join("fixture.txt")).unwrap(),
+            "existing project\n"
+        );
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
         assert!(
             !root.join(".localpilot").exists(),
             "an incognito child persists nothing under the store root"
