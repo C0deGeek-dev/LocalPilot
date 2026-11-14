@@ -740,12 +740,15 @@ fn format_session_line(entry: &localpilot_store::SessionIndexEntry) -> String {
         .as_deref()
         .map(|n| format!("  name: {n}"))
         .unwrap_or_default();
-    let badge = entry
+    let badge = if entry
         .name
         .as_deref()
         .is_some_and(|n| n.starts_with("imported_cc_"))
-        .then_some("  [cc-import]")
-        .unwrap_or_default();
+    {
+        "  [cc-import]"
+    } else {
+        Default::default()
+    };
     format!(
         "{}  messages: {:<4} updated: {}{name}{badge}",
         entry.id, entry.message_count, entry.updated_unix

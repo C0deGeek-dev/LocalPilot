@@ -3145,9 +3145,11 @@ impl SessionRuntime {
     #[must_use]
     pub fn envelope_enabled(&self) -> bool {
         !self.envelope_off
-            && self.config.granularity.as_ref().map_or(true, |caps| {
-                caps.mode != localpilot_config::WorkLimitMode::Off
-            })
+            && self
+                .config
+                .granularity
+                .as_ref()
+                .is_none_or(|caps| caps.mode != localpilot_config::WorkLimitMode::Off)
     }
 
     /// The work-limit mode in force: `Off` while the envelope is switched off
@@ -5824,7 +5826,7 @@ impl SessionRuntime {
                     && self
                         .broker
                         .as_ref()
-                        .map_or(true, |broker| broker.is_advertised(name))
+                        .is_none_or(|broker| broker.is_advertised(name))
                 {
                     match self
                         .prepare_project_write(name, projected_input, cancel)

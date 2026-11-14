@@ -21,7 +21,7 @@ fn request_contains(requests: &[ModelRequest], turn: usize, needle: &str) -> boo
         request
             .messages
             .iter()
-            .any(|m| serde_json::to_string(m).map_or(false, |s| s.contains(needle)))
+            .any(|m| serde_json::to_string(m).is_ok_and(|s| s.contains(needle)))
     })
 }
 

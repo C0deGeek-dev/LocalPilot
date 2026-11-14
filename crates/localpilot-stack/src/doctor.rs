@@ -101,7 +101,7 @@ pub fn diagnose() -> Option<Report> {
     dirs.dedup();
 
     Some(Report {
-        on_path: entries.iter().any(|entry| *entry == bin),
+        on_path: entries.contains(&bin),
         bin,
         duplicates,
         strays: {
@@ -593,7 +593,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(duplicates_on_path(&managed, &[managed.clone()], None).is_empty());
+        assert!(duplicates_on_path(&managed, std::slice::from_ref(&managed), None).is_empty());
     }
 
     #[test]

@@ -282,7 +282,7 @@ fn open_review(
     let Some(request) = rows
         .iter()
         .filter(|m| str_of(m, "kind") == Some("REVIEW_REQUEST") && m.get("unit_id") == unit)
-        .last()
+        .next_back()
     else {
         return (
             None,

@@ -299,7 +299,7 @@ fn a_ratified_check_that_failed_in_the_step_is_a_replay_fail_fix_pair() {
     let lesson = candidate(LESSON, facts, &[0, 1]);
     let progress = progress(&repo.fix);
 
-    let result = classify(&lesson, root, Some(&progress), &[check.clone()]);
+    let result = classify(&lesson, root, Some(&progress), std::slice::from_ref(&check));
 
     assert_eq!(result.eligibility, Eligibility::Replay, "{result:?}");
     assert_eq!(
@@ -471,7 +471,7 @@ fn style_is_tested_only_by_the_check_that_verifies_style() {
 
     // A test command's trajectory says nothing about indentation.
     let unrelated = candidate("Indent with tabs in this repository", trajectory(), &[0, 1]);
-    let result = classify(&unrelated, empty.path(), None, &[fmt.clone()]);
+    let result = classify(&unrelated, empty.path(), None, std::slice::from_ref(&fmt));
     assert_eq!(result.eligibility, Eligibility::UpliftOnly, "{result:?}");
     assert!(result
         .reasons
@@ -497,8 +497,8 @@ fn the_frozen_oracle_is_bound_to_the_base_revision_not_to_later_edits() {
     let lesson = candidate(LESSON, facts, &[0]);
     let progress = progress(&repo.fix);
 
-    let first = classify(&lesson, root, Some(&progress), &[check.clone()]);
-    let again = classify(&lesson, root, Some(&progress), &[check.clone()]);
+    let first = classify(&lesson, root, Some(&progress), std::slice::from_ref(&check));
+    let again = classify(&lesson, root, Some(&progress), std::slice::from_ref(&check));
     assert_eq!(first, again, "classification is deterministic");
 
     // Someone — the treatment arm, say — rewrites the test afterwards.
@@ -643,7 +643,7 @@ fn review_corpus() {
             &lesson,
             repo.dir.path(),
             Some(&pair_progress),
-            &[check.clone()],
+            std::slice::from_ref(&check),
         ),
     );
 
@@ -661,7 +661,7 @@ fn review_corpus() {
             &lesson,
             touched.dir.path(),
             Some(&touched_progress),
-            &[check.clone()],
+            std::slice::from_ref(&check),
         ),
     );
 
@@ -705,7 +705,7 @@ fn review_corpus() {
     show(
         "style judged by its own ratified check",
         &lesson,
-        &classify(&lesson, empty.path(), None, &[fmt.clone()]),
+        &classify(&lesson, empty.path(), None, std::slice::from_ref(&fmt)),
     );
     let lesson = candidate_with(
         "Indent with tabs in this repository",

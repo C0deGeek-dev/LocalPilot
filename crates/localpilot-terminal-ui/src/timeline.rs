@@ -779,9 +779,9 @@ impl Timeline {
                 }
             }
             TimelineFocusTarget::SuccessGroup(_) => {
-                if !self
+                if self
                     .success_group_containing(id)
-                    .is_some_and(|group| group.head_index == index)
+                    .is_none_or(|group| group.head_index != index)
                 {
                     return false;
                 }

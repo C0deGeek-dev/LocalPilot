@@ -37,7 +37,7 @@ pub(crate) fn fixture(code: &str) -> Fixture {
     git(root.path(), &["config", "user.name", "fixture"]);
     git(root.path(), &["config", "user.email", "fixture@localhost"]);
     git(root.path(), &["config", "core.autocrlf", "false"]);
-    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "1.82".into());
+    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "1.89".into());
     assert!(toolchain
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')));

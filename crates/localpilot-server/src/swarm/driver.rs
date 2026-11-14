@@ -273,11 +273,7 @@ async fn settle(host: &SwarmHost, swarm: &SwarmId, finished: Running, reclaim_li
         timed_out,
     } = finished;
 
-    if timed_out
-        || answer
-            .as_deref()
-            .map_or(true, |text| text.trim().is_empty())
-    {
+    if timed_out || answer.as_deref().is_none_or(|text| text.trim().is_empty()) {
         // A worker that reported nothing is indistinguishable from one that
         // died, and is treated the same: the task goes back to the pool rather
         // than being marked done on the strength of silence.

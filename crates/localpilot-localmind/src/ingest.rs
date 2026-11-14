@@ -409,7 +409,7 @@ pub fn preview(project_root: &Path, config: &IngestConfig) -> Result<PreviewMani
                 path: root.clone(),
                 source: source
                     .into_io_error()
-                    .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, message)),
+                    .unwrap_or_else(|| std::io::Error::other(message)),
             }
         })?;
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {

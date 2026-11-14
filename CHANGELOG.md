@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Upgrade bundled SQLite through rusqlite 0.41.0 and libsqlite3-sys 0.39.1
+  to resolve RUSTSEC-2026-0459. Source builds now require Rust 1.89
+  (ADR-0286). Refresh inactive QUIC dependencies for newer advisories.
+- Keep PowerShell command-inspection fixtures compatible with Unix paths and
+  isolate the incognito delegation ledger fixture from empty-project Git setup.
+
 - MCP tool results now pass their first image on to the model (an image-only
   result no longer arrives empty). Sessions report which observation routes they
   can provide: browser interaction when navigate and click tools are connected,

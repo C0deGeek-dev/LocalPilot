@@ -1934,7 +1934,7 @@ mod tests {
         let size = MAX_REPLY + 4096;
         let mut response =
             format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {size}\r\n\r\n").into_bytes();
-        response.extend(std::iter::repeat(b'x').take(size));
+        response.extend(std::iter::repeat_n(b'x', size));
         let (client, _server) = fake_daemon(response);
         let reply = exchange(
             client,

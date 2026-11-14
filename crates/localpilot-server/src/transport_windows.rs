@@ -133,10 +133,7 @@ impl Listener {
 }
 
 fn poisoned<T>(_: PoisonError<T>) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Other,
-        "named-pipe listener mutex was poisoned",
-    )
+    io::Error::other("named-pipe listener mutex was poisoned")
 }
 
 pub(super) async fn connect(endpoint: &Endpoint) -> Result<RawConn, TransportError> {

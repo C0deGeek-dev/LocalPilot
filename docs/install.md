@@ -370,7 +370,7 @@ published archive — `update --from-source` also falls back here automatically.
 
 ## Requirements
 
-- The Rust toolchain (`cargo`, MSRV 1.82) from <https://rustup.rs>.
+- The Rust toolchain (`cargo`, MSRV 1.89) from <https://rustup.rs>.
 - `git` (the LocalMind learning engine is a submodule).
 - A C compiler for the bundled LocalMind SQLite store: `cc`/`clang` on
   Linux/macOS, the MSVC C++ build tools on Windows.

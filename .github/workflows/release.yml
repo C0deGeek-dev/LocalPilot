@@ -17,9 +17,9 @@ jobs:
     name: archive (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     env:
-      # Override rust-toolchain.toml as well as rustup's default. Rust 1.82's
-      # captured child-process pipes fail under Windows restricted tokens.
-      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain || '1.82' }}
+      # Override rust-toolchain.toml as well as rustup's default. Windows keeps
+      # its release compiler for restricted-token process capture (ADR-0192).
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain || '1.89' }}
     strategy:
       fail-fast: false
       matrix:
@@ -56,7 +56,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.toolchain || '1.82' }}
+          toolchain: ${{ matrix.toolchain || '1.89' }}
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:

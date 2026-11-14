@@ -77,11 +77,8 @@ pub fn inspect(
     project_root: &Path,
     used: &[MemoryUsed],
 ) -> Result<Vec<InspectedMemory>, LearningError> {
-    let persistence = match MemoryPersistence::open_project(project_root) {
-        Ok(persistence) => Some(persistence),
-        // No store yet → no provenance, but still list what was used.
-        Err(_) => None,
-    };
+    // No store yet means no provenance; still list what was used.
+    let persistence = MemoryPersistence::open_project(project_root).ok();
     let mut inspected = Vec::with_capacity(used.len());
     for memory in used {
         let provenance = persistence

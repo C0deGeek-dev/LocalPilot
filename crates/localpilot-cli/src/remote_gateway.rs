@@ -454,6 +454,7 @@ impl Gateway {
     }
 
     /// Spend from a global bucket, or the response to send instead.
+    #[allow(clippy::result_large_err)] // Return the HTTP refusal directly to the caller.
     fn spend(bucket: &std::sync::Mutex<Bucket>) -> Result<(), Response<Full<Bytes>>> {
         let mut bucket = bucket
             .lock()
@@ -467,6 +468,7 @@ impl Gateway {
 
     /// The verified device a request's cookie names. A missing or invalid
     /// credential spends only the shared unauthenticated budget.
+    #[allow(clippy::result_large_err)] // Return the HTTP refusal directly to the caller.
     fn device(&self, headers: &HeaderMap) -> Result<(String, String), Response<Full<Bytes>>> {
         let verified = device_cookie(headers).and_then(|credential| {
             (self.discovery.verify)(&credential).map(|device| (device, credential))
@@ -481,6 +483,7 @@ impl Gateway {
     }
 
     /// Spend from the device's listing or open budget.
+    #[allow(clippy::result_large_err)] // Return the HTTP refusal directly to the caller.
     fn spend_device(&self, device: &str, listing: bool) -> Result<(), Response<Full<Bytes>>> {
         self.rates
             .lock()
@@ -3724,7 +3727,7 @@ mod tests {
                 PROBE_REPLY_CAP + 10
             )
             .into_bytes();
-            body.extend(std::iter::repeat(b'x').take(PROBE_REPLY_CAP + 10));
+            body.extend(std::iter::repeat_n(b'x', PROBE_REPLY_CAP + 10));
             let _ = server.write_all(&body).await;
         });
         let _ = &mut client;

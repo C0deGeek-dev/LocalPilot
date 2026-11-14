@@ -107,7 +107,7 @@ impl McpClient {
         // return capabilities. Preserve their tools/list path, while a server
         // that does declare capabilities is treated as authoritative.
         let supports_tools =
-            capabilities.map_or(true, |capabilities| capabilities.contains_key("tools"));
+            capabilities.is_none_or(|capabilities| capabilities.contains_key("tools"));
         let supports_resources =
             capabilities.is_some_and(|capabilities| capabilities.contains_key("resources"));
         Ok(McpServerStatus {

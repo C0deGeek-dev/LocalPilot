@@ -17,8 +17,8 @@ default; deviating requires a one-line justification in the PR or an
 
 ## 1. Toolchain and MSRV
 
-- MSRV is **1.82** (`rust-toolchain.toml`, `workspace.package.rust-version`).
-  CI builds on this exact channel. Do not use APIs or syntax newer than 1.82.
+- MSRV is **1.89** (`rust-toolchain.toml`, `workspace.package.rust-version`).
+  CI builds on this exact channel. Do not use APIs or syntax newer than 1.89.
 - Edition is **2021** for every crate. Inherit it from the workspace.
 - All external dependencies are **exact-pinned** (`=x.y.z`) in the workspace
   `[workspace.dependencies]` table. Member crates reference them with

@@ -441,12 +441,10 @@ fn describe_distillation(distillation: &Distillation, reasons: &str) -> String {
     }
     let refused = trace
         .dispositions
-        .iter()
-        .any(|disposition| *disposition == ConstraintDisposition::RefusedByTransport);
+        .contains(&ConstraintDisposition::RefusedByTransport);
     let requested = trace
         .dispositions
-        .iter()
-        .any(|disposition| *disposition == ConstraintDisposition::Requested);
+        .contains(&ConstraintDisposition::Requested);
     if refused {
         out.push_str(", the server refused the output schema");
     } else if requested {

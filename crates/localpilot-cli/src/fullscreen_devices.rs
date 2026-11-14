@@ -504,7 +504,7 @@ fn reach_text(row: &DeviceRow) -> String {
 fn here(row: &DeviceRow, attached: Option<&[String]>) -> &'static str {
     match attached {
         None => "unknown here",
-        Some(ids) if ids.iter().any(|id| *id == row.id) => "attached here",
+        Some(ids) if ids.contains(&row.id) => "attached here",
         Some(_) if row.grant == DeviceGrant::Active => "detached",
         Some(_) => "not attached",
     }
@@ -634,7 +634,7 @@ fn confirm_view(
         format!("{} [{}]", row.name, row.id),
         format!("{} | {}", scope_text(row), reach_text(row)),
     ];
-    if attached.is_some_and(|ids| ids.iter().any(|id| *id == row.id)) {
+    if attached.is_some_and(|ids| ids.contains(&row.id)) {
         lines.push("Attached here: this session.".to_string());
     }
     lines.push("Removes this device's access in every workspace.".to_string());

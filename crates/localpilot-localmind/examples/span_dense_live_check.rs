@@ -31,7 +31,7 @@ fn main() {
     let mut disagreements = 0;
     for query in query_set() {
         let live = endpoint
-            .embed(&[query.text.clone()])
+            .embed(std::slice::from_ref(&query.text))
             .expect("embed")
             .into_iter()
             .next()

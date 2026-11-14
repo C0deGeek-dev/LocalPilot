@@ -55,11 +55,11 @@ jobs:
           echo "=== free disk after ==="; df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.82"
+          toolchain: "1.89"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       # Prebuilt nextest binary; install-action does not build from source, so the
-      # pinned 1.82 toolchain does not constrain the runner version.
+      # pinned 1.89 toolchain does not constrain the runner version.
       - uses: taiki-e/install-action@nextest
       # The hosted-ubuntu VM freezes under parallel link/test storms (see the
       # nextest step's history note). The first containment only wrapped that
@@ -442,7 +442,7 @@ jobs:
           echo "=== free disk after ==="; df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.82"
+          toolchain: "1.89"
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -528,7 +528,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.82"
+          toolchain: "1.89"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny,cargo-audit,cargo-machete
@@ -570,7 +570,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.82"
+          toolchain: "1.89"
       - uses: Swatinem/rust-cache@v2
       # Install exactly what a user would get, from the locked graph, into a
       # fresh root; then prove the produced binary runs.

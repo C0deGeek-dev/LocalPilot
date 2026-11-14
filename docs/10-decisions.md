@@ -2,6 +2,30 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0286: Raise The Source MSRV For Patched Bundled SQLite
+
+**Status:** accepted · **Date:** 2026-11-14.
+
+The bundled SQLite security fix for RUSTSEC-2026-0459 requires
+libsqlite3-sys 0.39.1 and rusqlite 0.41.0. The workspace and embedded LocalMind
+therefore require Rust 1.89. CI, non-Windows release builds and explicit
+self-improvement fallback selectors follow that floor. Windows release builds
+retain their Rust 1.95 compiler for restricted-token process capture.
+
+Rusqlite retains bundled SQLite and statement caching. Its optional wasm
+backend is disabled because supported hosts use the native backend.
+The fallible unsigned-integer conversion feature preserves existing database
+reads. The dependency manifests and lockfiles are updated together.
+
+Rust 1.89 Clippy migrations use equivalent expressions. Scoped lint allowances
+retain configuration error payloads, direct HTTP refusals, the live claim and
+intact pair host returned on failure, and the common inline single-session
+projection.
+
+The command-filter fixture uses native path syntax on each OS. The delegated
+incognito fixture starts with pre-existing material, isolating its ledger and
+persistence assertions from Git initialization and developer identity.
+
 ## ADR-0285: Observation Routes Are Qualified Before Visual Or Interaction Claims
 
 **Status:** accepted · **Date:** 2026-11-10. Refs LocalHub#282. Builds on ADR-0282.

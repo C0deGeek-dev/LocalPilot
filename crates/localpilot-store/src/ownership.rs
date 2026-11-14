@@ -358,6 +358,7 @@ impl SessionClaim {
     /// # Errors
     /// Returns the claim and the store error when the record cannot be
     /// published.
+    #[allow(clippy::result_large_err)] // Return the live claim on failure so the caller retains ownership.
     pub fn release(mut self, transfer: TransferRecord) -> Result<(), (Self, StoreError)> {
         let record = OwnerRecord {
             transfer: Some(TransferRecord {

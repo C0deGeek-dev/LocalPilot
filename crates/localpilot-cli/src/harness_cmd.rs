@@ -1054,9 +1054,11 @@ async fn offer_completion_hindsight(
     );
     match (&offer.lesson, &offer.enqueued) {
         (Some(lesson), queued) => {
-            if let Err(error) =
-                localpilot_harness::append_lessons(root, &progress.name, &[lesson.clone()])
-            {
+            if let Err(error) = localpilot_harness::append_lessons(
+                root,
+                &progress.name,
+                std::slice::from_ref(lesson),
+            ) {
                 writeln!(out, "hindsight: could not update LESSONS.md ({error})")?;
             }
             let state = if queued.is_some() {

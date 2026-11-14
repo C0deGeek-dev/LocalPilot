@@ -112,7 +112,7 @@ fn entry_bytes(state: Option<&RelayRequestState>) -> usize {
 }
 
 fn is_open(state: Option<&RelayRequestState>) -> bool {
-    state.map_or(true, |state| !state.is_terminal())
+    state.is_none_or(|state| !state.is_terminal())
 }
 
 /// The bounded table of one relay's requests.

@@ -615,6 +615,7 @@ pub(crate) fn write_out(w: &mut impl Write, text: &str) -> std::io::Result<()> {
 /// repository's `.localpilot.toml` is not trusted to choose a program this
 /// command runs: otherwise `localpilot mesh status` in a cloned repository
 /// could execute whatever that repository names.
+#[allow(clippy::result_large_err)] // Preserve the configuration loader error contract.
 pub(crate) fn trusted_mesh_config(
 ) -> Result<localpilot_config::MeshConfig, localpilot_config::ConfigError> {
     let paths = localpilot_config::ConfigPaths {

@@ -37,7 +37,7 @@ restating them.
   [`docs/00-clean-room.md`](docs/00-clean-room.md) and `CONTRIBUTING.md` for the
   PR provenance note.
 - **Engineering rules live in [`docs/13-rust-best-practices.md`](docs/13-rust-best-practices.md)** —
-  MSRV 1.82, exact-pinned workspace deps, typed errors per crate,
+  MSRV 1.89, exact-pinned workspace deps, typed errors per crate,
   `#![forbid(unsafe_code)]`, no `unwrap`/`expect`/`panic!` on library runtime
   paths, cross-platform path/shell discipline. Do not duplicate them here.
 - **Windows, Linux, and macOS are equal tier-1 platforms** (ADR-0007).

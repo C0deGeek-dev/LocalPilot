@@ -1678,7 +1678,7 @@ async fn provider_prompt_usage_corrects_the_context_gauge() {
             RuntimeEvent::ContextUsage { used, .. } => Some(used),
             _ => None,
         })
-        .last();
+        .next_back();
     assert_eq!(corrected, Some(321));
 }
 

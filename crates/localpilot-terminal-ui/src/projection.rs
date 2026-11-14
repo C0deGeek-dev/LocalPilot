@@ -120,6 +120,7 @@ impl SessionProjection {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // The common single-session projection stays inline.
 pub(super) enum ProjectionSet {
     Single(SessionProjection),
     Pair {

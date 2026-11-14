@@ -370,7 +370,7 @@ impl Mesh {
                         .and_then(Value::as_bool)
                         .unwrap_or(false)
             })
-            .last()
+            .next_back()
             .unwrap_or_default())
     }
 
@@ -391,7 +391,7 @@ impl Mesh {
                     && m.get("unit_id") == unit
                     && strings(m.get("to")).iter().any(|x| x == r)
             })
-            .last()
+            .next_back()
             .and_then(|m| thread_of(&m).map(str::to_owned));
         let mut best: Option<Obj> = None;
         for m in self.journal_rows(s, r)? {

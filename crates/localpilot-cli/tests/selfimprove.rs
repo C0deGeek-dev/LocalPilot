@@ -40,7 +40,7 @@ fn preflight_shows_the_base_command_and_preserves_the_proposal_without_execution
     git(&["config", "user.name", "fixture"]);
     git(&["config", "user.email", "fixture@localhost"]);
     git(&["config", "core.autocrlf", "false"]);
-    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "1.82".into());
+    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "1.89".into());
     assert!(toolchain
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')));
@@ -236,7 +236,7 @@ fn explicit_execution_then_separate_direct_promotion_updates_the_matching_loop()
     git(&["config", "user.name", "fixture"]);
     git(&["config", "user.email", "fixture@localhost"]);
     git(&["config", "core.autocrlf", "false"]);
-    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "1.82".into());
+    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "1.89".into());
     assert!(toolchain
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')));

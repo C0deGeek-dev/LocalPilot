@@ -419,7 +419,7 @@ async fn context_stays_with_the_question_through_repairs_and_preserves_attachmen
         runtime
             .run_turn_with_attachments(
                 "question",
-                &[attachment.clone()],
+                std::slice::from_ref(&attachment),
                 &events,
                 &CancellationToken::new()
             )

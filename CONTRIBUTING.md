@@ -28,7 +28,7 @@ that captures child-process output inside a restricted-token sandbox, use:
 cargo +1.95.0 build --locked -p localpilot --features tui,keychain
 ```
 
-Rust 1.82 remains the source MSRV and the compiler for the existing MSRV jobs
+Rust 1.89 is the source MSRV and the compiler for the existing MSRV jobs
 and non-Windows release archives. A separate Windows CI job tests the release
 compiler. Successful ordinary MSRV tests do not prove restricted-token behavior.
 

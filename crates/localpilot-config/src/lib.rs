@@ -10,6 +10,7 @@
 mod context;
 pub mod credentials;
 mod error;
+#[allow(clippy::result_large_err)] // Preserve the public figment error payload.
 mod load;
 pub mod redact;
 mod schema;

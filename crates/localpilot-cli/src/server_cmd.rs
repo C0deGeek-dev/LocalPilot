@@ -7906,7 +7906,7 @@ pub(crate) mod tests {
             hosts.devices.clone(),
             DEADLINE,
             limits,
-            &[rewritten.clone()],
+            std::slice::from_ref(&rewritten),
         )
         .await;
         let rewriting = proxy(gateway, Some(rewritten)).await;

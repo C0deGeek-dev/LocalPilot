@@ -234,10 +234,7 @@ pub(crate) fn list_in(store: &Path) -> Result<Vec<String>, TrustError> {
 /// ever replaced by a fully-written file and is left intact on error.
 fn rewrite_atomic(store: &Path, lines: &[&str]) -> Result<(), TrustError> {
     let parent = store.parent().ok_or_else(|| {
-        TrustError::Persistence(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "trust store has no parent directory",
-        ))
+        TrustError::Persistence(std::io::Error::other("trust store has no parent directory"))
     })?;
     let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(TrustError::Persistence)?;
     for line in lines {

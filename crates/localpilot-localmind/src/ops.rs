@@ -978,7 +978,7 @@ fn declared_dependencies(root: &Path) -> std::collections::BTreeSet<String> {
                 }
                 continue;
             }
-            if !path.file_name().is_some_and(|name| name == "Cargo.toml") {
+            if path.file_name().is_none_or(|name| name != "Cargo.toml") {
                 continue;
             }
             let Ok(text) = std::fs::read_to_string(&path) else {

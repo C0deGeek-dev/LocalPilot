@@ -1077,7 +1077,7 @@ pub fn path_notice(out: &mut dyn Write) -> anyhow::Result<()> {
     let entries: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
-    if !entries.iter().any(|entry| *entry == bin) {
+    if !entries.contains(&bin) {
         writeln!(out, "\nadd this directory to PATH to use them:")?;
         writeln!(out, "    {}", bin.display())?;
         if cfg!(windows) {

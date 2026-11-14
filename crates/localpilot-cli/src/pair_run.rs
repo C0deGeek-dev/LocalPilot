@@ -460,6 +460,7 @@ pub(crate) struct PreparedPairRun {
 }
 
 impl PreparedPairRun {
+    #[allow(clippy::result_large_err)] // Failure returns the intact host for explicit cleanup.
     pub(crate) fn new(
         host: InteractivePairHost,
         bounds: PairBounds,

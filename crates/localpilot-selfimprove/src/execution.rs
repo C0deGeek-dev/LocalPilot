@@ -393,7 +393,7 @@ pub(crate) mod tests {
         .unwrap();
         // Exercise exactly the toolchain running the test, including the release
         // compiler CI lane. This is fixture configuration, not product fallback.
-        let selector = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "1.82".into());
+        let selector = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "1.89".into());
         fs::write(
             root.path().join("rust-toolchain.toml"),
             format!("[toolchain]\nchannel={selector:?}\n"),

@@ -49,7 +49,7 @@ license = "PolyForm-Noncommercial-1.0.0"
 authors = ["David <David@c0degeek.dev>", "Bram (C0deGeek.dev)"]
 repository = "https://github.com/C0deGeek-dev/LocalPilot"
 homepage = "https://github.com/C0deGeek-dev/LocalPilot"
-rust-version = "1.82"
+rust-version = "1.89"
 
 [workspace.dependencies]
 anyhow = "=1.0.103"
@@ -86,7 +86,7 @@ ignore = "=0.4.23"
 # PNG-encode a captured clipboard image (RGBA → PNG), TUI only. `arboard`'s
 # image-data feature pulls `image` regardless, so we reuse it for encoding and
 # pin it: image >= 0.25.6 pulls `moxcms`, which needs edition 2024 and breaks the
-# MSRV-1.82 build. Only the `png` codec is enabled.
+# MSRV-1.89 build. Only the `png` codec is enabled.
 image = { version = "=0.25.5", default-features = false, features = ["png"] }
 indexmap = { version = "=2.7.0", features = ["serde"] }
 insta = "=1.47.2"
@@ -96,7 +96,7 @@ insta = "=1.47.2"
 # is built. The macOS (apple-native → security-framework 3.7) and Linux
 # (sync-secret-service → zeroize_derive 1.5) backends are intentionally omitted:
 # both pull a transitive that requires Rust edition 2024, above this workspace's
-# MSRV (1.82), and they break `cargo deny --all-features` cross-target metadata.
+# MSRV (1.89), and they break `cargo deny --all-features` cross-target metadata.
 # macOS and Linux therefore use the `0600` fallback file — behaviour parity holds
 # (login/resolution work everywhere); only the backend differs. v3 is pinned
 # because v4 also requires edition 2024.
@@ -112,7 +112,7 @@ regex = "=1.11.3"
 # `bundled` compiles SQLite (with FTS5) from the amalgamation, so the indexed
 # ingest chunk store needs no system SQLite and loads no runtime extension. Same
 # pin as the LocalMind store this reuses the pattern from.
-rusqlite = { version = "=0.32.1", features = ["bundled"] }
+rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled", "cache", "fallible_uint"] }
 tempfile = "=3.14.0"
 sha2 = "=0.10.8"
 # OS randomness for device credentials and pairing codes (already locked via rustls).
@@ -129,7 +129,7 @@ reqwest = { version = "=0.12.11", features = ["json", "stream", "rustls-tls"], d
 schemars = "=0.8.21"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
-# Maintained YAML organization fork; Rust 1.82 compatible. Configuration uses
+# Maintained YAML organization fork; Rust 1.89 compatible. Configuration uses
 # Figment's TOML/env providers, not its legacy serde_yaml feature.
 yaml_serde = "=0.10.7"
 thiserror = "=2.0.9"
@@ -154,7 +154,7 @@ windows-sys = "=0.61.2"
 # system browser, used only by `localpilot-render` behind the cli `render-browser`
 # feature. No TLS: CDP is a local `ws://127.0.0.1` endpoint, so default features
 # (which pull a TLS backend) are off and only `connect` is enabled — a small,
-# MSRV-1.82-clean tree.
+# MSRV-1.89-clean tree.
 tokio-tungstenite = { version = "=0.24.0", default-features = false, features = ["connect"] }
 tracing = "=0.1.41"
 tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }

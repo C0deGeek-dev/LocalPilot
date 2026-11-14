@@ -123,7 +123,7 @@ prebuilt binaries). Each maps to an existing project need.
 | `cargo-deny` | present (`deny.toml`) | License/advisory/ban/source gate. `cargo deny check`. |
 | `cargo-audit` | recommended | RustSec advisory scan of `Cargo.lock`. Run before release. |
 | `cargo-machete` | recommended | Find unused dependencies; keeps the pinned workspace table honest. |
-| `cargo-hack` | optional | Feature-matrix and MSRV checks (`--rust-version`), so the 1.82 floor and minimal feature sets stay real. |
+| `cargo-hack` | optional | Feature-matrix and MSRV checks (`--rust-version`), so the 1.89 floor and minimal feature sets stay real. |
 | `cargo-llvm-cov` | optional | Coverage for the eval/test suites; track over time per [08-testing.md](08-testing.md). |
 | `bacon` | optional | Background `check`/`clippy`/`test` watcher for a tight local loop. |
 | `typos-cli` | optional | Catch typos in docs/code/identifiers in CI. |
