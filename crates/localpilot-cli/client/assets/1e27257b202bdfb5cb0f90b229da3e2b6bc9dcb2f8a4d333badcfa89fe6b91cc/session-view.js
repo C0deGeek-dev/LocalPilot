@@ -26,6 +26,25 @@ export function mountSessions(document, window) {
   let commandsKey;
   let historyKeys = new Map();
   let nextHistoryKey = 0;
+  let scrollKey;
+  let wasAuthorized = false;
+  let firstSnapshot = false;
+  let followLatest = true;
+  let forceLatest = false;
+  const wideLayout = window.matchMedia('(min-width: 760px)');
+  const scroller = el('conversation-scroll');
+  const nearLatest = () => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 80;
+  function jumpLatest() {
+    scroller.scrollTop = scroller.scrollHeight;
+    followLatest = true;
+    el('jump-latest').hidden = true;
+  }
+  scroller.addEventListener('scroll', () => {
+    followLatest = nearLatest();
+    el('jump-latest').hidden = followLatest;
+  }, { passive: true });
+  el('jump-latest').addEventListener('click', jumpLatest);
+  wideLayout.addEventListener('change', () => { el('session-browser').open = wideLayout.matches || !model.selected; });
   const announceReply = replyAnnouncer(el('reply-announcement'));
   const model = new Sessions({
     origin: window.location.origin, fetch: window.fetch.bind(window), socket: (url) => new window.WebSocket(url),
@@ -68,7 +87,7 @@ export function mountSessions(document, window) {
       const identity = JSON.stringify([content, occurrence]);
       const messageKey = historyKeys.get(identity) ?? ++nextHistoryKey;
       nextKeys.set(identity, messageKey);
-      const article = make('article', null, 'message');
+      const article = make('article', null, `message ${message.role === 'user' ? 'user' : 'assistant'}`);
       article.dataset.key = `${model.key}/history/${messageKey}`;
       article.append(make('h3', message.role === 'assistant' ? 'LocalPilot' : message.role === 'user' ? 'You' : message.role), ...messageBody(message.text));
       nodes.push(article);
@@ -81,7 +100,12 @@ export function mountSessions(document, window) {
         if (!entry.text) return;
         const article = make('article', null, `message ${entry.type}`);
         article.dataset.key = `${model.key}/entry/${index}`;
-        article.append(make('h3', entry.type === 'assistant' ? 'LocalPilot' : entry.queued ? 'Sent from this phone · follow-up' : 'Sent from this phone'), ...messageBody(entry.text));
+        article.append(make('h3', entry.type === 'assistant' ? 'LocalPilot' : 'You'), ...messageBody(entry.text));
+        if (entry.type === 'user') {
+          const delivery = { sending: 'Sending…', accepted: 'Received by your PC', queued: 'Queued for the next turn', rejected: 'Not sent · draft kept below', unknown: 'Delivery unconfirmed · check your PC before resending' };
+          article.dataset.delivery = entry.delivery || 'accepted';
+          article.append(make('p', delivery[entry.delivery] || (entry.queued ? delivery.queued : delivery.accepted), 'delivery-status'));
+        }
         nodes.push(article);
         return;
       }
@@ -119,8 +143,11 @@ export function mountSessions(document, window) {
         const summary = make('summary');
         summary.append(make('span', '', 'project-label'), make('span', '', 'help project-id'), make('span', '', 'help project-state'));
         const content = make('div', null, 'project-content');
+        const loading = make('div', null, 'session-skeleton');
+        loading.setAttribute('aria-hidden', 'true');
+        loading.append(make('i'), make('i'));
         const status = make('p', '', 'help project-status'); status.setAttribute('role', 'status');
-        content.append(status, make('div', null, 'session-list'), make('button', 'Refresh sessions', 'secondary'));
+        content.append(status, loading, make('div', null, 'session-list'), make('button', 'Refresh sessions', 'secondary'));
         group.append(summary, content);
         group.addEventListener('toggle', () => {
           const project = model.projects.get(group.dataset.key);
@@ -142,24 +169,28 @@ export function mountSessions(document, window) {
           ready: items.length ? '' : 'No shared sessions. Open LocalPilot in this project on your PC and enable phone access.',
         };
         set('.project-status', messages[phase]);
+        group.querySelector('.session-skeleton').hidden = phase !== 'loading';
+        group.querySelector('.session-list').setAttribute('aria-busy', String(phase === 'loading'));
         const refresh = group.querySelector('.project-content > button');
         refresh.hidden = phase === 'offline';
         refresh.disabled = phase === 'loading' || !!model.inventoryBusy;
         refresh.textContent = phase === 'idle' ? 'Load sessions' : phase === 'forbidden' ? 'Check access' : ['throttled', 'error'].includes(phase) ? 'Try again' : 'Refresh sessions';
         refresh.onclick = () => phase === 'forbidden' ? el('check-connection').click() : void model.loadProject(workspace.id);
         keyedItems(group.querySelector('.session-list'), items, (item) => item.id,
-          () => make('button', '', 'secondary session-choice'), (button, item) => {
+          () => { const button = make('button', '', 'secondary session-choice'); button.append(make('strong'), make('span')); return button; }, (button, item) => {
             const current = model.workspace?.id === workspace.id && model.selected?.id === item.id;
             const name = item.name || 'Unnamed session';
             const duplicate = items.some((other) => other.id !== item.id && (other.name || 'Unnamed session') === name);
             const label = `${name}${duplicate ? ` · ${item.id}` : ''} · ${item.live ? 'Shared now' : 'No longer shared'}${current ? ' · Current session' : ''}`;
-            if (button.textContent !== label) button.textContent = label;
+            if (button.children[0].textContent !== name) button.children[0].textContent = name;
+            const metadata = label.slice(name.length).replace(/^ · /, '');
+            if (button.children[1].textContent !== metadata) button.children[1].textContent = metadata;
             button.disabled = !item.live || phase !== 'ready' || !workspace.online;
             button.setAttribute('aria-pressed', String(current));
             button.onclick = () => {
               model.openProjectSession(workspace.id, item.id);
               if (model.workspace?.id !== workspace.id || model.selected?.id !== item.id) return;
-              render(); el('session-browser').open = false; el('session-name').focus();
+              forceLatest = true; render(); el('session-browser').open = wideLayout.matches; el('session-name').focus({ preventScroll: true });
             };
           });
       });
@@ -171,10 +202,15 @@ export function mountSessions(document, window) {
   function render() {
     const paired = model.authorized;
     const viewing = paired && !!model.selected;
-    el('sessions-title').closest('section').setAttribute('aria-labelledby', viewing ? 'session-name' : 'sessions-title');
+    el('sessions-title').closest('section').setAttribute('aria-labelledby', viewing ? 'session-name' : paired ? 'workspace-title' : 'sessions-title');
     el('main').classList.toggle('viewing-session', viewing);
-    el('pair-card').hidden = viewing;
-    for (const id of ['sessions-title', 'sessions-intro', 'sessions-eyebrow']) el(id).hidden = viewing;
+    el('main').classList.toggle('has-projects', paired);
+    el('session-empty').hidden = !paired || viewing;
+    if (paired && !wasAuthorized) el('session-browser').open = true;
+    wasAuthorized = paired;
+    if (scrollKey !== model.key) { scrollKey = model.key; firstSnapshot = false; followLatest = true; }
+    el('pair-card').hidden = paired;
+    for (const id of ['sessions-title', 'sessions-intro', 'sessions-eyebrow']) el(id).hidden = paired;
     el('session-browser').hidden = !paired;
     el('session-view').hidden = !model.selected || !paired;
     setText('session-browser-title', viewing ? 'Switch session' : 'Choose a shared session');
@@ -192,10 +228,12 @@ export function mountSessions(document, window) {
     el('timeline').classList.toggle('stale', model.viewStale || !model.ready);
     el('timeline').setAttribute('aria-busy', String(model.viewStale || !model.ready));
     setText('session-state', status);
+    el('session-state').closest('header').classList.toggle('loading-state', !model.ready);
     setText('last-sync', model.synced ? `Last sync ${new Date(model.synced).toLocaleTimeString()}` : 'Waiting for first snapshot');
     setText('session-access', model.scope === 'control' ? 'Control access' : model.scope === 'observe' ? 'Observe only' : 'Access scope unconfirmed · controls locked');
-    setText('session-notice', [...new Set([model.outcomeIssue, model.notice].filter(Boolean))].join(' '));
-    el('reconnect-session').hidden = !['disconnected', 'refused', 'incompatible', 'syncing'].includes(model.phase);
+    const notice = model.actionNotice && ['Input accepted by your PC.', 'Follow-up queued by your PC.'].includes(model.notice) ? '' : model.notice;
+    setText('session-notice', [...new Set([model.outcomeIssue, notice].filter(Boolean))].join(' '));
+    el('reconnect-session').hidden = !(['disconnected', 'refused', 'incompatible'].includes(model.phase) || (model.phase === 'syncing' && model.baselineReceived));
     el('back-to-sessions').hidden = model.phase !== 'closed';
     el('pending-attention').hidden = !model.asks.length;
     setText('pending-attention', `${model.asks.length} request${model.asks.length === 1 ? '' : 's'} need attention. Open Attention to review.`);
@@ -203,7 +241,25 @@ export function mountSessions(document, window) {
     el('session-plan').hidden = !model.plan.length;
     const planStatus = { pending: 'Pending', in_progress: 'In progress', completed: 'Completed', done: 'Done', skipped: 'Skipped' };
     el('plan-steps').replaceChildren(...model.plan.map((step) => make('li', `${step.title} · ${planStatus[step.status] || 'Status unavailable'}`)));
+    const loading = ['connecting', 'syncing'].includes(model.phase) && !model.synced && !model.history.length && !model.entries.length;
+    el('session-loading').hidden = !loading;
+    el('timeline').hidden = loading;
     renderTimeline();
+    const sending = [...model.pending.values()].some((pending) => pending.command.type === 'prompt');
+    const runningTool = model.entries.findLast((entry) => entry.type === 'tool' && entry.running);
+    const activity = !model.ready || model.viewStale ? '' : model.asks.length ? 'Waiting for your approval' : model.busy ?
+      runningTool ? `Running ${runningTool.name}…` : model.entries.at(-1)?.type === 'assistant' && model.entries.at(-1).text ? 'Responding…' : 'Thinking…' :
+      sending ? 'Sending message…' : model.awaitingReply ? 'Waiting for LocalPilot…' : '';
+    el('turn-activity').hidden = !activity;
+    el('turn-activity').classList.toggle('waiting-approval', !!model.asks.length);
+    setText('turn-activity-text', activity);
+    if (loading) scroller.scrollTop = 0;
+    else if (forceLatest || (!firstSnapshot && model.ready && !model.viewStale) || followLatest) jumpLatest();
+    if (model.ready && !model.viewStale) firstSnapshot = true;
+    forceLatest = false;
+    el('jump-latest').hidden = followLatest || loading;
+    el('session-composer').setAttribute('aria-busy', String(sending));
+    setText('composer-help', !model.ready ? 'Waiting for the session. Sending is locked.' : model.scope === 'observe' ? 'Observe only · send messages from your PC.' : sending ? 'Waiting for your PC to confirm delivery.' : model.busy ? 'Follow-ups are queued after the current turn.' : window.matchMedia('(pointer: coarse)').matches ? 'Send a message to this session.' : 'Enter to send · Shift+Enter for a new line.');
     if (el('session-draft').value !== model.draft) el('session-draft').value = model.draft;
     el('session-draft').disabled = model.scope !== 'control';
     el('send-input').disabled = !model.canSubmit || !model.draft.trim();
@@ -234,7 +290,16 @@ export function mountSessions(document, window) {
   el('reconnect-session').addEventListener('click', () => model.attach(model.selected.id));
   el('back-to-sessions').addEventListener('click', () => { el('session-browser').open = true; el('session-browser-title').focus(); });
   el('session-draft').addEventListener('input', () => { model.setDraft(el('session-draft').value); render(); });
-  el('session-composer').addEventListener('submit', (event) => { event.preventDefault(); model.submit(el('session-draft').value); });
+  el('session-composer').addEventListener('submit', (event) => { event.preventDefault(); forceLatest = true; model.submit(el('session-draft').value); });
+  el('session-draft').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !window.matchMedia('(pointer: coarse)').matches) {
+      event.preventDefault();
+      if (model.canSubmit) el('session-composer').requestSubmit();
+    }
+  });
+  window.addEventListener('hashchange', () => {
+    if (window.location.hash === '#sessions' && model.selected) window.requestAnimationFrame(() => { if (followLatest) jumpLatest(); });
+  });
   el('stop-turn').addEventListener('click', () => model.stop());
   el('session-check-access').addEventListener('click', () => el('check-connection').click());
   window.addEventListener('offline', () => model.fail('disconnected'));

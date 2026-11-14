@@ -21,7 +21,8 @@ export function showDestination(document, hash, focus = false) {
     if (link.dataset.destination === destination) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
-  if (focus) document.querySelector(`[data-panel="${destination}"] h1:not([hidden]), [data-panel="${destination}"] h2:not([hidden])`)?.focus();
+  if (focus) [...document.querySelectorAll(`[data-panel="${destination}"] h1, [data-panel="${destination}"] h2`)]
+    .find((heading) => !heading.closest('[hidden]'))?.focus({ preventScroll: true });
 }
 
 if (typeof document !== 'undefined') {
@@ -29,7 +30,10 @@ if (typeof document !== 'undefined') {
   mountTheme(document, window);
   const sessions = mountSessions(document, window);
   const element = (id) => document.getElementById(id);
-  void prepareOffline(window, (message) => { element('app-update').textContent = message; });
+  void prepareOffline(window, (message) => {
+    element('app-update').textContent = message;
+    element('app-update-label').textContent = message.startsWith('App update ready.') ? 'App update ready' : 'App status';
+  });
   const form = element('pair-form');
   const code = element('pair-code');
   const workspace = element('pair-workspace');

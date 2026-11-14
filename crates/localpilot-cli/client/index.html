@@ -9,9 +9,9 @@
     <meta name="referrer" content="no-referrer">
     <title>LocalLink</title>
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="icon" href="/assets/058fb88b2a206885786dcaf09fd33cb017a9039394e976f8237c349d8dc0dd47/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/058fb88b2a206885786dcaf09fd33cb017a9039394e976f8237c349d8dc0dd47/style.css">
-    <script type="module" src="/assets/058fb88b2a206885786dcaf09fd33cb017a9039394e976f8237c349d8dc0dd47/app.js"></script>
+    <link rel="icon" href="/assets/1e27257b202bdfb5cb0f90b229da3e2b6bc9dcb2f8a4d333badcfa89fe6b91cc/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/1e27257b202bdfb5cb0f90b229da3e2b6bc9dcb2f8a4d333badcfa89fe6b91cc/style.css">
+    <script type="module" src="/assets/1e27257b202bdfb5cb0f90b229da3e2b6bc9dcb2f8a4d333badcfa89fe6b91cc/app.js"></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -21,11 +21,11 @@
         <span class="connection" id="connection">Not connected</span>
       </header>
       <main id="main" tabindex="-1">
-        <p id="app-update" class="help" role="status"></p>
-        <section data-panel="sessions" aria-labelledby="sessions-title">
+        <details id="app-status" class="app-status"><summary><span id="app-update-label" role="status">App status</span></summary><p id="app-update" class="help"></p></details>
+        <section id="sessions-panel" data-panel="sessions" aria-labelledby="sessions-title">
           <p class="eyebrow" id="sessions-eyebrow">Sessions</p>
           <h1 id="sessions-title" tabindex="-1">Your work stays<br>on your computer.</h1>
-          <p class="intro" id="sessions-intro">A quiet place to follow your LocalPilot sessions from your phone.</p>
+          <p class="intro" id="sessions-intro">Follow your LocalPilot sessions, wherever you work.</p>
           <div class="empty-state pairing" id="pair-card">
             <div id="pair-status" role="status" aria-live="polite" aria-atomic="true">
               <h2 id="pair-title" tabindex="-1">Connect your computer</h2>
@@ -58,39 +58,43 @@
           </div>
           <details id="session-browser" class="session-browser" open hidden>
             <summary id="session-browser-title">Choose a shared session</summary>
-            <p class="help">Open a project to see its shared sessions. Your current session stays connected while you browse.</p>
+            <p class="help browser-help">Open a project to see its shared sessions. Your current session stays connected while you browse.</p>
             <button id="refresh-projects" type="button" class="secondary">Refresh projects</button>
             <p id="projects-status" class="help" role="status"></p>
             <p id="sessions-status" role="status"></p>
             <div id="session-list" class="session-list"></div>
           </details>
+          <div id="session-empty" class="session-empty" hidden><p class="eyebrow">Your workspace</p><h1 id="workspace-title" tabindex="-1">Pick up the conversation.</h1><p>Choose a project and a shared session to see what LocalPilot is working on.</p></div>
           <div id="session-view" hidden>
             <header class="session-heading">
               <p id="session-project" class="eyebrow"></p>
               <h1 id="session-name" tabindex="-1"></h1>
               <p id="session-state" role="status"></p>
-              <p id="last-sync" class="help"></p>
-              <details class="connection-details"><summary id="session-access">Access scope unconfirmed</summary><p id="session-pc" class="help"></p><button id="session-check-access" type="button" class="secondary">Check access</button></details>
+              <details class="connection-details"><summary id="session-access">Access scope unconfirmed</summary><p id="session-pc" class="help"></p><p id="last-sync" class="help"></p><p class="help">Tool activity covers the current turn. Messages from your PC appear with the next snapshot.</p><button id="session-check-access" type="button" class="secondary">Check access</button></details>
               <button id="reconnect-session" type="button" class="secondary" hidden>Reconnect</button>
               <button id="back-to-sessions" type="button" class="secondary" hidden>Back to sessions</button>
             </header>
-            <p id="pending-attention" class="attention-banner" role="status" hidden></p>
-            <details id="session-plan" class="plan-panel" hidden><summary>Session plan</summary><ol id="plan-steps"></ol></details>
-            <p id="history-limit" class="help"></p>
-            <h2 id="conversation-title" class="visually-hidden">Conversation</h2>
-            <div id="timeline" role="region" aria-labelledby="conversation-title"></div>
-            <p id="reply-announcement" class="visually-hidden" role="status" aria-atomic="true"></p>
-            <p class="help">Tool activity shows only the turn in progress. Messages typed on your PC appear when the next snapshot arrives.</p>
-            <details id="command-picker" hidden><summary>Slash commands</summary><div id="command-list"></div></details>
-            <p id="session-notice" role="status" aria-atomic="true"></p>
+            <div id="conversation-scroll" class="conversation-scroll" tabindex="0" role="region" aria-label="Conversation and activity">
+              <div id="session-loading" class="loading-placeholder" role="status" hidden><span>Loading conversation…</span><div class="skeleton-message" aria-hidden="true"><i></i><i></i><i></i></div><div class="skeleton-message short" aria-hidden="true"><i></i><i></i></div></div>
+              <p id="pending-attention" class="attention-banner" role="status" hidden></p>
+              <details id="session-plan" class="plan-panel" hidden><summary>Session plan</summary><ol id="plan-steps"></ol></details>
+              <p id="history-limit" class="help"></p>
+              <h2 id="conversation-title" class="visually-hidden">Conversation</h2>
+              <div id="timeline" role="region" aria-labelledby="conversation-title"></div>
+              <p id="reply-announcement" class="visually-hidden" role="status" aria-atomic="true"></p>
+              <div id="turn-activity" class="turn-activity" role="status" hidden><span class="activity-dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="turn-activity-text"></span></div>
+            </div>
+            <button id="jump-latest" class="secondary jump-latest" type="button" hidden>Latest messages ↓</button>
             <div class="composer-panel">
+              <p id="session-notice" role="status" aria-atomic="true"></p>
+              <details id="command-picker" hidden><summary>Slash commands</summary><div id="command-list"></div></details>
               <form id="session-composer">
                 <label for="session-draft" class="visually-hidden">Message or slash command</label>
                 <textarea id="session-draft" rows="2" maxlength="65536" placeholder="Keep the work moving…" aria-describedby="composer-help"></textarea>
-                <p id="composer-help" class="help">Follow up queues a message after this turn.</p>
+                <p id="composer-help" class="help">Enter to send · Shift+Enter for a new line.</p>
                 <div class="composer-actions"><button id="send-input" type="submit" disabled>Send</button><button id="stop-turn" type="button" class="secondary" aria-describedby="stop-project" disabled>Stop turn</button></div>
               </form>
-              <p id="stop-project" class="help"></p>
+              <p id="stop-project" class="visually-hidden"></p>
             </div>
           </div>
         </section>

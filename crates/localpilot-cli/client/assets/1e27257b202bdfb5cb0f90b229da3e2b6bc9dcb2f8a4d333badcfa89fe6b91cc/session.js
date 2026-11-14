@@ -41,6 +41,7 @@ export class Sessions {
     this.asks = [];
     this.turn = 'unknown';
     this.busy = false;
+    this.awaitingReply = false;
     this.queued = 0;
     this.synced = null;
     this.capabilities = [];
@@ -161,6 +162,7 @@ export class Sessions {
     this.unschedule(this.attachTimer);
     for (const pending of this.pending.values()) {
       this.unschedule(pending.timer);
+      if (pending.entry) pending.entry.delivery = 'unknown';
       if (pending.command.type === 'permission_reply' && this.approval?.ask_id === pending.command.ask_id) this.approval.state = 'unknown';
     }
     if (this.pending.size) {
@@ -267,7 +269,10 @@ export class Sessions {
       this.historyUnconfirmed = false;
       this.clearActionNotice();
       this.history = event.history;
+      this.awaitingReply = false;
+      const unconfirmed = this.entries.filter((entry) => entry.type === 'user' && ['sending', 'unknown', 'rejected'].includes(entry.delivery));
       this.entries = event.turn === 'running' && event.turn_text ? [{ type: 'assistant', text: event.turn_text }] : [];
+      this.entries.push(...unconfirmed);
       this.plan = event.plan || [];
       this.asks = asks;
       this.reconcileApproval();
@@ -316,7 +321,7 @@ export class Sessions {
   }
   project(event) {
     switch (event.type) {
-      case 'turn_started': this.turn = 'running'; this.busy = true; this.plan = []; this.entries.push({ type: 'assistant', text: '' }); break;
+      case 'turn_started': this.awaitingReply = false; this.turn = 'running'; this.busy = true; this.plan = []; this.entries.push({ type: 'assistant', text: '' }); break;
       case 'text_delta': {
         let entry = this.entries.at(-1);
         if (entry?.type !== 'assistant') { entry = { type: 'assistant', text: '' }; this.entries.push(entry); }
@@ -331,7 +336,7 @@ export class Sessions {
         break;
       }
       case 'plan': this.plan = event.steps; break;
-      case 'stopped': this.turn = 'idle'; this.busy = false; this.clearActionNotice(); break;
+      case 'stopped': this.awaitingReply = false; this.turn = 'idle'; this.busy = false; this.clearActionNotice(); break;
       case 'permission_ask': this.asks = [...this.asks.filter((ask) => ask.ask_id !== event.ask_id), normalizeAsk(event)]; break;
       case 'permission_resolved':
         this.asks = this.asks.filter((ask) => ask.ask_id !== event.ask_id);
@@ -394,6 +399,11 @@ export class Sessions {
   mutate(command, draft) {
     const id = `action-${++this.nextId}`;
     const pending = { command, draft, key: this.key };
+    if (command.type === 'prompt') {
+      pending.entry = { type: 'user', text: command.text, queued: command.disposition === 'follow_up', delivery: 'sending', id };
+      this.entries.push(pending.entry);
+      if (command.disposition === 'immediate') this.awaitingReply = true;
+    }
     this.pending.set(id, pending);
     this.notice = command.type === 'cancel' ? 'Requesting Stop… Waiting for your PC.' : 'Submitting… Waiting for your PC.';
     this.actionNotice = false;
@@ -426,6 +436,10 @@ export class Sessions {
       return;
     }
     if (event.type === 'rejected' || event.type === 'error') {
+      if (pending.entry) {
+        pending.entry.delivery = ['outcome_unknown', 'in_progress'].includes(event.code) ? 'unknown' : 'rejected';
+        this.awaitingReply = false;
+      }
       this.actionNotice = false;
       if (event.code === 'outcome_unknown' || event.code === 'in_progress') {
         this.outcomeIssue = `${this.projectLabel()} / ${this.selected.name || 'session'}: ${unknownOutcome}`;
@@ -435,7 +449,8 @@ export class Sessions {
     }
     if (pending.draft !== undefined && this.drafts.get(pending.key) === pending.draft) this.drafts.delete(pending.key);
     if (pending.command.type === 'prompt') {
-      this.entries.push({ type: 'user', text: pending.command.text, queued: event.type === 'queued' });
+      pending.entry.delivery = event.type === 'queued' ? 'queued' : 'accepted';
+      pending.entry.queued = event.type === 'queued';
     }
     this.actionNotice = true;
     this.notice = event.type === 'command_result' ? `/${event.name}: ${event.message || 'Completed.'}` :
