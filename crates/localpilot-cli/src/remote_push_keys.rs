@@ -181,9 +181,9 @@ pub(crate) fn rotate_command() -> anyhow::Result<()> {
     let (key, removed) = PushKeys::user()?.rotate(&registry)?;
     println!("New push key {}.", key.id());
     match removed {
-        0 => println!("No phone had notifications on."),
-        1 => println!("1 phone had notifications on; it must turn them on again."),
-        n => println!("{n} phones had notifications on; they must turn them on again."),
+        0 => println!("No device had notifications on."),
+        1 => println!("1 device had notifications on; it must turn them on again."),
+        n => println!("{n} devices had notifications on; they must turn them on again."),
     }
     Ok(())
 }

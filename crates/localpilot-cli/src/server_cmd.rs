@@ -2303,7 +2303,7 @@ pub async fn pair(
                 )?,
                 Err(error) => writeln!(out, "(could not draw a QR code: {error})")?,
             }
-            writeln!(out, "Scan this with the phone, or open: {link}")?;
+            writeln!(out, "Scan this with the device, or open: {link}")?;
         }
         None => {
             writeln!(out, "Pairing code: {code}")?;

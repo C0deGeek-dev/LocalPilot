@@ -654,9 +654,9 @@ fn describe(
             };
             let lines = vec![
                 if show_link {
-                    "Open this link on the phone.".to_string()
+                    "Open this link on the device.".to_string()
                 } else {
-                    "Scan this QR code with the phone.".to_string()
+                    "Scan this QR code with the device.".to_string()
                 },
                 format!(
                     "{} gets {} access to {reach}.",

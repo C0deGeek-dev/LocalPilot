@@ -5468,7 +5468,7 @@ mod tests {
         );
         let mut view = crate::pairing::PairingView::new(
             "Pair a device".to_string(),
-            vec!["Scan this QR code with the phone.".to_string()],
+            vec!["Scan this QR code with the device.".to_string()],
             vec![
                 "Show link".to_string(),
                 "Copy link".to_string(),
@@ -5556,7 +5556,7 @@ mod tests {
         let text = screen_text(&app, 100, 30);
         for expected in [
             "Pair a device",
-            "> Name: phone",
+            "> Name: device",
             "Access: control",
             "no steering",
             "Reach: every workspace",
@@ -5581,7 +5581,7 @@ mod tests {
         let mut view = crate::pairing::PairingView::new(
             "Pair a device".to_string(),
             vec![
-                "Scan this QR code with the phone.".to_string(),
+                "Scan this QR code with the device.".to_string(),
                 format!("{name} gets control access to every workspace this server serves."),
                 "The code works once, for 4:59 more. Closing this view invalidates it.".to_string(),
             ],

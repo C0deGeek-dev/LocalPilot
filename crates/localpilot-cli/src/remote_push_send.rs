@@ -1121,7 +1121,7 @@ mod tests {
             last: rig.registry.last_audit("push_sent"),
         });
         assert!(
-            line.contains("on; 0 phones") && line.contains("fcm.googleapis.com 410"),
+            line.contains("on; 0 devices") && line.contains("fcm.googleapis.com 410"),
             "{line}"
         );
         assert!(!audit.contains("/fcm/send/phone"), "{audit}");

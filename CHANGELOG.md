@@ -15,6 +15,10 @@ is SemVer-stable; the configuration schema stability policy is in
   (ADR-0286). Refresh inactive QUIC dependencies for newer advisories.
 - Keep PowerShell command-inspection fixtures compatible with Unix paths and
   isolate the incognito delegation ledger fixture from empty-project Git setup.
+- Pairing, notification and access messages say "device" instead of "phone",
+  the pairing form suggests the name `device`, and a remote prompt reads
+  `(device: <name>)` (LocalHub#287).
+
 - A device's session list shows the name set with `/name` or `/rename`; it
   showed every shared session as unnamed (LocalHub#289).
 

@@ -47,11 +47,11 @@ impl PairingSetup {
     #[must_use]
     pub fn new(control: bool) -> Self {
         Self {
-            name: "phone".to_string(),
+            name: "device".to_string(),
             control,
             this_workspace_only: false,
             focus: PairingField::Name,
-            cursor: "phone".chars().count(),
+            cursor: "device".chars().count(),
             problem: None,
             controls_visible: std::cell::Cell::new(true),
         }
@@ -354,7 +354,7 @@ mod tests {
     fn the_form_starts_on_the_name_and_cycles_through_every_field() {
         let mut setup = PairingSetup::new(true);
         assert_eq!(setup.focus, PairingField::Name);
-        assert_eq!(setup.name, "phone");
+        assert_eq!(setup.name, "device");
         for expected in [
             PairingField::Scope,
             PairingField::Reach,
@@ -382,7 +382,7 @@ mod tests {
         setup.move_focus(true);
         assert!(setup.toggle());
         assert!(setup.this_workspace_only);
-        assert_eq!(setup.device_name().unwrap(), "phone2");
+        assert_eq!(setup.device_name().unwrap(), "device2");
     }
 
     #[test]
@@ -431,17 +431,17 @@ mod tests {
     #[test]
     fn the_name_edits_at_its_cursor() {
         let mut setup = PairingSetup::new(true);
-        assert_eq!(setup.cursor, 5);
+        assert_eq!(setup.cursor, 6);
         setup.move_cursor(false);
         setup.move_cursor(false);
         assert!(setup.type_char('X'));
-        assert_eq!(setup.name, "phoXne");
+        assert_eq!(setup.name, "deviXce");
         assert!(setup.backspace());
         assert!(setup.delete());
-        assert_eq!(setup.name, "phoe");
+        assert_eq!(setup.name, "devie");
         setup.cursor_to(false);
         setup.type_char('é');
-        assert_eq!(setup.name, "éphoe");
+        assert_eq!(setup.name, "édevie");
         setup.cursor_to(true);
         assert!(!setup.delete(), "nothing after the end");
         setup.move_focus(true);

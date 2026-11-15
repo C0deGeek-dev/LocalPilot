@@ -24673,7 +24673,7 @@ last_seen = "2026-08-10"
         let link = shown_link(&app);
         let code = crate::remote_pairing::tests::code_of(&link);
         assert!(app.pairing_view().unwrap().secret().unwrap().qr().is_some());
-        assert!(view_lines(&app).contains("phone gets control access"));
+        assert!(view_lines(&app).contains("device gets control access"));
         assert!(view_actions(&app).contains(&"Copy link".to_string()));
         // Copy fails here: said in the view, and the link goes nowhere else.
         let view = app.pairing_view_mut().unwrap();
@@ -24720,7 +24720,7 @@ last_seen = "2026-08-10"
             "{paired:?}"
         );
         pump_pairing(&mut app, &host, "used", |app, _| {
-            view_lines(app).contains("Paired phone with control access.")
+            view_lines(app).contains("Paired device with control access.")
         })
         .await;
         assert!(!view_shows_code(&app), "the used code is wiped");
@@ -25086,7 +25086,7 @@ last_seen = "2026-08-10"
         })
         .await;
         let setup = app.pairing_setup().expect("the form is still open");
-        assert_eq!(setup.name, "mphoe");
+        assert_eq!(setup.name, "mdevie");
         assert_eq!(setup.focus, localpilot_terminal_ui::PairingField::Scope);
         assert!(
             host.pairing.phase().is_none(),
@@ -25247,7 +25247,7 @@ last_seen = "2026-08-10"
             }
             let told = format!("{:?}", app.active_timeline_mut().items());
             assert_eq!(
-                told.matches("Paired phone with control access.").count(),
+                told.matches("Paired device with control access.").count(),
                 1,
                 "told exactly once (replaced {replaced}): {told}"
             );
@@ -25403,7 +25403,7 @@ last_seen = "2026-08-10"
             }
             assert!(!view_shows_code(&app), "the used code is wiped");
             let told = format!("{:?}", app.active_timeline_mut().items());
-            assert!(!told.contains("Paired phone"), "{told}");
+            assert!(!told.contains("Paired device"), "{told}");
             if session_change {
                 host.share.track(crate::remote_share::Tracked {
                     session: localpilot_core::SessionId::new(),
@@ -25421,7 +25421,7 @@ last_seen = "2026-08-10"
             assert!(app.dialog.is_some(), "the ask stays");
             let told = format!("{:?}", app.active_timeline_mut().items());
             assert_eq!(
-                told.matches("Paired phone with control access.").count(),
+                told.matches("Paired device with control access.").count(),
                 1,
                 "told once (session change {session_change}): {told}"
             );
@@ -25444,7 +25444,7 @@ last_seen = "2026-08-10"
         let code = crate::remote_pairing::tests::code_of(&shown_link(&app));
         let _ = crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
         pump_pairing(&mut app, &host, "shown", |app, _| {
-            view_lines(app).contains("Paired phone")
+            view_lines(app).contains("Paired device")
         })
         .await;
         app.open_report("Report".to_string(), vec!["kept".to_string()]);
@@ -25454,7 +25454,7 @@ last_seen = "2026-08-10"
         }
         let told = format!("{:?}", app.active_timeline_mut().items());
         assert_eq!(
-            told.matches("Paired phone with control access.").count(),
+            told.matches("Paired device with control access.").count(),
             0,
             "{told}"
         );
@@ -29028,7 +29028,7 @@ last_seen = "2026-08-10"
         let _ = crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
         // The outcome reaches the pairing view (pairing's own tick only).
         pump_pairing(&mut app, &host, "used", |app, _| {
-            view_lines(app).contains("Paired phone")
+            view_lines(app).contains("Paired device")
         })
         .await;
         // /remote closes that view, which lets the ended attempt go, before

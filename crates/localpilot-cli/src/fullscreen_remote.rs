@@ -595,7 +595,7 @@ fn phone_prompt(
     let display = if tag.device().starts_with("remote device [") {
         format!("({}) {text}", tag.device())
     } else {
-        format!("(phone: {}) {text}", tag.device())
+        format!("(device: {}) {text}", tag.device())
     };
     let item_id = app.append_prompt(display, Some(super::local_prompt_time()), pending)?;
     Some(super::QueuedOperation::Prompt(super::QueuedPrompt {
@@ -1002,12 +1002,12 @@ pub(super) fn request_exit(app: &mut AppModel, host: &RemoteHost, turn: &str) ->
     if app.choice().is_none() {
         let sharing = match host.share.state() {
             ShareState::Interrupted { .. } | ShareState::ServerStopped => {
-                "Phone access is interrupted. Closing ends this session and stops reconnecting."
+                "Device access is interrupted. Closing ends this session and stops reconnecting."
             }
             ShareState::Connecting => {
                 "Sharing is connecting. Closing ends this session; it does not keep running on the server."
             }
-            _ => "This session is shared with paired devices. Closing ends this session and phone access; it does not keep running on the server.",
+            _ => "This session is shared with paired devices. Closing ends this session and device access; it does not keep running on the server.",
         };
         host.choice.set(Some(ChoiceKind::Exit));
         let attended = host
@@ -1144,7 +1144,7 @@ pub(super) fn choice_key(
                 (Some(ChoiceKind::Exit), 1) => {
                     host.share.stop();
                     app.apply_runtime(RuntimeUpdate::Notice(
-                        "Closing session. Ending phone access...".to_string(),
+                        "Closing session. Ending device access...".to_string(),
                     ));
                     ChoiceKey::Close
                 }

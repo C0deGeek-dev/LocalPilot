@@ -288,7 +288,7 @@ pub async fn run_chat_with(
         .wind_down(std::time::Duration::from_millis(500))
         .await;
     if was_shared && !confirmed {
-        println!("Phone disconnect could not be confirmed. This session is closing.");
+        println!("Device disconnect could not be confirmed. This session is closing.");
     }
     // A session still incognito at exit (launched with `--incognito`, or entered
     // via `/incognito` and never turned off) reports what it created and closes

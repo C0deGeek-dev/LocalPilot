@@ -83,9 +83,9 @@ pub fn render_push(push: &PushStatus) -> String {
         "off ([remote.push] enabled = false)"
     };
     let phones = match &push.subscribed {
-        Ok(1) => "1 phone turned them on".to_string(),
-        Ok(n) => format!("{n} phones turned them on"),
-        Err(reason) => format!("phones cannot be read: {reason}"),
+        Ok(1) => "1 device turned them on".to_string(),
+        Ok(n) => format!("{n} devices turned them on"),
+        Err(reason) => format!("devices cannot be read: {reason}"),
     };
     let last = match &push.last {
         Some((at, detail)) => format!("last sent {at} (Unix time): {detail}"),
