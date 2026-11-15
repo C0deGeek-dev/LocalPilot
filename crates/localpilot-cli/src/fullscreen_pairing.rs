@@ -134,7 +134,7 @@ impl PairingHost {
             return;
         }
         drop(self.release());
-        app.open_pairing_setup(PairingSetup::new(!observe));
+        app.open_pairing_setup(PairingSetup::new_among(!observe, &active_device_names()));
     }
 
     fn open_view(&self, app: &mut AppModel) {
@@ -751,4 +751,28 @@ fn unconfirmed_text(restarted: bool) -> String {
         "Could not confirm the code was invalidated. It may still work until it expires; use /remote pair to retry."
             .to_string()
     }
+}
+
+/// The names of the devices still paired, so a new pairing suggests a name
+/// none of them has (LocalHub#287). An unreadable registry suggests the plain
+/// default.
+#[cfg(not(test))]
+fn active_device_names() -> Vec<String> {
+    let root = std::env::current_dir().unwrap_or_default();
+    crate::server_devices::DeviceRegistry::for_user(&root)
+        .list()
+        .map(|devices| {
+            devices
+                .into_iter()
+                .filter(|device| device.revoked_unix.is_none())
+                .map(|device| device.name)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Tests never read this computer's device registry.
+#[cfg(test)]
+fn active_device_names() -> Vec<String> {
+    Vec::new()
 }

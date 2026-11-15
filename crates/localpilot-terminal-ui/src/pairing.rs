@@ -43,6 +43,23 @@ pub struct PairingSetup {
     controls_visible: std::cell::Cell<bool>,
 }
 
+/// The default device name: `device`, numbered from 2 while an active device
+/// already has it.
+#[must_use]
+pub fn unique_default_name(active_names: &[String]) -> String {
+    let taken: std::collections::HashSet<String> = active_names
+        .iter()
+        .map(|name| name.trim().to_lowercase())
+        .collect();
+    if !taken.contains("device") {
+        return "device".to_string();
+    }
+    (2_usize..)
+        .map(|n| format!("device-{n}"))
+        .find(|name| !taken.contains(name))
+        .unwrap_or_else(|| "device".to_string())
+}
+
 impl PairingSetup {
     #[must_use]
     pub fn new(control: bool) -> Self {
@@ -65,6 +82,14 @@ impl PairingSetup {
 
     pub(crate) fn set_controls_visible(&self, visible: bool) {
         self.controls_visible.set(visible);
+    }
+
+    /// The form with a default name no active device has yet: `device`, or
+    /// `device-2`, `device-3`, ... (LocalHub#287). Names compare without case
+    /// and surrounding spaces.
+    #[must_use]
+    pub fn new_among(control: bool, active_names: &[String]) -> Self {
+        Self::new(control).named(&unique_default_name(active_names))
     }
 
     /// The same form with `name` (the cursor at its end).
@@ -349,6 +374,22 @@ impl PairingView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_name_is_numbered_past_active_devices() {
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_string()).collect::<Vec<_>>();
+        assert_eq!(unique_default_name(&[]), "device");
+        assert_eq!(unique_default_name(&names(&["Pixel"])), "device");
+        assert_eq!(unique_default_name(&names(&["device"])), "device-2");
+        assert_eq!(
+            unique_default_name(&names(&[" Device ", "device-2"])),
+            "device-3"
+        );
+        assert_eq!(unique_default_name(&names(&["device-2"])), "device");
+        let setup = PairingSetup::new_among(true, &names(&["device"]));
+        assert_eq!(setup.name, "device-2");
+        assert_eq!(setup.cursor, "device-2".chars().count());
+    }
 
     #[test]
     fn the_form_starts_on_the_name_and_cycles_through_every_field() {

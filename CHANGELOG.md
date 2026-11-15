@@ -6,6 +6,9 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The pairing form suggests a name no paired device has yet: `device`, then
+  `device-2`, `device-3`, ... (LocalHub#287).
+
 - Embed LocalLink 0.1.4: a message sent from a device stays in view while the
   PC works on it, also through the resync at the start of a turn
   (LocalHub#285).
