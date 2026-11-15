@@ -2,6 +2,41 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0288: The Gateway Can Run In The Background And Be Stopped From Any Terminal
+
+**Status:** accepted · **Date:** 2026-11-15. Amends ADR-0247 and ADR-0269. Refs
+LocalHub#293.
+
+**Context.** The gateway ran only as `localpilot remote gateway` in the
+foreground, so phone access lasted as long as one terminal window. ADR-0247 and
+ADR-0269 require a separate, opt-in, loopback-only process whose lifetime is the
+capability's lifetime; they do not require a terminal to hold it. Stopping it
+from elsewhere had no safe path: signalling a recorded process id can hit an
+unrelated process once the id is reused, and Windows has no `SIGTERM`.
+
+**Decision.**
+1. `localpilot remote gateway start` starts the same gateway detached (the
+   daemon spawn of the background server) and waits for its health answer. It
+   refuses while `[remote] enabled` is off and never replaces a running gateway
+   or whatever else holds the port. The user's command is the consent; setup
+   and pairing name it instead of starting anything themselves.
+2. A running gateway writes an owner-only control file beside the device
+   registry (`gateway.json`: port, process id, how it was started, a random
+   32-byte stop token) and removes it when it ends, only while the file still
+   describes it.
+3. `localpilot remote gateway stop` presents the token on `POST /control/stop`.
+   The gateway accepts it only with a loopback-literal `Host`, no `Origin`, and
+   the exact token (constant-time); anything else is answered as an unknown
+   path. A request through the proxy carries the proxy's host, and a web page
+   sends an `Origin` and cannot read the file. On Unix `SIGTERM` stops it too.
+4. Not decided here: starting the gateway from a consent dialog inside pairing
+   or `/remote share`, and a login item that starts it at sign-in.
+
+**Consequences.** Phone access no longer depends on a terminal window, and ends
+on request from any terminal. A gateway started before this version has no
+control file; `stop` reports that none is running, and it is stopped where it
+runs.
+
 ## ADR-0287: A Background Server Can Be Stopped, And Stops Itself When Idle
 
 **Status:** accepted · **Date:** 2026-11-15. Builds on ADR-0249 and ADR-0261.

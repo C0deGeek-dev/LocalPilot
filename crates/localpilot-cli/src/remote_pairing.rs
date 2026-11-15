@@ -184,7 +184,7 @@ pub(crate) fn prerequisites_for(cwd: PathBuf) -> Prerequisites {
                 Some(GatewayHealth::Running) => {}
                 Some(GatewayHealth::NotRunning) => {
                     return Err(
-                        "The gateway is not running. Start it with localpilot remote gateway."
+                        "The gateway is not running. Start it in the background with `localpilot remote gateway start`."
                             .to_string(),
                     )
                 }

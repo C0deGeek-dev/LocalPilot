@@ -88,7 +88,10 @@ pub enum PushState {
     Unknown(String),
 }
 
-fn serialize_push_state<S: serde::Serializer>(state: &PushState, serializer: S) -> Result<S::Ok, S::Error> {
+fn serialize_push_state<S: serde::Serializer>(
+    state: &PushState,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     match state {
         PushState::On => serializer.serialize_bool(true),
         PushState::Off(_) => serializer.serialize_bool(false),
@@ -147,6 +150,21 @@ pub fn render_status(status: &RemoteStatus) -> String {
                 "  gateway:        {gateway} (127.0.0.1:{})",
                 settings.port
             );
+            match &status.gateway {
+                Some(GatewayHealth::NotRunning) => {
+                    let _ = writeln!(
+                        s,
+                        "                  start it with `localpilot remote gateway start`"
+                    );
+                }
+                Some(GatewayHealth::Running) => {
+                    let _ = writeln!(
+                        s,
+                        "                  stop it with `localpilot remote gateway stop`"
+                    );
+                }
+                _ => {}
+            }
         }
         Err(reason) => {
             let _ = writeln!(s, "  settings:       cannot be read: {reason}");
@@ -177,16 +195,29 @@ mod push_line_tests {
     use super::*;
 
     fn line(enabled: PushState) -> String {
-        render_push(&PushStatus { enabled, subscribed: Ok(1), last: None })
+        render_push(&PushStatus {
+            enabled,
+            subscribed: Ok(1),
+            last: None,
+        })
     }
 
     #[test]
     fn off_names_the_setting_and_the_command_and_unreadable_is_not_off() {
         assert!(line(PushState::On).contains("notifications:  on; 1 device turned them on"));
         let off = line(PushState::Off("[remote.push] enabled = false"));
-        assert!(off.contains("off ([remote.push] enabled = false); run `localpilot remote push on`"), "{off}");
-        let unknown = line(PushState::Unknown("project config may not set remote".into()));
-        assert!(unknown.contains("unknown (settings cannot be read: project config may not set remote)"), "{unknown}");
+        assert!(
+            off.contains("off ([remote.push] enabled = false); run `localpilot remote push on`"),
+            "{off}"
+        );
+        let unknown = line(PushState::Unknown(
+            "project config may not set remote".into(),
+        ));
+        assert!(
+            unknown
+                .contains("unknown (settings cannot be read: project config may not set remote)"),
+            "{unknown}"
+        );
         assert!(!unknown.contains("off"), "{unknown}");
     }
 }

@@ -15,6 +15,11 @@ is SemVer-stable; the configuration schema stability policy is in
   (ADR-0286). Refresh inactive QUIC dependencies for newer advisories.
 - Keep PowerShell command-inspection fixtures compatible with Unix paths and
   isolate the incognito delegation ledger fixture from empty-project Git setup.
+- `localpilot remote gateway start` runs the gateway in the background, so phone
+  access no longer needs a terminal window kept open, and `localpilot remote
+  gateway stop` ends it from any terminal (ADR-0288, LocalHub#293). Setup,
+  pairing and `remote status` name these commands.
+
 - `localpilot remote push on` / `off` turn device notifications on or off in the
   user config, so nobody has to edit `[remote.push]` by hand. `remote status`
   and a device's refused request name that command, and a config that cannot be

@@ -956,8 +956,9 @@ async fn setup(run: &mut Run<'_, '_>, flag: NameFlag, yes: bool) -> Step<()> {
     match s.probes.listener(s.port).await {
         Listener::NotRunning => {
             s.console.say(&format!(
-                "The gateway is not running. Start it with `localpilot remote gateway`, then \
-                 run `localpilot remote setup` again to check {origin} from this computer."
+                "The gateway is not running. Start it in the background with `localpilot remote \
+                 gateway start`, then run `localpilot remote setup` again to check {origin} from \
+                 this computer."
             ));
             return Ok(());
         }
@@ -975,8 +976,9 @@ async fn setup(run: &mut Run<'_, '_>, flag: NameFlag, yes: bool) -> Step<()> {
         OriginAnswer::Current => {}
         OriginAnswer::OtherPolicy(why) => {
             s.console.say(&format!(
-                "The gateway is running with an older address ({why}). Stop it and start it \
-                 again with `localpilot remote gateway`, then run setup again to check."
+                "The gateway is running with an older address ({why}). Restart it with \
+                 `localpilot remote gateway stop` and `localpilot remote gateway start`, then run \
+                 setup again to check."
             ));
             return Ok(());
         }

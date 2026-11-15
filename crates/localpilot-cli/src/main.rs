@@ -71,6 +71,7 @@ mod relay_host;
 mod relay_source;
 mod remote_devices;
 mod remote_gateway;
+mod remote_gateway_control;
 mod remote_pairing;
 mod remote_push_crypto;
 mod remote_push_endpoint;
@@ -943,8 +944,15 @@ enum RemoteAction {
     /// (`[remote] port`); your HTTPS tunnel or reverse proxy on this computer
     /// forwards the `[remote] advertised_url` to it. Needs `[remote] enabled =
     /// true` in your user config; it reaches every workspace served with
-    /// remote access on.
-    Gateway,
+    /// remote access on. `start` runs it in the background instead of this
+    /// terminal; `stop` ends it, and with it all device access.
+    Gateway {
+        #[command(subcommand)]
+        action: Option<RemoteGatewayAction>,
+        /// Set by `start`: the gateway runs in the background.
+        #[arg(long, hide = true)]
+        background: bool,
+    },
     /// Show whether remote access is on, whether the gateway runs, the
     /// workspaces it can reach and how many devices are paired.
     Status,
@@ -979,6 +987,17 @@ enum RemoteAction {
         #[command(subcommand)]
         action: RemotePushAction,
     },
+}
+
+/// `localpilot remote gateway` actions.
+#[derive(Subcommand, Debug)]
+enum RemoteGatewayAction {
+    /// Start the gateway in the background (it keeps running after this
+    /// terminal closes) and wait until it answers.
+    Start,
+    /// Stop the gateway, wherever it was started. Paired devices lose access
+    /// until it runs again.
+    Stop,
 }
 
 /// `localpilot remote push` actions.
@@ -2191,7 +2210,33 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             DevicesAction::Revoke { id } => server_cmd::devices_revoke(&id)?,
         },
         Command::Remote { action } => match action {
-            RemoteAction::Gateway => remote_gateway::run().await?,
+            RemoteAction::Gateway { action, background } => match action {
+                None => remote_gateway::run(background).await?,
+                Some(RemoteGatewayAction::Start) => {
+                    use remote_gateway_control::StartOutcome;
+                    let cwd = std::env::current_dir()?;
+                    match remote_gateway_control::start(&cwd).await {
+                        Ok(StartOutcome::Started) => println!(
+                            "The gateway runs in the background. Stop it with `localpilot remote gateway stop`."
+                        ),
+                        Ok(StartOutcome::AlreadyRunning) => println!("The gateway is already running."),
+                        Ok(StartOutcome::NotYet) => println!(
+                            "The gateway was started but has not answered yet; check `localpilot remote status`."
+                        ),
+                        Err(refusal) => anyhow::bail!(refusal),
+                    }
+                }
+                Some(RemoteGatewayAction::Stop) => {
+                    use remote_gateway_control::StopOutcome;
+                    match remote_gateway_control::stop().await {
+                        Ok(StopOutcome::Stopped) => {
+                            println!("The gateway stopped. Paired devices have no access until it runs again.");
+                        }
+                        Ok(StopOutcome::NotRunning) => println!("No gateway is running."),
+                        Err(refusal) => anyhow::bail!(refusal),
+                    }
+                }
+            },
             RemoteAction::Status => remote_gateway::print_status().await,
             RemoteAction::Setup {
                 check,

@@ -412,9 +412,17 @@ pub(crate) struct Gateway {
     unauthenticated: std::sync::Mutex<Bucket>,
     rates: std::sync::Mutex<DeviceRates>,
     device_sockets: std::sync::Mutex<DeviceSockets>,
+    /// The token `localpilot remote gateway stop` presents (ADR-0288); unset,
+    /// the stop path answers nothing.
+    stop_token: std::sync::OnceLock<String>,
 }
 
 impl Gateway {
+    /// Accept `localpilot remote gateway stop` requests that carry `token`.
+    pub(crate) fn accept_stop_token(&self, token: String) {
+        let _ = self.stop_token.set(token);
+    }
+
     pub(crate) fn new(policy: Policy, discovery: Discovery, stop: CancellationToken) -> Arc<Self> {
         Self::with_step(policy, discovery, stop, STEP_TIMEOUT)
     }
@@ -451,6 +459,7 @@ impl Gateway {
             unauthenticated: std::sync::Mutex::new(Bucket::new(limits.unauthenticated)),
             rates: std::sync::Mutex::new(DeviceRates::default()),
             device_sockets: std::sync::Mutex::new(DeviceSockets::default()),
+            stop_token: std::sync::OnceLock::new(),
         })
     }
 
@@ -637,6 +646,11 @@ impl Gateway {
         request: Request<Incoming>,
         armed: &Arm,
     ) -> Response<Full<Bytes>> {
+        if request.method() == Method::POST
+            && request.uri().path() == crate::remote_gateway_control::STOP_PATH
+        {
+            return self.control_stop(request.headers());
+        }
         if !self.policy.host_ok(request.headers()) {
             // Setup identifies the gateway on this computer without knowing
             // the address it was started with. Only the version string is
@@ -672,6 +686,29 @@ impl Gateway {
             (&Method::GET, path) => client_file(path),
             _ => plain(StatusCode::NOT_FOUND, "not found"),
         }
+    }
+
+    /// `localpilot remote gateway stop`: only from this computer (a loopback
+    /// `Host`, no `Origin`, so neither the proxy nor a web page qualifies) and
+    /// only with this gateway's token. Anything else looks like an unknown
+    /// path.
+    fn control_stop(&self, headers: &HeaderMap) -> Response<Full<Bytes>> {
+        let presented = single(
+            headers,
+            &header::HeaderName::from_static(crate::remote_gateway_control::TOKEN_HEADER),
+        );
+        let allowed = self.policy.loopback_host(headers)
+            && headers.get(header::ORIGIN).is_none()
+            && self.stop_token.get().is_some_and(|token| {
+                presented.is_some_and(|presented| {
+                    crate::remote_gateway_control::token_matches(token, presented.as_bytes())
+                })
+            });
+        if !allowed {
+            return plain(StatusCode::NOT_FOUND, "not found");
+        }
+        self.stop.cancel();
+        plain(StatusCode::OK, "stopping")
     }
 
     /// What this device is: its id, name, scope, whether it is limited to
@@ -2297,7 +2334,9 @@ fn push_status(cwd: &std::path::Path) -> crate::remote_status::PushStatus {
         &localpilot_config::CliOverrides::default(),
     ) {
         Ok(config) if !config.remote.enabled => PushState::Off("remote access is off"),
-        Ok(config) if !config.remote.push.enabled => PushState::Off("[remote.push] enabled = false"),
+        Ok(config) if !config.remote.push.enabled => {
+            PushState::Off("[remote.push] enabled = false")
+        }
         Ok(_) => PushState::On,
         Err(error) => PushState::Unknown(error.to_string()),
     };
@@ -2325,7 +2364,7 @@ async fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
 }
 
 /// `localpilot remote gateway`: run until interrupted or switched off.
-pub(crate) async fn run() -> anyhow::Result<()> {
+pub(crate) async fn run(background: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(
         &localpilot_config::ConfigPaths::standard(&cwd),
@@ -2351,9 +2390,27 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // Loopback only, always: TLS and any network exposure belong to the
     // user's proxy.
     let listener = bind_loopback(config.port).await?;
+    // Record this gateway so `remote gateway stop` and `remote status` find
+    // it (ADR-0288). Without the file it still runs; it just cannot be
+    // stopped from another terminal.
+    let token = crate::remote_gateway_control::new_token()?;
+    let control = crate::remote_gateway_control::Control {
+        port: config.port,
+        pid: std::process::id(),
+        started_by: if background {
+            crate::remote_gateway_control::StartedBy::Background
+        } else {
+            crate::remote_gateway_control::StartedBy::Foreground
+        },
+        token: token.clone(),
+    };
+    gateway.accept_stop_token(token.clone());
+    if let Err(error) = crate::remote_gateway_control::write_control(&control) {
+        eprintln!("The gateway's control file could not be written ({error}); `localpilot remote gateway stop` cannot stop it.");
+    }
     eprintln!(
         "Gateway on http://127.0.0.1:{} for {origin}. It reaches every workspace served with \
-         remote access on. Press Ctrl-C to stop.",
+         remote access on. Press Ctrl-C or run `localpilot remote gateway stop` to stop.",
         config.port
     );
     tokio::spawn({
@@ -2363,7 +2420,20 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             stop.cancel();
         }
     });
+    #[cfg(unix)]
+    tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            if let Ok(mut terminate) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                terminate.recv().await;
+                stop.cancel();
+            }
+        }
+    });
     gateway.serve(listener).await;
+    crate::remote_gateway_control::clear_control(&token);
     eprintln!("Gateway stopped.");
     Ok(())
 }
@@ -3580,6 +3650,47 @@ mod tests {
         )
         .await;
         assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(403));
+    }
+
+    #[tokio::test]
+    async fn only_this_computer_with_the_token_can_stop_the_gateway() {
+        let gateway = plain_gateway("https://pc.tail1.ts.net", &[]);
+        let stop = |host: &str, extra: &str| {
+            format!(
+                "POST /control/stop HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes()
+        };
+        let token = "a".repeat(64);
+        let with_token = format!("x-localpilot-gateway-token: {token}\r\n");
+        // No token is set yet: the path answers nothing.
+        let raw = ask_gateway(&gateway, stop("127.0.0.1:47610", &with_token)).await;
+        assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(404));
+        gateway.accept_stop_token(token.clone());
+        for (host, extra) in [
+            // Through the proxy, from a web page, without or with a wrong token.
+            ("pc.tail1.ts.net", with_token.clone()),
+            (
+                "127.0.0.1:47610",
+                format!("{with_token}Origin: https://evil.example\r\n"),
+            ),
+            ("127.0.0.1:47610", String::new()),
+            (
+                "127.0.0.1:47610",
+                format!("x-localpilot-gateway-token: {}\r\n", "b".repeat(64)),
+            ),
+        ] {
+            let raw = ask_gateway(&gateway, stop(host, &extra)).await;
+            assert_eq!(
+                status_and_body(&raw).map(|(code, _)| code),
+                Some(404),
+                "{host} {extra}"
+            );
+            assert!(!gateway.stop.is_cancelled());
+        }
+        let raw = ask_gateway(&gateway, stop("127.0.0.1:47610", &with_token)).await;
+        assert_eq!(status_and_body(&raw).map(|(code, _)| code), Some(200));
+        assert!(gateway.stop.is_cancelled());
     }
 
     #[tokio::test]

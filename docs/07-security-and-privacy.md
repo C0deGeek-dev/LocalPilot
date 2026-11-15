@@ -1304,6 +1304,13 @@ project file cannot set any `[remote]` key).
   and WebSocket. TLS and any exposure beyond this computer belong to the HTTPS
   tunnel or reverse proxy the user runs on the same machine; LocalPilot bundles
   and runs none.
+- **Started and stopped by the user.** It runs in a terminal, or in the
+  background after `localpilot remote gateway start`. `localpilot remote gateway
+  stop` ends it from any terminal: it presents a random token from an
+  owner-only control file (`~/.localpilot/devices/gateway.json`) on a stop path
+  the gateway accepts only with a loopback `Host`, no `Origin` and that exact
+  token, so neither a request through the proxy nor a web page can stop it
+  (ADR-0288).
 - **It carries traffic; the servers decide.** A server started with remote
   access on lists its workspace in `~/.localpilot/served` (owner-only) under an
   opaque id (a hash of its folder, never the path) while it runs, and only it
