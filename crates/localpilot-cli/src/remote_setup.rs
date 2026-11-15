@@ -1340,6 +1340,21 @@ pub(crate) fn edit_config_with(
     origin: &str,
     after_replace: &dyn Fn(&Path),
 ) -> Result<ConfigEdit, ConfigError> {
+    edit_remote_table(path, after_replace, &|table| {
+        table["enabled"] = toml_edit::value(true);
+        table["advertised_url"] = toml_edit::value(origin);
+        Ok(())
+    })
+}
+
+/// Edit the user config's `[remote]` table under the config lock, keeping
+/// everything else byte for byte, and confirm the result by reading it back.
+/// Shared by `remote setup` and `remote push on|off`.
+pub(crate) fn edit_remote_table(
+    path: Option<&Path>,
+    after_replace: &dyn Fn(&Path),
+    edit: &dyn Fn(&mut toml_edit::Table) -> Result<(), String>,
+) -> Result<ConfigEdit, ConfigError> {
     let before_ = |message: String| ConfigError::Before(message);
     let path =
         path.ok_or_else(|| before_("there is no user config location on this system".into()))?;
@@ -1380,8 +1395,7 @@ pub(crate) fn edit_config_with(
     let table = remote
         .as_table_mut()
         .ok_or_else(|| before_("[remote] in the config is not a table".into()))?;
-    table["enabled"] = toml_edit::value(true);
-    table["advertised_url"] = toml_edit::value(origin);
+    edit(table).map_err(before_)?;
     let after = document.to_string();
     if after.as_bytes() == before.as_slice() {
         return Ok(ConfigEdit::Unchanged);
@@ -1390,7 +1404,7 @@ pub(crate) fn edit_config_with(
     let now = std::fs::read(path).unwrap_or_default();
     if now != before {
         return Err(before_(
-            "the config changed while setup was editing it".into(),
+            "the config changed while it was being edited".into(),
         ));
     }
     let temporary = path.with_extension("toml.tmp");

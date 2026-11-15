@@ -188,11 +188,104 @@ pub(crate) fn rotate_command() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `localpilot remote push on|off`: set `[remote.push] enabled` in the user
+/// config through the same locked, read-back edit `remote setup` uses.
+pub(crate) fn toggle_command(on: bool) -> anyhow::Result<()> {
+    let path = localpilot_config::user_config_path();
+    let remote_on = toggle(path.as_deref(), on)?;
+    let state = if on { "on" } else { "off" };
+    match &path {
+        Some(path) => println!("Notifications are {state} in {}.", path.display()),
+        None => println!("Notifications are {state}."),
+    }
+    if on && !remote_on {
+        println!(
+            "Remote access is off, so no notifications are sent until it is on: run `localpilot remote setup`."
+        );
+    }
+    println!(
+        "A workspace server that is running reads this when it next starts (`localpilot serve --stop` stops it)."
+    );
+    if on {
+        println!(
+            "Then turn notifications on in the companion app (Devices → Enable notifications)."
+        );
+    }
+    Ok(())
+}
+
+/// Write `[remote.push] enabled`; returns whether `[remote] enabled` is on.
+fn toggle(path: Option<&Path>, on: bool) -> anyhow::Result<bool> {
+    let remote_on = std::cell::Cell::new(false);
+    crate::remote_setup::edit_remote_table(path, &|_| {}, &|remote| {
+        remote_on.set(remote.get("enabled").and_then(toml_edit::Item::as_bool) == Some(true));
+        let push = remote
+            .entry("push")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let push = push
+            .as_table_mut()
+            .ok_or_else(|| "[remote.push] in the config is not a table".to_string())?;
+        push["enabled"] = toml_edit::value(on);
+        Ok(())
+    })
+    .map_err(|error| match error {
+        crate::remote_setup::ConfigError::Before(message) => {
+            anyhow::anyhow!("The config was not changed: {message}.")
+        }
+        crate::remote_setup::ConfigError::After(message) => {
+            anyhow::anyhow!(
+                "The config was replaced, but {message}; check it before relying on it."
+            )
+        }
+    })?;
+    Ok(remote_on.get())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn push_on_and_off_round_trip_and_keep_the_rest_of_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# mine\n[provider]\nname = \"local\" # keep\n\n[remote]\nenabled = true\nadvertised_url = \"https://pc.example.ts.net/\"\n";
+        std::fs::write(&path, original).unwrap();
+        assert!(toggle(Some(&path), true).unwrap(), "remote access is on");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("# mine\n[provider]\nname = \"local\" # keep\n"),
+            "{text}"
+        );
+        let parsed: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(parsed["remote"]["push"]["enabled"].as_bool(), Some(true));
+        assert_eq!(parsed["remote"]["enabled"].as_bool(), Some(true));
+        toggle(Some(&path), false).unwrap();
+        let parsed: toml_edit::DocumentMut =
+            std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(parsed["remote"]["push"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn push_on_without_remote_access_still_writes_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(!toggle(Some(&path), true).unwrap(), "no [remote] yet");
+        let parsed: toml_edit::DocumentMut =
+            std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(parsed["remote"]["push"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn a_config_that_is_not_toml_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "not = = toml").unwrap();
+        assert!(toggle(Some(&path), true).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not = = toml");
+    }
 
     #[test]
     fn the_key_is_made_once_kept_and_replaced_only_by_a_rotation() {

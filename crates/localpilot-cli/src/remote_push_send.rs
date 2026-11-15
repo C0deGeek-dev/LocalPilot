@@ -1116,7 +1116,7 @@ mod tests {
         let (_, last) = rig.registry.last_audit("push_sent").unwrap();
         assert_eq!(last, "fcm.googleapis.com 410");
         let line = crate::remote_status::render_push(&crate::remote_status::PushStatus {
-            enabled: true,
+            enabled: crate::remote_status::PushState::On,
             subscribed: Ok(0),
             last: rig.registry.last_audit("push_sent"),
         });

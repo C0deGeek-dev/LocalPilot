@@ -2289,11 +2289,18 @@ fn client_line() -> String {
 /// Whether notifications are on, how many phones turned them on, and the
 /// last send recorded in the device audit log.
 fn push_status(cwd: &std::path::Path) -> crate::remote_status::PushStatus {
-    let enabled = localpilot_config::load(
+    use crate::remote_status::PushState;
+    // A config that cannot be read says nothing about notifications: report
+    // that, rather than "off".
+    let enabled = match localpilot_config::load(
         &localpilot_config::ConfigPaths::standard(cwd),
         &localpilot_config::CliOverrides::default(),
-    )
-    .is_ok_and(|config| config.remote.enabled && config.remote.push.enabled);
+    ) {
+        Ok(config) if !config.remote.enabled => PushState::Off("remote access is off"),
+        Ok(config) if !config.remote.push.enabled => PushState::Off("[remote.push] enabled = false"),
+        Ok(_) => PushState::On,
+        Err(error) => PushState::Unknown(error.to_string()),
+    };
     let registry = crate::server_devices::DeviceRegistry::for_user(cwd);
     let subscribed = registry
         .list()

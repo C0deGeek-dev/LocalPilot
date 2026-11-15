@@ -15,6 +15,11 @@ is SemVer-stable; the configuration schema stability policy is in
   (ADR-0286). Refresh inactive QUIC dependencies for newer advisories.
 - Keep PowerShell command-inspection fixtures compatible with Unix paths and
   isolate the incognito delegation ledger fixture from empty-project Git setup.
+- `localpilot remote push on` / `off` turn device notifications on or off in the
+  user config, so nobody has to edit `[remote.push]` by hand. `remote status`
+  and a device's refused request name that command, and a config that cannot be
+  read shows notifications as `unknown` instead of `off` (LocalHub#291).
+
 - Pairing, notification and access messages say "device" instead of "phone",
   the pairing form suggests the name `device`, and a remote prompt reads
   `(device: <name>)` (LocalHub#287).

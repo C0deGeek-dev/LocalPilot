@@ -1912,7 +1912,7 @@ async fn push_for_device(
             };
         }
         return error(
-            "notifications are off on this computer: set `[remote.push] enabled = true` in its user config",
+            "notifications are off on this computer: run `localpilot remote push on` there",
         );
     };
     match request {
@@ -6148,7 +6148,7 @@ pub(crate) mod tests {
         let ask = |request| first_record(&endpoint, device_push(&capability, &credential, request));
         let (_, _, reply) = ask(PushRequest::Key).await;
         assert!(
-            matches!(reply, ServerEvent::Error { ref message } if message.contains("[remote.push]")),
+            matches!(reply, ServerEvent::Error { ref message } if message.contains("localpilot remote push on")),
             "{reply:?}"
         );
         let (_, _, reply) = ask(subscribe("k", "https://fcm.googleapis.com/x")).await;

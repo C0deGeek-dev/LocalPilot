@@ -974,7 +974,7 @@ enum RemoteAction {
         #[arg(long, conflicts_with_all = ["random_name", "keep_name"])]
         resolve: bool,
     },
-    /// Phone notifications (`[remote.push]`).
+    /// Device notifications (`[remote.push]`).
     Push {
         #[command(subcommand)]
         action: RemotePushAction,
@@ -984,9 +984,14 @@ enum RemoteAction {
 /// `localpilot remote push` actions.
 #[derive(Subcommand, Debug)]
 enum RemotePushAction {
-    /// Replace the key this computer signs notifications with. Phones that
+    /// Replace the key this computer signs notifications with. Devices that
     /// had notifications on must turn them on again.
     Rotate,
+    /// Allow paired devices to turn notifications on (`[remote.push] enabled = true`
+    /// in the user config). Notifications never contain session content.
+    On,
+    /// Stop sending notifications (`[remote.push] enabled = false`).
+    Off,
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -2212,9 +2217,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 };
                 remote_setup::command(mode, yes).await?;
             }
-            RemoteAction::Push {
-                action: RemotePushAction::Rotate,
-            } => remote_push_keys::rotate_command()?,
+            RemoteAction::Push { action } => match action {
+                RemotePushAction::Rotate => remote_push_keys::rotate_command()?,
+                RemotePushAction::On => remote_push_keys::toggle_command(true)?,
+                RemotePushAction::Off => remote_push_keys::toggle_command(false)?,
+            },
         },
 
         Command::ServerServe => {

@@ -65,8 +65,10 @@ pub fn health_body() -> String {
 /// Phone notifications as `remote status` reports them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PushStatus {
-    /// `[remote] enabled` and `[remote.push] enabled` are both on.
-    pub enabled: bool,
+    /// Whether notifications are sent from this computer. In JSON: `true`,
+    /// `false`, or `null` when the settings cannot be read.
+    #[serde(serialize_with = "serialize_push_state")]
+    pub enabled: PushState,
     /// Phones with notifications on (not revoked); `Err` names why the
     /// registry could not be read.
     pub subscribed: Result<usize, String>,
@@ -75,12 +77,31 @@ pub struct PushStatus {
     pub last: Option<(u64, String)>,
 }
 
+/// Whether notifications are on, as far as the settings say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushState {
+    /// `[remote] enabled` and `[remote.push] enabled` are both on.
+    On,
+    /// Off; names which setting is off.
+    Off(&'static str),
+    /// The settings could not be read, so it is not known.
+    Unknown(String),
+}
+
+fn serialize_push_state<S: serde::Serializer>(state: &PushState, serializer: S) -> Result<S::Ok, S::Error> {
+    match state {
+        PushState::On => serializer.serialize_bool(true),
+        PushState::Off(_) => serializer.serialize_bool(false),
+        PushState::Unknown(_) => serializer.serialize_none(),
+    }
+}
+
 /// The notifications line.
 pub fn render_push(push: &PushStatus) -> String {
-    let state = if push.enabled {
-        "on"
-    } else {
-        "off ([remote.push] enabled = false)"
+    let state = match &push.enabled {
+        PushState::On => "on".to_string(),
+        PushState::Off(why) => format!("off ({why}); run `localpilot remote push on`"),
+        PushState::Unknown(error) => format!("unknown (settings cannot be read: {error})"),
     };
     let phones = match &push.subscribed {
         Ok(1) => "1 device turned them on".to_string(),
@@ -149,4 +170,23 @@ pub fn render_status(status: &RemoteStatus) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod push_line_tests {
+    use super::*;
+
+    fn line(enabled: PushState) -> String {
+        render_push(&PushStatus { enabled, subscribed: Ok(1), last: None })
+    }
+
+    #[test]
+    fn off_names_the_setting_and_the_command_and_unreadable_is_not_off() {
+        assert!(line(PushState::On).contains("notifications:  on; 1 device turned them on"));
+        let off = line(PushState::Off("[remote.push] enabled = false"));
+        assert!(off.contains("off ([remote.push] enabled = false); run `localpilot remote push on`"), "{off}");
+        let unknown = line(PushState::Unknown("project config may not set remote".into()));
+        assert!(unknown.contains("unknown (settings cannot be read: project config may not set remote)"), "{unknown}");
+        assert!(!unknown.contains("off"), "{unknown}");
+    }
 }

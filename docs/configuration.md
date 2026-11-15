@@ -892,6 +892,12 @@ repository must not choose where pairing points.
 | `proxy_hosts` | array of strings | `[]` | The exact `Host` values your proxy sends to the gateway. Empty means the advertised host, which is what a proxy that preserves `Host` sends. Exact matches only; no wildcards. |
 | `push.enabled` | bool | `false` | Phone notifications (`[remote.push]`): paired phones may turn them on through the gateway, and the workspace server sends them a content-free, end-to-end encrypted notification when a shared session waits on a permission ask or stops (ADR-0267). |
 
+`localpilot remote push on` sets `push.enabled = true` in the user config (and
+`off` sets it back), through the same locked edit `remote setup` uses; a
+workspace server that is running reads it when it next starts. `remote status`
+reports notifications as `on`, `off` with the setting that is off and this
+command, or `unknown` when the settings cannot be read.
+
 `[remote.push]` notifications are signed with a key this computer makes for
 itself (P-256, kept owner-only beside the device registry as
 `~/.localpilot/devices/vapid.p8`). `localpilot remote push rotate` replaces it;
