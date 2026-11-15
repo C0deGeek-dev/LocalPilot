@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A `/name` or `/rename` in the terminal that shares a session reaches devices
+  while they watch: the snapshot carries the session's name, and a rename sends
+  attached devices a fresh one (LocalHub#289).
+
 - The pairing form suggests a name no paired device has yet: `device`, then
   `device-2`, `device-3`, ... (LocalHub#287).
 

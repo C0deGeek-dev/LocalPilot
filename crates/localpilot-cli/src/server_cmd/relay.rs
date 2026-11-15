@@ -1032,6 +1032,7 @@ pub(super) fn relayed_for_test(hosts: &HostMap) -> SessionId {
         turn_text_truncated: false,
         history: Vec::new(),
         history_truncated: false,
+        name: None,
     });
     hosts
         .relays

@@ -232,9 +232,11 @@ declares `"resume"`:
   turn" while it is true), the latest `plan`, pending `asks` with
   detail, `turn_text` (the current or last turn's text, a 64 KiB tail with
   `turn_text_truncated`; absent when it was lost), and `history` (the stored
-  transcript's last 20 messages within 64 KiB, `history_truncated`). The stored
-  history may not include the current turn. A snapshot never waits for a
-  running turn;
+  transcript's last 20 messages within 64 KiB, `history_truncated`), and the
+  session's `name` when it has one (a session shared from a terminal; one line,
+  at most 200 characters). The stored history may not include the current
+  turn. A snapshot never waits for a running turn. A rename in the sharing
+  terminal reaches attached devices as `resync_required` and a fresh snapshot;
 - receives `turn_started` before each turn's other records;
 - receives `resync_required` followed by a fresh `snapshot` when it fell behind,
   or when the server itself lost events. In the second case the server starts a

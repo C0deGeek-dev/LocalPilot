@@ -9837,6 +9837,68 @@ pub(crate) mod tests {
             .is_none());
     }
 
+    /// LocalHub#289: a `/name` or `/rename` in the sharing terminal reaches an
+    /// attached device while it watches, in a fresh snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_rename_in_the_sharing_terminal_reaches_an_attached_device() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
+        let hosts = HostMap::default();
+        let (endpoint, _server) = spawn_server_on(factory.clone(), 8, hosts.clone());
+        let source = relay_source(&factory, "share-1");
+        source
+            .source
+            .feed()
+            .set_name(Some("First name".to_string()));
+        let stop = CancellationToken::new();
+        let _relay = start_relay(&endpoint, &source, &stop);
+        wait_relayed(&hosts, source.identity.session).await;
+        let (_gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Observe,
+        )
+        .await;
+        let (mut device, _device_write, attached) = first_record(
+            &endpoint,
+            device_attach(
+                &capability,
+                &credential,
+                AttachTarget::ResumeId {
+                    session_id: source.identity.session,
+                },
+            ),
+        )
+        .await;
+        assert!(
+            matches!(attached, ServerEvent::Attached { .. }),
+            "{attached:?}"
+        );
+        timeout(
+            DEADLINE,
+            snapshot_where(&mut device, |event| {
+                matches!(event, ServerEvent::Snapshot { name: Some(name), .. } if name == "First name")
+            }),
+        )
+        .await
+        .expect("the name is in the first snapshot");
+
+        source
+            .source
+            .feed()
+            .set_name(Some("Renamed on the PC".to_string()));
+        timeout(
+            DEADLINE,
+            snapshot_where(&mut device, |event| {
+                matches!(event, ServerEvent::Snapshot { name: Some(name), .. } if name == "Renamed on the PC")
+            }),
+        )
+        .await
+        .expect("the rename reached the attached device");
+        stop.cancel();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn devices_reach_only_shared_sessions() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
@@ -9999,6 +10061,7 @@ pub(crate) mod tests {
                 text: history.to_string(),
             }],
             history_truncated: false,
+            name: None,
         }
     }
 

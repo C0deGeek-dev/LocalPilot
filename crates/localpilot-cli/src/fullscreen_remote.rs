@@ -249,6 +249,15 @@ impl RemoteHost {
         }
     }
 
+    /// Publish the session's name as the terminal shows it; the feed sends
+    /// devices a fresh snapshot only when it changed (LocalHub#289).
+    fn publish_name(&self, name: Option<&str>) {
+        self.share
+            .source()
+            .feed()
+            .set_name(name.map(str::to_string));
+    }
+
     /// Take the phone `/compact` waiting for its result, if any.
     pub(super) fn take_compact(&self) -> Option<RemoteTag> {
         self.compact.borrow_mut().take()
@@ -565,6 +574,7 @@ pub(super) fn idle_tick(
         ));
     }
     host.publish(runtime, false);
+    host.publish_name(app.active_session_name());
     host.publish_admission(false, 0);
     show_notices(app, host);
     tick_pairing(app, host, false);

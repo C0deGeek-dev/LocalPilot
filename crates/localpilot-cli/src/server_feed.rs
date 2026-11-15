@@ -161,6 +161,8 @@ struct FeedState {
 struct MirrorExtra {
     history: (Vec<HistoryMessage>, bool),
     admission: Admission,
+    /// The session's name, when it has one.
+    name: Option<String>,
 }
 
 impl MirrorExtra {
@@ -169,6 +171,7 @@ impl MirrorExtra {
         Self {
             history: (Vec::new(), true),
             admission: Admission::default(),
+            name: None,
         }
     }
 }
@@ -322,6 +325,7 @@ impl SessionFeed {
             turn_text_truncated,
             history,
             history_truncated,
+            name,
             ..
         } = snapshot
         else {
@@ -350,6 +354,7 @@ impl SessionFeed {
                 busy: *busy,
                 queued: *queued,
             },
+            name: name.as_deref().and_then(shown_name),
         });
         let event = ServerEvent::ResyncRequired {
             epoch: state.epoch.clone(),
@@ -612,12 +617,34 @@ impl SessionFeed {
             if state.closed.is_some() {
                 return;
             }
-            let admission = state
+            let (admission, name) = state
                 .source
-                .as_ref()
-                .map(|s| s.admission)
+                .take()
+                .map(|s| (s.admission, s.name))
                 .unwrap_or_default();
-            state.source = Some(MirrorExtra { history, admission });
+            state.source = Some(MirrorExtra {
+                history,
+                admission,
+                name,
+            });
+        }
+        self.history.send_modify(|n| *n += 1);
+    }
+
+    /// Publish the session's name (a source feed). A change sends devices a
+    /// fresh snapshot, as a history change does (LocalHub#289).
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    pub(crate) fn set_name(&self, name: Option<String>) {
+        {
+            let mut state = self.state();
+            if state.closed.is_some() {
+                return;
+            }
+            let extra = state.source.get_or_insert_with(MirrorExtra::unknown);
+            if extra.name == name {
+                return;
+            }
+            extra.name = name;
         }
         self.history.send_modify(|n| *n += 1);
     }
@@ -631,11 +658,15 @@ impl SessionFeed {
             if state.closed.is_some() {
                 return;
             }
-            let history = state
+            let (history, name) = state
                 .source
                 .take()
-                .map_or_else(|| (Vec::new(), true), |s| s.history);
-            state.source = Some(MirrorExtra { history, admission });
+                .map_or_else(|| ((Vec::new(), true), None), |s| (s.history, s.name));
+            state.source = Some(MirrorExtra {
+                history,
+                admission,
+                name,
+            });
         }
         self.history.send_modify(|n| *n += 1);
     }
@@ -670,12 +701,16 @@ impl SessionFeed {
                         .insert(ask.ask_id.clone(), ask.detail());
                 }
             }
-            let admission = state
+            let (admission, name) = state
                 .source
-                .as_ref()
-                .map(|s| s.admission)
+                .take()
+                .map(|s| (s.admission, s.name))
                 .unwrap_or_default();
-            state.source = Some(MirrorExtra { history, admission });
+            state.source = Some(MirrorExtra {
+                history,
+                admission,
+                name,
+            });
             let event = ServerEvent::ResyncRequired {
                 epoch: state.epoch.clone(),
                 seq: state.ring.head() + 1,
@@ -962,6 +997,25 @@ fn ask_event(ask: &AskDetail) -> ServerEvent {
     }
 }
 
+/// The longest session name a snapshot carries, in characters.
+const NAME_MAX: usize = 200;
+
+/// A relayed session name as devices are shown it: one line, no control
+/// characters, at most [`NAME_MAX`] characters; `None` when nothing is left.
+fn shown_name(name: &str) -> Option<String> {
+    let line: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(NAME_MAX)
+        .collect();
+    (!line.is_empty()).then_some(line)
+}
+
 fn snapshot(
     state: &FeedState,
     history: &(Vec<HistoryMessage>, bool),
@@ -970,9 +1024,9 @@ fn snapshot(
     // A mirror's history and admission are its source's, and a source feed's
     // are its host's, each held with the projection; the caller's are for
     // hosted sessions only.
-    let (history, admission) = match state.mirror.as_ref().or(state.source.as_ref()) {
-        Some(extra) => (&extra.history, extra.admission),
-        None => (history, admission),
+    let (history, admission, name) = match state.mirror.as_ref().or(state.source.as_ref()) {
+        Some(extra) => (&extra.history, extra.admission, extra.name.clone()),
+        None => (history, admission, None),
     };
     let projection = &state.projection;
     ServerEvent::Snapshot {
@@ -987,6 +1041,7 @@ fn snapshot(
         turn_text_truncated: projection.turn_text_truncated,
         history: history.0.clone(),
         history_truncated: history.1,
+        name,
     }
 }
 
@@ -1675,6 +1730,74 @@ mod tests {
         })
         .await;
         drop((history, newest));
+    }
+
+    #[tokio::test]
+    async fn a_published_name_is_in_the_snapshot_and_only_a_change_signals() {
+        let ingress = Arc::new(Ingress::default());
+        let feed = SessionFeed::start_fed(ingress.clone(), None, 8 * 1024 * 1024);
+        let mut changes = feed.source_changes();
+        changes.borrow_and_update();
+        feed.set_name(Some("Renamed on the PC".to_string()));
+        assert!(changes.has_changed().unwrap(), "a new name signals");
+        changes.borrow_and_update();
+        let (ServerEvent::Snapshot { name, .. }, _) = feed.source_snapshot() else {
+            unreachable!()
+        };
+        assert_eq!(name.as_deref(), Some("Renamed on the PC"));
+        feed.set_name(Some("Renamed on the PC".to_string()));
+        assert!(!changes.has_changed().unwrap(), "the same name does not");
+        // History and admission keep the name.
+        ingress.history(shown("one"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), changes.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        feed.set_admission(Admission {
+            busy: true,
+            queued: 0,
+        });
+        let (ServerEvent::Snapshot { name, .. }, _) = feed.source_snapshot() else {
+            unreachable!()
+        };
+        assert_eq!(name.as_deref(), Some("Renamed on the PC"));
+    }
+
+    #[test]
+    fn a_mirror_shows_its_sources_name_on_one_bounded_line() {
+        let feed = SessionFeed::mirror();
+        let installed = |name: &str| {
+            let source = ServerEvent::Snapshot {
+                epoch: "source".to_string(),
+                seq: 1,
+                turn: TurnState::Idle,
+                busy: false,
+                queued: 0,
+                plan: None,
+                asks: Vec::new(),
+                turn_text: None,
+                turn_text_truncated: false,
+                history: Vec::new(),
+                history_truncated: false,
+                name: Some(name.to_string()),
+            };
+            assert!(feed.install(&source));
+            let (ServerEvent::Snapshot { name, .. }, _) =
+                feed.snapshot(&(Vec::new(), false), &Admission::default)
+            else {
+                unreachable!()
+            };
+            name
+        };
+        assert_eq!(
+            installed("Release\nnotes\t 2").as_deref(),
+            Some("Release notes 2")
+        );
+        assert_eq!(installed(" \u{7} ").as_deref(), None);
+        assert_eq!(
+            installed(&"x".repeat(500)).map(|n| n.chars().count()),
+            Some(NAME_MAX)
+        );
     }
 
     #[tokio::test]

@@ -317,6 +317,7 @@ mod tests {
             turn_text_truncated: false,
             history: Vec::new(),
             history_truncated: false,
+            name: Some("Named on the PC".to_string()),
         }
     }
 

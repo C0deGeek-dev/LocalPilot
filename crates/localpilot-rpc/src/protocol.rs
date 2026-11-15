@@ -746,6 +746,10 @@ pub enum ServerEvent {
         history: Vec<HistoryMessage>,
         #[serde(default)]
         history_truncated: bool,
+        /// The session's name, when it has one (`/name`, `/rename`). A
+        /// rename in the sharing terminal reaches devices as a new snapshot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// The connection (or the server) lost feed records it cannot replay. A
     /// `snapshot` follows for [`CAPABILITY_RESUME`] clients.

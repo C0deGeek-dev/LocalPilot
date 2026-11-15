@@ -28348,6 +28348,14 @@ last_seen = "2026-08-10"
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let _ = snapshot_where(&mut early, cleared).await;
+        // A `/name` in the terminal (the header's name) reaches the phone
+        // while it watches (LocalHub#289).
+        app.set_active_session_name(Some("Named in the terminal".to_string()));
+        ticking(&mut app, &mut bundle.runtime, &host, |_| true).await;
+        let _ = snapshot_where(&mut early, |s| {
+            matches!(s, localpilot_rpc::ServerEvent::Snapshot { name: Some(name), .. } if name == "Named in the terminal")
+        })
+        .await;
         // A phone prompt reaches the terminal's own queue with its authority.
         send_command(
             &mut early_write,
