@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Embed LocalLink 0.1.4: a message sent from a device stays in view while the
+  PC works on it, also through the resync at the start of a turn
+  (LocalHub#285).
+
 - A session shared from the terminal now marks each turn's start for devices,
   as the server's own sessions do: the companion shows the turn as running
   before its first text, and a device that opens the session mid-turn sees it

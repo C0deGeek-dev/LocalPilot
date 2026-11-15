@@ -277,11 +277,15 @@ export class Sessions {
       this.viewStale = false;
       this.historyUnconfirmed = false;
       this.clearActionNotice();
+      const local = this.localInputs(event.history, event.history_truncated);
       this.history = event.history;
       this.awaitingReply = false;
-      const unconfirmed = this.entries.filter((entry) => entry.type === 'user' && ['sending', 'unknown', 'rejected'].includes(entry.delivery));
-      this.entries = event.turn === 'running' && event.turn_text ? [{ type: 'assistant', text: event.turn_text }] : [];
-      this.entries.push(...unconfirmed);
+      // Inputs the PC took but has not written to its history yet (it does at
+      // the end of the turn) stay, in order: the running prompt before its
+      // reply, queued follow-ups after it.
+      this.entries = [...local.accepted];
+      if (event.turn === 'running' && event.turn_text) this.entries.push({ type: 'assistant', text: event.turn_text });
+      this.entries.push(...local.queued, ...local.unconfirmed);
       this.plan = event.plan || [];
       this.asks = asks;
       this.reconcileApproval();
@@ -322,6 +326,25 @@ export class Sessions {
     }
     if (this.ready) this.synced = this.now();
     this.emit();
+  }
+  // Split this view's own inputs for a snapshot with `history`. An accepted or
+  // queued input stays until a user message with its text appears in the
+  // history beyond what this view already had (an earlier identical message
+  // does not count; a truncated history is matched as a whole). Unconfirmed
+  // ones always stay.
+  localInputs(history, truncated) {
+    const users = (messages) => messages.filter((message) => message.role === 'user').map((message) => message.text);
+    const known = users(this.history).length, next = users(history);
+    const arrived = truncated ? next : next.slice(Math.min(known, next.length));
+    const result = { accepted: [], queued: [], unconfirmed: [] };
+    for (const entry of this.entries) {
+      if (entry.type !== 'user') continue;
+      if (['sending', 'unknown', 'rejected'].includes(entry.delivery)) { result.unconfirmed.push(entry); continue; }
+      const index = arrived.indexOf(entry.text);
+      if (index >= 0) { arrived.splice(index, 1); continue; }
+      (entry.delivery === 'queued' ? result.queued : result.accepted).push(entry);
+    }
+    return result;
   }
   readCommands() {
     this.commands = [];
