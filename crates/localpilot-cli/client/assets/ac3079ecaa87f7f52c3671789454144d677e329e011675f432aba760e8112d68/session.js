@@ -3,6 +3,8 @@ import { compatibilityIssue, protocol } from './compatibility.js';
 const terminalReplies = new Set(['accepted', 'queued', 'command_result', 'rejected', 'error']);
 const unknownOutcome = 'Outcome unknown. Check the session on your PC before sending again. Nothing will be retried automatically.';
 
+// A session name from the PC: absent, null (unnamed) or a bounded string.
+function validName(name) { return name === undefined || name === null || (typeof name === 'string' && name.length <= 512); }
 function normalizeAsk(ask) {
   if (!ask || typeof ask !== 'object') throw new Error('ask');
   // RPC zero means no deadline; live events omit it while snapshots include it.
@@ -136,6 +138,11 @@ export class Sessions {
         (item.name !== undefined && item.name !== null && typeof item.name !== 'string'))) throw new Error('listing');
       project.items = data.sessions;
       project.phase = 'ready';
+      // A refreshed listing also refreshes the attached session's name (/name, /rename).
+      if (this.workspace?.id === workspaceId && this.selected) {
+        const listed = project.items.find((item) => item.id === this.selected.id);
+        if (listed) { this.selected = listed; this.items = project.items; }
+      }
     } catch {
       if (!current()) return;
       project.phase = 'error';
@@ -245,7 +252,9 @@ export class Sessions {
         !Array.isArray(event.history) || event.history.some((item) => typeof item.role !== 'string' || typeof item.text !== 'string') ||
         !Array.isArray(event.asks) || (event.plan !== undefined && event.plan !== null && (!Array.isArray(event.plan) ||
           event.plan.some((step) => typeof step.title !== 'string' || typeof step.status !== 'string'))) ||
-        (event.turn_text !== undefined && event.turn_text !== null && typeof event.turn_text !== 'string')) throw new Error('snapshot');
+        (event.turn_text !== undefined && event.turn_text !== null && typeof event.turn_text !== 'string') ||
+        !validName(event.name)) throw new Error('snapshot');
+      if (event.name !== undefined) this.rename(event.name);
       const asks = event.asks.map(normalizeAsk);
       this.seq = event.seq;
       // A newer mirror install can win while this connection handles a resync.
@@ -350,7 +359,17 @@ export class Sessions {
         this.asks = event.asks.map(normalizeAsk); this.reconcileApproval(); break;
       case 'warning': this.notice = event.message; break;
       case 'quota_paused': this.notice = `Paused by the provider. Reset: ${event.reset}`; break;
+      case 'session_renamed': if (event.name !== undefined && validName(event.name)) this.rename(event.name); break;
     }
+  }
+  // The PC is the source of the session name; keep the header and the listing in step.
+  rename(name) {
+    if (!this.selected) return;
+    const value = name || null;
+    this.selected = { ...this.selected, name: value };
+    const project = this.projects.get(this.workspace?.id);
+    if (project) project.items = project.items.map((item) => item.id === this.selected.id ? { ...item, name: value } : item);
+    if (this.workspace && project) this.items = project.items;
   }
   submit(text) {
     if (!this.canSubmit || !text.trim()) return;
@@ -452,6 +471,8 @@ export class Sessions {
       pending.entry.delivery = event.type === 'queued' ? 'queued' : 'accepted';
       pending.entry.queued = event.type === 'queued';
     }
+    // The PC stores a new name; read it back so the header and the list show it.
+    if (event.type === 'command_result' && ['name', 'rename'].includes(event.name) && this.workspace) void this.loadProject(this.workspace.id);
     this.actionNotice = true;
     this.notice = event.type === 'command_result' ? `/${event.name}: ${event.message || 'Completed.'}` :
       event.type === 'queued' && this.busy ? 'Follow-up queued by your PC.' : pending.command.type === 'cancel' ?

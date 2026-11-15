@@ -41,7 +41,7 @@ export class Device {
         if (generation !== this.generation) return;
         if (response.status === 401) { this.revoked(); return; }
       } catch { /* Keep the uncertain outcome visible. */ }
-      if (generation === this.generation) this.message = 'Revocation outcome unknown. Check access or revoke this phone on your PC. Nothing was retried.';
+      if (generation === this.generation) this.message = 'Revocation outcome unknown. Check access or revoke this device on your PC. Nothing was retried.';
     } finally { if (generation === this.generation) { this.busy = false; this.changed(this); } }
   }
 }

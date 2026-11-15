@@ -32,11 +32,11 @@ export function takePairingLink(location, history) {
 }
 
 export const messages = {
-  checking: ['Checking this phone', 'Contacting your computer securely…'],
+  checking: ['Checking this device', 'Contacting your computer securely…'],
   unpaired: ['Connect your computer', 'Scan the QR code on your PC, or enter its pairing link below.'],
   confirm: ['Is this your computer?', 'Check this HTTPS address against the one shown on your PC before pairing.'],
-  submitting: ['Pairing this phone', 'Waiting for your computer. Keep this page open.'],
-  paired: ['Phone paired', 'Choose a project and a shared terminal session below. Your work stays on your PC.'],
+  submitting: ['Pairing this device', 'Waiting for your computer. Keep this page open.'],
+  paired: ['Device paired', 'Choose a project and a shared terminal session below. Your work stays on your PC.'],
   invalid: ['Check the pairing details', 'Use the complete pairing link, or the code and 16-character workspace ID shown on your PC.'],
   'workspace-required': ['Workspace ID needed', 'Enter the Workspace line shown with the code on your PC, or copy the complete link from localpilot devices pair --url <your HTTPS address>.'],
   'wrong-origin': ['This link is for another address', 'Open the HTTPS address shown on your PC and enter the link there. No code was sent.'],
@@ -48,10 +48,10 @@ export const messages = {
   throttled: ['Too many requests', 'Pairing is temporarily limited across this computer. Wait before trying again.'],
   server: ['The PC could not finish pairing', 'Check LocalPilot on your computer before creating a fresh code.'],
   protocol: ['Unexpected gateway response', 'Check that your LocalPilot gateway and LocalLink versions are compatible.'],
-  unreachable: ['Cannot reach your computer', 'Check that your PC is awake, LocalPilot is running and your phone can reach its HTTPS address.'],
+  unreachable: ['Cannot reach your computer', 'Check that your PC is awake, LocalPilot is running and this device can reach its HTTPS address.'],
   unknown: ['Pairing result is unknown', 'The reply was lost. Check connection before entering a fresh code. The exchange will not be repeated automatically.'],
-  'cookie-missing': ['Pairing could not be confirmed', 'This phone has no accepted credential. Allow cookies for this HTTPS address, check access on the PC, then create a fresh pairing code.'],
-  revoked: ['This phone no longer has access', 'Access may have been revoked, or the browser credential was cleared. Create a new pairing code on your PC to connect again.'],
+  'cookie-missing': ['Pairing could not be confirmed', 'This device has no accepted credential. Allow cookies for this HTTPS address, check access on the PC, then create a fresh pairing code.'],
+  revoked: ['This device no longer has access', 'Access may have been revoked, or the browser credential was cleared. Create a new pairing code on your PC to connect again.'],
 };
 
 export function pairingFailure(status, body) {

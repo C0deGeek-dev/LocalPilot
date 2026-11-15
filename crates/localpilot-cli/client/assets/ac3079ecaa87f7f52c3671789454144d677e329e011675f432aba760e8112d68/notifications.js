@@ -1,13 +1,13 @@
 export class Notifications {
   constructor({ browser, fetch, changed }) {
     Object.assign(this, { browser, fetch, changed });
-    this.generation = 0; this.authorized = false; this.busy = false; this.enabled = false; this.message = 'Pair this phone before enabling notifications.';
+    this.generation = 0; this.authorized = false; this.busy = false; this.enabled = false; this.message = 'Pair this device before enabling notifications.';
   }
   get supported() { return !!(this.browser.Notification && this.browser.PushManager && this.browser.navigator.serviceWorker); }
   access(authorized) {
     if (this.authorized === authorized) return;
     this.authorized = authorized; ++this.generation; this.busy = false; this.enabled = false; this.workspace = '';
-    this.message = authorized ? 'Notifications are not confirmed. Choose a project, then enable or re-enable notifications.' : 'Pair this phone before enabling notifications.';
+    this.message = authorized ? 'Notifications are not confirmed. Choose a project, then enable or re-enable notifications.' : 'Pair this device before enabling notifications.';
     this.changed(this);
   }
   select(workspace) {
@@ -70,7 +70,7 @@ export class Notifications {
       const result = await this.request({ op: 'subscribe', endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth, key_id: key.key_id });
       if (!current()) return;
       if (result.subscribed !== true) throw new Error('Your PC did not confirm notification registration.');
-      this.enabled = true; this.message = 'Notifications enabled for this project. Use Test notification to check delivery on this phone.';
+      this.enabled = true; this.message = 'Notifications enabled for this project. Use Test notification to check delivery on this device.';
     });
   }
   test() {
@@ -79,7 +79,7 @@ export class Notifications {
       const result = await this.request({ op: 'test' });
       if (!current()) return;
       if (result.sent !== true) throw new Error('The PC did not confirm sending the test.');
-      this.message = 'Test sent through the push service. Check this phone’s notification tray; sending alone does not prove display. If missing, check browser and Android notification settings.';
+      this.message = 'Test sent through the push service. Check this device’s notification tray; sending alone does not prove display. If missing, check browser and Android notification settings.';
     });
   }
   off() {

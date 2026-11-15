@@ -1,8 +1,8 @@
 // Verified static shell updates automatically. Never caches private responses or replays mutations.
 /* global self, caches, fetch, MessageChannel, setTimeout, clearTimeout */
-const generation = 'f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103';
+const generation = 'ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68';
 const cacheName = `locallink-shell-${generation}`;
-const shellFiles = [{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/accessibility.js","integrity":"sha256-cdM1DPkH0iWZsOIFG+5vzzJUhTx8W8HnddPX1p2Tfcc="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/app.js","integrity":"sha256-e6C8Vwk2uuH4qnwZr0MeYV6MHys2DkqrGbwBkXNi0po="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/companion-view.js","integrity":"sha256-xVND0kLRQ1k3loT/ny2s83grCAbm2LbFe7sfaCfZgbE="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/compatibility.js","integrity":"sha256-utyfSYFqEeEZZC4M7vqp3Y2ApalA6gIRkDbeoaNf12A="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/device.js","integrity":"sha256-Ji6Pce589OjTBag8cdr7iRkGwEYheTxpVARgxbk+1Uk="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/icon-192.png","integrity":"sha256-JeHq97uQLPJKIRrm+I6eZzaXBonOOcl14oOaAZKiXl0="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/icon-512.png","integrity":"sha256-M092CgQsFn+0hCfcLSAOAXqYUwtWDJpLnvBJQlPhVe4="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/icon.svg","integrity":"sha256-TzYAdGS3TipGhrnsdNB4z05bHnqI8CY4W22W5gM2T+E="},{"url":"/index.html","integrity":"sha256-onnVB+ei7ObiPc/nK7BxcxoRkbm5tQecgedGNZogqKo="},{"url":"/manifest.webmanifest","integrity":"sha256-TbP1GZU6oKtbsPzkJY2+vrNQmluZi9N0f9dEUlmeXLY="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/notifications.js","integrity":"sha256-s0Br2FdHyvXzN9S9lGOqPoa209xiLmxGVY6lkJSyPng="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/offline.js","integrity":"sha256-LOWQAiC8RqYikqI3Ez4dkugTXeRGKZLxchAm2r4pzVg="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/pairing.js","integrity":"sha256-wfm/IGM8D4lYRQyWBv2GrCkqGPiCn2D32aDf1VeWmGE="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/session-view.js","integrity":"sha256-9wSMq2V1wqaXlhbet0ta2bq+uuv5T+6oSEEWz7O0Mac="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/session.js","integrity":"sha256-rnODeU8Nlgluvto7Ern7bxYl1PxOc9vO163tpmBed90="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/style.css","integrity":"sha256-LJLhpkZyDoWT4tJqdlZy9ecisJxrJZTWRCYx0inT3Hc="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/theme.js","integrity":"sha256-9Wjmlsb8zp/+YeUQOU/Py0eZt20JwQg94++dXVbAe4U="},{"url":"/assets/f46cb586c52207808881c25a6e73fd69c77f798c9020a8a63a920bc3da0af103/update-state.js","integrity":"sha256-qmF5Snmjo523e1LcvWKetdx/AKDTK2M18wcG//qj1HM="}];
+const shellFiles = [{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/accessibility.js","integrity":"sha256-cdM1DPkH0iWZsOIFG+5vzzJUhTx8W8HnddPX1p2Tfcc="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/app.js","integrity":"sha256-e6C8Vwk2uuH4qnwZr0MeYV6MHys2DkqrGbwBkXNi0po="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/companion-view.js","integrity":"sha256-Omx45YghjfTilMrafp/4dzYcxJI8bJvGzB9iHJREnN8="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/compatibility.js","integrity":"sha256-utyfSYFqEeEZZC4M7vqp3Y2ApalA6gIRkDbeoaNf12A="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/device.js","integrity":"sha256-JKlT0mjCU0LRRqXBYMYsuHsYKsIlzJfscyeWiUBVmAA="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/icon-192.png","integrity":"sha256-JeHq97uQLPJKIRrm+I6eZzaXBonOOcl14oOaAZKiXl0="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/icon-512.png","integrity":"sha256-M092CgQsFn+0hCfcLSAOAXqYUwtWDJpLnvBJQlPhVe4="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/icon.svg","integrity":"sha256-TzYAdGS3TipGhrnsdNB4z05bHnqI8CY4W22W5gM2T+E="},{"url":"/index.html","integrity":"sha256-SeNk7PkKDShgQE0mXEaUTBVGr3bp4EVNNNnzPF/tZI0="},{"url":"/manifest.webmanifest","integrity":"sha256-wkECMyfD+MxsUErcFfYwVDzpQIJXmwoyzguRaUaMoyI="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/notifications.js","integrity":"sha256-CmoPUn5A1a3ShGTvZMNjdyF/1+GP8CSXdkng1E4pmXo="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/offline.js","integrity":"sha256-LOWQAiC8RqYikqI3Ez4dkugTXeRGKZLxchAm2r4pzVg="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/pairing.js","integrity":"sha256-TtgzsUixGwiBPj9RGw3CeNnsK56rXnl1WnL+znWXIJQ="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/session-view.js","integrity":"sha256-jUY1g1h2ky2bvJvcRKoUxpOv/gapyW2LBbLIB7BawUg="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/session.js","integrity":"sha256-IRdXiFZL7F0uXsY3feDG4mDUqxMUhBk6Pzw/UX4M4wc="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/style.css","integrity":"sha256-LJLhpkZyDoWT4tJqdlZy9ecisJxrJZTWRCYx0inT3Hc="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/theme.js","integrity":"sha256-9Wjmlsb8zp/+YeUQOU/Py0eZt20JwQg94++dXVbAe4U="},{"url":"/assets/ac3079ecaa87f7f52c3671789454144d677e329e011675f432aba760e8112d68/update-state.js","integrity":"sha256-qmF5Snmjo523e1LcvWKetdx/AKDTK2M18wcG//qj1HM="}];
 const shellPaths = new Set(shellFiles.map((file) => file.url));
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
@@ -74,9 +74,16 @@ self.addEventListener('fetch', (event) => {
     return response;
   })());
 });
+// The PC sends only a kind ({"k":"ask"|"stopped"|"test"}); the visible text stays generic.
+// The kind decides where a tap leads: an ask to Attention, a finished turn to its session.
+const destinations = { ask: 'attention', stopped: 'sessions', test: 'devices' };
+function pushKind(event) {
+  try { const kind = event.data?.json()?.k; return Object.hasOwn(destinations, kind) ? kind : 'update'; } catch { return 'update'; }
+}
 self.addEventListener('push', (event) => {
+  const kind = pushKind(event);
   event.waitUntil(self.registration.showNotification('LocalLink', {
-    body: 'There is an update on your PC. Open LocalLink to check.', tag: 'locallink-update',
+    body: 'There is an update on your PC. Open LocalLink to check.', tag: `locallink-${kind}`, data: { k: kind },
   }));
 });
 self.addEventListener('notificationclick', (event) => {
@@ -84,7 +91,8 @@ self.addEventListener('notificationclick', (event) => {
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     const client = windows.find((client) => new URL(client.url).origin === self.location.origin && new URL(client.url).pathname === '/');
-    if (client) { client.postMessage({ type: 'notification-open' }); await client.focus(); }
-    else await self.clients.openWindow('/#attention');
+    const destination = destinations[event.notification.data?.k] || 'attention';
+    if (client) { client.postMessage({ type: 'notification-open', destination }); await client.focus(); }
+    else await self.clients.openWindow(`/#${destination}`);
   })());
 });

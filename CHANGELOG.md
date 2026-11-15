@@ -15,6 +15,12 @@ is SemVer-stable; the configuration schema stability policy is in
   (ADR-0286). Refresh inactive QUIC dependencies for newer advisories.
 - Keep PowerShell command-inspection fixtures compatible with Unix paths and
   isolate the incognito delegation ledger fixture from empty-project Git setup.
+- Embed LocalLink 0.1.3: it says "device" instead of "phone", keeps a renamed
+  session's name current (LocalHub#287, LocalHub#289), sends with Ctrl/Cmd+Enter
+  on every device (LocalHub#286), and a notification tap
+  opens Attention for an approval request, Sessions for a finished turn and
+  Devices for a test (LocalHub#290).
+
 - `localpilot remote gateway start` runs the gateway in the background, so phone
   access no longer needs a terminal window kept open, and `localpilot remote
   gateway stop` ends it from any terminal (ADR-0288, LocalHub#293). Setup,
