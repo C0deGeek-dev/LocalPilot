@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0287: A Background Server Can Be Stopped, And Stops Itself When Idle
+
+**Status:** accepted · **Date:** 2026-11-15. Builds on ADR-0249 and ADR-0261.
+
+**Context.** `/remote` ("Start server and share") and `connect --server` start
+the workspace's server as a detached `__server-serve`, which the terminal never
+stops (ADR-0261) so a session can outlive it (ADR-0249). The reaper removes
+sessions nobody needs, but the process itself stopped only on Ctrl-C, which a
+detached server cannot receive. It ran until reboot with nothing to serve, and
+`localbox stop`, which stops the model runtime, neither knew of it nor should
+find it by name. Ending the process from outside skipped saving its sessions.
+
+**Decision.**
+1. `server_stop` is a local-only first record over the workspace's owner-only
+   endpoint; the reply is `server_stopping`, then the server runs the same
+   shutdown as Ctrl-C (stop the reaper, save and close every session, release
+   the endpoint). It is refused on an attached connection, and the gateway
+   refuses it from a browser. `localpilot serve --stop` sends it and waits until
+   the endpoint is free. On Unix a `SIGTERM` stops the server the same way.
+2. A detached server also stops once no session is live, no client connection
+   is open and none has opened or closed for 30 minutes (checked every 30 s).
+   The gateway's control channel does not count: it stays open while the
+   gateway runs, whether or not anyone uses the workspace. A server started
+   with `localpilot serve` keeps running until it is stopped.
+3. `localbox stop` is unchanged: it stops the model runtime only.
+
+**Consequences.** A background server goes away on its own after the last use,
+or at once on request, and always saves its sessions. A phone does not list a
+workspace whose server stopped until it is started again from the terminal. An
+older server does not understand `server_stop`; `serve --stop` says so.
+
 ## ADR-0286: Raise The Source MSRV For Patched Bundled SQLite
 
 **Status:** accepted · **Date:** 2026-11-14.

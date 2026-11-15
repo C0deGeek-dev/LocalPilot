@@ -428,9 +428,10 @@ enum Command {
         resume: Option<String>,
     },
     /// Serve this workspace's sessions over the opt-in local-IPC transport (a
-    /// Unix domain socket or a Windows named pipe) until Ctrl-C. Clients attach
-    /// with `localpilot connect`. Strictly opt-in: the default in-process
-    /// `chat`/`ask`/`print`/`harness` path is unchanged and never starts it.
+    /// Unix domain socket or a Windows named pipe) until Ctrl-C or
+    /// `localpilot serve --stop`. Clients attach with `localpilot connect`.
+    /// Strictly opt-in: the default in-process `chat`/`ask`/`print`/`harness`
+    /// path is unchanged and never starts it.
     Serve {
         /// Model name to request; defaults to the provider's configured model.
         #[arg(long)]
@@ -444,6 +445,10 @@ enum Command {
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
         bypass: bool,
+        /// Stop this workspace's running server (saving its sessions first)
+        /// instead of starting one.
+        #[arg(long, conflicts_with_all = ["model", "provider", "permission", "bypass"])]
+        stop: bool,
     },
     /// Connect to this workspace's `serve` server and relay a session over
     /// stdin/stdout (plain text): stdin lines become prompts, session events
@@ -2139,18 +2144,26 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             )
             .await?;
         }
+        Command::Serve { stop: true, .. } => server_cmd::stop().await?,
         Command::Serve {
             model,
             provider,
             permission,
             bypass,
+            stop: false,
         } => {
             let profile = session_cmd::host_profile(
                 permission.as_deref(),
                 bypass,
                 session_cmd::Reach::Remote,
             )?;
-            server_cmd::serve(model.as_deref(), provider.as_deref(), profile).await?;
+            server_cmd::serve(
+                model.as_deref(),
+                provider.as_deref(),
+                profile,
+                server_cmd::Lifetime::UntilStopped,
+            )
+            .await?;
         }
         Command::Connect { resume, server } => {
             server_cmd::connect(resume.as_deref(), server).await?;
@@ -2210,7 +2223,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             // default profile. If the endpoint is already owned, `serve` prints
             // that and exits 0.
             let profile = session_cmd::host_profile(None, false, session_cmd::Reach::Remote)?;
-            server_cmd::serve(None, None, profile).await?;
+            server_cmd::serve(None, None, profile, server_cmd::Lifetime::UntilIdle).await?;
         }
         Command::EmbedReap {
             endpoint,
@@ -3227,7 +3240,7 @@ fn starts_a_session(command: &Command) -> bool {
         command,
         Command::Harness { .. }
             | Command::Eval { .. }
-            | Command::Serve { .. }
+            | Command::Serve { stop: false, .. }
             | Command::Ask { .. }
     )
 }

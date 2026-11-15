@@ -15,6 +15,13 @@ is SemVer-stable; the configuration schema stability policy is in
   (ADR-0286). Refresh inactive QUIC dependencies for newer advisories.
 - Keep PowerShell command-inspection fixtures compatible with Unix paths and
   isolate the incognito delegation ledger fixture from empty-project Git setup.
+- `localpilot serve --stop` stops this workspace's server cleanly (sessions are
+  saved first, as on Ctrl-C), and a `SIGTERM` now does the same on Unix. A
+  server started in the background by `/remote` or `connect --server` stops by
+  itself after 30 minutes with no live sessions and no attached clients, instead
+  of running until reboot; the remote gateway's connection does not keep it
+  alive. `localpilot serve` started by hand still runs until stopped (ADR-0287).
+
 - Embed LocalLink 0.1.1: verified app updates refresh open companion windows
   automatically, including CSS and scripts after version-only bumps. Preserve
   drafts during an update without replaying actions; retain a complete offline

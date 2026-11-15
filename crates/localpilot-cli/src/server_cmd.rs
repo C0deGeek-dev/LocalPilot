@@ -512,6 +512,101 @@ pub(crate) struct HostMap {
     /// come and go before its first attendance record).
     #[cfg(test)]
     telemetry_hold: Option<Arc<tokio::sync::Semaphore>>,
+    /// Cancelled to stop the whole server (a local `server_stop`, a signal, or
+    /// the idle exit); the accept loop then shuts down as on Ctrl-C.
+    stop: CancellationToken,
+    /// Which connections are open, and when one last came or went (the idle
+    /// exit reads it).
+    activity: Arc<Activity>,
+}
+
+// --- Server activity and the idle exit ---------------------------------------
+
+/// How long a detached server waits with no sessions and no clients before it
+/// stops by itself.
+const IDLE_EXIT_SECS: u64 = 30 * 60;
+/// How often the idle exit checks.
+const IDLE_EXIT_TICK_SECS: u64 = 30;
+
+/// Which connections are open, and when one last opened or closed. The
+/// gateway's control channel is not counted: it stays open for as long as the
+/// gateway runs, whether or not anyone uses this workspace.
+#[derive(Debug)]
+struct Activity {
+    clients: std::sync::atomic::AtomicUsize,
+    last: StdMutex<Instant>,
+}
+
+impl Default for Activity {
+    fn default() -> Self {
+        Self {
+            clients: std::sync::atomic::AtomicUsize::new(0),
+            last: StdMutex::new(Instant::now()),
+        }
+    }
+}
+
+impl Activity {
+    /// Count a connection while the returned guard lives.
+    fn enter(self: &Arc<Self>) -> ActivityGuard {
+        self.clients
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.touch();
+        ActivityGuard(self.clone())
+    }
+
+    fn touch(&self) {
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    }
+
+    /// No session is live, no client is connected, and none has come or gone
+    /// for at least `idle`.
+    fn idle_for(&self, now: Instant, idle: Duration, sessions: usize) -> bool {
+        let last = *self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        sessions == 0
+            && self.clients.load(std::sync::atomic::Ordering::SeqCst) == 0
+            && now.saturating_duration_since(last) >= idle
+    }
+}
+
+/// One counted connection; dropping it records that it went.
+struct ActivityGuard(Arc<Activity>);
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        self.0
+            .clients
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.touch();
+    }
+}
+
+/// Stop the server once it has been idle (see [`Activity::idle_for`]) for
+/// `idle`, checking every `tick`, until `stop` fires for another reason.
+async fn idle_exit(
+    registry: SessionRegistry,
+    activity: Arc<Activity>,
+    stop: CancellationToken,
+    idle: Duration,
+    tick: Duration,
+) {
+    let mut interval = tokio::time::interval(tick);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = stop.cancelled() => return,
+            _ = interval.tick() => {
+                if activity.idle_for(Instant::now(), idle, registry.len().await) {
+                    eprintln!(
+                        "localpilot server stopping: no sessions or clients for {} min",
+                        idle.as_secs() / 60
+                    );
+                    stop.cancel();
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// The server's side of `[remote]`: a gateway may register only while remote
@@ -954,6 +1049,9 @@ where
         }
     };
     let reply_id = record.id;
+    // Every connection counts as activity while it is open, except the
+    // gateway's control channel (released below).
+    let activity = hosts.activity.enter();
     if record.v > RPC_PROTOCOL_VERSION {
         emit(
             &mut write,
@@ -976,7 +1074,16 @@ where
             since,
         } => (Principal::Local, None, target, capabilities, since),
         ClientCommand::GatewayRegister => {
+            drop(activity);
             return serve_gateway_control(&mut reader, &mut write, hosts, reply_id).await;
+        }
+        ClientCommand::ServerStop => {
+            // A local connection (same OS user over the owner-only pipe): a
+            // device can never send this as a first record (the gateway sends
+            // those), and on an attached connection it is refused as local-only.
+            emit(&mut write, reply_id, ServerEvent::ServerStopping).await?;
+            hosts.stop.cancel();
+            return Ok(());
         }
         ClientCommand::RelayHost {
             session,
@@ -3146,7 +3253,20 @@ async fn emit_at<W: AsyncWrite + Unpin>(
 
 // --- `localpilot serve` -----------------------------------------------------
 
-/// Serve this workspace's sessions on the local-IPC endpoint until Ctrl-C.
+/// When a server stops by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifetime {
+    /// Until Ctrl-C, a termination signal or `serve --stop` (`localpilot serve`).
+    UntilStopped,
+    /// Also once it has had no sessions and no clients for a while: the
+    /// detached server `/remote` and `connect --server` start, which has no
+    /// terminal to stop it from.
+    UntilIdle,
+}
+
+/// Serve this workspace's sessions on the local-IPC endpoint until Ctrl-C, a
+/// termination signal, or a local `server_stop` (`localpilot serve --stop`) —
+/// and, for [`Lifetime::UntilIdle`], until it has been idle for a while.
 ///
 /// Acquires the single-owner singleton first: if a live daemon already owns the
 /// endpoint, this prints that and exits cleanly rather than double-serving.
@@ -3158,6 +3278,7 @@ pub async fn serve(
     model: Option<&str>,
     provider_id: Option<&str>,
     profile: Profile,
+    lifetime: Lifetime,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let endpoint = Endpoint::resolve(&cwd)?;
@@ -3237,9 +3358,18 @@ pub async fn serve(
     let reaper_shutdown = CancellationToken::new();
     let reaper = Reaper::new(registry.clone(), hosts.clone(), ReaperConfig::default());
     let reaper_task = tokio::spawn(reaper.run(reaper_shutdown.clone()));
+    let idle_task = (lifetime == Lifetime::UntilIdle).then(|| {
+        tokio::spawn(idle_exit(
+            registry.clone(),
+            hosts.activity.clone(),
+            hosts.stop.clone(),
+            Duration::from_secs(IDLE_EXIT_SECS),
+            Duration::from_secs(IDLE_EXIT_TICK_SECS),
+        ))
+    });
 
     eprintln!(
-        "localpilot server listening at {} — Ctrl-C to stop",
+        "localpilot server listening at {} — Ctrl-C or `localpilot serve --stop` to stop",
         endpoint.display()
     );
     accept_loop(&listener, &registry, &hosts, &factory, &store, profile).await;
@@ -3247,8 +3377,12 @@ pub async fn serve(
     // Clean shutdown: stop the reaper, then persist and drop every remaining
     // session, then drop the listener (Unix unlinks the socket) and the singleton
     // (Unix removes the lock file) to release the endpoint.
+    hosts.stop.cancel();
     reaper_shutdown.cancel();
     let _ = reaper_task.await;
+    if let Some(task) = idle_task {
+        let _ = task.await;
+    }
     close_all_sessions(&registry, &hosts).await;
     drop(listener);
     drop(singleton);
@@ -3264,12 +3398,16 @@ async fn accept_loop<F: ConnectionFactory + 'static>(
     store: &Store,
     profile: Profile,
 ) {
+    let terminated = terminate_signal();
+    tokio::pin!(terminated);
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 eprintln!();
                 break;
             }
+            () = &mut terminated => break,
+            () = hosts.stop.cancelled() => break,
             accepted = listener.accept() => match accepted {
                 Ok(conn) => {
                     let registry = registry.clone();
@@ -3295,6 +3433,90 @@ async fn accept_loop<F: ConnectionFactory + 'static>(
                 }
                 Err(error) => tracing::warn!("localpilot server accept failed: {error}"),
             },
+        }
+    }
+}
+
+/// Resolves when the process is asked to terminate (`SIGTERM` on Unix), so a
+/// service manager or `kill` gets the same clean shutdown as Ctrl-C. Never
+/// resolves elsewhere, or if the handler cannot be installed.
+async fn terminate_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut stream) = signal(SignalKind::terminate()) {
+            stream.recv().await;
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
+// --- `localpilot serve --stop` ----------------------------------------------
+
+/// Ask this workspace's server to stop, and wait until its endpoint is free.
+///
+/// # Errors
+/// Returns an error if the server cannot be reached, refuses, or is still
+/// running after the wait.
+pub async fn stop() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let endpoint = Endpoint::resolve(&cwd)?;
+    match request_stop(&endpoint, STOP_WAIT).await? {
+        StopOutcome::NotRunning => {
+            println!("no localpilot server is running for this workspace");
+        }
+        StopOutcome::Stopped => println!("localpilot server stopped"),
+    }
+    Ok(())
+}
+
+/// How long `serve --stop` waits for the server to release its endpoint.
+const STOP_WAIT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, PartialEq, Eq)]
+enum StopOutcome {
+    NotRunning,
+    Stopped,
+}
+
+async fn request_stop(endpoint: &Endpoint, within: Duration) -> anyhow::Result<StopOutcome> {
+    let conn = match localpilot_server::connect(endpoint).await {
+        Ok(conn) => conn,
+        Err(TransportError::NotRunning) => return Ok(StopOutcome::NotRunning),
+        Err(error) => return Err(error.into()),
+    };
+    let (read, mut write) = tokio::io::split(conn);
+    let mut reader = JsonRecordReader::new(read);
+    send_command(&mut write, ClientCommand::ServerStop).await?;
+    let reply = tokio::time::timeout(within, reader.next())
+        .await
+        .map_err(|_| anyhow::anyhow!("the localpilot server did not answer the stop request"))??;
+    let event = reply
+        .and_then(|value| serde_json::from_value::<ServerRecord>(value).ok())
+        .map(|record| record.event);
+    match event {
+        Some(ServerEvent::ServerStopping) => {}
+        Some(ServerEvent::Error { message }) => {
+            anyhow::bail!("the localpilot server refused to stop: {message}")
+        }
+        _ => anyhow::bail!(
+            "the localpilot server did not understand the stop request; it may be an older \
+             version — stop it with Ctrl-C where it runs, or end its process"
+        ),
+    }
+    drop(write);
+    drop(reader);
+    // Saving sessions can take a moment; the stop is done once nothing answers.
+    let deadline = Instant::now() + within;
+    loop {
+        match localpilot_server::connect(endpoint).await {
+            Err(TransportError::NotRunning) => return Ok(StopOutcome::Stopped),
+            Ok(_) | Err(_) if Instant::now() >= deadline => anyhow::bail!(
+                "the localpilot server is still running {} s after it agreed to stop",
+                within.as_secs()
+            ),
+            _ => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
 }
@@ -3946,6 +4168,173 @@ pub(crate) mod tests {
             .await
             .expect("server task did not stop")
             .unwrap();
+    }
+
+    // --- stopping the server, and the idle exit ------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_local_server_stop_is_answered_and_stops_the_server() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 1, hosts.clone());
+
+        let conn = dial(&endpoint).await;
+        let (read, mut write) = tokio::io::split(conn);
+        let mut reader = JsonRecordReader::new(read);
+        send_command(&mut write, ClientCommand::ServerStop)
+            .await
+            .unwrap();
+        assert_eq!(read_event(&mut reader).await, ServerEvent::ServerStopping);
+        timeout(DEADLINE, hosts.stop.cancelled())
+            .await
+            .expect("the stop token was not cancelled");
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_attached_connection_cannot_stop_the_server() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 1, hosts.clone());
+
+        let conn = dial(&endpoint).await;
+        let (read, mut write) = tokio::io::split(conn);
+        let mut reader = JsonRecordReader::new(read);
+        attach_client(&mut reader, &mut write, AttachTarget::OpenNew).await;
+        send_command(&mut write, ClientCommand::ServerStop)
+            .await
+            .unwrap();
+        let refused = loop {
+            let event = read_event(&mut reader).await;
+            if matches!(
+                event,
+                ServerEvent::Error { .. } | ServerEvent::Rejected { .. }
+            ) {
+                break event;
+            }
+        };
+        assert!(
+            !matches!(refused, ServerEvent::ServerStopping),
+            "{refused:?}"
+        );
+        assert!(
+            !hosts.stop.is_cancelled(),
+            "an attached client stopped the server"
+        );
+        drop(write);
+        drop(reader);
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_open_connection_counts_as_activity_until_it_closes() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory, 1, hosts.clone());
+
+        let conn = dial(&endpoint).await;
+        let (read, mut write) = tokio::io::split(conn);
+        let mut reader = JsonRecordReader::new(read);
+        attach_client(&mut reader, &mut write, AttachTarget::OpenNew).await;
+        assert_eq!(hosts.activity.clients.load(Ordering::SeqCst), 1);
+        drop(write);
+        drop(reader);
+        timeout(DEADLINE, server).await.unwrap().unwrap();
+        assert_eq!(hosts.activity.clients.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn idle_needs_no_sessions_no_clients_and_the_full_window() {
+        let activity = Arc::new(Activity::default());
+        let idle = Duration::from_secs(60);
+        let start = *activity.last.lock().unwrap();
+        let later = start + idle;
+        assert!(
+            activity.idle_for(later, idle, 0),
+            "quiet for the window: idle"
+        );
+        assert!(!activity.idle_for(start + idle / 2, idle, 0), "too soon");
+        assert!(
+            !activity.idle_for(later, idle, 1),
+            "a live session keeps it"
+        );
+        let guard = activity.enter();
+        let entered = *activity.last.lock().unwrap();
+        assert!(
+            !activity.idle_for(entered + idle * 2, idle, 0),
+            "an open client keeps it"
+        );
+        drop(guard);
+        let left = *activity.last.lock().unwrap();
+        assert!(
+            !activity.idle_for(left + idle / 2, idle, 0),
+            "the window restarts when it leaves"
+        );
+        assert!(activity.idle_for(left + idle, idle, 0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_idle_exit_stops_an_idle_server_and_spares_a_busy_one() {
+        // Idle: stops.
+        let activity = Arc::new(Activity::default());
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(idle_exit(
+            SessionRegistry::new(),
+            activity.clone(),
+            stop.clone(),
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        ));
+        timeout(DEADLINE, stop.cancelled())
+            .await
+            .expect("an idle server was not stopped");
+        timeout(DEADLINE, task).await.unwrap().unwrap();
+
+        // A client stays connected: never stops; the task ends with the server.
+        let stop = CancellationToken::new();
+        let _client = activity.enter();
+        let task = tokio::spawn(idle_exit(
+            SessionRegistry::new(),
+            activity.clone(),
+            stop.clone(),
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!stop.is_cancelled(), "a server with a client was stopped");
+        stop.cancel();
+        timeout(DEADLINE, task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn serve_stop_ends_the_accept_loop_and_frees_the_endpoint() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new()));
+        let endpoint = unique_endpoint();
+        assert_eq!(
+            request_stop(&endpoint, DEADLINE).await.unwrap(),
+            StopOutcome::NotRunning
+        );
+        let listener = Listener::bind(&endpoint).unwrap();
+        let store = factory.store();
+        let hosts = HostMap::default();
+        let server = tokio::spawn(async move {
+            let registry = SessionRegistry::new();
+            accept_loop(
+                &listener,
+                &registry,
+                &hosts,
+                &factory,
+                &store,
+                Profile::Bypass,
+            )
+            .await;
+            drop(listener);
+        });
+        assert_eq!(
+            request_stop(&endpoint, DEADLINE).await.unwrap(),
+            StopOutcome::Stopped
+        );
+        timeout(DEADLINE, server).await.unwrap().unwrap();
     }
 
     // --- a connect-style client drives one full turn -------------------------

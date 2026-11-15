@@ -133,6 +133,20 @@ $ localpilot serve --model <name> --provider <id> --bypass
 `serve` acquires a single-owner lock first: if a server is already running for
 this workspace it prints that and exits cleanly rather than double-serving.
 
+Stop a workspace's server from any terminal in that workspace; its sessions are
+saved first, exactly as on `Ctrl-C` (a `SIGTERM` on Unix does the same):
+
+```console
+$ localpilot serve --stop
+```
+
+A server started for you in the background — by `/remote` ("Start server and
+share") or `connect --server` — also stops by itself once it has had no live
+sessions and no attached clients for 30 minutes. The remote gateway's own
+connection does not keep it running; while it is stopped, the phone does not
+list this workspace. A server you start with `localpilot serve` runs until you
+stop it (ADR-0287).
+
 Attach a client (plain text: stdin lines become prompts; session events stream
 to stdout):
 
@@ -285,6 +299,9 @@ use a new correlation id but must repeat the same command. Commands without
   receipt}` (this computer only) — answer `pairing_status {instance, state}`
   (`pending`, `finished` with its outcome, `cancelled_before_open` or
   `unknown`); a cancel for an attempt not yet opened makes sure it never is;
+- `server_stop` (this computer only) — answers `server_stopping` and ends;
+  the server then saves its sessions and stops, as on `Ctrl-C`. Refused on an
+  attached connection and from a browser (ADR-0287);
 - `gateway_register` (this computer only) — answers
   `gateway_registered {capability}`. The capability is valid while this
   connection stays open; the connection accepts nothing else;

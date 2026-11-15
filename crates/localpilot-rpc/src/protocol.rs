@@ -141,6 +141,10 @@ pub enum ClientCommand {
     /// First record of the gateway's control channel (local only). The reply
     /// carries a capability that is valid while this connection stays open.
     GatewayRegister,
+    /// This computer only: stop this workspace's server, the same clean
+    /// shutdown as Ctrl-C (sessions are saved first). The reply is
+    /// `server_stopping`; the connection then ends.
+    ServerStop,
     /// First record of a local connection that starts pairing a device. The
     /// reply carries a single-use pairing code; the connection then ends.
     /// This computer only: which server instance would take a pairing, before
@@ -385,6 +389,7 @@ impl ClientCommand {
             // attached connection they are refused for everyone.
             Self::Attach { .. }
             | Self::GatewayRegister
+            | Self::ServerStop
             | Self::DeviceAttach { .. }
             | Self::DeviceSessions { .. }
             | Self::DevicePush { .. }
@@ -591,6 +596,8 @@ pub enum ServerEvent {
         code: WireSecret,
         expires_in_secs: u64,
     },
+    /// Reply to `server_stop`: the server is shutting down.
+    ServerStopping,
     /// Reply to `pair_hello`: the server instance a pairing would be bound to.
     PairingReady {
         instance: String,

@@ -479,7 +479,12 @@ attach clients to it:
 ```console
 $ localpilot serve        # foreground; Ctrl-C to stop (scoped to this workspace)
 $ localpilot connect      # attach a plain-text client (--resume <id|name>, --server)
+$ localpilot serve --stop # stop this workspace's server, saving its sessions
 ```
+
+A server started in the background (by `/remote` or `connect --server`) stops by
+itself after 30 minutes with no sessions and no clients. `localbox stop` stops
+the model runtime only, not LocalPilot servers.
 
 It is a local-only Unix-socket / Windows-named-pipe transport — never a network
 server — and stays entirely opt-in. See

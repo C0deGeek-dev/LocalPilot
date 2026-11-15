@@ -194,6 +194,7 @@ where
             // not apply here. Reject it without disturbing the bound session.
             ClientCommand::Attach { .. }
             | ClientCommand::GatewayRegister
+            | ClientCommand::ServerStop
             | ClientCommand::DeviceAttach { .. }
             | ClientCommand::DeviceSessions { .. }
             | ClientCommand::DevicePush { .. }
@@ -358,6 +359,7 @@ where
                             }
                             ClientCommand::Attach { .. }
             | ClientCommand::GatewayRegister
+            | ClientCommand::ServerStop
             | ClientCommand::DeviceAttach { .. }
             | ClientCommand::DeviceSessions { .. }
             | ClientCommand::DevicePush { .. }
