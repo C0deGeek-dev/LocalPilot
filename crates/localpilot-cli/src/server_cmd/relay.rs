@@ -281,21 +281,28 @@ impl HostMap {
     }
 
     /// Every relayed session, as a device listing shows it.
-    pub(super) fn relayed_listing(&self) -> Vec<localpilot_rpc::SessionInfo> {
+    /// The shared sessions a device may list. Names come from the workspace's
+    /// session index, which `/name` and `/rename` write in the sharing process,
+    /// so a listing always shows the current name.
+    pub(super) fn relayed_listing(&self, store: &Store) -> Vec<localpilot_rpc::SessionInfo> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
+        let indexed = store.list_sessions().unwrap_or_default();
         let mut items: Vec<_> = self
             .relays
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
-            .map(|relayed| localpilot_rpc::SessionInfo {
-                id: relayed.session,
-                name: None,
-                live: true,
-                message_count: 0,
-                updated_unix: now,
+            .map(|relayed| {
+                let entry = indexed.iter().find(|entry| entry.id == relayed.session);
+                localpilot_rpc::SessionInfo {
+                    id: relayed.session,
+                    name: entry.and_then(|entry| entry.name.clone()),
+                    live: true,
+                    message_count: entry.map_or(0, |entry| entry.message_count),
+                    updated_unix: now,
+                }
             })
             .collect();
         items.sort_by_key(|item| item.id.to_string());

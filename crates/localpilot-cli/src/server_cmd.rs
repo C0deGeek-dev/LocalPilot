@@ -1868,8 +1868,7 @@ async fn list_sessions_for_device<W: AsyncWrite + Unpin>(
         return Ok(());
     }
     // Devices see only shared (relayed) sessions.
-    let _ = store;
-    let items = device_listing(hosts.relayed_listing());
+    let items = device_listing(hosts.relayed_listing(store));
     let reply = emit(write, reply_id, ServerEvent::Sessions { items });
     match while_authorized(&lease, &authorized, reply).await {
         Some(written) => written?,
@@ -9110,6 +9109,9 @@ pub(crate) mod tests {
     /// A session this test "owns" the way a full-screen TUI does: claimed in
     /// the workspace store, with its own source feed.
     struct RelaySource {
+        /// The sharing process's store: it holds the session's lease, so its
+        /// writes (such as a rename) are the ones that process would make.
+        store: Store,
         _claim: localpilot_store::SessionClaim,
         identity: crate::relay_client::RelayIdentity,
         source: crate::relay_source::SessionSource,
@@ -9117,8 +9119,8 @@ pub(crate) mod tests {
 
     fn relay_source(factory: &FakeFactory, share: &str) -> RelaySource {
         let session = SessionId::new();
-        let claim = factory
-            .store()
+        let store = factory.store();
+        let claim = store
             .claim_session(
                 session,
                 localpilot_store::Holder::this_process(localpilot_store::HolderKind::Tui),
@@ -9132,6 +9134,7 @@ pub(crate) mod tests {
             share: share.to_string(),
         };
         RelaySource {
+            store,
             _claim: claim,
             identity,
             source: crate::relay_source::SessionSource::start(AskRegistry::default()),
@@ -9663,6 +9666,25 @@ pub(crate) mod tests {
         };
         let ids: Vec<SessionId> = items.iter().map(|item| item.id).collect();
         assert_eq!(ids, vec![source.identity.session]);
+
+        // A /name or /rename in the sharing process shows in the next listing
+        // (LocalHub#289): the name comes from the session index.
+        source
+            .store
+            .set_session_name(source.identity.session, "Renamed on the PC")
+            .expect("rename");
+        let (_, _, relisted) = first_record(
+            &endpoint,
+            ClientCommand::DeviceSessions {
+                capability: localpilot_rpc::WireSecret::new(&capability),
+                credential: localpilot_rpc::WireSecret::new(&credential),
+            },
+        )
+        .await;
+        let ServerEvent::Sessions { items } = relisted else {
+            panic!("a listing: {relisted:?}");
+        };
+        assert_eq!(items[0].name.as_deref(), Some("Renamed on the PC"));
 
         // A hosted session, a new session, and a stored one stay local.
         for target in [

@@ -15,6 +15,9 @@ is SemVer-stable; the configuration schema stability policy is in
   (ADR-0286). Refresh inactive QUIC dependencies for newer advisories.
 - Keep PowerShell command-inspection fixtures compatible with Unix paths and
   isolate the incognito delegation ledger fixture from empty-project Git setup.
+- A device's session list shows the name set with `/name` or `/rename`; it
+  showed every shared session as unnamed (LocalHub#289).
+
 - `localpilot serve --stop` stops this workspace's server cleanly (sessions are
   saved first, as on Ctrl-C), and a `SIGTERM` now does the same on Unix. A
   server started in the background by `/remote` or `connect --server` stops by
