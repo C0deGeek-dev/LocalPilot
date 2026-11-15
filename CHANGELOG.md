@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A session shared from the terminal now marks each turn's start for devices,
+  as the server's own sessions do: the companion shows the turn as running
+  before its first text, and a device that opens the session mid-turn sees it
+  running (LocalHub#285). Timing tests pin that a device's prompt is
+  acknowledged, and its turn's records arrive, while the answer still streams.
+  `LOCALPILOT_LOG=localpilot::remote_timing=debug` logs those steps with
+  timestamps for a live measurement.
+
 - Keep existing-project harness fixtures independent of machine Git identity
   and empty-project initialization. The background-process lifecycle fixture
   also asserts that it creates no repository.

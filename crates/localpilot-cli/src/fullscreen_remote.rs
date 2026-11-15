@@ -133,6 +133,7 @@ impl RemoteTag {
 
     /// The request started.
     pub(super) fn accept(&self) {
+        tracing::debug!(target: crate::relay_host::TIMING, "device prompt starts in the terminal");
         self.0.settle(RelayRequestState::Accepted);
     }
 
@@ -614,6 +615,7 @@ fn idle_request(
     request: SourceRequest,
 ) -> Option<IdleWork> {
     let SourceRequest { command, ticket } = request;
+    tracing::debug!(target: crate::relay_host::TIMING, busy = false, "device request taken by the terminal");
     if !ticket.accept_now() {
         ticket.report(RelayRequestState::Rejected {
             reason: "this device may no longer do that".to_string(),
@@ -701,6 +703,7 @@ pub(super) fn busy_tick(
         let Some(SourceRequest { command, ticket }) = host.share.next_request() else {
             return;
         };
+        tracing::debug!(target: crate::relay_host::TIMING, busy = true, "device request taken by the terminal");
         if !ticket.accept_now() {
             ticket.report(RelayRequestState::Rejected {
                 reason: "this device may no longer do that".to_string(),

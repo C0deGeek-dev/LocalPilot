@@ -898,6 +898,14 @@ workspace server that is running reads it when it next starts. `remote status`
 reports notifications as `on`, `off` with the setting that is off and this
 command, or `unknown` when the settings cannot be read.
 
+To time a device's prompt end to end, start the gateway, the workspace server
+and the terminal with `LOCALPILOT_LOG=localpilot::remote_timing=debug`. Each
+writes its own log under `<cwd>/.localpilot/logs/`, with a timestamp per step:
+the record at the gateway, at the server, taken and started by the terminal,
+the server's reply (`accepted`, `queued`, `rejected`), and each live record to
+the device (`turn_started`, `text_delta`, `stopped`). The trace names steps and
+record kinds only, never the text of a prompt or reply.
+
 `[remote.push]` notifications are signed with a key this computer makes for
 itself (P-256, kept owner-only beside the device registry as
 `~/.localpilot/devices/vapid.p8`). `localpilot remote push rotate` replaces it;

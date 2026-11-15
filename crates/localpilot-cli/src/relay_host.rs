@@ -35,6 +35,11 @@ use localpilot_rpc::{
 };
 use tokio::sync::{mpsc, Notify};
 
+/// The log target for the remote timing trace (LocalHub#285): enable it with
+/// `LOCALPILOT_LOG=localpilot::remote_timing=debug`. It names record kinds and
+/// steps only, never a prompt's or reply's text.
+pub(crate) const TIMING: &str = "localpilot::remote_timing";
+
 /// Terminal results remembered per device.
 pub(crate) const WINDOW: usize = 32;
 /// Requests not yet terminal (pending or queued), per relay.

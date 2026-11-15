@@ -114,6 +114,16 @@ impl SessionSource {
         events
     }
 
+    /// [`Self::turn_events`] for a turn that starts now: the channel's first
+    /// record marks the turn's start, as the server's own host does, so a
+    /// device shows the turn as running (thinking) before its first text, and
+    /// attributes every later record to this turn (LocalHub#285).
+    pub(crate) fn begin_turn(&self) -> broadcast::Sender<RuntimeEvent> {
+        let events = self.turn_events();
+        let _ = events.send(RuntimeEvent::TurnStarted);
+        events
+    }
+
     /// Publish `history` (what the host shows now, see [`history_of`]) as the
     /// feed's history, after every record already sent (a turn's records reach
     /// the feed before the history that follows it).
@@ -223,6 +233,21 @@ mod tests {
             tokio::task::yield_now().await;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    #[tokio::test]
+    async fn a_begun_turn_is_running_before_its_first_text() {
+        let source = SessionSource::start(AskRegistry::default());
+        let events = source.begin_turn();
+        settle().await;
+        let (snapshot, _) = source
+            .feed()
+            .snapshot(&history(), &|| crate::server_feed::Admission::default());
+        let ServerEvent::Snapshot { turn, .. } = snapshot else {
+            panic!("a snapshot");
+        };
+        assert_eq!(turn, TurnState::Running);
+        let _ = events.send(RuntimeEvent::Stopped(StopReason::Done));
     }
 
     #[tokio::test]

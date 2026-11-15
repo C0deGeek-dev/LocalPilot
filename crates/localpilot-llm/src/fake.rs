@@ -31,6 +31,9 @@ pub struct FakeProvider {
     /// does: the scripted reply is still served, and the refusal is reported.
     refuse_constraints: bool,
     constraint_refused: std::sync::atomic::AtomicBool,
+    /// Wait this long before each scripted event, like a model that streams
+    /// at a known pace (timing tests); `None` replays at once.
+    pacing: Option<std::time::Duration>,
 }
 
 impl FakeProvider {
@@ -44,7 +47,16 @@ impl FakeProvider {
             requests: Mutex::new(Vec::new()),
             refuse_constraints: false,
             constraint_refused: std::sync::atomic::AtomicBool::new(false),
+            pacing: None,
         }
+    }
+
+    /// Wait `gap` before each scripted event, so a test can tell what arrives
+    /// while a reply is still streaming from what arrives once it is done.
+    #[must_use]
+    pub fn paced(mut self, gap: std::time::Duration) -> Self {
+        self.pacing = Some(gap);
+        self
     }
 
     /// Declare a context window, for callers that size their requests by it.
@@ -109,6 +121,18 @@ impl FakeProvider {
             })),
             Ok(ModelEvent::Done),
         ])
+    }
+
+    /// Queue a text response streamed as `chunks` (one delta each), then
+    /// `Done`.
+    #[must_use]
+    pub fn text_chunks(self, chunks: &[&str]) -> Self {
+        let mut events: Script = chunks
+            .iter()
+            .map(|chunk| Ok(ModelEvent::TextDelta((*chunk).to_string())))
+            .collect();
+        events.push(Ok(ModelEvent::Done));
+        self.script(events)
     }
 
     /// Queue a single tool call followed by `Done`.
@@ -182,7 +206,15 @@ impl ModelProvider for FakeProvider {
             .ok()
             .and_then(|mut scripts| scripts.pop_front())
             .unwrap_or_else(|| vec![Ok(ModelEvent::Done)]);
-        Ok(futures::stream::iter(script).boxed())
+        match self.pacing {
+            None => Ok(futures::stream::iter(script).boxed()),
+            Some(gap) => Ok(futures::stream::iter(script)
+                .then(move |event| async move {
+                    tokio::time::sleep(gap).await;
+                    event
+                })
+                .boxed()),
+        }
     }
 }
 

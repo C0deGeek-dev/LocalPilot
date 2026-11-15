@@ -1668,6 +1668,10 @@ async fn relay<S: AsyncRead + AsyncWrite + Unpin>(
                     if total > limits.queue_bytes || queue.try_send(line).is_err() {
                         return Ending::Policy;
                     }
+                    tracing::debug!(
+                        target: crate::relay_host::TIMING,
+                        "device record at the gateway"
+                    );
                 }
                 Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
                 Message::Binary(_) => return Ending::Policy,

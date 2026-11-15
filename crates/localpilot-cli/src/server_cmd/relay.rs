@@ -960,6 +960,9 @@ where
                     if seq <= view.floor {
                         continue;
                     }
+                    if let Some(kind) = timing_kind(&event) {
+                        tracing::debug!(target: crate::relay_host::TIMING, kind, "live record to the device");
+                    }
                     if guarded!(deliver(write, &mut view, &feed_ctx, Some(seq), event))
                         == Flow::Stop
                     {
@@ -984,8 +987,12 @@ where
                         guarded!(reject(write, id, acks, RejectCode::Forbidden, message));
                     }
                     Authorized::Yes => {
+                        tracing::debug!(target: crate::relay_host::TIMING, "device record at the server");
                         let replies = device_command(hosts, &relayed, device, acks, &value).await;
                         for (id, event) in replies {
+                            if let Some(kind) = timing_kind(&event) {
+                                tracing::debug!(target: crate::relay_host::TIMING, kind, "reply to the device");
+                            }
                             guarded!(emit(write, id, event));
                         }
                     }
@@ -1143,6 +1150,19 @@ async fn device_command(
             .complete(relayed.session, &stream, key, reply.clone());
     }
     reply.into_iter().map(|event| (id.clone(), event)).collect()
+}
+
+/// The record kinds the timing trace follows.
+fn timing_kind(event: &ServerEvent) -> Option<&'static str> {
+    match event {
+        ServerEvent::Accepted { .. } => Some("accepted"),
+        ServerEvent::Queued { .. } => Some("queued"),
+        ServerEvent::Rejected { .. } => Some("rejected"),
+        ServerEvent::TurnStarted => Some("turn_started"),
+        ServerEvent::TextDelta { .. } => Some("text_delta"),
+        ServerEvent::Stopped { .. } => Some("stopped"),
+        _ => None,
+    }
 }
 
 /// The records answering a decided command.

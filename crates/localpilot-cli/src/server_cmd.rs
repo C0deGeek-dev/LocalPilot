@@ -6456,6 +6456,209 @@ pub(crate) mod tests {
         let _ = timeout(DEADLINE, server).await;
     }
 
+    /// When each record of a device's prompt reaches the device, measured
+    /// from the moment it sent the prompt.
+    #[derive(Debug, Default)]
+    struct DeviceTimeline {
+        acknowledged: Option<Duration>,
+        turn_started: Option<Duration>,
+        first_text: Option<Duration>,
+        stopped: Option<Duration>,
+    }
+
+    /// Read until the turn stops, timing the acknowledgement (`accepted` or
+    /// `queued`), `turn_started`, the first text and `stopped`.
+    async fn device_timeline(
+        reader: &mut JsonRecordReader<impl AsyncRead + Unpin>,
+        sent: tokio::time::Instant,
+        acknowledgement: impl Fn(&ServerEvent) -> bool,
+    ) -> DeviceTimeline {
+        let mut timeline = DeviceTimeline::default();
+        timeout(DEADLINE, async {
+            loop {
+                let event = read_event(reader).await;
+                let at = sent.elapsed();
+                match &event {
+                    event if acknowledgement(event) => {
+                        timeline.acknowledged.get_or_insert(at);
+                    }
+                    ServerEvent::TurnStarted => {
+                        timeline.turn_started.get_or_insert(at);
+                    }
+                    ServerEvent::TextDelta { .. } => {
+                        timeline.first_text.get_or_insert(at);
+                    }
+                    ServerEvent::Stopped { .. } => {
+                        timeline.stopped = Some(at);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the turn stopped");
+        timeline
+    }
+
+    /// The pace of the scripted model in the timing tests: each delta (and the
+    /// end) comes this long after the previous one.
+    const PACE: Duration = Duration::from_millis(300);
+
+    /// LocalHub#285: a device's prompt to a session shared from a terminal is
+    /// acknowledged, and its turn's records arrive, while the answer is still
+    /// streaming, not once it is done. Covers the relay path the companion
+    /// uses: device → server → sharing process → server → device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_prompt_is_acknowledged_and_streamed_while_the_turn_runs() {
+        let factory = Arc::new(FakeFactory::new(
+            FakeProvider::new()
+                .paced(PACE)
+                .text_chunks(&["one ", "two ", "three"]),
+        ));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory.clone(), 4, hosts.clone());
+        let shared = host_share(&endpoint_dial(&endpoint), &hosts, &factory, false, false).await;
+        let (gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (mut reader, mut write, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, shared.target()),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Attached { .. }), "{reply:?}");
+        read_event(&mut reader).await; // snapshot
+
+        let sent = tokio::time::Instant::now();
+        send_with_id(&mut write, "p1", prompt("count to three")).await;
+        let timeline = device_timeline(&mut reader, sent, |event| {
+            matches!(event, ServerEvent::Accepted { .. })
+        })
+        .await;
+        eprintln!("LocalHub#285 device timeline, model pace {PACE:?}: {timeline:?}");
+
+        let (Some(acknowledged), Some(turn_started), Some(first_text), Some(stopped)) = (
+            timeline.acknowledged,
+            timeline.turn_started,
+            timeline.first_text,
+            timeline.stopped,
+        ) else {
+            panic!("every record reached the device: {timeline:?}");
+        };
+        // Four paced events: the answer takes at least four paces.
+        assert!(stopped >= PACE * 4, "{timeline:?}");
+        // The acknowledgement and turn_started come before the model's first
+        // delta, and the first delta long before the answer ends.
+        assert!(acknowledged < PACE, "accepted at once: {timeline:?}");
+        assert!(turn_started < PACE, "turn_started at once: {timeline:?}");
+        assert!(
+            first_text < PACE * 2,
+            "the first text while streaming: {timeline:?}"
+        );
+        assert!(
+            stopped - first_text >= PACE * 2,
+            "text arrived live, not with the end: {timeline:?}"
+        );
+
+        drop((reader, write, gateway));
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
+        let _ = timeout(DEADLINE, server).await;
+    }
+
+    /// LocalHub#285: a follow-up sent while the shared session is busy is
+    /// reported as queued at once, and the next turn's records arrive live
+    /// (a turn's forwarder does not hold them behind the previous turn's).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_follow_up_is_queued_at_once_and_its_turn_streams_live() {
+        let factory = Arc::new(FakeFactory::new(
+            FakeProvider::new()
+                .paced(PACE)
+                .text_chunks(&["first ", "answer ", "here"])
+                .text_chunks(&["second ", "answer ", "here"]),
+        ));
+        let hosts = HostMap::default();
+        let (endpoint, server) = spawn_server_on(factory.clone(), 4, hosts.clone());
+        let shared = host_share(&endpoint_dial(&endpoint), &hosts, &factory, false, false).await;
+        let (gateway, capability) = register_gateway(&endpoint).await;
+        let (_, credential) = pair_device(
+            &endpoint,
+            &hosts,
+            &capability,
+            localpilot_rpc::Scope::Control,
+        )
+        .await;
+        let (mut reader, mut write, reply) = first_record(
+            &endpoint,
+            device_attach(&capability, &credential, shared.target()),
+        )
+        .await;
+        assert!(matches!(reply, ServerEvent::Attached { .. }), "{reply:?}");
+        read_event(&mut reader).await; // snapshot
+
+        send_with_id(&mut write, "p1", prompt("first")).await;
+        timeout(
+            DEADLINE,
+            read_until(&mut reader, |event| {
+                matches!(event, ServerEvent::TextDelta { .. })
+            }),
+        )
+        .await
+        .expect("the first turn streams");
+
+        let sent = tokio::time::Instant::now();
+        send_with_id(
+            &mut write,
+            "f1",
+            ClientCommand::Prompt {
+                text: "second".to_string(),
+                disposition: InputDisposition::FollowUp,
+            },
+        )
+        .await;
+        // The rest of the first turn, with the follow-up's acknowledgement.
+        let first = device_timeline(&mut reader, sent, |event| {
+            matches!(event, ServerEvent::Queued { .. })
+        })
+        .await;
+        let second_from = sent.elapsed();
+        let second = device_timeline(&mut reader, sent, |_| false).await;
+        eprintln!(
+            "LocalHub#285 follow-up, model pace {PACE:?}: queued/first turn {first:?}; second turn {second:?}"
+        );
+
+        let queued = first.acknowledged.expect("queued reached the device");
+        assert!(queued < PACE, "queued at once: {first:?}");
+        let (Some(turn_started), Some(first_text), Some(stopped)) =
+            (second.turn_started, second.first_text, second.stopped)
+        else {
+            panic!("the follow-up's turn reached the device: {second:?}");
+        };
+        assert!(
+            turn_started - second_from < PACE,
+            "the follow-up starts once the first turn stops: {second:?}"
+        );
+        assert!(
+            stopped - first_text >= PACE * 2,
+            "the follow-up's text arrived live: {second:?}"
+        );
+
+        drop((reader, write, gateway));
+        assert_eq!(
+            shared.finish().await,
+            crate::relay_client::RelayEnd::Stopped
+        );
+        let _ = timeout(DEADLINE, server).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_device_connection_never_falls_back_to_local() {
         let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("x")));
@@ -9471,7 +9674,8 @@ pub(crate) mod tests {
     ) -> (JoinHandle<()>, CancellationToken) {
         ticket.report(localpilot_rpc::RelayRequestState::Accepted);
         let cancel = CancellationToken::new();
-        let events = source.turn_events();
+        // As the terminal does (`drive_turn`).
+        let events = source.begin_turn();
         let runtime = runtime.clone();
         let turn_cancel = cancel.clone();
         let handle = tokio::spawn(async move {
