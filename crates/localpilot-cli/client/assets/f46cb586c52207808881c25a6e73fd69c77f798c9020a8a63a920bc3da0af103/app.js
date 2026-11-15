@@ -67,6 +67,7 @@ if (typeof document !== 'undefined') {
       element('pair-connected').hidden = !paired;
       element('pair-scope').textContent = scope === 'control' ? 'Access granted: control.' : scope === 'observe' ? 'Access granted: observe only.' : 'Access confirmed by your computer.';
       element('connection').textContent = paired ? 'Paired' : state === 'revoked' ? 'Access ended' : 'Not connected';
+      document.documentElement.classList.toggle('paired', paired);
       form.hidden = paired || state === 'confirm';
       confirm.hidden = state !== 'confirm';
       element('scan-code').hidden = paired || state === 'confirm';

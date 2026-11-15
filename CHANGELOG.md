@@ -22,6 +22,13 @@ is SemVer-stable; the configuration schema stability policy is in
   of running until reboot; the remote gateway's connection does not keep it
   alive. `localpilot serve` started by hand still runs until stopped (ADR-0287).
 
+- Embed LocalLink 0.1.2: the companion app follows the LocalX site's look
+  (dark surfaces, teal accents, monospace labels, new icon) with a refreshed
+  light theme. On phones the conversation gets most of the screen: a compact
+  header, a one-row session header whose back button opens the session list as
+  a sheet, a single-row composer that grows with the draft, and the bottom
+  navigation hidden while typing.
+
 - Embed LocalLink 0.1.1: verified app updates refresh open companion windows
   automatically, including CSS and scripts after version-only bumps. Preserve
   drafts during an update without replaying actions; retain a complete offline

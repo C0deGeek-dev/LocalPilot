@@ -10,7 +10,7 @@ export function mountTheme(document, window) {
     // Browser chrome follows the same palette as native controls and the page.
     for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
       const dark = preference === 'dark' || (preference === 'system' && meta.media.includes('dark'));
-      meta.content = dark ? '#1c2422' : '#f5f3ec';
+      meta.content = dark ? '#070b0f' : '#f4f7f6';
     }
   }
   try { apply(window.localStorage.getItem(key)); } catch { apply('system'); }

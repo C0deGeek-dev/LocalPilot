@@ -44,6 +44,35 @@ export function mountSessions(document, window) {
     el('jump-latest').hidden = followLatest;
   }, { passive: true });
   el('jump-latest').addEventListener('click', jumpLatest);
+  // Phones: the session list opens as a sheet over the chat; closing it returns focus to the chat header.
+  el('open-sessions').addEventListener('click', () => { el('session-browser').open = true; el('session-browser-title').focus(); });
+  el('session-browser').addEventListener('toggle', () => {
+    if (!el('session-browser').open && model.selected && !wideLayout.matches && el('session-browser').contains(document.activeElement)) el('open-sessions').focus();
+  });
+  el('session-browser').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && model.selected && !wideLayout.matches && el('session-browser').open) { event.preventDefault(); el('session-browser').open = false; el('open-sessions').focus(); }
+  });
+  // Grow the composer with its draft (CSS caps the height) and keep the latest-messages button above it.
+  const draft = el('session-draft');
+  function fitDraft() {
+    draft.style.height = 'auto';
+    if (draft.value) draft.style.height = `${draft.scrollHeight + draft.offsetHeight - draft.clientHeight}px`;
+  }
+  draft.addEventListener('input', fitDraft);
+  if (window.ResizeObserver) new window.ResizeObserver(([entry]) => {
+    el('session-view').style.setProperty('--composer-height', `${entry.target.offsetHeight}px`);
+  }).observe(document.querySelector('.composer-panel'));
+  // Touch keyboards take half the screen; hide the bottom navigation while composing.
+  const touch = window.matchMedia('(pointer: coarse)');
+  // Restore it only after a tap on Send or Stop has completed, so the layout never shifts under the finger.
+  const panel = document.querySelector('.composer-panel');
+  let restoreNav = null;
+  const composing = (on) => { window.clearTimeout(restoreNav); document.documentElement.classList.toggle('composing', on); };
+  panel.addEventListener('focusin', (event) => {
+    if (event.target === draft) { if (touch.matches) composing(true); }
+    else restoreNav = window.setTimeout(() => composing(false), 400);
+  });
+  panel.addEventListener('focusout', (event) => { if (!panel.contains(event.relatedTarget)) { window.clearTimeout(restoreNav); restoreNav = window.setTimeout(() => composing(false), 400); } });
   wideLayout.addEventListener('change', () => { el('session-browser').open = wideLayout.matches || !model.selected; });
   const announceReply = replyAnnouncer(el('reply-announcement'));
   const model = new Sessions({
@@ -260,7 +289,7 @@ export function mountSessions(document, window) {
     el('jump-latest').hidden = followLatest || loading;
     el('session-composer').setAttribute('aria-busy', String(sending));
     setText('composer-help', !model.ready ? 'Waiting for the session. Sending is locked.' : model.scope === 'observe' ? 'Observe only · send messages from your PC.' : sending ? 'Waiting for your PC to confirm delivery.' : model.busy ? 'Follow-ups are queued after the current turn.' : window.matchMedia('(pointer: coarse)').matches ? 'Send a message to this session.' : 'Enter to send · Shift+Enter for a new line.');
-    if (el('session-draft').value !== model.draft) el('session-draft').value = model.draft;
+    if (el('session-draft').value !== model.draft) { el('session-draft').value = model.draft; fitDraft(); }
     el('session-draft').disabled = model.scope !== 'control';
     el('send-input').disabled = !model.canSubmit || !model.draft.trim();
     setText('send-input', model.draft.trim().startsWith('/') ? 'Run command' : model.busy ? 'Follow up' : 'Send');
