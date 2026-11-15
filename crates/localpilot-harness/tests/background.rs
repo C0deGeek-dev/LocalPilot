@@ -80,6 +80,9 @@ fn tool_output(events: &[RuntimeEvent], id: &str) -> String {
 fn a_started_process_is_remembered_then_killed_on_close() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    // Existing project material keeps process lifecycle independent of Git setup.
+    let fixture = root.join("server.txt");
+    std::fs::write(&fixture, "background fixture\n").unwrap();
 
     // Start a long-running process and list it; closing the session must
     // terminate and forget it.
@@ -98,9 +101,9 @@ fn a_started_process_is_remembered_then_killed_on_close() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     let reason = rt.block_on(runtime.run_turn("start the server", &events, &cancel));
-    assert_eq!(reason, StopReason::Done);
-
     let turn1 = drain(&mut rx);
+    assert_eq!(reason, StopReason::Done, "{turn1:?}");
+    assert!(!root.join(".git").exists());
     let start = tool_output(&turn1, "c1");
     assert!(
         start.contains("started background process"),
@@ -117,6 +120,10 @@ fn a_started_process_is_remembered_then_killed_on_close() {
     assert!(
         runtime.background_registry().list().is_empty(),
         "close() must terminate and forget the process"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture).unwrap(),
+        "background fixture\n"
     );
     // A closed runtime runs nothing until it claims a session again.
     let reason = rt.block_on(runtime.run_turn("list again", &events, &cancel));

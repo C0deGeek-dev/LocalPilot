@@ -791,6 +791,7 @@ async fn long_line_output_is_retained_and_projection_is_bounded() {
 #[tokio::test]
 async fn unavailable_immediate_verification_cannot_finalize_a_changed_unit() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "sizing fixture\n").unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
@@ -1066,6 +1067,7 @@ async fn malformed_input_and_stream_recovery_cannot_upgrade_capability() {
 #[tokio::test]
 async fn compaction_does_not_excuse_an_oversized_active_patch() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "sizing fixture\n").unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
@@ -1315,6 +1317,7 @@ async fn read_only_step_scope_does_not_leak_into_a_new_session() {
 #[tokio::test]
 async fn changed_unit_without_a_verifier_stops_with_a_durable_next_action() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "sizing fixture\n").unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
@@ -1342,6 +1345,7 @@ async fn changed_unit_without_a_verifier_stops_with_a_durable_next_action() {
 #[tokio::test]
 async fn failed_changed_unit_verification_narrows_reliability() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "sizing fixture\n").unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
@@ -1517,6 +1521,7 @@ fn html_rows(rows: usize) -> String {
 #[tokio::test]
 async fn a_step_can_create_one_ordinary_file_and_correct_it() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "sizing fixture\n").unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
@@ -1552,6 +1557,7 @@ async fn a_step_can_create_one_ordinary_file_and_correct_it() {
 #[tokio::test]
 async fn a_file_beyond_the_allowance_is_refused_with_the_limit_it_hit() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "sizing fixture\n").unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
@@ -1570,6 +1576,7 @@ async fn a_file_beyond_the_allowance_is_refused_with_the_limit_it_hit() {
 #[tokio::test]
 async fn the_user_can_switch_the_envelope_off_and_on() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "sizing fixture\n").unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
@@ -1819,6 +1826,7 @@ async fn full_action_authority_still_meets_the_sizing_limit_and_names_it() {
     // `Unrestricted` is what Accept all selects. It authorizes the action; it is
     // not a work-size decision, so an oversized write is refused for its size.
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "sizing fixture\n").unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(
@@ -1842,6 +1850,7 @@ async fn full_action_authority_still_meets_the_sizing_limit_and_names_it() {
 async fn a_session_work_limit_change_lets_a_refused_write_be_retried() {
     use localpilot_config::WorkLimitMode;
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "sizing fixture\n").unwrap();
     let provider = Arc::new(
         FakeProvider::new()
             .tool_call(

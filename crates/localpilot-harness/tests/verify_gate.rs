@@ -73,6 +73,7 @@ fn runtime_with_verify(
     provider: FakeProvider,
     verify_command: Option<String>,
 ) -> SessionRuntime {
+    std::fs::write(root.join("project.txt"), "verification fixture\n").unwrap();
     SessionRuntime::new(
         Arc::new(provider),
         ToolRegistry::with_builtins(),
@@ -369,6 +370,7 @@ fn required_but_unrunnable(
 ) -> (SessionRuntime, StopReason, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
+    std::fs::write(root.join("project.txt"), "verification fixture\n").unwrap();
     let mut runtime = SessionRuntime::new(
         Arc::new(
             FakeProvider::new()

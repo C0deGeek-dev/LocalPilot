@@ -813,6 +813,8 @@ fn spawn_probe_target() -> u16 {
 fn run_launch_scenario(scenario: &LaunchScenario) -> bool {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    // This benchmark measures launch discipline in an existing project.
+    std::fs::write(root.join("project.txt"), "launch fixture\n").unwrap();
 
     let mut provider = FakeProvider::new();
     if let Some(port) = scenario.probe_port {

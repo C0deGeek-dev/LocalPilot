@@ -339,6 +339,8 @@ async fn the_broker_recovers_an_unadvertised_tool_where_the_baseline_errors() {
         .tool_call("c2", "git_add", serde_json::json!({}))
         .text("done");
     let mut h = build_broker_harness(provider, BrokerConfig::default());
+    // Keep dispatch on a non-repository independent of empty-project Git setup.
+    std::fs::write(h._dir.path().join("project.txt"), "broker fixture\n").unwrap();
     let mut rx = h.events.subscribe();
     let reason = h
         .runtime

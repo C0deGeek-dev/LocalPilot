@@ -1,9 +1,18 @@
 # Test Plan
 
 CI portability controls use native path spellings for shell inspection. The
-incognito delegation ledger fixture starts with existing project material and
-asserts that its bytes and directory entries survive unchanged, avoiding
-empty-project Git setup and any dependency on a personal commit identity.
+incognito delegation ledger and background-process lifecycle fixtures start
+with existing project material, avoiding empty-project Git setup and any
+dependency on a personal commit identity. The incognito fixture preserves its
+bytes and directory entries. The background fixture asserts that no repository
+is created and its project file survives process cleanup unchanged.
+
+Existing-project broker, launch, claim, sizing, precondition, repetition,
+recovery, handoff and verification fixtures likewise seed project material.
+For the identity isolation control, run the harness suite with a process-local
+`GIT_CONFIG_GLOBAL` naming a disposable file whose `[user]` section contains
+only `useConfigOnly = true`, with `GIT_CONFIG_NOSYSTEM=1`. The configuration has
+no author identity. Git initialization itself has dedicated isolated controls.
 
 The verification limits controls execute the existing completion check with
 different sizing caps, after disabling sizing, and with sizing absent at startup.

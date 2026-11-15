@@ -1202,7 +1202,7 @@ async fn an_output_limited_file_write_is_retried_in_pieces_once() {
     );
     let mut h = build_from_arc(
         Arc::clone(&provider),
-        &[],
+        &[("project.txt", "session fixture\n")],
         SessionConfig::default(),
         Profile::Bypass,
     );
@@ -2165,7 +2165,7 @@ async fn a_malformed_large_write_recovers_by_writing_in_pieces() {
     );
     let mut h = build_from_arc(
         Arc::clone(&provider),
-        &[],
+        &[("project.txt", "session fixture\n")],
         SessionConfig::default(),
         Profile::Bypass,
     );
@@ -2651,7 +2651,12 @@ async fn the_handoff_reports_tool_calls_and_files_changed() {
             json!({ "path": "out.txt", "content": "hi" }),
         )
         .text("wrote it");
-    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let mut h = build_with(
+        provider,
+        &[("project.txt", "session fixture\n")],
+        SessionConfig::default(),
+        Profile::Bypass,
+    );
 
     let reason = h
         .runtime
@@ -2733,7 +2738,12 @@ async fn a_realistic_edit_test_loop_finishes_clean() {
             );
     }
     let provider = provider.text("fixed it");
-    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let mut h = build_with(
+        provider,
+        &[("project.txt", "session fixture\n")],
+        SessionConfig::default(),
+        Profile::Bypass,
+    );
     let mut rx = h.events.subscribe();
 
     let reason = h
@@ -2793,7 +2803,12 @@ async fn identical_reported_failures_get_the_failing_work_hint() {
         .tool_call("c2", "run_shell", json!({ "command": "exit  7" }))
         .tool_call("c3", "run_shell", json!({ "command": "exit   7" }))
         .text("giving up");
-    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let mut h = build_with(
+        provider,
+        &[("project.txt", "session fixture\n")],
+        SessionConfig::default(),
+        Profile::Bypass,
+    );
 
     let reason = h.runtime.run_turn("run it", &h.events, &h.cancel).await;
     assert_eq!(reason, StopReason::Done);
@@ -2823,7 +2838,12 @@ async fn the_handoff_counts_both_failure_kinds_and_reads_zero_when_clean() {
         .tool_call("c2", "read_file", json!({ "path": "missing.txt" }))
         .text("done")
         .text("clean turn");
-    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let mut h = build_with(
+        provider,
+        &[("project.txt", "session fixture\n")],
+        SessionConfig::default(),
+        Profile::Bypass,
+    );
 
     let reason = h.runtime.run_turn("try things", &h.events, &h.cancel).await;
     assert_eq!(reason, StopReason::Done);
@@ -2968,7 +2988,12 @@ async fn an_incognito_command_that_writes_outside_then_fails_is_still_reported()
         incognito: true,
         ..SessionConfig::default()
     };
-    let mut h = build_with(provider, &[], config, Profile::Bypass);
+    let mut h = build_with(
+        provider,
+        &[("project.txt", "session fixture\n")],
+        config,
+        Profile::Bypass,
+    );
 
     let reason = h.runtime.run_turn("run it", &h.events, &h.cancel).await;
     assert_eq!(reason, StopReason::Done);
@@ -3034,7 +3059,12 @@ async fn an_incognito_command_cancelled_mid_run_is_still_reported() {
         incognito: true,
         ..SessionConfig::default()
     };
-    let mut h = build_with(provider, &[], config, Profile::Bypass);
+    let mut h = build_with(
+        provider,
+        &[("project.txt", "session fixture\n")],
+        config,
+        Profile::Bypass,
+    );
     let cancel = h.cancel.clone();
     let events = h.events.clone();
 

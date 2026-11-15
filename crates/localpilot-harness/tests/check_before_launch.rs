@@ -32,6 +32,8 @@ fn run_turn_collecting_warnings(
     provider: FakeProvider,
     rules: IndexMap<String, RuleSeverity>,
 ) -> Vec<String> {
+    // This fixture measures launch discipline in an existing project.
+    std::fs::write(root.join("project.txt"), "launch fixture\n").unwrap();
     let mut runtime = SessionRuntime::new(
         Arc::new(provider),
         ToolRegistry::with_builtins(),

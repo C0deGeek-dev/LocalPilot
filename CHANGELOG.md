@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Keep existing-project harness fixtures independent of machine Git identity
+  and empty-project initialization. The background-process lifecycle fixture
+  also asserts that it creates no repository.
+
 - Upgrade bundled SQLite through rusqlite 0.41.0 and libsqlite3-sys 0.39.1
   to resolve RUSTSEC-2026-0459. Source builds now require Rust 1.89
   (ADR-0286). Refresh inactive QUIC dependencies for newer advisories.

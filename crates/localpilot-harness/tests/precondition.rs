@@ -88,6 +88,7 @@ fn overwrite_after_a_prior_read_proceeds() {
 fn edit_file_requires_an_existing_target_and_runs_when_it_exists() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    std::fs::write(root.join("project.txt"), "precondition fixture\n").unwrap();
 
     let provider = FakeProvider::new()
         .tool_call(

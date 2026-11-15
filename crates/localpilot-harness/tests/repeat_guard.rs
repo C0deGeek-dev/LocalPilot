@@ -465,7 +465,12 @@ fn identical_calls(name: &str, input: &Value, count: usize) -> FakeProvider {
 #[tokio::test]
 async fn three_identical_failing_commands_stop_on_the_third() {
     let provider = identical_calls("run_shell", &json!({ "command": "exit 7" }), 6);
-    let (runtime, dir) = build(provider, ToolRegistry::with_builtins(), default_rail(), &[]);
+    let (runtime, dir) = build(
+        provider,
+        ToolRegistry::with_builtins(),
+        default_rail(),
+        &[("project.txt", "repeat fixture\n")],
+    );
     // Exercise an actual exit failure, rather than bypass's opaque-code denial.
     runtime
         .permission_engine_handle()
@@ -572,7 +577,7 @@ async fn an_edit_and_rerun_loop_with_the_same_failure_is_not_stopped() {
         provider.text("still failing; here is what I found"),
         ToolRegistry::with_builtins(),
         default_rail(),
-        &[],
+        &[("project.txt", "repeat fixture\n")],
     );
     let r = run(runtime, &dir).await;
 
@@ -900,6 +905,7 @@ async fn every_equivalent_retry_rechecks_interactive_approval() {
         ..default_rail()
     };
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("project.txt"), "repeat fixture\n").unwrap();
     let runtime = SessionRuntime::new(
         Arc::new(provider),
         ToolRegistry::with_builtins(),

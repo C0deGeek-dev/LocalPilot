@@ -24,6 +24,8 @@ fn final_reply(root: &Path, provider: FakeProvider) -> String {
 }
 
 fn reply_with_gate(root: &Path, provider: FakeProvider, enforce_claim_gate: bool) -> String {
+    // Claims are evaluated independently of empty-project Git setup.
+    std::fs::write(root.join("project.txt"), "claim fixture\n").unwrap();
     let mut runtime = SessionRuntime::new(
         Arc::new(provider),
         ToolRegistry::with_builtins(),
@@ -68,6 +70,7 @@ fn is_text(block: &ContentBlock) -> bool {
 fn an_unverifiable_tool_result_is_recorded_as_unverified() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
+    std::fs::write(root.join("project.txt"), "claim fixture\n").unwrap();
     #[cfg(windows)]
     let command = json!({ "program": "cmd", "args": ["/c", "exit 0"] });
     #[cfg(not(windows))]
