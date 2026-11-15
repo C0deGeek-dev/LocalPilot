@@ -15,6 +15,11 @@ is SemVer-stable; the configuration schema stability policy is in
   (ADR-0286). Refresh inactive QUIC dependencies for newer advisories.
 - Keep PowerShell command-inspection fixtures compatible with Unix paths and
   isolate the incognito delegation ledger fixture from empty-project Git setup.
+- Embed LocalLink 0.1.1: verified app updates refresh open companion windows
+  automatically, including CSS and scripts after version-only bumps. Preserve
+  drafts during an update without replaying actions; retain a complete offline
+  shell when an update cannot finish. Show the app version under App status.
+
 - Embed the updated LocalLink companion with a tablet/desktop project sidebar,
   automatic latest-message scrolling, loading placeholders, immediate message
   delivery feedback and visible activity while LocalPilot works.

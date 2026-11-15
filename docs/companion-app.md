@@ -45,9 +45,21 @@ The app's worker (`/push-worker.js`, also `no-cache`) keeps one complete copy
 of these static files in the browser, checked against the hashes it was built
 with, so the app opens while the computer is unreachable. It never keeps
 pairing, device, session or other `/api` responses, and it queues nothing to
-send later. A new build is installed beside the old one and announced; it
-takes over only when every LocalLink window has been closed, so a page never
-mixes two builds.
+send later. A complete verified update activates automatically and refreshes
+outdated windows, including clients still using the earlier cache-first worker.
+The build identity includes the app version and source content, so a version-only
+bump refreshes every asset URL. Current windows are not reloaded again. Online
+navigation revalidates the installed generation and checks for a newer complete
+build; offline navigation keeps the last complete shell. Partial downloads cannot
+activate or mix a new entry point with older assets.
+
+The app checks on startup, focus, reconnect and once per visible minute. Its
+version is shown under App status. Before an automatic reload, current clients
+hand drafts and the active project/session identity through one-use per-tab
+session storage, deleted on startup. Access is checked again before reattaching;
+no prompt or approval is replayed. Unconfirmed actions are disclosed. Blocked
+storage with an unsent draft or action defers that window's reload with an
+explanation; fresh windows still use the new build.
 
 ## Updating the app
 

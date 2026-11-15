@@ -2,6 +2,7 @@ import { Pairing, PairingCamera, cameraMessages, messages, takePairingLink } fro
 import { mountSessions } from './session-view.js';
 import { mountCompanion } from './companion-view.js';
 import { prepareOffline } from './offline.js';
+import { saveUpdateState, takeUpdateState } from './update-state.js';
 import { mountTheme } from './theme.js';
 
 // Navigation is local. A network connection alone never enables session controls.
@@ -29,11 +30,13 @@ if (typeof document !== 'undefined') {
   let incoming = takePairingLink(window.location, window.history);
   mountTheme(document, window);
   const sessions = mountSessions(document, window);
+  const updateState = takeUpdateState(window);
+  if (updateState) sessions.drafts = new Map(updateState.drafts);
   const element = (id) => document.getElementById(id);
   void prepareOffline(window, (message) => {
     element('app-update').textContent = message;
     element('app-update-label').textContent = message.startsWith('App update ready.') ? 'App update ready' : 'App status';
-  });
+  }, () => saveUpdateState(window, sessions));
   const form = element('pair-form');
   const code = element('pair-code');
   const workspace = element('pair-workspace');
@@ -130,6 +133,13 @@ if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => { if (document.hidden) leaveCamera(); });
   // A read-only check is also how a returning phone confirms its cookie.
   void pairing.check().then(() => {
+    if (updateState && pairing.state === 'paired') {
+      if (updateState.uncertain) sessions.outcomeIssue = 'The app updated before an action was confirmed. Check your PC before sending again. Nothing was retried.';
+      if (updateState.active) {
+        const [workspace, session] = updateState.active.split('/');
+        void sessions.loadProject(workspace).then(() => sessions.openProjectSession(workspace, session));
+      }
+    }
     if (incoming) { pairing.prepare(incoming); incoming = null; focusPairing(); }
   });
 }
