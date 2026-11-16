@@ -6,6 +6,9 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Embed LocalLink 0.1.5: the app says when this device's notifications
+  stopped and need turning on again (LocalHub#290).
+
 - A finished-turn notification is kept by the push service for 6 hours
   instead of 15 minutes, so a dozing phone still gets it when it wakes. A
   device can ask whether its notifications are on, off or lapsed

@@ -38,6 +38,9 @@ export function mountCompanion(document, window, sessions, checkAccess) {
       el('notification-workspace').replaceChildren(blank, ...options);
     }
     el('notification-workspace').value = notifications.workspace || selected;
+    const lapsed = notifications.authorized ? notifications.lapsed : [];
+    el('notification-lapsed').hidden = !lapsed.length;
+    text('notification-lapsed-text', lapsed.length ? `Notifications stopped for ${lapsed.map((workspace) => workspace.label).join(', ')}. Turn them on again in Devices.` : '');
   }
   let attentionKey;
   function renderAttention() {
@@ -76,6 +79,7 @@ export function mountCompanion(document, window, sessions, checkAccess) {
   el('confirm-revoke').addEventListener('click', () => { el('revoke-confirm').hidden = true; void device.revoke(); });
   el('notification-workspace').addEventListener('change', () => notifications.select(el('notification-workspace').value));
   el('enable-notifications').addEventListener('click', () => void notifications.enable());
+  el('notification-lapsed-open').addEventListener('click', () => { const first = notifications.lapsed[0]; if (first) notifications.select(first.id); });
   el('test-notification').addEventListener('click', () => void notifications.test());
   el('off-notifications').addEventListener('click', () => void notifications.off());
   el('allow-approval').addEventListener('click', () => sessions.answerApproval(true));
@@ -86,7 +90,7 @@ export function mountCompanion(document, window, sessions, checkAccess) {
     else if (!el('attention-title').closest('section').hidden) el('attention-title').focus();
   });
   const previousChanged = sessions.changed;
-  sessions.changed = (model) => { previousChanged(model); device.access(model.authorized); notifications.access(model.authorized); renderAttention(); renderNotifications(); };
+  sessions.changed = (model) => { previousChanged(model); device.access(model.authorized); notifications.access(model.authorized); void notifications.review(model.workspaces); renderAttention(); renderNotifications(); };
   const refetch = async (destination = 'attention') => {
     window.location.hash = ['attention', 'sessions', 'devices'].includes(destination) ? destination : 'attention';
     const confirmed = await checkAccess();

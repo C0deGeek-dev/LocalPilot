@@ -1,12 +1,14 @@
 export class Notifications {
   constructor({ browser, fetch, changed }) {
     Object.assign(this, { browser, fetch, changed });
-    this.generation = 0; this.authorized = false; this.busy = false; this.enabled = false; this.message = 'Pair this device before enabling notifications.';
+    this.generation = 0; this.checks = 0; this.authorized = false; this.busy = false; this.enabled = false; this.message = 'Pair this device before enabling notifications.';
+    this.lapsed = []; this.reviewed = '';
   }
   get supported() { return !!(this.browser.Notification && this.browser.PushManager && this.browser.navigator.serviceWorker); }
   access(authorized) {
     if (this.authorized === authorized) return;
     this.authorized = authorized; ++this.generation; this.busy = false; this.enabled = false; this.workspace = '';
+    this.lapsed = []; this.reviewed = '';
     this.message = authorized ? 'Notifications are not confirmed. Choose a project, then enable or re-enable notifications.' : 'Pair this device before enabling notifications.';
     this.changed(this);
   }
@@ -14,9 +16,54 @@ export class Notifications {
     if (this.workspace === workspace) return;
     ++this.generation; this.workspace = workspace; this.busy = false; this.enabled = false;
     this.message = 'Notifications are not confirmed for this project. Use Enable notifications to register or re-enable.'; this.changed(this);
+    void this.check();
   }
-  async request(body) {
-    const response = await this.fetch(`/api/push?workspace=${encodeURIComponent(this.workspace)}`, {
+  // What the PC has for this device in `workspace`: on, off, lapsed (the push
+  // service ended the subscription or the key changed) or unavailable; null
+  // when unknown (an older PC, or no answer). Changes nothing.
+  async state(workspace) {
+    try {
+      const result = await this.request({ op: 'status' }, workspace);
+      return ['on', 'off', 'lapsed', 'unavailable'].includes(result?.notifications) ? result.notifications : null;
+    } catch { return null; }
+  }
+  // Show the selected project's state. Superseded by any enable, test or off.
+  async check() {
+    if (!this.authorized || !this.workspace || !this.supported) return;
+    const generation = this.generation, token = ++this.checks, workspace = this.workspace;
+    const state = await this.state(workspace);
+    if (generation !== this.generation || token !== this.checks || this.busy || !state) return;
+    const granted = this.browser.Notification.permission === 'granted';
+    this.enabled = state === 'on' && granted;
+    this.message = {
+      on: granted ? 'Notifications are on for this project. Use Test notification to check delivery on this device.' : 'Your PC has notifications on for this device, but this browser blocks them. Allow notifications in this site’s settings, then use Enable notifications again.',
+      off: 'Notifications are off for this project. Use Enable notifications to turn them on.',
+      lapsed: 'Notifications stopped for this project: the push service ended this device’s subscription, or your PC’s notification key changed. Use Enable notifications to turn them on again.',
+      unavailable: 'Notifications are turned off on your PC. Enable remote push in LocalPilot.',
+    }[state];
+    this.settle(workspace, state);
+    this.changed(this);
+  }
+  // On opening: which projects stopped sending this device notifications.
+  // Asked one project at a time, at most `limit`, once per project list.
+  async review(workspaces, limit = 8) {
+    workspaces = workspaces.filter((workspace) => workspace.online);
+    const key = workspaces.map((workspace) => workspace.id).join();
+    if (!this.authorized || !this.supported || !key || key === this.reviewed) return;
+    this.reviewed = key;
+    const generation = this.generation, lapsed = [];
+    for (const workspace of workspaces.slice(0, limit)) {
+      const state = await this.state(workspace.id);
+      if (generation !== this.generation || key !== this.reviewed) return;
+      if (state === 'lapsed') lapsed.push(workspace);
+    }
+    this.lapsed = lapsed; this.changed(this);
+  }
+  settle(workspace, state) {
+    if (state !== 'lapsed') this.lapsed = this.lapsed.filter((item) => item.id !== workspace);
+  }
+  async request(body, workspace = this.workspace) {
+    const response = await this.fetch(`/api/push?workspace=${encodeURIComponent(workspace)}`, {
       method: body ? 'POST' : 'GET', credentials: 'same-origin', mode: 'same-origin', cache: 'no-store', redirect: 'error',
       ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15000),
     });
@@ -30,7 +77,7 @@ export class Notifications {
     if (!this.authorized || !this.workspace || this.busy || !this.supported) return;
     const generation = this.generation;
     const current = () => generation === this.generation && this.authorized;
-    this.busy = true; this.changed(this);
+    ++this.checks; this.busy = true; this.changed(this);
     try { await operation(current); }
     catch (error) { if (current()) { this.message = error.message; this.enabled = false; } }
     finally { if (current()) { this.busy = false; this.changed(this); } }
@@ -70,7 +117,7 @@ export class Notifications {
       const result = await this.request({ op: 'subscribe', endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth, key_id: key.key_id });
       if (!current()) return;
       if (result.subscribed !== true) throw new Error('Your PC did not confirm notification registration.');
-      this.enabled = true; this.message = 'Notifications enabled for this project. Use Test notification to check delivery on this device.';
+      this.enabled = true; this.settle(this.workspace, 'on'); this.message = 'Notifications enabled for this project. Use Test notification to check delivery on this device.';
     });
   }
   test() {
@@ -87,7 +134,7 @@ export class Notifications {
       const result = await this.request({ op: 'unsubscribe' });
       if (!current()) return;
       if (result.subscribed !== false) throw new Error('Your PC did not confirm notifications off.');
-      this.enabled = false;
+      this.enabled = false; this.settle(this.workspace, 'off');
       // Server off is authoritative. Keep the browser subscription reusable:
       // another workspace on this origin may still use it.
       this.message = 'Notifications off for this project. Browser permission remains available for re-enabling.';
