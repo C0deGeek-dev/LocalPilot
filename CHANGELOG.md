@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A finished-turn notification is no longer dropped by the resync the terminal
+  sends devices right after a turn ends; only the share ending cancels it.
+  `LOCALPILOT_LOG=localpilot::remote_push=debug` traces every notification
+  decision (LocalHub#290).
+
 - Embed LocalLink 0.1.5: the app says when this device's notifications
   stopped and need turning on again (LocalHub#290).
 

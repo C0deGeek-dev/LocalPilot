@@ -906,6 +906,13 @@ the server's reply (`accepted`, `queued`, `rejected`), and each live record to
 the device (`turn_started`, `text_delta`, `stopped`). The trace names steps and
 record kinds only, never the text of a prompt or reply.
 
+To see why a phone notification was or was not sent, start the workspace
+server with `LOCALPILOT_LOG=localpilot::remote_push=debug`. It logs each fact
+the push sender takes from a shared session (`baseline`, `ask_opened`,
+`ask_ended`, `stopped`, `gap`, `gone`), which pushes that wanted, to how many
+devices, and the push service's answer, or that a push was no longer due.
+Session ids and kinds only; no endpoint, key or text.
+
 `[remote.push]` notifications are signed with a key this computer makes for
 itself (P-256, kept owner-only beside the device registry as
 `~/.localpilot/devices/vapid.p8`). `localpilot remote push rotate` replaces it;

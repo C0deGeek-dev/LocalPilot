@@ -920,7 +920,10 @@ or account; a third-party carrier is acceptable only end-to-end encrypted.
    open). Each push is tied to its session and that session's verified
    view: a mirror gap or rebuild suspends the session until the next verified
    baseline, and work queued before a gap, a rebuild or the share ending is
-   never sent. One push of a kind per device per 30 seconds per workspace
+   never sent. Amended for LocalHub#290: a stop, which was committed in order
+   on a verified view, is still sent through a rebuild (the terminal resyncs
+   devices right after each turn ends) unless the rebuilt view has an ask
+   open; only the share ending cancels it. One push of a kind per device per 30 seconds per workspace
    server, with a trailing re-check of current state. TTL: an ask's remaining expiry,
    at most 300 seconds; a stop 6 hours (amended from 900 seconds for
    LocalHub#290: a stop is a `normal` push, which a dozing Android phone

@@ -201,6 +201,10 @@ pub(crate) async fn deliver(
     .unwrap_or(Err(SendError::TimedOut))
 }
 
+/// Debug trace of every push decision
+/// (`LOCALPILOT_LOG=localpilot::remote_push=debug`).
+const TRACE: &str = "localpilot::remote_push";
+
 /// What the relay mirror tells the sender.
 #[derive(Debug, Clone)]
 pub(crate) enum Mirror {
@@ -219,6 +223,19 @@ pub(crate) enum Mirror {
     Gone,
 }
 
+impl Mirror {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Baseline(_) => "baseline",
+            Self::AskOpened(..) => "ask_opened",
+            Self::AskEnded(_) => "ask_ended",
+            Self::Stopped(..) => "stopped",
+            Self::Gap => "gap",
+            Self::Gone => "gone",
+        }
+    }
+}
+
 #[derive(Default)]
 struct SessionState {
     open: BTreeMap<String, u64>,
@@ -231,6 +248,9 @@ struct SessionState {
     generation: u64,
     /// A verified baseline holds for `generation`.
     live: bool,
+    /// Bumped only when the session stops being relayed here: a stop
+    /// already committed is still sent through a rebuild, never after this.
+    share: u64,
 }
 
 impl SessionState {
@@ -261,6 +281,7 @@ impl SessionState {
 struct Cause {
     session: SessionId,
     generation: u64,
+    share: u64,
 }
 
 #[derive(Default)]
@@ -358,9 +379,18 @@ impl PushSender {
         let wanted = {
             let mut state = self.state();
             let entry = state.sessions.entry(session).or_default();
+            tracing::debug!(
+                target: TRACE,
+                %session,
+                fact = fact.name(),
+                live = entry.live,
+                open = entry.open.len(),
+                "push: mirror fact"
+            );
             let cause = Cause {
                 session,
                 generation: entry.generation,
+                share: entry.share,
             };
             let mut kinds = Vec::new();
             match fact {
@@ -405,7 +435,14 @@ impl PushSender {
                     }
                 }
                 // Notified ids are kept, so a re-share does not repeat them.
-                Mirror::Gap | Mirror::Gone => entry.lose_track(),
+                Mirror::Gap => entry.lose_track(),
+                Mirror::Gone => {
+                    entry.lose_track();
+                    entry.share += 1;
+                }
+            }
+            if !kinds.is_empty() {
+                tracing::debug!(target: TRACE, %session, ?kinds, "push: wanted");
             }
             kinds
                 .into_iter()
@@ -417,12 +454,22 @@ impl PushSender {
         }
     }
 
-    /// Whether a push of `kind` for `cause` is still due, and with which TTL:
-    /// the session is still relayed with the same verified view, and for an
-    /// ask one is still open (and not expired); for a stop none is open.
+    /// Whether a push of `kind` for `cause` is still due, and with which TTL.
+    /// An ask: the session is still relayed with the same verified view and
+    /// one is still open (and not expired). A stop: the session is still
+    /// relayed and no ask is known to be open. A stop was committed in order
+    /// on a verified view, so the rebuild that follows a turn's end (the
+    /// terminal resyncs devices when its admission changes) does not cancel
+    /// it (LocalHub#290); the share ending does.
     fn due(&self, kind: Kind, cause: Cause) -> Option<u64> {
         let state = self.state();
         let session = state.sessions.get(&cause.session)?;
+        if session.share != cause.share {
+            return None;
+        }
+        if kind == Kind::Stopped {
+            return session.open.is_empty().then_some(STOPPED_TTL_SECS);
+        }
         if !session.live || session.generation != cause.generation {
             return None;
         }
@@ -441,7 +488,7 @@ impl PushSender {
                 let left = latest.saturating_sub(now_ms()) / 1000;
                 (left > 0).then(|| left.min(ASK_TTL_SECS))
             }
-            Kind::Stopped => session.open.is_empty().then_some(STOPPED_TTL_SECS),
+            Kind::Stopped => None,
             // Tests are sent directly by `test`, never through a session.
             Kind::Test => None,
         }
@@ -459,7 +506,9 @@ impl PushSender {
     }
 
     fn want(self: &Arc<Self>, kind: Kind, cause: Cause) {
-        for (device, push) in self.recipients() {
+        let recipients = self.recipients();
+        tracing::debug!(target: TRACE, ?kind, devices = recipients.len(), "push: recipients");
+        for (device, push) in recipients {
             let now = tokio::time::Instant::now();
             let mut state = self.state();
             let window = state.windows.entry((device.clone(), kind)).or_default();
@@ -537,8 +586,12 @@ impl PushSender {
             let detail = match &outcome {
                 Some((host, Ok(status))) => format!("{host} {status}"),
                 Some((host, Err(error))) => format!("{host} {error}"),
-                None => return,
+                None => {
+                    tracing::debug!(target: TRACE, ?kind, "push: no longer due, not sent");
+                    return;
+                }
             };
+            tracing::debug!(target: TRACE, ?kind, %detail, "push: sent");
             sender.registry.audit("push_sent", Some(&device), &detail);
             if let Some((_, Ok(404 | 410))) = outcome {
                 let _ = sender.registry.clear_push_rev(&device, &rev);
@@ -974,6 +1027,7 @@ mod tests {
             Cause {
                 session,
                 generation: 0,
+                share: 0,
             },
         );
         settle().await;
@@ -1054,6 +1108,37 @@ mod tests {
                 Ok(vec!["142.250.1.1:443".parse().unwrap()])
             })
         })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_survives_the_resync_that_follows_it_but_not_the_share_ending() {
+        // At the end of a turn the sharing terminal sends a fresh snapshot
+        // (its admission changed): the mirror rebuilds right after the stop,
+        // often while the push service's name still resolves (LocalHub#290).
+        for (ending, sent) in [
+            ("resync", true),
+            ("resync, not yet verified", true),
+            ("gone", false),
+        ] {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let rig = rig_with(201, held_resolve(&release));
+            let session = shared(&rig);
+            rig.sender
+                .observe(session, Mirror::Stopped("e".to_string(), 7));
+            settle().await;
+            match ending {
+                "resync" => {
+                    rig.sender.observe(session, Mirror::Gap);
+                    rig.sender.observe(session, Mirror::Baseline(Vec::new()));
+                }
+                "resync, not yet verified" => rig.sender.observe(session, Mirror::Gap),
+                _ => rig.sender.observe(session, Mirror::Gone),
+            }
+            release.notify_one();
+            settle().await;
+            let expected: Vec<&str> = if sent { vec!["normal"] } else { Vec::new() };
+            assert_eq!(kinds(&rig), expected, "{ending}");
+        }
     }
 
     #[tokio::test(start_paused = true)]
