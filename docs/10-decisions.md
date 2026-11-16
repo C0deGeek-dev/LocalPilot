@@ -41,6 +41,15 @@ unrelated process once the id is reused, and Windows has no `SIGTERM`.
    pairing continues with the same name and access. `remote status` says
    whether a running gateway was started in a terminal or in the background.
    Still not decided: a login item that starts it at sign-in.
+5. Amended 2026-11-16 (LocalHub#293): a gateway started in the background
+   stops itself once no workspace has been served for 5 minutes (checked
+   every 30 s), so closing the last session and its background server
+   (ADR-0287) ends phone access too; one started in a terminal runs until
+   Ctrl-C. A workspace counts as served while its server holds a lock on a
+   per-run file beside its index entry (`<id>.<run>.alive`); the OS releases
+   it if the server dies, so an entry left by a crash does not keep the
+   gateway running. The check reads files only and never connects to a
+   server, so it never counts as a use that keeps a server from idling.
 
 **Consequences.** Phone access no longer depends on a terminal window, and ends
 on request from any terminal. A gateway started before this version has no

@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A gateway started in the background stops itself once no workspace has been
+  served for 5 minutes, so it ends after the last session and its background
+  server. A server crash no longer keeps it running (LocalHub#293).
+
 - The terminal offers to start the phone gateway when it is needed: pairing
   that stops because the gateway is not running shows "Start gateway" and then
   continues with the same name and access, and `/remote share` asks once

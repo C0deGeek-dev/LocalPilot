@@ -2384,6 +2384,44 @@ async fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
 }
 
 /// `localpilot remote gateway`: run until interrupted or switched off.
+/// How often a background gateway checks whether any workspace is served.
+const UNSERVED_CHECK: Duration = Duration::from_secs(30);
+/// How long no workspace may be served before a background gateway stops.
+const UNSERVED_STOP: Duration = Duration::from_secs(5 * 60);
+
+/// Cancel `stop` once `served` has said no at every check for `after`.
+async fn stop_when_unserved(
+    served: Arc<dyn Fn() -> bool + Send + Sync>,
+    stop: CancellationToken,
+    every: Duration,
+    after: Duration,
+) {
+    let mut since: Option<tokio::time::Instant> = None;
+    loop {
+        tokio::select! {
+            () = stop.cancelled() => return,
+            () = tokio::time::sleep(every) => {}
+        }
+        let check = served.clone();
+        let live = tokio::task::spawn_blocking(move || check())
+            .await
+            .unwrap_or(true);
+        if live {
+            since = None;
+            continue;
+        }
+        let first = *since.get_or_insert_with(tokio::time::Instant::now);
+        if first.elapsed() >= after {
+            eprintln!(
+                "No workspace has been served for {} minutes; the gateway stops.",
+                after.as_secs() / 60
+            );
+            stop.cancel();
+            return;
+        }
+    }
+}
+
 pub(crate) async fn run(background: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(
@@ -2452,6 +2490,19 @@ pub(crate) async fn run(background: bool) -> anyhow::Result<()> {
             }
         }
     });
+    // A gateway started in the background stops on its own once no
+    // workspace has been served for a while (LocalHub#293); one in a
+    // terminal runs until Ctrl-C.
+    if background {
+        if let Some(index) = crate::server_index::ServedIndex::for_user() {
+            tokio::spawn(stop_when_unserved(
+                Arc::new(move || index.any_served()),
+                stop.clone(),
+                UNSERVED_CHECK,
+                UNSERVED_STOP,
+            ));
+        }
+    }
     gateway.serve(listener).await;
     crate::remote_gateway_control::clear_control(&token);
     eprintln!("Gateway stopped.");
@@ -2472,6 +2523,32 @@ mod tests {
             );
         }
         map
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_background_gateway_stops_after_no_workspace_is_served_for_a_while() {
+        let served = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let stop = CancellationToken::new();
+        let check = served.clone();
+        let watcher = tokio::spawn(stop_when_unserved(
+            Arc::new(move || check.load(std::sync::atomic::Ordering::SeqCst)),
+            stop.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        ));
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        assert!(!stop.is_cancelled(), "served: keeps running");
+        // Unserved for a while, then served again: the wait starts over.
+        served.store(false, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(240)).await;
+        served.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        served.store(false, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(240)).await;
+        assert!(!stop.is_cancelled(), "not yet five minutes in a row");
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(stop.is_cancelled(), "stopped after five unserved minutes");
+        watcher.await.unwrap();
     }
 
     #[test]

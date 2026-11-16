@@ -107,6 +107,7 @@ impl ServedIndex {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| canonical.to_string_lossy().into_owned());
         let instance = random_hex(8).map_err(|error| std::io::Error::other(error.to_string()))?;
+        let alive = self.hold_alive(&id, &instance);
         let entry = ServedEntry {
             id: id.clone(),
             label,
@@ -127,10 +128,73 @@ impl ServedIndex {
             replace(&temp, &self.dir.join(format!("{id}.json")))
         })?;
         Ok(Published {
+            alive,
             index: self.clone(),
             id,
             instance,
         })
+    }
+
+    /// Lock `<id>.<instance>.alive` for this run's lifetime (one file per run,
+    /// so a restart never waits on the run it replaces). Best effort: without
+    /// it the workspace reads as not served, which only lets an idle
+    /// background gateway stop sooner.
+    fn hold_alive(&self, id: &str, instance: &str) -> Option<std::fs::File> {
+        prepare_dir(&self.dir).ok()?;
+        let path = self.dir.join(format!("{id}.{instance}.alive"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .ok()?;
+        restrict(&path).ok()?;
+        file.try_lock().ok()?;
+        Some(file)
+    }
+
+    /// Whether any listed workspace has a server running now: its entry's
+    /// lock is held. A crashed server's entry is not (the OS released its
+    /// lock). Never connects to a server, so it never counts as a use.
+    /// A lock file no run holds (left by a crash) is removed on the way.
+    pub(crate) fn any_served(&self) -> bool {
+        let ids: std::collections::HashSet<String> =
+            self.list().into_iter().map(|entry| entry.id).collect();
+        let Ok(dir) = std::fs::read_dir(&self.dir) else {
+            return false;
+        };
+        let mut served = false;
+        for item in dir.flatten().take(MAX_ENTRIES * 8) {
+            let path = item.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(id) = name
+                .strip_suffix(".alive")
+                .and_then(|rest| rest.split_once('.'))
+                .map(|(id, _)| id)
+            else {
+                continue;
+            };
+            let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+            else {
+                continue;
+            };
+            match file.try_lock() {
+                Ok(()) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => served |= ids.contains(id),
+                // Unknown: count it as served, so nothing stops early.
+                Err(std::fs::TryLockError::Error(_)) => served |= ids.contains(id),
+            }
+        }
+        served
     }
 
     /// Remove the entry for `id` if it is still the one `instance` published.
@@ -218,6 +282,9 @@ fn replace(temp: &Path, target: &Path) -> std::io::Result<()> {
 
 /// A published entry; dropping it withdraws the entry if it is still ours.
 pub(crate) struct Published {
+    /// Held locked while this server runs (released by the OS if it dies),
+    /// so a stale entry left by a crash is told apart from a live one.
+    alive: Option<std::fs::File>,
     index: ServedIndex,
     id: String,
     instance: String,
@@ -232,6 +299,13 @@ impl Published {
 
 impl Drop for Published {
     fn drop(&mut self) {
+        if self.alive.take().is_some() {
+            let _ = std::fs::remove_file(
+                self.index
+                    .dir
+                    .join(format!("{}.{}.alive", self.id, self.instance)),
+            );
+        }
         let _ = self.index.withdraw(&self.id, &self.instance);
     }
 }
@@ -322,5 +396,44 @@ mod tests {
         assert_eq!(listed[0].id, published.id());
         assert!(index.get(&id_b).is_none());
         assert!(index.get("../../etc").is_none());
+    }
+
+    #[test]
+    fn only_a_running_server_counts_as_served_and_a_crash_leaves_nothing_live() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("served");
+        let index = ServedIndex::open(&dir);
+        assert!(!index.any_served(), "nothing published");
+        let root = home.path().join("w");
+        std::fs::create_dir_all(&root).unwrap();
+        let old = index.publish(&root).unwrap();
+        assert!(index.any_served());
+        // A restart: the new run is live on its own, before and after the old
+        // run exits.
+        let new = index.publish(&root).unwrap();
+        drop(old);
+        assert!(index.any_served(), "the new run holds its own lock");
+        drop(new);
+        assert!(!index.any_served());
+        // A crash: the entry stays, its lock is gone (the OS released it).
+        let crashed = index.publish(&root).unwrap();
+        let entry = std::fs::read(dir.join(format!("{}.json", crashed.id()))).unwrap();
+        let alive: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|item| item.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "alive"))
+            .collect();
+        assert_eq!(alive.len(), 1);
+        drop(crashed);
+        std::fs::write(
+            dir.join(format!("{}.json", discovery_id(&root).unwrap())),
+            entry,
+        )
+        .unwrap();
+        std::fs::write(&alive[0], b"").unwrap();
+        assert_eq!(index.list().len(), 1, "the stale entry is still listed");
+        assert!(!index.any_served(), "but not served");
+        assert!(!alive[0].exists(), "its stale lock file was removed");
     }
 }
