@@ -1337,6 +1337,13 @@ project file cannot set any `[remote]` key).
   this computer (`503`), too soon (`429` with `Retry-After`), the browser's
   subscription gone (`410`, and it is removed), or the push service refusing
   (`502`). The audit log records the push service's host and status only.
+- **Notification state.** `POST /api/push?workspace=<id>` with
+  `{"op": "status"}` answers `{"notifications": "on" | "off" | "lapsed" |
+  "unavailable"}` for the calling device and changes nothing (no key is
+  made). `lapsed` means the subscription was removed without the device
+  turning it off: the push service answered `404`/`410`, or the key was
+  rotated. The app then asks the user to turn notifications on again. A
+  subscribe or turning notifications off clears it.
 - **Choosing a workspace.** A paired device lists the workspaces it may reach
   (`GET /api/workspaces`: its credential is verified and each workspace's grant
   checked first; only ids, folder names and whether each is online are

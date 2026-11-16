@@ -937,6 +937,7 @@ impl Gateway {
                 // of an internally tagged enum.
                 Unsubscribe {},
                 Test {},
+                Status {},
             }
             match serde_json::from_slice::<Change>(&body.to_bytes()) {
                 Ok(Change::Subscribe {
@@ -952,10 +953,11 @@ impl Gateway {
                 },
                 Ok(Change::Unsubscribe {}) => PushRequest::Unsubscribe,
                 Ok(Change::Test {}) => PushRequest::Test,
+                Ok(Change::Status {}) => PushRequest::Status,
                 _ => {
                     return plain(
                         StatusCode::BAD_REQUEST,
-                        "expected {\"op\": \"subscribe\", ...}, {\"op\": \"unsubscribe\"} or {\"op\": \"test\"}",
+                        "expected {\"op\": \"subscribe\", ...}, {\"op\": \"unsubscribe\"}, {\"op\": \"test\"} or {\"op\": \"status\"}",
                     )
                 }
             }
@@ -989,6 +991,9 @@ impl Gateway {
             }
             Ok((Some(ServerEvent::PushSaved { subscribed }), _)) => {
                 json(&serde_json::json!({ "subscribed": subscribed }))
+            }
+            Ok((Some(ServerEvent::PushStatus { state }), _)) => {
+                json(&serde_json::json!({ "notifications": state }))
             }
             Ok((
                 Some(ServerEvent::PushTested {
@@ -3208,6 +3213,9 @@ mod tests {
                             public_key: "pk".to_string(),
                             key_id: "kid".to_string(),
                         },
+                        Some("status") => ServerEvent::PushStatus {
+                            state: "lapsed".to_string(),
+                        },
                         Some("subscribe") => ServerEvent::Error {
                             message: first["command"]["request"]["endpoint"]
                                 .as_str()
@@ -3321,6 +3329,20 @@ mod tests {
         assert!(answered.contains(r#""subscribed":false"#), "{answered}");
         let refused = push_request(&request, false).await;
         assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
+        let status = r#"{"op":"status"}"#;
+        let answered = push_request(
+            &format!(
+                "POST /api/push?workspace={{id}} HTTP/1.1\r\n{{headers}}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{status}",
+                status.len()
+            ),
+            true,
+        )
+        .await;
+        assert!(
+            answered.contains(r#""notifications":"lapsed""#),
+            "{answered}"
+        );
         // Unknown fields, and the shape without an "op" tag, are refused.
         for wrong in [
             r#"{"op":"unsubscribe","x":1}"#,

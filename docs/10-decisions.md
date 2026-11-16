@@ -922,7 +922,10 @@ or account; a third-party carrier is acceptable only end-to-end encrypted.
    baseline, and work queued before a gap, a rebuild or the share ending is
    never sent. One push of a kind per device per 30 seconds per workspace
    server, with a trailing re-check of current state. TTL: an ask's remaining expiry,
-   at most 300 seconds; a stop 900 seconds.
+   at most 300 seconds; a stop 6 hours (amended from 900 seconds for
+   LocalHub#290: a stop is a `normal` push, which a dozing Android phone
+   receives only at its next maintenance window, often later than 15
+   minutes; a later stop replaces it on the phone).
 6. Every send is audited with the device id, the push service's host and the
    result; the endpoint and keys never appear in logs, audit or status.
 

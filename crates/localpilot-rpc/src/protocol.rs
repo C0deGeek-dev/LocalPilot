@@ -256,6 +256,9 @@ pub enum PushRequest {
     /// Send one content-free test notification to this device's saved
     /// subscription, through the real push path.
     Test,
+    /// Whether this device has notifications on, read without changing
+    /// anything (no key is made).
+    Status,
 }
 
 /// A secret carried on the wire (a gateway capability, a device credential, a
@@ -696,6 +699,13 @@ pub enum ServerEvent {
     /// now has notifications on.
     PushSaved {
         subscribed: bool,
+    },
+    /// Reply to a `device_push` status request: `state` is `on`, `off`,
+    /// `lapsed` (the push service ended the subscription or the key changed;
+    /// turn notifications on again) or `unavailable` (notifications are off
+    /// on this computer).
+    PushStatus {
+        state: String,
     },
     /// Reply to a device's test notification: `outcome` is `sent`,
     /// `no_subscription`, `off` (notifications are off on this computer),

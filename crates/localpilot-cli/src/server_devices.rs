@@ -220,6 +220,12 @@ pub(crate) struct DeviceRecord {
     /// on. An additive field: a registry without it reads as "off".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) push: Option<PushSubscription>,
+    /// When the device's subscription was removed because the push service
+    /// said it no longer exists, or the notification key was rotated: the
+    /// device should turn notifications on again. Cleared by a subscribe or
+    /// by turning notifications off. Additive, like `push`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) push_lapsed_unix: Option<u64>,
 }
 
 /// A browser push subscription, as stored. The endpoint and both keys are
@@ -778,6 +784,7 @@ impl DeviceRegistry {
             created_unix: now_unix(),
             revoked_unix: None,
             push: None,
+            push_lapsed_unix: None,
         };
         self.change(|file| {
             file.devices.insert(id.clone(), record);
@@ -810,6 +817,7 @@ impl DeviceRegistry {
                         key_id: key_id.to_string(),
                         created_unix: now_unix(),
                     });
+                    record.push_lapsed_unix = None;
                     saved = true;
                 }
             }
@@ -828,6 +836,7 @@ impl DeviceRegistry {
         self.change(|file| {
             if let Some(record) = file.devices.get_mut(id) {
                 cleared = record.push.take().is_some();
+                record.push_lapsed_unix = None;
             }
         })?;
         Ok(cleared)
@@ -842,6 +851,7 @@ impl DeviceRegistry {
             if let Some(record) = file.devices.get_mut(id) {
                 if record.push.as_ref().is_some_and(|push| push.rev == rev) {
                     record.push = None;
+                    record.push_lapsed_unix = Some(now_unix());
                     cleared = true;
                 }
             }
@@ -862,6 +872,7 @@ impl DeviceRegistry {
                     .is_some_and(|push| push.key_id != key_id)
                 {
                     record.push = None;
+                    record.push_lapsed_unix = Some(now_unix());
                     cleared += 1;
                 }
             }
@@ -878,6 +889,18 @@ impl DeviceRegistry {
             return None;
         }
         record.push.clone()
+    }
+
+    /// Whether a device's notifications ended without it turning them off
+    /// (see [`DeviceRecord::push_lapsed_unix`]); `false` when unknown or
+    /// revoked.
+    pub(crate) fn push_lapsed(&self, id: &str) -> bool {
+        let Ok(file) = self.current() else {
+            return false;
+        };
+        file.devices.get(id).is_some_and(|record| {
+            record.revoked_unix.is_none() && record.push_lapsed_unix.is_some()
+        })
     }
 
     /// Revoke a device everywhere. Persisted before it takes effect. Returns
@@ -2038,8 +2061,41 @@ mod tests {
         // The push service's late "gone" answer for the first subscription.
         assert!(!registry.clear_push_rev(&standing.id, &first).unwrap());
         assert_eq!(registry.push_of(&standing.id).unwrap().rev, second);
+        assert!(
+            !registry.push_lapsed(&standing.id),
+            "a stale answer is no lapse"
+        );
         assert!(registry.clear_push_rev(&standing.id, &second).unwrap());
         assert!(registry.push_of(&standing.id).is_none());
+    }
+
+    #[test]
+    fn a_subscription_the_push_service_ended_reads_as_lapsed_until_on_or_off() {
+        let registry = DeviceRegistry::default();
+        let (phone, _) = registry.add("phone", Scope::Observe, false).unwrap();
+        assert!(!registry.push_lapsed(&phone.id), "never on");
+        let rev = registry
+            .set_push(&phone.id, ENDPOINT, "p", "a", "key1")
+            .unwrap();
+        assert!(registry.clear_push_rev(&phone.id, &rev).unwrap());
+        assert!(registry.push_lapsed(&phone.id));
+        // Turning them on again clears it.
+        registry
+            .set_push(&phone.id, ENDPOINT, "p", "a", "key1")
+            .unwrap();
+        assert!(!registry.push_lapsed(&phone.id));
+        // So does a key rotation set it, and turning them off clear it.
+        assert_eq!(registry.clear_push_except_key("key2").unwrap(), 1);
+        assert!(registry.push_lapsed(&phone.id));
+        registry.clear_push(&phone.id).unwrap();
+        assert!(!registry.push_lapsed(&phone.id));
+        // A revoked device reads as not lapsed.
+        let rev = registry
+            .set_push(&phone.id, ENDPOINT, "p", "a", "key2")
+            .unwrap();
+        registry.clear_push_rev(&phone.id, &rev).unwrap();
+        assert!(registry.revoke(&phone.id).unwrap());
+        assert!(!registry.push_lapsed(&phone.id));
     }
 
     #[test]

@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A finished-turn notification is kept by the push service for 6 hours
+  instead of 15 minutes, so a dozing phone still gets it when it wakes. A
+  device can ask whether its notifications are on, off or lapsed
+  (`{"op": "status"}` on `/api/push`); lapsed means the push service ended the
+  subscription or the key was rotated, and the app asks to turn them on again
+  (LocalHub#290).
+
 - A `/name` or `/rename` in the terminal that shares a session reaches devices
   while they watch: the snapshot carries the session's name, and a rename sends
   attached devices a fresh one (LocalHub#289).

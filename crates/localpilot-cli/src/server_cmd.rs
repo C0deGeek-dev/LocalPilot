@@ -1904,6 +1904,28 @@ async fn push_for_device(
             _ => error("notifications could not be turned off; try again"),
         };
     }
+    if matches!(request, PushRequest::Status) {
+        let Some(keys) = hosts.remote.push.clone() else {
+            return ServerEvent::PushStatus {
+                state: "unavailable".to_string(),
+            };
+        };
+        let state = tokio::task::spawn_blocking(move || {
+            let current = keys.current().ok().flatten();
+            let saved = registry.push_of(&device);
+            match (saved, current) {
+                (Some(push), Some(key)) if push.key_id == key.id() => "on",
+                (Some(_), _) => "lapsed",
+                (None, _) if registry.push_lapsed(&device) => "lapsed",
+                (None, _) => "off",
+            }
+        })
+        .await
+        .unwrap_or("off");
+        return ServerEvent::PushStatus {
+            state: state.to_string(),
+        };
+    }
     let Some(keys) = hosts.remote.push.clone() else {
         if matches!(request, PushRequest::Test) {
             return ServerEvent::PushTested {
@@ -1916,7 +1938,7 @@ async fn push_for_device(
         );
     };
     match request {
-        PushRequest::Unsubscribe => error("unreachable"),
+        PushRequest::Unsubscribe | PushRequest::Status => error("unreachable"),
         PushRequest::Test => {
             let Some(sender) = hosts.push_sender.clone() else {
                 return ServerEvent::PushTested {
@@ -6089,7 +6111,7 @@ pub(crate) mod tests {
             }),
             ..HostMap::default()
         };
-        let (endpoint, server) = spawn_server_on(factory, 8, hosts.clone());
+        let (endpoint, server) = spawn_server_on(factory, 12, hosts.clone());
         let (_gateway, capability) = register_gateway(&endpoint).await;
         let (device, credential) = pair_device(
             &endpoint,
@@ -6099,6 +6121,13 @@ pub(crate) mod tests {
         )
         .await;
         let ask = |request| first_record(&endpoint, device_push(&capability, &credential, request));
+        let status = |state: &str| ServerEvent::PushStatus {
+            state: state.to_string(),
+        };
+        // Asking the state makes no key.
+        let (_, _, reply) = ask(PushRequest::Status).await;
+        assert_eq!(reply, status("off"));
+        assert!(keys.current().unwrap().is_none(), "status made a key");
         // The key is made on first request and kept.
         let (_, _, reply) = ask(PushRequest::Key).await;
         let ServerEvent::PushKey { public_key, key_id } = reply else {
@@ -6123,11 +6152,18 @@ pub(crate) mod tests {
         let audit = hosts.devices.audit_lines().join("\n");
         assert!(audit.contains("push_subscribed") && audit.contains("fcm.googleapis.com"));
         assert!(!audit.contains("/fcm/send/abc"), "{audit}");
-        // A rotation removes it; turning off works with or without one.
+        let (_, _, reply) = ask(PushRequest::Status).await;
+        assert_eq!(reply, status("on"));
+        // A rotation removes it, and the device is told to turn them on
+        // again; turning off works with or without one, and clears that.
         let (_, removed) = keys.rotate(&hosts.devices).unwrap();
         assert_eq!(removed, 1);
+        let (_, _, reply) = ask(PushRequest::Status).await;
+        assert_eq!(reply, status("lapsed"));
         let (_, _, reply) = ask(PushRequest::Unsubscribe).await;
         assert_eq!(reply, ServerEvent::PushSaved { subscribed: false });
+        let (_, _, reply) = ask(PushRequest::Status).await;
+        assert_eq!(reply, status("off"));
         server.abort();
     }
 
@@ -6155,9 +6191,18 @@ pub(crate) mod tests {
         assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
         let (_, _, reply) = ask(PushRequest::Unsubscribe).await;
         assert_eq!(reply, ServerEvent::PushSaved { subscribed: false });
+        let (_, _, reply) = ask(PushRequest::Status).await;
+        assert_eq!(
+            reply,
+            ServerEvent::PushStatus {
+                state: "unavailable".to_string()
+            }
+        );
         // A revoked device is refused even for that.
         assert!(hosts.devices.revoke(&device).unwrap());
         let (_, _, reply) = ask(PushRequest::Unsubscribe).await;
+        assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
+        let (_, _, reply) = ask(PushRequest::Status).await;
         assert!(matches!(reply, ServerEvent::Error { .. }), "{reply:?}");
         server.abort();
     }

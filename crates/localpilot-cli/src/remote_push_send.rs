@@ -40,7 +40,11 @@ const NOTIFIED_CAP: usize = 256;
 const PADDED: usize = 32;
 /// The longest an ask notification is kept by the push service.
 const ASK_TTL_SECS: u64 = 300;
-const STOPPED_TTL_SECS: u64 = 900;
+/// The longest a finished-turn notification is kept. A `normal` push can
+/// wait for a dozing phone's next maintenance window, which grows to hours;
+/// a shorter TTL drops it before the phone wakes (LocalHub#290). A later
+/// stop replaces it on the phone (one tag per kind).
+const STOPPED_TTL_SECS: u64 = 6 * 60 * 60;
 
 /// What a notification says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
