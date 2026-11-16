@@ -29,8 +29,18 @@ unrelated process once the id is reused, and Windows has no `SIGTERM`.
    the exact token (constant-time); anything else is answered as an unknown
    path. A request through the proxy carries the proxy's host, and a web page
    sends an `Origin` and cannot read the file. On Unix `SIGTERM` stops it too.
-4. Not decided here: starting the gateway from a consent dialog inside pairing
-   or `/remote share`, and a login item that starts it at sign-in.
+4. Amended 2026-11-16 (LocalHub#293): in the terminal, an explicit choice
+   inside pairing or after `/remote share` is consent too. Pairing that stops
+   only because the gateway is not running shows "Start gateway"; after a
+   share, a gateway that is not running (with `[remote] enabled` on) is offered
+   once as "Start the phone gateway?" with "Start gateway" or "Not now". Either
+   runs exactly the start of item 1, with its refusals, and says that the
+   gateway runs for every workspace until `localpilot remote gateway stop`.
+   Nothing is started unless that action is chosen; a device request never
+   starts it; Esc or "Not now" names the command instead. After a start,
+   pairing continues with the same name and access. `remote status` says
+   whether a running gateway was started in a terminal or in the background.
+   Still not decided: a login item that starts it at sign-in.
 
 **Consequences.** Phone access no longer depends on a terminal window, and ends
 on request from any terminal. A gateway started before this version has no

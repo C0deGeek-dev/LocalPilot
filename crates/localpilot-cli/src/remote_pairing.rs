@@ -157,6 +157,11 @@ pub(crate) type Prerequisites = Arc<
         + Sync,
 >;
 
+/// Why pairing stopped when the gateway is not running: the terminal offers
+/// to start it (LocalHub#293).
+pub(crate) const GATEWAY_NOT_RUNNING: &str =
+    "The gateway is not running, so a device cannot reach this computer.";
+
 /// The real prerequisites for the workspace at `cwd`.
 pub(crate) fn prerequisites_for(cwd: PathBuf) -> Prerequisites {
     Arc::new(move || {
@@ -182,12 +187,7 @@ pub(crate) fn prerequisites_for(cwd: PathBuf) -> Prerequisites {
             use crate::remote_status::GatewayHealth;
             match status.gateway {
                 Some(GatewayHealth::Running) => {}
-                Some(GatewayHealth::NotRunning) => {
-                    return Err(
-                        "The gateway is not running. Start it in the background with `localpilot remote gateway start`."
-                            .to_string(),
-                    )
-                }
+                Some(GatewayHealth::NotRunning) => return Err(GATEWAY_NOT_RUNNING.to_string()),
                 Some(GatewayHealth::Unexpected) => {
                     return Err(format!(
                         "Another service is using the gateway port {}. Check [remote] port.",

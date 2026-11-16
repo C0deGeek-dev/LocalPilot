@@ -176,6 +176,13 @@ pub(super) struct RemoteHost {
     pub(super) devices: super::devices_host::DevicesHost,
     /// Starting the background server from `/remote`.
     pub(super) start: super::start_host::StartHost,
+    /// Offering to start the gateway after `/remote share` (LocalHub#293):
+    /// `None` never offers.
+    gateway: Option<(
+        crate::remote_gateway_control::Probe,
+        crate::remote_gateway_control::Starter,
+    )>,
+    gateway_offer: RefCell<GatewayOffer>,
     /// The device whose cancel the running operation took, until it ends.
     cancel_from: RefCell<Option<String>>,
     /// How the session's permission asks were decided, to say who answered.
@@ -184,10 +191,19 @@ pub(super) struct RemoteHost {
 
 impl RemoteHost {
     pub(super) fn new(share: Arc<RemoteShare>, cwd: &std::path::Path) -> Self {
+        let starter = crate::remote_gateway_control::starter_for(cwd.to_path_buf());
         let pairing = super::pairing_host::PairingHost::new(
             share.dial(),
             crate::remote_pairing::prerequisites_for(cwd.to_path_buf()),
-        );
+        )
+        .with_gateway(starter.clone());
+        // Tests never probe or start the real gateway unless they ask to.
+        let gateway = (!cfg!(test)).then(|| {
+            (
+                crate::remote_gateway_control::probe_for(cwd.to_path_buf()),
+                starter,
+            )
+        });
         let devices = super::devices_host::DevicesHost::new(std::sync::Arc::new(
             crate::server_devices::DeviceRegistry::for_user(cwd),
         ));
@@ -212,7 +228,20 @@ impl RemoteHost {
             admission: Cell::new(None),
             status: super::status_host::StatusHost::new(cwd.to_path_buf()),
             start,
+            gateway,
+            gateway_offer: RefCell::new(GatewayOffer::Idle),
         }
+    }
+
+    /// The same host, probing and starting the gateway with these.
+    #[cfg(test)]
+    pub(super) fn with_gateway(
+        mut self,
+        probe: crate::remote_gateway_control::Probe,
+        starter: crate::remote_gateway_control::Starter,
+    ) -> Self {
+        self.gateway = Some((probe, starter));
+        self
     }
 
     /// The same host, starting servers with `server`.
@@ -785,6 +814,7 @@ pub(super) fn command(app: &mut AppModel, host: &RemoteHost, action: RemoteActio
         RemoteAction::Share => match host.share.share() {
             ShareOutcome::Connecting => {
                 notice(app, "Connecting this session to the background server...");
+                probe_gateway(host);
             }
             ShareOutcome::AlreadyShared => notice(app, "This session is already shared."),
             ShareOutcome::AlreadyConnecting => notice(app, "Sharing is connecting."),
@@ -848,9 +878,112 @@ fn tick_start(app: &mut AppModel, host: &RemoteHost) {
     }
 }
 
+/// Where offering to start the gateway after a share stands.
+enum GatewayOffer {
+    Idle,
+    /// Checking whether the gateway runs.
+    Probing(crate::remote_gateway_control::Pending<bool>),
+    /// It does not: offered once no other choice is open.
+    Due,
+    /// The choice is open.
+    Open,
+    /// The user chose to start it.
+    Starting(crate::remote_gateway_control::StartPending),
+}
+
+const GATEWAY_TITLE: &str = "Start the phone gateway?";
+const GATEWAY_START: &str = "Start gateway";
+const GATEWAY_NOT_NOW: &str = "Not now";
+
+/// A share began: check whether devices can reach this computer at all.
+fn probe_gateway(host: &RemoteHost) {
+    let Some((probe, _)) = &host.gateway else {
+        return;
+    };
+    let mut offer = host.gateway_offer.borrow_mut();
+    if matches!(*offer, GatewayOffer::Idle) {
+        *offer = GatewayOffer::Probing(crate::remote_gateway_control::Pending::spawn(probe()));
+    }
+}
+
+/// Offer the gateway once the probe says it is not running and nothing else
+/// is asked; report a chosen start when it ends.
+fn tick_gateway(app: &mut AppModel, host: &RemoteHost) {
+    let mut offer = host.gateway_offer.borrow_mut();
+    let next = match &*offer {
+        GatewayOffer::Idle => return,
+        GatewayOffer::Probing(pending) => match pending.take() {
+            Some(true) => GatewayOffer::Due,
+            Some(false) => GatewayOffer::Idle,
+            None => return,
+        },
+        GatewayOffer::Due => {
+            if matches!(host.share.state(), ShareState::Off) {
+                GatewayOffer::Idle
+            } else if app.choice().is_some() || host.choice.get().is_some() {
+                return;
+            } else {
+                app.open_yielding_choice(
+                    GATEWAY_TITLE.to_string(),
+                    vec![
+                        "This session is shared, but devices cannot reach this computer: the gateway is not running.".to_string(),
+                        "Start gateway runs it in the background for every workspace, until `localpilot remote gateway stop`.".to_string(),
+                    ],
+                    vec![GATEWAY_START.to_string(), GATEWAY_NOT_NOW.to_string()],
+                );
+                host.choice.set(Some(ChoiceKind::StartGateway));
+                GatewayOffer::Open
+            }
+        }
+        // Closed by its keys (which move it on) or replaced by another
+        // choice: either way it is not asked again for this share.
+        GatewayOffer::Open => {
+            if host.choice.get() == Some(ChoiceKind::StartGateway) && app.choice().is_some() {
+                return;
+            }
+            if host.choice.get() == Some(ChoiceKind::StartGateway) {
+                host.choice.set(None);
+            }
+            GatewayOffer::Idle
+        }
+        GatewayOffer::Starting(pending) => match pending.take() {
+            Some(outcome) => {
+                app.apply_runtime(RuntimeUpdate::Notice(
+                    crate::remote_gateway_control::started_text(&outcome),
+                ));
+                GatewayOffer::Idle
+            }
+            None => return,
+        },
+    };
+    *offer = next;
+}
+
+/// The gateway choice was answered: Start begins it, anything else says how
+/// to start it later.
+fn answer_gateway(app: &mut AppModel, host: &RemoteHost, start: bool) {
+    let mut offer = host.gateway_offer.borrow_mut();
+    match (&host.gateway, start) {
+        (Some((_, starter)), true) => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "Starting the gateway in the background...".to_string(),
+            ));
+            *offer =
+                GatewayOffer::Starting(crate::remote_gateway_control::Pending::spawn(starter()));
+        }
+        _ => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "The gateway is not running; devices cannot connect until it is. Start it with `localpilot remote gateway start`.".to_string(),
+            ));
+            *offer = GatewayOffer::Idle;
+        }
+    }
+}
+
 /// Keep the pairing overlay current (and closed if the session changed).
 fn tick_pairing(app: &mut AppModel, host: &RemoteHost, busy: bool) {
     tick_start(app, host);
+    tick_gateway(app, host);
     let shared = !matches!(host.share.state(), ShareState::Off);
     host.pairing.tick(app, host.share.tracked_session(), shared);
     // Attendance here: only this session's confirmed list (when shared).
@@ -1001,6 +1134,8 @@ enum ChoiceKind {
     Remote { stop: bool },
     /// Starting the background server (see `start_host`).
     StartServer,
+    /// Starting the gateway after a share: "Start gateway" or "Not now".
+    StartGateway,
 }
 
 /// Whether an exit request may close the terminal now. While sharing is on
@@ -1148,7 +1283,9 @@ pub(super) fn choice_key(
         }
         KeyCode::Esc => {
             app.close_choice();
-            host.choice.set(None);
+            if host.choice.take() == Some(ChoiceKind::StartGateway) {
+                answer_gateway(app, host, false);
+            }
             ChoiceKey::Back
         }
         KeyCode::Enter => {
@@ -1170,6 +1307,10 @@ pub(super) fn choice_key(
                         RemoteAction::Share
                     };
                     command(app, host, action);
+                    ChoiceKey::Back
+                }
+                (Some(ChoiceKind::StartGateway), selected) => {
+                    answer_gateway(app, host, selected == 0);
                     ChoiceKey::Back
                 }
                 _ => ChoiceKey::Back,

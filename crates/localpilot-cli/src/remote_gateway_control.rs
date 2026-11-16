@@ -9,6 +9,8 @@
 //! file, so it cannot stop the gateway; a request through the user's proxy
 //! carries the proxy's host name and is refused before the token is checked.
 
+#![cfg_attr(not(feature = "tui"), allow(dead_code))]
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -159,6 +161,84 @@ pub(crate) async fn start(cwd: &Path) -> Result<StartOutcome, Refusal> {
         if tokio::time::Instant::now() >= deadline {
             return Ok(StartOutcome::NotYet);
         }
+    }
+}
+
+/// Starts the gateway in the background, on the user's explicit choice in
+/// the terminal (LocalHub#293). A seam so tests never spawn a process.
+pub(crate) type Starter = std::sync::Arc<
+    dyn Fn() -> futures::future::BoxFuture<'static, Result<StartOutcome, Refusal>> + Send + Sync,
+>;
+
+/// The real [`Starter`] for the workspace at `cwd`: [`start`], with all its
+/// refusals (remote access off, the port taken).
+pub(crate) fn starter_for(cwd: PathBuf) -> Starter {
+    std::sync::Arc::new(move || {
+        let cwd = cwd.clone();
+        Box::pin(async move { start(&cwd).await })
+    })
+}
+
+/// Whether to offer starting the gateway: remote access is on and nothing
+/// answers on its port. Anything unclear (settings unreadable, the port held
+/// by something else) is not an offer; pairing and status say those.
+pub(crate) type Probe =
+    std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, bool> + Send + Sync>;
+
+/// The real [`Probe`] for the workspace at `cwd`.
+pub(crate) fn probe_for(cwd: PathBuf) -> Probe {
+    std::sync::Arc::new(move || {
+        let cwd = cwd.clone();
+        Box::pin(async move {
+            let status = crate::remote_gateway::status_at(&cwd).await;
+            status.settings.is_ok_and(|settings| settings.enabled)
+                && status.gateway == Some(GatewayHealth::NotRunning)
+        })
+    })
+}
+
+/// A background task's result, read without waiting.
+#[derive(Clone)]
+pub(crate) struct Pending<T>(std::sync::Arc<std::sync::Mutex<Option<T>>>);
+
+impl<T: Send + 'static> Pending<T> {
+    /// Run `work` on the runtime; its result is kept for [`Pending::take`].
+    pub(crate) fn spawn(work: futures::future::BoxFuture<'static, T>) -> Self {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let filled = slot.clone();
+        tokio::spawn(async move {
+            let value = work.await;
+            *filled
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value);
+        });
+        Self(slot)
+    }
+
+    /// The result, once, when it is there.
+    pub(crate) fn take(&self) -> Option<T> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+/// A start the user chose, running in the background.
+pub(crate) type StartPending = Pending<Result<StartOutcome, Refusal>>;
+
+/// How the terminal says a start's result.
+pub(crate) fn started_text(outcome: &Result<StartOutcome, Refusal>) -> String {
+    match outcome {
+        Ok(StartOutcome::Started) => {
+            "The gateway is running in the background. Stop it with `localpilot remote gateway stop`.".to_string()
+        }
+        Ok(StartOutcome::AlreadyRunning) => "The gateway is already running.".to_string(),
+        Ok(StartOutcome::NotYet) => {
+            "The gateway was started but has not answered yet; check `localpilot remote status`."
+                .to_string()
+        }
+        Err(reason) => format!("The gateway was not started. {reason}"),
     }
 }
 

@@ -44,9 +44,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::remote_status::{
-    health_body, render_status, GatewayHealth, RemoteSettings, RemoteStatus,
-};
+use crate::remote_status::{health_body, GatewayHealth, RemoteSettings, RemoteStatus};
 
 /// The device credential's cookie. `__Host-` makes the browser insist on
 /// `Secure`, `Path=/` and no `Domain`, so no sibling origin can set it.
@@ -2316,12 +2314,25 @@ pub(crate) async fn status_at(cwd: &std::path::Path) -> RemoteStatus {
 /// `localpilot remote status`.
 pub(crate) async fn print_status() {
     let cwd = std::env::current_dir().unwrap_or_default();
+    let status = status_at(&cwd).await;
+    let started = (status.gateway == Some(crate::remote_status::GatewayHealth::Running))
+        .then(crate::remote_gateway_control::read_control)
+        .flatten()
+        .map(|control| started_text(control.started_by));
     print!(
         "remote access:\n{}{}{}",
-        render_status(&status_at(&cwd).await),
+        crate::remote_status::render_status_started(&status, started),
         crate::remote_status::render_push(&push_status(&cwd)),
         client_line()
     );
+}
+
+/// How a running gateway was started, as `remote status` says it.
+fn started_text(by: crate::remote_gateway_control::StartedBy) -> &'static str {
+    match by {
+        crate::remote_gateway_control::StartedBy::Foreground => "in a terminal",
+        crate::remote_gateway_control::StartedBy::Background => "in the background",
+    }
 }
 
 /// The companion app this binary serves.
@@ -2450,6 +2461,7 @@ pub(crate) async fn run(background: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote_status::render_status;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();

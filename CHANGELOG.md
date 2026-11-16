@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The terminal offers to start the phone gateway when it is needed: pairing
+  that stops because the gateway is not running shows "Start gateway" and then
+  continues with the same name and access, and `/remote share` asks once
+  whether to start it. Nothing starts without that choice. `remote status`
+  says whether a running gateway was started in a terminal or in the
+  background (LocalHub#293).
+
 - A finished-turn notification is no longer dropped by the resync the terminal
   sends devices right after a turn ends; only the share ending cancels it.
   `LOCALPILOT_LOG=localpilot::remote_push=debug` traces every notification

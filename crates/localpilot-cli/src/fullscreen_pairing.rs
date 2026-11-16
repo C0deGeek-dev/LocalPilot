@@ -48,6 +48,7 @@ const CHECK: &str = "Check status";
 const AGAIN: &str = "Create a new code";
 const SHARE: &str = "Share this session";
 const DEVICES: &str = "Devices";
+const START_GATEWAY: &str = "Start gateway";
 
 /// What a key in the pairing overlay asks the terminal to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +83,11 @@ pub(super) struct PairingHost {
     used_told: Cell<bool>,
     /// A paired device not yet reported to the registry's followers.
     used_pending: Cell<bool>,
+    /// Starts the gateway when pairing stopped because it is not running
+    /// (`None`: never offered).
+    gateway: Option<crate::remote_gateway_control::Starter>,
+    /// A gateway start the user chose, and the grant to pair with after it.
+    starting: RefCell<Option<(crate::remote_gateway_control::StartPending, Grant)>>,
 }
 
 impl PairingHost {
@@ -97,6 +103,73 @@ impl PairingHost {
             note: RefCell::new(None),
             used_told: Cell::new(false),
             used_pending: Cell::new(false),
+            gateway: None,
+            starting: RefCell::new(None),
+        }
+    }
+
+    /// The same host, offering to start the gateway with `starter` when
+    /// pairing finds it not running.
+    pub(super) fn with_gateway(mut self, starter: crate::remote_gateway_control::Starter) -> Self {
+        self.gateway = Some(starter);
+        self
+    }
+
+    /// Whether the kept attempt stopped only because the gateway is not
+    /// running, and starting it can be offered.
+    fn gateway_offer(&self) -> bool {
+        self.gateway.is_some()
+            && self.starting.borrow().is_none()
+            && self.attempt.borrow().as_ref().is_some_and(|attempt| {
+                matches!(
+                    attempt.phase(),
+                    Phase::Finished(Ended::NoCode(ref why))
+                        if why == crate::remote_pairing::GATEWAY_NOT_RUNNING
+                )
+            })
+    }
+
+    /// "Start gateway" was chosen: start it in the background, and pair with
+    /// the same grant once it runs.
+    fn start_gateway(&self) {
+        let Some(starter) = self.gateway.as_ref() else {
+            return;
+        };
+        if !self.gateway_offer() {
+            return;
+        }
+        let Some(grant) = self.attempt.borrow().as_ref().map(|a| a.grant().clone()) else {
+            return;
+        };
+        self.note.borrow_mut().take();
+        let pending = crate::remote_gateway_control::Pending::spawn(starter());
+        *self.starting.borrow_mut() = Some((pending, grant));
+    }
+
+    /// A chosen gateway start that ended: pair again with its grant when the
+    /// gateway runs, otherwise say why not.
+    fn settle_gateway(&self, app: &mut AppModel) {
+        let ended = {
+            let slot = self.starting.borrow();
+            slot.as_ref()
+                .and_then(|(pending, grant)| pending.take().map(|outcome| (outcome, grant.clone())))
+        };
+        let Some((outcome, grant)) = ended else {
+            return;
+        };
+        self.starting.borrow_mut().take();
+        let running = matches!(
+            outcome,
+            Ok(crate::remote_gateway_control::StartOutcome::Started
+                | crate::remote_gateway_control::StartOutcome::AlreadyRunning)
+        );
+        if running && app.pairing_view().is_some() {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                crate::remote_gateway_control::started_text(&outcome),
+            ));
+            self.create_grant(app, grant);
+        } else {
+            *self.note.borrow_mut() = Some(crate::remote_gateway_control::started_text(&outcome));
         }
     }
 
@@ -172,6 +245,11 @@ impl PairingHost {
             },
             this_workspace_only: setup.this_workspace_only,
         };
+        self.create_grant(app, grant);
+    }
+
+    /// Start an attempt for `grant` and show it.
+    fn create_grant(&self, app: &mut AppModel, grant: Grant) {
         let Some(attempt) = Attempt::start(
             &self.issuer,
             self.dial.clone(),
@@ -350,6 +428,10 @@ impl PairingHost {
                 self.hide(app);
                 return PairingKey::Devices;
             }
+            Some(START_GATEWAY) => {
+                self.start_gateway();
+                self.refresh(app, shared);
+            }
             _ => {}
         }
         PairingKey::Handled
@@ -508,6 +590,7 @@ impl PairingHost {
                 }
             }
         }
+        self.settle_gateway(app);
         if app.pairing_view().is_some() {
             self.refresh(app, shared);
         } else {
@@ -585,7 +668,7 @@ impl PairingHost {
             *self.told.borrow_mut() = Some(phase.clone());
         }
         let qr_available = view.secret().is_some_and(|secret| secret.qr().is_some());
-        let (title, mut lines, actions) = describe(
+        let (title, mut lines, mut actions) = describe(
             &phase,
             &grant,
             deadline,
@@ -600,6 +683,17 @@ impl PairingHost {
         }
         if let Some(note) = self.note.borrow().as_ref() {
             lines.push(note.clone());
+        }
+        if self.starting.borrow().is_some() {
+            lines.push("Starting the gateway in the background...".to_string());
+            actions = vec![CLOSE.to_string()];
+        } else if self.gateway_offer() {
+            lines.push(
+                "Start gateway runs it in the background, for every workspace, until \
+                 `localpilot remote gateway stop`; then pairing continues."
+                    .to_string(),
+            );
+            actions = vec![START_GATEWAY.to_string(), CLOSE.to_string()];
         }
         view.update(title, lines, actions);
     }

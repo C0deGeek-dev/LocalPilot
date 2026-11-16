@@ -120,6 +120,12 @@ pub fn render_push(push: &PushStatus) -> String {
 
 /// The status as indented text lines.
 pub fn render_status(status: &RemoteStatus) -> String {
+    render_status_started(status, None)
+}
+
+/// [`render_status`], saying how a running gateway was started (`in a
+/// terminal` or `in the background`), as its control file records it.
+pub fn render_status_started(status: &RemoteStatus, started: Option<&str>) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
     match &status.settings {
@@ -137,7 +143,10 @@ pub fn render_status(status: &RemoteStatus) -> String {
             };
             let _ = writeln!(s, "  advertised url: {advertised}");
             let gateway = match &status.gateway {
-                Some(GatewayHealth::Running) => "running".to_string(),
+                Some(GatewayHealth::Running) => match started {
+                    Some(how) => format!("running, started {how}"),
+                    None => "running".to_string(),
+                },
                 Some(GatewayHealth::NotRunning) => "not running".to_string(),
                 Some(GatewayHealth::Unexpected) => "port in use by something else".to_string(),
                 Some(GatewayHealth::TimedOut) => "no answer in time (unknown)".to_string(),
@@ -219,5 +228,39 @@ mod push_line_tests {
             "{unknown}"
         );
         assert!(!unknown.contains("off"), "{unknown}");
+    }
+}
+
+#[cfg(test)]
+mod gateway_line_tests {
+    use super::*;
+
+    fn status(gateway: GatewayHealth) -> RemoteStatus {
+        RemoteStatus {
+            settings: Ok(RemoteSettings {
+                enabled: true,
+                advertised: Ok(Some("https://pc.example.test".to_string())),
+                port: 9,
+            }),
+            gateway: Some(gateway),
+            workspaces: Vec::new(),
+            devices: Ok((0, 0)),
+        }
+    }
+
+    #[test]
+    fn a_running_gateway_says_how_it_was_started_when_known() {
+        let running = status(GatewayHealth::Running);
+        let text = render_status_started(&running, Some("in the background"));
+        assert!(
+            text.contains("gateway:        running, started in the background (127.0.0.1:9)"),
+            "{text}"
+        );
+        assert!(render_status(&running).contains("gateway:        running (127.0.0.1:9)"));
+        // Only a running gateway is described so.
+        let stopped =
+            render_status_started(&status(GatewayHealth::NotRunning), Some("in a terminal"));
+        assert!(stopped.contains("gateway:        not running"), "{stopped}");
+        assert!(!stopped.contains("started"), "{stopped}");
     }
 }

@@ -24661,6 +24661,201 @@ last_seen = "2026-08-10"
         assert!(app.pairing_view().is_some());
     }
 
+    /// A fake gateway start that counts its calls and answers `outcome`.
+    fn fake_gateway(
+        outcome: Result<crate::remote_gateway_control::StartOutcome, String>,
+    ) -> (
+        crate::remote_gateway_control::Starter,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let starter: crate::remote_gateway_control::Starter = std::sync::Arc::new(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let outcome = outcome.clone();
+            Box::pin(async move { outcome })
+        });
+        (starter, calls)
+    }
+
+    /// Pairing that finds the gateway not running offers to start it; once
+    /// the user chooses that and it runs, pairing continues with the same
+    /// grant. Nothing is started without that choice (LocalHub#293).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pairing_offers_to_start_the_gateway_and_continues_once_it_runs() {
+        use crate::remote_gateway_control::StartOutcome;
+        for (outcome, continues) in [
+            (Ok(StartOutcome::Started), true),
+            (Ok(StartOutcome::AlreadyRunning), true),
+            (Err("Remote access is off.".to_string()), false),
+        ] {
+            let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);
+            let (_gateway, _capability) =
+                crate::server_cmd::tests::register_gateway(&endpoint).await;
+            let script = crate::remote_pairing::tests::Script::new(&endpoint, vec![]);
+            // Not running until the gateway was started.
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let prerequisites: crate::remote_pairing::Prerequisites = {
+                let running = running.clone();
+                std::sync::Arc::new(move || {
+                    let up = running.load(std::sync::atomic::Ordering::SeqCst);
+                    Box::pin(async move {
+                        if up {
+                            Ok(("https://pc.example.test".to_string(), "w1".to_string()))
+                        } else {
+                            Err(crate::remote_pairing::GATEWAY_NOT_RUNNING.to_string())
+                        }
+                    })
+                })
+            };
+            let (starter, calls) = fake_gateway(outcome.clone());
+            let starter: crate::remote_gateway_control::Starter = {
+                let running = running.clone();
+                let ok = outcome.is_ok();
+                std::sync::Arc::new(move || {
+                    if ok {
+                        running.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    starter()
+                })
+            };
+            let source = std::sync::Arc::new(crate::relay_source::SessionSource::start(
+                localpilot_rpc::AskRegistry::default(),
+            ));
+            let dials = crate::remote_share::test_support::Dials::default();
+            let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+            let share = crate::remote_share::RemoteShare::new(
+                dials.dial(),
+                crate::remote_share::test_support::standing(&level),
+                std::sync::Arc::new(|_| Some("Pixel".to_string())),
+                source,
+            );
+            let pairing = pairing_host::PairingHost::new(script.dial(), prerequisites)
+                .with_copier(no_copy())
+                .with_gateway(starter);
+            let host = std::rc::Rc::new(
+                remote_host::RemoteHost::new(std::sync::Arc::new(share), &std::env::temp_dir())
+                    .with_pairing(pairing),
+            );
+            let mut app = app();
+            create_code(&mut app, &host);
+            pump_pairing(&mut app, &host, "the offer", |app, _| {
+                view_actions(app).first().map(String::as_str) == Some("Start gateway")
+            })
+            .await;
+            assert!(
+                view_lines(&app).contains("The gateway is not running"),
+                "{}",
+                view_lines(&app)
+            );
+            assert!(view_lines(&app).contains("localpilot remote gateway stop"));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "never unasked"
+            );
+            let view = app.pairing_view_mut().unwrap();
+            while view.selected_action() != Some("Start gateway") {
+                view.move_action(true);
+            }
+            pairing_press(&mut app, &host, KeyCode::Enter);
+            if continues {
+                pump_pairing(&mut app, &host, "a code after the start", |app, _| {
+                    view_shows_code(app)
+                })
+                .await;
+                let told = format!("{:?}", app.active_timeline_mut().items());
+                assert!(told.contains("gateway"), "{told}");
+            } else {
+                pump_pairing(&mut app, &host, "the refusal", |app, _| {
+                    view_lines(app).contains("The gateway was not started. Remote access is off.")
+                })
+                .await;
+                assert!(!view_shows_code(&app));
+                assert_eq!(
+                    view_actions(&app).first().map(String::as_str),
+                    Some("Start gateway")
+                );
+            }
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    /// After `/remote share`, a gateway that is not running is offered once;
+    /// "Not now" starts nothing and says how to start it later.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_offers_to_start_a_gateway_that_is_not_running() {
+        use crate::remote_gateway_control::StartOutcome;
+        for (needed, answer) in [
+            (true, Some(0)),
+            (true, Some(1)),
+            (true, None),
+            (false, None),
+        ] {
+            let dials = crate::remote_share::test_support::Dials::default();
+            let level = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(2));
+            let host = std::rc::Rc::try_unwrap(sharing_host(&dials, &level))
+                .ok()
+                .unwrap();
+            let probe: crate::remote_gateway_control::Probe =
+                std::sync::Arc::new(move || Box::pin(async move { needed }));
+            let (starter, calls) = fake_gateway(Ok(StartOutcome::Started));
+            let host = host.with_gateway(probe, starter);
+            let mut app = app();
+            let peer = dials.push_link();
+            remote_host::command(&mut app, &host, localpilot_slash::RemoteAction::Share);
+            let mut server = crate::remote_share::test_support::Server::accept(peer).await;
+            server.ready().await;
+            until_state(&host, crate::remote_share::ShareState::Shared).await;
+            let started = std::time::Instant::now();
+            while app.choice().is_none() && started.elapsed() < Duration::from_millis(500) {
+                remote_host::idle_status_for_test(&mut app, &host);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            if !needed {
+                assert!(app.choice().is_none(), "a running gateway is never offered");
+                continue;
+            }
+            let choice = app.choice().expect("offered").clone();
+            assert_eq!(choice.title, "Start the phone gateway?");
+            assert_eq!(choice.options, ["Start gateway", "Not now"]);
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "never unasked"
+            );
+            let key = match answer {
+                Some(index) => {
+                    if index == 1 {
+                        app.move_choice(true);
+                    }
+                    KeyCode::Enter
+                }
+                None => KeyCode::Esc,
+            };
+            remote_host::choice_key(&mut app, &host, press(key, KeyModifiers::NONE));
+            assert!(app.choice().is_none());
+            for _ in 0..20 {
+                remote_host::idle_status_for_test(&mut app, &host);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let told = format!("{:?}", app.active_timeline_mut().items());
+            if answer == Some(0) {
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert!(
+                    told.contains("The gateway is running in the background"),
+                    "{told}"
+                );
+            } else {
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert!(told.contains("localpilot remote gateway start"), "{told}");
+            }
+            // Asked once per share: not again.
+            remote_host::idle_status_for_test(&mut app, &host);
+            assert!(app.choice().is_none());
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_code_shown_in_the_terminal_is_invalidated_as_soon_as_its_view_closes() {
         let (endpoint, _hosts) = crate::remote_pairing::tests::daemon(16);

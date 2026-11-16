@@ -1305,7 +1305,9 @@ project file cannot set any `[remote]` key).
   tunnel or reverse proxy the user runs on the same machine; LocalPilot bundles
   and runs none.
 - **Started and stopped by the user.** It runs in a terminal, or in the
-  background after `localpilot remote gateway start`. `localpilot remote gateway
+  background after `localpilot remote gateway start`, or after the user
+  chooses "Start gateway" in the terminal when pairing or sharing finds it not
+  running (never by itself, and never from a device request). `localpilot remote gateway
   stop` ends it from any terminal: it presents a random token from an
   owner-only control file (`~/.localpilot/devices/gateway.json`) on a stop path
   the gateway accepts only with a loopback `Host`, no `Origin` and that exact
